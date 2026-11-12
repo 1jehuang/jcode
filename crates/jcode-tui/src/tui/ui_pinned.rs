@@ -17,9 +17,7 @@ use layout_support::{
 #[cfg(test)]
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
-use util_support::{
-    compact_image_label, estimate_side_panel_pane_area, lru_touch, side_panel_content_signature,
-};
+use util_support::{estimate_side_panel_pane_area, lru_touch, side_panel_content_signature};
 
 const SIDE_PANEL_HEADER_HEIGHT: u16 = 1;
 
@@ -83,69 +81,6 @@ fn side_panel_mermaid_profile_area(inner: Rect, reserve_native_scrollbar: bool) 
 mod selection_support;
 use selection_support::apply_side_selection_highlight;
 
-enum PinnedContentEntry {
-    Diff {
-        file_path: String,
-        lines: Vec<ParsedDiffLine>,
-        additions: usize,
-        deletions: usize,
-    },
-    Image {
-        label: String,
-        media_type: String,
-        byte_count: Option<u64>,
-        source: crate::session::RenderedImageSource,
-        hash: u64,
-        width: u32,
-        height: u32,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ImageGroup {
-    Inputs,
-    Tools,
-    Other,
-}
-
-fn image_group_for(source: &crate::session::RenderedImageSource) -> ImageGroup {
-    match source {
-        crate::session::RenderedImageSource::UserInput => ImageGroup::Inputs,
-        crate::session::RenderedImageSource::ToolResult { .. } => ImageGroup::Tools,
-        crate::session::RenderedImageSource::Other { .. } => ImageGroup::Other,
-    }
-}
-
-fn image_group_heading(group: ImageGroup) -> (&'static str, Color) {
-    match group {
-        ImageGroup::Inputs => ("inputs", rgb(138, 180, 248)),
-        ImageGroup::Tools => ("tools", accent_color()),
-        ImageGroup::Other => ("other", dim_color()),
-    }
-}
-
-fn image_source_badge(source: &crate::session::RenderedImageSource) -> String {
-    match source {
-        crate::session::RenderedImageSource::UserInput => "input".to_string(),
-        crate::session::RenderedImageSource::ToolResult { tool_name } => {
-            format!("tool:{}", tool_name)
-        }
-        crate::session::RenderedImageSource::Other { role } => role.clone(),
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct PinnedCacheKey {
-    messages_version: u64,
-}
-
-#[derive(Default)]
-struct PinnedCacheState {
-    key: Option<PinnedCacheKey>,
-    entries: Vec<PinnedContentEntry>,
-    rendered_lines: Option<PinnedRenderedCache>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SidePanelMarkdownKey {
     page_id: String,
@@ -178,7 +113,7 @@ struct SidePanelRenderKey {
 
 #[derive(Default)]
 struct SidePanelRenderCacheState {
-    entries: HashMap<SidePanelRenderKey, PinnedRenderedCache>,
+    entries: HashMap<SidePanelRenderKey, RenderedSidePanelCache>,
     order: VecDeque<SidePanelRenderKey>,
 }
 
@@ -204,16 +139,14 @@ struct RenderedSidePanelMarkdown {
 }
 
 #[derive(Clone)]
-struct PinnedRenderedCache {
-    inner_width: u16,
-    line_wrap: bool,
+struct RenderedSidePanelCache {
     lines: Vec<Line<'static>>,
     wrapped_plain_lines: std::sync::Arc<Vec<String>>,
     wrapped_copy_offsets: std::sync::Arc<Vec<usize>>,
     raw_plain_lines: std::sync::Arc<Vec<String>>,
     wrapped_line_map: std::sync::Arc<Vec<WrappedLineMap>>,
     left_margins: Vec<u16>,
-    image_placements: Vec<PinnedImagePlacement>,
+    image_placements: Vec<SidePanelImagePlacement>,
     has_scrollable_images: bool,
 }
 
@@ -247,50 +180,20 @@ fn estimate_arc_wrapped_line_map_bytes(values: &std::sync::Arc<Vec<WrappedLineMa
         + values.capacity() * std::mem::size_of::<WrappedLineMap>()
 }
 
-fn estimate_pinned_rendered_cache_bytes(cache: &PinnedRenderedCache) -> usize {
+fn estimate_side_panel_rendered_cache_bytes(cache: &RenderedSidePanelCache) -> usize {
     estimate_lines_bytes(&cache.lines)
         + estimate_arc_string_vec_bytes(&cache.wrapped_plain_lines)
         + estimate_arc_usize_vec_bytes(&cache.wrapped_copy_offsets)
         + estimate_arc_string_vec_bytes(&cache.raw_plain_lines)
         + estimate_arc_wrapped_line_map_bytes(&cache.wrapped_line_map)
         + cache.left_margins.capacity() * std::mem::size_of::<u16>()
-        + cache.image_placements.capacity() * std::mem::size_of::<PinnedImagePlacement>()
+        + cache.image_placements.capacity() * std::mem::size_of::<SidePanelImagePlacement>()
 }
 
 fn estimate_rendered_side_panel_markdown_bytes(value: &RenderedSidePanelMarkdown) -> usize {
     estimate_lines_bytes(&value.rendered_markdown)
         + value.placeholder_hashes.capacity() * std::mem::size_of::<Option<u64>>()
         + value.has_following_content_after.capacity() * std::mem::size_of::<bool>()
-}
-
-fn estimate_pinned_content_entry_bytes(entry: &PinnedContentEntry) -> usize {
-    match entry {
-        PinnedContentEntry::Diff {
-            file_path, lines, ..
-        } => {
-            file_path.capacity()
-                + lines.capacity() * std::mem::size_of::<crate::tui::ui_diff::ParsedDiffLine>()
-                + lines
-                    .iter()
-                    .map(|line| line.prefix.capacity() + line.content.capacity())
-                    .sum::<usize>()
-        }
-        PinnedContentEntry::Image {
-            label,
-            media_type,
-            source,
-            ..
-        } => {
-            let source_bytes = match source {
-                crate::session::RenderedImageSource::UserInput => 0,
-                crate::session::RenderedImageSource::ToolResult { tool_name } => {
-                    tool_name.capacity()
-                }
-                crate::session::RenderedImageSource::Other { role } => role.capacity(),
-            };
-            label.capacity() + media_type.capacity() + source_bytes
-        }
-    }
 }
 
 fn estimate_side_panel_markdown_key_bytes(key: &SidePanelMarkdownKey) -> usize {
@@ -302,24 +205,6 @@ fn estimate_side_panel_render_key_bytes(key: &SidePanelRenderKey) -> usize {
 }
 
 pub(crate) fn debug_memory_profile() -> serde_json::Value {
-    let (pinned_entries_count, pinned_entries_bytes, pinned_rendered_lines_bytes) = {
-        let cache = pinned_cache()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let entries_bytes = cache
-            .entries
-            .iter()
-            .map(estimate_pinned_content_entry_bytes)
-            .sum::<usize>()
-            + cache.entries.capacity() * std::mem::size_of::<PinnedContentEntry>();
-        let rendered_lines_bytes = cache
-            .rendered_lines
-            .as_ref()
-            .map(estimate_pinned_rendered_cache_bytes)
-            .unwrap_or(0);
-        (cache.entries.len(), entries_bytes, rendered_lines_bytes)
-    };
-
     let (markdown_cache_entries_count, markdown_cache_bytes, markdown_cache_key_bytes) =
         with_side_panel_markdown_cache(|cache| {
             let entry_bytes = cache
@@ -345,7 +230,7 @@ pub(crate) fn debug_memory_profile() -> serde_json::Value {
             let entry_bytes = cache
                 .entries
                 .values()
-                .map(estimate_pinned_rendered_cache_bytes)
+                .map(estimate_side_panel_rendered_cache_bytes)
                 .sum::<usize>();
             let key_bytes = cache
                 .entries
@@ -361,11 +246,6 @@ pub(crate) fn debug_memory_profile() -> serde_json::Value {
         });
 
     serde_json::json!({
-        "pinned_cache": {
-            "entries_count": pinned_entries_count,
-            "entries_bytes": pinned_entries_bytes,
-            "rendered_lines_bytes": pinned_rendered_lines_bytes,
-        },
         "side_panel_markdown_cache": {
             "entries_count": markdown_cache_entries_count,
             "entries_bytes": markdown_cache_bytes,
@@ -376,9 +256,7 @@ pub(crate) fn debug_memory_profile() -> serde_json::Value {
             "entries_bytes": render_cache_bytes,
             "key_bytes": render_cache_key_bytes,
         },
-        "total_estimate_bytes": pinned_entries_bytes
-            + pinned_rendered_lines_bytes
-            + markdown_cache_bytes
+        "total_estimate_bytes": markdown_cache_bytes
             + markdown_cache_key_bytes
             + render_cache_bytes
             + render_cache_key_bytes,
@@ -386,7 +264,7 @@ pub(crate) fn debug_memory_profile() -> serde_json::Value {
 }
 
 #[derive(Clone)]
-struct PinnedImagePlacement {
+struct SidePanelImagePlacement {
     after_text_line: usize,
     hash: u64,
     rows: u16,
@@ -426,61 +304,6 @@ enum FitImageRenderPlan {
 const SIDE_PANEL_INLINE_IMAGE_MIN_ROWS: u16 = 4;
 const SIDE_PANEL_INLINE_IMAGE_MIN_ZOOM_PERCENT: u16 = 70;
 
-fn pinned_content_image_layout_with_font(
-    width: u32,
-    height: u32,
-    inner: Rect,
-    lines_before_image: usize,
-    has_following_content: bool,
-    font_size: Option<(u16, u16)>,
-    force_full_width: bool,
-) -> SidePanelImageLayout {
-    let layout = estimate_side_panel_image_layout_with_font(
-        width,
-        height,
-        inner.width,
-        inner.height,
-        lines_before_image,
-        has_following_content,
-        font_size,
-    );
-
-    // Real pasted/read images (photos, screenshots) must always be shown in
-    // full. The viewport zoom heuristic is tuned for mermaid diagrams, which can
-    // pan horizontally, but for a wide screenshot it crops to the left edge.
-    // If the chosen zoom would overflow the pane width, fall back to a fully
-    // visible Fit render so the whole image is on screen.
-    if force_full_width
-        && let SidePanelImageRenderMode::ScrollableViewport { zoom_percent } = layout.render_mode
-    {
-        let (cell_w, cell_h) = font_size.unwrap_or((8, 16));
-        let cell_w = cell_w.max(1) as u32;
-        let cell_h = cell_h.max(1) as u32;
-        let avail_px = (inner.width.max(1) as u32).saturating_mul(cell_w);
-        let scaled_w_px = width
-            .saturating_mul(zoom_percent as u32)
-            .checked_div(100)
-            .unwrap_or(width);
-        if scaled_w_px > avail_px {
-            // Fit to width: scale the height by the same width ratio, then
-            // convert to terminal rows.
-            let fitted_h_px = height
-                .saturating_mul(avail_px)
-                .checked_div(width.max(1))
-                .unwrap_or(height);
-            let rows = super::diagram_pane::div_ceil_u32(fitted_h_px.max(1), cell_h)
-                .min(inner.height.max(1) as u32)
-                .max(SIDE_PANEL_INLINE_IMAGE_MIN_ROWS as u32) as u16;
-            return SidePanelImageLayout {
-                rows,
-                render_mode: SidePanelImageRenderMode::Fit,
-            };
-        }
-    }
-
-    layout
-}
-
 type SidePaneSnapshotCache = (
     std::sync::Arc<Vec<String>>,
     std::sync::Arc<Vec<usize>>,
@@ -514,7 +337,6 @@ fn build_side_pane_snapshot_cache(
         left_margins,
     )
 }
-static PINNED_CACHE: OnceLock<Mutex<PinnedCacheState>> = OnceLock::new();
 #[cfg(not(test))]
 static SIDE_PANEL_MARKDOWN_CACHE: OnceLock<Mutex<SidePanelMarkdownCacheState>> = OnceLock::new();
 #[cfg(not(test))]
@@ -531,10 +353,6 @@ thread_local! {
 
 const SIDE_PANEL_MARKDOWN_CACHE_LIMIT: usize = 12;
 const SIDE_PANEL_RENDER_CACHE_LIMIT: usize = 12;
-
-fn pinned_cache() -> &'static Mutex<PinnedCacheState> {
-    PINNED_CACHE.get_or_init(|| Mutex::new(PinnedCacheState::default()))
-}
 
 #[cfg(not(test))]
 fn side_panel_markdown_cache() -> &'static Mutex<SidePanelMarkdownCacheState> {
@@ -699,614 +517,6 @@ pub(crate) fn prewarm_focused_side_panel(
     }
     let _ = render_side_panel_markdown_cached(page, inner, has_protocol, centered);
     true
-}
-
-/// Collect the pinned file-diff entries used by the right-hand pane.
-///
-/// Inline images render in the transcript now. Keeping image payloads out of
-/// this frame-level probe is important because `TuiState::side_pane_images()`
-/// may materialize and clone multi-megabyte base64 strings.
-pub(super) fn collect_pinned_diffs_cached(
-    messages: &[DisplayMessage],
-    messages_version: u64,
-) -> bool {
-    let key = PinnedCacheKey { messages_version };
-
-    let mut cache = match pinned_cache().lock() {
-        Ok(c) => c,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-
-    if cache.key.as_ref() == Some(&key) {
-        return !cache.entries.is_empty();
-    }
-
-    let entries = collect_pinned_content(messages, &[], true, false);
-    let has_entries = !entries.is_empty();
-    cache.key = Some(key);
-    cache.entries = entries;
-    cache.rendered_lines = None;
-    has_entries
-}
-
-fn collect_pinned_content(
-    messages: &[DisplayMessage],
-    images: &[crate::session::RenderedImage],
-    collect_diffs: bool,
-    collect_images: bool,
-) -> Vec<PinnedContentEntry> {
-    let mut entries = Vec::new();
-
-    if collect_images {
-        let mut user_entries = Vec::new();
-        let mut tool_entries = Vec::new();
-        let mut other_entries = Vec::new();
-        for image in images {
-            let Some((hash, width, height)) =
-                mermaid::register_inline_image(&image.media_type, &image.data)
-            else {
-                continue;
-            };
-
-            let entry = PinnedContentEntry::Image {
-                label: image
-                    .label
-                    .clone()
-                    .unwrap_or_else(|| image.media_type.clone()),
-                media_type: image.media_type.clone(),
-                byte_count: crate::tui::image_metadata::estimate_base64_decoded_len(&image.data),
-                source: image.source.clone(),
-                hash,
-                width,
-                height,
-            };
-
-            match &image.source {
-                crate::session::RenderedImageSource::UserInput => user_entries.push(entry),
-                crate::session::RenderedImageSource::ToolResult { .. } => tool_entries.push(entry),
-                crate::session::RenderedImageSource::Other { .. } => other_entries.push(entry),
-            }
-        }
-
-        entries.extend(user_entries);
-        entries.extend(tool_entries);
-        entries.extend(other_entries);
-    }
-
-    for msg in messages {
-        if msg.role != "tool" {
-            continue;
-        }
-        let Some(ref tc) = msg.tool_data else {
-            continue;
-        };
-
-        if !collect_diffs {
-            continue;
-        }
-
-        if !tools_ui::is_edit_tool_name(&tc.name) {
-            continue;
-        }
-
-        let file_path = tc
-            .input
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .or_else(|| {
-                tc.input
-                    .get("patch_text")
-                    .and_then(|v| v.as_str())
-                    .and_then(|patch_text| match tools_ui::canonical_tool_name(&tc.name) {
-                        "apply_patch" => tools_ui::extract_apply_patch_primary_file(patch_text),
-                        "patch" => tools_ui::extract_unified_patch_primary_file(patch_text),
-                        _ => None,
-                    })
-            })
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let change_lines = {
-            let from_content = collect_diff_lines(&msg.content);
-            if !from_content.is_empty() {
-                from_content
-            } else {
-                generate_diff_lines_from_tool_input(tc)
-            }
-        };
-        if change_lines.is_empty() {
-            continue;
-        }
-
-        let additions = change_lines
-            .iter()
-            .filter(|l| l.kind == DiffLineKind::Add)
-            .count();
-        let deletions = change_lines
-            .iter()
-            .filter(|l| l.kind == DiffLineKind::Del)
-            .count();
-
-        entries.push(PinnedContentEntry::Diff {
-            file_path,
-            lines: change_lines,
-            additions,
-            deletions,
-        });
-    }
-    entries
-}
-
-pub(super) fn draw_pinned_content_cached(
-    frame: &mut Frame,
-    area: Rect,
-    app: &dyn TuiState,
-    scroll: usize,
-    line_wrap: bool,
-    focused: bool,
-) {
-    use ratatui::widgets::{Paragraph, Wrap};
-
-    if area.width < 10 || area.height < 3 {
-        return;
-    }
-
-    let mut cache = match pinned_cache().lock() {
-        Ok(c) => c,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-
-    if cache.entries.is_empty() {
-        return;
-    }
-
-    let entries = &cache.entries;
-    let total_diffs = entries
-        .iter()
-        .filter(|e| matches!(e, PinnedContentEntry::Diff { .. }))
-        .count();
-    let total_images = entries
-        .iter()
-        .filter(|e| matches!(e, PinnedContentEntry::Image { .. }))
-        .count();
-    let total_image_bytes: u64 = entries
-        .iter()
-        .filter_map(|entry| match entry {
-            PinnedContentEntry::Image { byte_count, .. } => *byte_count,
-            _ => None,
-        })
-        .sum();
-    let total_additions: usize = entries
-        .iter()
-        .map(|e| match e {
-            PinnedContentEntry::Diff { additions, .. } => *additions,
-            _ => 0,
-        })
-        .sum();
-    let total_deletions: usize = entries
-        .iter()
-        .map(|e| match e {
-            PinnedContentEntry::Diff { deletions, .. } => *deletions,
-            _ => 0,
-        })
-        .sum();
-
-    let mut title_parts = vec![Span::styled(" side ", Style::default().fg(tool_color()))];
-    title_parts.push(Span::styled(
-        "Pinned",
-        Style::default()
-            .fg(rgb(180, 200, 255))
-            .add_modifier(ratatui::style::Modifier::BOLD),
-    ));
-    title_parts.push(Span::styled(" ", Style::default().fg(dim_color())));
-    if total_diffs > 0 {
-        title_parts.push(Span::styled(
-            format!("+{}", total_additions),
-            Style::default().fg(diff_add_color()),
-        ));
-        title_parts.push(Span::styled(" ", Style::default().fg(dim_color())));
-        title_parts.push(Span::styled(
-            format!("-{}", total_deletions),
-            Style::default().fg(diff_del_color()),
-        ));
-        title_parts.push(Span::styled(
-            format!(" {}f", total_diffs),
-            Style::default().fg(dim_color()),
-        ));
-    }
-    if total_images > 0 {
-        if total_diffs > 0 {
-            title_parts.push(Span::styled(" ", Style::default().fg(dim_color())));
-        }
-        title_parts.push(Span::styled(
-            if total_image_bytes > 0 {
-                format!(
-                    "📷{} {}",
-                    total_images,
-                    crate::tui::image_metadata::format_byte_count(total_image_bytes)
-                )
-            } else {
-                format!("📷{}", total_images)
-            },
-            Style::default().fg(dim_color()),
-        ));
-    }
-    if total_diffs == 0
-        && total_images > 0
-        && let Some(remaining) = app.pinned_images_auto_hide_remaining_secs()
-    {
-        title_parts.push(Span::styled(
-            format!(" auto-hide {}s", remaining),
-            Style::default().fg(rgb(255, 193, 7)),
-        ));
-    }
-    title_parts.push(Span::styled(
-        if total_images > 0 {
-            format!(
-                " {} hide ",
-                crate::tui::keybind::side_panel_toggle_key_label()
-            )
-        } else {
-            " ⇧Tab hide ".to_string()
-        },
-        Style::default().fg(dim_color()),
-    ));
-    let border_style = side_panel_border_style(focused);
-    let Some(inner) =
-        super::draw_right_rail_chrome(frame, area, Line::from(title_parts), border_style)
-    else {
-        return;
-    };
-
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    let needs_rebuild = match &cache.rendered_lines {
-        Some(rendered) => rendered.inner_width != inner.width || rendered.line_wrap != line_wrap,
-        None => true,
-    };
-
-    if needs_rebuild {
-        let has_protocol = mermaid::protocol_type().is_some();
-        let mut text_lines: Vec<Line<'static>> = Vec::new();
-        let mut image_placements: Vec<PinnedImagePlacement> = Vec::new();
-        let mut last_image_group: Option<ImageGroup> = None;
-
-        for (i, entry) in entries.iter().enumerate() {
-            if i > 0 {
-                text_lines.push(Line::from(""));
-            }
-
-            match entry {
-                PinnedContentEntry::Diff {
-                    file_path,
-                    lines: diff_lines,
-                    additions,
-                    deletions,
-                } => {
-                    let short_path = file_path
-                        .rsplit('/')
-                        .take(2)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .collect::<Vec<_>>()
-                        .join("/");
-
-                    let file_ext = std::path::Path::new(file_path)
-                        .extension()
-                        .and_then(|e| e.to_str());
-
-                    text_lines.push(Line::from(vec![
-                        Span::styled("── ", Style::default().fg(dim_color())),
-                        Span::styled(
-                            short_path,
-                            Style::default()
-                                .fg(rgb(180, 200, 255))
-                                .add_modifier(ratatui::style::Modifier::BOLD),
-                        ),
-                        Span::styled(" (", Style::default().fg(dim_color())),
-                        Span::styled(
-                            format!("+{}", additions),
-                            Style::default().fg(diff_add_color()),
-                        ),
-                        Span::styled(" ", Style::default().fg(dim_color())),
-                        Span::styled(
-                            format!("-{}", deletions),
-                            Style::default().fg(diff_del_color()),
-                        ),
-                        Span::styled(")", Style::default().fg(dim_color())),
-                    ]));
-
-                    for line in diff_lines {
-                        let base_color = if line.kind == DiffLineKind::Add {
-                            diff_add_color()
-                        } else {
-                            diff_del_color()
-                        };
-
-                        let mut spans: Vec<Span<'static>> = vec![Span::styled(
-                            line.prefix.clone(),
-                            Style::default().fg(base_color),
-                        )];
-
-                        if !line.content.is_empty() {
-                            let highlighted =
-                                markdown::highlight_line(line.content.as_str(), file_ext);
-                            for span in highlighted {
-                                let tinted = tint_span_with_diff_color(span, base_color);
-                                spans.push(tinted);
-                            }
-                        }
-
-                        text_lines.push(Line::from(spans));
-                    }
-                }
-                PinnedContentEntry::Image {
-                    label,
-                    media_type,
-                    byte_count,
-                    source,
-                    hash,
-                    width: img_w,
-                    height: img_h,
-                } => {
-                    let group = image_group_for(source);
-                    if last_image_group != Some(group) {
-                        let (group_label, group_color) = image_group_heading(group);
-                        text_lines.push(Line::from(vec![
-                            Span::styled("   ", Style::default().fg(dim_color())),
-                            Span::styled(
-                                group_label.to_uppercase(),
-                                Style::default()
-                                    .fg(group_color)
-                                    .add_modifier(ratatui::style::Modifier::BOLD),
-                            ),
-                        ]));
-                        last_image_group = Some(group);
-                    }
-
-                    let short_label = compact_image_label(label);
-                    let source_badge = image_source_badge(source);
-                    let dimensions = crate::tui::image_metadata::format_dimensions(*img_w, *img_h);
-                    let mut metadata_parts =
-                        vec![crate::tui::image_metadata::compact_image_format(media_type)];
-                    if let Some(byte_count) = byte_count {
-                        metadata_parts
-                            .push(crate::tui::image_metadata::format_byte_count(*byte_count));
-                    }
-                    if let Some(ratio) = crate::tui::image_metadata::aspect_ratio(*img_w, *img_h) {
-                        metadata_parts.push(format!("{ratio} ratio"));
-                    }
-
-                    text_lines.push(Line::from(vec![
-                        Span::styled("── 🖼 ", Style::default().fg(dim_color())),
-                        Span::styled(
-                            short_label,
-                            Style::default()
-                                .fg(rgb(180, 200, 255))
-                                .add_modifier(ratatui::style::Modifier::BOLD),
-                        ),
-                        Span::styled(format!(" {dimensions}"), Style::default().fg(dim_color())),
-                        Span::styled(
-                            format!(" [{}]", source_badge),
-                            Style::default().fg(match group {
-                                ImageGroup::Inputs => rgb(138, 180, 248),
-                                ImageGroup::Tools => accent_color(),
-                                ImageGroup::Other => dim_color(),
-                            }),
-                        ),
-                    ]));
-                    let mut metadata_spans =
-                        vec![Span::styled("   ", Style::default().fg(dim_color()))];
-                    for (index, part) in metadata_parts.into_iter().enumerate() {
-                        if index > 0 {
-                            metadata_spans
-                                .push(Span::styled(" • ", Style::default().fg(dim_color())));
-                        }
-                        metadata_spans.push(Span::styled(part, Style::default().fg(dim_color())));
-                    }
-                    text_lines.push(Line::from(metadata_spans));
-
-                    if has_protocol {
-                        let image_layout = pinned_content_image_layout_with_font(
-                            *img_w,
-                            *img_h,
-                            inner,
-                            text_lines.len(),
-                            i + 1 < entries.len(),
-                            mermaid::get_font_size(),
-                            true,
-                        );
-                        image_placements.push(PinnedImagePlacement {
-                            after_text_line: text_lines.len(),
-                            hash: *hash,
-                            rows: image_layout.rows,
-                            render_mode: image_layout.render_mode,
-                        });
-                        for _ in 0..image_layout.rows {
-                            text_lines.push(Line::from(""));
-                        }
-                    }
-                }
-            }
-        }
-
-        if text_lines.is_empty() {
-            text_lines.push(Line::from(Span::styled(
-                "No content yet",
-                Style::default().fg(dim_color()),
-            )));
-        }
-
-        let (
-            wrapped_plain_lines,
-            wrapped_copy_offsets,
-            raw_plain_lines,
-            wrapped_line_map,
-            left_margins,
-        ) = build_side_pane_snapshot_cache(&text_lines, inner.width);
-
-        let has_scrollable_images = image_placements
-            .iter()
-            .any(|placement| placement.render_mode.is_scrollable());
-
-        cache.rendered_lines = Some(PinnedRenderedCache {
-            inner_width: inner.width,
-            line_wrap,
-            lines: text_lines,
-            wrapped_plain_lines,
-            wrapped_copy_offsets,
-            raw_plain_lines,
-            wrapped_line_map,
-            left_margins,
-            image_placements,
-            has_scrollable_images,
-        });
-    }
-
-    let Some(rendered) = cache.rendered_lines.as_ref() else {
-        return;
-    };
-    let total_lines = rendered.lines.len();
-    super::set_pinned_pane_total_lines(total_lines);
-
-    let max_scroll = total_lines.saturating_sub(inner.height as usize);
-    super::set_last_diff_pane_max_scroll(max_scroll);
-    let clamped_scroll = scroll.min(max_scroll);
-    super::set_last_diff_pane_effective_scroll(clamped_scroll);
-
-    let mut visible_lines: Vec<Line<'static>> = rendered
-        .lines
-        .iter()
-        .skip(clamped_scroll)
-        .take(inner.height as usize)
-        .cloned()
-        .collect();
-    let visible_end = clamped_scroll + visible_lines.len();
-    let visible_left_margins = rendered
-        .left_margins
-        .get(clamped_scroll..visible_end.min(rendered.left_margins.len()))
-        .unwrap_or(&[]);
-    record_side_pane_snapshot_precomputed(
-        rendered.wrapped_plain_lines.clone(),
-        rendered.wrapped_copy_offsets.clone(),
-        rendered.raw_plain_lines.clone(),
-        rendered.wrapped_line_map.clone(),
-        clamped_scroll,
-        visible_end,
-        inner,
-        visible_left_margins,
-    );
-    apply_side_selection_highlight(app, &mut visible_lines, clamped_scroll);
-    super::clear_area(frame, inner);
-
-    let paragraph = if line_wrap {
-        Paragraph::new(visible_lines).wrap(Wrap { trim: false })
-    } else {
-        Paragraph::new(visible_lines)
-    };
-    frame.render_widget(paragraph, inner);
-
-    let has_protocol = mermaid::protocol_type().is_some();
-    if has_protocol {
-        for placement in &rendered.image_placements {
-            let image_start = placement.after_text_line;
-            let image_end = image_start.saturating_add(placement.rows as usize);
-            let viewport_start = clamped_scroll;
-            let viewport_end = clamped_scroll.saturating_add(inner.height as usize);
-            if image_end <= viewport_start || image_start >= viewport_end {
-                continue;
-            }
-
-            let visible_start = image_start.max(viewport_start);
-            let visible_end = image_end.min(viewport_end);
-            let y_in_inner = visible_start.saturating_sub(viewport_start) as u16;
-            let avail_rows = visible_end.saturating_sub(visible_start) as u16;
-            if avail_rows < 2 {
-                continue;
-            }
-            let img_area = Rect {
-                x: inner.x,
-                y: inner.y + y_in_inner,
-                width: inner.width,
-                height: avail_rows,
-            };
-            match placement.render_mode {
-                SidePanelImageRenderMode::Fit => {
-                    if let Some((_, width, height)) = mermaid::get_cached_png(placement.hash) {
-                        if let Some(plan) = plan_fit_image_render(
-                            inner,
-                            clamped_scroll,
-                            image_start,
-                            placement.rows,
-                            width,
-                            height,
-                            false,
-                        ) {
-                            match plan {
-                                FitImageRenderPlan::Full { area } => {
-                                    mermaid::render_image_widget_scale(
-                                        placement.hash,
-                                        area,
-                                        frame.buffer_mut(),
-                                        false,
-                                    );
-                                }
-                                FitImageRenderPlan::ClippedViewport {
-                                    area,
-                                    scroll_y,
-                                    zoom_percent,
-                                } => {
-                                    mermaid::render_image_widget_viewport_precise(
-                                        placement.hash,
-                                        area,
-                                        frame.buffer_mut(),
-                                        0,
-                                        scroll_y,
-                                        zoom_percent as u16,
-                                        false,
-                                    );
-                                }
-                            }
-                        }
-                    } else {
-                        mermaid::render_image_widget_scale(
-                            placement.hash,
-                            img_area,
-                            frame.buffer_mut(),
-                            false,
-                        );
-                    }
-                }
-                SidePanelImageRenderMode::ScrollableViewport { zoom_percent } => {
-                    let scroll_y = visible_start.saturating_sub(image_start) as i32;
-                    let scroll_x = mermaid::get_cached_png(placement.hash)
-                        .map(|(_, width, _)| {
-                            side_panel_viewport_scroll_x(
-                                width,
-                                img_area.width,
-                                zoom_percent,
-                                false,
-                                mermaid::get_font_size(),
-                                app.diff_pane_scroll_x(),
-                            )
-                        })
-                        .unwrap_or(0);
-                    mermaid::render_image_widget_viewport_precise(
-                        placement.hash,
-                        img_area,
-                        frame.buffer_mut(),
-                        scroll_x,
-                        scroll_y,
-                        zoom_percent,
-                        false,
-                    );
-                }
-            }
-        }
-    }
 }
 
 pub(super) fn draw_side_panel_markdown(
@@ -1529,6 +739,10 @@ pub(super) fn draw_side_panel_markdown(
                             ) {
                                 let visible_widget_rect = match plan {
                                     FitImageRenderPlan::Full { area } => {
+                                        super::panel_image_preview::record_image(
+                                            area,
+                                            placement.hash,
+                                        );
                                         mermaid::render_image_widget_scale(
                                             placement.hash,
                                             area,
@@ -1542,6 +756,10 @@ pub(super) fn draw_side_panel_markdown(
                                         scroll_y,
                                         zoom_percent,
                                     } => {
+                                        super::panel_image_preview::record_image(
+                                            area,
+                                            placement.hash,
+                                        );
                                         mermaid::render_image_widget_viewport_precise(
                                             placement.hash,
                                             area,
@@ -1594,6 +812,7 @@ pub(super) fn draw_side_panel_markdown(
                                 });
                             }
                         } else {
+                            super::panel_image_preview::record_image(img_area, placement.hash);
                             mermaid::render_image_widget_scale(
                                 placement.hash,
                                 img_area,
@@ -1617,6 +836,7 @@ pub(super) fn draw_side_panel_markdown(
                                 )
                             })
                             .unwrap_or(0);
+                        super::panel_image_preview::record_image(img_area, placement.hash);
                         mermaid::render_image_widget_viewport_precise(
                             placement.hash,
                             img_area,
@@ -1686,7 +906,7 @@ fn render_side_panel_markdown_cached(
     inner: Rect,
     has_protocol: bool,
     centered: bool,
-) -> PinnedRenderedCache {
+) -> RenderedSidePanelCache {
     render_side_panel_markdown_cached_with_zoom(page, inner, has_protocol, centered, 100)
 }
 
@@ -1696,7 +916,7 @@ fn render_side_panel_markdown_cached_with_zoom(
     has_protocol: bool,
     centered: bool,
     image_zoom_percent: u8,
-) -> PinnedRenderedCache {
+) -> RenderedSidePanelCache {
     render_side_panel_markdown_cached_with_zoom_and_profile_area(
         page,
         inner,
@@ -1714,7 +934,7 @@ fn render_side_panel_markdown_cached_with_zoom_and_profile_area(
     has_protocol: bool,
     centered: bool,
     image_zoom_percent: u8,
-) -> PinnedRenderedCache {
+) -> RenderedSidePanelCache {
     let content_signature = side_panel_content_signature(page);
     let mermaid_aspect_ratio =
         side_panel_mermaid_preferred_aspect_ratio(page, mermaid_profile_area, has_protocol);
@@ -1764,7 +984,7 @@ fn render_side_panel_markdown_cached_with_zoom_and_profile_area(
         Alignment::Left
     };
     let mut text_lines: Vec<Line<'static>> = Vec::new();
-    let mut image_placements: Vec<PinnedImagePlacement> = Vec::new();
+    let mut image_placements: Vec<SidePanelImagePlacement> = Vec::new();
 
     for (idx, line) in rendered_markdown.rendered_markdown.iter().enumerate() {
         if let Some(hash) = rendered_markdown.placeholder_hashes[idx] {
@@ -1789,7 +1009,7 @@ fn render_side_panel_markdown_cached_with_zoom_and_profile_area(
                     },
                 };
             }
-            image_placements.push(PinnedImagePlacement {
+            image_placements.push(SidePanelImagePlacement {
                 after_text_line: text_lines.len(),
                 hash,
                 rows: image_layout.rows,
@@ -1829,9 +1049,7 @@ fn render_side_panel_markdown_cached_with_zoom_and_profile_area(
         left_margins,
     ) = build_side_pane_snapshot_cache(&text_lines, inner.width);
 
-    let rendered = PinnedRenderedCache {
-        inner_width: inner.width,
-        line_wrap: false,
+    let rendered = RenderedSidePanelCache {
         lines: text_lines,
         wrapped_plain_lines,
         wrapped_copy_offsets,

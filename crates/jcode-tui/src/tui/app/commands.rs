@@ -113,6 +113,7 @@ pub(super) fn disable_auto_poke(app: &mut App) -> usize {
     app.todo_confidence_spike_challenged = false;
     app.todo_completion_gate_attempts = 0;
     app.last_auto_poke_fingerprint = None;
+    app.last_todo_ownership_fingerprint = None;
     app.todo_gate_digest_delivered = false;
     cleared
 }
@@ -245,6 +246,7 @@ pub(super) fn activate_auto_poke(app: &mut App) -> PokeActivation {
     app.todo_confidence_spike_challenged = false;
     app.todo_completion_gate_attempts = 0;
     app.last_auto_poke_fingerprint = None;
+    app.last_todo_ownership_fingerprint = None;
     // Re-arming starts a fresh review cycle, so the deferred quality digest is
     // eligible to be delivered again for the upcoming work.
     app.todo_gate_digest_delivered = false;
@@ -364,6 +366,7 @@ pub(super) fn create_transfer_session_from_parent(
     let mut child = crate::session::Session::create(Some(parent_session_id.to_string()), None);
     child.messages.clear();
     child.compaction = compaction;
+    child.system_prompt = parent.system_prompt.clone();
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
     child.provider_key = parent.provider_key.clone();
@@ -959,7 +962,6 @@ fn parse_diff_mode_name(value: &str) -> Option<crate::config::DiffDisplayMode> {
         "full" | "full-inline" | "full_inline" | "fullinline" | "inline-full" => {
             Some(DiffDisplayMode::FullInline)
         }
-        "pinned" | "pin" | "pane" => Some(DiffDisplayMode::Pinned),
         "file" | "fullfile" | "full-file" => Some(DiffDisplayMode::File),
         _ => None,
     }
@@ -987,7 +989,7 @@ pub(super) fn handle_diff_command(app: &mut App, trimmed: &str) -> bool {
 
     if arg.eq_ignore_ascii_case("status") {
         app.push_display_message(DisplayMessage::system(format!(
-            "Diff mode: {} (use /diff [off|inline|full|pinned|file] or /diff to cycle)",
+            "Diff mode: {} (use /diff [off|inline|full|file] or /diff to cycle)",
             app.diff_mode.label()
         )));
         return true;
@@ -996,7 +998,7 @@ pub(super) fn handle_diff_command(app: &mut App, trimmed: &str) -> bool {
     match parse_diff_mode_name(arg) {
         Some(mode) => apply_diff_mode(app, mode),
         None => app.push_display_message(DisplayMessage::error(
-            "Usage: /diff [off|inline|full|pinned|file|cycle|status]".to_string(),
+            "Usage: /diff [off|inline|full|file|cycle|status]".to_string(),
         )),
     }
     true
@@ -1353,8 +1355,18 @@ fn handle_fork_command(app: &mut App, trimmed: &str) -> bool {
 /// as the first message of the forked session. Shared by `/btw <question>`,
 /// `/fork [prompt]`, and `/split`.
 pub(super) fn fork_session_with_prompt_local(app: &mut App, prompt: Option<&str>) {
-    let staged = prompt.map(|prompt| (prompt.to_string(), Vec::new()));
+    // Images attached to the input belong to the prompt being forked off, so
+    // they travel with it instead of lingering on the parent's next message.
+    let images = if prompt.is_some() {
+        std::mem::take(&mut app.pending_images)
+    } else {
+        Vec::new()
+    };
+    let staged = prompt.map(|prompt| (prompt.to_string(), images.clone()));
     if let Err(error) = launch_forked_session_local(app, staged) {
+        if !images.is_empty() {
+            app.pending_images = images;
+        }
         app.push_display_message(DisplayMessage::error(format!(
             "Failed to fork session: {}",
             error
@@ -1674,6 +1686,16 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
 
     if trimmed == "/commit" {
         handle_commit_command_local(app);
+        return true;
+    }
+
+    if trimmed == "/merge" {
+        handle_merge_command_local(app);
+        return true;
+    }
+
+    if trimmed == "/merge-remote-release" {
+        handle_merge_remote_release_command_local(app);
         return true;
     }
 
@@ -2144,6 +2166,42 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
     false
 }
 
+pub(super) fn build_merge_prompt() -> String {
+    String::from(
+        "Merge the current Git branch into the repository's main or master branch, then leave HEAD attached to that destination branch in the session's working directory. \
+        This is an explicit request to integrate this branch and switch to the destination, not merely to reset HEAD. \
+        First inspect the repository, current branch, git status (including staged, unstaged, and untracked files), worktrees, and any merge/rebase/cherry-pick/revert in progress. \
+        If there are uncommitted changes, an operation in progress, or a detached/unborn HEAD, stop and explain without changing anything. Do not auto-commit, stash, clean, or discard work. \
+        Select an existing local main or master branch. If both exist, use the configured remote default only when it unambiguously names one of them; otherwise ask which to use. If neither exists, stop rather than inventing a destination. \
+        If already on the destination branch, report that and do nothing. If the destination is checked out in another worktree, stop rather than forcing a checkout or modifying that worktree. \
+        Record the source branch and both commit IDs, inspect the commits and diff being integrated, and honor the repository's validation requirements before merging. Stop if validation fails. \
+        Recheck that the worktree is clean and both branch tips are unchanged before switching. Use git switch to the destination and a normal non-interactive git merge --no-edit of the recorded source commit, allowing a fast-forward when possible. \
+        Never reset, rebase, squash, force-update refs, bypass hooks, push, delete branches, or include unrelated branches. \
+        If this merge conflicts, do not resolve conflicts automatically: abort only the merge you just started and return to the original branch when safe. If recovery fails, stop and report the exact state without destructive cleanup. \
+        After a successful merge, rerun the appropriate validation against the combined result. If it fails, report the failure and leave the completed merge intact rather than resetting it or claiming success. \
+        Verify the final branch, clean status, and that the source commit is an ancestor of HEAD before claiming success. Report the source, destination, resulting commit, validation, and that nothing was pushed.",
+    )
+}
+
+pub(super) fn build_merge_remote_release_prompt() -> String {
+    format!(
+        "Merge the current branch and then cut a remote release from the destination branch. Execute these two phases in order. \
+        Phase 1 (merge only, no push or release): {} \
+        Gate: proceed to Phase 2 only after Phase 1 successfully merges the source and all post-merge validation passes, \
+        HEAD is attached to the selected destination, the worktree is clean, and the recorded source commit is an ancestor of HEAD. \
+        If Phase 1 stops for any reason (including already being on the destination branch), has conflicts, fails validation, \
+        or needs clarification, stop the entire workflow without pushing, tagging, or releasing. \
+        The no-push rule and nothing-pushed report above apply to Phase 1 only. \
+        Phase 2 (remote release): stay on the verified destination branch and release its merged HEAD, never the original feature branch. \
+        Do not auto-commit any unexpected work that appears between phases. Stop if the destination branch or HEAD changes unexpectedly. \
+        Stop on any push failure before creating a tag or triggering a release. {} \
+        Finally report the merge source and destination, validation results, release version, push result, and remote release status. \
+        Distinguish a triggered remote workflow from a completed publication.",
+        build_merge_prompt(),
+        build_remote_release_prompt(),
+    )
+}
+
 pub(super) fn build_commit_prompt() -> String {
     "Make interactive, logical commits for the current uncommitted work. Inspect the git state first, including unstaged and staged changes. Group related changes into small coherent commits, staging only the files or hunks that belong together. Preserve unrelated user or agent work, do not discard changes, and do not amend existing commits unless clearly necessary. For each commit, use a concise conventional-style message when possible. Validate as appropriate for the changed files before committing, and report the commits created plus any remaining uncommitted changes.".to_string()
 }
@@ -2186,9 +2244,12 @@ pub(super) fn build_fast_macos_release_prompt() -> String {
 }
 
 pub(super) fn build_remote_release_prompt() -> String {
-    build_release_prompt(
+    let jcode_release = build_release_prompt(
         "",
         "Then run scripts/quick-release.sh --remote v<version> to push the tag immediately without any local build. Let the release workflow build, sign, checksum, and publish every platform, and leave publication gated on those remote checks.",
+    );
+    format!(
+        "First identify the repository in the current working directory from its git remote, release documentation, package manifests, existing tags, and CI workflows. Only use the following Jcode-specific procedure when this is the Jcode self-development repository and scripts/quick-release.sh exists: {jcode_release} Otherwise, use the repository's own established release conventions. Inspect its release documentation, workflows, scripts, manifests, tag format, and recent releases before changing anything. Make logical commits for current work without disturbing unrelated changes and push them normally. Determine the next version from this repository's versioning scheme and user-visible changes, update only the version files and changelog formats it actually uses, validate the metadata, commit and push it, then trigger the repository's documented remote release mechanism. Prefer a tag-triggered or workflow-dispatch CI release that performs builds and publication remotely. Do not assume the project uses Cargo, changelog JSON, v-prefixed tags, or scripts/quick-release.sh. Do not build release artifacts locally unless this repository explicitly requires it and no remote release path exists. Never force-push, move an existing tag, bypass remote release gates, or invent a release process. Report the detected release convention, version, commits, tag or workflow invocation, and remote release status."
     )
 }
 
@@ -2233,6 +2294,29 @@ fn handle_triage_command_local(app: &mut App, rest: &str) {
     }
 }
 
+pub(super) fn merge_launch_notice(interrupted: bool) -> String {
+    if interrupted {
+        "👉 Interrupting and starting merge into main/master...".to_string()
+    } else {
+        "🚀 Starting merge into main/master...".to_string()
+    }
+}
+
+fn handle_merge_command_local(app: &mut App) {
+    let prompt = build_merge_prompt();
+    if app.is_processing {
+        super::commands_improve::interrupt_and_queue_synthetic_message(
+            app,
+            prompt,
+            "Interrupting for /merge...",
+            merge_launch_notice(true),
+        );
+    } else {
+        app.push_display_message(DisplayMessage::system(merge_launch_notice(false)));
+        super::commands_improve::start_synthetic_user_turn(app, prompt);
+    }
+}
+
 pub(super) fn commit_launch_notice(interrupted: bool) -> String {
     if interrupted {
         "👉 Interrupting and starting logical commits...".to_string()
@@ -2262,6 +2346,14 @@ pub(super) fn fast_macos_release_launch_notice(interrupted: bool) -> String {
         "👉 Interrupting and starting logical commits + push + fast macOS release...".to_string()
     } else {
         "🚀 Starting logical commits + push + fast macOS release...".to_string()
+    }
+}
+
+pub(super) fn merge_remote_release_launch_notice(interrupted: bool) -> String {
+    if interrupted {
+        "👉 Interrupting and starting merge + push + remote release...".to_string()
+    } else {
+        "🚀 Starting merge + push + remote release...".to_string()
     }
 }
 
@@ -2329,6 +2421,23 @@ fn handle_fast_macos_release_command_local(app: &mut App) {
         );
     } else {
         app.push_display_message(DisplayMessage::system(fast_macos_release_launch_notice(
+            false,
+        )));
+        super::commands_improve::start_synthetic_user_turn(app, prompt);
+    }
+}
+
+fn handle_merge_remote_release_command_local(app: &mut App) {
+    let prompt = build_merge_remote_release_prompt();
+    if app.is_processing {
+        super::commands_improve::interrupt_and_queue_synthetic_message(
+            app,
+            prompt,
+            "Interrupting for /merge-remote-release...",
+            merge_remote_release_launch_notice(true),
+        );
+    } else {
+        app.push_display_message(DisplayMessage::system(merge_remote_release_launch_notice(
             false,
         )));
         super::commands_improve::start_synthetic_user_turn(app, prompt);
@@ -3019,19 +3128,23 @@ pub(super) fn handle_swarm_prompt_command(app: &mut App, trimmed: &str) -> bool 
         return true;
     };
     let extra: Vec<&str> = parts.collect();
-    match std::process::Command::new(bin)
-        .args(&extra)
-        .arg(&path)
-        .spawn()
-    {
-        Ok(_) => {
+    let mut command = std::process::Command::new(bin);
+    command.args(&extra).arg(&path);
+    match run_interactive_editor(&mut command) {
+        Ok(status) if status.success() => {
             app.push_display_message(DisplayMessage::system(format!(
-                "Opening the active swarm routing prompt in {}:\n{}\n\nChanges apply after restarting or reloading Jcode because running agent tool registries cache the prompt.",
+                "Edited the active swarm routing prompt in {}:\n{}\n\nNew agents will use this prompt immediately. Existing agents retain their current prompt to preserve their context cache.",
                 editor,
                 path.display()
             )));
-            app.set_status_notice("Opened swarm prompt");
+            app.set_status_notice("Edited swarm prompt");
         }
+        Ok(status) => app.push_display_message(DisplayMessage::error(format!(
+            "Editor '{}' exited with status {} while editing {}",
+            editor,
+            status,
+            path.display()
+        ))),
         Err(error) => app.push_display_message(DisplayMessage::error(format!(
             "Failed to launch editor '{}' for {}: {}",
             editor,
@@ -3040,6 +3153,121 @@ pub(super) fn handle_swarm_prompt_command(app: &mut App, trimmed: &str) -> bool 
         ))),
     }
     true
+}
+
+/// Run a terminal editor without letting it fight Jcode's raw-mode event loop.
+///
+/// Interactive editors need the primary screen and cooked input. Spawning one
+/// while the TUI keeps ownership of the terminal causes arrow-key escape
+/// sequences and editor output to be consumed/rendered by both processes.
+fn run_interactive_editor(
+    command: &mut std::process::Command,
+) -> std::io::Result<std::process::ExitStatus> {
+    run_interactive_editor_with(
+        command,
+        suspend_terminal_for_editor,
+        resume_terminal_after_editor,
+    )
+}
+
+fn run_interactive_editor_with(
+    command: &mut std::process::Command,
+    suspend: impl FnOnce(),
+    resume: impl FnOnce(),
+) -> std::io::Result<std::process::ExitStatus> {
+    suspend();
+    let result = command.status();
+    resume();
+    result
+}
+
+fn suspend_terminal_for_editor() {
+    use crossterm::event::{DisableBracketedPaste, DisableFocusChange, DisableMouseCapture};
+
+    // These commands are safe even when a mode was not enabled. Disable them
+    // before leaving the alternate screen so the child receives normal input.
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        DisableBracketedPaste,
+        DisableFocusChange,
+        DisableMouseCapture
+    );
+    crate::tui::disable_keyboard_enhancement();
+    jcode_tui_style::restore_terminal_quietly();
+}
+
+fn resume_terminal_after_editor() {
+    use crossterm::event::{EnableBracketedPaste, EnableFocusChange, EnableMouseCapture};
+
+    // Re-enter the TUI before returning to the event loop. The existing
+    // ratatui Terminal remains usable and the next loop iteration redraws it.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(ratatui::init));
+    let policy = crate::perf::tui_policy();
+    let _ = crossterm::execute!(std::io::stdout(), EnableBracketedPaste);
+    if policy.enable_focus_change {
+        let _ = crossterm::execute!(std::io::stdout(), EnableFocusChange);
+    }
+    if policy.enable_mouse_capture {
+        let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
+    }
+    if policy.enable_keyboard_enhancement {
+        crate::tui::enable_keyboard_enhancement();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod interactive_editor_tests {
+    use super::run_interactive_editor_with;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[test]
+    fn handoff_waits_for_editor_before_resuming_terminal() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let child_events = Rc::clone(&events);
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "sleep 0.05"]);
+
+        let started = std::time::Instant::now();
+        let status = run_interactive_editor_with(
+            &mut command,
+            {
+                let events = Rc::clone(&events);
+                move || events.borrow_mut().push("suspend")
+            },
+            move || {
+                assert!(
+                    started.elapsed() >= std::time::Duration::from_millis(40),
+                    "terminal resumed before the editor process exited"
+                );
+                child_events.borrow_mut().push("resume");
+            },
+        )
+        .expect("editor command should run");
+
+        assert!(status.success());
+        assert_eq!(&*events.borrow(), &["suspend", "resume"]);
+    }
+
+    #[test]
+    fn handoff_resumes_terminal_after_editor_failure_status() {
+        let resumed = Rc::new(RefCell::new(false));
+        let resumed_after = Rc::clone(&resumed);
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "exit 7"]);
+
+        let status = run_interactive_editor_with(
+            &mut command,
+            || {},
+            move || {
+                *resumed_after.borrow_mut() = true;
+            },
+        )
+        .expect("shell should launch");
+
+        assert_eq!(status.code(), Some(7));
+        assert!(*resumed.borrow());
+    }
 }
 
 pub(super) fn handle_agents_command(app: &mut App, trimmed: &str) -> bool {
@@ -3393,19 +3621,6 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
             }
 
             let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
-            app.push_display_message(DisplayMessage {
-                role: "system".to_string(),
-                content: format!(
-                    "Opening config in editor...\n{} {}\n\n*Restart jcode after editing for changes to take effect.*",
-                    editor,
-                    path.display()
-                ),
-                tool_calls: vec![],
-                duration_secs: None,
-                title: None,
-                tool_data: None,
-            });
-
             // $EDITOR may contain arguments (e.g. "zed --wait" or "code -w"), so
             // split on whitespace and use the first token as the binary, passing
             // the rest as leading args before the file path. Report spawn errors
@@ -3414,15 +3629,25 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
             match parts.next() {
                 Some(bin) => {
                     let extra: Vec<&str> = parts.collect();
-                    if let Err(e) = std::process::Command::new(bin)
-                        .args(&extra)
-                        .arg(&path)
-                        .spawn()
-                    {
-                        app.push_display_message(DisplayMessage::error(format!(
+                    let mut command = std::process::Command::new(bin);
+                    command.args(&extra).arg(&path);
+                    match run_interactive_editor(&mut command) {
+                        Ok(status) if status.success() => {
+                            app.push_display_message(DisplayMessage::system(format!(
+                                "Edited config in {}:\n{}\n\n*Restart jcode after editing for changes to take effect.*",
+                                editor,
+                                path.display()
+                            )));
+                            app.set_status_notice("Edited config");
+                        }
+                        Ok(status) => app.push_display_message(DisplayMessage::error(format!(
+                            "Editor '{}' exited with status {}",
+                            editor, status
+                        ))),
+                        Err(e) => app.push_display_message(DisplayMessage::error(format!(
                             "Failed to launch editor '{}': {}",
                             editor, e
-                        )));
+                        ))),
                     }
                 }
                 None => {

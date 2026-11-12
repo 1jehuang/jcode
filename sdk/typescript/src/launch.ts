@@ -149,6 +149,8 @@ function linkCredentialFile(source: string, root: string, relative: string): boo
   return true;
 }
 
+export type WakeMode = "internal" | "external";
+
 export interface LaunchOptions {
   /**
    * Directory holding the instance's state (sessions, logs, credentials).
@@ -172,6 +174,17 @@ export interface LaunchOptions {
   binary?: string;
   /** Extra environment variables for the instance. */
   env?: Record<string, string>;
+  /**
+   * Default model for spawned swarm workers, unless overridden per spawn.
+   * Use `inherit` to default to the coordinator's model and auth route. This setting takes
+   * precedence over `env.JCODE_SWARM_MODEL`.
+   */
+  swarmModel?: string;
+  /**
+   * Who executes autonomous wake requests. This operator-level setting takes
+   * precedence over `env.JCODE_WAKE_MODE`.
+   */
+  wakeMode?: WakeMode;
   /** Milliseconds to wait for the socket to appear. Defaults to 30000. */
   startupTimeoutMs?: number;
   /** Forward the instance's stderr to this process. Defaults to false. */
@@ -551,6 +564,10 @@ export async function launchInstance(options: LaunchOptions = {}): Promise<Launc
         JCODE_API_SOCKET: socketPath,
         JCODE_SOCKET: path.join(runtimeDir, "jcode.sock"),
         ...options.env,
+        ...(options.swarmModel === undefined
+          ? {}
+          : { JCODE_SWARM_MODEL: options.swarmModel }),
+        ...(options.wakeMode === undefined ? {} : { JCODE_WAKE_MODE: options.wakeMode }),
       },
       stdio: ["ignore", "ignore", options.inheritStderr ? "inherit" : "pipe"],
       detached: false,

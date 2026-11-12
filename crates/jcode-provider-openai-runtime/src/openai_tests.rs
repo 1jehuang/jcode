@@ -50,7 +50,7 @@ impl Drop for EnvVarGuard {
     }
 }
 
-async fn test_persistent_ws_state() -> (PersistentWsState, tokio::task::JoinHandle<()>) {
+pub(super) async fn test_persistent_ws_state() -> (PersistentWsState, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test websocket listener");
@@ -77,12 +77,16 @@ async fn test_persistent_ws_state() -> (PersistentWsState, tokio::task::JoinHand
     (
         PersistentWsState {
             ws_stream: client_ws,
+            identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
             last_response_id: "resp_test".to_string(),
             connected_at: Instant::now(),
             last_activity_at: Instant::now(),
             last_response_completed_at: Instant::now(),
             message_count: 1,
             last_input_item_count: 1,
+            last_input_item_hashes: persistent_ws_input_item_hashes(&[
+                serde_json::json!({"role":"user","content":"previous"}),
+            ]),
         },
         server,
     )
@@ -130,12 +134,16 @@ async fn test_persistent_ws_state_with_ping_notify() -> (
     (
         PersistentWsState {
             ws_stream: client_ws,
+            identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
             last_response_id: "resp_test".to_string(),
             connected_at: Instant::now(),
             last_activity_at: Instant::now(),
             last_response_completed_at: Instant::now(),
             message_count: 1,
             last_input_item_count: 1,
+            last_input_item_hashes: persistent_ws_input_item_hashes(&[
+                serde_json::json!({"role":"user","content":"previous"}),
+            ]),
         },
         server,
         ping_notify,
@@ -225,6 +233,7 @@ async fn live_openai_smoke(model: &str, sentinel: &str) -> Result<Option<String>
 include!("openai_tests/models_state.rs");
 include!("openai_tests/responses_input.rs");
 include!("openai_tests/transport_runtime.rs");
+include!("openai_tests/websocket_prewarm.rs");
 include!("openai_tests/payloads.rs");
 include!("openai_tests/parsing_tools.rs");
 
@@ -286,7 +295,9 @@ async fn openai_available_efforts_follow_active_model_catalog_metadata() {
     );
     *provider.model.write().await = "gpt-5.6".to_string();
     assert_eq!(
-        provider.api_reasoning_effort(Some("swarm")).as_deref(),
+        provider
+            .api_reasoning_effort_with_swarm_root(Some("swarm"), Some("max"))
+            .as_deref(),
         Some("max")
     );
 
@@ -299,7 +310,9 @@ async fn openai_available_efforts_follow_active_model_catalog_metadata() {
             vec!["low".to_string(), "high".to_string(), "xhigh".to_string()],
         );
     assert_eq!(
-        provider.api_reasoning_effort(Some("swarm")).as_deref(),
+        provider
+            .api_reasoning_effort_with_swarm_root(Some("swarm"), Some("max"))
+            .as_deref(),
         Some("xhigh"),
         "swarm must clamp to the active model's strongest advertised effort"
     );
@@ -346,3 +359,7 @@ fn catalog_credential_identity_survives_token_refresh_but_changes_accounts() {
         OpenAIProvider::catalog_credential_identity(&credentials("new", "refresh-b", None))
     );
 }
+
+include!("openai_tests/persistent_terminal.rs");
+
+include!("openai_tests/persistent_prefix.rs");

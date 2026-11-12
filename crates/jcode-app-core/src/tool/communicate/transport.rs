@@ -3,6 +3,33 @@ use anyhow::Result;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+const SERVER_NOT_RUNNING: &str = "jcode server is not running; start it with jcode server start";
+
+fn map_socket_connection_error(err: anyhow::Error) -> anyhow::Error {
+    let server_is_unavailable = err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io_err| {
+                matches!(
+                    io_err.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                )
+            })
+    });
+
+    if server_is_unavailable {
+        anyhow::anyhow!(SERVER_NOT_RUNNING)
+    } else {
+        err
+    }
+}
+
+async fn connect_swarm_socket(path: &std::path::Path) -> Result<crate::transport::Stream> {
+    crate::server::connect_socket(path)
+        .await
+        .map_err(map_socket_connection_error)
+}
+
 fn request_type_from_json(json: &str) -> String {
     serde_json::from_str::<Value>(json)
         .ok()
@@ -24,7 +51,7 @@ pub(super) async fn send_request_with_timeout(
     timeout: Option<std::time::Duration>,
 ) -> Result<ServerEvent> {
     let path = crate::server::socket_path();
-    let stream = crate::server::connect_socket(&path).await?;
+    let stream = connect_swarm_socket(&path).await?;
     let (reader, mut writer) = stream.into_split();
 
     let request_id = request.id();
@@ -115,5 +142,38 @@ pub(super) async fn send_request_with_timeout(
             // Terminal responses and typed request responses with matching ids.
             _ => return Ok(serde_json::from_value(value)?),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SERVER_NOT_RUNNING, connect_swarm_socket};
+
+    #[tokio::test]
+    async fn missing_daemon_socket_has_actionable_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("missing.sock");
+
+        let err = connect_swarm_socket(&socket_path)
+            .await
+            .expect_err("missing socket should fail");
+
+        assert_eq!(err.to_string(), SERVER_NOT_RUNNING);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refused_daemon_socket_has_actionable_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("refused.sock");
+        {
+            let _listener = crate::transport::Listener::bind(&socket_path).expect("bind listener");
+        }
+
+        let err = connect_swarm_socket(&socket_path)
+            .await
+            .expect_err("stale socket should refuse the connection");
+
+        assert_eq!(err.to_string(), SERVER_NOT_RUNNING);
     }
 }

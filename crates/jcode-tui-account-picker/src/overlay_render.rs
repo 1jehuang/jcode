@@ -94,6 +94,9 @@ pub(super) fn compact_item_title(item: &AccountPickerItem) -> String {
         ActionSection::Login => extract_account_label(&item.title)
             .map(|label| format!("Refresh {label}"))
             .unwrap_or_else(|| "Login / refresh".to_string()),
+        ActionSection::Overview if !item.details.is_empty() || item.title.contains("Usage") => {
+            item.title.clone()
+        }
         ActionSection::Overview => "Provider settings".to_string(),
         ActionSection::Remove => extract_account_label(&item.title)
             .map(|label| format!("Remove {label}"))

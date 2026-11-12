@@ -2,7 +2,7 @@ use jcode_message_types::{
     ContentBlock, Message, Role, TOOL_OUTPUT_MISSING_TEXT, sanitize_tool_id,
 };
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Normalize a tool `parameters` JSON schema for whichever upstream OpenRouter
 /// routes the model to.
@@ -19,6 +19,26 @@ use std::collections::{HashMap, HashSet};
 /// same upstreams reject when they reach them.
 pub fn sanitize_tool_parameters_schema(schema: &Value) -> Value {
     jcode_schema_dialect::normalize(schema, &jcode_schema_dialect::registry::OPENROUTER)
+}
+
+fn orphan_tool_output_to_user_message(
+    tool_use_id: &str,
+    output: &str,
+    missing_output: &str,
+) -> Option<Value> {
+    let output = output.trim();
+    if output.is_empty() || output == missing_output {
+        return None;
+    }
+
+    Some(serde_json::json!({
+        "role": "user",
+        "content": format!(
+            "[Recovered orphaned tool output: {}]\n{}",
+            sanitize_tool_id(tool_use_id),
+            output
+        )
+    }))
 }
 
 /// Build OpenAI-compatible chat `messages` for OpenRouter/direct compatible providers.
@@ -180,21 +200,30 @@ pub fn build_chat_messages(
                             reasoning_content.push_str(text);
                         }
                         ContentBlock::ToolUse {
-                            id, name, input, ..
+                            id,
+                            name,
+                            input,
+                            thought_signature,
                         } => {
                             let args = if input.is_object() {
                                 serde_json::to_string(input).unwrap_or_default()
                             } else {
                                 "{}".to_string()
                             };
-                            tool_calls.push(serde_json::json!({
+                            let mut tool_call = serde_json::json!({
                                 "id": sanitize_tool_id(id),
                                 "type": "function",
                                 "function": {
                                     "name": name,
                                     "arguments": args
                                 }
-                            }));
+                            });
+                            if let Some(signature) = thought_signature {
+                                tool_call["extra_content"] = serde_json::json!({
+                                    "google": { "thought_signature": signature }
+                                });
+                            }
+                            tool_calls.push(tool_call);
                             tool_calls_seen.insert(id.clone());
                             if let Some(output) = pending_tool_results.remove(id) {
                                 post_tool_outputs.push((id.clone(), output));
@@ -300,14 +329,34 @@ pub fn build_chat_messages(
         ));
     }
 
+    let mut rewritten_pending_orphans = 0usize;
     if !pending_tool_results.is_empty() {
-        skipped_results += pending_tool_results.len();
+        let mut pending_entries: Vec<(String, String)> = std::mem::take(&mut pending_tool_results)
+            .into_iter()
+            .collect();
+        pending_entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for (tool_use_id, output) in pending_entries {
+            if let Some(message) =
+                orphan_tool_output_to_user_message(&tool_use_id, &output, &missing_output)
+            {
+                api_messages.push(message);
+                rewritten_pending_orphans += 1;
+            } else {
+                skipped_results += 1;
+            }
+        }
     }
 
     if injected_missing > 0 {
         jcode_logging::info(&format!(
             "[openrouter] Injected {} synthetic tool output(s) to prevent API error",
             injected_missing
+        ));
+    }
+    if rewritten_pending_orphans > 0 {
+        jcode_logging::info(&format!(
+            "[openrouter] Rewrote {} pending orphaned tool output(s) as user messages",
+            rewritten_pending_orphans
         ));
     }
     if skipped_results > 0 {
@@ -439,7 +488,8 @@ pub fn build_chat_messages(
     }
 
     // Final pass: ensure tool outputs immediately follow assistant tool calls.
-    let mut tool_output_map: HashMap<String, Value> = HashMap::new();
+    let mut tool_output_map: HashMap<String, VecDeque<Value>> = HashMap::new();
+    let mut missing_tool_outputs: HashMap<String, Value> = HashMap::new();
     for msg in &api_messages {
         if msg.get("role").and_then(|v| v.as_str()) == Some("tool")
             && let Some(id) = msg.get("tool_call_id").and_then(|v| v.as_str())
@@ -449,26 +499,20 @@ pub fn build_chat_messages(
                 .and_then(|v| v.as_str())
                 .map(|v| v == missing_output)
                 .unwrap_or(false);
-            match tool_output_map.get(id) {
-                Some(existing) => {
-                    let existing_missing = existing
-                        .get("content")
-                        .and_then(|v| v.as_str())
-                        .map(|v| v == missing_output)
-                        .unwrap_or(false);
-                    if existing_missing && !is_missing {
-                        tool_output_map.insert(id.to_string(), msg.clone());
-                    }
-                }
-                None => {
-                    tool_output_map.insert(id.to_string(), msg.clone());
-                }
+            if is_missing {
+                missing_tool_outputs
+                    .entry(id.to_string())
+                    .or_insert_with(|| msg.clone());
+            } else {
+                tool_output_map
+                    .entry(id.to_string())
+                    .or_default()
+                    .push_back(msg.clone());
             }
         }
     }
 
     let mut reordered: Vec<Value> = Vec::with_capacity(api_messages.len());
-    let mut used_outputs: HashSet<String> = HashSet::new();
     let mut injected_ordered = 0usize;
     let mut dropped_orphans = 0usize;
 
@@ -484,9 +528,12 @@ pub fn build_chat_messages(
                 reordered.push(msg);
                 for call in tool_calls {
                     if let Some(id) = call.get("id").and_then(|v| v.as_str()) {
-                        if let Some(tool_msg) = tool_output_map.get(id) {
-                            reordered.push(tool_msg.clone());
-                            used_outputs.insert(id.to_string());
+                        if let Some(tool_msg) = tool_output_map
+                            .get_mut(id)
+                            .and_then(VecDeque::pop_front)
+                            .or_else(|| missing_tool_outputs.get(id).cloned())
+                        {
+                            reordered.push(tool_msg);
                         } else {
                             injected_ordered += 1;
                             reordered.push(serde_json::json!({
@@ -494,7 +541,6 @@ pub fn build_chat_messages(
                                 "tool_call_id": id,
                                 "content": missing_output.clone()
                             }));
-                            used_outputs.insert(id.to_string());
                         }
                     }
                 }
@@ -503,12 +549,6 @@ pub fn build_chat_messages(
         }
 
         if role == "tool" {
-            if let Some(id) = msg.get("tool_call_id").and_then(|v| v.as_str())
-                && used_outputs.contains(id)
-            {
-                dropped_orphans += 1;
-                continue;
-            }
             dropped_orphans += 1;
             continue;
         }
@@ -532,6 +572,102 @@ pub fn build_chat_messages(
     }
 
     api_messages
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::build_chat_messages;
+    use jcode_message_types::{ContentBlock, Message, Role};
+    use serde_json::json;
+
+    fn tool_call(id: &str, output: &str) -> [Message; 2] {
+        [
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: id.to_string(),
+                    name: "read".to_string(),
+                    input: json!({"path": output}),
+                    thought_signature: None,
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            Message::tool_result(id, output, false),
+        ]
+    }
+
+    #[test]
+    fn repeated_tool_call_ids_get_their_own_outputs_in_order() {
+        let messages = tool_call("read:0", "first output")
+            .into_iter()
+            .chain(tool_call("read_0", "second output"))
+            .collect::<Vec<_>>();
+
+        let api_messages = build_chat_messages(&messages, "", false, false, false);
+        let outputs = api_messages
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .map(|message| message["content"].as_str().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(outputs, ["first output", "second output"]);
+    }
+
+    #[test]
+    fn orphaned_tool_output_is_recovered_as_a_user_message() {
+        let messages = vec![Message::tool_result("call_orphan", "orphan result", false)];
+
+        let api_messages = build_chat_messages(&messages, "", false, false, false);
+
+        assert_eq!(
+            api_messages,
+            vec![json!({
+                "role": "user",
+                "content": "[Recovered orphaned tool output: call_orphan]\norphan result"
+            })]
+        );
+    }
+
+    #[test]
+    fn multi_turn_replay_preserves_vertex_tool_call_thought_signatures() {
+        let signed_turn = |id: &str, signature: &str| Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: id.to_string(),
+                name: "read".to_string(),
+                input: json!({"path": format!("{id}.txt")}),
+                thought_signature: Some(signature.to_string()),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        };
+        let messages = vec![
+            Message::user("first"),
+            signed_turn("call_1", "signature-one"),
+            Message::tool_result("call_1", "first result", false),
+            Message::user("second"),
+            signed_turn("call_2", "signature-two"),
+            Message::tool_result("call_2", "second result", false),
+        ];
+
+        let api_messages = build_chat_messages(&messages, "", false, false, false);
+        let assistant_calls = api_messages
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .map(|message| &message["tool_calls"][0])
+            .collect::<Vec<_>>();
+
+        assert_eq!(assistant_calls.len(), 2);
+        assert_eq!(
+            assistant_calls[0]["extra_content"]["google"]["thought_signature"],
+            "signature-one"
+        );
+        assert_eq!(
+            assistant_calls[1]["extra_content"]["google"]["thought_signature"],
+            "signature-two"
+        );
+    }
 }
 
 #[cfg(test)]

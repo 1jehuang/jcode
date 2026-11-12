@@ -1,5 +1,8 @@
 name: Announce release on Discord
 
+env:
+  JCODE_CI: "1"
+
 on:
   # Covers releases published outside the tag-driven release workflow. Events
   # created by GITHUB_TOKEN are suppressed, so release.yml also dispatches this
@@ -22,6 +25,11 @@ permissions:
 
 jobs:
   announce:
+    # Same rule as `release.yml`: announcing is an outbound side effect, so it
+    # belongs to the canonical repository. On a fork the webhook secret is
+    # absent and the step would fail rather than post, but the guard makes that
+    # independent of whether the fork happens to hold the secret.
+    if: github.repository == '1jehuang/jcode'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

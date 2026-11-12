@@ -99,6 +99,17 @@ fn non_gpt5_copilot_models_keep_max_tokens() {
 }
 
 #[test]
+fn only_gpt_5_6_family_uses_responses_api() {
+    assert!(copilot_model_uses_responses_api("gpt-5.6-terra"));
+    assert!(copilot_model_uses_responses_api("gpt-5.6-sol"));
+    assert!(copilot_model_uses_responses_api("gpt-5.6-luna"));
+    assert!(!copilot_model_uses_responses_api("gpt-5.4"));
+    assert!(!copilot_model_uses_responses_api("claude-sonnet-4.6"));
+    assert_eq!(copilot_api_path(true), "responses");
+    assert_eq!(copilot_api_path(false), "chat/completions");
+}
+
+#[test]
 fn context_window_handles_dot_and_dash_names() {
     assert_eq!(
         jcode_base::provider::context_limit_for_model_with_provider(

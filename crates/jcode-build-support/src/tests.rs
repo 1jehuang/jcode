@@ -334,6 +334,59 @@ fn pending_activation_can_complete_and_roll_back() {
 }
 
 #[test]
+fn explicit_promotion_pins_installed_version_without_moving_client_channels() {
+    with_temp_jcode_home(|| {
+        let stable = "0.22.0";
+        let current = "abc1234-dirty-deadbeef";
+        install_binary_at_version(std::env::current_exe().as_ref().unwrap(), stable)
+            .expect("install stable");
+        install_binary_at_version(std::env::current_exe().as_ref().unwrap(), current)
+            .expect("install current");
+        update_stable_symlink(stable).expect("publish stable");
+        update_current_symlink(current).expect("publish current");
+        update_shared_server_symlink(stable).expect("shared server initially tracks stable");
+
+        let previous = promote_version_to_shared_server(current).expect("promote current");
+
+        assert_eq!(previous.as_deref(), Some(stable));
+        assert_eq!(
+            read_shared_server_version().unwrap().as_deref(),
+            Some(current)
+        );
+        assert_eq!(read_current_version().unwrap().as_deref(), Some(current));
+        assert_eq!(read_stable_version().unwrap().as_deref(), Some(stable));
+        assert!(!shared_server_tracks_stable().expect("explicit promotion should pin the channel"));
+
+        let previous = promote_version_to_shared_server(current).expect("repeat promotion");
+        assert_eq!(
+            previous.as_deref(),
+            Some(current),
+            "repeating the same promotion is idempotent"
+        );
+    });
+}
+
+#[test]
+fn explicit_promotion_rejects_missing_and_path_like_versions() {
+    with_temp_jcode_home(|| {
+        let missing = promote_version_to_shared_server("not-installed")
+            .expect_err("missing version must be rejected");
+        assert!(missing.to_string().contains("Version binary not found"));
+
+        for invalid in ["", "..", "../stable", r"..\stable", "C:\\stable"] {
+            let error = promote_version_to_shared_server(invalid)
+                .expect_err("path-like version must be rejected");
+            assert!(
+                error
+                    .to_string()
+                    .contains("Invalid installed version label"),
+                "unexpected error for {invalid:?}: {error:#}"
+            );
+        }
+    });
+}
+
+#[test]
 fn shared_server_candidate_prefers_approved_channel_over_current() {
     with_temp_jcode_home(|| {
         let approved_version = "shared-ok";

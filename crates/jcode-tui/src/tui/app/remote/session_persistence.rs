@@ -47,6 +47,9 @@ pub(super) fn persist_remote_session_metadata<F>(app: &mut App, update: F) -> Re
 where
     F: FnOnce(&mut crate::session::Session),
 {
+    if crate::tui::is_ssh_remote() {
+        anyhow::bail!("Session metadata belongs to the SSH server; local persistence is disabled");
+    }
     let session_id = app
         .remote_session_id
         .as_deref()

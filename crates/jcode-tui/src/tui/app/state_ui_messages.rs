@@ -17,11 +17,12 @@ fn display_message_from_stored_message(
     if text.trim().is_empty() {
         return None;
     }
+    if is_background_task_lifecycle_message(&text) {
+        return None;
+    }
     match message.display_role {
         Some(crate::session::StoredDisplayRole::System) => Some(DisplayMessage::system(text)),
-        Some(crate::session::StoredDisplayRole::BackgroundTask) => {
-            Some(DisplayMessage::background_task(text))
-        }
+        Some(crate::session::StoredDisplayRole::BackgroundTask) => None,
         None => match message.role {
             Role::User => {
                 if crate::session::is_scheduled_task_message(message) {
@@ -43,6 +44,14 @@ fn display_message_from_stored_message(
             Role::Assistant => Some(DisplayMessage::assistant(text)),
         },
     }
+}
+
+fn is_background_task_lifecycle_message(content: &str) -> bool {
+    let content = content.trim_start();
+    content.starts_with("**Background task**")
+        || content.starts_with("**Background task started**")
+        || content.starts_with("**Background task progress**")
+        || content.starts_with("**Background task stalled**")
 }
 
 fn stored_message_visible_text(message: &crate::session::StoredMessage) -> String {
@@ -68,7 +77,7 @@ fn stored_message_visible_text(message: &crate::session::StoredMessage) -> Strin
             ContentBlock::Image { media_type, .. } => {
                 parts.push(format!("[image:{}]", media_type));
             }
-            ContentBlock::OpenAICompaction { .. } => {}
+            ContentBlock::OpenAICompaction { .. } | ContentBlock::ToolReference { .. } => {}
         }
     }
     parts.join("\n\n")
@@ -76,6 +85,9 @@ fn stored_message_visible_text(message: &crate::session::StoredMessage) -> Strin
 
 impl App {
     pub fn push_display_message(&mut self, mut message: DisplayMessage) {
+        if is_background_task_lifecycle_message(&message.content) {
+            return;
+        }
         compact_display_message_tool_data(&mut message);
         // A trailing Ctrl+L spacer only exists to keep the screen clear while
         // idle. The moment real content arrives, drop it so the transcript
@@ -115,6 +127,7 @@ impl App {
     }
 
     pub(super) fn replace_display_messages(&mut self, mut messages: Vec<DisplayMessage>) {
+        messages.retain(|message| !is_background_task_lifecycle_message(&message.content));
         compact_display_messages_for_storage(&mut messages);
         self.display_messages = messages;
         self.attempt_committed_assistant_messages = 0;
@@ -165,30 +178,140 @@ impl App {
             return false;
         };
 
+        // A tool moved to the background finishes its foreground card with the
+        // background lifecycle notification returned by the tool. The same
+        // notification also drives the retained row in the pinned status band,
+        // so remove the transient tool card instead of turning it into a second
+        // transcript representation.
+        if is_background_task_lifecycle_message(&content) {
+            self.remove_display_message(idx);
+            return true;
+        }
+
         self.replace_display_message_title_and_content(idx, title, content)
     }
 
-    pub(super) fn upsert_background_task_progress_message(&mut self, content: String) {
-        let Some(progress) =
-            crate::message::parse_background_task_progress_notification_markdown(&content)
-        else {
-            self.push_display_message(DisplayMessage::background_task(content));
-            return;
-        };
+    pub(super) fn background_task_rows_ref(&self) -> &[crate::tui::BackgroundTaskRow] {
+        &self.background_task_rows
+    }
 
-        let idx = self.display_messages.iter().rposition(|message| {
-            message.role == "background_task"
-                && crate::message::parse_background_task_progress_notification_markdown(
-                    &message.content,
-                )
-                .is_some_and(|existing| existing.task_id == progress.task_id)
-        });
-
-        if let Some(idx) = idx {
-            self.replace_display_message_content(idx, content);
-        } else {
-            self.push_display_message(DisplayMessage::background_task(content));
+    fn retain_latest_background_tasks(&mut self) {
+        const MAX_PINNED_BACKGROUND_TASKS: usize = 2;
+        if self.background_task_rows.len() > MAX_PINNED_BACKGROUND_TASKS {
+            let stale = self.background_task_rows.len() - MAX_PINNED_BACKGROUND_TASKS;
+            self.background_task_rows.drain(..stale);
         }
+    }
+
+    pub(super) fn upsert_running_background_task(
+        &mut self,
+        task_id: String,
+        label: String,
+        percent: Option<f32>,
+    ) {
+        if let Some(index) = self
+            .background_task_rows
+            .iter()
+            .position(|task| task.task_id == task_id)
+        {
+            let mut task = self.background_task_rows.remove(index);
+            task.label = label;
+            // Output parsers can alternate between determinate updates (for
+            // example `42%`) and phase-only updates (`Compiling foo`).  A
+            // phase-only update must not erase the last useful percentage,
+            // otherwise the pinned progress bar jumps back to zero until the
+            // task completes at 100%.
+            if percent.is_some() || task.percent.is_none() {
+                task.percent = percent;
+            }
+            task.status = crate::tui::BackgroundTaskRowStatus::Running;
+            task.completed_at = None;
+            self.background_task_rows.push(task);
+            return;
+        }
+        self.background_task_rows
+            .push(crate::tui::BackgroundTaskRow {
+                task_id,
+                label,
+                percent,
+                status: crate::tui::BackgroundTaskRowStatus::Running,
+                completed_at: None,
+            });
+        self.retain_latest_background_tasks();
+    }
+
+    pub(super) fn upsert_running_background_task_progress(&mut self, content: &str) -> bool {
+        let Some(progress) =
+            crate::message::parse_background_task_progress_notification_markdown(content)
+        else {
+            return false;
+        };
+        let label = crate::message::background_task_display_label(
+            &progress.tool_name,
+            progress.display_name.as_deref(),
+        );
+        self.upsert_running_background_task(progress.task_id, label, progress.percent);
+        true
+    }
+
+    pub(super) fn upsert_running_background_task_started(&mut self, content: &str) -> bool {
+        let Some(started) =
+            crate::message::parse_background_task_started_notification_markdown(content)
+        else {
+            return false;
+        };
+        self.upsert_running_background_task(started.task_id, started.label, None);
+        true
+    }
+
+    pub(super) fn finish_background_task(
+        &mut self,
+        task_id: String,
+        label: String,
+        status: crate::tui::BackgroundTaskRowStatus,
+    ) {
+        if let Some(index) = self
+            .background_task_rows
+            .iter()
+            .position(|task| task.task_id == task_id)
+        {
+            let mut task = self.background_task_rows.remove(index);
+            task.label = label;
+            task.status = status;
+            task.completed_at = (status == crate::tui::BackgroundTaskRowStatus::Completed)
+                .then(std::time::Instant::now);
+            if status == crate::tui::BackgroundTaskRowStatus::Completed {
+                task.percent = Some(100.0);
+            }
+            self.background_task_rows.push(task);
+            return;
+        }
+        self.background_task_rows
+            .push(crate::tui::BackgroundTaskRow {
+                task_id,
+                label,
+                percent: (status == crate::tui::BackgroundTaskRowStatus::Completed)
+                    .then_some(100.0),
+                status,
+                completed_at: (status == crate::tui::BackgroundTaskRowStatus::Completed)
+                    .then(std::time::Instant::now),
+            });
+        self.retain_latest_background_tasks();
+    }
+
+    /// Successful tasks are useful as short-lived confirmation, but should not
+    /// permanently consume the pinned todo band's limited space. Failures stay
+    /// until acted on, and running tasks always stay visible.
+    pub(super) fn prune_irrelevant_background_tasks(&mut self) -> bool {
+        const COMPLETED_TASK_VISIBILITY: std::time::Duration = std::time::Duration::from_secs(12);
+        let now = std::time::Instant::now();
+        let previous_len = self.background_task_rows.len();
+        self.background_task_rows.retain(|task| {
+            task.completed_at.is_none_or(|completed_at| {
+                now.saturating_duration_since(completed_at) < COMPLETED_TASK_VISIBILITY
+            })
+        });
+        self.background_task_rows.len() != previous_len
     }
 
     pub(super) fn upsert_overnight_display_card(
@@ -213,6 +336,9 @@ impl App {
     }
 
     pub(super) fn maybe_refresh_overnight_display_card(&mut self) -> bool {
+        if crate::tui::is_ssh_remote() {
+            return false;
+        }
         let now = Instant::now();
         if self
             .last_overnight_card_refresh
@@ -524,6 +650,10 @@ impl App {
         // render map it back to an absolute offset against the larger total.
         let scroll = self.scroll_offset.min(total);
         let lines_from_bottom = total.saturating_sub(scroll).saturating_add(overshoot);
+        // A prepend shifts content ordinals, so a resize anchor captured against
+        // the pre-prepend frame can no longer be trusted to name the same
+        // message. Drop it; this prepend anchor is authoritative.
+        self.pending_resize_anchor = None;
         self.pending_history_anchor = Some(super::HistoryScrollAnchor {
             lines_from_bottom,
             base_total: total,
@@ -545,6 +675,69 @@ impl App {
         let resolved = crate::tui::ui::last_resolved_chat_scroll();
         self.pending_history_anchor = None;
         let changed = self.scroll_offset != resolved || !self.auto_scroll_paused;
+        self.scroll_offset = resolved;
+        self.auto_scroll_paused = true;
+        changed
+    }
+
+    /// Capture the reader's position in content coordinates before a resize
+    /// rewraps the transcript. Only meaningful while parked in history; while
+    /// following the tail the resize snaps to the new bottom instead.
+    pub(super) fn capture_resize_anchor(&mut self) {
+        if !self.auto_scroll_paused {
+            return;
+        }
+        // A prepend anchor may be pending here, and this capture is still the
+        // right one: a content position is width-independent, while the prepend
+        // anchor's row distance is only meaningful at the width it was captured
+        // at. So this anchor takes precedence while it exists, and the prepend
+        // anchor adopts the resolved row afterwards. The prepend anchor still
+        // wins when it is captured *after* this one (see
+        // `capture_history_anchor`), which is what stops a prepended duplicate
+        // from being misnamed.
+        //
+        // ponytail: if the prepended history is still in flight (a remote load)
+        // and contains a message identical to the anchored one, this ordinal can
+        // name the older copy until messages get a stable identity.
+        let Some(frame) = crate::tui::ui::last_chat_frame() else {
+            return;
+        };
+        // The row actually on screen, not the stored index (which may exceed
+        // the scrollable range after an earlier widen).
+        let row = crate::tui::ui::last_resolved_chat_scroll();
+        let Some(target) = jcode_tui_messages::content_pos_at_row(&frame, row) else {
+            return;
+        };
+        let captured_width = crate::tui::ui::last_layout_snapshot()
+            .map(|layout| layout.messages_area.width)
+            .unwrap_or(0);
+        self.pending_resize_anchor = Some(super::PendingResizeAnchor {
+            target,
+            captured_width,
+            captured_scroll: row,
+        });
+    }
+
+    /// Adopt the row the renderer resolved from a pending resize anchor, once a
+    /// frame laid out against the new geometry has rendered. Returns true when
+    /// the scroll position changed.
+    pub(super) fn reconcile_resize_anchor(&mut self) -> bool {
+        let Some(pending) = self.pending_resize_anchor else {
+            return false;
+        };
+        let width = crate::tui::ui::last_layout_snapshot()
+            .map(|layout| layout.messages_area.width)
+            .unwrap_or(0);
+        let resolved = crate::tui::ui::last_resolved_chat_scroll();
+        // Wait until a frame has been laid out against the new geometry: either
+        // the viewport width moved off the captured one, or the resolved row
+        // already differs from the row captured. Both readings are stale until
+        // that frame exists, so resolving early would adopt the old position.
+        if width == pending.captured_width && resolved == pending.captured_scroll {
+            return false;
+        }
+        self.pending_resize_anchor = None;
+        let changed = self.scroll_offset != resolved;
         self.scroll_offset = resolved;
         self.auto_scroll_paused = true;
         changed

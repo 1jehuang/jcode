@@ -643,6 +643,34 @@ fn is_retryable_empty_turn_ignores_normal_and_productive_turns() {
     assert!(!is_retryable_empty_turn(&empty_stop));
 }
 
+#[test]
+fn pseudo_tool_call_turn_only_matches_the_recovery_marker_as_a_call() {
+    let response = |text: &str| {
+        serde_json::from_value::<CodeAssistGenerateResponse>(serde_json::json!({
+            "response": {
+                "candidates": [{
+                    "content": {"parts": [{"text": text}]},
+                    "finishReason": "STOP"
+                }]
+            }
+        }))
+        .expect("decode response")
+    };
+
+    assert!(jcode_provider_antigravity::is_pseudo_tool_call_turn(
+        &response("  [previous tool call] todo({\"todos\":[]})")
+    ));
+    assert!(!jcode_provider_antigravity::is_pseudo_tool_call_turn(
+        &response("I saw [previous tool call] todo({}) in the transcript")
+    ));
+    assert!(!jcode_provider_antigravity::is_pseudo_tool_call_turn(
+        &response("[previous tool call] was only a history marker")
+    ));
+    assert!(!jcode_provider_antigravity::is_pseudo_tool_call_turn(
+        &response("ordinary answer")
+    ));
+}
+
 /// End-to-end guard for the turn-2 HTTP 404: `--provider antigravity` gives the
 /// agent this runtime directly, and session restore calls `set_model` with the
 /// routing spec `antigravity:<model>`. The id we store is the id we put on the

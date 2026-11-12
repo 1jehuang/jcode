@@ -37,6 +37,7 @@ impl Provider for QualityFirstOpenAiProvider {
                 api_method: "claude-oauth".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -45,6 +46,7 @@ impl Provider for QualityFirstOpenAiProvider {
                 api_method: "openai-api-key".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -53,6 +55,7 @@ impl Provider for QualityFirstOpenAiProvider {
                 api_method: "openai-api-key".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
         ]
@@ -1671,7 +1674,7 @@ fn recent_project_review_falls_back_cleanly_when_no_repo_is_known() {
     assert!(app.queued_messages.is_empty());
     assert!(matches!(app.onboarding_phase(), Some(OnboardingPhase::Suggestions)));
     assert!(app.status_notice.as_ref().is_some_and(|(notice, _)| {
-        notice.contains("No recent Git repository found")
+        notice.contains("No active Git repository found")
     }));
 }
 

@@ -1,0 +1,23 @@
+{
+  "version": "0.75.0",
+  "date": "2026-08-10",
+  "title": "A more capable desktop workspace",
+  "highlights": [
+    "The desktop app now includes a project file explorer and an in-app help overlay",
+    "Desktop sessions open as spatial panels with familiar new-tab shortcuts and animated navigation",
+    "The desktop window can hot-reload app code without being recreated"
+  ],
+  "improvements": [
+    "Desktop reasoning now shows the full thought history by default",
+    "Desktop resume navigation supports Vim-style keyboard chords",
+    "Desktop activity appears immediately while a response is starting"
+  ],
+  "fixes": [
+    "Desktop windows remain visible and reconnect cleanly across daemon and app reloads",
+    "Desktop session polling no longer interferes with live requests",
+    "Adjacent diff rows no longer show hairline gaps at fractional display scales",
+    "Explicit provider routes remain pinned when selected",
+    "Shifted punctuation and meta new-session shortcuts work consistently in the TUI",
+    "ACP clients enforce dynamic MCP tool policy"
+  ]
+}

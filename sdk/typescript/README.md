@@ -112,12 +112,134 @@ console.log("tokens:", turn.usage);
 client.close();
 ```
 
+### Full system prompt override
+
+```ts
+const session = await client.createSession({
+  workingDir: process.cwd(),
+  systemPrompt: "You are a concise code reviewer.",
+});
+```
+
+`systemPrompt` is sent as `system_prompt` and replaces the **entire assembled
+system prompt**, not just its base text. Default instructions and assembled
+instruction/context additions are not appended. The override is immutable after
+session creation and is persisted by the runtime for resume. Omit it (or use
+`undefined`) to keep normal prompt assembly. An empty string explicitly replaces
+the system prompt with an empty prompt. Existing `createSession()` and
+`createSession("/path")` calls retain their normal behavior.
+
+### Controlling tools
+
+Use `createSession({ workingDir, tools })` or `configureTools(sessionId, tools)`
+to control the tools exposed to one session. This requires a runtime and API
+bridge advertising `session_tools`. Existing `createSession("/path")` calls
+continue to work unchanged.
+
+```ts
+const session = await client.createSession({
+  workingDir: process.cwd(),
+  tools: {
+    enabled: ["read", "agentgrep"],
+    disabled: ["bash"],
+    custom: [{
+      name: "lookup_ticket",
+      description: "Look up a ticket in the application's ticket store",
+      parameters: {
+        type: "object",
+        properties: { id: { type: "string" } },
+        required: ["id"],
+        additionalProperties: false,
+      },
+      execute: async (input, { signal }) => {
+        // Your application implements this function. Honor signal for cancellation.
+        return JSON.stringify(await lookupTicket(String(input.id), { signal }));
+      },
+    }],
+  },
+});
+
+console.log(await client.listTools(session.session_id));
+const turn = await client.run(session.session_id, "Summarize ticket ABC-123");
+
+// Replace the policy between turns. No tools at all:
+await client.configureTools(session.session_id, { enabled: [] });
+// Restore configured defaults and remove all custom callbacks:
+await client.configureTools(session.session_id, {});
+```
+
+- `enabled` selects built-in/MCP tools. Omitted or `null` inherits configured
+  defaults. An empty array exposes no built-in/MCP tools.
+- `custom` adds tools regardless of `enabled`. A custom tool with the same name
+  replaces that tool only in this session. `disabled` wins over both lists.
+- Configuration replaces the previous SDK policy, not a patch. It is accepted
+  only while the session is idle. Await it before starting another turn.
+- `execute` receives schema-validated input and returns a string or
+  `{ output: string, error?: string }`. Thrown errors become tool errors sent back
+  to the model. The SDK never serializes the callback function.
+- Callbacks have a 60-second deadline. Set `timeoutMs` on a custom tool to shorten
+  it. Cancellation and disconnect abort the supplied signal. Callbacks must
+  cooperate with that signal to stop external work, and synchronous blocking
+  callbacks cannot be forcibly interrupted by JavaScript timers.
+- Custom callbacks belong to the registering connection. Keep it open throughout
+  the turn. Policies are in-memory, not saved in the transcript. Reconfigure
+  before sending a message after reconnecting, reloading a session, restarting
+  the daemon, or forking a session. These controls are not an OS sandbox:
+  an enabled shell or application callback can still perform arbitrary work.
+  Automatic recovery after a daemon restart uses the daemon's default policy,
+  not the previous SDK selection. Do not treat these live-session controls as
+  a persistent security boundary. Prefer a private ephemeral `JcodeClient.launch()`
+  instance for embedding rather than a shared or automatically resumed session.
+- If a configuration acknowledgement times out, the SDK closes its connection
+  rather than risk executing old callbacks against an uncertain new policy.
+
+For manual dispatch, send a wire-level `configure_tools` request via
+`client.request`, consume `tool_call` events, and call
+`client.submitToolResult(sessionId, callId, result)`. Do not manually answer calls
+that already have an `execute` callback.
+
+### Assistant messages and final answers
+
+`turn.text` is the concatenation of **all** assistant text in the turn, including
+intermediate narration before tools. This behavior is preserved for compatibility.
+Use `turn.finalText` to forward only the last completed assistant message, or
+`turn.messages` to retain each completed message separately:
+
+```ts
+const turn = await client.run(session.session_id, "Investigate the failure");
+console.log(turn.finalText);
+// turn.messages: [{ messageId?: string, text: string }, ...]
+```
+
+Framing-capable bridges attach `message_id` to `text_delta` and emit `text_done`
+with the same id when that message ends. Reasoning may interleave within one
+message and is **not** a text boundary. These ids correlate a live stream, not
+persisted history entries, and should be scoped to the connection and session.
+`text_replace` replaces the text for its `message_id`, including a previously
+completed message. An empty replacement retracts discarded retry output. Streaming
+clients should apply these corrections, and wait for `turn_done` before publishing
+an irreversible final answer. The SDK applies them to `text`, `messages`, and
+`finalText` automatically.
+With older bridges, `messages` is empty and `finalText` falls back to whole-turn
+`text`. Exact message boundaries cannot be reconstructed from that older stream.
+
+To verify message framing and concurrent history reads against a real provider
+in a private instance, run the opt-in acceptance check from the repository root:
+
+```sh
+JCODE_SDK_TEST_MODEL="your-model-id" node sdk/typescript/test/live-text-framing.mjs ./target/selfdev/jcode
+```
+
+This uses your existing provider login and quota, runs one harmless bash tool,
+and cleans up its private instance. It does not restart the shared daemon.
+
 ## Structured output
 
 `runStructured()` asks the model for JSON, validates the response with Ajv, and
 sends bounded corrective retries when the response is not valid JSON or does not
 match your JSON Schema. It returns the normal turn metadata plus validated
-`data` and an `attempts` audit trail.
+`data` and an `attempts` audit trail. On framing-capable bridges it validates
+`finalText`, so intermediate narration does not contaminate the JSON answer.
 
 ```ts
 const result = await client.runStructured<{ summary: string; count: number }>(
@@ -208,7 +330,7 @@ discovery pass only.
 | `listSessions({ includeArchived? })` | Every persisted session, optionally including archived sessions |
 | `archiveSession(id)` / `restoreSession(id)` | Reversibly hide or restore a session |
 | `setRetentionPolicy(days?)` | Auto-archive inactive sessions, or disable retention |
-| `createSession(workingDir?)` | Create and attach |
+| `createSession(workingDirOrOptions?)` | Create and attach, optionally overriding the full system prompt |
 | `attachSession(id)` / `detachSession(id)` | Subscribe / unsubscribe |
 | `sendMessage(id, content, images?)` | Send a user message (awaits `message_accepted`) |
 | `run(id, content, options?)` | Send and collect one full turn |
@@ -316,6 +438,8 @@ up for you:
 | `inheritLogins` | Inherit the user's provider logins. Defaults to `true`. |
 | `binary` | Path to the jcode binary. Defaults to `jcode` on `PATH`. |
 | `env` | Extra environment variables for the instance. |
+| `swarmModel` | Operator-enforced model for all swarm workers. Use `inherit` to keep the coordinator model and auth route. Takes precedence over `env.JCODE_SWARM_MODEL`. |
+| `wakeMode` | `internal` (daemon-owned wakes) or `external` (emit `wake_requested` for the operator). Takes precedence over `env.JCODE_WAKE_MODE`. |
 | `startupTimeoutMs` | How long to wait for the instance to come up. Defaults to 30000. |
 | `cleanupTimeoutMs` | How long `close()` spends removing an ephemeral home. Defaults to 30000. |
 | `inheritStderr` | Forward the instance's stderr to your process. Defaults to `false`. |
@@ -329,6 +453,7 @@ rebuild its complete session index without keeping a separate id registry.
 | Env var | Effect |
 | --- | --- |
 | `JCODE_API_SOCKET` | Override the API socket path |
+| `JCODE_WAKE_MODE` | Autonomous wake ownership: `internal` (default) or `external` |
 | `JCODE_RUNTIME_DIR` | Override the runtime directory |
 | `XDG_RUNTIME_DIR` | Default runtime directory on Linux |
 
@@ -390,6 +515,8 @@ try {
 | `unknown_session` | The session no longer exists, is not available to this instance, or the connection is not attached where attachment is required. | Refresh `listSessions()`, use the right private/shared instance, and attach when the method requires it. |
 | `invalid_request` | Arguments or current state violate the operation's contract (for example an invalid model, retry count, path, or compaction request). | Correct the caller input. The message contains the rejected constraint; do not blindly retry. |
 | `invalid_option` | A client-only option is outside its allowed range. | Correct the named option, such as `discoveryIntervalMs` or `maxBufferedEvents`. |
+| `unsupported` | The runtime does not advertise `session_tools`. | Update both the jcode daemon and API bridge before using tool controls. |
+| `busy` | Another tool configuration request is in flight for this session. | Await the previous configuration before submitting another. |
 | `internal` | The bridge or daemon failed unexpectedly while handling a valid request. | Preserve the message and jcode logs, retry once if safe, then report it if reproducible. |
 
 ### Streaming and structured-output errors

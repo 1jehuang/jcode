@@ -3,7 +3,7 @@ use crate::protocol::ServerEvent;
 use crate::provider::Provider;
 use crate::server::{
     SessionInterruptQueues, SwarmMember, VersionedPlan, broadcast_swarm_status,
-    register_background_tool_signal, register_session_interrupt_queue, swarm_id_for_dir,
+    register_background_tool_signal, register_session_interrupt_queue, swarm_id_for_session,
 };
 use crate::tool::Registry;
 use anyhow::Result;
@@ -90,10 +90,11 @@ pub(super) async fn create_headless_session(
     let working_dir_string = working_dir
         .as_ref()
         .map(|dir| dir.to_string_lossy().into_owned());
-    let mut new_agent = Agent::new_with_initial_working_dir(
+    let mut new_agent = Agent::new_with_parent_and_initial_working_dir(
         Arc::clone(&provider),
         registry,
         working_dir_string.as_deref(),
+        report_back_to_session_id.clone(),
     );
     new_agent.set_memory_enabled(memory_enabled);
     // Inline swarm mode renders a live gallery of worker viewports in the
@@ -209,7 +210,17 @@ pub(super) async fn create_headless_session(
     };
 
     let swarm_id = if swarm_enabled {
-        swarm_id_for_dir(working_dir.clone())
+        // A spawned worker belongs to its parent's swarm. A standalone
+        // headless session is an independent root and gets its own swarm.
+        let parent_swarm_id = if let Some(parent_id) = report_back_to_session_id.as_deref() {
+            let members = swarm_members.read().await;
+            members
+                .get(parent_id)
+                .and_then(|member| member.swarm_id.clone())
+        } else {
+            None
+        };
+        parent_swarm_id.or_else(|| swarm_id_for_session(&client_session_id))
     } else {
         None
     };

@@ -286,6 +286,53 @@ pub fn format_background_task_progress_markdown(task: &BackgroundTaskProgressEve
     )
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedBackgroundTaskStartedNotification {
+    pub task_id: String,
+    pub label: String,
+}
+
+pub fn parse_background_task_started_notification_markdown(
+    content: &str,
+) -> Option<ParsedBackgroundTaskStartedNotification> {
+    let header = content.trim().lines().next()?.trim();
+    let rest = header.strip_prefix("**Background task started** `")?;
+    let (task_id, label) = rest.split_once("` · `")?;
+    let label = label.strip_suffix('`')?;
+    if task_id.is_empty() || label.is_empty() {
+        return None;
+    }
+    Some(ParsedBackgroundTaskStartedNotification {
+        task_id: task_id.to_string(),
+        label: label.to_string(),
+    })
+}
+
+pub fn format_background_task_stalled_markdown(
+    task: &jcode_background_types::BackgroundTaskStalled,
+) -> String {
+    let mut message = format!(
+        "**Background task stalled** `{}` · {} · no output or progress for {}s (running {:.0}s total)",
+        task.task_id,
+        background_task_header_label(&task.tool_name, task.display_name.as_deref()),
+        task.stall_wake_seconds,
+        task.running_secs,
+    );
+
+    if let Some(tail) = normalize_background_task_preview(&task.output_tail) {
+        message.push_str(&format!("\n\nLast output:\n```text\n{}\n```", tail));
+    } else {
+        message.push_str("\n\n_No output captured yet._");
+    }
+
+    message.push_str(&format!(
+        "\n\nThe task is still running. Inspect it (`bg action=\"status\" task_id=\"{}\"`, `bg action=\"output\" task_id=\"{}\"`) and decide whether to keep waiting or cancel it (`bg action=\"cancel\" task_id=\"{}\"`). The watchdog re-arms if output resumes.",
+        task.task_id, task.task_id, task.task_id
+    ));
+
+    message
+}
+
 pub fn format_model_refresh_progress_markdown(detail: &str, percent: Option<u8>) -> String {
     let detail = detail.trim();
     let progress = percent

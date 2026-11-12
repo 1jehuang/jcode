@@ -1,5 +1,10 @@
 use super::*;
-use std::sync::{Mutex, OnceLock};
+use std::{
+    ffi::OsString,
+    sync::{Mutex, MutexGuard, OnceLock},
+};
+
+pub(super) static TEST_DELIVERY_MODES: Mutex<Vec<DeliveryMode>> = Mutex::new(Vec::new());
 
 // All of these tests mutate process-global state: the env-var opt-out tests
 // flip `JCODE_NO_TELEMETRY` / `DO_NOT_TRACK`, while the session tests drive the
@@ -10,12 +15,51 @@ use std::sync::{Mutex, OnceLock};
 // as `None`; the session test's `expect(...)` panicked while holding the
 // `SESSION_STATE` lock and poisoned it, cascading into `PoisonError` failures
 // in every other session test.
-fn global_test_lock() -> std::sync::MutexGuard<'static, ()> {
+struct TestEnvironment {
+    _home: tempfile::TempDir,
+    previous_home: Option<OsString>,
+    previous_no_telemetry: Option<OsString>,
+    previous_do_not_track: Option<OsString>,
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl Drop for TestEnvironment {
+    fn drop(&mut self) {
+        restore_env_var("JCODE_HOME", self.previous_home.take());
+        restore_env_var("JCODE_NO_TELEMETRY", self.previous_no_telemetry.take());
+        restore_env_var("DO_NOT_TRACK", self.previous_do_not_track.take());
+    }
+}
+
+fn restore_env_var(key: &str, value: Option<OsString>) {
+    if let Some(value) = value {
+        jcode_core::env::set_var(key, value);
+    } else {
+        jcode_core::env::remove_var(key);
+    }
+}
+
+fn global_test_lock() -> TestEnvironment {
     static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    TEST_LOCK
+    let lock = TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let home = tempfile::tempdir().expect("create isolated telemetry test home");
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let previous_no_telemetry = std::env::var_os("JCODE_NO_TELEMETRY");
+    let previous_do_not_track = std::env::var_os("DO_NOT_TRACK");
+    jcode_core::env::set_var("JCODE_HOME", home.path());
+    jcode_core::env::remove_var("JCODE_NO_TELEMETRY");
+    jcode_core::env::remove_var("DO_NOT_TRACK");
+
+    TestEnvironment {
+        _home: home,
+        previous_home,
+        previous_no_telemetry,
+        previous_do_not_track,
+        _lock: lock,
+    }
 }
 
 #[test]
@@ -57,13 +101,56 @@ fn background_delivery_queue_is_bounded() {
 #[test]
 fn telemetry_endpoint_uses_production_custom_domain() {
     assert_eq!(TELEMETRY_ENDPOINT, "https://telemetry.jcode.sh/v1/event");
+    assert_eq!(
+        TRANSCRIPT_ENDPOINT,
+        "https://telemetry.jcode.sh/v1/transcript"
+    );
 }
 
-fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
+#[test]
+fn transcript_upload_requires_separate_content_consent() {
+    let _guard = lock_test_env();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+
+    assert!(!record_transcript(
+        "provider",
+        "model",
+        SessionEndReason::NormalExit,
+        serde_json::json!([{"role": "user", "content": "secret prompt"}]),
+    ));
+    assert!(TEST_EMITTED_PAYLOADS.lock().unwrap().is_empty());
+}
+
+#[test]
+fn opted_in_transcript_payload_contains_full_structured_messages() {
+    let _guard = lock_test_env();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+    assert!(set_content_sharing_enabled(true));
+    let messages = serde_json::json!([
+        {"role": "user", "content": [{"type": "text", "text": "secret prompt"}]},
+        {"role": "assistant", "content": [{"type": "reasoning", "text": "private reasoning"}]}
+    ]);
+
+    assert!(record_transcript(
+        "provider",
+        "model",
+        SessionEndReason::NormalExit,
+        messages.clone(),
+    ));
+    let payloads = TEST_EMITTED_PAYLOADS.lock().unwrap();
+    let payload = payloads.last().expect("transcript payload");
+    assert_eq!(payload["event"], "transcript");
+    assert_eq!(payload["consent_version"], 1);
+    assert_eq!(payload["message_count"], 2);
+    assert_eq!(payload["messages"], messages);
+    assert!(uuid::Uuid::parse_str(payload["upload_id"].as_str().unwrap()).is_ok());
+}
+
+fn lock_test_env() -> TestEnvironment {
     global_test_lock()
 }
 
-fn lock_telemetry_test_state() -> std::sync::MutexGuard<'static, ()> {
+fn lock_telemetry_test_state() -> TestEnvironment {
     global_test_lock()
 }
 
@@ -84,10 +171,114 @@ fn test_do_not_track() {
 }
 
 #[test]
+fn false_opt_out_values_keep_telemetry_enabled() {
+    let _guard = lock_test_env();
+    for value in ["", "0", "false", "no", "off"] {
+        jcode_core::env::set_var("JCODE_NO_TELEMETRY", value);
+        jcode_core::env::set_var("DO_NOT_TRACK", value);
+        assert!(is_enabled(), "{value:?} should not opt out");
+    }
+}
+
+#[test]
+fn in_app_opt_out_emits_once_then_stops_telemetry() {
+    let _guard = lock_test_env();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+
+    assert!(set_usage_telemetry_enabled(false));
+    assert!(!is_enabled());
+    assert!(set_usage_telemetry_enabled(false));
+
+    let payloads = TEST_EMITTED_PAYLOADS.lock().unwrap();
+    let opt_outs = payloads
+        .iter()
+        .filter(|payload| payload["event"] == "telemetry_opt_out")
+        .collect::<Vec<_>>();
+    assert_eq!(opt_outs.len(), 1);
+    assert_eq!(opt_outs[0]["step"], "telemetry_settings");
+}
+
+#[test]
+fn record_turn_emits_prompt_submitted_immediately() {
+    let _guard = lock_telemetry_test_state();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+    if let Ok(mut session) = SESSION_STATE.lock() {
+        *session = None;
+    }
+    begin_session_with_mode("openai", "gpt-test", None, false);
+
+    record_turn();
+
+    let payloads = TEST_EMITTED_PAYLOADS.lock().unwrap().clone();
+    let prompt = payloads
+        .iter()
+        .find(|payload| payload["event"] == "prompt_submitted")
+        .expect("prompt_submitted should be emitted before turn completion");
+    assert_eq!(prompt["turn_index"], 1);
+    assert!(prompt["session_id"].is_string());
+    if let Ok(mut session) = SESSION_STATE.lock() {
+        *session = None;
+    }
+}
+
+#[test]
+fn telemetry_status_on_fresh_home_is_read_only() {
+    let _guard = lock_test_env();
+
+    let snapshot = status();
+
+    assert!(snapshot.enabled);
+    assert_eq!(snapshot.opt_out_source, None);
+    assert_eq!(snapshot.telemetry_id, None);
+    assert!(!snapshot.content_sharing_enabled);
+    assert!(!telemetry_id_path().expect("telemetry id path").exists());
+}
+
+#[test]
+fn telemetry_status_reads_an_existing_id_without_replacing_it() {
+    let _guard = lock_test_env();
+    let path = telemetry_id_path().expect("telemetry id path");
+    write_private_file(&path, "existing-id\n");
+
+    assert_eq!(status().telemetry_id.as_deref(), Some("existing-id"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "existing-id\n");
+}
+
+#[test]
+fn telemetry_status_reports_marker_file_opt_out() {
+    let _guard = lock_test_env();
+    assert!(set_usage_telemetry_enabled(false));
+
+    let snapshot = status();
+
+    assert!(!snapshot.enabled);
+    assert_eq!(
+        snapshot.opt_out_source,
+        Some(TelemetryOptOutSource::MarkerFile)
+    );
+}
+
+#[test]
+fn environment_opt_out_takes_precedence_over_marker_file() {
+    let _guard = lock_test_env();
+    assert!(set_usage_telemetry_enabled(false));
+    jcode_core::env::set_var("DO_NOT_TRACK", "1");
+
+    let snapshot = status();
+
+    assert!(!snapshot.enabled);
+    assert_eq!(
+        snapshot.opt_out_source,
+        Some(TelemetryOptOutSource::Environment)
+    );
+}
+
+#[test]
 fn test_is_ci_detects_ci_env() {
     let _guard = lock_test_env();
     // Clear any inherited CI markers so the baseline is deterministic.
     for key in [
+        "JCODE_CI",
         "CI",
         "CONTINUOUS_INTEGRATION",
         "BUILD_NUMBER",
@@ -120,6 +311,28 @@ fn test_is_ci_detects_ci_env() {
     );
     jcode_core::env::remove_var("CI");
     assert!(!is_ci());
+
+    jcode_core::env::set_var("JCODE_CI", "1");
+    assert!(is_ci(), "explicit JCODE_CI=1 should mark any runtime as CI");
+    jcode_core::env::remove_var("JCODE_CI");
+
+    jcode_core::env::set_var("CI", "true");
+    jcode_core::env::set_var("JCODE_CI", "0");
+    assert!(
+        !is_ci(),
+        "explicit JCODE_CI=0 should override inherited provider markers"
+    );
+    jcode_core::env::remove_var("JCODE_CI");
+    jcode_core::env::remove_var("CI");
+
+    jcode_core::env::set_var("CI", "true");
+    jcode_core::env::set_var("JCODE_CI", "invalid");
+    assert!(
+        is_ci(),
+        "invalid explicit values should fall back to provider detection"
+    );
+    jcode_core::env::remove_var("JCODE_CI");
+    jcode_core::env::remove_var("CI");
 
     // Vendor-specific markers count on their own: several providers never set
     // the generic `CI` variable, and those runners used to look like people.
@@ -962,4 +1175,268 @@ fn test_begin_session_closes_superseded_session() {
 #[test]
 fn test_superseded_reason_has_label() {
     assert_eq!(SessionEndReason::Superseded.as_str(), "superseded");
+}
+
+#[test]
+fn superseded_session_queues_complete_lifecycle_without_blocking() {
+    let _guard = lock_telemetry_test_state();
+    *SESSION_STATE.lock().unwrap() = None;
+    begin_session("test", "first");
+    record_turn();
+    let first_id = SESSION_STATE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .session_id
+        .clone();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+    TEST_DELIVERY_MODES.lock().unwrap().clear();
+
+    begin_session("test", "second");
+
+    let payloads = TEST_EMITTED_PAYLOADS.lock().unwrap().clone();
+    let events: Vec<_> = payloads
+        .iter()
+        .map(|p| p["event"].as_str().unwrap())
+        .collect();
+    assert_eq!(events, ["turn_end", "session_end", "todo_session"]);
+    assert_eq!(payloads[0]["session_id"], first_id);
+    assert_eq!(payloads[0]["turn_end_reason"], "superseded");
+    assert_eq!(payloads[1]["session_id"], first_id);
+    assert_eq!(payloads[1]["end_reason"], "superseded");
+    let modes = TEST_DELIVERY_MODES.lock().unwrap();
+    assert_eq!(modes.len(), payloads.len());
+    assert!(modes.iter().all(|m| matches!(m, DeliveryMode::Background)));
+    let state = SESSION_STATE.lock().unwrap();
+    assert_eq!(state.as_ref().unwrap().model_start, "second");
+    assert!(!state.as_ref().unwrap().start_event_sent);
+}
+
+#[test]
+fn process_shutdown_keeps_bounded_blocking_lifecycle_delivery() {
+    let _guard = lock_telemetry_test_state();
+    *SESSION_STATE.lock().unwrap() = None;
+    begin_session("test", "test");
+    record_turn();
+    TEST_DELIVERY_MODES.lock().unwrap().clear();
+    end_session("test", "test");
+    let modes = TEST_DELIVERY_MODES.lock().unwrap();
+    assert_eq!(modes.len(), 3);
+    assert!(modes.iter().all(
+        |m| matches!(m, DeliveryMode::Blocking(timeout) if *timeout == BLOCKING_LIFECYCLE_TIMEOUT)
+    ));
+    assert!(SESSION_STATE.lock().unwrap().is_none());
+}
+
+#[test]
+fn concurrency_guard_emits_versioned_runtime_events_without_counting_legacy_tui_activity() {
+    let _guard = lock_telemetry_test_state();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+    *SESSION_STATE.lock().unwrap() = None;
+    let mut root = begin_concurrency_session("root-session", None);
+    assert!(root.is_active());
+    assert_eq!(root.session_id(), "root-session");
+    // TUI/singleton begin calls must not add runtime ownership or inflate peaks.
+    begin_session("test", "test");
+    begin_session("test", "test");
+    record_turn();
+    let child = begin_concurrency_session("child-session", Some("root-session"));
+    drop(child);
+    root.finish();
+    root.finish();
+    assert!(!root.is_active());
+    end_session("test", "test");
+    drop(root);
+
+    let payloads = TEST_EMITTED_PAYLOADS.lock().unwrap().clone();
+    let events: Vec<_> = payloads
+        .iter()
+        .filter(|p| p["event"] == "session_concurrency")
+        .collect();
+    assert_eq!(
+        events.len(),
+        4,
+        "explicit finish followed by Drop emits only one end"
+    );
+    for event in &events {
+        assert_eq!(event["concurrency_tracking_version"], 2);
+        assert_eq!(
+            event["concurrency_tracking_scope"],
+            "runtime_agent_sessions"
+        );
+        assert_eq!(event["concurrency_tracking_available"], true);
+        assert_eq!(event["id"], events[0]["id"]);
+        assert!(uuid::Uuid::parse_str(event["concurrency_session_id"].as_str().unwrap()).is_ok());
+        let active = event["active_sessions_at_start"].as_u64().unwrap();
+        let peak = event["max_concurrent_sessions"].as_u64().unwrap();
+        assert!(peak >= active && active >= 1);
+        assert_eq!(event["other_active_sessions_at_start"], active - 1);
+        assert_eq!(event["multi_sessioned"], peak > 1);
+        assert_eq!(
+            event["root_sessions_at_start"].as_u64().unwrap()
+                + event["child_sessions_at_start"].as_u64().unwrap(),
+            active
+        );
+    }
+    assert_eq!(events[0]["phase"], "start");
+    assert_eq!(events[0]["active_sessions_at_start"], 1);
+    assert_eq!(events[1]["agent_role"], "child");
+    assert_eq!(events[1]["active_sessions_at_start"], 2);
+    assert_eq!(events[3]["phase"], "end");
+    assert_eq!(events[3]["max_concurrent_sessions"], 2);
+    assert_eq!(events[3]["max_concurrent_root_sessions"], 1);
+    assert_eq!(events[3]["max_concurrent_child_sessions"], 1);
+    assert_eq!(
+        events[0]["concurrency_session_id"],
+        events[3]["concurrency_session_id"]
+    );
+    assert_ne!(
+        events[0]["concurrency_session_id"],
+        events[1]["concurrency_session_id"]
+    );
+    let legacy: Vec<_> = payloads
+        .iter()
+        .filter(|p| matches!(p["event"].as_str(), Some("session_start" | "session_end")))
+        .collect();
+    assert_eq!(legacy.len(), 2);
+    for event in legacy {
+        assert_eq!(event["concurrency_tracking_version"], 2);
+        assert_eq!(event["concurrency_tracking_scope"], "legacy_process_global");
+        assert_eq!(event["concurrency_tracking_available"], false);
+        for key in [
+            "active_sessions_at_start",
+            "other_active_sessions_at_start",
+            "max_concurrent_sessions",
+            "multi_sessioned",
+        ] {
+            assert!(event.get(key).is_none());
+        }
+    }
+    assert!(
+        !storage::jcode_dir()
+            .unwrap()
+            .join("telemetry_active_sessions")
+            .exists()
+    );
+}
+
+#[test]
+fn concurrency_guard_opt_out_is_inert_and_opt_out_after_start_still_releases_ownership() {
+    let _guard = lock_telemetry_test_state();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+    jcode_core::env::set_var("JCODE_NO_TELEMETRY", "1");
+    let mut disabled = begin_concurrency_session("disabled-session", None);
+    assert!(!disabled.is_active());
+    assert_eq!(disabled.session_id(), "disabled-session");
+    disabled.finish();
+    assert!(
+        !storage::jcode_dir()
+            .unwrap()
+            .join("telemetry_concurrency_v2")
+            .exists()
+    );
+    assert!(TEST_EMITTED_PAYLOADS.lock().unwrap().is_empty());
+    jcode_core::env::remove_var("JCODE_NO_TELEMETRY");
+    let mut active = begin_concurrency_session("active", None);
+    jcode_core::env::set_var("DO_NOT_TRACK", "1");
+    active.finish();
+    jcode_core::env::remove_var("DO_NOT_TRACK");
+    let mut fresh = begin_concurrency_session("fresh", None);
+    fresh.finish();
+    let payloads = TEST_EMITTED_PAYLOADS.lock().unwrap();
+    assert_eq!(payloads.len(), 3, "opted-out end must not emit");
+    assert_eq!(payloads[1]["active_sessions_at_start"], 1);
+    assert_eq!(payloads[2]["max_concurrent_sessions"], 1);
+}
+
+#[test]
+fn concurrency_guard_paths_never_use_untrusted_session_ids() {
+    let _guard = lock_telemetry_test_state();
+    let home = storage::jcode_dir().unwrap();
+    let escape = home.join("escaped");
+    let mut first = begin_concurrency_session("../../escaped", None);
+    let mut second = begin_concurrency_session(escape.to_str().unwrap(), Some(".."));
+    assert!(!escape.exists());
+    for entry in std::fs::read_dir(home.join("telemetry_concurrency_v2")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|s| s.to_str()) == Some("lease") {
+            assert!(uuid::Uuid::parse_str(path.file_stem().unwrap().to_str().unwrap()).is_ok());
+        }
+    }
+    first.finish();
+    second.finish();
+}
+
+#[test]
+fn concurrency_guard_io_failure_omits_numbers_instead_of_fabricating_zero() {
+    let _guard = lock_telemetry_test_state();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+    std::fs::write(
+        storage::jcode_dir()
+            .unwrap()
+            .join("telemetry_concurrency_v2"),
+        "not a directory",
+    )
+    .unwrap();
+    let mut session = begin_concurrency_session("unavailable", None);
+    assert!(session.is_active());
+    session.finish();
+    let payloads = TEST_EMITTED_PAYLOADS.lock().unwrap();
+    assert_eq!(payloads.len(), 2);
+    for event in payloads.iter() {
+        assert_eq!(event["concurrency_tracking_version"], 2);
+        assert_eq!(event["concurrency_tracking_available"], false);
+        for key in [
+            "active_sessions_at_start",
+            "other_active_sessions_at_start",
+            "max_concurrent_sessions",
+            "multi_sessioned",
+            "root_sessions_at_start",
+            "child_sessions_at_start",
+            "max_concurrent_root_sessions",
+            "max_concurrent_child_sessions",
+        ] {
+            assert!(event.get(key).is_none());
+        }
+    }
+}
+
+#[test]
+fn concurrent_first_sessions_share_one_persisted_install_id() {
+    let _guard = lock_telemetry_test_state();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(12));
+    let threads: Vec<_> = (0..12)
+        .map(|_| {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                get_or_create_id().unwrap()
+            })
+        })
+        .collect();
+    let ids: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+    assert!(ids.iter().all(|id| id == &ids[0]));
+    assert_eq!(read_existing_id().as_ref(), Some(&ids[0]));
+}
+
+#[test]
+fn concurrency_crash_lifecycle_does_not_emit_untrusted_legacy_counts() {
+    let _guard = lock_telemetry_test_state();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+    *SESSION_STATE.lock().unwrap() = None;
+    begin_session("test", "test");
+    record_turn();
+    record_crash("test", "test", SessionEndReason::Panic);
+    let payloads = TEST_EMITTED_PAYLOADS.lock().unwrap();
+    let crash = payloads
+        .iter()
+        .find(|p| p["event"] == "session_crash")
+        .unwrap();
+    assert_eq!(crash["concurrency_tracking_version"], 2);
+    assert_eq!(crash["concurrency_tracking_scope"], "legacy_process_global");
+    assert_eq!(crash["concurrency_tracking_available"], false);
+    assert!(crash.get("max_concurrent_sessions").is_none());
+    assert!(crash.get("active_sessions_at_start").is_none());
+    assert!(crash.get("multi_sessioned").is_none());
 }

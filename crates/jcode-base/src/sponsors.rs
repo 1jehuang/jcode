@@ -34,6 +34,7 @@ pub mod provenance;
 /// served by the discovery endpoint.
 pub const DISCOVERY_CATEGORIES: &[&str] = &[
     "payments",
+    "git",
     "code-review",
     "databases",
     "browser-automation",
@@ -74,6 +75,7 @@ mod tests {
             DISCOVERY_CATEGORIES,
             &[
                 "payments",
+                "git",
                 "code-review",
                 "databases",
                 "browser-automation",

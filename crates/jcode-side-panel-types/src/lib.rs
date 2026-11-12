@@ -5,12 +5,14 @@ use serde::{Deserialize, Serialize};
 pub enum SidePanelPageFormat {
     #[default]
     Markdown,
+    Pdf,
 }
 
 impl SidePanelPageFormat {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Markdown => "markdown",
+            Self::Pdf => "pdf",
         }
     }
 }
@@ -36,6 +38,8 @@ impl SidePanelPageSource {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PersistedSidePanelState {
+    #[serde(default)]
+    pub focus_revision: u64,
     #[serde(default)]
     pub focused_page_id: Option<String>,
     #[serde(default)]
@@ -65,12 +69,17 @@ pub struct SidePanelPage {
     pub source: SidePanelPageSource,
     #[serde(default)]
     pub content: String,
+    /// Base64 PDF bytes. Content remains a human-readable Markdown fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pdf_data: Option<String>,
     #[serde(default)]
     pub updated_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SidePanelSnapshot {
+    #[serde(default)]
+    pub focus_revision: u64,
     #[serde(default)]
     pub focused_page_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

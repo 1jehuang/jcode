@@ -66,9 +66,10 @@ impl Provider for OpenRouterProvider {
         // call even though the route has no OpenRouter provider features
         // (issue #815). Unlike Kimi, this only unlocks stored reasoning: it does
         // not synthesize the field when the prior turn did not return one.
-        let deepseek_model = Self::model_is_deepseek_family(&model);
+        let direct_deepseek_model =
+            !self.supports_provider_features && Self::model_is_deepseek_family(&model);
         let allow_reasoning =
-            (self.supports_provider_features || kimi_coding_endpoint || deepseek_model)
+            (self.supports_provider_features || kimi_coding_endpoint || direct_deepseek_model)
                 && thinking_enabled != Some(false);
         let include_reasoning_content = thinking_enabled == Some(true)
             || (allow_reasoning && Self::is_kimi_model(&model))
@@ -137,47 +138,11 @@ impl Provider for OpenRouterProvider {
             request["max_tokens"] = serde_json::json!(max_tokens);
         }
 
-        let mut sent_reasoning_config = false;
-        if let Some(effort) = reasoning_effort.as_deref() {
-            if self.supports_deepseek_reasoning_effort() {
-                // The `swarm` sentinel maps to the strongest real effort.
-                let effort = if jcode_base::prompt::is_swarm_effort(effort) {
-                    "max"
-                } else {
-                    effort
-                };
-                if effort != "none" {
-                    request["reasoning_effort"] = serde_json::json!(effort);
-                    sent_reasoning_config = true;
-                }
-            } else if self.supports_openai_reasoning_effort() {
-                // GPT-family models on direct compat gateways (e.g. OpenCode
-                // Zen serving gpt-5.3-codex-spark) take the standard OpenAI
-                // `reasoning_effort` field with OpenAI's effort vocabulary.
-                let effort = if jcode_base::prompt::is_swarm_effort(effort) {
-                    "max"
-                } else {
-                    effort
-                };
-                if effort != "none" {
-                    request["reasoning_effort"] = serde_json::json!(effort);
-                    sent_reasoning_config = true;
-                }
-            } else if Self::profile_supports_unified_reasoning(
-                self.profile_id.as_deref(),
-                self.send_openrouter_headers,
-            ) {
-                let effort = if jcode_base::prompt::is_swarm_effort(effort) {
-                    "xhigh"
-                } else {
-                    effort
-                };
-                request["reasoning"] = serde_json::json!({
-                    "effort": effort,
-                });
-                sent_reasoning_config = true;
-            }
-        }
+        let sent_reasoning_config = reasoning_effort.as_deref().is_some_and(|effort| {
+            let resolved =
+                jcode_base::prompt::swarm_root_reasoning_effort(effort).unwrap_or(effort);
+            self.apply_resolved_reasoning_effort(&mut request, resolved, strict_openai_schema)
+        });
 
         if !api_tools.is_empty() {
             request["tools"] = serde_json::json!(api_tools);
@@ -299,6 +264,7 @@ impl Provider for OpenRouterProvider {
         let api_base = self.api_base.clone();
         let auth = self.auth.clone();
         let send_openrouter_headers = self.send_openrouter_headers;
+        let conversation_id = self.conversation_id.clone();
         let request_for_retries = request;
         let model_for_stream = model.clone();
         let provider_pin = Arc::clone(&self.provider_pin);
@@ -318,6 +284,7 @@ impl Provider for OpenRouterProvider {
                 api_base,
                 auth,
                 send_openrouter_headers,
+                conversation_id,
                 request_for_retries,
                 tx,
                 provider_pin,
@@ -352,6 +319,19 @@ impl Provider for OpenRouterProvider {
             .to_ascii_lowercase();
         if let Some(supports_images) = self.static_image_input_support.get(&model_id) {
             return *supports_images;
+        }
+        // The direct DeepSeek Flash aliases accept image_url parts (#1221).
+        // Keep Pro and unverified models text-only, and let explicit per-model
+        // input configuration above override this narrow built-in allowlist.
+        if self
+            .profile_id
+            .as_deref()
+            .is_some_and(|id| id.eq_ignore_ascii_case("deepseek"))
+        {
+            return matches!(
+                model_id.as_str(),
+                "deepseek-flash" | "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp"
+            );
         }
         if Self::profile_rejects_image_input(self.profile_id.as_deref()) {
             return false;
@@ -425,6 +405,18 @@ impl Provider for OpenRouterProvider {
             }
         } else {
             self.clear_pin_if_model_changed(&model_id, true);
+        }
+
+        if Self::profile_supports_openai_reasoning_effort(self.profile_id.as_deref())
+            || self
+                .model_reasoning_config()
+                .and_then(|config| config.1.as_ref())
+                .is_some()
+        {
+            let configured = self.configured_effort_for_model();
+            if let Ok(mut effort) = self.reasoning_effort.try_write() {
+                *effort = configured;
+            }
         }
 
         let stored_effort = self
@@ -631,6 +623,7 @@ impl Provider for OpenRouterProvider {
                     api_method: api_method.clone(),
                     available: true,
                     detail: route_detail,
+                    usage: None,
                     cheapness: None,
                 }
             })
@@ -739,6 +732,13 @@ impl Provider for OpenRouterProvider {
         if let Some(limit) = self.static_context_limits.get(&normalized_model_id) {
             return *limit;
         }
+        // Config loading seeds explicit per-model context windows here. They
+        // must outrank built-in profile family guesses. See #1087.
+        if let Some(limit) =
+            jcode_base::provider::cached_context_limit_for_model(&normalized_model_id)
+        {
+            return limit;
+        }
         // Ollama caps the served window server-side (OLLAMA_CONTEXT_LENGTH,
         // default 4096) and silently truncates anything longer, so a model's
         // advertised trained window is not a safe budget. Until the native-API
@@ -750,7 +750,9 @@ impl Provider for OpenRouterProvider {
         // was actually serving 4K. It stays *below* the live catalog and the
         // user's explicit per-model `context_window`, both of which are real
         // evidence about this endpoint.
-        if super::ollama_context::is_ollama_api_base(&self.api_base, self.profile_id.as_deref()) {
+        if super::ollama_context::is_ollama_api_base(&self.api_base, self.profile_id.as_deref())
+            && !super::ollama_context::is_cloud_model(&model_id)
+        {
             return super::ollama_context::OLLAMA_DEFAULT_SERVING_CONTEXT as usize;
         }
         if let Some(profile_id) = self.profile_id.as_deref()
@@ -778,12 +780,17 @@ impl Provider for OpenRouterProvider {
             supports_model_catalog: self.supports_model_catalog,
             profile_id: self.profile_id.clone(),
             reasoning_effort_support: self.reasoning_effort_support,
+            disable_reasoning_heuristics: self.disable_reasoning_heuristics,
+            static_reasoning_config: self.static_reasoning_config.clone(),
             max_tokens: self.max_tokens,
             extra_body: self.extra_body.clone(),
             static_models: self.static_models.clone(),
             static_context_limits: self.static_context_limits.clone(),
             static_image_input_support: self.static_image_input_support.clone(),
             send_openrouter_headers: self.send_openrouter_headers,
+            // A fork is a new conversation (new session or subagent), so it
+            // gets its own stable id.
+            conversation_id: new_conversation_id(),
             models_cache: Arc::clone(&self.models_cache),
             model_catalog_refresh: Arc::clone(&self.model_catalog_refresh),
             provider_routing: Arc::new(RwLock::new(
@@ -792,7 +799,12 @@ impl Provider for OpenRouterProvider {
                     .map(|r| r.clone())
                     .unwrap_or_default(),
             )),
-            provider_pin: Arc::new(Mutex::new(None)),
+            provider_pin: Arc::new(Mutex::new(
+                self.provider_pin
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone(),
+            )),
             endpoints_cache: Arc::clone(&self.endpoints_cache),
             endpoint_refresh: Arc::clone(&self.endpoint_refresh),
         })

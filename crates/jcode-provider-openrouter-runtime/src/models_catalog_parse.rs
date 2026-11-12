@@ -56,6 +56,8 @@ pub(crate) fn parse_model_info_value(value: &Value) -> Option<ModelInfo> {
             object,
             &[
                 "context_length",
+                "context_window",
+                "context_size",
                 "contextLength",
                 "max_context_length",
                 "maxModelLength",
@@ -123,5 +125,35 @@ pub(crate) fn parse_model_pricing(value: Option<&Value>) -> ModelPricing {
         input_cache_write: object
             .get("input_cache_write")
             .and_then(value_as_pricing_string),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn novita_model_catalog_preserves_names_and_context_limits() {
+        let models = parse_openai_compatible_models_response(
+            r#"{"data":[{"id":"zai-org/glm-5.3","object":"model","owned_by":"novita","display_name":"GLM 5.3","context_size":1048576,"created":1787105676}]}"#,
+        )
+        .expect("Novita catalog response should parse");
+        assert_eq!(models[0].id, "zai-org/glm-5.3");
+        assert_eq!(models[0].name, "GLM 5.3");
+        assert_eq!(models[0].context_length, Some(1_048_576));
+        assert_eq!(models[0].created, Some(1_787_105_676));
+    }
+
+    #[test]
+    fn conifer_context_window_and_pricing_are_parsed() {
+        let models = parse_openai_compatible_models_response(
+            r#"{"data":[{"id":"gpt-5.6-sol","context_window":1000000,"pricing":{"input":"0.1","output":"0.2","cached_input":"0.01"}}]}"#,
+        )
+        .expect("Conifer catalog response should parse");
+
+        assert_eq!(models[0].context_length, Some(1_000_000));
+        assert_eq!(models[0].pricing.prompt.as_deref(), Some("0.1"));
+        assert_eq!(models[0].pricing.completion.as_deref(), Some("0.2"));
+        assert_eq!(models[0].pricing.input_cache_read.as_deref(), Some("0.01"));
     }
 }

@@ -20,11 +20,13 @@ mod notifications;
 
 pub use notifications::{
     ParsedBackgroundTaskNotification, ParsedBackgroundTaskProgressNotification,
-    background_task_display_label, background_task_status_notice,
-    format_background_task_notification_markdown, format_background_task_progress_markdown,
+    ParsedBackgroundTaskStartedNotification, background_task_display_label,
+    background_task_status_notice, format_background_task_notification_markdown,
+    format_background_task_progress_markdown, format_background_task_stalled_markdown,
     format_input_shell_result_markdown, format_model_refresh_progress_markdown,
     input_shell_status_notice, parse_background_task_notification_markdown,
-    parse_background_task_progress_notification_markdown, strip_ansi_escape_sequences,
+    parse_background_task_progress_notification_markdown,
+    parse_background_task_started_notification_markdown, strip_ansi_escape_sequences,
 };
 
 fn compile_static_regex(pattern: &str) -> Option<Regex> {
@@ -60,8 +62,16 @@ pub fn redact_secrets(text: &str) -> String {
         && !text.contains("AIza")
         && !text.contains("ya29.")
         && !text.contains("xox")
+        && !text.contains("AKIA")
+        && !text.contains("-----BEGIN ")
+        && !text.contains("eyJ")
         && !lower.contains("api_key")
         && !lower.contains("token")
+        && !lower.contains("bearer ")
+        && !lower.contains("password")
+        && !lower.contains("secret")
+        && !lower.contains("authorization")
+        && !lower.contains("cookie")
     {
         logging::debug("secret redaction fast path skipped regex scan");
         return text.to_string();
@@ -84,12 +94,17 @@ pub fn redact_secrets(text: &str) -> String {
             r"ya29\.[A-Za-z0-9._-]{20,}",
             r"AIza[0-9A-Za-z_-]{20,}",
             r"xox[baprs]-[A-Za-z0-9-]{10,}",
+            r"AKIA[0-9A-Z]{16}",
+            r"(?i)Bearer\s+[A-Za-z0-9._~+/=-]{20,}",
+            r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
+            r"(?s)-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----.*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
         ])
     });
 
     let assignment_patterns = ASSIGNMENT_PATTERNS.get_or_init(|| {
         compile_static_regexes(&[
             r"(?m)^\s*(OPENROUTER_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(CONIFER_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(OPENCODE_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(OPENCODE_GO_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(ZHIPU_API_KEY\s*=\s*)[^\r\n]+",
@@ -114,18 +129,22 @@ pub fn redact_secrets(text: &str) -> String {
             r"(?m)^\s*(OLLAMA_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(CHUTES_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(CEREBRAS_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(BELVEDIR_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(OPENAI_COMPAT_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(ANTHROPIC_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(OPENAI_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(AZURE_OPENAI_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(CURSOR_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(GITHUB_TOKEN\s*=\s*)[^\r\n]+",
+            r"(?im)^\s*([A-Z][A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|COOKIE)\s*=\s*)[^\r\n]+",
+            r"(?im)^\s*(AUTHORIZATION\s*[:=]\s*)[^\r\n]+",
         ])
     });
 
     let mut redacted = text.to_string();
     let mut redacted_keys: HashSet<String> = [
         "OPENROUTER_API_KEY",
+        "CONIFER_API_KEY",
         "OPENCODE_API_KEY",
         "OPENCODE_GO_API_KEY",
         "ZHIPU_API_KEY",
@@ -150,6 +169,7 @@ pub fn redact_secrets(text: &str) -> String {
         "OLLAMA_API_KEY",
         "CHUTES_API_KEY",
         "CEREBRAS_API_KEY",
+        "BELVEDIR_API_KEY",
         "OPENAI_COMPAT_API_KEY",
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
@@ -355,6 +375,7 @@ pub fn generated_image_rendered_image(
 ) -> Option<jcode_session_types::RenderedImage> {
     let (media_type, data) = generated_image_payload(path, output_format)?;
     Some(jcode_session_types::RenderedImage {
+        history_message_index: None,
         media_type,
         data,
         label: Some(path.to_string()),

@@ -31,7 +31,7 @@ pub(crate) enum ProviderAuthArg {
 #[command(version = jcode_build_meta::version())]
 #[command(about = "J-Code: A coding agent using Claude Max or ChatGPT Pro subscriptions")]
 pub(crate) struct Args {
-    /// Initial provider to use (jcode, claude, openai, openai-api, openrouter, azure, opencode, opencode-go, zai, 302ai, baseten, cortecs, comtegra, deepseek, fpt, firmware, huggingface, moonshotai, nebius, scaleway, stackit, groq, mistral, perplexity, togetherai, deepinfra, xai, nvidia-nim, lmstudio, ollama, chutes, cerebras, alibaba-coding-plan, openai-compatible, cursor, copilot, gemini, antigravity, google, or auto-detect). Interactive sessions can switch providers with /model.
+    /// Initial provider to use (jcode, claude, openai, openai-api, openrouter, azure, opencode, opencode-go, zai, 302ai, baseten, conifer, cortecs, comtegra, deepseek, fpt, firmware, huggingface, moonshotai, nebius, scaleway, stackit, groq, mistral, perplexity, togetherai, deepinfra, xai, grok-build, nvidia-nim, lmstudio, ollama, chutes, cerebras, alibaba-coding-plan, openai-compatible, cursor, copilot, gemini, antigravity, google, or auto-detect). Interactive sessions can switch providers with /model.
     #[arg(short, long, default_value = "auto", global = true)]
     pub(crate) provider: ProviderChoice,
 
@@ -42,6 +42,18 @@ pub(crate) struct Args {
     /// Working directory to send to a remote server when using --socket
     #[arg(long, global = true)]
     pub(crate) remote_working_dir: Option<String>,
+
+    /// Run the UI locally and attach to the persistent Jcode server on this SSH host
+    #[arg(long, global = true, conflicts_with = "socket", value_name = "HOST")]
+    pub(crate) ssh: Option<String>,
+
+    /// Remote Jcode executable name or literal path (requires --ssh)
+    #[arg(long, global = true, requires = "ssh", value_name = "PATH")]
+    pub(crate) ssh_binary: Option<String>,
+
+    /// Remote daemon socket override, for isolated servers (requires --ssh)
+    #[arg(long, global = true, requires = "ssh", value_name = "PATH")]
+    pub(crate) ssh_server_socket: Option<String>,
 
     /// Skip the automatic update check
     #[arg(long, global = true)]
@@ -81,6 +93,11 @@ pub(crate) struct Args {
     #[arg(long = "onboarding-sim")]
     pub(crate) onboarding_sim: bool,
 
+    /// Launch the normal TUI, skip onboarding, then autoplay a safe simulation
+    /// of receiving, downloading, installing, and restarting after an update.
+    #[arg(long = "update-sim")]
+    pub(crate) update_sim: bool,
+
     /// Custom socket path for server/client communication
     #[arg(long, global = true)]
     pub(crate) socket: Option<String>,
@@ -113,6 +130,14 @@ pub(crate) struct Args {
     /// Hide all built-in tools unless --tools or [tools].enabled opts tools back in.
     #[arg(long, global = true)]
     pub(crate) disable_base_tools: bool,
+
+    /// MCP tool exposure mode: auto, eager, or deferred.
+    #[arg(long, global = true, value_parser = ["auto", "eager", "deferred"])]
+    pub(crate) mcp_tools: Option<String>,
+
+    /// Token estimate at which --mcp-tools=auto switches to deferred exposure.
+    #[arg(long, global = true, value_name = "TOKENS")]
+    pub(crate) mcp_tools_token_threshold: Option<usize>,
 
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
@@ -182,7 +207,7 @@ pub(crate) enum Command {
         #[arg(long, short = 'a')]
         account: Option<String>,
 
-        /// Do not try to open a browser locally. Useful over SSH or on headless machines.
+        /// Do not open a local browser. Show a login QR for another device (useful over SSH).
         #[arg(long, alias = "headless")]
         no_browser: bool,
 
@@ -205,6 +230,14 @@ pub(crate) enum Command {
         /// Resume a pending scriptable login flow that does not require callback/code input.
         #[arg(long, conflicts_with_all = ["print_auth_url", "callback_url", "auth_code"])]
         complete: bool,
+
+        /// Isolate temporary login state using 1-64 ASCII letters, digits, underscores or hyphens.
+        #[arg(long, value_parser = super::login::parse_login_flow_id)]
+        flow_id: Option<String>,
+
+        /// Cancel only this provider's pending flow. Does not remove saved credentials.
+        #[arg(long, requires = "flow_id", conflicts_with_all = ["print_auth_url", "callback_url", "auth_code", "complete", "account", "api_base", "api_key", "api_key_env"])]
+        cancel: bool,
 
         /// Save credentials without running the post-login live provider validation.
         /// Useful for offline setup, CI, or when entering credentials before network access is available.
@@ -253,6 +286,10 @@ pub(crate) enum Command {
         #[arg(long)]
         json: bool,
     },
+
+    /// Inspect or change anonymous telemetry settings
+    #[command(subcommand)]
+    Telemetry(TelemetryCommand),
 
     /// Self-development mode: run as a canary session on the shared server
     #[command(alias = "selfdev")]
@@ -363,14 +400,18 @@ pub(crate) enum Command {
         uninstall: bool,
     },
 
-    /// Install a launcher so jcode appears in your app launcher
+    /// Install platform launcher integration (Windows shortcut; macOS notification helper)
     SetupLauncher,
 
     /// Browser automation setup and status
     Browser {
-        /// Action (setup, status)
+        /// Action (setup, status, detect)
         #[arg(default_value = "setup")]
         action: String,
+
+        /// Browser to target: auto (default: detect your browser), firefox,
+        /// chrome, chromium, edge, brave, or safari
+        browser: Option<String>,
     },
 
     /// Replay a saved session in the TUI
@@ -547,7 +588,26 @@ pub(crate) enum Command {
         /// both ends of the bridge at the same path.
         #[arg(long = "api-socket")]
         api_socket: Option<String>,
+
+        /// Serve one API connection on stdin/stdout (for SSH SDK clients).
+        /// Starts the shared daemon if needed; does not create an API socket.
+        #[arg(long, conflicts_with = "api_socket")]
+        stdio: bool,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum TelemetryCommand {
+    /// Show the current telemetry state without creating an anonymous ID
+    Status {
+        /// Emit JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Enable anonymous usage telemetry
+    Enable,
+    /// Disable all telemetry persistently
+    Disable,
 }
 
 #[derive(Subcommand, Debug)]
@@ -572,6 +632,11 @@ pub(crate) enum AccountCommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum ServerCommand {
+    /// Internal native client protocol bridge over stdin/stdout (for SSH attach)
+    #[cfg(unix)]
+    #[command(hide = true)]
+    Stdio,
+
     /// Start the background server if it is not already running.
     Start {
         /// Emit JSON instead of human-readable text
@@ -582,6 +647,19 @@ pub(crate) enum ServerCommand {
     /// Internal: hold a lightweight connection open until stdin closes.
     #[command(hide = true)]
     Keepalive,
+
+    /// Pin the shared server channel to an installed version.
+    ///
+    /// Defaults to the active `current` version. This only selects the daemon's
+    /// binary; run `jcode server reload` separately to apply it.
+    Promote {
+        /// Installed version to promote (defaults to the current channel)
+        version: Option<String>,
+
+        /// Emit JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Gracefully reload the running background server onto the newest binary.
     ///
@@ -974,6 +1052,16 @@ pub(crate) enum ProviderCommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AuthCommand {
+    /// Import one selected OAuth login from a trusted client (never overwrites a store)
+    Import {
+        /// Read the private credential envelope from stdin, never from command arguments
+        #[arg(long, required = true)]
+        stdin: bool,
+
+        /// Emit a secret-free JSON acknowledgement
+        #[arg(long)]
+        json: bool,
+    },
     /// Show configured authentication status for model/tool providers
     Status {
         /// Emit JSON instead of plain text
@@ -1029,7 +1117,7 @@ pub(crate) enum MemoryCommand {
         /// Search query
         query: String,
 
-        /// Use semantic search (embedding-based) instead of keyword
+        /// Use Jev relevance decisions instead of local keyword search (requires Jev access)
         #[arg(short, long)]
         semantic: bool,
     },

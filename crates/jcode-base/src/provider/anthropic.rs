@@ -14,7 +14,7 @@
 //! - the static model list.
 
 use anyhow::{Context, Result};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use uuid::Uuid;
 
 pub use jcode_provider_core::CredentialMode as AnthropicCredentialMode;
@@ -23,20 +23,25 @@ use jcode_provider_core::{
     anthropic_stainless_arch as stainless_arch, anthropic_stainless_os as stainless_os,
 };
 
-static CACHE_TTL_1H: AtomicBool = AtomicBool::new(true);
+// 0 follows persisted configuration, 1/2 are explicit process-local overrides.
+static CACHE_TTL_1H: AtomicU8 = AtomicU8::new(0);
 
-/// Enable or disable the 1-hour cache TTL (default: 1-hour)
+/// Override cache TTL for this process. UI preferences should use Config instead.
 pub fn set_cache_ttl_1h(enabled: bool) {
-    CACHE_TTL_1H.store(enabled, Ordering::Relaxed);
+    CACHE_TTL_1H.store(if enabled { 2 } else { 1 }, Ordering::Relaxed);
 }
 
 /// Check if 1-hour cache TTL is enabled
 pub fn is_cache_ttl_1h() -> bool {
-    CACHE_TTL_1H.load(Ordering::Relaxed)
+    match CACHE_TTL_1H.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => crate::config::config().provider.anthropic_cache_ttl_1h,
+    }
 }
 
 /// User-Agent for OAuth requests, matching the official Claude Code CLI.
-pub const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.123 (external, sdk-cli)";
+pub const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.280 (external, sdk-cli)";
 
 pub const OAUTH_BETA_HEADERS: &str = ANTHROPIC_OAUTH_BETA_HEADERS;
 
@@ -70,22 +75,43 @@ pub fn apply_oauth_attribution_headers(
 }
 
 /// Available models
-pub const AVAILABLE_MODELS: &[&str] = &[
-    "claude-opus-5",
-    "claude-fable-5",
-    "claude-opus-4-8",
-    "claude-opus-4-6",
-    "claude-opus-4-6[1m]",
-    "claude-sonnet-5",
-    "claude-sonnet-4-6",
-    "claude-sonnet-4-6[1m]",
-    "claude-haiku-4-5",
-    "claude-opus-4-5",
-    "claude-sonnet-4-5",
-    "claude-sonnet-4-20250514",
-];
+pub const AVAILABLE_MODELS: &[&str] = jcode_provider_core::ALL_CLAUDE_MODELS;
 
 pub fn load_anthropic_api_key() -> Result<String> {
+    if std::env::var("JCODE_ANTHROPIC_AUTH")
+        .ok()
+        .is_some_and(|value| value.eq_ignore_ascii_case("none"))
+    {
+        return Ok(String::new());
+    }
+    if let Ok(env_name) = std::env::var("JCODE_ANTHROPIC_API_KEY_NAME") {
+        let env_name = env_name.trim();
+        if !env_name.is_empty() {
+            if let Ok(value) = std::env::var(env_name)
+                && !value.trim().is_empty()
+            {
+                return Ok(value);
+            }
+            if let Ok(env_file) = std::env::var("JCODE_ANTHROPIC_ENV_FILE")
+                && let Some(value) = crate::provider_catalog::load_env_value_from_config_file(
+                    env_name,
+                    env_file.trim(),
+                )
+                && !value.trim().is_empty()
+            {
+                return Ok(value);
+            }
+            anyhow::bail!(
+                "Anthropic-compatible profile credential '{}' is not configured",
+                env_name
+            );
+        }
+    }
+    if let Ok(value) = std::env::var("ANTHROPIC_AUTH_TOKEN")
+        && !value.trim().is_empty()
+    {
+        return Ok(value);
+    }
     let key = crate::provider_catalog::load_api_key_from_env_or_config(
         "ANTHROPIC_API_KEY",
         "anthropic.env",

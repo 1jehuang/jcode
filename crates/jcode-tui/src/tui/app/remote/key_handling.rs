@@ -35,6 +35,10 @@ pub(in crate::tui::app) async fn handle_remote_update_command(
     app: &mut App,
     remote: &mut RemoteConnection,
 ) -> Result<()> {
+    if crate::tui::is_ssh_remote() {
+        app.set_status_notice("Update the client and SSH server separately, then reconnect");
+        return Ok(());
+    }
     reload_stale_remote_server_before_update(app, remote).await?;
 
     let session_id = app
@@ -273,9 +277,25 @@ async fn handle_remote_key_internal(
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
 
+    if app.handle_ssh_login_key(code, modifiers, text_input.as_deref()) {
+        return Ok(());
+    }
+    // A local login picker preview must not capture native SSH /login.
+    if code == KeyCode::Enter && crate::tui::is_ssh_remote() {
+        let input = app.input.clone();
+        if app.handle_ssh_login_command(input.trim()) {
+            app.input.clear();
+            app.cursor_pos = 0;
+            return Ok(());
+        }
+    }
+
     // Alt+5 always resets the simulator before modal routing, including in the
     // remote/client mode used by self-dev sessions.
     if app.handle_onboarding_sim_reset_shortcut(code, modifiers) {
+        return Ok(());
+    }
+    if app.handle_update_sim_shortcut(code, modifiers) {
         return Ok(());
     }
 
@@ -294,12 +314,8 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
-    if app.changelog_scroll.is_some() {
-        return app.handle_changelog_key(code);
-    }
-
-    if app.help_scroll.is_some() {
-        return app.handle_help_key(code);
+    if input::handle_scroll_overlay_key(app, code)? {
+        return Ok(());
     }
 
     if app.session_picker_overlay.is_some() {
@@ -321,6 +337,22 @@ async fn handle_remote_key_internal(
     if let Some(ref picker) = app.inline_interactive_state
         && !picker.preview
     {
+        if code == KeyCode::Enter {
+            let subagent_model = picker
+                .filtered
+                .get(picker.selected)
+                .and_then(|index| picker.entries.get(*index))
+                .and_then(|entry| match entry.action {
+                    crate::tui::PickerAction::SubagentModelChoice { inherit: true } => Some(None),
+                    crate::tui::PickerAction::SubagentModelChoice { inherit: false } => Some(Some(
+                        super::super::inline_interactive::subagent_picker_model_spec(entry),
+                    )),
+                    _ => None,
+                });
+            if let Some(model) = subagent_model {
+                remote.set_subagent_model(model).await?;
+            }
+        }
         return app.handle_inline_interactive_key(code, modifiers);
     }
 
@@ -348,16 +380,28 @@ async fn handle_remote_key_internal(
     }
 
     if input::is_next_prompt_new_session_hotkey(code, modifiers) {
+        if app_mod::commands_dispatch::ssh_local_action_blocked(app, "New-session routing") {
+            return Ok(());
+        }
         app.toggle_next_prompt_new_session_routing();
         return Ok(());
     }
 
     if app.dictation_key_matches(code, modifiers) {
+        if app_mod::commands_dispatch::ssh_local_action_blocked(app, "Local dictation") {
+            return Ok(());
+        }
         app.handle_dictation_trigger();
         return Ok(());
     }
 
     if app.new_terminal_key_matches(code, modifiers) {
+        if crate::tui::is_ssh_remote() {
+            app.set_status_notice(
+                "New local terminal disabled for SSH sessions; launch jcode --ssh separately",
+            );
+            return Ok(());
+        }
         app.handle_new_terminal_hotkey();
         return Ok(());
     }
@@ -377,11 +421,21 @@ async fn handle_remote_key_internal(
     // Accept an armed "merge the diverged update" offer (self-dev/remote
     // sessions surface the same update card as local ones).
     if app.merge_offer_key_matches(code, modifiers) {
+        if crate::tui::is_ssh_remote() {
+            app.set_status_notice("Update the SSH server on its host");
+            return Ok(());
+        }
         app.accept_update_merge_offer();
         return Ok(());
     }
 
     if app.open_resume_key_matches(code, modifiers) {
+        if crate::tui::is_ssh_remote() {
+            app.set_status_notice(
+                "Local session picker disabled for SSH; use --ssh HOST --resume REMOTE_ID",
+            );
+            return Ok(());
+        }
         app.open_session_picker();
         return Ok(());
     }
@@ -390,8 +444,60 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if app.toggle_keys.auto_poke.matches(code, modifiers) {
+        if app.auto_poke_incomplete_todos {
+            let cleared = app_mod::commands::disable_auto_poke(app);
+            app.set_status_notice("Poke: OFF");
+            app.push_display_message(DisplayMessage::system(
+                app_mod::commands::poke_disabled_message(cleared),
+            ));
+        } else {
+            match app_mod::commands::activate_auto_poke(app) {
+                app_mod::commands::PokeActivation::EnabledNoIncomplete => {
+                    app.push_display_message(DisplayMessage::system(
+                        app_mod::commands::poke_enabled_without_incomplete_message(),
+                    ));
+                }
+                app_mod::commands::PokeActivation::Queued => {
+                    app.push_display_message(DisplayMessage::system(
+                        app_mod::commands::poke_queued_display_message(),
+                    ));
+                }
+                app_mod::commands::PokeActivation::SendNow {
+                    incomplete_count,
+                    poke_msg,
+                } => {
+                    app.push_display_message(DisplayMessage::system(
+                        app_mod::commands::poke_triggered_display_message(incomplete_count),
+                    ));
+
+                    let _ =
+                        begin_remote_send(app, remote, poke_msg, vec![], true, None, true, 0).await;
+                    app.visible_turn_started = Some(Instant::now());
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    if app.toggle_keys.copy_selection.matches(code, modifiers) {
+        app.toggle_copy_selection_mode();
+        return Ok(());
+    }
+
     if app.toggle_keys.side_panel.matches(code, modifiers) {
         app.toggle_side_panel();
+        return Ok(());
+    }
+
+    if app.toggle_keys.info_widget.matches(code, modifiers) {
+        crate::tui::info_widget::toggle_enabled();
+        let status = if crate::tui::info_widget::is_enabled() {
+            "Info widget: ON"
+        } else {
+            "Info widget: OFF"
+        };
+        app.set_status_notice(status);
         return Ok(());
     }
 
@@ -448,6 +554,9 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
     if app.toggle_keys.todo_card.matches(code, modifiers) {
+        if app_mod::commands_dispatch::ssh_local_action_blocked(app, "Local todo view") {
+            return Ok(());
+        }
         app.toggle_todo_card();
         return Ok(());
     }
@@ -700,50 +809,6 @@ async fn handle_remote_key_internal(
                 app.toggle_input_stash();
                 return Ok(());
             }
-            KeyCode::Char('p') => {
-                if app.auto_poke_incomplete_todos {
-                    let cleared = app_mod::commands::disable_auto_poke(app);
-                    app.set_status_notice("Poke: OFF");
-                    app.push_display_message(DisplayMessage::system(
-                        app_mod::commands::poke_disabled_message(cleared),
-                    ));
-                } else {
-                    match app_mod::commands::activate_auto_poke(app) {
-                        app_mod::commands::PokeActivation::EnabledNoIncomplete => {
-                            app.push_display_message(DisplayMessage::system(
-                                app_mod::commands::poke_enabled_without_incomplete_message(),
-                            ));
-                        }
-                        app_mod::commands::PokeActivation::Queued => {
-                            app.push_display_message(DisplayMessage::system(
-                                app_mod::commands::poke_queued_display_message(),
-                            ));
-                        }
-                        app_mod::commands::PokeActivation::SendNow {
-                            incomplete_count,
-                            poke_msg,
-                        } => {
-                            app.push_display_message(DisplayMessage::system(
-                                app_mod::commands::poke_triggered_display_message(incomplete_count),
-                            ));
-
-                            let _ = begin_remote_send(
-                                app,
-                                remote,
-                                poke_msg,
-                                vec![],
-                                true,
-                                None,
-                                true,
-                                0,
-                            )
-                            .await;
-                            app.visible_turn_started = Some(Instant::now());
-                        }
-                    }
-                }
-                return Ok(());
-            }
             KeyCode::Char('v') => {
                 app.paste_from_clipboard();
                 return Ok(());
@@ -896,6 +961,10 @@ async fn handle_remote_key_internal(
                 let prepared = input::take_prepared_input(app);
                 let trimmed = prepared.expanded.trim();
 
+                if app_mod::commands_dispatch::handle_ssh_unsupported_command(app, trimmed) {
+                    return Ok(());
+                }
+
                 if let Some(topic) = trimmed
                     .strip_prefix("/help ")
                     .or_else(|| trimmed.strip_prefix("/? "))
@@ -1043,17 +1112,15 @@ async fn handle_remote_key_internal(
                 }
 
                 if trimmed == "/model" || trimmed == "/models" {
-                    let _ = remote.refresh_models().await;
-                    // `refresh_models` re-queries providers and pushes the
-                    // result over the bus, where oversized frames get
-                    // downgraded to names-only. Also request the catalog
-                    // directly so the picker gets real route expansion even
-                    // when the bus push is downgraded and no usable local
-                    // catalog cache exists (otherwise every row is a
-                    // placeholder "remote-catalog" entry).
-                    let _ = remote.request_model_catalog().await;
-                    app.set_status_notice("Refreshing model catalog...");
+                    // Opening the picker is a read-only UI action. The session
+                    // bootstrap and explicit `/model refresh` command own
+                    // catalog I/O; doing it here races startup and briefly
+                    // replaces the session catalog with remote fallback rows.
                     app.open_model_picker();
+                    return Ok(());
+                }
+
+                if app.handle_usage_reset_command(trimmed) {
                     return Ok(());
                 }
 
@@ -1660,12 +1727,16 @@ async fn handle_remote_key_internal(
                     app.queued_messages.clear();
                     app.pasted_contents.clear();
                     app.pending_images.clear();
+                    app.clear_inline_image_state();
                     app.clear_streaming_render_state();
                     app.clear_live_usage_state();
                     // Full transcript discard: diagrams and side panel pages
                     // are both orphaned (same rationale as
                     // reset_current_session; side panel is #605).
                     crate::tui::mermaid::clear_active_diagrams();
+                    app.swarm_plan_items.clear();
+                    app.swarm_plan_version = None;
+                    app.swarm_plan_swarm_id = None;
                     super::super::commands_review::clear_side_panel_for_new_session(app);
                     app.is_processing = false;
                     app.status = ProcessingStatus::Idle;
@@ -1696,10 +1767,13 @@ async fn handle_remote_key_internal(
                         ));
                         return Ok(());
                     }
+                    // Attached images belong to the forked prompt, not the
+                    // parent's next message.
+                    let images = std::mem::take(&mut app.pending_images);
                     let prepared = input::PreparedInput {
                         raw_input: prompt.to_string(),
                         expanded: prompt.to_string(),
-                        images: vec![],
+                        images,
                     };
                     route_prepared_input_to_new_remote_session(app, remote, prepared).await?;
                     return Ok(());
@@ -1819,6 +1893,9 @@ async fn handle_remote_key_internal(
                         )));
                         return Ok(());
                     }
+                    // The daemon's in-memory session owns later writes. Without
+                    // this it would persist `saved: false` on its next save.
+                    remote.set_session_saved(true, label.clone()).await?;
                     crate::tui::session_picker::invalidate_session_list_cache();
                     if app.memory_enabled
                         && let Err(err) = remote.trigger_memory_extraction().await
@@ -1855,6 +1932,7 @@ async fn handle_remote_key_internal(
                         )));
                         return Ok(());
                     }
+                    remote.set_session_saved(false, None).await?;
                     crate::tui::session_picker::invalidate_session_list_cache();
                     let name = app.session.display_name().to_string();
                     app.push_display_message(DisplayMessage::system(format!(
@@ -1943,6 +2021,8 @@ async fn handle_remote_key_internal(
                 }
 
                 if trimmed == "/commit"
+                    || trimmed == "/merge"
+                    || trimmed == "/merge-remote-release"
                     || trimmed == "/commit-push"
                     || trimmed == "/commit-and-push"
                     || trimmed == "/fast-release"
@@ -1960,8 +2040,14 @@ async fn handle_remote_key_internal(
                     );
                     let is_remote_release = trimmed == "/remote-release";
                     let is_fast_macos_release = trimmed == "/fast-macos-release";
-                    let is_push = trimmed != "/commit";
-                    let prompt = if is_triage {
+                    let is_merge = trimmed == "/merge";
+                    let is_merge_remote_release = trimmed == "/merge-remote-release";
+                    let is_push = matches!(trimmed, "/commit-push" | "/commit-and-push");
+                    let prompt = if is_merge_remote_release {
+                        app_mod::commands::build_merge_remote_release_prompt()
+                    } else if is_merge {
+                        app_mod::commands::build_merge_prompt()
+                    } else if is_triage {
                         app_mod::commands::build_triage_prompt(
                             trimmed.strip_prefix("/triage").unwrap_or_default(),
                         )
@@ -1977,7 +2063,11 @@ async fn handle_remote_key_internal(
                         app_mod::commands::build_commit_prompt()
                     };
                     let launch_notice = |interrupted: bool| {
-                        if is_triage {
+                        if is_merge_remote_release {
+                            app_mod::commands::merge_remote_release_launch_notice(interrupted)
+                        } else if is_merge {
+                            app_mod::commands::merge_launch_notice(interrupted)
+                        } else if is_triage {
                             app_mod::commands::triage_launch_notice(interrupted)
                         } else if is_fast_macos_release {
                             app_mod::commands::fast_macos_release_launch_notice(interrupted)
@@ -1991,7 +2081,11 @@ async fn handle_remote_key_internal(
                             app_mod::commands::commit_launch_notice(interrupted)
                         }
                     };
-                    let cmd_label = if is_triage {
+                    let cmd_label = if is_merge_remote_release {
+                        "/merge-remote-release"
+                    } else if is_merge {
+                        "/merge"
+                    } else if is_triage {
                         "/triage"
                     } else if is_fast_macos_release {
                         "/fast-macos-release"

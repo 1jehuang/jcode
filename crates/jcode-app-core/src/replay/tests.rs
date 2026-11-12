@@ -401,7 +401,7 @@ fn test_load_swarm_sessions_discovers_related_sessions() {
         todo_items: Vec::new(),
         runtime: crate::protocol::SwarmMemberRuntime::default(),
     }]);
-    seed.save().unwrap();
+    seed.save_prepared().unwrap();
 
     let mut child = Session::create_with_id(
         "session_child".to_string(),
@@ -425,11 +425,11 @@ fn test_load_swarm_sessions_discovers_related_sessions() {
         vec![seed.id.clone(), child.id.clone()],
         None,
     );
-    child.save().unwrap();
+    child.save_prepared().unwrap();
 
     let mut unrelated = Session::create_with_id("session_other".to_string(), None, None);
     unrelated.working_dir = Some("/tmp/other".to_string());
-    unrelated.save().unwrap();
+    unrelated.save_prepared().unwrap();
 
     let loaded = load_swarm_sessions("session_seed", false).unwrap();
     let ids: Vec<_> = loaded.iter().map(|s| s.session.id.as_str()).collect();
@@ -539,7 +539,7 @@ fn test_batch_tool_input_preserved() {
 
     // Verify the ToolInput delta contains the batch input
     let input_delta = replay_events.iter().find_map(|(_, e)| match e {
-        ReplayEvent::Server(ServerEvent::ToolInput { delta }) => Some(delta.clone()),
+        ReplayEvent::Server(ServerEvent::ToolInput { delta, .. }) => Some(delta.clone()),
         _ => None,
     });
     assert!(

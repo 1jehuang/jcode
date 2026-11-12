@@ -1,9 +1,81 @@
 use super::*;
 use crate::bus::{BackgroundTaskProgressSource, BackgroundTaskStatus};
 use crate::tool::StdinInputRequest;
-use crate::tool::bash::{BashTool, parse_heuristic_progress};
+use crate::tool::bash::{
+    BashTool, ProgressLineUpdate, parse_heuristic_progress, parse_progress_line,
+};
 use serde_json::json;
 use tokio::sync::mpsc;
+
+#[test]
+fn bash_optional_nulls_use_omitted_defaults() {
+    let omitted: BashInput = serde_json::from_value(json!({"command": "printf ok"})).unwrap();
+    let nulls: BashInput = serde_json::from_value(json!({
+        "command": "printf ok",
+        "intent": null,
+        "accept_large_output": null,
+        "timeout": null,
+        "run_in_background": null,
+        "notify": null,
+        "wake": null,
+        "stall_wake_seconds": null,
+        "justification": null
+    }))
+    .unwrap();
+    assert!(nulls.notify);
+    assert!(!nulls.wake);
+    assert_eq!(nulls.notify, omitted.notify);
+    assert_eq!(nulls.wake, omitted.wake);
+    assert_eq!(nulls.run_in_background, omitted.run_in_background);
+    assert_eq!(nulls.timeout, omitted.timeout);
+    assert_eq!(nulls.stall_wake_seconds, omitted.stall_wake_seconds);
+    assert_eq!(nulls.justification, omitted.justification);
+    assert_eq!(nulls.intent, omitted.intent);
+}
+
+#[test]
+fn bash_optional_booleans_preserve_explicit_values() {
+    for value in [false, true] {
+        let input: BashInput = serde_json::from_value(json!({
+            "command": "printf ok", "notify": value, "wake": value,
+            "run_in_background": value
+        }))
+        .unwrap();
+        assert_eq!(input.notify, value);
+        assert_eq!(input.wake, value);
+        assert_eq!(input.run_in_background, Some(value));
+    }
+}
+
+#[test]
+fn bash_optional_booleans_still_reject_invalid_types() {
+    for key in ["notify", "wake", "run_in_background"] {
+        for value in [json!("false"), json!(0), json!([]), json!({})] {
+            let mut input = json!({"command": "printf ok"});
+            input[key] = value;
+            assert!(serde_json::from_value::<BashInput>(input).is_err());
+        }
+    }
+    assert!(serde_json::from_value::<BashInput>(json!({"command": null})).is_err());
+    assert!(serde_json::from_value::<BashInput>(json!({})).is_err());
+}
+
+#[tokio::test]
+async fn bash_executes_with_null_optional_arguments() {
+    let output = BashTool::new()
+        .execute(
+            json!({
+                "command": "printf null-options-ok",
+                "notify": null, "wake": null, "run_in_background": null,
+                "timeout": null, "stall_wake_seconds": null, "justification": null,
+                "intent": null, "accept_large_output": null
+            }),
+            make_ctx(None),
+        )
+        .await
+        .unwrap();
+    assert!(output.output.contains("null-options-ok"));
+}
 
 #[test]
 fn repository_commands_export_a_logged_cargo_function() {
@@ -28,6 +100,30 @@ fn cargo_routing_is_limited_to_the_jcode_repository() {
 #[test]
 fn cargo_wrapper_path_is_shell_quoted() {
     assert_eq!(shell_single_quote("a'b"), "'a'\"'\"'b'");
+}
+
+#[tokio::test]
+async fn background_command_stdin_is_null() {
+    let mut command =
+        build_shell_command("if IFS= read -r _; then printf inherited; else printf eof; fi");
+
+    // Start with a readable pipe so this test does not depend on, or modify, the
+    // test runner's process-wide stdin. Background configuration must replace it.
+    command.stdin(Stdio::piped());
+    configure_background_command_stdio(&mut command);
+
+    let child = command.spawn().expect("background command should spawn");
+    assert!(
+        child.stdin.is_none(),
+        "background commands must not retain a writable stdin pipe"
+    );
+
+    let output = tokio::time::timeout(Duration::from_secs(2), child.wait_with_output())
+        .await
+        .expect("background command should observe EOF instead of blocking")
+        .expect("background command should exit cleanly");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "eof");
 }
 
 fn make_ctx(stdin_tx: Option<mpsc::UnboundedSender<StdinInputRequest>>) -> ToolContext {
@@ -240,6 +336,13 @@ async fn test_foreground_timeout_promotes_and_command_keeps_running() {
         .as_str()
         .expect("task_id should be present")
         .to_string();
+
+    // Promotion must retain an output artifact before returning, even though
+    // this in-process path only fills it once the command finishes.
+    assert!(
+        crate::background::global().output(&task_id).await.is_some(),
+        "output artifact should exist immediately after promotion"
+    );
 
     // Wait for the promoted command to finish on its own.
     let mut final_status = None;
@@ -917,7 +1020,14 @@ async fn bash_holds_a_risky_delete_until_justified_then_runs_it() {
     std::fs::create_dir_all(&target).expect("target");
     std::fs::write(target.join("f.txt"), "x").expect("file");
 
-    let command = format!("rm -rf {}", target.display());
+    // The concrete outside-workspace directory is allowed by policy. Its glob
+    // keeps this test focused on the Confirm path for a statically unknown set
+    // of affected files.
+    let command = format!(
+        "rm -rf {}/* && rmdir {}",
+        target.display(),
+        target.display()
+    );
     let tool = BashTool::new();
 
     // First attempt: no justification, so it is held.
@@ -1006,4 +1116,178 @@ async fn indirect_dispatch_paths_cannot_bypass_the_gate() {
         "background dispatch must be gated too, not just foreground"
     );
     assert!(canary.exists(), "the file must survive a backgrounded call");
+}
+
+#[test]
+fn parse_progress_line_classifies_markers_checkpoints_and_heuristics() {
+    let update = parse_progress_line(r#"JCODE_PROGRESS {"percent":40,"message":"Working"}"#)
+        .expect("parser should not fail")
+        .expect("progress marker should parse");
+    match update {
+        ProgressLineUpdate::Progress(progress) => assert_eq!(progress.percent, Some(40.0)),
+        other => panic!("expected a progress update, got {other:?}"),
+    }
+
+    let update = parse_progress_line(r#"JCODE_CHECKPOINT {"message":"Tests passed"}"#)
+        .expect("parser should not fail")
+        .expect("checkpoint marker should parse");
+    match update {
+        ProgressLineUpdate::Checkpoint(progress) => {
+            assert_eq!(progress.message.as_deref(), Some("Tests passed"))
+        }
+        other => panic!("expected a checkpoint update, got {other:?}"),
+    }
+
+    let update = parse_progress_line("Copied 7/10 files")
+        .expect("parser should not fail")
+        .expect("heuristic ratio should parse");
+    match update {
+        ProgressLineUpdate::Progress(progress) => {
+            assert_eq!(progress.percent, Some(70.0));
+            assert_eq!(progress.source, BackgroundTaskProgressSource::ParsedOutput);
+        }
+        other => panic!("expected a progress update, got {other:?}"),
+    }
+
+    assert!(
+        parse_progress_line("plain log line with no progress")
+            .expect("parser should not fail")
+            .is_none(),
+        "non-progress output must not produce updates"
+    );
+}
+
+/// The bug this guards against: a foreground command promoted to background at
+/// the timeout showed 0% until it completed, because nothing parsed its output
+/// for progress. Both the update emitted *before* promotion and updates
+/// emitted *after* promotion must reach the background task's status.
+#[tokio::test]
+async fn test_timeout_promoted_command_reports_intermediate_progress() {
+    let tool = BashTool::new();
+    // Emits 10% before the 300ms foreground timeout, then 80% about 2s in.
+    let input = json!({
+        "command": "echo 'progress 10% done'; sleep 2; echo 'progress 80% done'; sleep 1",
+        "timeout": 300,
+    });
+    let ctx = make_ctx(None);
+
+    let result = tool
+        .execute(input, ctx)
+        .await
+        .expect("timeout should promote to background");
+    let metadata = result.metadata.expect("expected background metadata");
+    assert_eq!(metadata["timeout_promoted"], true);
+    let task_id = metadata["task_id"]
+        .as_str()
+        .expect("task_id should be present")
+        .to_string();
+
+    // The pre-promotion update (10%) must be attached at promotion time, and
+    // the post-promotion update (80%) must stream in while still running.
+    let mut observed: Vec<f32> = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        let status = crate::background::global()
+            .status(&task_id)
+            .await
+            .expect("status should exist");
+        if let Some(percent) = status.progress.as_ref().and_then(|p| p.percent)
+            && observed.last() != Some(&percent)
+        {
+            observed.push(percent);
+        }
+        if observed.contains(&80.0) {
+            break;
+        }
+        if status.status != BackgroundTaskStatus::Running {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    assert!(
+        observed.contains(&80.0),
+        "promoted task should reach 80% via parsed output, saw {observed:?}"
+    );
+    assert!(
+        observed.contains(&10.0),
+        "the pre-promotion 10% update should be flushed at promotion, saw {observed:?}"
+    );
+
+    let _ = crate::background::global().cancel(&task_id).await;
+}
+
+/// Same guarantee for the reload-persistable (detached) path: the command
+/// writes straight to its output file, so a follower must translate progress
+/// lines into status updates while the task is still running.
+#[tokio::test]
+async fn test_detached_promoted_command_reports_intermediate_progress() {
+    let tool = BashTool::new();
+    let signal = jcode_agent_runtime::InterruptSignal::new();
+    let ctx = make_agent_ctx(signal);
+
+    let result = tool
+        .execute(
+            json!({
+                "command": "sleep 0.5; echo 'done 3/10 steps'; sleep 2; echo 'done 8/10 steps'; sleep 1",
+                "timeout": 200,
+            }),
+            ctx,
+        )
+        .await
+        .expect("timeout should promote the detached command to background");
+    let metadata = result.metadata.expect("expected background metadata");
+    assert_eq!(metadata["timeout_promoted"], true);
+    let task_id = metadata["task_id"]
+        .as_str()
+        .expect("task_id should be present")
+        .to_string();
+
+    let mut observed: Vec<f32> = Vec::new();
+    let mut saw_intermediate_while_running = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        let status = crate::background::global()
+            .status(&task_id)
+            .await
+            .expect("status should exist");
+        if let Some(percent) = status.progress.as_ref().and_then(|p| p.percent) {
+            if observed.last() != Some(&percent) {
+                observed.push(percent);
+            }
+            if status.status == BackgroundTaskStatus::Running && percent < 100.0 {
+                saw_intermediate_while_running = true;
+            }
+        }
+        if observed.contains(&80.0) {
+            break;
+        }
+        if status.status != BackgroundTaskStatus::Running {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    assert!(
+        observed.contains(&30.0) && observed.contains(&80.0),
+        "detached task should report 30% then 80% from parsed output, saw {observed:?}"
+    );
+    assert!(
+        saw_intermediate_while_running,
+        "intermediate progress must be visible while the task is still running"
+    );
+
+    let output_file = std::path::PathBuf::from(
+        metadata["output_file"]
+            .as_str()
+            .expect("output_file should be present"),
+    );
+    let status_file = std::path::PathBuf::from(
+        metadata["status_file"]
+            .as_str()
+            .expect("status_file should be present"),
+    );
+    let _ = crate::background::global().cancel(&task_id).await;
+    let _ = tokio::fs::remove_file(output_file).await;
+    let _ = tokio::fs::remove_file(status_file).await;
 }

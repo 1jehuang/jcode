@@ -9,7 +9,7 @@ use super::pool::SharedMcpPool;
 use super::protocol::{McpConfig, McpServerConfig, McpToolDef, ToolCallResult};
 use anyhow::{Context, Result};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -316,6 +316,39 @@ impl McpManager {
         tools
     }
 
+    /// Get the best available MCP tool catalog for deferred discovery.
+    ///
+    /// Live definitions win, while the schema cache fills in enabled servers
+    /// that are still connecting. This preserves advertise-early behavior for
+    /// the fixed `mcp_search` surface without changing `all_tools()`, whose
+    /// callers intentionally operate on connected servers only.
+    pub async fn searchable_tools(&self) -> Vec<(String, McpToolDef)> {
+        let mut tools: BTreeMap<(String, String), McpToolDef> = BTreeMap::new();
+        let schema_cache = super::McpSchemaCache::load();
+
+        for (server, config) in &self.config.servers {
+            if !config.is_enabled() {
+                continue;
+            }
+            if let Some(cached) = schema_cache.tools_for(server, config) {
+                for tool in cached {
+                    tools.insert((server.clone(), tool.name.clone()), tool.clone());
+                }
+            }
+        }
+
+        // Insert live definitions last so schema changes discovered during this
+        // session replace stale cache entries immediately.
+        for (server, tool) in self.all_tools().await {
+            tools.insert((server.clone(), tool.name.clone()), tool);
+        }
+
+        tools
+            .into_iter()
+            .map(|((server, _), tool)| (server, tool))
+            .collect()
+    }
+
     /// Call a tool on a specific server.
     ///
     /// Connect-on-first-call: if the server is configured but not yet connected
@@ -589,6 +622,7 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 enabled: Some(false),
                 disabled: None,
+                timeout_secs: None,
             },
         );
         let manager = McpManager::with_config(config);
@@ -623,6 +657,7 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 enabled: None,
                 disabled: None,
+                timeout_secs: None,
             },
         );
         let manager = McpManager::with_config(config);
@@ -730,6 +765,7 @@ done
                 headers: std::collections::HashMap::new(),
                 enabled: None,
                 disabled: None,
+                timeout_secs: None,
             },
         );
         let manager = McpManager::with_config(config.clone());

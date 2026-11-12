@@ -20,7 +20,9 @@ fn nonblank_texts(lines: &[Line<'static>]) -> Vec<String> {
                 .collect::<String>()
         })
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        // The TUI keeps gutters on blank quote separators. They are spacing,
+        // not additional content compared with the shared-core renderer.
+        .filter(|s| !s.chars().all(|ch| ch.is_whitespace() || ch == '│'))
         .collect()
 }
 

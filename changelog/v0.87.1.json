@@ -1,0 +1,15 @@
+{
+  "version": "0.87.1",
+  "date": "2026-09-22",
+  "title": "Always-on adaptive status line",
+  "highlights": [
+    "The status line below the input is now always visible by default and adapts to the terminal width, keeping the directory, model, and context usage in view even on narrow terminals"
+  ],
+  "improvements": [
+    "Status line is right-aligned with the model at the right edge, and model and provider text is muted to keep the line quiet",
+    "Status line shows git status counts next to the branch (modified, staged, untracked, ahead, behind)",
+    "On narrow terminals facts compact step by step instead of disappearing, and the full token counts and context bar return when there is room",
+    "Set display.overscroll_status = \"overscroll\" to keep the previous reveal-on-overscroll behavior"
+  ],
+  "fixes": []
+}

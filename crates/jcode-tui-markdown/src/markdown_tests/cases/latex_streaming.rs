@@ -96,6 +96,24 @@ fn inline_math_stays_inline_in_image_mode_and_skips_the_image_toolchain() {
 }
 
 #[test]
+fn display_math_nested_in_a_list_uses_graphical_rendering() {
+    let source = concat!(
+        "- Gaussian integral:\n\n",
+        "  \\[\n",
+        "  \\int_{-\\infty}^{\\infty} e^{-x^2}\\,dx=\\sqrt{\\pi}\n",
+        "  \\]\n",
+    );
+
+    latex_image::reset_test_render_attempts();
+    let lines = render_markdown_with_width(source, Some(90));
+    assert!(
+        latex_image::test_render_attempts() > 0,
+        "list-nested display math should enter the graphical LaTeX pipeline: {}",
+        lines_to_string(&lines)
+    );
+}
+
+#[test]
 fn multiline_relations_survive_blockquotes_and_promoted_delimiters() {
     let source = concat!(
         "> Blockquote display:\n> \\[\n> x^2\n> =\n> y^2\n> \\]\n\n",

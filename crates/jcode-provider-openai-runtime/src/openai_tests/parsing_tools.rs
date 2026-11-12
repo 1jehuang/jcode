@@ -2,6 +2,7 @@
 fn test_parse_openai_response_completed_captures_incomplete_stop_reason() {
     let data = r#"{"type":"response.completed","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}"#;
     let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
     let mut streaming_tool_calls = HashMap::new();
     let mut completed_tool_items = HashSet::new();
     let mut pending = VecDeque::new();
@@ -9,6 +10,7 @@ fn test_parse_openai_response_completed_captures_incomplete_stop_reason() {
     let event = parse_openai_response_event(
         data,
         &mut saw_text_delta,
+        &mut saw_thinking_delta,
         &mut streaming_tool_calls,
         &mut completed_tool_items,
         &mut pending,
@@ -26,6 +28,7 @@ fn test_parse_openai_response_completed_captures_incomplete_stop_reason() {
 fn test_parse_openai_response_completed_without_stop_reason() {
     let data = r#"{"type":"response.completed","response":{"status":"completed"}}"#;
     let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
     let mut streaming_tool_calls = HashMap::new();
     let mut completed_tool_items = HashSet::new();
     let mut pending = VecDeque::new();
@@ -33,6 +36,7 @@ fn test_parse_openai_response_completed_without_stop_reason() {
     let event = parse_openai_response_event(
         data,
         &mut saw_text_delta,
+        &mut saw_thinking_delta,
         &mut streaming_tool_calls,
         &mut completed_tool_items,
         &mut pending,
@@ -50,6 +54,7 @@ fn test_parse_openai_response_completed_without_stop_reason() {
 fn test_parse_openai_response_completed_commentary_phase_sets_stop_reason() {
     let data = r#"{"type":"response.completed","response":{"status":"completed","output":[{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Still working"}]}]}}"#;
     let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
     let mut streaming_tool_calls = HashMap::new();
     let mut completed_tool_items = HashSet::new();
     let mut pending = VecDeque::new();
@@ -57,6 +62,7 @@ fn test_parse_openai_response_completed_commentary_phase_sets_stop_reason() {
     let event = parse_openai_response_event(
         data,
         &mut saw_text_delta,
+        &mut saw_thinking_delta,
         &mut streaming_tool_calls,
         &mut completed_tool_items,
         &mut pending,
@@ -74,6 +80,7 @@ fn test_parse_openai_response_completed_commentary_phase_sets_stop_reason() {
 fn test_parse_openai_response_incomplete_emits_message_end_with_reason() {
     let data = r#"{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"content_filter"}}}"#;
     let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
     let mut streaming_tool_calls = HashMap::new();
     let mut completed_tool_items = HashSet::new();
     let mut pending = VecDeque::new();
@@ -81,6 +88,7 @@ fn test_parse_openai_response_incomplete_emits_message_end_with_reason() {
     let event = parse_openai_response_event(
         data,
         &mut saw_text_delta,
+        &mut saw_thinking_delta,
         &mut streaming_tool_calls,
         &mut completed_tool_items,
         &mut pending,
@@ -97,67 +105,52 @@ fn test_parse_openai_response_incomplete_emits_message_end_with_reason() {
 #[test]
 fn test_parse_openai_response_function_call_arguments_streaming() {
     let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
     let mut streaming_tool_calls = HashMap::new();
     let mut completed_tool_items = HashSet::new();
     let mut pending = VecDeque::new();
 
     let added = r#"{"type":"response.output_item.added","item":{"id":"fc_123","type":"function_call","call_id":"call_123","name":"batch","arguments":""}}"#;
-    assert!(
-        parse_openai_response_event(
-            added,
-            &mut saw_text_delta,
-            &mut streaming_tool_calls,
-            &mut completed_tool_items,
-            &mut pending,
-        )
-        .is_none(),
-        "output_item.added should just seed tool state"
-    );
-
-    let delta = r#"{"type":"response.function_call_arguments.delta","item_id":"fc_123","delta":"{\"tool_calls\":[{\"tool\":\"read\"}]"}"#;
-    assert!(
-        parse_openai_response_event(
-            delta,
-            &mut saw_text_delta,
-            &mut streaming_tool_calls,
-            &mut completed_tool_items,
-            &mut pending,
-        )
-        .is_none(),
-        "argument delta should accumulate state only"
-    );
-
-    let done = r#"{"type":"response.function_call_arguments.done","item_id":"fc_123","arguments":"{\"tool_calls\":[{\"tool\":\"read\"}]}"}"#;
     let first = parse_openai_response_event(
-        done,
+        added,
         &mut saw_text_delta,
+        &mut saw_thinking_delta,
         &mut streaming_tool_calls,
         &mut completed_tool_items,
         &mut pending,
     )
-    .expect("expected tool start");
+    .expect("tool name must be emitted at output_item.added");
+    assert!(matches!(first, StreamEvent::ToolUseStart { id, name }
+        if id == "call_123" && name == "batch"));
+    assert!(pending.is_empty());
 
-    match first {
-        StreamEvent::ToolUseStart { id, name } => {
-            assert_eq!(id, "call_123");
-            assert_eq!(name, "batch");
-        }
-        other => panic!("expected ToolUseStart, got {:?}", other),
-    }
+    let delta = r#"{"type":"response.function_call_arguments.delta","item_id":"fc_123","delta":"{\"tool_calls\":[{\"tool\":\"read\"}]"}"#;
+    let event = parse_openai_response_event(
+        delta,
+        &mut saw_text_delta,
+        &mut saw_thinking_delta,
+        &mut streaming_tool_calls,
+        &mut completed_tool_items,
+        &mut pending,
+    )
+    .expect("argument fragments must stream before completion");
+    assert!(matches!(event, StreamEvent::ToolInputDeltaFor { ref id, ref delta }
+        if id == "call_123" && delta == r#"{"tool_calls":[{"tool":"read"}]"#));
+    assert!(pending.is_empty());
 
-    match pending.pop_front() {
-        Some(StreamEvent::ToolInputDelta(delta)) => {
-            let parsed: Value = serde_json::from_str(&delta).expect("valid args json");
-            let tool_calls = parsed
-                .get("tool_calls")
-                .and_then(|v| v.as_array())
-                .expect("tool_calls array");
-            assert_eq!(tool_calls.len(), 1);
-        }
-        other => panic!("expected ToolInputDelta, got {:?}", other),
-    }
-
-    assert!(matches!(pending.pop_front(), Some(StreamEvent::ToolUseEnd)));
+    let done = r#"{"type":"response.function_call_arguments.done","item_id":"fc_123","arguments":"{\"tool_calls\":[{\"tool\":\"read\"}]}"}"#;
+    let event = parse_openai_response_event(
+        done,
+        &mut saw_text_delta,
+        &mut saw_thinking_delta,
+        &mut streaming_tool_calls,
+        &mut completed_tool_items,
+        &mut pending,
+    )
+    .expect("only the unstreamed suffix should be emitted");
+    assert!(matches!(event, StreamEvent::ToolInputDeltaFor { ref id, ref delta } if id == "call_123" && delta == "}"));
+    assert!(matches!(pending.pop_front(), Some(StreamEvent::ToolUseEndFor { id }) if id == "call_123"));
+    assert!(pending.is_empty());
     assert!(streaming_tool_calls.is_empty());
     assert!(completed_tool_items.contains("fc_123"));
 }
@@ -165,6 +158,7 @@ fn test_parse_openai_response_function_call_arguments_streaming() {
 #[test]
 fn test_parse_openai_response_output_item_done_skips_duplicate_after_arguments_done() {
     let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
     let mut streaming_tool_calls = HashMap::new();
     let mut completed_tool_items = HashSet::from(["fc_123".to_string()]);
     let mut pending = VecDeque::new();
@@ -173,6 +167,7 @@ fn test_parse_openai_response_output_item_done_skips_duplicate_after_arguments_d
     let event = parse_openai_response_event(
         duplicate_done,
         &mut saw_text_delta,
+        &mut saw_thinking_delta,
         &mut streaming_tool_calls,
         &mut completed_tool_items,
         &mut pending,
@@ -180,12 +175,13 @@ fn test_parse_openai_response_output_item_done_skips_duplicate_after_arguments_d
 
     assert!(event.is_none(), "duplicate function call should be skipped");
     assert!(pending.is_empty());
-    assert!(!completed_tool_items.contains("fc_123"));
+    assert!(completed_tool_items.contains("fc_123"));
 }
 
 #[test]
 fn test_parse_openai_response_output_item_done_emits_native_compaction() {
     let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
     let mut streaming_tool_calls = HashMap::new();
     let mut completed_tool_items = HashSet::new();
     let mut pending = VecDeque::new();
@@ -194,6 +190,7 @@ fn test_parse_openai_response_output_item_done_emits_native_compaction() {
     let event = parse_openai_response_event(
         compaction_done,
         &mut saw_text_delta,
+        &mut saw_thinking_delta,
         &mut streaming_tool_calls,
         &mut completed_tool_items,
         &mut pending,
@@ -218,6 +215,7 @@ fn test_parse_openai_response_output_item_done_emits_native_compaction() {
 #[test]
 fn test_parse_openai_response_output_item_done_emits_reasoning_item() {
     let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
     let mut streaming_tool_calls = HashMap::new();
     let mut completed_tool_items = HashSet::new();
     let mut pending = VecDeque::new();
@@ -235,6 +233,7 @@ fn test_parse_openai_response_output_item_done_emits_reasoning_item() {
     let event = parse_openai_response_event(
         reasoning_done,
         &mut saw_text_delta,
+        &mut saw_thinking_delta,
         &mut streaming_tool_calls,
         &mut completed_tool_items,
         &mut pending,
@@ -261,6 +260,61 @@ fn test_parse_openai_response_output_item_done_emits_reasoning_item() {
 }
 
 #[test]
+fn test_reasoning_item_done_does_not_replay_summary_after_live_deltas() {
+    // Regression: OpenAI streams the reasoning summary live via
+    // `response.reasoning_summary_text.delta`, then repeats the full summary
+    // inside the `response.output_item.done` reasoning item. Replaying it
+    // rendered the thinking text twice in the TUI.
+    let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
+    let mut streaming_tool_calls = HashMap::new();
+    let mut completed_tool_items = HashSet::new();
+    let mut pending = VecDeque::new();
+
+    let delta = r#"{"type":"response.reasoning_summary_text.delta","delta":"Checked the constraints."}"#;
+    let event = parse_openai_response_event(
+        delta,
+        &mut saw_text_delta,
+        &mut saw_thinking_delta,
+        &mut streaming_tool_calls,
+        &mut completed_tool_items,
+        &mut pending,
+    )
+    .expect("expected thinking delta");
+    assert!(matches!(event, StreamEvent::ThinkingDelta(text) if text == "Checked the constraints."));
+
+    let reasoning_done = r#"{
+        "type":"response.output_item.done",
+        "item":{
+            "id":"rs_123",
+            "type":"reasoning",
+            "status":"completed",
+            "encrypted_content":"enc_reasoning",
+            "summary":[{"type":"summary_text","text":"Checked the constraints."}]
+        }
+    }"#;
+    let event = parse_openai_response_event(
+        reasoning_done,
+        &mut saw_text_delta,
+        &mut saw_thinking_delta,
+        &mut streaming_tool_calls,
+        &mut completed_tool_items,
+        &mut pending,
+    )
+    .expect("expected reasoning item event");
+    assert!(
+        matches!(event, StreamEvent::OpenAIReasoning { .. }),
+        "expected OpenAIReasoning (for history persistence), got {:?}",
+        event
+    );
+    assert!(
+        pending.is_empty(),
+        "summary must not be replayed as thinking events after live deltas: {:?}",
+        pending
+    );
+}
+
+#[test]
 fn test_parse_openai_response_image_generation_saves_metadata_and_emits_event() {
     let _lock = jcode_base::storage::lock_test_env();
     let original_dir = std::env::current_dir().expect("current dir");
@@ -271,6 +325,7 @@ fn test_parse_openai_response_image_generation_saves_metadata_and_emits_event() 
     std::env::set_current_dir(temp.path()).expect("set temp cwd");
 
     let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
     let mut streaming_tool_calls = HashMap::new();
     let mut completed_tool_items = HashSet::new();
     let mut pending = VecDeque::new();
@@ -289,6 +344,7 @@ fn test_parse_openai_response_image_generation_saves_metadata_and_emits_event() 
     let event = parse_openai_response_event(
         data,
         &mut saw_text_delta,
+        &mut saw_thinking_delta,
         &mut streaming_tool_calls,
         &mut completed_tool_items,
         &mut pending,
@@ -344,6 +400,7 @@ fn test_build_tools_sets_strict_true() {
             "required": ["command"],
             "properties": { "command": { "type": "string" } }
         }),
+        defer_loading: false,
     }];
     let api_tools = build_tools(&defs);
     assert_eq!(api_tools.len(), 1);
@@ -372,6 +429,7 @@ fn test_build_tools_disables_strict_for_free_form_object_nodes() {
                 }
             }
         }),
+        defer_loading: false,
     }];
     let api_tools = build_tools(&defs);
     assert_eq!(api_tools.len(), 1);
@@ -404,6 +462,7 @@ fn test_build_tools_normalizes_object_schema_additional_properties() {
             },
             "required": ["path"]
         }),
+        defer_loading: false,
     }];
     let api_tools = build_tools(&defs);
     assert_eq!(
@@ -449,6 +508,7 @@ fn test_build_tools_rewrites_oneof_to_anyof_for_openai() {
                 }
             }
         }),
+        defer_loading: false,
     }];
     let api_tools = build_tools(&defs);
     assert!(api_tools[0]["parameters"]["properties"]["tool_calls"]["items"]["oneOf"].is_null());
@@ -490,6 +550,7 @@ fn test_build_tools_keeps_strict_for_anyof_object_branches_with_properties() {
                 "wake_at": { "type": "string" }
             }
         }),
+        defer_loading: false,
     }];
     let api_tools = build_tools(&defs);
     assert_eq!(api_tools[0]["strict"], serde_json::json!(true));
@@ -522,8 +583,9 @@ fn test_handle_openai_output_item_normalizes_null_arguments() {
         "arguments": "null",
     });
     let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
     let mut pending = VecDeque::new();
-    let first = handle_openai_output_item(item, &mut saw_text_delta, &mut pending)
+    let first = handle_openai_output_item(item, &mut saw_text_delta, &mut saw_thinking_delta, &mut pending)
         .expect("expected tool event");
 
     match first {
@@ -534,10 +596,13 @@ fn test_handle_openai_output_item_normalizes_null_arguments() {
         _ => panic!("expected ToolUseStart"),
     }
     match pending.pop_front() {
-        Some(StreamEvent::ToolInputDelta(delta)) => assert_eq!(delta, "{}"),
-        _ => panic!("expected ToolInputDelta"),
+        Some(StreamEvent::ToolInputDeltaFor { id, delta }) => {
+            assert_eq!(id, "call_1");
+            assert_eq!(delta, "{}");
+        }
+        _ => panic!("expected ToolInputDeltaFor"),
     }
-    assert!(matches!(pending.pop_front(), Some(StreamEvent::ToolUseEnd)));
+    assert!(matches!(pending.pop_front(), Some(StreamEvent::ToolUseEndFor { id }) if id == "call_1"));
 }
 
 #[test]
@@ -551,10 +616,11 @@ fn test_handle_openai_output_item_recovers_bright_pearl_fixture() {
     });
 
     let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
     let mut pending = VecDeque::new();
     let mut events = Vec::new();
 
-    if let Some(first) = handle_openai_output_item(item, &mut saw_text_delta, &mut pending) {
+    if let Some(first) = handle_openai_output_item(item, &mut saw_text_delta, &mut saw_thinking_delta, &mut pending) {
         events.push(first);
     }
     while let Some(ev) = pending.pop_front() {
@@ -575,7 +641,7 @@ fn test_handle_openai_output_item_recovers_bright_pearl_fixture() {
             StreamEvent::ToolUseStart { name, .. } if name == "batch" => {
                 saw_tool = true;
             }
-            StreamEvent::ToolInputDelta(delta) => {
+            StreamEvent::ToolInputDeltaFor { delta, .. } => {
                 let args: Value = serde_json::from_str(&delta).expect("valid tool args");
                 let calls = args
                     .get("tool_calls")

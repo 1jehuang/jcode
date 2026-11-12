@@ -597,25 +597,14 @@ pub(super) fn windows_launch_hotkeys_notice(state: &SetupHintsState) -> Option<S
         return None;
     }
 
-    let last_dir = super::mac_hotkey_last_dir_file()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let last_repo = super::mac_hotkey_last_repo_file()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default();
-
     let rows: Vec<super::LaunchHotkeyRow> = resolve_windows_hotkeys()
         .into_iter()
         .filter(|hk| windows_hotkeys::hotkey_to_win32(hk).is_some())
-        .map(|hk| {
-            let cwd = crate::launch_hotkeys::resolve_target_dir(&hk.dir, &last_dir, &last_repo);
-            super::LaunchHotkeyRow {
-                chord: hk.chord.canonical(),
-                display: windows_hotkeys::display_windows_hotkey(&hk),
-                label: hk.label.clone(),
-                cwd_display: cwd.display().to_string(),
-                self_dev: hk.self_dev,
-            }
+        .map(|hk| super::LaunchHotkeyRow {
+            chord: hk.chord.canonical(),
+            display: windows_hotkeys::display_windows_hotkey(&hk),
+            label: hk.label.clone(),
+            self_dev: hk.self_dev,
         })
         .collect();
 
@@ -625,10 +614,7 @@ pub(super) fn windows_launch_hotkeys_notice(state: &SetupHintsState) -> Option<S
     Some(StartupHints::with_status_and_display(
         "Launch hotkeys available".to_string(),
         "Launch hotkeys",
-        format!(
-            "Configured Jcode launch hotkeys:\n{}\n\nThese fire system-wide.",
-            lines.join("\n")
-        ),
+        super::compact_launch_hotkey_notice(&lines),
     ))
 }
 

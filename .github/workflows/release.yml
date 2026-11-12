@@ -1,5 +1,11 @@
 name: Release
 
+env:
+  JCODE_CI: "1"
+  CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  CARGO_INCREMENTAL: "0"
+
 on:
   push:
     tags:
@@ -12,14 +18,17 @@ concurrency:
 permissions:
   contents: write
 
-env:
-  CARGO_TERM_COLOR: always
-  SCCACHE_GHA_ENABLED: "true"
-  CARGO_INCREMENTAL: "0"
-
 jobs:
   create-release:
     name: Create release
+    # Publish only from the canonical repository. A fork that runs this
+    # workflow on a `v*` tag would otherwise create a release carrying that
+    # upstream version number with binaries built from the fork, which is the
+    # same class of accidental-publication path as a fork pushing a package.
+    # Every other job in this workflow needs `create-release`, directly or
+    # transitively, so gating this one job skips the whole workflow: a skipped
+    # dependency skips its dependents.
+    if: github.repository == '1jehuang/jcode'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -155,6 +164,7 @@ jobs:
           fi
         env:
           JCODE_RELEASE_BUILD: "1"
+          JCODE_CI_BUILD: "1"
           JCODE_BUILD_SEMVER: ${{ github.ref_name }}
 
       - name: Build portable Linux x86_64 release binary
@@ -163,6 +173,7 @@ jobs:
         run: scripts/build_linux_compat.sh dist
         env:
           JCODE_RELEASE_BUILD: "1"
+          JCODE_CI_BUILD: "1"
           JCODE_BUILD_SEMVER: ${{ github.ref_name }}
           JCODE_COMPAT_ARTIFACT: ${{ matrix.artifact }}
 
@@ -264,6 +275,7 @@ jobs:
           & cargo @cargoArgs
         env:
           JCODE_RELEASE_BUILD: "1"
+          JCODE_CI_BUILD: "1"
           JCODE_BUILD_SEMVER: ${{ github.ref_name }}
 
       - name: Verify built Windows binary launches
@@ -473,6 +485,7 @@ jobs:
             # CARGO_BUILD_JOBS keeps memory in check; aws-lc-sys is memory hungry.
             export CARGO_BUILD_JOBS=3
             export JCODE_RELEASE_BUILD=1
+            export JCODE_CI_BUILD=1
             export JCODE_BUILD_SEMVER="${{ github.ref_name }}"
 
             echo "::group::cargo build (jcode binary)"
@@ -512,6 +525,7 @@ jobs:
     permissions:
       actions: write
       contents: write
+      issues: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -769,7 +783,7 @@ jobs:
                   libexec.install Dir["libssl.so*"], Dir["libcrypto.so*"] unless Dir["libssl.so*", "libcrypto.so*"].empty?
                   (bin/"jcode").write <<~SH
                     #!/bin/sh
-                    exec "#{libexec}/jcode-linux-x86_64" "$@"
+                    exec "#{libexec}/jcode-linux-x86_64" "\$@"
                   SH
                 end
               end

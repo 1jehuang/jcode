@@ -1,5 +1,7 @@
 #[derive(Debug, Clone)]
 pub(crate) enum PendingLogin {
+    /// SSH flow state and sensitive input are held separately, never in local auth.
+    Remote,
     /// Waiting for user to paste Claude OAuth code for a specific stored account
     ClaudeAccount {
         verifier: String,
@@ -46,6 +48,8 @@ pub(crate) enum PendingLogin {
     CursorApiKey,
     /// GitHub Copilot device flow in progress (polling in background)
     Copilot,
+    /// Grok Build device/browser flow in progress via Jcode's managed backend.
+    GrokBuild,
     /// Waiting for the user to choose which external auth sources to import.
     AutoImportSelection {
         candidates: Vec<crate::external_auth::ExternalAuthReviewCandidate>,
@@ -63,6 +67,7 @@ pub(crate) enum PendingLogin {
 impl PendingLogin {
     pub(crate) fn telemetry_context(&self) -> Option<(String, String)> {
         match self {
+            Self::Remote => None,
             Self::ClaudeAccount { .. } => Some(("claude".to_string(), "oauth".to_string())),
             Self::OpenAiAccount { .. } => Some(("openai".to_string(), "oauth".to_string())),
             Self::Gemini { .. } => Some(("gemini".to_string(), "oauth".to_string())),
@@ -85,6 +90,7 @@ impl PendingLogin {
             }
             Self::CursorApiKey => Some(("cursor".to_string(), "api_key".to_string())),
             Self::Copilot => Some(("copilot".to_string(), "device_code".to_string())),
+            Self::GrokBuild => Some(("grok-build".to_string(), "oauth".to_string())),
             Self::AutoImportSelection { .. } => None,
             Self::AzureEndpoint | Self::AzureModel { .. } | Self::AzureAuthChoice { .. } => {
                 Some(("azure".to_string(), "hybrid".to_string()))

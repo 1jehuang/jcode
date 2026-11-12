@@ -53,6 +53,130 @@ fn prepare_body_preserves_multiline_user_prompt_lines() {
     assert_eq!(line_copy_offsets, vec![3, 3, 3, 3]);
 }
 
+/// A wrapped row re-seeds its prefix: list items repeat their hanging indent
+/// (`• ` / `1. ` as spaces), blockquotes repeat their `│ ` gutter. Those columns
+/// are display-only, so the rows must still tile the raw line exactly and each
+/// continuation row must skip the prefix. Regression test for drag-to-copy
+/// returning shifted text on wrapped rows.
+#[test]
+fn wrapped_row_map_tiles_raw_line_and_skips_repeated_prefix() {
+    let cases = [
+        "- item one that is long enough to wrap several times over so we can see the hanging indent behaviour clearly and check the copy mapping once more",
+        "> quoted text that is long enough to wrap several times over so we can see the repeated gutter behaviour clearly and check the copy mapping once more",
+    ];
+    for case in cases {
+        let rendered = crate::tui::markdown::render_markdown_with_width(case, Some(40));
+        let line = rendered
+            .into_iter()
+            .find(|line| line.width() > 40)
+            .unwrap_or_else(|| panic!("case should render a line wider than 40: {case:?}"));
+        let raw_width = unicode_width::UnicodeWidthStr::width(ui::line_plain_text(&line).as_str());
+
+        let prepared = wrap_lines_with_map(vec![line], &[], &[], &[], &[], &[], 40, &[], &[], &[]);
+        let maps = prepared.wrapped_line_map.as_ref();
+
+        assert!(maps.len() > 1, "case should wrap at width 40: {case:?}");
+        assert_eq!(maps.first().expect("first row").start_col, 0, "{case:?}");
+        assert_eq!(
+            maps.last().expect("last row").end_col,
+            raw_width,
+            "last row must reach the end of the raw line: {case:?}"
+        );
+        for pair in maps.windows(2) {
+            assert_eq!(
+                pair[0].end_col, pair[1].start_col,
+                "rows must tile the raw line without drift: {case:?}"
+            );
+        }
+        for (row, offset) in prepared.wrapped_copy_offsets.iter().enumerate() {
+            if row == 0 {
+                assert_eq!(*offset, 0, "row 0 copies from the raw line start: {case:?}");
+            } else {
+                assert!(
+                    *offset > 0,
+                    "row {row} must skip the repeated prefix: {case:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Every wrapped row must copy its visible content, without prefix drift.
+#[test]
+fn wrapped_copy_rows_match_visible_content_at_reported_widths() {
+    fn check(prepared: &PreparedMessages) {
+        assert!(prepared.wrapped_lines.len() > 2);
+        for (row, map) in prepared.wrapped_line_map.iter().enumerate() {
+            let displayed = &prepared.wrapped_plain_lines[row];
+            let offset = prepared.wrapped_copy_offsets[row];
+            let visible = ui::display_col_slice(
+                displayed,
+                offset,
+                unicode_width::UnicodeWidthStr::width(displayed.as_str()),
+            );
+            let copied = ui::display_col_slice(
+                &prepared.raw_plain_lines[map.raw_line],
+                map.start_col,
+                map.end_col,
+            );
+            assert_eq!(copied, visible, "row {row}, map {map:?}, offset {offset}");
+        }
+    }
+
+    let text = "alpha bravo charlie delta echo foxtrot golf hotel india juliet ".repeat(8);
+    for width in [40, 80, 120] {
+        for prefix in ["1. ", "- ", "> "] {
+            let markdown = format!("{prefix}{text}");
+            let line = markdown::render_markdown_with_width(&markdown, Some(width as usize))
+                .into_iter()
+                .find(|line| line.width() > width as usize)
+                .expect("long source line");
+            check(&wrap_lines(vec![line.clone()], &[], &[], &[], width));
+            check(&wrap_lines_with_map(
+                vec![line],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                width,
+                &[],
+                &[],
+                &[],
+            ));
+        }
+
+        let mut lines = Vec::new();
+        let mut raws = Vec::new();
+        let mut maps = Vec::new();
+        let mut offsets = Vec::new();
+        let mut users = Vec::new();
+        push_user_prompt_lines(
+            &mut lines,
+            &mut raws,
+            &mut maps,
+            &mut offsets,
+            &mut users,
+            1,
+            user_color(),
+            &text,
+            ratatui::layout::Alignment::Left,
+        );
+        check(&wrap_lines_with_map(
+            lines,
+            &raws,
+            &maps,
+            &offsets,
+            &users,
+            &[],
+            width,
+            &[],
+            &[],
+            &[],
+        ));
+    }
+}
+
 /// Regression coverage for issue #344: loading older compacted history above
 /// an unchanged tail must be detected as a suffix match so scrolling to the
 /// start of a long session reuses the prepared tail instead of re-rendering

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DisplayConfig {
-    /// How to display file diffs (off/inline/full-inline/pinned/file, default: inline)
+    /// How to display file diffs (off/inline/full-inline/file, default: inline)
     #[serde(deserialize_with = "crate::serde_lenient::lenient_enum")]
     pub diff_mode: DiffDisplayMode,
     /// Legacy: "show_diffs = true/false" maps to diff_mode inline/off
@@ -28,7 +28,7 @@ pub struct DisplayConfig {
     pub emoji: bool,
     /// Center all content (default: false)
     pub centered: bool,
-    /// Show thinking/reasoning content by default (default: false)
+    /// Show thinking/reasoning content by default (default: true)
     pub show_thinking: bool,
     /// How to display reasoning/thinking content (off/full/current).
     /// When unset, falls back to `show_thinking` (true => full, false => off).
@@ -51,8 +51,8 @@ pub struct DisplayConfig {
     /// Pin read images to side pane (default: true)
     pub pin_images: bool,
     /// Pin the full session todo list to the top of the chat transcript while
-    /// it scrolls, like the sticky previous-prompt preview (default: false)
-    #[serde(default)]
+    /// it scrolls, like the sticky previous-prompt preview (default: true)
+    #[serde(default = "default_true")]
     pub pin_todos: bool,
     /// Show idle animation before first prompt (default: false)
     pub idle_animation: bool,
@@ -60,8 +60,6 @@ pub struct DisplayConfig {
     pub prompt_entry_animation: bool,
     /// Disable specific animation variants by name (e.g. ["donut", "orbit_rings"])
     pub disabled_animations: Vec<String>,
-    /// Wrap long lines in the pinned diff pane (default: true)
-    pub diff_line_wrap: bool,
     /// Performance tier override: auto/full/reduced/minimal (default: auto)
     pub performance: String,
     /// FPS for animations (startup, idle donut): 1-120 (default: 60)
@@ -79,6 +77,10 @@ pub struct DisplayConfig {
     /// just the one-line summary (default: false)
     #[serde(default)]
     pub show_agentgrep_output: bool,
+    /// Show up to the last three non-empty bash output lines beneath the tool
+    /// summary (default: false).
+    #[serde(default)]
+    pub show_bash_output: bool,
     /// Show the dimmed technical detail (command, path, args) after the
     /// model-provided intent on tool rows (default: false). When off, rows
     /// that have an intent show only the intent; rows without an intent
@@ -115,8 +117,10 @@ pub struct DisplayConfig {
     /// sessions (issue #674).
     #[serde(default = "default_true")]
     pub external_sessions: bool,
+    /// Usage percentage wording: "left" (default) or "used".
+    pub usage_display: String,
     /// When to show the overscroll status line below the input
-    /// (off/on/overscroll, default: overscroll). "overscroll" is the elastic
+    /// (off/on/overscroll, default: on). "overscroll" is the elastic
     /// reveal when scrolling past the bottom, "on" keeps it always visible.
     #[serde(default, deserialize_with = "crate::serde_lenient::lenient_enum")]
     pub overscroll_status: OverscrollStatusMode,
@@ -127,22 +131,21 @@ impl Default for DisplayConfig {
             diff_mode: DiffDisplayMode::default(),
             show_diffs: None,
             pin_images: true,
-            pin_todos: false,
+            pin_todos: true,
             queue_mode: false,
             auto_server_reload: true,
             mouse_capture: true,
             debug_socket: false,
             emoji: true,
             centered: false,
-            show_thinking: false,
-            reasoning_display: Some(ReasoningDisplayMode::Off),
+            show_thinking: true,
+            reasoning_display: Some(ReasoningDisplayMode::Full),
             diagram_mode: DiagramDisplayMode::default(),
             markdown_spacing: MarkdownSpacingMode::default(),
             latex_rendering: LatexRenderingMode::default(),
             idle_animation: false,
             prompt_entry_animation: true,
             disabled_animations: Vec::new(),
-            diff_line_wrap: true,
             performance: String::new(),
             animation_fps: 60,
             redraw_fps: 60,
@@ -150,6 +153,7 @@ impl Default for DisplayConfig {
             compact_notifications: false,
             copy_badge_alt_label: String::new(),
             show_agentgrep_output: false,
+            show_bash_output: false,
             tool_call_details: false,
             native_scrollbars: NativeScrollbarConfig::default(),
             keybinding_hints: true,
@@ -157,6 +161,7 @@ impl Default for DisplayConfig {
             colors: std::collections::BTreeMap::new(),
             active_sessions_manager: false,
             external_sessions: true,
+            usage_display: "left".to_string(),
             overscroll_status: OverscrollStatusMode::default(),
         }
     }
@@ -201,5 +206,47 @@ impl DisplayConfig {
     /// Whether reasoning content should be generated/requested at all.
     pub fn reasoning_enabled(&self) -> bool {
         !matches!(self.reasoning_display(), ReasoningDisplayMode::Off)
+    }
+
+    pub fn usage_display_used(&self) -> bool {
+        self.usage_display.eq_ignore_ascii_case("used")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DisplayConfig;
+    use crate::ReasoningDisplayMode;
+
+    #[test]
+    fn thinking_is_shown_in_full_by_default() {
+        let default = DisplayConfig::default();
+        assert!(default.show_thinking);
+        assert_eq!(default.reasoning_display(), ReasoningDisplayMode::Full);
+
+        let missing: DisplayConfig = serde_json::from_str("{}").expect("display config");
+        assert!(missing.show_thinking);
+        assert_eq!(missing.reasoning_display(), ReasoningDisplayMode::Full);
+    }
+
+    #[test]
+    fn todos_are_pinned_by_default_but_can_be_disabled() {
+        assert!(DisplayConfig::default().pin_todos);
+
+        let missing: DisplayConfig = serde_json::from_str("{}").expect("display config");
+        assert!(missing.pin_todos);
+
+        let disabled: DisplayConfig =
+            serde_json::from_str(r#"{"pin_todos":false}"#).expect("display config");
+        assert!(!disabled.pin_todos);
+    }
+
+    #[test]
+    fn usage_percentage_wording_defaults_to_left_and_accepts_used() {
+        assert_eq!(DisplayConfig::default().usage_display, "left");
+
+        let used: DisplayConfig =
+            serde_json::from_str(r#"{"usage_display":"used"}"#).expect("display config");
+        assert!(used.usage_display_used());
     }
 }

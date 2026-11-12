@@ -1,0 +1,16 @@
+{
+  "version": "0.79.0",
+  "date": "2026-08-21",
+  "highlights": [
+    "Large MCP tool catalogs can now be deferred automatically to keep agent context compact",
+    "Recent session lists now use a durable metadata index for faster dashboard loading"
+  ],
+  "improvements": [
+    "Background commands promoted after a timeout now report live progress"
+  ],
+  "fixes": [
+    "Remote TUI sessions now dispatch productivity results and handle Alt-key toggles correctly",
+    "Memory sidecars now preserve provider routing while omitting unnecessary metadata",
+    "Invalid CI telemetry overrides now fall back safely"
+  ]
+}

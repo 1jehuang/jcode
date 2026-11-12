@@ -1,0 +1,18 @@
+{
+  "version": "0.81.0",
+  "date": "2026-08-25",
+  "title": "Embedder control",
+  "highlights": [
+    "Headless embedders can use external wake mode to receive typed wake requests without the daemon starting invisible turns",
+    "Operators can pin one model and authentication route for every spawned swarm worker"
+  ],
+  "improvements": [
+    "The Rust and TypeScript SDKs can launch isolated jcode runtimes on Windows and configure swarm models and wake behavior",
+    "The SDK now launches private API bridges through the supported jcode CLI entry point",
+    "Remote model pickers use the daemon-provided route catalog without unnecessary network refreshes"
+  ],
+  "fixes": [
+    "Invalid configuration files are preserved when settings change instead of being overwritten",
+    "Mistral reasoning effort is normalized to the supported maximum"
+  ]
+}

@@ -188,7 +188,6 @@ struct PreviewCacheKey {
     /// drives the scrollbar decision (which can narrow the content one column).
     inner_width: u16,
     inner_height: u16,
-    centered: bool,
     diff_mode: crate::config::DiffDisplayMode,
     /// Normalized (trimmed + lowercased) active search query. Included so the
     /// wrapped-line cache is rebuilt (and match highlighting reapplied) whenever
@@ -1206,6 +1205,19 @@ impl SessionPicker {
             return self.handle_search_key(code, modifiers);
         }
 
+        // The first-run choice is deliberately simpler than the full session
+        // picker: Enter submits, and every other key rotates between its two
+        // actions. This makes the page work without requiring users to discover
+        // a particular navigation key.
+        if self.onboarding_banner_active() && code != KeyCode::Enter {
+            if self.onboarding_review_recent_project_highlighted() {
+                self.onboarding_action = Some(OnboardingAction::StartNewSession);
+            } else {
+                self.onboarding_action = Some(OnboardingAction::ReviewRecentProject);
+            }
+            return Ok(OverlayAction::Continue);
+        }
+
         match code {
             KeyCode::Esc => {
                 if !self.search_query.is_empty() {
@@ -1337,13 +1349,10 @@ impl SessionPicker {
             return;
         };
 
-        let centered = crate::config::config().display.centered;
         let diff_mode = crate::config::config().display.diff_mode;
-        let align = if centered {
-            Alignment::Center
-        } else {
-            Alignment::Left
-        };
+        // The narrow preview is always left-aligned, independently of the main
+        // chat's alignment preference.
+        let align = Alignment::Left;
 
         // Draw the bordered block first so we know the inner rect (which drives
         // wrapping width and the scrollbar decision) before building content.
@@ -1368,10 +1377,9 @@ impl SessionPicker {
         // changes, and idle redraws reuse the cached wrapped lines. This mirrors
         // the main chat viewport, whose prepared frame is cached the same way.
         let key = PreviewCacheKey {
-            content_hash: self.preview_content_hash(&session, centered, diff_mode),
+            content_hash: self.preview_content_hash(&session, diff_mode),
             inner_width: inner.width,
             inner_height: inner.height,
-            centered,
             diff_mode,
             search_query: self.search_query.trim().to_lowercase(),
         };
@@ -1380,7 +1388,12 @@ impl SessionPicker {
             .as_ref()
             .is_some_and(|cache| cache.key == key);
         if !cache_valid {
-            let rebuilt = self.build_preview_cache(&session, area, inner, key, align, diff_mode);
+            // Shared markdown renderers also center structured blocks via a
+            // thread-local setting. Scope it so lists/code/tools stay flush
+            // left here without changing the chat rendered behind the picker.
+            let rebuilt = markdown::with_center_code_blocks(false, || {
+                self.build_preview_cache(&session, area, inner, key, align, diff_mode)
+            });
             self.preview_cache = Some(rebuilt);
         }
         // Read cache geometry through a short-lived borrow so the scroll-offset
@@ -1485,7 +1498,6 @@ impl SessionPicker {
     fn preview_content_hash(
         &self,
         session: &SessionInfo,
-        centered: bool,
         diff_mode: crate::config::DiffDisplayMode,
     ) -> u64 {
         use std::hash::{Hash, Hasher};
@@ -1520,7 +1532,6 @@ impl SessionPicker {
                 .as_ref()
                 .is_some_and(|pending| pending.session_id == session.id);
         is_loading.hash(&mut h);
-        centered.hash(&mut h);
         diff_mode.hash(&mut h);
         for msg in &session.messages_preview {
             msg.role.hash(&mut h);
@@ -2083,7 +2094,7 @@ impl SessionPicker {
     }
 
     /// Render the suggested first-run prompt as the primary centered action,
-    /// with the blank-session escape hatch kept secondary in the bottom-right.
+    /// with the current-directory session kept secondary in the bottom-right.
     fn render_onboarding_band(&self, frame: &mut Frame, area: Rect) {
         if area.height == 0 {
             return;
@@ -2151,7 +2162,7 @@ impl SessionPicker {
         let review_selected = self.onboarding_review_recent_project_highlighted();
         frame.render_widget(
             Paragraph::new(action_line(
-                "Find bugs in what I've been working on",
+                "Find bugs in my most active repo",
                 review_selected,
             ))
             .alignment(Alignment::Center),
@@ -2165,8 +2176,11 @@ impl SessionPicker {
 
         let start_selected = self.onboarding_start_new_highlighted();
         frame.render_widget(
-            Paragraph::new(action_line("Start a new session", start_selected))
-                .alignment(Alignment::Right),
+            Paragraph::new(action_line(
+                "Start in the current directory",
+                start_selected,
+            ))
+            .alignment(Alignment::Right),
             Rect {
                 x: inner.x,
                 y: inner.y + inner.height.saturating_sub(1),
@@ -2362,7 +2376,7 @@ impl SessionPicker {
                 self.render(frame);
                 // Standalone picker loop bypasses `ui::draw`; adapt for light
                 // terminal themes here (no-op on dark).
-                jcode_tui_style::adapt_buffer_for_theme(frame.buffer_mut());
+                jcode_tui_style::adapt_buffer_for_display(frame.buffer_mut());
                 crate::tui::ui::adapt_buffer_for_emoji_preference(frame.buffer_mut());
             })?;
             if event::poll(Duration::from_millis(100))? {

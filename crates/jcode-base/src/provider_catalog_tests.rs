@@ -1,5 +1,82 @@
 use super::*;
 
+#[test]
+fn conifer_static_fallback_preserves_catalog_except_unverified_together_alias() {
+    let profile = openai_compatible_profile_by_id("conifer").expect("Conifer profile");
+    let models = openai_compatible_profile_static_models(profile);
+
+    assert_eq!(models.len(), 95);
+    assert_eq!(models.first().map(String::as_str), Some("claude-fable-5"));
+    assert_eq!(models.last().map(String::as_str), Some("gemma-3-27b"));
+    assert!(models.iter().any(|model| model == "gpt-5.6-sol"));
+    assert!(models.iter().any(|model| model == "nemotron-3-ultra"));
+    assert!(
+        !models
+            .iter()
+            .any(|model| model == "nemotron-3-ultra-together")
+    );
+    assert_eq!(
+        openai_compatible_profile_context_limit("conifer", "nemotron-3-ultra-together"),
+        None,
+        "an undocumented Together route must not inherit DeepInfra's window"
+    );
+}
+
+#[test]
+fn conifer_context_limits_match_public_catalog_snapshot() {
+    // Exact observations from /v1/catalog, 2026-09-16. Source/hash and refresh
+    // policy are documented in docs/CONIFER_PROVIDER.md (issue #1274).
+    let expected = [
+        ("grok-4.6", 500_000),
+        ("grok-4.5", 500_000),
+        ("grok-4.3", 1_000_000),
+        ("seed-2.0-pro", 256_000),
+        ("seed-2.0-code", 256_000),
+        ("seed-2.0-mini", 256_000),
+        ("step-3.7-flash", 262_144),
+        ("step-3.7-flash-novita", 262_144),
+        ("hy3", 262_144),
+        ("hy3-tencent", 262_144),
+        ("hy3-novita", 262_144),
+        ("ling-3.0-flash", 131_072),
+        ("inkling", 524_288),
+        ("inkling-small", 524_288),
+        ("nemotron-3-ultra", 262_144),
+        ("nemotron-3-super-120b", 262_144),
+        ("nemotron-3.5-lightning", 262_144),
+        ("mistral-large-latest", 256_000),
+        ("mistral-medium-latest", 256_000),
+        ("mistral-small-latest", 256_000),
+        ("command-a-cohere", 256_000),
+        ("llama-4-maverick", 1_048_576),
+        ("llama-4-scout", 327_680),
+        ("gemma-4-31b", 128_000),
+    ];
+    let limits = openai_compatible_profile_static_context_limits(CONIFER_PROFILE);
+    for (model, limit) in expected {
+        assert_eq!(limits.get(model), Some(&limit), "{model}");
+        assert_eq!(
+            openai_compatible_profile_context_limit(" CONIFER ", &model.to_uppercase()),
+            Some(limit),
+            "{model}"
+        );
+        assert_eq!(
+            openai_compatible_profile_context_limit("openrouter", model),
+            jcode_provider_core::models::open_weight_family_context_limit(model),
+            "Conifer metadata must not leak into other profiles: {model}"
+        );
+    }
+    assert_eq!(
+        openai_compatible_profile_context_limit("conifer", "grok-4.6-unknown"),
+        None
+    );
+    assert_eq!(
+        openai_compatible_profile_context_limit("conifer", "kimi-k3"),
+        jcode_provider_core::models::open_weight_family_context_limit("kimi-k3"),
+        "existing shared family fallback must remain intact"
+    );
+}
+
 struct EnvGuard {
     vars: Vec<(String, Option<String>)>,
 }
@@ -24,6 +101,59 @@ impl Drop for EnvGuard {
             }
         }
     }
+}
+
+#[test]
+fn anthropic_catalog_auth_uses_api_key_and_version_headers() {
+    let request = apply_openai_compatible_catalog_auth(
+        reqwest::Client::new().get("https://api.anthropic.com/v1/models"),
+        "https://api.anthropic.com/v1",
+        "test-key",
+    )
+    .build()
+    .expect("request should build");
+
+    assert_eq!(request.headers().get("x-api-key").unwrap(), "test-key");
+    assert_eq!(
+        request.headers().get("anthropic-version").unwrap(),
+        ANTHROPIC_VERSION_HEADER_VALUE
+    );
+    assert!(request.headers().get("authorization").is_none());
+}
+
+#[test]
+fn anthropic_catalog_auth_detects_host_case_insensitively() {
+    let request = apply_openai_compatible_catalog_auth(
+        reqwest::Client::new().get("https://api.anthropic.com/v1/models"),
+        "https://API.ANTHROPIC.COM/v1",
+        "test-key",
+    )
+    .build()
+    .expect("request should build");
+
+    assert_eq!(request.headers().get("x-api-key").unwrap(), "test-key");
+    assert_eq!(
+        request.headers().get("anthropic-version").unwrap(),
+        ANTHROPIC_VERSION_HEADER_VALUE
+    );
+}
+
+#[test]
+fn generic_catalog_auth_uses_bearer_header() {
+    let request = apply_openai_compatible_catalog_auth(
+        reqwest::Client::new().get("https://example.com/v1/models"),
+        "https://example.com/v1",
+        "test-key",
+    )
+    .build()
+    .expect("request should build");
+
+    assert_eq!(
+        request.headers().get("authorization").unwrap(),
+        "Bearer test-key"
+    );
+    assert!(request.headers().get("x-api-key").is_none());
+    assert!(request.headers().get("anthropic-version").is_none());
 }
 
 #[test]
@@ -92,7 +222,7 @@ fn auth_issue_profile_metadata_matches_direct_provider_endpoints() {
     assert_eq!(DEEPSEEK_PROFILE.default_model, Some("deepseek-v4-flash"));
     assert_eq!(DEEPSEEK_PROFILE.setup_url, "https://api-docs.deepseek.com/");
     assert_eq!(MINIMAX_PROFILE.api_base, "https://api.minimax.io/v1");
-    assert_eq!(MINIMAX_PROFILE.api_key_env, "OPENAI_API_KEY");
+    assert_eq!(MINIMAX_PROFILE.api_key_env, "MINIMAX_API_KEY");
     assert_eq!(
         ALIBABA_CODING_PLAN_PROFILE.api_base,
         "https://coding-intl.dashscope.aliyuncs.com/v1"
@@ -196,7 +326,10 @@ fn resolved_named_profile_skips_non_chat_models_when_picking_newest_default() {
 #[test]
 fn minimax_token_plan_keys_resolve_to_china_endpoint_without_changing_international_default() {
     let _lock = crate::storage::lock_test_env();
-    let _guard = EnvGuard::save(&["OPENAI_API_KEY"]);
+    let _guard = EnvGuard::save(&["JCODE_HOME", "MINIMAX_API_KEY", "OPENAI_API_KEY"]);
+    let home = tempfile::tempdir().expect("temporary JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::remove_var("MINIMAX_API_KEY");
     crate::env::remove_var("OPENAI_API_KEY");
 
     let international = resolve_openai_compatible_profile(MINIMAX_PROFILE);
@@ -212,6 +345,11 @@ fn minimax_token_plan_keys_resolve_to_china_endpoint_without_changing_internatio
     );
     assert_eq!(china.api_base, MINIMAX_CHINA_API_BASE);
     assert_eq!(china.setup_url, MINIMAX_CHINA_SETUP_URL);
+
+    crate::env::set_var("OPENAI_API_KEY", "sk-cp-legacy-token");
+    let legacy = resolve_openai_compatible_profile(MINIMAX_PROFILE);
+    assert_eq!(legacy.api_key_env, "OPENAI_API_KEY");
+    assert_eq!(legacy.api_base, MINIMAX_CHINA_API_BASE);
 }
 
 #[test]
@@ -536,8 +674,18 @@ fn named_provider_config_accepts_openai_compatible_spelling() {
 }
 
 #[test]
-fn named_provider_profile_reports_malformed_config_instead_of_unknown_profile() {
+fn named_anthropic_compatible_profile_maps_endpoint_auth_headers_and_model() {
     let _lock = crate::storage::lock_test_env();
+    let _guard = EnvGuard::save(&[
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_ANTHROPIC_API_BASE",
+        "JCODE_ANTHROPIC_API_KEY_NAME",
+        "JCODE_ANTHROPIC_AUTH",
+        "JCODE_ANTHROPIC_AUTH_HEADER",
+        "JCODE_ANTHROPIC_HEADERS",
+        "JCODE_ANTHROPIC_MODEL",
+        "JCODE_RUNTIME_PROVIDER",
+    ]);
     let previous_home = std::env::var_os("JCODE_HOME");
     let temp = tempfile::TempDir::new().expect("tempdir");
     crate::env::set_var("JCODE_HOME", temp.path());
@@ -549,32 +697,53 @@ fn named_provider_profile_reports_malformed_config_instead_of_unknown_profile() 
     std::fs::write(
         &config_path,
         r#"
-        [providers.antigravity]
+        [providers.corporate-claude]
         type = "anthropic-compatible"
-        base_url = "http://192.168.1.202:8080"
-        api_key_env = "ANTIGRAVITY_API_KEY"
-        default_model = "gemini-3.1-pro-low"
+        base_url = "https://gateway.example.com/anthropic/v1/"
+        auth = "bearer"
+        api_key_env = "CORPORATE_CLAUDE_TOKEN"
+        default_model = "claude-custom"
 
-        [[providers.antigravity.models]]
-        id = "gemini-3.1-pro-low"
+        [providers.corporate-claude.headers]
+        x-tenant-id = "tenant-42"
+
+        [[providers.corporate-claude.models]]
+        id = "claude-custom"
         context_window = 128000
         "#,
     )
     .expect("write config");
 
-    let err = apply_named_provider_profile_env("antigravity").expect_err("malformed config");
-    let message = err.to_string();
-    assert!(
-        message.contains("Failed to parse config file"),
-        "unexpected error: {message}"
+    apply_named_provider_profile_env("corporate-claude").expect("apply Anthropic profile");
+    assert_eq!(
+        std::env::var("JCODE_ANTHROPIC_API_BASE").ok().as_deref(),
+        Some("https://gateway.example.com/anthropic/v1")
     );
-    assert!(
-        message.contains("anthropic-compatible"),
-        "unexpected error: {message}"
+    assert_eq!(
+        std::env::var("JCODE_ANTHROPIC_API_KEY_NAME")
+            .ok()
+            .as_deref(),
+        Some("CORPORATE_CLAUDE_TOKEN")
     );
-    assert!(
-        !message.contains("Unknown provider profile"),
-        "unexpected error: {message}"
+    assert_eq!(
+        std::env::var("JCODE_ANTHROPIC_AUTH").ok().as_deref(),
+        Some("bearer")
+    );
+    assert_eq!(
+        std::env::var("JCODE_ANTHROPIC_MODEL").ok().as_deref(),
+        Some("claude-custom")
+    );
+    let headers: std::collections::BTreeMap<String, String> = serde_json::from_str(
+        &std::env::var("JCODE_ANTHROPIC_HEADERS").expect("custom headers env"),
+    )
+    .expect("headers JSON");
+    assert_eq!(
+        headers.get("x-tenant-id").map(String::as_str),
+        Some("tenant-42")
+    );
+    assert_eq!(
+        std::env::var("JCODE_RUNTIME_PROVIDER").ok().as_deref(),
+        Some("anthropic-api")
     );
 
     if let Some(previous_home) = previous_home {
@@ -1075,7 +1244,7 @@ fn every_static_profile_model_has_a_known_context_limit() {
     assert!(
         missing.is_empty(),
         "static profile models without a known context limit (would fall back to the \
-         generic default); add them to open_weight_family_context_limit: {missing:?}"
+         generic default); add verified provider-specific or shared family metadata: {missing:?}"
     );
 }
 
@@ -1097,9 +1266,14 @@ fn open_weight_family_context_limits_match_published_windows() {
     assert_eq!(f("kimi-k2.5"), Some(262_144));
     assert_eq!(f("minimax-m2.7"), Some(204_800));
     assert_eq!(f("mimo-v2.5"), Some(262_144));
+    assert_eq!(f("mimo-v2.6-pro"), Some(1_048_576));
+    assert_eq!(f("xiaomi/mimo-v2.6-flash"), Some(1_048_576));
     assert_eq!(f("muse-spark-1.2"), Some(1_048_576));
     assert_eq!(f("deepseek-v3.2"), Some(163_840));
     assert_eq!(f("deepseek-v4-pro"), Some(1_000_000));
+    // DeepSeek renamed `deepseek-v4-flash` to `deepseek-flash`; the renamed
+    // spelling must resolve to the same 1M window.
+    assert_eq!(f("deepseek-flash"), Some(1_000_000));
     assert_eq!(f("qwen3-235b-a22b-instruct-2507"), Some(262_144));
     assert_eq!(f("gpt-oss-120b"), Some(131_072));
     assert_eq!(f("llama-3.3-70b-instruct"), Some(131_072));
@@ -1110,10 +1284,10 @@ fn open_weight_family_context_limits_match_published_windows() {
 }
 
 #[test]
-fn minimax_default_provider_applies_openai_api_key_env_not_openrouter() {
+fn minimax_default_provider_applies_minimax_api_key_env_not_openrouter() {
     // Regression for #407: `default_provider = "minimax"` (the built-in MiniMax
     // profile) must resolve credentials from the profile's documented
-    // OPENAI_API_KEY / minimax.env, not the generic OPENROUTER_API_KEY /
+    // MINIMAX_API_KEY / minimax.env, not the generic OPENROUTER_API_KEY /
     // openrouter.env. The earlier bug surfaced as
     // "OPENROUTER_API_KEY not found ..." when applying the configured
     // default_model.
@@ -1150,12 +1324,29 @@ fn minimax_default_provider_applies_openai_api_key_env_not_openrouter() {
         std::env::var("JCODE_OPENROUTER_API_KEY_NAME")
             .ok()
             .as_deref(),
-        Some("OPENAI_API_KEY"),
-        "MiniMax profile must use OPENAI_API_KEY, not OPENROUTER_API_KEY"
+        Some("MINIMAX_API_KEY"),
+        "MiniMax profile must use MINIMAX_API_KEY, not OPENROUTER_API_KEY"
     );
     assert_eq!(
         std::env::var("JCODE_OPENROUTER_ENV_FILE").ok().as_deref(),
         Some("minimax.env"),
         "MiniMax profile must use minimax.env, not openrouter.env"
     );
+}
+
+#[test]
+fn novita_static_models_are_available_before_live_catalog_refresh() {
+    let models = openai_compatible_profile_static_models(NOVITA_PROFILE);
+    assert_eq!(
+        models.first().map(String::as_str),
+        NOVITA_PROFILE.default_model
+    );
+    for model in [
+        "zai-org/glm-5.3",
+        "zai-org/glm-5.3-flash",
+        "moonshotai/kimi-k3",
+        "deepseek/deepseek-v4-pro-0813",
+    ] {
+        assert!(models.iter().any(|candidate| candidate == model));
+    }
 }

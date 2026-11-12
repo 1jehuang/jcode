@@ -173,7 +173,6 @@ fn test_initial_provider_allows_cross_provider_switch_and_reports_target_credent
         let runtime = enter_test_runtime();
         let _enter = runtime.enter();
         let provider = MultiProvider {
-            claude: RwLock::new(None),
             anthropic: RwLock::new(None),
             openai: RwLock::new(None),
             copilot_api: RwLock::new(None),
@@ -185,7 +184,6 @@ fn test_initial_provider_allows_cross_provider_switch_and_reports_target_credent
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
             active_openai_compatible_profile: RwLock::new(None),
             active: RwLock::new(ActiveProvider::OpenAI),
-            use_claude_cli: false,
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: Some(ActiveProvider::OpenAI),
             routes_memo: std::sync::Mutex::new(None),
@@ -291,7 +289,6 @@ fn test_should_not_failover_on_generic_error() {
 #[test]
 fn test_no_provider_error_mentions_tokens_and_details() {
     let provider = MultiProvider {
-        claude: RwLock::new(None),
         anthropic: RwLock::new(None),
         openai: RwLock::new(None),
         copilot_api: RwLock::new(None),
@@ -303,7 +300,6 @@ fn test_no_provider_error_mentions_tokens_and_details() {
         openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
         active_openai_compatible_profile: RwLock::new(None),
         active: RwLock::new(ActiveProvider::OpenAI),
-        use_claude_cli: false,
         startup_notices: RwLock::new(Vec::new()),
         initial_provider: None,
         routes_memo: std::sync::Mutex::new(None),
@@ -331,7 +327,6 @@ fn test_active_compat_profile_counts_as_configured_openrouter_slot() {
         with_env_var("DEEPSEEK_API_KEY", "test-deepseek-key", || {
             crate::env::remove_var("OPENROUTER_API_KEY");
             let provider = MultiProvider {
-                claude: RwLock::new(None),
                 anthropic: RwLock::new(None),
                 openai: RwLock::new(None),
                 copilot_api: RwLock::new(None),
@@ -343,7 +338,6 @@ fn test_active_compat_profile_counts_as_configured_openrouter_slot() {
                 openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
                 active_openai_compatible_profile: RwLock::new(None),
                 active: RwLock::new(ActiveProvider::OpenRouter),
-                use_claude_cli: false,
                 startup_notices: RwLock::new(Vec::new()),
                 initial_provider: None,
                 routes_memo: std::sync::Mutex::new(None),

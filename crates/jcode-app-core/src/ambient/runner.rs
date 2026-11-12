@@ -28,6 +28,12 @@ use tokio::sync::{Notify, RwLock};
 
 const MAX_IDLE_POLL_SECS: u64 = 30;
 
+/// Re-read enabled on each loop iteration, without overriding an explicit stop.
+/// Config edits take effect on the next wake, not on the config cache's cadence.
+fn ambient_allowed(status: &AmbientStatus) -> bool {
+    config().ambient.enabled && !matches!(status, AmbientStatus::Disabled)
+}
+
 /// Shared ambient runner state, accessible from the server, debug socket, and TUI.
 #[derive(Clone)]
 pub struct AmbientRunnerHandle {
@@ -548,12 +554,10 @@ impl AmbientRunnerHandle {
         }
         logging::info("Ambient runner: starting background loop");
 
-        let ambient_enabled = config().ambient.enabled;
-
-        // Spawn reply pollers only when ambient mode is enabled; scheduled
+        // Spawn reply pollers only when ambient mode is enabled at startup; scheduled
         // session-targeted scheduled tasks should still work without the ambient-only reply
         // infrastructure.
-        if ambient_enabled {
+        if config().ambient.enabled {
             let safety_config = config().safety.clone();
             if safety_config.email_reply_enabled
                 && safety_config.email_imap_host.is_some()
@@ -588,8 +592,7 @@ impl AmbientRunnerHandle {
             // Check state
             let state = { self.inner.state.read().await.clone() };
 
-            let ambient_allowed =
-                ambient_enabled && !matches!(state.status, AmbientStatus::Disabled);
+            let ambient_allowed = ambient_allowed(&state.status);
 
             if ambient_allowed {
                 // Update scheduler's user-active state
@@ -773,26 +776,8 @@ impl AmbientRunnerHandle {
                     // Send notifications (fire-and-forget)
                     self.inner.notifier.dispatch_cycle_summary(&transcript);
 
-                    // Post-cycle memory consolidation (fire-and-forget)
-                    tokio::spawn(async move {
-                        let manager = MemoryManager::new();
-                        match manager.backfill_embeddings() {
-                            Ok((backfilled, _failed)) => {
-                                if backfilled > 0 {
-                                    logging::info(&format!(
-                                        "Ambient: backfilled {} embeddings",
-                                        backfilled
-                                    ));
-                                }
-                            }
-                            Err(e) => {
-                                logging::error(&format!(
-                                    "Ambient: embedding backfill failed: {}",
-                                    e
-                                ));
-                            }
-                        }
-                    });
+                    // Stored memories are recalled directly by Jev, so ambient
+                    // cycles must not initialize or backfill an embedding model.
                 }
                 Err(e) => {
                     logging::error(&format!("Ambient cycle failed: {}", e));
@@ -887,17 +872,55 @@ impl AmbientRunnerHandle {
 
     /// Run a single ambient cycle. Returns the cycle result.
     async fn run_cycle(&self, provider: &Arc<dyn Provider>) -> anyhow::Result<AmbientCycleResult> {
+        self.run_cycle_with_visible_launcher(provider, config().ambient.visible, || {
+            let jcode_bin =
+                std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("jcode"));
+
+            std::process::Command::new("kitty")
+                .args([
+                    "--title",
+                    "🤖 jcode ambient cycle",
+                    "-e",
+                    &jcode_bin.to_string_lossy(),
+                    "ambient",
+                    "run-visible",
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+        })
+        .await
+    }
+
+    async fn run_cycle_with_visible_launcher<F>(
+        &self,
+        provider: &Arc<dyn Provider>,
+        visible: bool,
+        launch_visible: F,
+    ) -> anyhow::Result<AmbientCycleResult>
+    where
+        F: FnOnce() -> std::io::Result<std::process::Child> + Send,
+    {
         let started_at = Utc::now();
-        let visible = config().ambient.visible;
 
         self.set_running_detail("gathering context").await;
         let (system_prompt, initial_message) = self.build_cycle_context(provider).await?;
 
         // Visible mode: spawn a full TUI instead of running headlessly
         if visible {
-            return self
-                .run_cycle_visible(started_at, system_prompt, initial_message)
-                .await;
+            match self
+                .run_cycle_visible(
+                    started_at,
+                    system_prompt.clone(),
+                    initial_message.clone(),
+                    launch_visible,
+                )
+                .await?
+            {
+                VisibleCycleOutcome::Completed(result) => return Ok(*result),
+                VisibleCycleOutcome::FallBackHeadless => {}
+            }
         }
 
         // Headless mode: run agent directly
@@ -986,12 +1009,16 @@ impl AmbientRunnerHandle {
     }
 
     /// Run a visible ambient cycle by spawning a full TUI in a kitty window.
-    async fn run_cycle_visible(
+    async fn run_cycle_visible<F>(
         &self,
         started_at: chrono::DateTime<Utc>,
         system_prompt: String,
         initial_message: String,
-    ) -> anyhow::Result<AmbientCycleResult> {
+        launch_visible: F,
+    ) -> anyhow::Result<VisibleCycleOutcome>
+    where
+        F: FnOnce() -> std::io::Result<std::process::Child> + Send,
+    {
         use crate::ambient::VisibleCycleContext;
 
         self.set_running_detail("launching visible TUI").await;
@@ -1008,25 +1035,9 @@ impl AmbientRunnerHandle {
             let _ = std::fs::remove_file(&result_path);
         }
 
-        // Find the jcode binary
-        let jcode_bin =
-            std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("jcode"));
-
         // Spawn kitty with `jcode ambient run-visible`
         logging::info("Ambient visible: spawning kitty with jcode TUI");
-        let child = std::process::Command::new("kitty")
-            .args([
-                "--title",
-                "🤖 jcode ambient cycle",
-                "-e",
-                &jcode_bin.to_string_lossy(),
-                "ambient",
-                "run-visible",
-            ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+        let child = launch_visible();
 
         match child {
             Ok(mut child) => {
@@ -1046,25 +1057,29 @@ impl AmbientRunnerHandle {
                         crate::storage::read_json::<AmbientCycleResult>(&result_path)
                 {
                     let _ = std::fs::remove_file(&result_path);
-                    return Ok(AmbientCycleResult {
-                        started_at,
-                        ended_at: Utc::now(),
-                        ..result
-                    });
+                    return Ok(VisibleCycleOutcome::Completed(Box::new(
+                        AmbientCycleResult {
+                            started_at,
+                            ended_at: Utc::now(),
+                            ..result
+                        },
+                    )));
                 }
 
                 // No result file — user closed the window without end_ambient_cycle
-                Ok(AmbientCycleResult {
-                    summary: "Visible cycle ended (user closed window)".to_string(),
-                    memories_modified: 0,
-                    compactions: 0,
-                    proactive_work: None,
-                    next_schedule: None,
-                    started_at,
-                    ended_at: Utc::now(),
-                    status: CycleStatus::Incomplete,
-                    conversation: None,
-                })
+                Ok(VisibleCycleOutcome::Completed(Box::new(
+                    AmbientCycleResult {
+                        summary: "Visible cycle ended (user closed window)".to_string(),
+                        memories_modified: 0,
+                        compactions: 0,
+                        proactive_work: None,
+                        next_schedule: None,
+                        started_at,
+                        ended_at: Utc::now(),
+                        status: CycleStatus::Incomplete,
+                        conversation: None,
+                    },
+                )))
             }
             Err(e) => {
                 logging::warn(&format!(
@@ -1072,10 +1087,15 @@ impl AmbientRunnerHandle {
                     e
                 ));
                 // Fall back to headless mode
-                Err(anyhow::anyhow!("Failed to spawn visible TUI: {}", e))
+                Ok(VisibleCycleOutcome::FallBackHeadless)
             }
         }
     }
+}
+
+enum VisibleCycleOutcome {
+    Completed(Box<AmbientCycleResult>),
+    FallBackHeadless,
 }
 
 // ---------------------------------------------------------------------------

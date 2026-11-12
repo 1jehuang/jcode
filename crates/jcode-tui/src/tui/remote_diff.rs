@@ -13,32 +13,37 @@ pub(crate) struct PendingFileDiff {
 pub(crate) struct RemoteDiffTracker {
     pub(crate) pending_diffs: HashMap<String, PendingFileDiff>,
     pub(crate) current_tool_id: Option<String>,
-    pub(crate) current_tool_name: Option<String>,
-    pub(crate) current_tool_input: String,
+    tool_inputs: HashMap<String, String>,
 }
 
 impl RemoteDiffTracker {
-    pub(crate) fn handle_tool_start(&mut self, id: &str, name: &str) {
+    pub(crate) fn handle_tool_start(&mut self, id: &str, _name: &str) {
         self.current_tool_id = Some(id.to_string());
-        self.current_tool_name = Some(name.to_string());
-        self.current_tool_input.clear();
+        self.tool_inputs.insert(id.to_string(), String::new());
     }
 
-    pub(crate) fn handle_tool_input(&mut self, delta: &str) {
-        self.current_tool_input.push_str(delta);
+    pub(crate) fn handle_tool_input(&mut self, id: Option<&str>, delta: &str) {
+        if let Some(id) = id.or(self.current_tool_id.as_deref())
+            && let Some(input) = self.tool_inputs.get_mut(id)
+        {
+            input.push_str(delta);
+        }
     }
 
-    pub(crate) fn current_tool_input_json(&self) -> Value {
-        serde_json::from_str(&self.current_tool_input).unwrap_or(Value::Null)
+    pub(crate) fn tool_input_json(&self, id: &str) -> Value {
+        self.tool_inputs
+            .get(id)
+            .and_then(|input| serde_json::from_str(input).ok())
+            .unwrap_or(Value::Null)
     }
 
     pub(crate) fn handle_tool_exec(&mut self, id: &str, name: &str) {
+        let input = self.tool_input_json(id);
         if show_diffs_enabled()
             && matches!(
                 crate::tui::ui::tools_ui::canonical_tool_name(name),
                 "edit" | "write" | "multiedit"
             )
-            && let Ok(input) = serde_json::from_str::<Value>(&self.current_tool_input)
             && let Some(file_path) = input.get("file_path").and_then(|v| v.as_str())
         {
             let resolved = resolve_diff_path(file_path);
@@ -52,9 +57,10 @@ impl RemoteDiffTracker {
             );
         }
 
-        self.current_tool_id = None;
-        self.current_tool_name = None;
-        self.current_tool_input.clear();
+        self.tool_inputs.remove(id);
+        if self.current_tool_id.as_deref() == Some(id) {
+            self.current_tool_id = None;
+        }
     }
 
     pub(crate) fn finish_tool(&mut self, id: &str, name: &str, output: &str) -> String {
@@ -73,8 +79,7 @@ impl RemoteDiffTracker {
     pub(crate) fn clear(&mut self) {
         self.pending_diffs.clear();
         self.current_tool_id = None;
-        self.current_tool_name = None;
-        self.current_tool_input.clear();
+        self.tool_inputs.clear();
     }
 }
 
@@ -118,4 +123,68 @@ pub(crate) fn generate_unified_diff(old: &str, new: &str, file_path: &str) -> St
     }
 
     output
+}
+
+#[cfg(test)]
+mod keyed_tool_tests {
+    use super::*;
+
+    #[test]
+    fn keyed_tool_inputs_survive_sibling_exec_and_preserve_legacy_fallback() {
+        let mut tracker = RemoteDiffTracker::default();
+        tracker.handle_tool_start("a", "read");
+        tracker.handle_tool_input(Some("a"), r#"{"file_path":"a"#);
+        tracker.handle_tool_start("b", "read");
+        tracker.handle_tool_input(None, r#"{"file_path":"b"}"#);
+        tracker.handle_tool_input(Some("a"), r#""}"#);
+        tracker.handle_tool_input(Some("unknown"), "corruption");
+        assert_eq!(tracker.tool_input_json("a")["file_path"], "a");
+        tracker.handle_tool_exec("a", "read");
+        assert_eq!(tracker.tool_input_json("a"), Value::Null);
+        assert_eq!(tracker.tool_input_json("b")["file_path"], "b");
+        assert_eq!(tracker.current_tool_id.as_deref(), Some("b"));
+        tracker.handle_tool_exec("b", "read");
+        assert_eq!(tracker.tool_input_json("b"), Value::Null);
+        assert!(tracker.current_tool_id.is_none());
+    }
+
+    #[test]
+    fn keyed_tool_inputs_snapshot_the_matching_file_for_each_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        std::fs::write(&a, "before a\n").unwrap();
+        std::fs::write(&b, "before b\n").unwrap();
+        let mut tracker = RemoteDiffTracker::default();
+        tracker.handle_tool_start("a", "write");
+        tracker.handle_tool_start("b", "write");
+        tracker.handle_tool_input(Some("a"), &serde_json::json!({"file_path": a}).to_string());
+        tracker.handle_tool_input(Some("b"), &serde_json::json!({"file_path": b}).to_string());
+        tracker.handle_tool_exec("a", "write");
+        tracker.handle_tool_exec("b", "write");
+        if show_diffs_enabled() {
+            assert_eq!(tracker.pending_diffs["a"].original_content, "before a\n");
+            assert_eq!(tracker.pending_diffs["b"].original_content, "before b\n");
+            std::fs::write(&a, "after a\n").unwrap();
+            std::fs::write(&b, "after b\n").unwrap();
+            let a_diff = tracker.finish_tool("a", "write", "done");
+            let b_diff = tracker.finish_tool("b", "write", "done");
+            assert!(a_diff.contains("-before a\n+after a"));
+            assert!(b_diff.contains("-before b\n+after b"));
+        }
+    }
+
+    #[test]
+    fn keyed_tool_inputs_clear_discards_all_partial_calls() {
+        let mut tracker = RemoteDiffTracker::default();
+        tracker.handle_tool_start("a", "read");
+        tracker.handle_tool_input(None, "{}");
+        tracker.handle_tool_start("b", "read");
+        tracker.handle_tool_input(None, "{}");
+        tracker.clear();
+        assert!(tracker.tool_inputs.is_empty());
+        assert!(tracker.current_tool_id.is_none());
+        tracker.handle_tool_input(Some("a"), "{}");
+        assert!(tracker.tool_inputs.is_empty());
+    }
 }

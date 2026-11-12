@@ -23,6 +23,8 @@ pub(super) struct RestoredReloadInput {
     pub split_view_enabled: bool,
     pub todos_view_enabled: bool,
     pub todo_confidence_spike_challenged: bool,
+    pub last_todo_ownership_fingerprint: Option<String>,
+    pub final_response_todo_fingerprint: Option<String>,
 }
 
 impl App {
@@ -40,6 +42,10 @@ impl App {
     }
 
     fn recompute_display_message_stats(&mut self) {
+        self.display_edit_line_counts = self.display_messages.iter().fold((0, 0), |counts, msg| {
+            let (added, removed) = super::terminal_title::edit_line_counts(msg);
+            (counts.0 + added, counts.1 + removed)
+        });
         self.display_user_message_count = self
             .display_messages
             .iter()
@@ -68,6 +74,18 @@ impl App {
     /// `recompute_display_message_stats`, which made appending M messages one at
     /// a time cumulatively O(M^2).
     pub(super) fn adjust_display_message_stats(&mut self, message: &DisplayMessage, added: bool) {
+        let counts = super::terminal_title::edit_line_counts(message);
+        let update = |total: usize, count: usize| {
+            if added {
+                total.saturating_add(count)
+            } else {
+                total.saturating_sub(count)
+            }
+        };
+        self.display_edit_line_counts = (
+            update(self.display_edit_line_counts.0, counts.0),
+            update(self.display_edit_line_counts.1, counts.1),
+        );
         let delta: isize = if added { 1 } else { -1 };
         if message.effective_role() == "user" {
             self.display_user_message_count =
@@ -88,6 +106,9 @@ impl App {
     }
 
     pub(super) fn note_client_focus(&mut self, force: bool) {
+        if crate::tui::is_ssh_remote() {
+            return;
+        }
         let Some(session_id) = self.active_client_session_id() else {
             return;
         };
@@ -135,17 +156,19 @@ impl App {
     }
 
     /// Record a terminal focus-state change (from crossterm FocusGained/FocusLost).
-    /// Returns true when a redraw is warranted (focus regained, so we repaint at
-    /// full fidelity immediately).
+    /// Returns true when a redraw is warranted. The normal ratatui diff is enough
+    /// to catch up state that changed while the tab was backgrounded: the terminal
+    /// still contains the last frame ratatui emitted. Do not invalidate the whole
+    /// backend here. Doing so sends an ED2 clear followed by every terminal cell on
+    /// each tab switch, which makes focus changes visibly lag on large terminals.
     pub(super) fn set_client_focused(&mut self, focused: bool) -> bool {
         if self.client_focused == focused {
             return false;
         }
         self.client_focused = focused;
         if focused {
-            // Repaint immediately so a newly-focused window is not stuck on the
-            // last paused frame, and resume animation timing from "now".
-            self.request_full_redraw();
+            // Schedule an immediate differential frame so a newly-focused window
+            // catches up and resumes animation timing from "now".
             self.note_client_focus(true);
             true
         } else {
@@ -181,6 +204,15 @@ impl App {
     /// display-messages mutation (e.g. a live SidePaneImages event).
     pub(super) fn invalidate_side_pane_images_signature(&mut self) {
         self.side_pane_images_signature_cache.set(None);
+    }
+
+    /// Drop rendered inline images and every cache keyed by their contents.
+    /// Use this when the entire transcript is discarded.
+    pub(crate) fn clear_inline_image_state(&mut self) {
+        self.remote_side_pane_images.clear();
+        self.invalidate_side_pane_images_signature();
+        self.expanded_images.clear();
+        self.expanded_images_version = self.expanded_images_version.wrapping_add(1);
     }
 
     /// Bump the display-messages version without rescanning the transcript to
@@ -226,6 +258,8 @@ impl App {
             && !self.split_view_enabled
             && !self.todos_view_enabled
             && !self.todo_confidence_spike_challenged
+            && self.last_todo_ownership_fingerprint.is_none()
+            && self.final_response_todo_fingerprint.is_none()
         {
             // Nothing to save, but a stale file from an earlier run could
             // still hold old queued messages/input. Leaving it behind would
@@ -316,6 +350,8 @@ impl App {
                 "split_view_enabled": self.split_view_enabled,
                 "todos_view_enabled": self.todos_view_enabled,
                 "todo_confidence_spike_challenged": self.todo_confidence_spike_challenged,
+                "last_todo_ownership_fingerprint": self.last_todo_ownership_fingerprint,
+                "final_response_todo_fingerprint": self.final_response_todo_fingerprint,
             });
             let _ = std::fs::write(&path, data.to_string());
         }
@@ -557,6 +593,14 @@ impl App {
                 split_view_enabled,
                 todos_view_enabled,
                 todo_confidence_spike_challenged,
+                final_response_todo_fingerprint: value
+                    .get("final_response_todo_fingerprint")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                last_todo_ownership_fingerprint: value
+                    .get("last_todo_ownership_fingerprint")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
             });
         }
 
@@ -583,6 +627,8 @@ impl App {
             split_view_enabled: false,
             todos_view_enabled: false,
             todo_confidence_spike_challenged: false,
+            last_todo_ownership_fingerprint: None,
+            final_response_todo_fingerprint: None,
         })
     }
 
@@ -684,6 +730,10 @@ impl App {
     }
 
     pub(super) fn refresh_side_panel_linked_content_if_due(&mut self) -> bool {
+        if crate::tui::is_ssh_remote() {
+            // Linked paths in server snapshots belong to the remote filesystem.
+            return false;
+        }
         let refresh_interval = crate::perf::tui_policy().linked_side_panel_refresh_interval;
 
         let should_refresh = self
@@ -1103,6 +1153,16 @@ fn push_cache_baseline(lines: &mut Vec<String>, label: &str, baseline: Option<&K
         lines.push(format!("- {}.provider: {}", label, baseline.provider));
         lines.push(format!("- {}.model: {}", label, baseline.model));
         lines.push(format!(
+            "- {}.cache_ttl_secs: {:?}",
+            label, baseline.cache_ttl_secs
+        ));
+        lines.push(format!(
+            "- {}.cache_ttl_is_estimate: {}",
+            label,
+            crate::provider::cache_ttl_is_estimate(&baseline.provider)
+        ));
+
+        lines.push(format!(
             "- {}.upstream_provider: {}",
             label,
             opt_string(baseline.upstream_provider.as_deref())
@@ -1133,26 +1193,31 @@ fn format_cache_stats(app: &App) -> String {
     let read = remote_cache_read.saturating_add(app.token_accounting.total_cache_read_tokens);
     let write = remote_cache_write.saturating_add(app.token_accounting.total_cache_creation_tokens);
     let optimal = app.token_accounting.total_cache_optimal_input_tokens;
-    // `reported` is the aggregate of provider-reported `input_tokens`, which for
-    // split-accounting providers (Anthropic) excludes cached + cache-creation
-    // tokens. Percentages must use the effective prompt size so they stay in
-    // 0-100% instead of clamping at 100%.
-    let effective_reported =
-        crate::tui::info_widget::effective_prompt_tokens(reported, read, write);
-    let read_pct = cache_ratio_pct(read, effective_reported);
-    let write_pct = cache_ratio_pct(write, effective_reported);
-    let optimal_pct = (optimal > 0).then(|| cache_ratio_pct(read, optimal));
+    // Preserve per-request accounting across providers. Legacy history without an
+    // explicit denominator remains unknown rather than guessing from aggregate writes.
+    let effective_reported = remote_usage
+        .map_or(Some(0), |usage| usage.cache_prompt_tokens)
+        .map(|prompt| prompt.saturating_add(app.token_accounting.total_cache_prompt_tokens));
+    let format_pct = |tokens, prompt: Option<u64>| {
+        prompt
+            .filter(|prompt| *prompt > 0)
+            .map(|prompt| format!("{}%", cache_ratio_pct(tokens, prompt)))
+            .unwrap_or_else(|| "unknown (prompt accounting unavailable)".to_string())
+    };
+    let read_pct = format_pct(read, effective_reported);
+    let write_pct = format_pct(write, effective_reported);
+    let optimal_pct =
+        (optimal > 0 && remote_cache_read == 0).then(|| cache_ratio_pct(read, optimal));
     let cache_totals_source = match (
         remote_usage.is_some(),
-        app.token_accounting.total_cache_reported_input_tokens > 0,
+        app.token_accounting.total_cache_prompt_tokens > 0,
     ) {
         (true, true) => "remote_history+client_observed_api_calls",
         (true, false) => "remote_history",
         (false, true) => "client_observed_api_calls",
         (false, false) => "none_yet",
     };
-    let live_cache_telemetry = app.streaming.streaming_input_tokens > 0
-        && !app.kv_cache.current_api_usage_recorded
+    let live_cache_telemetry = !app.kv_cache.current_api_usage_recorded
         && (app.streaming.streaming_cache_read_tokens.is_some()
             || app.streaming.streaming_cache_creation_tokens.is_some());
     let live_reported = if live_cache_telemetry {
@@ -1171,22 +1236,19 @@ fn format_cache_stats(app: &App) -> String {
     } else {
         0
     });
-    let read_pct_including_live = cache_ratio_pct(
-        read_including_live,
+    let live_prompt = if live_cache_telemetry {
         crate::tui::info_widget::effective_prompt_tokens(
-            reported_including_live,
-            read_including_live,
-            write_including_live,
-        ),
-    );
-    let write_pct_including_live = cache_ratio_pct(
-        write_including_live,
-        crate::tui::info_widget::effective_prompt_tokens(
-            reported_including_live,
-            read_including_live,
-            write_including_live,
-        ),
-    );
+            &app.kv_cache_provider_name(),
+            live_reported,
+            app.streaming.streaming_cache_read_tokens.unwrap_or(0),
+            app.streaming.streaming_cache_creation_tokens.unwrap_or(0),
+        )
+    } else {
+        0
+    };
+    let prompt_including_live = effective_reported.map(|prompt| prompt.saturating_add(live_prompt));
+    let read_pct_including_live = format_pct(read_including_live, prompt_including_live);
+    let write_pct_including_live = format_pct(write_including_live, prompt_including_live);
     let ttl = if crate::provider::anthropic::is_cache_ttl_1h() {
         "1 hour"
     } else {
@@ -1319,11 +1381,45 @@ fn format_cache_stats(app: &App) -> String {
     lines.push(String::new());
 
     lines.push("Current route / settings".to_string());
-    lines.push(format!("- cache_ttl_setting: {}", ttl));
+    lines.push(format!(
+        "- anthropic_cache_ttl_setting: {} (subsequent requests)",
+        ttl
+    ));
     lines.push(format!("- is_remote: {}", app.is_remote));
     lines.push(format!("- is_replay: {}", app.is_replay));
     lines.push(format!("- current_provider: {}", current_provider));
     lines.push(format!("- current_model: {}", current_model));
+    let route_provider = app.kv_cache_provider_name();
+    let route_ttl = crate::tui::cache_ttl_for_provider_model(&route_provider, Some(&current_model));
+    let retention = match route_ttl {
+        Some(seconds) if crate::provider::cache_ttl_is_estimate(&route_provider) => format!(
+            "{} minutes, provider estimate/minimum, not a guaranteed expiry",
+            seconds / 60
+        ),
+        Some(seconds) => format!("{} minutes", seconds / 60),
+        None => "unknown, provider-managed retention".to_string(),
+    };
+    lines.push(format!("- active_route_cache_retention: {}", retention));
+    let expiry_policy =
+        if route_ttl.is_none() || crate::provider::cache_ttl_is_estimate(&route_provider) {
+            "disabled (retention is estimated or provider-managed)"
+        } else {
+            "explicit TTL only"
+        };
+    lines.push(format!(
+        "- cache_expiry_notification_policy: {}",
+        expiry_policy
+    ));
+    lines.push(format!(
+        "- cache_expiry_notification_active: {}",
+        app.cache_ttl_status()
+            .is_some_and(|info| info.expiry_notification_active())
+    ));
+
+    lines.push(
+        "- anthropic_cache_ttl_setting_scope: Anthropic only, does not configure OpenAI retention"
+            .to_string(),
+    );
     lines.push(format!(
         "- upstream_provider: {}",
         opt_string(app.upstream_provider.as_deref())
@@ -1420,15 +1516,23 @@ fn format_cache_stats(app: &App) -> String {
     ));
     lines.push(format!(
         "- effective_prompt_tokens (input+read+creation for split providers): {}",
-        bold_count(effective_reported)
+        effective_reported
+            .map(bold_count)
+            .unwrap_or_else(|| "unknown (legacy history lacks per-request accounting)".to_string())
     ));
     lines.push(format!(
-        "- cache_read_pct_of_effective_prompt: {}%",
+        "- cache_read_pct_of_effective_prompt: {}",
         read_pct
     ));
     lines.push(format!(
-        "- cache_write_pct_of_effective_prompt: {}%",
+        "- cache_write_pct_of_effective_prompt: {}",
         write_pct
+    ));
+    lines.push(format!(
+        "- effective_prompt_tokens_including_unrecorded_live: {}",
+        prompt_including_live
+            .map(bold_count)
+            .unwrap_or_else(|| "unknown".to_string())
     ));
     lines.push(format!(
         "- total_cache_reported_input_tokens_including_unrecorded_live: {}",
@@ -1443,11 +1547,11 @@ fn format_cache_stats(app: &App) -> String {
         bold_count(write_including_live)
     ));
     lines.push(format!(
-        "- cache_read_pct_of_effective_prompt_including_unrecorded_live: {}%",
+        "- cache_read_pct_of_effective_prompt_including_unrecorded_live: {}",
         read_pct_including_live
     ));
     lines.push(format!(
-        "- cache_write_pct_of_effective_prompt_including_unrecorded_live: {}%",
+        "- cache_write_pct_of_effective_prompt_including_unrecorded_live: {}",
         write_pct_including_live
     ));
     lines.push(format!(
@@ -1810,7 +1914,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
     if trimmed == "/cache" || trimmed.starts_with("/cache ") {
         let arg = trimmed.strip_prefix("/cache").unwrap_or("").trim();
         match arg {
-            "stats" | "status" => {
+            "" | "stats" | "status" => {
                 app.push_display_message(DisplayMessage {
                     role: "usage".to_string(),
                     content: format_cache_stats(app),
@@ -1821,32 +1925,27 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                 });
                 app.set_status_notice("Cache stats");
             }
-            "1h" | "1hour" | "extended" => {
-                crate::provider::anthropic::set_cache_ttl_1h(true);
-                app.push_display_message(DisplayMessage::system(
-                    "Cache TTL set to 1 hour. Cache writes cost 2x base input tokens.".to_string(),
-                ));
-            }
-            "5m" | "5min" | "default" | "reset" => {
-                crate::provider::anthropic::set_cache_ttl_1h(false);
-                app.push_display_message(DisplayMessage::system(
-                    "Cache TTL set to 5 minutes.".to_string(),
-                ));
-            }
-            "" => {
-                let current = crate::provider::anthropic::is_cache_ttl_1h();
-                let new_state = !current;
-                crate::provider::anthropic::set_cache_ttl_1h(new_state);
-                let msg = if new_state {
-                    "Cache TTL toggled to 1 hour. Cache writes cost 2x base input tokens.\nUse /cache 5m to revert."
-                } else {
-                    "Cache TTL toggled to 5 minutes.\nUse /cache 1h to extend."
-                };
-                app.push_display_message(DisplayMessage::system(msg.to_string()));
+            "extend" | "1h" | "1hour" | "extended" | "5m" | "5min" | "default" | "reset" => {
+                let enabled = !matches!(arg, "5m" | "5min" | "default" | "reset");
+                match crate::config::Config::set_anthropic_cache_ttl_1h(enabled) {
+                    Ok(()) => {
+                        let message = if enabled {
+                            "Saved Anthropic cache TTL: 1 hour, including future sessions. Cache writes cost 2x base input tokens.\nApplies to subsequent requests, not already-written cache entries. Use /cache 5m to revert."
+                        } else {
+                            "Saved Anthropic cache TTL: 5 minutes, including future sessions. Applies to subsequent requests. Use /cache extend for 1 hour."
+                        };
+                        app.push_display_message(DisplayMessage::system(format!(
+                            "{message}\nOpenAI cache retention is provider/model-managed and is not changed by this setting."
+                        )));
+                    }
+                    Err(error) => app.push_display_message(DisplayMessage::error(format!(
+                        "Could not save cache preference: {error}"
+                    ))),
+                }
             }
             _ => {
                 app.push_display_message(DisplayMessage::error(
-                    "Usage: /cache (toggle), /cache stats, /cache 1h (1 hour), /cache 5m (default)"
+                    "Usage: /cache or /cache stats (report), /cache extend (save Anthropic 1 hour), /cache 5m (save Anthropic 5 minutes)"
                         .to_string(),
                 ));
             }

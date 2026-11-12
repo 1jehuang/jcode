@@ -89,7 +89,7 @@ jcode-productivity-core = { path = "../jcode-productivity-core" }
 jcode-tui-workspace = { path = "../jcode-tui-workspace" }
 
 [features]
-default = ["pdf", "embeddings", "bedrock"]
+default = ["pdf", "bedrock"]
 # Exposes bench-only debug helpers (e.g. debug_copy_selection_text_for_bench)
 # consumed by the dev `tui_bench` binary in the root crate.
 dev-bins = []

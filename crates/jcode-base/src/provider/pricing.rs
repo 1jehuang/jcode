@@ -135,7 +135,12 @@ pub(crate) fn openrouter_route_pricing(
     model: &str,
     provider: &str,
 ) -> Option<RouteCheapnessEstimate> {
-    let cache = openrouter::load_endpoints_disk_cache_public(model);
+    let (model, pinned_provider) = openrouter::parse_model_spec(model);
+    let provider = pinned_provider
+        .as_ref()
+        .map(|pin| pin.name.as_str())
+        .unwrap_or(provider);
+    let cache = openrouter::load_endpoints_disk_cache_public(&model);
     if let Some((endpoints, _)) = cache.as_ref() {
         if provider == "auto"
             && let Some(best) = endpoints.first()
@@ -160,7 +165,7 @@ pub(crate) fn openrouter_route_pricing(
         }
     }
 
-    openrouter::load_model_pricing_disk_cache_public(model).and_then(|pricing| {
+    openrouter::load_model_pricing_disk_cache_public(&model).and_then(|pricing| {
         openrouter_pricing_from_model_pricing(
             &pricing,
             RouteCostSource::OpenRouterCatalog,
@@ -228,6 +233,60 @@ pub fn metered_pricing_for_source_with_tier(
         cost.cache_read_usd_per_mtok.map(usd_to_micros),
         Some("models.dev pricing catalog".to_string()),
     ))
+}
+
+/// Estimated USD for one request's reported token usage on a per-token route.
+///
+/// `source_key` uses the activity-ledger convention (`claude:api-key`,
+/// `openai:api-key`, `openrouter`, `openai-compatible:<id>`). Returns `None`
+/// when the route cannot be priced, so callers can show "unknown" instead of
+/// a misleading `$0`.
+///
+/// Providers report usage in two conventions. Anthropic splits cache reads and
+/// writes out of `input`. OpenAI counts both inside `input`. Others are
+/// inferred: cache writes or reads larger than input imply split accounting.
+pub fn metered_usage_cost_usd(
+    source_key: &str,
+    model: &str,
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_creation: u64,
+) -> Option<f64> {
+    let estimate = metered_pricing_for_source(source_key, model)?;
+    let per_tok = |micros: u64| micros as f64 / 1_000_000.0 / 1_000_000.0;
+    let input_price = per_tok(estimate.input_price_per_mtok_micros?);
+    let output_price = per_tok(estimate.output_price_per_mtok_micros?);
+    let read_price = estimate
+        .cache_read_price_per_mtok_micros
+        .map(per_tok)
+        .unwrap_or(input_price);
+    let anthropic = source_key.starts_with("claude");
+    let openai = source_key.starts_with("openai:");
+    let split = anthropic || (!openai && (cache_creation > 0 || cache_read > input));
+    let fresh = if split {
+        input
+    } else {
+        input
+            .saturating_sub(cache_read)
+            .saturating_sub(cache_creation)
+    };
+    let write_multiplier = if anthropic {
+        if super::anthropic::is_cache_ttl_1h() {
+            2.0
+        } else {
+            1.25
+        }
+    } else if openai {
+        1.25
+    } else {
+        1.0
+    };
+    let cost = fresh as f64 * input_price
+        + output as f64 * output_price
+        + cache_read as f64 * read_price
+        + cache_creation as f64 * input_price * write_multiplier;
+    cost.is_finite().then_some(cost)
 }
 
 pub(crate) fn cheapness_for_route(
@@ -300,6 +359,23 @@ mod tests {
     use crate::env;
     use jcode_provider_core::{RouteBillingKind, RouteCostConfidence, RouteCostSource};
 
+    #[test]
+    fn metered_usage_cost_prices_split_and_subset_accounting() {
+        // Sonnet 4.5 API: $3 input, $15 output, $0.30 cache read per MTok.
+        let anthropic = metered_usage_cost_usd(
+            "claude:api-key",
+            "claude-sonnet-4-5",
+            1_000_000,
+            100_000,
+            1_000_000,
+            0,
+        )
+        .unwrap();
+        assert!((anthropic - (3.0 + 1.5 + 0.3)).abs() < 1e-9, "{anthropic}");
+        // Unpriced routes are unknown, never $0.
+        assert!(metered_usage_cost_usd("cursor", "whatever", 1, 1, 0, 0).is_none());
+    }
+
     fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
         let _guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir().expect("tempdir");
@@ -365,6 +441,53 @@ mod tests {
         assert_eq!(estimate.input_price_per_mtok_micros, Some(2_500_000));
         assert_eq!(estimate.output_price_per_mtok_micros, Some(15_000_000));
         assert_eq!(estimate.cache_read_price_per_mtok_micros, Some(250_000));
+    }
+
+    #[test]
+    fn openrouter_pinned_endpoint_pricing_strips_pin_and_uses_endpoint_price() {
+        // Regression for #1095: `model@Provider` pins used to miss both the
+        // endpoint cache and the catalog and fall back to generic defaults.
+        let _guard = crate::storage::lock_test_env();
+        let prev_ns = std::env::var_os("JCODE_OPENROUTER_CACHE_NAMESPACE");
+        let namespace = format!("pricing-test-{}", std::process::id());
+        env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", &namespace);
+
+        let model = "deepseek/deepseek-v4-pro-0813";
+        let endpoints: Vec<openrouter::EndpointInfo> = serde_json::from_value(serde_json::json!([
+            {
+                "provider_name": "DeepInfra",
+                "pricing": { "prompt": "0.0000003", "completion": "0.0000012" }
+            },
+            {
+                "provider_name": "Sail Research",
+                "pricing": { "prompt": "0.0000005", "completion": "0.0000015" }
+            }
+        ]))
+        .expect("endpoints");
+        openrouter::save_endpoints_disk_cache(model, &endpoints);
+
+        let pinned = openrouter_route_pricing(&format!("{model}@Sail Research"), "auto")
+            .expect("pinned endpoint priced");
+        assert_eq!(pinned.source, RouteCostSource::OpenRouterEndpoint);
+        assert_eq!(pinned.input_price_per_mtok_micros, Some(500_000));
+        assert_eq!(pinned.output_price_per_mtok_micros, Some(1_500_000));
+
+        let bare = openrouter_route_pricing(model, "auto").expect("auto route priced");
+        assert_eq!(bare.input_price_per_mtok_micros, Some(300_000));
+
+        let _ = std::fs::remove_file(
+            dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".jcode")
+                .join("cache")
+                .join(format!(
+                    "{namespace}_endpoints_deepseek__deepseek-v4-pro-0813.json"
+                )),
+        );
+        match prev_ns {
+            Some(prev) => env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", prev),
+            None => env::remove_var("JCODE_OPENROUTER_CACHE_NAMESPACE"),
+        }
     }
 
     #[test]

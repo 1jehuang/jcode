@@ -37,7 +37,6 @@ It is not an allowlist. It is a triage record so advisories are visible and acti
 - `RUSTSEC-2026-0217` (`tract-nnef` 0.21.10, integer overflow in the NNEF tensor
   parser) was resolved on 2026-07-30 by moving `jcode-embedding` to `tract` 0.23.
   The in-line `0.21.16` fix was unreachable: `tract-data 0.21.16` pins
-  `half =2.4.1` while `naga` (via `vello` in `jcode-desktop2`) requires
   `half ^2.5`. The 0.23 line drops that pin. This mattered because the parser
   runs over a model downloaded at runtime rather than one shipped in the binary,
   so an ignore would not have been clearly safe. See #657.

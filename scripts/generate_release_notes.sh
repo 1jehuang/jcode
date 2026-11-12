@@ -38,10 +38,36 @@ repo_slug() {
 
 REPO="$(repo_slug)"
 
-# Determine the previous tag if not supplied: nearest ancestor tag first,
-# falling back to the next entry in version-sorted tag order.
+# Prefer the published release index: replayed history can make the nearest
+# ancestor tag much older than the actual preceding release. This also works
+# while preparing notes before the new tag exists.
 if [[ -z "$PREV_TAG" ]]; then
-    if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+    PREV_TAG="$(python3 - "$VERSION_NUM" << 'PY'
+import json
+import pathlib
+import re
+import sys
+
+def version(value):
+    if re.fullmatch(r"\d+\.\d+\.\d+", value):
+        return tuple(map(int, value.split(".")))
+    return None
+
+current = version(sys.argv[1])
+index = pathlib.Path("changelog/index.json")
+if current and index.exists():
+    entries = json.loads(index.read_text())["entries"]
+    candidates = [entry["version"] for entry in entries
+                  if version(entry["version"]) is not None
+                  and version(entry["version"]) < current]
+    if candidates:
+        print("v" + max(candidates, key=version))
+PY
+)"
+    if [[ -n "$PREV_TAG" ]] && ! git rev-parse -q --verify "refs/tags/$PREV_TAG" >/dev/null; then
+        PREV_TAG=""
+    fi
+    if [[ -z "$PREV_TAG" ]] && git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
         PREV_TAG="$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)"
     fi
     if [[ -z "$PREV_TAG" ]]; then

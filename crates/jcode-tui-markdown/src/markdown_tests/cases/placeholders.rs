@@ -3,6 +3,21 @@
 
 #[cfg(feature = "mermaid-renderer")]
 #[test]
+fn test_blockquote_separators_preserve_image_fill_rows() {
+    let mut lines = vec![Line::from("│ before"), Line::default()];
+    lines.extend(jcode_tui_mermaid::inline_image_placeholder_lines(0xabcdef, 4, 40));
+    lines.push(Line::default());
+    lines.push(Line::from("│ after"));
+    lines.push(Line::default());
+    fill_blockquote_separators(&mut lines, 1);
+    assert_eq!(line_to_string(&lines[1]), "│ ");
+    assert!(lines[3..6].iter().all(line_is_blank));
+    assert_eq!(line_to_string(&lines[6]), "│ ");
+    assert!(line_is_blank(lines.last().unwrap()));
+}
+
+#[cfg(feature = "mermaid-renderer")]
+#[test]
 fn test_normalize_block_separators_preserves_inline_image_placeholder_body() {
     let rows = 12u16;
     let mut lines = vec![Line::from("before")];

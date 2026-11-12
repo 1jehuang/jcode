@@ -50,6 +50,38 @@ fn test_remote_bus_dictation_completion_ignores_other_session() {
 }
 
 #[test]
+fn test_remote_bus_productivity_failure_clears_refresh_state() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut remote = rt.block_on(async { crate::tui::backend::RemoteConnection::dummy() });
+    app.productivity_refreshing = true;
+    let session_id = app.session.id.clone();
+
+    let handled = rt.block_on(crate::tui::app::remote::handle_bus_event(
+        &mut app,
+        &mut remote,
+        Ok(crate::bus::BusEvent::ProductivityReportReady(
+            crate::bus::ProductivityReportReady {
+                session_id,
+                result: Err("generation failed".to_string()),
+            },
+        )),
+    ));
+
+    assert!(handled);
+    assert!(!app.productivity_refreshing);
+    assert_eq!(
+        app.status_notice.as_ref().map(|(notice, _)| notice.as_str()),
+        Some("Productivity report failed")
+    );
+    assert!(
+        app.display_messages()
+            .last()
+            .is_some_and(|message| message.content.contains("generation failed"))
+    );
+}
+
+#[test]
 fn test_handle_server_event_transcript_send_prefixes_user_message() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -151,6 +183,7 @@ fn test_handle_server_event_history_clears_connection_type_on_session_change_whe
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            applets: Default::default(),
             id: 1,
             session_id: "session_new".to_string(),
             messages: vec![],
@@ -204,6 +237,7 @@ fn test_handle_server_event_history_preserves_connection_type_for_same_session_w
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            applets: Default::default(),
             id: 1,
             session_id: "session_same".to_string(),
             messages: vec![],
@@ -246,6 +280,59 @@ fn test_handle_server_event_history_preserves_connection_type_for_same_session_w
 }
 
 #[test]
+fn test_handle_server_event_history_preserves_reasoning_effort_for_same_session_when_missing() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.remote_session_id = Some("session_same".to_string());
+    app.remote_reasoning_effort = Some("medium".to_string());
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::History {
+            applets: Default::default(),
+            id: 1,
+            session_id: "session_same".to_string(),
+            messages: vec![],
+            images: vec![],
+            provider_name: Some("anthropic".to_string()),
+            provider_model: Some("claude-opus-4-1".to_string()),
+            subagent_model: None,
+            autoreview_enabled: None,
+            autojudge_enabled: None,
+            available_models: vec![],
+            available_model_routes: vec![],
+            mcp_servers: vec![],
+            skills: vec![],
+            total_tokens: None,
+            token_usage_totals: None,
+            all_sessions: vec![],
+            client_count: None,
+            is_canary: None,
+            reload_recovery: None,
+            server_version: None,
+            server_name: None,
+            server_icon: None,
+            server_has_update: None,
+            was_interrupted: None,
+            connection_type: None,
+            status_detail: None,
+            upstream_provider: None,
+            resolved_credential: None,
+            reasoning_effort: None,
+            service_tier: None,
+            compaction_mode: crate::config::CompactionMode::Reactive,
+            activity: None,
+            side_panel: crate::side_panel::SidePanelSnapshot::default(),
+        },
+        &mut remote,
+    );
+
+    assert_eq!(app.remote_reasoning_effort.as_deref(), Some("medium"));
+}
+
+#[test]
 fn test_handle_server_event_history_session_change_clears_streaming_preview_diagram() {
     // Regression pin: a mermaid preview registered mid-stream (via
     // set_streaming_preview_diagram from the streaming markdown render) must
@@ -285,6 +372,7 @@ fn test_handle_server_event_history_session_change_clears_streaming_preview_diag
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            applets: Default::default(),
             id: 1,
             session_id: "session_new".to_string(),
             messages: vec![],
@@ -382,9 +470,11 @@ fn test_handle_server_event_history_same_session_rewind_reapply_clears_streaming
     // Truncated payload after the rewind: same session id, fewer messages.
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            applets: Default::default(),
             id: 2,
             session_id: "session_rewind_preview".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
+                response_stats: None,
                 role: "user".to_string(),
                 content: "first message kept by the rewind".to_string(),
                 tool_calls: None,
@@ -490,9 +580,11 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
     // Same-session, rewind-truncated payload this client never requested.
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            applets: Default::default(),
             id: 3,
             session_id: "session_midstream_dup".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
+                response_stats: None,
                 role: "user".to_string(),
                 content: "truncated payload from another client's rewind".to_string(),
                 tool_calls: None,
@@ -571,9 +663,11 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
         );
         app.handle_server_event(
             crate::protocol::ServerEvent::History {
+            applets: Default::default(),
                 id: 3,
                 session_id: "session_midstream_dup".to_string(),
                 messages: vec![crate::protocol::HistoryMessage {
+                    response_stats: None,
                     role: "user".to_string(),
                     content: "truncated payload from another client's rewind".to_string(),
                     tool_calls: None,
@@ -672,9 +766,11 @@ fn test_handle_server_event_history_same_session_rewind_then_late_done_does_not_
     // Truncated payload after the rewind: same session id, fewer messages.
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            applets: Default::default(),
             id: 2,
             session_id: "session_rewind_done_race".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
+                response_stats: None,
                 role: "user".to_string(),
                 content: "first message kept by the rewind".to_string(),
                 tool_calls: None,
@@ -766,6 +862,7 @@ fn test_handle_server_event_history_session_change_clears_pending_interleaves() 
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            applets: Default::default(),
             id: 1,
             session_id: "session_new".to_string(),
             messages: vec![],
@@ -1462,7 +1559,7 @@ fn test_handle_server_event_interrupted_clears_stream_state_and_sets_idle() {
         .push((77, "pending soft interrupt".to_string()));
 
     remote.handle_tool_start("tool_1", "bash");
-    remote.handle_tool_input("{\"command\":\"sleep 10\"}");
+    remote.handle_tool_input(None, "{\"command\":\"sleep 10\"}");
     remote.handle_tool_exec("tool_1", "edit");
 
     app.handle_server_event(crate::protocol::ServerEvent::Interrupted, &mut remote);
@@ -1675,6 +1772,7 @@ fn test_handle_server_event_side_pane_images_populates_pane_live() {
         crate::protocol::ServerEvent::SidePaneImages {
             session_id: "session_active".to_string(),
             images: vec![crate::session::RenderedImage {
+                history_message_index: None,
                 media_type: "image/png".to_string(),
                 data: "image-data".to_string(),
                 label: Some("openclaw.png".to_string()),
@@ -1721,6 +1819,7 @@ fn test_native_generated_image_renders_inline_without_opening_side_panel() {
         crate::protocol::ServerEvent::SidePaneImages {
             session_id: "session_active".to_string(),
             images: vec![crate::session::RenderedImage {
+                history_message_index: None,
                 media_type: "image/png".to_string(),
                 data: "image-data".to_string(),
                 label: Some("/tmp/generated.png".to_string()),
@@ -1772,6 +1871,7 @@ fn test_handle_server_event_side_pane_images_ignores_inactive_session() {
         crate::protocol::ServerEvent::SidePaneImages {
             session_id: "session_other".to_string(),
             images: vec![crate::session::RenderedImage {
+                history_message_index: None,
                 media_type: "image/png".to_string(),
                 data: "image-data".to_string(),
                 label: None,
@@ -1880,6 +1980,7 @@ fn test_pending_startup_notice_survives_history_bootstrap_for_fresh_session() {
     // The bootstrap for a brand-new session clears the transcript.
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            applets: Default::default(),
             id: 1,
             session_id: "session_new".to_string(),
             messages: vec![],

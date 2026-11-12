@@ -20,6 +20,27 @@ fn spawn_initial_message_accepts_prompt_alias_and_prefers_explicit_initial_messa
         preferred.spawn_initial_message().as_deref(),
         Some("preferred")
     );
+
+    for blank_initial_message in ["", " \t\n"] {
+        let from_prompt: CommunicateInput = serde_json::from_value(serde_json::json!({
+            "action": "spawn",
+            "initial_message": blank_initial_message,
+            "prompt": "fallback"
+        }))
+        .expect("spawn payload should deserialize");
+        assert_eq!(
+            from_prompt.spawn_initial_message().as_deref(),
+            Some("fallback")
+        );
+    }
+
+    let blank_messages: CommunicateInput = serde_json::from_value(serde_json::json!({
+        "action": "spawn",
+        "initial_message": "",
+        "prompt": "  "
+    }))
+    .expect("spawn payload should deserialize");
+    assert_eq!(blank_messages.spawn_initial_message(), None);
 }
 
 #[test]
@@ -244,6 +265,7 @@ fn format_members_renders_activity_progress_churn_and_turns() {
             }),
             provider_name: Some("anthropic".to_string()),
             provider_model: Some("claude-sonnet".to_string()),
+            provider_effort: Some("medium".to_string()),
             turn_count: Some(7),
             recent_total_tokens: Some(12_345),
             recent_output_tokens: Some(2_000),
@@ -260,7 +282,10 @@ fn format_members_renders_activity_progress_churn_and_turns() {
     assert!(text.contains("12.3k tok/10s"), "got: {text}");
     assert!(text.contains("7 turns"), "got: {text}");
     assert!(text.contains("98.8k tok total"), "got: {text}");
-    assert!(text.contains("Model: anthropic/claude-sonnet"), "got: {text}");
+    assert!(
+        text.contains("Model: anthropic/claude-sonnet (medium)"),
+        "got: {text}"
+    );
     // Running agent shows current-turn duration, not an "idle" label.
     assert!(text.contains("· 8s"), "got: {text}");
     // Running agent also surfaces last observed activity so a long turn does

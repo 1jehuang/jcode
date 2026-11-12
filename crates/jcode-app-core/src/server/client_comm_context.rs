@@ -312,6 +312,7 @@ pub(super) async fn handle_comm_list(
                 activity: extras.activity,
                 provider_name: extras.provider_name,
                 provider_model: extras.provider_model,
+                provider_effort: extras.provider_effort,
                 turn_count: extras.turn_count,
                 recent_total_tokens: extras.recent_total_tokens,
                 recent_output_tokens: extras.recent_output_tokens,

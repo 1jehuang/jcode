@@ -8,6 +8,21 @@ use async_trait::async_trait;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+#[path = "agent_tests/tool_streaming.rs"]
+mod tool_streaming;
+
+#[path = "agent_tests/concurrency.rs"]
+mod concurrency;
+
+#[path = "agent_tests/concurrency_construction.rs"]
+mod concurrency_construction;
+
+#[path = "agent_tests/desktop_selfdev.rs"]
+mod desktop_selfdev;
+
+#[path = "agent_tests/compile_remote.rs"]
+mod compile_remote;
+
 struct DelayedProvider {
     open_delay: Duration,
     first_event_delay: Duration,
@@ -16,6 +31,181 @@ struct DelayedProvider {
 struct NativeAutoCompactionProvider;
 
 struct NativeCompactionStreamProvider;
+
+#[derive(Clone, Default)]
+struct SignatureSessionProvider {
+    requests: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
+}
+
+#[async_trait]
+impl Provider for SignatureSessionProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let first = {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(messages.to_vec());
+            requests.len() == 1
+        };
+        let mut events = vec![StreamEvent::SessionId("provider-resume-handle".into())];
+        if first {
+            events.extend([
+                StreamEvent::ToolUseStart {
+                    id: "signed-call".into(),
+                    name: "provider_owned_probe".into(),
+                },
+                StreamEvent::ToolInputDelta("{}".into()),
+                StreamEvent::ToolUseEnd,
+                StreamEvent::ToolUseSignature("test-thought-signature".into()),
+                StreamEvent::ToolResult {
+                    tool_use_id: "signed-call".into(),
+                    content: "done".into(),
+                    is_error: false,
+                },
+            ]);
+        }
+        events.extend([
+            StreamEvent::TextDelta("completed".into()),
+            StreamEvent::MessageEnd {
+                stop_reason: Some("end_turn".into()),
+            },
+        ]);
+        Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
+    }
+
+    fn name(&self) -> &str {
+        "signature-session-test"
+    }
+    fn handles_tools_internally(&self) -> bool {
+        true
+    }
+    fn supports_compaction(&self) -> bool {
+        false
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[tokio::test]
+async fn mpsc_preserves_signatures_and_never_rebinds_to_provider_session_id() {
+    let _lock = crate::storage::lock_test_env();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            if let Some(home) = &self.0 {
+                crate::env::set_var("JCODE_HOME", home);
+            } else {
+                crate::env::remove_var("JCODE_HOME");
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+    let provider = Arc::new(SignatureSessionProvider::default());
+    let mut agent = Agent::new(provider.clone(), Registry::empty());
+    let jcode_id = agent.session_id().to_string();
+    for prompt in ["first turn", "second turn"] {
+        agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: prompt.into(),
+                cache_control: None,
+            }],
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        agent.run_turn_streaming_mpsc(tx).await.unwrap();
+        while let Ok(event) = rx.try_recv() {
+            if let ServerEvent::SessionId { session_id } = event {
+                assert_eq!(
+                    session_id, jcode_id,
+                    "provider handle must not replace jcode identity"
+                );
+            }
+        }
+    }
+    assert_eq!(agent.session_id(), jcode_id);
+    let saved = Session::load(&jcode_id).unwrap();
+    assert_eq!(
+        saved.provider_session_id.as_deref(),
+        Some("provider-resume-handle")
+    );
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].iter().flat_map(|message| &message.content).any(|block| matches!(
+        block, ContentBlock::ToolUse { thought_signature: Some(signature), .. } if signature == "test-thought-signature"
+    )), "second request must replay the persisted signature");
+    let saved_json = serde_json::to_value(&saved).unwrap();
+    assert!(saved_json.to_string().contains("test-thought-signature"));
+}
+
+#[derive(Clone)]
+struct ExplicitPinProvider {
+    model: Arc<std::sync::Mutex<String>>,
+    pin: Arc<std::sync::Mutex<Option<String>>>,
+    set_model_requests: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl ExplicitPinProvider {
+    fn new(model: &str) -> Self {
+        Self {
+            model: Arc::new(std::sync::Mutex::new(model.to_string())),
+            pin: Arc::new(std::sync::Mutex::new(None)),
+            set_model_requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for ExplicitPinProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        unreachable!("ExplicitPinProvider does not complete requests")
+    }
+
+    fn name(&self) -> &str {
+        "openrouter"
+    }
+
+    fn model(&self) -> String {
+        self.model.lock().unwrap().clone()
+    }
+
+    fn set_model(&self, request: &str) -> Result<()> {
+        self.set_model_requests
+            .lock()
+            .unwrap()
+            .push(request.to_string());
+        let spec = request.strip_prefix("openrouter:").unwrap_or(request);
+        let (model, pin) = spec
+            .rsplit_once('@')
+            .map(|(model, pin)| (model, Some(pin.to_string())))
+            .unwrap_or((spec, None));
+        *self.model.lock().unwrap() = model.to_string();
+        *self.pin.lock().unwrap() = pin;
+        Ok(())
+    }
+
+    fn explicit_provider_pin_for_current_model(&self) -> Option<String> {
+        self.pin.lock().unwrap().clone()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
 
 fn content_text(content: &[ContentBlock]) -> &str {
     match content.first() {
@@ -26,6 +216,102 @@ fn content_text(content: &[ContentBlock]) -> &str {
 
 fn message_text(message: &Message) -> &str {
     content_text(&message.content)
+}
+
+#[test]
+fn agent_drop_removes_its_configured_session_tool_policy() {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let session = Session::create(None, None);
+    let session_id = session.id.clone();
+    let agent = Agent::new_with_session(
+        provider,
+        Registry::empty(),
+        session,
+        Some(HashSet::from(["bash".to_string()])),
+    );
+
+    assert_eq!(
+        crate::tool::session_tool_policy_allows_tool_for_test(&session_id, "bash"),
+        Some(true)
+    );
+    drop(agent);
+    assert_eq!(
+        crate::tool::session_tool_policy_allows_tool_for_test(&session_id, "bash"),
+        None,
+        "dropping the Agent must remove its global policy entry"
+    );
+}
+
+#[test]
+fn stale_agent_drop_preserves_successor_session_tool_policy() {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let first_session = Session::create(None, None);
+    let session_id = first_session.id.clone();
+    let first = Agent::new_with_session(
+        provider.clone(),
+        Registry::empty(),
+        first_session,
+        Some(HashSet::from(["bash".to_string()])),
+    );
+    let mut successor_session = Session::create(None, None);
+    successor_session.id.clone_from(&session_id);
+    let successor = Agent::new_with_session(
+        provider,
+        Registry::empty(),
+        successor_session,
+        Some(HashSet::from(["read".to_string()])),
+    );
+
+    drop(first);
+
+    assert_eq!(
+        crate::tool::session_tool_policy_allows_tool_for_test(&session_id, "read"),
+        Some(true),
+        "a stale Agent must not remove its active successor's policy"
+    );
+    assert_eq!(
+        crate::tool::session_tool_policy_allows_tool_for_test(&session_id, "bash"),
+        Some(false),
+        "the surviving entry must be the successor's configured policy"
+    );
+    drop(successor);
+    assert_eq!(
+        crate::tool::session_tool_policy_allows_tool_for_test(&session_id, "read"),
+        None
+    );
+}
+
+#[test]
+fn agent_clear_moves_tool_policy_registration_to_new_session() {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let session = Session::create(None, None);
+    let previous_session_id = session.id.clone();
+    let mut agent = Agent::new_with_session(
+        provider,
+        Registry::empty(),
+        session,
+        Some(HashSet::from(["bash".to_string()])),
+    );
+
+    agent.clear();
+    let new_session_id = agent.session.id.clone();
+
+    assert_ne!(previous_session_id, new_session_id);
+    assert_eq!(
+        crate::tool::session_tool_policy_allows_tool_for_test(&previous_session_id, "bash"),
+        None,
+        "changing sessions must remove the former ID's policy"
+    );
+    assert_eq!(
+        crate::tool::session_tool_policy_allows_tool_for_test(&new_session_id, "bash"),
+        Some(true),
+        "the new session must retain the Agent's configured policy"
+    );
+    drop(agent);
+    assert_eq!(
+        crate::tool::session_tool_policy_allows_tool_for_test(&new_session_id, "bash"),
+        None
+    );
 }
 
 #[async_trait]
@@ -117,6 +403,17 @@ impl Provider for NativeCompactionStreamProvider {
     ) -> Result<EventStream> {
         let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(4);
         tokio::spawn(async move {
+            // Response usage is deliberately far below the provider-reported
+            // pre-compaction size so a regression that relabels usage as
+            // `pre_tokens` is caught (#1178).
+            let _ = tx
+                .send(Ok(StreamEvent::TokenUsage {
+                    input_tokens: Some(24_000),
+                    output_tokens: Some(10),
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                }))
+                .await;
             let _ = tx
                 .send(Ok(StreamEvent::Compaction {
                     trigger: "openai_native".to_string(),
@@ -247,7 +544,7 @@ async fn run_turn_streaming_mpsc_emits_keepalive_while_provider_is_quiet() {
     let keepalive_deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < keepalive_deadline {
         match tokio::time::timeout(Duration::from_secs(1), rx.recv()).await {
-            Ok(Some(ServerEvent::Pong { id })) => {
+            Ok(Some(ServerEvent::Pong { id, .. })) => {
                 assert_eq!(id, STREAM_KEEPALIVE_PONG_ID);
                 saw_keepalive = true;
                 break;
@@ -276,7 +573,7 @@ async fn run_turn_streaming_mpsc_emits_keepalive_while_provider_is_quiet() {
                 saw_text = true;
                 break;
             }
-            Ok(Some(ServerEvent::Pong { id })) => {
+            Ok(Some(ServerEvent::Pong { id, .. })) => {
                 assert_eq!(id, STREAM_KEEPALIVE_PONG_ID);
             }
             Ok(Some(_)) => {}
@@ -315,11 +612,17 @@ async fn run_turn_streaming_mpsc_emits_native_compaction_for_client_cache_reset(
     while let Ok(event) = rx.try_recv() {
         if let ServerEvent::Compaction {
             trigger,
+            pre_tokens,
             messages_compacted,
             ..
         } = event
         {
             assert_eq!(trigger, "openai_native");
+            assert_eq!(
+                pre_tokens,
+                Some(80_000),
+                "remote compaction must forward the provider's pre-compaction count"
+            );
             assert!(
                 messages_compacted.is_some_and(|count| count > 0),
                 "native compaction should report a non-empty compacted prefix"
@@ -710,6 +1013,15 @@ async fn gmail_is_exposed_by_default_and_can_be_explicitly_disabled() {
     let tool_name = "gmail";
 
     assert!(
+        tool_names.iter().any(|name| name == "jcode_docs"),
+        "jcode_docs must be model-visible in regular sessions"
+    );
+    assert!(
+        !tool_names.iter().any(|name| name == "selfdev"),
+        "selfdev must not be model-visible in regular sessions"
+    );
+
+    assert!(
         definitions
             .iter()
             .any(|definition| definition.name == tool_name),
@@ -722,6 +1034,60 @@ async fn gmail_is_exposed_by_default_and_can_be_explicitly_disabled() {
     agent
         .validate_tool_allowed(tool_name)
         .expect("gmail must be executable by default");
+
+    agent
+        .validate_tool_allowed("jcode_docs")
+        .expect("jcode_docs must be executable in regular sessions");
+    agent.set_canary("docs-tool-regression");
+    let definitions = agent.tool_definitions().await;
+    assert!(definitions.iter().any(|tool| tool.name == "selfdev"));
+    assert!(
+        !definitions.iter().any(|tool| tool.name == "jcode_docs"),
+        "jcode_docs must not be model-visible in self-dev sessions"
+    );
+    assert!(
+        !agent
+            .tool_definitions()
+            .await
+            .iter()
+            .any(|tool| tool.name == "jcode_docs"),
+        "cached provider definitions must also exclude bundled docs"
+    );
+    assert!(
+        !agent
+            .tool_names()
+            .await
+            .iter()
+            .any(|name| name == "jcode_docs"),
+        "debug tool introspection must agree with provider definitions"
+    );
+    assert!(
+        agent
+            .execute_tool("jcode_docs", serde_json::json!({"action": "list"}))
+            .await
+            .is_err(),
+        "direct execution must reject bundled docs in self-dev mode"
+    );
+    assert!(
+        agent
+            .validate_tool_allowed("jcode_docs")
+            .expect_err("jcode_docs must not be executable in self-dev sessions")
+            .to_string()
+            .contains("disabled in self-development mode")
+    );
+    agent.session.is_canary = false;
+    agent.unlock_tools();
+    assert!(
+        agent
+            .tool_definitions()
+            .await
+            .iter()
+            .any(|tool| tool.name == "jcode_docs"),
+        "jcode_docs must remain available after leaving self-dev mode"
+    );
+    agent
+        .validate_tool_allowed("jcode_docs")
+        .expect("jcode_docs must be executable again outside self-dev mode");
 
     crate::env::set_var("JCODE_DISABLED_TOOLS", tool_name);
     crate::config::Config::invalidate_cache();
@@ -801,6 +1167,7 @@ fn seed_transient_session_state(agent: &mut Agent) {
         name: "test_tool".to_string(),
         description: "test tool".to_string(),
         input_schema: serde_json::json!({"type": "object"}),
+        defer_loading: false,
     }]);
 }
 
@@ -845,7 +1212,9 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
         None,
         None,
     );
-    restored_session.save().expect("save restored session");
+    restored_session
+        .save_prepared()
+        .expect("save restored session");
 
     seed_transient_session_state(&mut agent);
     assert_eq!(agent.soft_interrupt_count(), 1);
@@ -874,6 +1243,44 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
 }
 
 #[tokio::test]
+async fn explicit_provider_pin_is_persisted_and_reapplied_on_restore() {
+    let _guard = crate::storage::lock_test_env();
+    let provider = Arc::new(ExplicitPinProvider::new("z-ai/glm-5.2"));
+    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let registry = Registry::new(provider_dyn.clone()).await;
+    let mut agent = Agent::new(provider_dyn, registry);
+    // Untouched sessions are not persisted (783c979a0); materialize the
+    // snapshot so the pin written by set_model lands on disk.
+    agent
+        .session
+        .save_prepared()
+        .expect("materialize session snapshot");
+
+    agent
+        .set_model("z-ai/glm-5.2@Novita")
+        .expect("set explicitly pinned model");
+    assert_eq!(agent.provider_model(), "z-ai/glm-5.2@Novita");
+    let persisted = crate::session::Session::load(agent.session_id()).expect("load saved session");
+    assert_eq!(persisted.model.as_deref(), Some("z-ai/glm-5.2@Novita"));
+
+    let restored_provider = Arc::new(ExplicitPinProvider::new("other/model"));
+    let restored_provider_dyn: Arc<dyn Provider> = restored_provider.clone();
+    let restored_registry = Registry::new(restored_provider_dyn.clone()).await;
+    let restored_agent =
+        Agent::new_with_session(restored_provider_dyn, restored_registry, persisted, None);
+
+    assert_eq!(
+        restored_provider
+            .set_model_requests
+            .lock()
+            .unwrap()
+            .as_slice(),
+        ["openrouter:z-ai/glm-5.2@Novita"]
+    );
+    assert_eq!(restored_agent.provider_model(), "z-ai/glm-5.2@Novita");
+}
+
+#[tokio::test]
 async fn restore_session_rehydrates_injected_memory_ids() {
     let _guard = crate::storage::lock_test_env();
     crate::memory::clear_all_pending_memory();
@@ -894,7 +1301,9 @@ async fn restore_session_rehydrates_injected_memory_ids() {
         5,
         vec!["memory-persisted".to_string()],
     );
-    restored_session.save().expect("save restored session");
+    restored_session
+        .save_prepared()
+        .expect("save restored session");
 
     crate::memory::mark_memories_injected(&restored_session.id, &["memory-stale".to_string()]);
 
@@ -917,19 +1326,49 @@ async fn restore_session_rehydrates_injected_memory_ids() {
 #[tokio::test]
 async fn build_memory_prompt_nonblocking_defers_pending_memory_during_tool_loop() {
     let _guard = crate::storage::lock_test_env();
+    struct RestoreMemoryHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreMemoryHome {
+        fn drop(&mut self) {
+            crate::memory::clear_all_pending_memory();
+            match &self.0 {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let home = tempfile::tempdir().expect("isolated memory home");
+    let _restore = RestoreMemoryHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
     crate::memory::clear_all_pending_memory();
 
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let registry = Registry::new(provider.clone()).await;
-    let agent = Agent::new(provider, registry);
+    let mut agent = Agent::new(provider, registry);
+    agent.memory_enabled = true;
+    let project = home.path().join("project");
+    std::fs::create_dir(&project).expect("isolated project");
+    agent.session.working_dir = Some(project.to_string_lossy().into_owned());
     let session_id = agent.session.id.clone();
 
-    crate::memory::set_pending_memory_with_ids(
+    let entry =
+        crate::memory::MemoryEntry::new(crate::memory::MemoryCategory::Fact, "remember this later");
+    crate::memory::MemoryManager::new()
+        .with_project_dir(&project)
+        .remember_project(entry.clone())
+        .expect("persist the selected memory for scoped revalidation");
+    let prompt = crate::memory::format_relevant_prompt(std::slice::from_ref(&entry), 1)
+        .expect("canonical memory prompt");
+    crate::memory::set_pending_memory_for_project(
         &session_id,
-        "remember this later".to_string(),
+        prompt.clone(),
         1,
-        vec!["memory-deferred".to_string()],
+        vec![entry.id.clone()],
+        None,
+        agent.session.working_dir.as_deref(),
     );
+    assert!(crate::memory::has_pending_memory(&session_id));
 
     let tool_loop_messages = vec![
         Message::user("hello"),
@@ -950,6 +1389,7 @@ async fn build_memory_prompt_nonblocking_defers_pending_memory_during_tool_loop(
     let pending = agent.build_memory_prompt_nonblocking(&tool_loop_messages, None);
     assert!(pending.is_none(), "memory should not inject mid tool loop");
     assert!(crate::memory::has_pending_memory(&session_id));
+    assert!(!crate::memory::is_memory_injected(&session_id, &entry.id));
 
     let next_turn_messages = vec![Message::user("follow up")];
     let pending = agent.build_memory_prompt_nonblocking(&next_turn_messages, None);
@@ -957,6 +1397,10 @@ async fn build_memory_prompt_nonblocking_defers_pending_memory_during_tool_loop(
         pending.is_some(),
         "memory should inject on the next real user turn"
     );
+    let pending = pending.unwrap();
+    assert_eq!(pending.prompt, prompt);
+    assert_eq!(pending.memory_ids, vec![entry.id.clone()]);
+    assert!(crate::memory::is_memory_injected(&session_id, &entry.id));
     assert!(!crate::memory::has_pending_memory(&session_id));
 
     crate::memory::clear_all_pending_memory();
@@ -1044,7 +1488,7 @@ async fn mark_closed_persists_soft_interrupts_for_restore_after_reload() {
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider.clone(), registry.clone());
     let session_id = agent.session_id().to_string();
-    agent.session.save().expect("save active session");
+    agent.session.save_prepared().expect("save active session");
     agent.queue_soft_interrupt(
         "resume me after reload".to_string(),
         Vec::new(),
@@ -1129,6 +1573,200 @@ impl crate::tool::Tool for FakeMcpTool {
     ) -> anyhow::Result<ToolOutput> {
         Ok(ToolOutput::new("ok"))
     }
+}
+
+struct VerboseFakeMcpTool {
+    name: String,
+    description: String,
+}
+
+#[async_trait]
+impl crate::tool::Tool for VerboseFakeMcpTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        &self.description
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {"value": {"type": "string"}}
+        })
+    }
+    async fn execute(
+        &self,
+        _input: serde_json::Value,
+        _ctx: crate::tool::ToolContext,
+    ) -> anyhow::Result<ToolOutput> {
+        Ok(ToolOutput::new("ok"))
+    }
+}
+
+async fn register_fake_deferred_mcp_surface(registry: &Registry) {
+    for name in ["mcp_search", "mcp_call"] {
+        registry
+            .register(
+                name.to_string(),
+                Arc::new(FakeMcpTool {
+                    name: name.to_string(),
+                }) as Arc<dyn crate::tool::Tool>,
+            )
+            .await;
+    }
+}
+
+async fn agent_with_fake_mcp_surface(mode: crate::config::McpToolsMode, threshold: usize) -> Agent {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    register_fake_deferred_mcp_surface(&registry).await;
+    registry
+        .register(
+            "mcp__test__verbose".to_string(),
+            Arc::new(VerboseFakeMcpTool {
+                name: "verbose".to_string(),
+                description: "large MCP definition ".repeat(32),
+            }) as Arc<dyn crate::tool::Tool>,
+        )
+        .await;
+    let mut agent = Agent::new(provider, registry);
+    agent.mcp_tools_mode = mode;
+    agent.mcp_tools_token_threshold = threshold;
+    agent
+}
+
+#[tokio::test]
+async fn mcp_exposure_modes_select_eager_or_fixed_definitions() {
+    let _guard = crate::storage::lock_test_env();
+
+    let mut eager = agent_with_fake_mcp_surface(crate::config::McpToolsMode::Eager, 0).await;
+    let eager_names: Vec<String> = eager
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert!(eager_names.iter().any(|name| name == "mcp__test__verbose"));
+    assert!(!eager_names.iter().any(|name| name == "mcp_search"));
+    assert!(!eager_names.iter().any(|name| name == "mcp_call"));
+
+    let mut deferred =
+        agent_with_fake_mcp_surface(crate::config::McpToolsMode::Deferred, usize::MAX).await;
+    let deferred_names: Vec<String> = deferred
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert!(!deferred_names.iter().any(|name| name.starts_with("mcp__")));
+    assert!(deferred_names.iter().any(|name| name == "mcp_search"));
+    assert!(deferred_names.iter().any(|name| name == "mcp_call"));
+
+    let mut auto_eager =
+        agent_with_fake_mcp_surface(crate::config::McpToolsMode::Auto, usize::MAX).await;
+    let auto_eager_names: Vec<String> = auto_eager
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert!(
+        auto_eager_names
+            .iter()
+            .any(|name| name == "mcp__test__verbose")
+    );
+
+    let mut auto_deferred = agent_with_fake_mcp_surface(crate::config::McpToolsMode::Auto, 1).await;
+    let auto_deferred_names: Vec<String> = auto_deferred
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert!(
+        !auto_deferred_names
+            .iter()
+            .any(|name| name.starts_with("mcp__"))
+    );
+    assert!(auto_deferred_names.iter().any(|name| name == "mcp_search"));
+    assert!(auto_deferred_names.iter().any(|name| name == "mcp_call"));
+    let stable_auto_names: Vec<String> = auto_deferred
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert_eq!(auto_deferred_names, stable_auto_names);
+    assert!(auto_deferred.mcp_late_register_resolved);
+}
+
+#[tokio::test]
+async fn deferred_mcp_surface_ignores_late_per_tool_registration() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    register_fake_deferred_mcp_surface(&registry).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.mcp_tools_mode = crate::config::McpToolsMode::Deferred;
+
+    let before: Vec<String> = agent
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    agent
+        .registry
+        .register(
+            "mcp__late__tool".to_string(),
+            Arc::new(FakeMcpTool {
+                name: "late".to_string(),
+            }) as Arc<dyn crate::tool::Tool>,
+        )
+        .await;
+    let after: Vec<String> = agent
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+
+    assert_eq!(
+        before, after,
+        "fixed deferred surface must stay cache-stable"
+    );
+    assert!(agent.mcp_late_register_resolved);
+    assert!(!after.iter().any(|name| name.starts_with("mcp__")));
+}
+
+#[tokio::test]
+async fn auto_mode_rechecks_late_mcp_definitions_before_deferring() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    register_fake_deferred_mcp_surface(&registry).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.mcp_tools_mode = crate::config::McpToolsMode::Auto;
+    agent.mcp_tools_token_threshold = 1;
+
+    let before = agent.tool_definitions().await;
+    assert!(!before.iter().any(|tool| tool.name == "mcp_search"));
+    agent
+        .registry
+        .register(
+            "mcp__late__large".to_string(),
+            Arc::new(VerboseFakeMcpTool {
+                name: "large".to_string(),
+                description: "late large definition ".repeat(32),
+            }) as Arc<dyn crate::tool::Tool>,
+        )
+        .await;
+
+    let after = agent.tool_definitions().await;
+    assert!(after.iter().any(|tool| tool.name == "mcp_search"));
+    assert!(after.iter().any(|tool| tool.name == "mcp_call"));
+    assert!(!after.iter().any(|tool| tool.name.starts_with("mcp__")));
+    assert!(agent.mcp_late_register_resolved);
 }
 
 /// Reproduction for #206: MCP tools that register on the registry *after* the
@@ -1310,12 +1948,14 @@ fn empty_post_tool_response_gets_more_than_one_retry() {
     // transient hiccup, not a finished task. With only one retry allowed, a
     // single empty response (observed once in 43 turns) ended a 20-hour agent
     // run with the work half-done and the submission unoptimized.
-    assert!(
-        Agent::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS > 1,
-        "a single retry lets one transient empty response end a long run"
-    );
-    // Bounded, so a genuinely finished agent still exits instead of looping.
-    assert!(Agent::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS <= 10);
+    const {
+        assert!(
+            Agent::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS > 1,
+            "a single retry lets one transient empty response end a long run"
+        );
+        // Bounded, so a genuinely finished agent still exits instead of looping.
+        assert!(Agent::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS <= 10);
+    }
 }
 
 #[test]
@@ -1757,4 +2397,283 @@ async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
         text.contains("Reconsidered and completed safely"),
         "{text:?}"
     );
+}
+
+#[tokio::test]
+async fn sdk_custom_compile_remote_schema_survives_locked_refresh() {
+    let _lock = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(SignatureSessionProvider::default());
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    crate::tool::sdk::configure(
+        agent.session_id(),
+        "cache-owner",
+        crate::protocol::SessionToolConfig {
+            enabled: Some(vec![]),
+            disabled: vec![],
+            custom: vec![crate::protocol::SessionToolDefinition {
+                name: "compile_remote".into(),
+                description: "SDK override".into(),
+                parameters: serde_json::json!({"type":"object", "additionalProperties":false}),
+            }],
+        },
+        tx,
+    )
+    .unwrap();
+    for _ in 0..2 {
+        let definitions = agent.tool_definitions().await;
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].description, "SDK override");
+        assert_eq!(
+            definitions[0].input_schema,
+            serde_json::json!({"type":"object", "additionalProperties":false})
+        );
+    }
+}
+
+#[test]
+fn system_prompt_override_restores_and_does_not_leak_across_sessions() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    for prompt in ["custom system prompt", ""] {
+        let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+        let mut agent = Agent::new(provider.clone(), Registry::empty());
+        agent.set_system_prompt(prompt);
+        let id = agent.session_id().to_string();
+        let split = agent.build_system_prompt_split(Some("memory must not be appended"));
+        assert_eq!(split.static_part, prompt);
+        assert!(split.dynamic_part.is_empty());
+        assert_eq!(
+            Session::load(&id).unwrap().system_prompt.as_deref(),
+            Some(prompt)
+        );
+
+        agent.clear();
+        assert_eq!(agent.session.system_prompt, None);
+        assert_ne!(agent.build_system_prompt_split(None).static_part, prompt);
+        agent.restore_session(&id).unwrap();
+        assert_eq!(agent.build_system_prompt_split(None).static_part, prompt);
+
+        let mut other = Session::create(None, Some("plain session".into()));
+        other.save().unwrap();
+        agent.restore_session(&other.id).unwrap();
+        assert_eq!(agent.session.system_prompt, None);
+        assert_ne!(agent.build_system_prompt_split(None).static_part, prompt);
+        let loaded = Session::load(&id).unwrap();
+        let attached = Agent::new_with_session(provider, Registry::empty(), loaded, None);
+        assert_eq!(attached.build_system_prompt_split(None).static_part, prompt);
+    }
+}
+
+/// Test provider advertising provider-native deferred tool loading.
+struct NativeDeferredToolsProvider;
+
+#[async_trait]
+impl Provider for NativeDeferredToolsProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let (_tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(1);
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "claude"
+    }
+
+    fn supports_deferred_tools(&self) -> bool {
+        true
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+}
+
+async fn native_deferred_agent(mode: crate::config::McpToolsMode) -> Agent {
+    let provider: Arc<dyn Provider> = Arc::new(NativeDeferredToolsProvider);
+    let registry = Registry::new(provider.clone()).await;
+    register_fake_deferred_mcp_surface(&registry).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.mcp_tools_mode = mode;
+    agent.mcp_tools_token_threshold = 1;
+    agent
+}
+
+fn eager_names(tools: &[ToolDefinition]) -> Vec<String> {
+    tools
+        .iter()
+        .filter(|t| !t.defer_loading)
+        .map(|t| t.name.clone())
+        .collect()
+}
+
+/// With provider-native deferred loading, MCP tools registering after the
+/// first turn (async connect, `mcp connect`, reconnect) only extend the
+/// deferred set. The eager, cached prefix must be byte-identical and the
+/// cache tracker must not be reset.
+#[tokio::test]
+async fn native_deferred_mcp_late_registration_keeps_eager_prefix() {
+    let _guard = crate::storage::lock_test_env();
+    for mode in [
+        crate::config::McpToolsMode::Auto,
+        crate::config::McpToolsMode::Deferred,
+    ] {
+        let mut agent = native_deferred_agent(mode).await;
+        let before = agent.tool_definitions().await;
+        assert!(agent.native_deferred_mcp());
+        assert!(
+            before
+                .iter()
+                .any(|t| t.name == "mcp_search" && !t.defer_loading),
+            "mcp_search stays eager for discovery"
+        );
+        assert!(
+            before
+                .iter()
+                .any(|t| t.name == "mcp_call" && t.defer_loading),
+            "mcp_call is a stable deferred placeholder"
+        );
+
+        agent
+            .registry
+            .register(
+                "mcp__late__tool".to_string(),
+                Arc::new(FakeMcpTool {
+                    name: "late".to_string(),
+                }) as Arc<dyn crate::tool::Tool>,
+            )
+            .await;
+        agent.unlock_tools_if_needed("mcp");
+        let after = agent.tool_definitions().await;
+
+        assert_eq!(eager_names(&before), eager_names(&after), "mode={mode:?}");
+        let serialized = |tools: &[ToolDefinition]| {
+            serde_json::to_string(&ToolDefinition::eager(tools)).unwrap()
+        };
+        assert_eq!(serialized(&before), serialized(&after));
+        let late = after
+            .iter()
+            .find(|t| t.name == "mcp__late__tool")
+            .expect("late MCP tool is offered to the provider");
+        assert!(late.defer_loading, "late MCP tools are deferred");
+        assert!(agent.locked_tools.is_some(), "eager snapshot stays locked");
+    }
+}
+
+#[tokio::test]
+async fn eager_mode_ignores_native_deferred_support() {
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = native_deferred_agent(crate::config::McpToolsMode::Eager).await;
+    agent
+        .registry
+        .register(
+            "mcp__srv__tool".to_string(),
+            Arc::new(FakeMcpTool {
+                name: "tool".to_string(),
+            }) as Arc<dyn crate::tool::Tool>,
+        )
+        .await;
+    let tools = agent.tool_definitions().await;
+    assert!(!agent.native_deferred_mcp());
+    assert!(tools.iter().all(|t| !t.defer_loading));
+    assert!(tools.iter().any(|t| t.name == "mcp__srv__tool"));
+}
+
+#[test]
+fn tool_reference_metadata_becomes_reference_blocks() {
+    let output = ToolOutput::new("found").with_metadata(serde_json::json!({
+        "tool_references": ["mcp__a__x", "mcp__b__y"],
+    }));
+    let blocks = tool_output_to_content_blocks("call_9".to_string(), output);
+    assert!(matches!(blocks[0], ContentBlock::ToolResult { .. }));
+    let refs: Vec<(&str, &str)> = blocks
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::ToolReference {
+                tool_use_id,
+                tool_name,
+            } => Some((tool_use_id.as_str(), tool_name.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(refs, vec![("call_9", "mcp__a__x"), ("call_9", "mcp__b__y")]);
+}
+
+/// Provider whose deferred-loading capability can flip, like a mid-session
+/// switch between Claude and a non-native route.
+struct SwitchableDeferredProvider(Arc<std::sync::atomic::AtomicBool>);
+
+#[async_trait]
+impl Provider for SwitchableDeferredProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let (_tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(1);
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "switchable"
+    }
+
+    fn supports_deferred_tools(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self(Arc::clone(&self.0)))
+    }
+}
+
+#[tokio::test]
+async fn switching_away_from_native_deferred_restores_mcp_fallback_surface() {
+    let _guard = crate::storage::lock_test_env();
+    let native = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let provider: Arc<dyn Provider> = Arc::new(SwitchableDeferredProvider(Arc::clone(&native)));
+    let registry = Registry::new(provider.clone()).await;
+    register_fake_deferred_mcp_surface(&registry).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.mcp_tools_mode = crate::config::McpToolsMode::Deferred;
+
+    let on_native = agent.tool_definitions().await;
+    assert!(
+        on_native
+            .iter()
+            .any(|t| t.name == "mcp_call" && t.defer_loading)
+    );
+
+    native.store(false, std::sync::atomic::Ordering::SeqCst);
+    let fallback = agent.tool_definitions().await;
+    assert!(
+        fallback
+            .iter()
+            .any(|t| t.name == "mcp_call" && !t.defer_loading),
+        "non-native provider must get an eager mcp_call"
+    );
+    assert!(fallback.iter().all(|t| !t.defer_loading));
+
+    native.store(true, std::sync::atomic::Ordering::SeqCst);
+    let back = agent.tool_definitions().await;
+    assert!(back.iter().any(|t| t.name == "mcp_call" && t.defer_loading));
 }

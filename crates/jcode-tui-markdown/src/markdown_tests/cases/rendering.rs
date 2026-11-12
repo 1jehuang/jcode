@@ -129,6 +129,63 @@ fn test_extract_copy_targets_from_rendered_lines_for_blockquote() {
 }
 
 #[test]
+fn test_blockquote_blank_lines_keep_continuous_gutters() {
+    let cases = [
+        (
+            "Before\n\n> Hello,\n>\n> A longer paragraph.\n>\n> Thanks,\n> Someone\n\nAfter",
+            "Before\n\n│ Hello,\n│ \n│ A longer paragraph.\n│ \n│ Thanks,\n│ Someone\n\nAfter",
+        ),
+        (
+            "> Outer\n>\n>> Inner one\n>>\n>> Inner two\n>\n> Outer again",
+            "│ Outer\n│ \n│ │ Inner one\n│ │ \n│ │ Inner two\n│ \n│ Outer again",
+        ),
+        ("> First quote\n\n> Separate quote", "│ First quote\n\n│ Separate quote"),
+        ("> Single paragraph\n>\n", "│ Single paragraph"),
+    ];
+    for mode in [MarkdownSpacingMode::Compact, MarkdownSpacingMode::Document] {
+        for (markdown, expected) in cases {
+            with_markdown_spacing_mode_override(Some(mode), || {
+                let full = render_markdown(markdown);
+                assert_eq!(lines_to_string(&full), expected, "{markdown}");
+                let lazy = render_markdown_lazy(markdown, None, 0..100);
+                assert_eq!(lazy, full);
+                assert_eq!(lines_to_string(&wrap_lines(full.clone(), 80)), expected);
+                for line in full.iter().filter(|line| line_to_string(line).trim() == "│") {
+                    assert_eq!(line.spans[0].style.fg, Some(md_dim_color()));
+                    assert_eq!(line.alignment, Some(Alignment::Left));
+                }
+            });
+        }
+    }
+}
+
+#[test]
+fn test_blockquote_copy_preserves_paragraph_breaks() {
+    let lines = render_markdown("> Hello\n>\n> A paragraph\n>\n> Thanks");
+    let targets = extract_copy_targets_from_rendered_lines(&lines);
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].content, "Hello\n\nA paragraph\n\nThanks");
+}
+
+#[test]
+fn test_blockquote_streaming_and_narrow_wrapping_keep_gutters() {
+    let markdown = "> A long opening paragraph with several words.\n>\n> A second paragraph.\n>\n> Thanks";
+    let mut incremental = IncrementalMarkdownRenderer::new(Some(16));
+    for end in 1..=markdown.len() {
+        let prefix = &markdown[..end];
+        let full = render_markdown_with_width(prefix, Some(16));
+        let streamed = incremental.update(prefix);
+        assert_eq!(streamed, full, "prefix {prefix:?}");
+        let wrapped = wrap_lines(full, 16);
+        for line in wrapped {
+            let text = line_to_string(&line);
+            assert!(text.starts_with("│ "), "lost quote gutter: {text:?}");
+            assert!(line.width() <= 16);
+        }
+    }
+}
+
+#[test]
 fn test_extract_copy_targets_nested_blockquote_strips_all_gutters() {
     let lines = render_markdown("> outer\n>> inner");
     let targets = extract_copy_targets_from_rendered_lines(&lines);

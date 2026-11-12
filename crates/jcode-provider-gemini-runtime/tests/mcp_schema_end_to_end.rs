@@ -50,6 +50,7 @@ fn playwright_tool_definitions() -> Vec<ToolDefinition> {
             name: format!("mcp__playwright__{}", tool.name),
             description: tool.description.unwrap_or_default(),
             input_schema: tool.input_schema,
+            defer_loading: false,
         })
         .collect()
 }

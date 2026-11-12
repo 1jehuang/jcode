@@ -4,7 +4,7 @@ mod clipboard_helper;
 pub(crate) mod model_names;
 
 use crate::todo::TodoItem;
-use crate::tui::info_widget::{AmbientWidgetData, GitInfo, MemoryInfo};
+use crate::tui::info_widget::{AmbientWidgetData, GitInfo};
 use crate::tui::session_picker::ResumeTarget;
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::path::{Path, PathBuf};
@@ -75,6 +75,19 @@ pub(crate) fn invalidate_git_info_cache() {
     }
 }
 
+/// Pin the git-status widget to a fixed value for deterministic renders.
+///
+/// Full-frame artifact generators (onboarding screenshots) would otherwise
+/// capture the live ahead/behind/dirty counts of whatever repo the generator
+/// happens to run in. Marking the entry as `refreshing` keeps the TTL path
+/// from spawning a background probe that overwrites the seed mid-render.
+#[cfg(test)]
+pub(crate) fn seed_git_info_cache_for_tests(info: Option<GitInfo>) {
+    if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
+        *guard = Some((std::time::Instant::now(), info, true));
+    }
+}
+
 /// Force the todos widget cache to refetch the given session on its next read.
 ///
 /// Call this right after the app persists a local todo write so the info widget
@@ -112,6 +125,14 @@ pub(crate) fn invalidate_ambient_info_cache() {
 pub(crate) fn open_path_or_url_detached(
     target: impl AsRef<std::ffi::OsStr>,
 ) -> std::io::Result<()> {
+    if crate::tui::is_ssh_remote() {
+        let target = target.as_ref().to_string_lossy();
+        if !target.starts_with("https://") && !target.starts_with("http://") {
+            return Err(std::io::Error::other(
+                "remote file opening is unavailable over SSH; open it on the remote host or ask the agent to read it",
+            ));
+        }
+    }
     if crate::auth::browser_suppressed(false) {
         return Err(std::io::Error::other(
             "opening files/URLs is suppressed (NO_BROWSER/JCODE_NO_BROWSER or test harness)",
@@ -201,15 +222,8 @@ pub(super) fn ctrl_bracket_fallback_to_esc(code: &mut KeyCode, modifiers: &mut K
     if !modifiers.contains(KeyModifiers::CONTROL) {
         return;
     }
-    match code {
-        KeyCode::Esc => {
-            *code = KeyCode::Char('[');
-        }
-        KeyCode::Char('5') => {
-            // Legacy tty mapping for Ctrl+]
-            *code = KeyCode::Char(']');
-        }
-        _ => {}
+    if *code == KeyCode::Esc {
+        *code = KeyCode::Char('[');
     }
 }
 
@@ -390,7 +404,7 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
                 None => *sink = Some(text.to_string()),
             }
         }
-        return true;
+        true
     }
 
     #[cfg(not(test))]
@@ -491,6 +505,7 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
 /// terminal emulator to set the system clipboard without needing a local
 /// display server, making it work over SSH, inside Docker, and under tmux
 /// (with `set -g set-clipboard on`). Returns false if stdout is not a TTY.
+#[cfg_attr(test, allow(dead_code))]
 fn copy_to_clipboard_osc52(text: &str) -> bool {
     use base64::Engine as _;
     use std::io::{IsTerminal, Write};
@@ -505,10 +520,29 @@ fn copy_to_clipboard_osc52(text: &str) -> bool {
     out.write_all(seq.as_bytes()).is_ok() && out.flush().is_ok()
 }
 
-pub(super) fn effort_display_label(effort: &str) -> &str {
+pub(crate) fn effort_display_label(effort: &str) -> &str {
+    effort_display_label_with_root(effort, crate::prompt::swarm_root_reasoning_effort(effort))
+}
+
+// Keep finite, validated effort labels static so autocomplete can share them
+// without allocations or leaking dynamically formatted strings.
+fn effort_display_label_with_root<'a>(effort: &'a str, root: Option<&str>) -> &'a str {
+    macro_rules! swarm_label {
+        ($mode:literal, $detail:literal) => {
+            match root.unwrap_or("max") {
+                "none" => concat!($mode, " (None + ", $detail, ") [Beta]"),
+                "minimal" => concat!($mode, " (Minimal + ", $detail, ") [Beta]"),
+                "low" => concat!($mode, " (Low + ", $detail, ") [Beta]"),
+                "medium" => concat!($mode, " (Medium + ", $detail, ") [Beta]"),
+                "high" => concat!($mode, " (High + ", $detail, ") [Beta]"),
+                "xhigh" => concat!($mode, " (xHigh + ", $detail, ") [Beta]"),
+                _ => concat!($mode, " (Max + ", $detail, ") [Beta]"),
+            }
+        };
+    }
     match effort {
-        "swarm" => "Swarm (light fan-out) [Beta]",
-        "swarm-deep" => "Swarm Deep (Max + task graph) [Beta]",
+        "swarm" => swarm_label!("Swarm", "light fan-out"),
+        "swarm-deep" => swarm_label!("Swarm Deep", "task graph"),
         "max" => "Max",
         "xhigh" => "xHigh",
         "high" => "High",
@@ -921,6 +955,57 @@ pub(super) fn clipboard_image() -> Option<(String, String)> {
     None
 }
 
+pub(super) fn copy_image_to_clipboard(media_type: &str, base64_data: &str) -> bool {
+    use base64::Engine;
+    use std::borrow::Cow;
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(base64_data) else {
+        return false;
+    };
+    // `wl-copy` keeps serving the selection after this function returns. A
+    // short-lived arboard owner can disappear as soon as Clipboard is dropped.
+    if std::env::var("WAYLAND_DISPLAY").is_ok()
+        && let Ok(mut child) = std::process::Command::new("wl-copy")
+            .args(["--type", media_type])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+    {
+        let wrote = child
+            .stdin
+            .take()
+            .is_some_and(|mut stdin| stdin.write_all(&bytes).is_ok());
+        if wrote && child.wait().is_ok_and(|status| status.success()) {
+            return true;
+        }
+    }
+    let Ok(decoded) = image::load_from_memory_with_format(
+        &bytes,
+        match media_type {
+            "image/jpeg" => image::ImageFormat::Jpeg,
+            "image/gif" => image::ImageFormat::Gif,
+            "image/webp" => image::ImageFormat::WebP,
+            _ => image::ImageFormat::Png,
+        },
+    ) else {
+        return false;
+    };
+    let rgba = decoded.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| {
+            clipboard.set_image(arboard::ImageData {
+                width: width as usize,
+                height: height as usize,
+                bytes: Cow::Owned(rgba.into_raw()),
+            })
+        })
+        .is_ok()
+}
+
 /// Extract an image URL from text that looks like an HTML img tag or a bare image URL.
 /// Returns the URL if found.
 pub(super) fn extract_image_url(text: &str) -> Option<String> {
@@ -1007,39 +1092,76 @@ pub(super) fn encode_rgba_as_png(width: usize, height: usize, rgba: &[u8]) -> Op
     Some(buf)
 }
 
+#[cfg(test)]
 pub(super) fn gather_git_info() -> Option<GitInfo> {
+    if crate::tui::is_ssh_remote() {
+        return None;
+    }
+    GIT_INFO_CACHE
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().and_then(|(_, cached, _)| cached.clone()))
+}
+
+#[cfg(not(test))]
+pub(super) fn gather_git_info() -> Option<GitInfo> {
+    if crate::tui::is_ssh_remote() {
+        return None;
+    }
     use std::time::Instant;
 
     const TTL: Duration = Duration::from_secs(5);
 
-    if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
-        if let Some((ts, cached, refreshing)) = guard.as_mut() {
-            if ts.elapsed() < TTL {
-                return cached.clone();
+    // Tests never probe the live repository. The probe runs on a background
+    // thread and writes its answer into this process-global cache, so the
+    // first test to call this gets `None` while every later test in the same
+    // binary silently inherits the developer's real branch and dirty counts.
+    // That made frame assertions depend on how many tests ran before them and
+    // on whether the checkout happened to be clean.
+    //
+    // Tests that want git data seed it explicitly with
+    // `seed_git_info_cache_for_tests`, which marks the entry `refreshing` and
+    // is honored by the read below.
+    #[cfg(test)]
+    {
+        return GIT_INFO_CACHE
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|(_, cached, _)| cached.clone()))
+            .flatten();
+    }
+
+    #[cfg(not(test))]
+    {
+        if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
+            if let Some((ts, cached, refreshing)) = guard.as_mut() {
+                if ts.elapsed() < TTL {
+                    return cached.clone();
+                }
+                if *refreshing {
+                    return cached.clone();
+                }
+                let stale = cached.clone();
+                *refreshing = true;
+                std::thread::spawn(|| {
+                    let result = gather_git_info_inner();
+                    if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
+                        *guard = Some((Instant::now(), result, false));
+                    }
+                });
+                return stale;
             }
-            if *refreshing {
-                return cached.clone();
-            }
-            let stale = cached.clone();
-            *refreshing = true;
+
+            *guard = Some((backdated_now(TTL + Duration::from_secs(1)), None, true));
             std::thread::spawn(|| {
                 let result = gather_git_info_inner();
                 if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
                     *guard = Some((Instant::now(), result, false));
                 }
             });
-            return stale;
         }
-
-        *guard = Some((backdated_now(TTL + Duration::from_secs(1)), None, true));
-        std::thread::spawn(|| {
-            let result = gather_git_info_inner();
-            if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
-                *guard = Some((Instant::now(), result, false));
-            }
-        });
+        None
     }
-    None
 }
 
 /// Fetch a session's todos plus its goal-level assessments through the same
@@ -1048,6 +1170,9 @@ pub(super) fn gather_git_info() -> Option<GitInfo> {
 pub(super) fn gather_todos_and_goals_for_session(
     session_id: Option<&str>,
 ) -> (Vec<TodoItem>, Vec<crate::todo::TodoGoal>) {
+    if crate::tui::is_ssh_remote() {
+        return (Vec::new(), Vec::new());
+    }
     use std::time::Instant;
 
     const TTL: Duration = Duration::from_secs(1);
@@ -1103,167 +1228,13 @@ pub(super) fn gather_todos_and_goals_for_session(
     (Vec::new(), Vec::new())
 }
 
-pub(super) fn gather_memory_info(
-    memory_enabled: bool,
-    working_dir: Option<String>,
-) -> Option<MemoryInfo> {
-    use std::sync::Mutex;
-    use std::time::Instant;
-
-    static CACHE: Mutex<Option<(Instant, Option<MemoryInfo>, bool)>> = Mutex::new(None);
-    const TTL: Duration = Duration::from_secs(2);
-
-    // When memory is disabled we still surface the stored counts (with a
-    // DISABLED badge) so the user can see they have memories but recall is off.
-    // Live activity and the sidecar model are suppressed in that case.
-    let activity = if memory_enabled {
-        crate::memory::get_activity()
-    } else {
-        None
-    };
-    let sidecar_model = if memory_enabled && crate::memory::memory_sidecar_enabled() {
-        let sidecar = crate::sidecar::Sidecar::new();
-        Some(format!(
-            "{} · {}",
-            sidecar.backend_name(),
-            sidecar.model_name()
-        ))
-    } else {
-        None
-    };
-
-    let finalize = |mut info: MemoryInfo| {
-        info.activity = activity.clone();
-        info.sidecar_model = sidecar_model.clone();
-        info.disabled = !memory_enabled;
-        info
-    };
-
-    if let Ok(mut guard) = CACHE.lock() {
-        if let Some((ts, cached, refreshing)) = guard.as_mut() {
-            if ts.elapsed() < TTL || *refreshing {
-                return match cached.clone() {
-                    Some(info) => Some(finalize(info)),
-                    None => fallback_memory_info(memory_enabled, &activity, &sidecar_model),
-                };
-            }
-            let stale = match cached.clone() {
-                Some(info) => Some(finalize(info)),
-                None => fallback_memory_info(memory_enabled, &activity, &sidecar_model),
-            };
-            *refreshing = true;
-            let working_dir = working_dir.clone();
-            std::thread::spawn(move || {
-                let result = gather_memory_info_inner(working_dir);
-                if let Ok(mut guard) = CACHE.lock() {
-                    *guard = Some((Instant::now(), result, false));
-                }
-            });
-            return stale;
-        }
-
-        *guard = Some((backdated_now(TTL + Duration::from_secs(1)), None, true));
-        std::thread::spawn(move || {
-            let result = gather_memory_info_inner(working_dir);
-            if let Ok(mut guard) = CACHE.lock() {
-                *guard = Some((Instant::now(), result, false));
-            }
-        });
-    }
-
-    fallback_memory_info(memory_enabled, &activity, &sidecar_model)
-}
-
-fn fallback_memory_info(
-    memory_enabled: bool,
-    activity: &Option<crate::memory_types::MemoryActivity>,
-    sidecar_model: &Option<String>,
-) -> Option<MemoryInfo> {
-    // No cached counts yet. Show whatever live signal we have.
-    if activity.is_none() && sidecar_model.is_none() && memory_enabled {
+pub(super) fn gather_ambient_info(ambient_enabled: bool) -> Option<AmbientWidgetData> {
+    if crate::tui::is_ssh_remote() {
+        // The cache and queue are laptop-local. The native protocol does not
+        // currently carry remote scheduler state, so leave both widget/footer
+        // absent instead of displaying unrelated local tasks.
         return None;
     }
-    Some(MemoryInfo {
-        sidecar_available: crate::memory::memory_sidecar_enabled(),
-        sidecar_model: sidecar_model.clone(),
-        activity: activity.clone(),
-        disabled: !memory_enabled,
-        ..Default::default()
-    })
-}
-
-fn gather_memory_info_inner(working_dir: Option<String>) -> Option<MemoryInfo> {
-    let activity = crate::memory::get_activity();
-    let sidecar_model = if crate::memory::memory_sidecar_enabled() {
-        let sidecar = crate::sidecar::Sidecar::new();
-        Some(format!(
-            "{} · {}",
-            sidecar.backend_name(),
-            sidecar.model_name()
-        ))
-    } else {
-        None
-    };
-
-    use crate::memory::MemoryManager;
-
-    // Scope the manager to the session working dir so the project count reads
-    // the same projects/<hash>.json store the memory tool writes (issue #491).
-    let manager = match working_dir.as_deref() {
-        Some(dir) if !dir.trim().is_empty() => MemoryManager::new().with_project_dir(dir),
-        _ => MemoryManager::new(),
-    };
-    let project_graph = manager.load_project_graph().ok();
-    let global_graph = manager.load_global_graph().ok();
-
-    let (project_count, global_count, by_category) = {
-        let mut by_category = std::collections::HashMap::new();
-        let project_count = project_graph
-            .as_ref()
-            .map(|p| {
-                for entry in p.memories.values() {
-                    *by_category.entry(entry.category.to_string()).or_insert(0) += 1;
-                }
-                p.memory_count()
-            })
-            .unwrap_or(0);
-        let global_count = global_graph
-            .as_ref()
-            .map(|g| {
-                for entry in g.memories.values() {
-                    *by_category.entry(entry.category.to_string()).or_insert(0) += 1;
-                }
-                g.memory_count()
-            })
-            .unwrap_or(0);
-        (project_count, global_count, by_category)
-    };
-
-    let total_count = project_count + global_count;
-    let (graph_nodes, graph_edges) = crate::tui::info_widget::build_graph_topology(
-        project_graph.as_ref(),
-        global_graph.as_ref(),
-    );
-
-    if total_count > 0 || activity.is_some() || sidecar_model.is_some() {
-        Some(MemoryInfo {
-            total_count,
-            project_count,
-            global_count,
-            by_category,
-            sidecar_available: crate::memory::memory_sidecar_enabled(),
-            sidecar_model,
-            activity,
-            disabled: false,
-            graph_nodes,
-            graph_edges,
-        })
-    } else {
-        None
-    }
-}
-
-pub(super) fn gather_ambient_info(ambient_enabled: bool) -> Option<AmbientWidgetData> {
     use std::time::Instant;
     const TTL: Duration = Duration::from_secs(2);
 
@@ -1407,6 +1378,7 @@ pub(crate) fn format_countdown_until(target: chrono::DateTime<chrono::Utc>) -> S
     }
 }
 
+#[cfg(not(test))]
 fn gather_git_info_inner() -> Option<GitInfo> {
     use std::process::Command;
 

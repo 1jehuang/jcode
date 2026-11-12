@@ -5,7 +5,7 @@
 
 use crate::bus::{
     BackgroundTaskCompleted, BackgroundTaskProgress, BackgroundTaskProgressEvent,
-    BackgroundTaskProgressSource, BackgroundTaskStatus, Bus, BusEvent,
+    BackgroundTaskStatus, Bus, BusEvent,
 };
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{RwLock, watch};
+use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant as TokioInstant, MissedTickBehavior};
 
@@ -35,6 +35,13 @@ use model::{
 /// Manages background task execution
 pub struct BackgroundTaskManager {
     tasks: Arc<RwLock<HashMap<String, RunningTask>>>,
+    /// Serializes progress status read-modify-write cycles so concurrent output
+    /// readers cannot overwrite a newer high-water mark with a stale update.
+    progress_updates: Arc<Mutex<()>>,
+    /// Live stall watchdogs by task id. Each entry is a spawned monitor that
+    /// fires a [`BusEvent::BackgroundTaskStalled`] after its task produces no
+    /// output bytes and no progress events for the configured window.
+    stall_watchdogs: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
     output_dir: PathBuf,
 }
 
@@ -46,6 +53,8 @@ impl BackgroundTaskManager {
         std::fs::create_dir_all(&output_dir).ok();
         Self {
             tasks: Arc::new(RwLock::new(HashMap::new())),
+            progress_updates: Arc::new(Mutex::new(())),
+            stall_watchdogs: Arc::new(RwLock::new(HashMap::new())),
             output_dir,
         }
     }
@@ -387,6 +396,7 @@ impl BackgroundTaskManager {
             wake,
             progress: None,
             event_history: Vec::new(),
+            stall_wake_seconds: None,
         };
         self.write_status_file(&info.status_file, &status).await;
         Self::publish_task_started_activity(
@@ -456,6 +466,7 @@ impl BackgroundTaskManager {
             wake,
             progress: None,
             event_history: Vec::new(),
+            stall_wake_seconds: None,
         };
         if let Ok(json) = serde_json::to_string_pretty(&initial_status) {
             let _ = std::fs::write(&status_path, json);
@@ -531,6 +542,7 @@ impl BackgroundTaskManager {
                 wake: wake_flag,
                 progress: prior_progress,
                 event_history: prior_event_history,
+                stall_wake_seconds: None,
             };
             push_task_event(
                 &mut final_status,
@@ -639,6 +651,12 @@ impl BackgroundTaskManager {
         let output_path = self.output_dir.join(format!("{}.output", task_id));
         let status_path = self.output_dir.join(format!("{}.status.json", task_id));
 
+        // Retain an output artifact before publishing the running task or
+        // returning its ID. Adopted work buffers its output until completion,
+        // when the wrapper below replaces this initially empty file. Create it
+        // before spawning that wrapper so a fast completion cannot be truncated.
+        let _ = std::fs::write(&output_path, "");
+
         let initial_status = TaskStatusFile {
             task_id: task_id.clone(),
             tool_name: tool_name.to_string(),
@@ -658,6 +676,7 @@ impl BackgroundTaskManager {
             wake,
             progress: None,
             event_history: Vec::new(),
+            stall_wake_seconds: None,
         };
         if let Ok(json) = serde_json::to_string_pretty(&initial_status) {
             let _ = std::fs::write(&status_path, json);
@@ -742,6 +761,7 @@ impl BackgroundTaskManager {
                 wake: wake_flag,
                 progress: prior_progress,
                 event_history: prior_event_history,
+                stall_wake_seconds: None,
             };
             push_task_event(
                 &mut final_status,
@@ -958,6 +978,17 @@ impl BackgroundTaskManager {
                                 });
                             }
                         }
+                        Ok(BusEvent::BackgroundTaskStalled(event)) if event.task_id == task_id => {
+                            // A stall is always worth returning: the caller
+                            // should decide whether to keep waiting or act.
+                            let task = self.status(task_id).await?;
+                            return Some(BackgroundTaskWaitResult {
+                                reason: BackgroundTaskWaitReason::Stalled,
+                                task,
+                                progress_event: None,
+                                event_record: None,
+                            });
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             let task = self.status(task_id).await?;
                             if task.status != BackgroundTaskStatus::Running {
@@ -1026,14 +1057,27 @@ impl BackgroundTaskManager {
         progress: BackgroundTaskProgress,
         event_kind: BackgroundTaskEventKind,
     ) -> Result<Option<TaskStatusFile>> {
+        let _progress_update_guard = self.progress_updates.lock().await;
         let status_path = self.status_path_for(task_id);
         let Some(mut status) = self.read_status_file(&status_path).await else {
             return Ok(None);
         };
 
-        let progress = progress.normalize();
+        let mut progress = progress.normalize();
         if let Some(existing) = status.progress.as_ref() {
             if progress_equivalent(existing, &progress) {
+                return Ok(Some(status));
+            }
+
+            // A determinate bar represents progress through the whole task. A
+            // lower later value would make that representation knowingly
+            // inconsistent, regardless of whether it was explicitly reported
+            // or inferred from output. Keep the last trustworthy high-water
+            // mark instead of allowing the UI to move backwards.
+            if let (Some(existing_percent), Some(new_percent)) =
+                (existing.percent, progress.percent)
+                && new_percent < existing_percent
+            {
                 return Ok(Some(status));
             }
 
@@ -1041,11 +1085,16 @@ impl BackgroundTaskManager {
                 || matches!((existing.current, existing.total), (_, Some(total)) if total > 0);
             let new_is_less_determinate = progress.percent.is_none()
                 && !matches!((progress.current, progress.total), (_, Some(total)) if total > 0);
-            if existing_is_more_determinate
-                && new_is_less_determinate
-                && matches!(progress.source, BackgroundTaskProgressSource::ParsedOutput)
-            {
-                return Ok(Some(status));
+            if existing_is_more_determinate && new_is_less_determinate {
+                // Preserve the measurable high-water mark while still allowing
+                // a new checkpoint/phase message to reach status and clients.
+                progress.kind = existing.kind.clone();
+                progress.percent = existing.percent;
+                progress.current = existing.current;
+                progress.total = existing.total;
+                if progress.unit.is_none() {
+                    progress.unit.clone_from(&existing.unit);
+                }
             }
         }
 
@@ -1067,6 +1116,163 @@ impl BackgroundTaskManager {
         ));
 
         Ok(Some(status))
+    }
+
+    /// How often a stall watchdog samples output size and progress state.
+    const STALL_POLL_INTERVAL: Duration = Duration::from_secs(5);
+    /// Minimum accepted stall window, to keep watchdogs from spamming wakes.
+    pub const MIN_STALL_WAKE_SECONDS: u64 = 30;
+
+    /// Arm (or re-arm) a stall watchdog for a running task.
+    ///
+    /// The watchdog fires a [`BusEvent::BackgroundTaskStalled`] after the task
+    /// produces no new output bytes and no new progress/checkpoint events for
+    /// `stall_wake_seconds`. Any activity resets the countdown. It fires at
+    /// most once per silence episode and re-arms itself when activity resumes,
+    /// so a task that stalls, recovers, and stalls again produces one wake per
+    /// stall. The watchdog exits when the task leaves `Running`.
+    ///
+    /// Returns the effective (clamped) window, or `None` when the task does
+    /// not exist or is no longer running.
+    pub async fn arm_stall_watchdog(&self, task_id: &str, stall_wake_seconds: u64) -> Option<u64> {
+        let stall_wake_seconds = stall_wake_seconds.max(Self::MIN_STALL_WAKE_SECONDS);
+        let status_path = self.status_path_for(task_id);
+        let mut status = self.read_status_file(&status_path).await?;
+        if status.status != BackgroundTaskStatus::Running {
+            return None;
+        }
+        status.stall_wake_seconds = Some(stall_wake_seconds);
+        self.write_status_file(&status_path, &status).await;
+
+        let task_id_owned = task_id.to_string();
+        let output_path = self.output_path_for(task_id);
+        let status_path_clone = status_path.clone();
+        let started_at = status.started_at.clone();
+        let watchdogs = Arc::clone(&self.stall_watchdogs);
+
+        let handle = tokio::spawn(async move {
+            let mut last_len = fs::metadata(&output_path)
+                .await
+                .map(|meta| meta.len())
+                .unwrap_or(0);
+            let mut last_event_count: Option<usize> = None;
+            let mut quiet_since = TokioInstant::now();
+            let mut fired_this_episode = false;
+            let window = Duration::from_secs(stall_wake_seconds);
+            let mut poll = tokio::time::interval(Self::STALL_POLL_INTERVAL);
+            poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            // interval fires immediately on first tick; consume it.
+            poll.tick().await;
+
+            loop {
+                poll.tick().await;
+
+                let Ok(content) = fs::read_to_string(&status_path_clone).await else {
+                    break;
+                };
+                let Ok(status) = serde_json::from_str::<TaskStatusFile>(&content) else {
+                    break;
+                };
+                if status.status != BackgroundTaskStatus::Running {
+                    break;
+                }
+                // Disarmed externally (e.g. re-armed with a new window by a
+                // newer watchdog that overwrote this one's registry entry and
+                // cleared the field first): keep it simple, exit if cleared.
+                if status.stall_wake_seconds != Some(stall_wake_seconds) {
+                    break;
+                }
+
+                let output_len = fs::metadata(&output_path)
+                    .await
+                    .map(|meta| meta.len())
+                    .unwrap_or(0);
+                let event_count = status.event_history.len();
+                let activity = output_len != last_len
+                    || last_event_count.is_some_and(|prior| prior != event_count);
+                last_len = output_len;
+                last_event_count = Some(event_count);
+
+                if activity {
+                    quiet_since = TokioInstant::now();
+                    fired_this_episode = false;
+                    continue;
+                }
+
+                if fired_this_episode || quiet_since.elapsed() < window {
+                    continue;
+                }
+                fired_this_episode = true;
+
+                let running_secs = DateTime::parse_from_rfc3339(&started_at)
+                    .ok()
+                    .and_then(|started| (Utc::now() - started.with_timezone(&Utc)).to_std().ok())
+                    .map(|duration| duration.as_secs_f64())
+                    .unwrap_or_default();
+                let output_tail = fs::read_to_string(&output_path)
+                    .await
+                    .map(|output| {
+                        let tail: Vec<&str> = output.lines().rev().take(20).collect();
+                        tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+                    })
+                    .unwrap_or_default();
+                let output_tail = if output_tail.len() > 2000 {
+                    crate::util::truncate_str(&output_tail, 2000).to_string()
+                } else {
+                    output_tail
+                };
+
+                Bus::global().publish(BusEvent::BackgroundTaskStalled(
+                    crate::bus::BackgroundTaskStalled {
+                        task_id: status.task_id.clone(),
+                        tool_name: status.tool_name.clone(),
+                        display_name: status.display_name.clone(),
+                        session_id: status.session_id.clone(),
+                        stall_wake_seconds,
+                        running_secs,
+                        output_tail,
+                        output_file: output_path.clone(),
+                        // Arming a stall watchdog is an explicit "wake me if
+                        // this goes quiet" request, independent of the task's
+                        // completion-delivery flags.
+                        notify: true,
+                        wake: true,
+                    },
+                ));
+            }
+
+            watchdogs.write().await.remove(&task_id_owned);
+        });
+
+        // Replace any existing watchdog for this task.
+        if let Some(prior) = self
+            .stall_watchdogs
+            .write()
+            .await
+            .insert(task_id.to_string(), handle)
+        {
+            prior.abort();
+        }
+
+        Some(stall_wake_seconds)
+    }
+
+    /// Disarm the stall watchdog for a task, if one is armed.
+    pub async fn disarm_stall_watchdog(&self, task_id: &str) -> bool {
+        let removed = self.stall_watchdogs.write().await.remove(task_id);
+        let disarmed = removed.is_some();
+        if let Some(handle) = removed {
+            handle.abort();
+        }
+        let status_path = self.status_path_for(task_id);
+        if let Some(mut status) = self.read_status_file(&status_path).await
+            && status.stall_wake_seconds.is_some()
+        {
+            status.stall_wake_seconds = None;
+            self.write_status_file(&status_path, &status).await;
+            return true;
+        }
+        disarmed
     }
 
     /// Update delivery behavior for an existing background task.
@@ -1146,6 +1352,7 @@ impl BackgroundTaskManager {
                 wake: wake_flag,
                 progress: None,
                 event_history: Vec::new(),
+                stall_wake_seconds: None,
             };
             let event_status = final_status.status.clone();
             let event_exit_code = final_status.exit_code;
@@ -1270,6 +1477,7 @@ impl BackgroundTaskManager {
                 event_history: prior_status
                     .map(|status| status.event_history)
                     .unwrap_or_default(),
+                stall_wake_seconds: None,
             };
             push_task_event(
                 &mut final_status,

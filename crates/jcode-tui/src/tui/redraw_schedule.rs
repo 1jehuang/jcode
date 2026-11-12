@@ -17,6 +17,8 @@ pub(crate) const REDRAW_IDLE: Duration = Duration::from_millis(250);
 pub(crate) const REDRAW_DEEP_IDLE: Duration = Duration::from_millis(5000);
 pub(crate) const REDRAW_REMOTE_STARTUP: Duration = Duration::from_millis(1000);
 pub(crate) const REDRAW_PASSIVE_LIVENESS: Duration = Duration::from_millis(1000);
+/// Tick cadence while a drag-held edge autoscroll runs (one line per tick).
+pub(crate) const REDRAW_COPY_AUTOSCROLL: Duration = Duration::from_millis(30);
 pub(crate) const REDRAW_DEEP_IDLE_AFTER: Duration = Duration::from_secs(30);
 
 /// Whether this session has been left alone long enough to be treated as
@@ -229,7 +231,7 @@ fn cache_cold_countdown_redraw_active(state: &dyn TuiState) -> bool {
     }
     state
         .cache_ttl_status()
-        .map(|info| info.is_cold || info.expiring_soon())
+        .map(|info| info.expiry_notification_active())
         .unwrap_or(false)
 }
 
@@ -244,9 +246,7 @@ fn full_frame_status_animation_active_with_policy(
     // These animations are rendered as part of the full status line, not by the
     // spinner-only cell renderer in app/run_shell.rs, so they need the normal
     // active redraw loop while visible.
-    matches!(state.status(), ProcessingStatus::RunningTool(_))
-        || rate_limit_countdown_redraw_active(state)
-        || crate::build::read_build_progress().is_some()
+    rate_limit_countdown_redraw_active(state) || crate::build::read_build_progress().is_some()
 }
 
 fn primary_status_spinner_fast_path_available_with_policy(
@@ -422,6 +422,11 @@ pub(crate) fn redraw_interval_with_policy_and_animation(
         };
     }
 
+    // A held drag scrolls a line per tick: pace the tick, not the fps.
+    if state.copy_selection_edge_autoscroll_active() {
+        return REDRAW_COPY_AUTOSCROLL;
+    }
+
     // While the terminal is backgrounded (FocusLost), an idle session has nothing
     // worth a fast tick: decorative animations are paused and the run loop only
     // repaints throttled idle frames. Use the slow deep-idle interval so the
@@ -449,6 +454,7 @@ pub(crate) fn redraw_interval_with_policy_and_animation(
         && !state.remote_startup_phase_active()
         && !rate_limit_countdown_redraw_active(state)
         && !cache_cold_countdown_redraw_active(state)
+        && state.openai_reset_hint().is_none()
         && crate::build::read_build_progress().is_none()
         && !swarm_spinner_redraw_active(state)
         && !session_picker_spinner_redraw_active(state)
@@ -593,6 +599,7 @@ fn periodic_redraw_required_inner(state: &dyn TuiState, include_idle_animation: 
         && !state.remote_startup_phase_active()
         && !rate_limit_countdown_redraw_active(state)
         && !cache_cold_countdown_redraw_active(state)
+        && state.openai_reset_hint().is_none()
         && crate::build::read_build_progress().is_none()
         && !swarm_spinner_redraw_active(state)
         && !session_picker_spinner_redraw_active(state)

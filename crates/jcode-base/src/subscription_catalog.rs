@@ -50,14 +50,13 @@ impl JcodeTier {
 
     /// Provider-price inference included with the monthly plan. The included
     /// portion is billed at 50%, so every subscription dollar buys two dollars
-    /// of inference. Usage after this allowance is billed at 90% of provider API
-    /// price (a 10% discount).
+    /// of inference. Usage after this allowance is billed at provider API price.
     pub fn included_inference_usd(self) -> f64 {
         self.usable_budget_usd()
     }
 
     pub fn overage_api_price_multiplier(self) -> f64 {
-        0.9
+        1.0
     }
 
     pub fn display_name(self) -> &'static str {
@@ -654,7 +653,7 @@ mod tests {
             assert_eq!(tier.retail_price_usd(), retail_price);
             assert_eq!(tier.usable_budget_usd(), usable_budget);
             assert_eq!(tier.included_inference_usd(), usable_budget);
-            assert_eq!(tier.overage_api_price_multiplier(), 0.9);
+            assert_eq!(tier.overage_api_price_multiplier(), 1.0);
         }
     }
 

@@ -8,7 +8,7 @@ use super::{
     register_session_interrupt_queue, remove_background_tool_signal, remove_plan_participant,
     remove_session_channel_subscriptions, remove_session_from_swarm,
     remove_session_interrupt_queue, rename_background_tool_signal, rename_plan_participant,
-    rename_session_interrupt_queue, send_swarm_plan_to_session, swarm_id_for_dir,
+    rename_session_interrupt_queue, send_swarm_plan_to_session, swarm_id_for_session,
     unregister_session_event_sender, update_member_status,
 };
 use crate::agent::Agent;
@@ -18,6 +18,7 @@ use crate::provider::Provider;
 use crate::tool::Registry;
 use crate::transport::WriteHalf;
 use anyhow::Result;
+use futures::FutureExt;
 use jcode_agent_runtime::InterruptSignal;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -226,24 +227,23 @@ pub(super) async fn handle_clear_session(
     }
     remove_session_interrupt_queue(soft_interrupt_queues, client_session_id).await;
 
-    let swarm_id_for_update = {
+    // `/clear` creates a genuinely fresh session. Do not migrate the old
+    // session's swarm membership or plan participation to the replacement:
+    // doing so lets a subsequent plan snapshot repopulate the cleared UI.
+    let (swarm_id_for_update, swarm_enabled, friendly_name) = {
         let mut members = swarm_members.write().await;
-        if let Some(mut member) = members.remove(client_session_id) {
-            let swarm_id = member.swarm_id.clone();
-            member.session_id = new_id.clone();
-            member.status = "ready".to_string();
-            member.detail = None;
-            members.insert(new_id.clone(), member);
-            swarm_id
-        } else {
-            None
+        match members.remove(client_session_id) {
+            Some(member) => (member.swarm_id, member.swarm_enabled, member.friendly_name),
+            None => (None, false, None),
         }
     };
     if let Some(ref swarm_id) = swarm_id_for_update {
         let mut swarms = swarms_by_id.write().await;
         if let Some(swarm) = swarms.get_mut(swarm_id) {
             swarm.remove(client_session_id);
-            swarm.insert(new_id.clone());
+            if swarm.is_empty() {
+                swarms.remove(swarm_id);
+            }
         }
     }
     file_touch.clear_session(client_session_id).await;
@@ -251,6 +251,23 @@ pub(super) async fn handle_clear_session(
         client_session_id,
         channel_subscriptions,
         channel_subscriptions_by_session,
+    )
+    .await;
+    // The connection remains subscribed across `/clear`, so there is no later
+    // subscribe request to register the replacement session. Register it as a
+    // fresh root while deliberately leaving the old swarm and plan behind.
+    ensure_client_swarm_member(
+        &new_id,
+        client_connection_id,
+        &friendly_name,
+        client_event_tx,
+        agent,
+        swarm_enabled,
+        swarm_members,
+        swarms_by_id,
+        event_history,
+        event_counter,
+        swarm_event_tx,
     )
     .await;
     update_member_status(
@@ -265,7 +282,7 @@ pub(super) async fn handle_clear_session(
     )
     .await;
     if let Some(ref swarm_id) = swarm_id_for_update {
-        rename_plan_participant(swarm_id, client_session_id, &new_id, swarm_plans).await;
+        remove_plan_participant(swarm_id, client_session_id, swarm_plans).await;
     }
 
     *client_session_id = new_id.clone();
@@ -335,7 +352,7 @@ async fn ensure_client_swarm_member(
             }
         };
         let derived_swarm_id = if swarm_enabled {
-            swarm_id_for_dir(working_dir.clone())
+            swarm_id_for_session(client_session_id)
         } else {
             None
         };
@@ -613,7 +630,7 @@ pub(super) async fn handle_subscribe(
             ("swarm_enabled", swarm_enabled.to_string()),
         ],
     );
-    ensure_client_swarm_member(
+    let inserted_swarm_member = ensure_client_swarm_member(
         client_session_id,
         client_connection_id,
         friendly_name,
@@ -642,13 +659,24 @@ pub(super) async fn handle_subscribe(
             effective_subscribe_working_dir(current.as_deref(), dir, dirs::home_dir().as_deref())
         };
         let new_path = PathBuf::from(&bound_dir);
-        let new_swarm_id = swarm_id_for_dir(Some(new_path.clone()));
         let mut old_swarm_id: Option<String> = None;
         let mut updated_swarm_id: Option<String> = None;
         {
             let mut members = swarm_members.write().await;
             if let Some(member) = members.get_mut(client_session_id) {
                 old_swarm_id = member.swarm_id.clone();
+                // Existing members include reconnects and daemon-restored
+                // sessions. Keep their persisted swarm id so an intentional
+                // resume retains its workers and plan. Only a newly inserted
+                // root receives the new session-scoped identity.
+                let new_swarm_id = if inserted_swarm_member {
+                    swarm_id_for_session(client_session_id)
+                } else {
+                    member
+                        .swarm_id
+                        .clone()
+                        .or_else(|| swarm_id_for_session(client_session_id))
+                };
                 member.working_dir = Some(new_path);
                 member.swarm_id = if member.swarm_enabled {
                     new_swarm_id.clone()
@@ -871,6 +899,17 @@ pub(super) async fn handle_subscribe(
         session_id: client_session_id.to_string(),
     });
     let _ = client_event_tx.send(ServerEvent::Done { id });
+    prewarm_idle_agent(agent);
+}
+
+fn prewarm_idle_agent(agent: &Arc<Mutex<Agent>>) -> bool {
+    // Poll local preparation once, without holding the agent across a yield.
+    // If a registry/provider lock would wait, abandon this optional attempt.
+    // Only the provider's network task can outlive this call.
+    let Ok(guard) = agent.try_lock() else {
+        return false;
+    };
+    guard.prewarm_provider().now_or_never().is_some()
 }
 
 async fn subscribe_should_mark_ready(
@@ -1176,6 +1215,7 @@ pub(super) async fn handle_resume_session(
     event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
+    supports_pdf_panels: bool,
 ) -> Result<Arc<Mutex<Agent>>> {
     let resume_start = Instant::now();
     let incoming_client_instance_id = client_instance_id.map(str::to_string);
@@ -1359,6 +1399,7 @@ pub(super) async fn handle_resume_session(
             server_name,
             server_icon,
             None,
+            supports_pdf_panels,
         )
         .await?;
         let _ = client_event_tx.send(ServerEvent::Done { id });
@@ -1526,11 +1567,6 @@ pub(super) async fn handle_resume_session(
         }
     }
 
-    {
-        let mut agent_guard = agent.lock().await;
-        agent_guard.mark_closed();
-    }
-
     let (result, is_canary) = {
         let mut agent_guard = agent.lock().await;
         let result =
@@ -1650,6 +1686,7 @@ pub(super) async fn handle_resume_session(
                 server_name,
                 server_icon,
                 Some(was_interrupted),
+                supports_pdf_panels,
             )
             .await?;
             let _ = client_event_tx.send(ServerEvent::Done { id });

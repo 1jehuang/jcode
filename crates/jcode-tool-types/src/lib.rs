@@ -86,6 +86,10 @@ pub fn resolve_tool_name(name: &str) -> &str {
         "file_write" => "write",
         "edit_file" => "edit",
         "file_edit" => "edit",
+        // `multiedit` merged into `edit` (which accepts an `edits` array), and
+        // `patch` merged into `apply_patch` (which accepts unified diffs).
+        "multiedit" | "MultiEdit" | "multi_edit" => "edit",
+        "patch" | "Patch" => "apply_patch",
         // The native grep tool was removed in favor of agentgrep, but models
         // still frequently call `grep` (and OAuth's `file_grep`). agentgrep's
         // grep mode accepts `pattern` as an alias for `query`, so these calls
@@ -138,6 +142,9 @@ mod tests {
         assert_eq!(resolve_tool_name("Bash"), "bash");
         assert_eq!(resolve_tool_name("Write"), "write");
         assert_eq!(resolve_tool_name("Edit"), "edit");
+        assert_eq!(resolve_tool_name("multiedit"), "edit");
+        assert_eq!(resolve_tool_name("MultiEdit"), "edit");
+        assert_eq!(resolve_tool_name("patch"), "apply_patch");
         assert_eq!(resolve_tool_name("Grep"), "agentgrep");
         assert_eq!(resolve_tool_name("Agent"), "subagent");
         assert_eq!(resolve_tool_name("ScheduleWakeup"), "schedule");

@@ -1,0 +1,14 @@
+{
+  "version": "0.75.3",
+  "date": "2026-08-11",
+  "title": "Reliable streams and desktop session overview",
+  "highlights": [
+    "Desktop sessions now include a restored Super-key overview with clickable session navigation"
+  ],
+  "improvements": [
+    "The desktop overview shortcut works safely across compositors"
+  ],
+  "fixes": [
+    "Transient stream_read_error failures are now recognized as retryable transport errors"
+  ]
+}

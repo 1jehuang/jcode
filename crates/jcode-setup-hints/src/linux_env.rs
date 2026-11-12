@@ -683,7 +683,8 @@ mod tests {
 
     #[test]
     fn detects_compositors_from_sockets_and_desktop_names() {
-        let cases: Vec<(Vec<(&str, &str)>, Option<LinuxCompositor>)> = vec![
+        type Case<'a> = (Vec<(&'a str, &'a str)>, Option<LinuxCompositor>);
+        let cases: Vec<Case> = vec![
             (
                 vec![("NIRI_SOCKET", "/run/niri.sock")],
                 Some(LinuxCompositor::Niri),

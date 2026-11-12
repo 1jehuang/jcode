@@ -376,6 +376,7 @@ impl ToggleBinding {
 /// All configurable pane / mode toggle keybindings.
 #[derive(Clone, Debug)]
 pub struct ToggleKeys {
+    pub auto_poke: ToggleBinding,
     pub side_panel: ToggleBinding,
     pub copy_selection: ToggleBinding,
     pub diagram_pane: ToggleBinding,
@@ -389,6 +390,13 @@ pub struct ToggleKeys {
 pub fn load_toggle_keys() -> ToggleKeys {
     let cfg = config();
     ToggleKeys {
+        auto_poke: ToggleBinding::load_with_default(
+            &cfg.keybindings.auto_poke_toggle,
+            KeyBinding {
+                code: KeyCode::Char('p'),
+                modifiers: KeyModifiers::CONTROL,
+            },
+        ),
         side_panel: ToggleBinding::load(&cfg.keybindings.side_panel_toggle, 'm'),
         copy_selection: ToggleBinding::load(&cfg.keybindings.copy_selection_toggle, 'y'),
         diagram_pane: ToggleBinding::load(&cfg.keybindings.diagram_pane_toggle, 't'),
@@ -527,17 +535,26 @@ fn macos_option_shift_char_to_ascii_key(code: KeyCode) -> Option<char> {
         'Î' => Some('d'),
         '´' => Some('e'),
         'Ï' => Some('f'),
+        '˝' => Some('g'),
         'Ó' => Some('h'),
         'ˆ' => Some('i'),
         'Ô' => Some('j'),
         '' => Some('k'),
         'Ò' => Some('l'),
         'Â' => Some('m'),
+        '˜' => Some('n'),
+        'Ø' => Some('o'),
+        '∏' => Some('p'),
+        'Œ' => Some('q'),
+        '‰' => Some('r'),
         'Í' => Some('s'),
         'ˇ' => Some('t'),
         '¨' => Some('u'),
         '◊' => Some('v'),
+        '„' => Some('w'),
+        '˛' => Some('x'),
         'Á' => Some('y'),
+        '¸' => Some('z'),
         _ => None,
     }
 }
@@ -614,6 +631,21 @@ pub fn load_open_resume_key() -> OptionalBinding {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_poke_toggle_can_be_remapped_or_disabled() {
+        let default = KeyBinding {
+            code: KeyCode::Char('p'),
+            modifiers: KeyModifiers::CONTROL,
+        };
+        let remapped = ToggleBinding::load_with_default("alt+p", default.clone());
+        assert!(remapped.matches(KeyCode::Char('p'), KeyModifiers::ALT));
+        assert!(!remapped.matches(KeyCode::Char('p'), KeyModifiers::CONTROL));
+
+        let disabled = ToggleBinding::load_with_default("", default);
+        assert!(disabled.binding().is_none());
+        assert!(!disabled.matches(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    }
 
     #[test]
     fn new_terminal_alt_enter_binding_parses_and_matches() {

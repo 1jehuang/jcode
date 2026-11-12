@@ -1,11 +1,17 @@
 use super::display::humanize_key;
 use super::{OpenAIUsageData, OpenAIUsageWindow, UsageLimit};
 
+#[cfg(test)]
+#[path = "reset_hint_tests.rs"]
+mod reset_hint_tests;
+
 #[derive(Debug, Default)]
 pub(super) struct ParsedOpenAIUsageReport {
     pub(super) limits: Vec<UsageLimit>,
     pub(super) extra_info: Vec<(String, String)>,
     pub(super) hard_limit_reached: bool,
+    pub(super) available_reset_count: Option<u64>,
+    pub(super) ordinary_usage_allowed: Option<bool>,
 }
 
 fn normalize_ratio_value(raw: f32) -> f32 {
@@ -104,7 +110,15 @@ pub(super) fn classify_openai_limits(limits: &[UsageLimit]) -> OpenAIUsageData {
     }
 
     if five_hour.is_none() {
-        five_hour = generic_non_spark.first().cloned();
+        five_hour = generic_non_spark
+            .iter()
+            .find(|w| {
+                seven_day
+                    .as_ref()
+                    .map(|weekly| weekly.name != w.name || weekly.resets_at != w.resets_at)
+                    .unwrap_or(true)
+            })
+            .cloned();
     }
     if seven_day.is_none() {
         seven_day = generic_non_spark
@@ -314,6 +328,14 @@ fn qualify_additional_limit(limit_name: &str, mut limit: UsageLimit) -> UsageLim
 pub(super) fn parse_openai_usage_payload(json: &serde_json::Value) -> ParsedOpenAIUsageReport {
     let mut parsed = ParsedOpenAIUsageReport {
         hard_limit_reached: parse_openai_hard_limit_reached(json),
+        available_reset_count: json
+            .get("rate_limit_reset_credits")
+            .and_then(|credits| credits.get("available_count"))
+            .and_then(serde_json::Value::as_u64),
+        ordinary_usage_allowed: json
+            .get("rate_limit")
+            .and_then(|limit| limit.get("allowed"))
+            .and_then(serde_json::Value::as_bool),
         ..Default::default()
     };
 

@@ -296,9 +296,52 @@ pub fn extract_session_name(session_id: &str) -> Option<&str> {
     None
 }
 
+/// True when `value` has the exact shape of a generated storage session id:
+/// `session_<name>_<millis>` or `session_<name>_<millis>_<hex>`.
+///
+/// Such ids are never valid short names or titles, so callers resolving a
+/// user query can skip expensive fuzzy scans when the id is not on disk.
+pub fn is_generated_session_id(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("session_") else {
+        return false;
+    };
+    let mut parts = rest.split('_');
+    let (Some(name), Some(ts)) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return false;
+    }
+    if ts.len() < 10 || !ts.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    match (parts.next(), parts.next()) {
+        (None, _) => true,
+        (Some(rand), None) => !rand.is_empty() && rand.bytes().all(|b| b.is_ascii_hexdigit()),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_session_id_detection() {
+        assert!(is_generated_session_id(
+            "session_butterfly_1790191044353_621ff7b98fbf962b"
+        ));
+        assert!(is_generated_session_id("session_fox_1234567890"));
+        let (full_id, _) = new_memorable_session_id();
+        assert!(is_generated_session_id(&full_id));
+        assert!(!is_generated_session_id("fox"));
+        assert!(!is_generated_session_id("session_fox"));
+        assert!(!is_generated_session_id("session_fox_abc"));
+        assert!(!is_generated_session_id("session_fox_1234567890_xyz"));
+        assert!(!is_generated_session_id("session_fox_1234567890_ab_cd"));
+        assert!(!is_generated_session_id("imported_codex_123"));
+        assert!(!is_generated_session_id("fix the reload bug"));
+    }
 
     #[test]
     fn test_new_memorable_session_id() {

@@ -284,18 +284,18 @@ pub fn parse_model_spec(raw: &str) -> (String, Option<ParsedProvider>) {
     let trimmed = raw.trim();
     if let Some((model, provider)) = trimmed.rsplit_once('@') {
         let model = model.trim();
-        let mut provider = provider.trim();
+        let provider = provider.trim();
         if model.is_empty() {
             return (trimmed.to_string(), None);
         }
         if provider.is_empty() {
             return (model.to_string(), None);
         }
-        let mut allow_fallbacks = true;
-        if provider.ends_with('!') {
-            provider = provider.trim_end_matches('!').trim();
-            allow_fallbacks = false;
-        }
+        // An explicit provider is a hard routing constraint. Historically only
+        // the optional `!` suffix disabled fallbacks, which meant `@Novita`
+        // could silently run on another backend. Keep accepting `!` for
+        // backwards compatibility, but make every explicit pin strict.
+        let provider = provider.trim_end_matches('!').trim();
         if provider.is_empty() {
             return (model.to_string(), None);
         }
@@ -307,7 +307,7 @@ pub fn parse_model_spec(raw: &str) -> (String, Option<ParsedProvider>) {
             model.to_string(),
             Some(ParsedProvider {
                 name: provider,
-                allow_fallbacks,
+                allow_fallbacks: false,
             }),
         );
     }
@@ -805,7 +805,7 @@ mod tests {
         assert_eq!(model, "anthropic/claude-sonnet-4");
         let provider = provider.expect("provider");
         assert_eq!(provider.name, "Fireworks");
-        assert!(provider.allow_fallbacks);
+        assert!(!provider.allow_fallbacks);
 
         let (model, provider) = parse_model_spec("anthropic/claude-sonnet-4@Fireworks!");
         assert_eq!(model, "anthropic/claude-sonnet-4");

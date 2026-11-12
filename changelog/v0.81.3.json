@@ -1,0 +1,12 @@
+{
+  "version": "0.81.3",
+  "date": "2026-08-29",
+  "improvements": [
+    "Active tool details are now emphasized in the running status line for faster progress scanning",
+    "Selected text remains clearly visible while copying from the terminal"
+  ],
+  "fixes": [
+    "Session attachments are correlated to the correct connection when multiple clients connect concurrently",
+    "Closing a macOS terminal window no longer leaves its jcode session running unexpectedly"
+  ]
+}

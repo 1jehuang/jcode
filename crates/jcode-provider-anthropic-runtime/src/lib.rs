@@ -15,6 +15,8 @@
 //! Uses the Anthropic Messages API directly without the Python SDK.
 //! This provides better control and eliminates the Python dependency.
 
+mod reasoning_request;
+
 use jcode_base::auth;
 use jcode_base::auth::oauth;
 use jcode_provider_core::{EventStream, NativeToolResultSender, Provider};
@@ -45,6 +47,7 @@ use jcode_provider_core::{
     anthropic_strip_1m_suffix as strip_1m_suffix,
 };
 use reqwest::Client;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -58,6 +61,101 @@ const API_URL: &str = "https://api.anthropic.com/v1/messages";
 
 /// OAuth endpoint (with beta=true query param)
 const API_URL_OAUTH: &str = "https://api.anthropic.com/v1/messages?beta=true";
+
+fn direct_api_url() -> String {
+    let base = std::env::var("JCODE_ANTHROPIC_API_BASE")
+        .ok()
+        .or_else(|| std::env::var("ANTHROPIC_BASE_URL").ok())
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty());
+    match base {
+        Some(base) if base.ends_with("/messages") => base,
+        Some(base) => format!("{base}/messages"),
+        None => API_URL.to_string(),
+    }
+}
+
+fn configured_direct_headers() -> Result<HeaderMap> {
+    let Some(raw) = std::env::var("JCODE_ANTHROPIC_HEADERS")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(HeaderMap::new());
+    };
+    let headers: std::collections::BTreeMap<String, String> = serde_json::from_str(&raw)
+        .context("JCODE_ANTHROPIC_HEADERS must be a JSON object of string values")?;
+    let mut result = HeaderMap::new();
+    for (name, value) in headers {
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .with_context(|| format!("invalid Anthropic-compatible header name '{name}'"))?;
+        let value = HeaderValue::from_str(&value)
+            .with_context(|| format!("invalid value for Anthropic-compatible header '{name}'"))?;
+        result.insert(name, value);
+    }
+    Ok(result)
+}
+
+fn direct_auth_mode() -> String {
+    std::env::var("JCODE_ANTHROPIC_AUTH")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            if std::env::var("ANTHROPIC_AUTH_TOKEN")
+                .ok()
+                .is_some_and(|value| !value.trim().is_empty())
+            {
+                "bearer".to_string()
+            } else {
+                "header".to_string()
+            }
+        })
+        .trim()
+        .to_ascii_lowercase()
+}
+
+#[derive(Clone)]
+struct DirectTransportConfig {
+    api_url: String,
+    headers: std::result::Result<HeaderMap, String>,
+    auth_mode: String,
+    auth_header: String,
+}
+
+impl DirectTransportConfig {
+    fn from_env() -> Self {
+        Self {
+            api_url: direct_api_url(),
+            headers: configured_direct_headers().map_err(|err| format!("{err:#}")),
+            auth_mode: direct_auth_mode(),
+            auth_header: std::env::var("JCODE_ANTHROPIC_AUTH_HEADER")
+                .unwrap_or_else(|_| "x-api-key".to_string()),
+        }
+    }
+}
+
+fn active_anthropic_profile_models() -> Option<Vec<String>> {
+    let Ok(profile_name) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE") else {
+        return None;
+    };
+    let profile = jcode_base::config::config().providers.get(&profile_name)?;
+    if !matches!(
+        profile.provider_type,
+        jcode_base::config::NamedProviderType::AnthropicCompatible
+    ) {
+        return None;
+    }
+    let mut models = profile
+        .models
+        .iter()
+        .map(|configured| configured.id.clone())
+        .collect::<Vec<_>>();
+    if let Some(default) = &profile.default_model
+        && !models.contains(default)
+    {
+        models.push(default.clone());
+    }
+    Some(models)
+}
 
 #[cfg(test)]
 pub(crate) const OAUTH_BETA_HEADERS_1M: &str = jcode_provider_core::ANTHROPIC_OAUTH_BETA_HEADERS_1M;
@@ -317,7 +415,7 @@ async fn ensure_oauth_preflight(
             rate_limit_tier: "default_claude_ai".to_string(),
             first_token_time: 1_740_976_801_491,
             email: email_address,
-            app_version: "2.1.123".to_string(),
+            app_version: "2.1.280".to_string(),
         },
         forced_variations: Default::default(),
         forced_features: Vec::new(),
@@ -378,6 +476,11 @@ pub struct AnthropicProvider {
     max_tokens_override: Option<u32>,
     oauth_session_id: String,
     oauth_preflight_done: Arc<AtomicBool>,
+    direct_transport: DirectTransportConfig,
+    /// Named profiles pin their credential at runtime construction so another
+    /// session/profile cannot redirect this runtime to a different process env.
+    profile_api_key: Option<std::result::Result<String, String>>,
+    profile_models: Option<Vec<String>>,
 }
 
 impl AnthropicProvider {
@@ -471,7 +574,10 @@ impl AnthropicProvider {
     /// live `GET /v1/models` endpoint works and that the model under test is in
     /// the live catalog.
     pub async fn fetch_live_model_ids_for_doctor(&self) -> Result<Vec<String>> {
+        let oauth_scope = jcode_base::provider::anthropic_catalog_scope_for_route(true);
+        let api_scope = jcode_base::provider::anthropic_catalog_scope_for_route(false);
         let (token, is_oauth) = self.get_access_token().await?;
+        let scope = if is_oauth { oauth_scope } else { api_scope };
         if token.trim().is_empty() {
             anyhow::bail!("resolved an empty Anthropic access token");
         }
@@ -482,14 +588,39 @@ impl AnthropicProvider {
         };
         // Persist so the rest of the process benefits from the warm catalog,
         // exactly like the runtime's own prefetch.
-        jcode_base::provider::persist_anthropic_model_catalog(&catalog);
+        jcode_base::provider::persist_anthropic_model_catalog_for_scope(&scope, &catalog);
         if !catalog.context_limits.is_empty() {
             jcode_base::provider::populate_context_limits(catalog.context_limits.clone());
         }
         if !catalog.available_models.is_empty() {
-            jcode_base::provider::populate_anthropic_models(catalog.available_models.clone());
+            jcode_base::provider::populate_anthropic_models_for_scope(
+                &scope,
+                catalog.available_models.clone(),
+            );
         }
         Ok(catalog.available_models)
+    }
+
+    async fn refresh_model_catalog_for_route(&self, oauth: bool, scope: &str) -> Result<()> {
+        let catalog = if oauth {
+            let (token, _) = self.get_oauth_access_token().await?;
+            match jcode_base::provider::fetch_anthropic_model_catalog_oauth(&token).await {
+                Ok(catalog) => catalog,
+                Err(err) if is_oauth_catalog_auth_error(&err.to_string()) => {
+                    let token = force_refresh_oauth_token(Arc::clone(&self.credentials)).await?;
+                    jcode_base::provider::fetch_anthropic_model_catalog_oauth(&token).await?
+                }
+                Err(err) => return Err(err),
+            }
+        } else {
+            jcode_base::provider::fetch_anthropic_model_catalog(&self.direct_api_key()?).await?
+        };
+        jcode_base::provider::persist_anthropic_model_catalog_for_scope(scope, &catalog);
+        if !catalog.context_limits.is_empty() {
+            jcode_base::provider::populate_context_limits(catalog.context_limits);
+        }
+        jcode_base::provider::populate_anthropic_models_for_scope(scope, catalog.available_models);
+        Ok(())
     }
 
     pub fn new() -> Self {
@@ -518,6 +649,11 @@ impl AnthropicProvider {
             .and_then(Self::normalize_reasoning_effort)
             .map(|effort| Self::store_effort_for_model(&model, &effort));
 
+        let direct_transport = DirectTransportConfig::from_env();
+        let profile_api_key = std::env::var_os("JCODE_ANTHROPIC_API_BASE")
+            .map(|_| load_anthropic_api_key().map_err(|err| format!("{err:#}")));
+        let profile_models = active_anthropic_profile_models();
+
         Self {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(std::sync::RwLock::new(model)),
@@ -530,6 +666,17 @@ impl AnthropicProvider {
             max_tokens_override,
             oauth_session_id: Uuid::new_v4().to_string(),
             oauth_preflight_done: Arc::new(AtomicBool::new(false)),
+            direct_transport,
+            profile_api_key,
+            profile_models,
+        }
+    }
+
+    fn direct_api_key(&self) -> Result<String> {
+        match &self.profile_api_key {
+            Some(Ok(key)) => Ok(key.clone()),
+            Some(Err(err)) => anyhow::bail!(err.clone()),
+            None => load_anthropic_api_key(),
         }
     }
 
@@ -575,7 +722,7 @@ impl AnthropicProvider {
         }
         match value.as_str() {
             "off" | "disabled" => Some("none".to_string()),
-            // `swarm` is a UI sentinel meaning "max effort + use the swarm tool".
+            // `swarm` is a UI sentinel meaning "configured root effort + use the swarm tool".
             // Stored verbatim; resolved to a real effort in `actual_effort_for_model`.
             "none" | "low" | "medium" | "high" | "xhigh" | "max" | "swarm" | "swarm-deep" => {
                 Some(value)
@@ -591,17 +738,13 @@ impl AnthropicProvider {
     }
 
     fn actual_effort_for_model(model: &str, effort: &str) -> String {
-        if jcode_base::prompt::is_swarm_effort(effort) {
-            // Swarm rungs sit above `max` on the ladder and mean "strongest
-            // reasoning the model supports", so cycling upward never lowers
-            // the wire effort.
-            if Self::model_supports_max_effort(model) {
-                "max".to_string()
-            } else if Self::model_supports_xhigh_effort(model) {
-                "xhigh".to_string()
-            } else {
-                "high".to_string()
-            }
+        let effort = jcode_base::prompt::swarm_root_reasoning_effort(effort).unwrap_or(effort);
+        Self::resolved_effort_for_model(model, effort)
+    }
+
+    fn resolved_effort_for_model(model: &str, effort: &str) -> String {
+        if effort == "minimal" {
+            "low".to_string()
         } else if effort == "max" && !Self::model_supports_max_effort(model) {
             if Self::model_supports_xhigh_effort(model) {
                 "xhigh".to_string()
@@ -630,7 +773,8 @@ impl AnthropicProvider {
     }
 
     /// Default reasoning effort to apply when the user has *not* explicitly
-    /// configured one. Claude Opus 5 defaults to `low`: it is strong enough
+    /// configured one. Claude Opus 5.5 (jcode's default Claude model) defaults
+    /// to `medium`. Claude Opus 5 defaults to `low`: it is strong enough
     /// at low effort for day-to-day coding/agentic work, and users can cycle
     /// up when they want deeper reasoning. Older Claude Opus models are
     /// reasoning-heavy flagships, so we default them to `xhigh` where
@@ -643,7 +787,9 @@ impl AnthropicProvider {
     /// cheaper models stay cheap.
     fn default_reasoning_effort_for_model(model: &str) -> Option<String> {
         let key = Self::normalized_model_key(model);
-        if key.contains("claude-opus-5") {
+        if key.contains("claude-opus-5-5") {
+            Some("medium".to_string())
+        } else if key.contains("claude-opus-5") {
             Some("low".to_string())
         } else if key.contains("claude-opus") {
             Some(if Self::model_supports_xhigh_effort(model) {
@@ -720,12 +866,12 @@ impl AnthropicProvider {
     }
 
     fn manual_thinking_budget(effort: &str, max_tokens: u32) -> Option<u32> {
+        let effort = jcode_base::prompt::swarm_root_reasoning_effort(effort).unwrap_or(effort);
         let desired = match effort {
-            "low" => 1_024,
+            "minimal" | "low" => 1_024,
             "medium" => 4_096,
             "high" => 8_192,
             "xhigh" | "max" => 16_384,
-            e if jcode_base::prompt::is_swarm_effort(e) => 16_384,
             _ => return None,
         };
         let budget = desired.min(max_tokens.saturating_sub(1));
@@ -750,40 +896,68 @@ impl AnthropicProvider {
         is_oauth: bool,
         show_thinking: bool,
     ) -> (Option<ApiThinking>, Option<ApiOutputConfig>, Option<f32>) {
-        let effort = self.effort_for_model(model);
-        // An explicit "none" (user-configured or a model default) means
-        // reasoning was deliberately disabled, so it must also win over the
-        // `display.show_thinking` fallback below. `effort_for_model` returns
-        // Some("none") even when nothing is configured, so check the
-        // stored/default effort instead.
-        let effort_is_explicit_none = self
+        let effort = self
             .stored_reasoning_effort()
-            .or_else(|| Self::default_reasoning_effort_for_model(model))
-            .as_deref()
-            == Some("none");
-        let effort = effort.as_deref().filter(|effort| *effort != "none");
-        let show_thinking = show_thinking && !effort_is_explicit_none;
+            .or_else(|| Self::default_reasoning_effort_for_model(model));
+        let resolved = effort.as_deref().map(|effort| {
+            jcode_base::prompt::swarm_root_reasoning_effort(effort).unwrap_or(effort)
+        });
+        self.build_reasoning_request_parts_with_effort(model, is_oauth, show_thinking, resolved)
+    }
+
+    fn build_reasoning_request_parts_with_effort(
+        &self,
+        model: &str,
+        is_oauth: bool,
+        show_thinking: bool,
+        resolved_effort: Option<&str>,
+    ) -> (Option<ApiThinking>, Option<ApiOutputConfig>, Option<f32>) {
+        Self::build_reasoning_request_parts_for_budget(
+            model,
+            is_oauth,
+            show_thinking,
+            resolved_effort,
+            self.max_tokens_for(model),
+        )
+    }
+
+    fn build_reasoning_request_parts_for_budget(
+        model: &str,
+        is_oauth: bool,
+        show_thinking: bool,
+        resolved_effort: Option<&str>,
+        max_tokens: u32,
+    ) -> (Option<ApiThinking>, Option<ApiOutputConfig>, Option<f32>) {
+        let always_on = jcode_provider_core::anthropic::anthropic_thinking_always_on(model);
+        // On always-on models `none` means the lowest supported effort, never
+        // disabled thinking. Keep progress summaries available even at low effort.
+        let resolved_effort = match resolved_effort {
+            Some("none") if always_on => Some("low"),
+            other => other,
+        };
+        let show_thinking = show_thinking && resolved_effort != Some("none");
+        let effort = resolved_effort
+            .filter(|effort| *effort != "none" && Self::model_supports_reasoning_effort(model));
 
         let output_config = effort
             .filter(|_| Self::model_supports_output_effort(model))
             .map(|effort| ApiOutputConfig {
-                effort: Self::actual_effort_for_model(model, effort),
+                effort: Self::resolved_effort_for_model(model, effort),
             });
 
         // When only the display toggle is on (no explicit effort), request
         // thinking without forcing `output_config`, so the model keeps its
         // default reasoning strength and only the thinking *display* is enabled.
         let thinking = if Self::model_supports_adaptive_thinking(model) {
-            (effort.is_some() || show_thinking).then_some(ApiThinking::Adaptive {
-                display: Some("summarized"),
-            })
+            (always_on || effort.is_some() || show_thinking)
+                .then(|| reasoning_request::adaptive_thinking(model))
         } else if Self::model_supports_manual_thinking(model) {
             // Manual-thinking models need a concrete budget. Use the configured
             // effort, or fall back to a minimal budget when only the display
             // toggle is on.
             effort
                 .or(show_thinking.then_some("low"))
-                .and_then(|effort| Self::manual_thinking_budget(effort, self.max_tokens_for(model)))
+                .and_then(|effort| Self::manual_thinking_budget(effort, max_tokens))
                 .map(|budget_tokens| ApiThinking::Enabled { budget_tokens })
         } else {
             None
@@ -809,7 +983,7 @@ impl AnthropicProvider {
         // Explicit API-key mode: use the direct API key and surface an error if
         // one is not configured (never silently fall back to OAuth).
         if matches!(mode, AnthropicCredentialMode::ApiKey) {
-            let key = load_anthropic_api_key()?;
+            let key = self.direct_api_key()?;
             return Ok((key, false)); // false = not OAuth
         }
 
@@ -822,7 +996,7 @@ impl AnthropicProvider {
         if matches!(mode, AnthropicCredentialMode::Auto) {
             match self.get_oauth_access_token().await {
                 Ok(token) => return Ok(token),
-                Err(oauth_err) => match load_anthropic_api_key() {
+                Err(oauth_err) => match self.direct_api_key() {
                     Ok(key) => {
                         jcode_base::logging::warn(&format!(
                             "Claude OAuth is unusable in automatic credential mode ({oauth_err:#}); falling back to the configured Anthropic API key"
@@ -979,8 +1153,13 @@ impl AnthropicProvider {
 
     /// Convert our Message type to Anthropic API format
     /// Also repairs dangling tool_uses by injecting synthetic tool_results
-    fn format_messages(&self, messages: &[Message], is_oauth: bool) -> Vec<ApiMessage> {
-        jcode_provider_anthropic::format_messages(messages, is_oauth)
+    fn format_messages(
+        &self,
+        messages: &[Message],
+        is_oauth: bool,
+        api_tools: &[ApiTool],
+    ) -> Vec<ApiMessage> {
+        jcode_provider_anthropic::format_messages_with_tools(messages, is_oauth, api_tools)
     }
 
     /// Convert our ContentBlock to Anthropic API format
@@ -1080,8 +1259,8 @@ impl Provider for AnthropicProvider {
         let api_model = strip_1m_suffix(&model).to_string();
 
         // Format request
-        let api_messages = self.format_messages(messages, is_oauth);
         let api_tools = self.format_tools(tools, is_oauth);
+        let api_messages = self.format_messages(messages, is_oauth, &api_tools);
         let (thinking, output_config, temperature) =
             self.build_reasoning_request_parts(&model, is_oauth);
 
@@ -1122,6 +1301,8 @@ impl Provider for AnthropicProvider {
         let credentials = Arc::clone(&self.credentials);
         let oauth_session_id = self.oauth_session_id.clone();
         let model_state = Arc::clone(&self.model);
+        let direct_transport = self.direct_transport.clone();
+        let retry_settings = reasoning_request::RetrySettings::from_provider(self);
 
         // Spawn task to handle streaming with retry logic.
         // This includes forced OAuth refresh on auth failures.
@@ -1145,6 +1326,8 @@ impl Provider for AnthropicProvider {
                 model,
                 oauth_session_id,
                 model_state,
+                direct_transport,
+                retry_settings,
             )
             .await;
         });
@@ -1181,9 +1364,13 @@ impl Provider for AnthropicProvider {
         } else {
             model
         };
-        if !jcode_base::provider::known_anthropic_model_ids()
-            .iter()
-            .any(|known| known == model)
+        if !self
+            .profile_models
+            .as_ref()
+            .is_some_and(|models| models.iter().any(|configured| configured == model))
+            && !jcode_base::provider::known_anthropic_model_ids()
+                .iter()
+                .any(|known| known == model)
         {
             anyhow::bail!("Model {} not supported by Anthropic provider", model);
         }
@@ -1212,8 +1399,9 @@ impl Provider for AnthropicProvider {
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {
-        jcode_base::provider::cached_anthropic_model_ids()
-            .unwrap_or_else(jcode_base::provider::known_anthropic_model_ids)
+        // Include both routes for model resolution. The picker reads each
+        // route's scoped snapshot and never copies these IDs across routes.
+        jcode_base::provider::known_anthropic_model_ids()
     }
 
     fn available_models_display(&self) -> Vec<String> {
@@ -1328,45 +1516,34 @@ impl Provider for AnthropicProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        let (token, is_oauth) = self.get_access_token().await?;
-        if token.trim().is_empty() {
+        if self.direct_transport.api_url != API_URL {
+            // Never send named gateway credentials to Anthropic's catalog.
             return Ok(());
         }
-
-        let catalog = if is_oauth {
-            match jcode_base::provider::fetch_anthropic_model_catalog_oauth(&token).await {
-                Ok(catalog) => Ok(catalog),
-                Err(err) if is_oauth_catalog_auth_error(&err.to_string()) => {
-                    jcode_base::logging::info(
-                        "Anthropic OAuth model catalog auth failed; forcing token refresh and retrying...",
-                    );
-                    let refreshed_token =
-                        force_refresh_oauth_token(Arc::clone(&self.credentials)).await?;
-                    jcode_base::provider::fetch_anthropic_model_catalog_oauth(&refreshed_token)
-                        .await
-                }
-                Err(err) => Err(err),
+        // Discovery is independent of the selected chat credential mode. Do not
+        // mutate that mode on this shared provider just to inspect another route.
+        // API discovery gets first opportunity, OAuth still runs on API failure.
+        for oauth in [false, true] {
+            let configured = if oauth {
+                auth::claude::load_credentials().is_ok()
+            } else {
+                self.direct_api_key().is_ok()
+            };
+            if !configured {
+                continue;
             }
-        } else {
-            jcode_base::provider::fetch_anthropic_model_catalog(&token).await
-        };
-        let catalog = match catalog {
-            Ok(catalog) => catalog,
-            Err(err) => {
-                let credential_label = if is_oauth { "OAuth" } else { "API key" };
+            let scope = jcode_base::provider::anthropic_catalog_scope_for_route(oauth);
+            if !jcode_base::provider::begin_anthropic_model_catalog_refresh_for_scope(&scope) {
+                continue;
+            }
+            let result = self.refresh_model_catalog_for_route(oauth, &scope).await;
+            jcode_base::provider::finish_anthropic_model_catalog_refresh_for_scope(&scope);
+            if let Err(err) = result {
                 jcode_base::logging::warn(&format!(
-                    "Anthropic {credential_label} model catalog refresh failed; keeping fallback list: {}",
-                    err
+                    "Anthropic {} model catalog refresh failed; keeping cached list: {err}",
+                    if oauth { "OAuth" } else { "API key" }
                 ));
-                return Ok(());
             }
-        };
-        jcode_base::provider::persist_anthropic_model_catalog(&catalog);
-        if !catalog.context_limits.is_empty() {
-            jcode_base::provider::populate_context_limits(catalog.context_limits);
-        }
-        if !catalog.available_models.is_empty() {
-            jcode_base::provider::populate_anthropic_models(catalog.available_models);
         }
         Ok(())
     }
@@ -1381,6 +1558,13 @@ impl Provider for AnthropicProvider {
 
     fn supports_image_input(&self) -> bool {
         true
+    }
+
+    fn supports_deferred_tools(&self) -> bool {
+        // Deferred loading and `tool_reference` are first-party Messages API
+        // features. Custom gateways (JCODE_ANTHROPIC_API_URL) may proxy a
+        // different backend that rejects the fields, so keep them eager there.
+        self.direct_transport.api_url == API_URL
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
@@ -1401,6 +1585,9 @@ impl Provider for AnthropicProvider {
             oauth_preflight_done: Arc::new(AtomicBool::new(
                 self.oauth_preflight_done.load(Ordering::Relaxed),
             )),
+            direct_transport: self.direct_transport.clone(),
+            profile_api_key: self.profile_api_key.clone(),
+            profile_models: self.profile_models.clone(),
         })
     }
 
@@ -1444,8 +1631,8 @@ impl Provider for AnthropicProvider {
         let api_model = strip_1m_suffix(&model).to_string();
 
         // Format request
-        let api_messages = self.format_messages(messages, is_oauth);
         let api_tools = self.format_tools(tools, is_oauth);
+        let api_messages = self.format_messages(messages, is_oauth, &api_tools);
         let (thinking, output_config, temperature) =
             self.build_reasoning_request_parts(&model, is_oauth);
 
@@ -1486,6 +1673,8 @@ impl Provider for AnthropicProvider {
         let credentials = Arc::clone(&self.credentials);
         let oauth_session_id = self.oauth_session_id.clone();
         let model_state = Arc::clone(&self.model);
+        let direct_transport = self.direct_transport.clone();
+        let retry_settings = reasoning_request::RetrySettings::from_provider(self);
 
         // Spawn task to handle streaming with retry logic
         tokio::spawn(async move {
@@ -1508,6 +1697,8 @@ impl Provider for AnthropicProvider {
                 model,
                 oauth_session_id,
                 model_state,
+                direct_transport,
+                retry_settings,
             )
             .await;
         });
@@ -1530,6 +1721,8 @@ async fn run_stream_with_retries(
     model_name: String,
     oauth_session_id: String,
     model_state: Arc<std::sync::RwLock<String>>,
+    direct_transport: DirectTransportConfig,
+    retry_settings: reasoning_request::RetrySettings,
 ) {
     let mut token = initial_token;
     let mut last_error = None;
@@ -1590,6 +1783,7 @@ async fn run_stream_with_retries(
             attempt_tx,
             &model_name,
             &oauth_session_id,
+            &direct_transport,
         )
         .await
         {
@@ -1666,7 +1860,7 @@ async fn run_stream_with_retries(
                             ),
                         }))
                         .await;
-                    request.model = strip_1m_suffix(&fallback).to_string();
+                    retry_settings.reshape(&mut request, &fallback, is_oauth);
                     *model_state
                         .write()
                         .unwrap_or_else(|poisoned| poisoned.into_inner()) = fallback.clone();
@@ -1698,7 +1892,7 @@ async fn run_stream_with_retries(
                             ),
                         }))
                         .await;
-                    request.model = strip_1m_suffix(&fallback).to_string();
+                    retry_settings.reshape(&mut request, &fallback, is_oauth);
                     *model_state
                         .write()
                         .unwrap_or_else(|poisoned| poisoned.into_inner()) = fallback.clone();
@@ -1712,23 +1906,23 @@ async fn run_stream_with_retries(
                 // thinking capabilities that the live API does not actually
                 // accept: "adaptive thinking is not supported on this model" or
                 // "This model does not support the effort parameter."). Self-heal
-                // once by stripping the reasoning fields (and restoring an OAuth
-                // temperature, which we omit only because thinking was active)
-                // and retrying, so a stale capability table degrades gracefully
-                // instead of hard-failing.
+                // once by stripping optional reasoning fields. Always-on models
+                // only drop effort, preserving summarized adaptive thinking and
+                // binding controls. If those fields are rejected too, surface
+                // the error rather than silently changing conversation semantics.
                 if (request.thinking.is_some() || request.output_config.is_some())
                     && !saw_output
                     && is_reasoning_unsupported_error(&error_str)
+                    && reasoning_request::recover_rejected_reasoning(
+                        &mut request,
+                        &model_name,
+                        is_oauth,
+                    )
                 {
                     jcode_base::logging::warn(&format!(
-                        "Anthropic model '{}' rejected the reasoning request ({}); retrying without thinking/effort",
+                        "Anthropic model '{}' rejected the reasoning request ({}); retrying with compatible reasoning fields",
                         model_name, e
                     ));
-                    request.thinking = None;
-                    request.output_config = None;
-                    if is_oauth {
-                        request.temperature = Some(1.0);
-                    }
                     last_error = Some(e);
                     continue;
                 }
@@ -1831,6 +2025,10 @@ async fn force_refresh_oauth_token(
 }
 
 /// Stream the response from Anthropic API
+#[expect(
+    clippy::too_many_arguments,
+    reason = "streaming requires transport, authentication, request, event, and session context"
+)]
 async fn stream_response(
     client: Client,
     token: String,
@@ -1839,6 +2037,7 @@ async fn stream_response(
     tx: mpsc::Sender<Result<StreamEvent>>,
     model_name: &str,
     oauth_session_id: &str,
+    direct_transport: &DirectTransportConfig,
 ) -> Result<()> {
     use jcode_message_types::ConnectionPhase;
     let requested_model_base = strip_1m_suffix(&request.model).to_ascii_lowercase();
@@ -1859,10 +2058,22 @@ async fn stream_response(
     let connect_start = std::time::Instant::now();
     let stream_idle_timeout = jcode_base::provider::stream_idle_timeout();
     // Build request with appropriate auth headers
-    let url = if is_oauth { API_URL_OAUTH } else { API_URL };
+    let url = if is_oauth {
+        API_URL_OAUTH
+    } else {
+        direct_transport.api_url.as_str()
+    };
 
-    let mut req = client
-        .post(url)
+    let mut req = client.post(url);
+    if !is_oauth {
+        req = req.headers(
+            direct_transport
+                .headers
+                .clone()
+                .map_err(anyhow::Error::msg)?,
+        );
+    }
+    req = req
         .header("anthropic-version", API_VERSION)
         .header("content-type", "application/json")
         .header(
@@ -1884,6 +2095,7 @@ async fn stream_response(
             oauth_beta_headers(model_name),
             request.thinking.is_some(),
         );
+        let beta_header = reasoning_request::with_binding_beta(&beta_header, &request.thinking);
         req = apply_oauth_attribution_headers(
             req.header("Authorization", format!("Bearer {}", token))
                 .header("User-Agent", CLAUDE_CLI_USER_AGENT)
@@ -1900,9 +2112,20 @@ async fn stream_response(
         };
         let beta_header =
             anthropic_beta_header_with_thinking(beta_header, request.thinking.is_some());
-        req = req
-            .header("x-api-key", &token)
-            .header("anthropic-beta", beta_header);
+        let beta_header = reasoning_request::with_binding_beta(&beta_header, &request.thinking);
+        req = match direct_transport.auth_mode.as_str() {
+            "none" => req,
+            "bearer" => req.header("Authorization", format!("Bearer {token}")),
+            "header" => {
+                let header = HeaderName::from_bytes(direct_transport.auth_header.trim().as_bytes())
+                    .context("invalid JCODE_ANTHROPIC_AUTH_HEADER")?;
+                req.header(header, &token)
+            }
+            value => anyhow::bail!(
+                "invalid JCODE_ANTHROPIC_AUTH value '{value}' (expected bearer, header, or none)"
+            ),
+        };
+        req = req.header("anthropic-beta", beta_header);
     }
 
     let response = jcode_provider_core::transport::send_with_initial_response_timeout(
@@ -2133,8 +2356,18 @@ fn anthropic_recommended_model_from_error(error_str: &str) -> Option<String> {
         .split("please use")
         .nth(1)
         .or_else(|| error_str.split("use ").nth(1))?;
-    // Take up to the next sentence boundary.
-    let hint = hint.split(['.', '!', '\n']).next().unwrap_or(hint).trim();
+    // A decimal point inside a model version is not a sentence boundary.
+    // Truncating "Opus 4.8" to "Opus 4" selected an arbitrary older release
+    // whenever catalog ordering changed.
+    let bytes = hint.as_bytes();
+    let end = hint.char_indices().find_map(|(i, c)| {
+        let version_dot = c == '.'
+            && i > 0
+            && bytes[i - 1].is_ascii_digit()
+            && bytes.get(i + 1).is_some_and(u8::is_ascii_digit);
+        (matches!(c, '.' | '!' | '\n') && !version_dot).then_some(i)
+    });
+    let hint = hint[..end.unwrap_or(hint.len())].trim();
     if hint.is_empty() {
         return None;
     }
@@ -2155,9 +2388,20 @@ fn anthropic_recommended_model_from_error(error_str: &str) -> Option<String> {
             let key = AnthropicProvider::normalized_model_key(&candidate);
             // The catalog id uses hyphenated digits ("claude-opus-4-8"), so the
             // hint tokens ["opus","4","8"] should all appear.
+            let mut candidate_tokens: Vec<&str> = key.split('-').collect();
             let score = hint_tokens
                 .iter()
-                .filter(|token| key.contains(token.as_str()))
+                .filter(|token| {
+                    if let Some(index) = candidate_tokens
+                        .iter()
+                        .position(|part| *part == token.as_str())
+                    {
+                        candidate_tokens.remove(index);
+                        true
+                    } else {
+                        false
+                    }
+                })
                 .count();
             (candidate, score)
         })

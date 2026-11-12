@@ -760,9 +760,21 @@ fn test_filter_mode_cycles_through_requested_session_sources() {
     cursor.source = SessionSource::Cursor;
 
     let mut picker = SessionPicker::new(vec![saved, claude_code, codex, pi, opencode, cursor]);
+    picker.all_sessions[0].working_dir = Some("/work/project".to_string());
+    picker.set_current_dir(Some("/work/project/".to_string()));
+    picker.rebuild_items();
 
     assert_eq!(picker.filter_mode, SessionFilterMode::All);
     assert_eq!(picker.visible_sessions.len(), 6);
+
+    picker.cycle_filter_mode();
+    assert_eq!(picker.filter_mode, SessionFilterMode::CurrentDir);
+    assert_eq!(picker.visible_sessions.len(), 1);
+    assert!(
+        picker
+            .visible_session_iter()
+            .all(|session| picker.session_in_current_dir(session))
+    );
 
     picker.cycle_filter_mode();
     assert_eq!(picker.filter_mode, SessionFilterMode::CatchUp);
@@ -846,7 +858,7 @@ fn test_filter_mode_keyboard_shortcuts_cycle_both_directions() {
     picker
         .handle_overlay_key(KeyCode::Char('s'), KeyModifiers::empty())
         .unwrap();
-    assert_eq!(picker.filter_mode, SessionFilterMode::CatchUp);
+    assert_eq!(picker.filter_mode, SessionFilterMode::CurrentDir);
 
     picker
         .handle_overlay_key(KeyCode::Char('S'), KeyModifiers::empty())
@@ -1295,8 +1307,30 @@ fn onboarding_banner_offers_review_then_new_session() {
         OverlayAction::Selected(PickerResult::ReviewRecentProject)
     ));
 
-    // Down selects the blank-session action.
-    picker.next();
+    // Any non-submit key rotates between the two choices.
+    picker
+        .handle_overlay_key(KeyCode::Char('x'), KeyModifiers::empty())
+        .expect("ordinary key");
+    assert!(picker.onboarding_start_new_highlighted());
+    picker
+        .handle_overlay_key(KeyCode::Char('x'), KeyModifiers::empty())
+        .expect("ordinary key");
+    assert!(picker.onboarding_review_recent_project_highlighted());
+
+    // Keys that normally close the full picker rotate on this action-only page.
+    picker
+        .handle_overlay_key(KeyCode::Esc, KeyModifiers::empty())
+        .expect("escape key");
+    assert!(picker.onboarding_start_new_highlighted());
+    picker
+        .handle_overlay_key(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        .expect("control-c");
+    assert!(picker.onboarding_review_recent_project_highlighted());
+
+    // Arrow keys use the same rotation behavior.
+    picker
+        .handle_overlay_key(KeyCode::Down, KeyModifiers::empty())
+        .expect("down arrow");
     assert!(picker.onboarding_start_new_highlighted());
     let action = picker
         .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
@@ -1309,7 +1343,9 @@ fn onboarding_banner_offers_review_then_new_session() {
     // There is no session list below the two actions.
     picker.next();
     assert!(picker.onboarding_start_new_highlighted());
-    picker.previous();
+    picker
+        .handle_overlay_key(KeyCode::Up, KeyModifiers::empty())
+        .expect("up arrow");
     assert!(picker.onboarding_review_recent_project_highlighted());
 }
 
@@ -1342,11 +1378,11 @@ fn onboarding_banner_renders_prompt_and_both_action_rows() {
         "onboarding prompt should render in the banner: {text:?}"
     );
     assert!(
-        text.contains("Start a new session"),
+        text.contains("Start in the current directory"),
         "start-new row should render in the banner: {text:?}"
     );
     assert!(
-        text.contains("Find bugs in what I've been working on"),
+        text.contains("Find bugs in my most active repo"),
         "suggested-review row should render in the banner: {text:?}"
     );
     assert!(
@@ -1364,17 +1400,17 @@ fn onboarding_banner_renders_prompt_and_both_action_rows() {
         .expect("welcome row");
     let review_y = lines
         .iter()
-        .position(|line| line.contains("Find bugs in what I've been working on"))
+        .position(|line| line.contains("Find bugs in my most active repo"))
         .expect("review row");
     let start_y = lines
         .iter()
-        .position(|line| line.contains("Start a new session"))
+        .position(|line| line.contains("Start in the current directory"))
         .expect("start-new row");
     let review_x = lines[review_y]
-        .find("Find bugs in what I've been working on")
+        .find("Find bugs in my most active repo")
         .expect("review column");
     let start_x = lines[start_y]
-        .find("Start a new session")
+        .find("Start in the current directory")
         .expect("start-new column");
 
     assert!(
@@ -1389,8 +1425,10 @@ fn onboarding_banner_renders_prompt_and_both_action_rows() {
         review_x < 50,
         "suggested prompt should span the visual center: {lines:#?}"
     );
+    let width = buffer.area.width as usize;
+    let start_end = lines[start_y].trim_end().chars().count();
     assert!(
-        start_y >= buffer.area.height as usize - 3 && start_x >= 95,
+        start_y >= buffer.area.height as usize - 3 && start_x > width / 2 && start_end + 4 >= width,
         "blank-session action should stay secondary in the bottom-right: {lines:#?}"
     );
 }
@@ -1783,6 +1821,119 @@ fn contains_scrollbar_glyph(text: &str) -> bool {
 }
 
 #[test]
+fn test_preview_is_left_aligned_independently_of_chat_markdown_context() {
+    for width in [60, 100] {
+        let mut reference = None;
+        for centered in [false, true] {
+            markdown::with_center_code_blocks(centered, || {
+                let mut session =
+                    make_session("alignment", "alignment", false, SessionStatus::Closed);
+                session.messages_preview[1].content =
+                    "world\n\n- list item\n\n```text\ncode sample\n```".to_string();
+                session.messages_preview[1].tool_calls = vec!["read".to_string()];
+                let mut picker = SessionPicker::new(vec![session]);
+                picker.auto_scroll_preview = false;
+                let backend = ratatui::backend::TestBackend::new(width, 40);
+                let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+                // Exercise both the initial render and a cached redraw.
+                for _ in 0..2 {
+                    terminal
+                        .draw(|frame| picker.render_preview(frame, frame.area()))
+                        .expect("render preview");
+                    assert_eq!(markdown::center_code_blocks(), centered);
+                    let buffer = terminal.backend().buffer();
+                    let rows: Vec<String> = (1..39)
+                        .map(|y| (1..width - 1).map(|x| buffer[(x, y)].symbol()).collect())
+                        .collect();
+                    for text in ["Test session", "1› hello", "world"] {
+                        let row = rows.iter().find(|row| row.contains(text)).expect(text);
+                        assert!(row.starts_with(text), "preview must be flush left: {row:?}");
+                    }
+                    for text in ["list item", "code sample", "tool:"] {
+                        let row = rows.iter().find(|row| row.contains(text)).expect(text);
+                        assert!(
+                            row.chars().take_while(|c| *c == ' ').count() <= 2,
+                            "structured content must not inherit centering padding: {row:?}"
+                        );
+                    }
+                    if let Some(reference) = &reference {
+                        assert_eq!(&rows, reference, "chat centering must not affect preview");
+                    } else {
+                        reference = Some(rows);
+                    }
+                }
+            });
+        }
+    }
+}
+
+#[test]
+fn test_preview_structured_messages_stay_left_aligned() {
+    let todos = serde_json::json!([{
+        "id": "alignment", "content": "Verify structured preview alignment",
+        "status": "completed", "priority": "high", "confidence": "verified"
+    }]);
+    let mut session = make_session(
+        "structured_alignment",
+        "alignment",
+        false,
+        SessionStatus::Closed,
+    );
+    session.messages_preview[1].tool_calls = vec!["todo".to_string()];
+    for (role, content, tool) in [
+        ("tool", todos.to_string(), Some("todo")),
+        ("system", "🔍 Reviewing the weak points of this turn for you...".to_string(), None),
+        ("tool", "Command completed successfully (no output)".to_string(), Some("bash")),
+        ("background_task", "**Background task** `alignment-task` · `selfdev test` (`selfdev-test`) · ✓ completed · 18.5s · exit 0\n\n```text\nAll alignment checks passed\n```".to_string(), None),
+    ] {
+        session.messages_preview.push(PreviewMessage {
+            role: role.to_string(), content, tool_calls: Vec::new(), timestamp: None,
+            tool_data: tool.map(|name| crate::message::ToolCall {
+                id: format!("alignment-{name}"), name: name.to_string(),
+                input: serde_json::json!({"command": "echo alignment"}),
+                intent: Some("Check structured preview alignment".to_string()),
+                thought_signature: None,
+            }),
+        });
+    }
+    for width in [100, 200, 320] {
+        markdown::with_center_code_blocks(true, || {
+            let mut picker = SessionPicker::new(vec![session.clone()]);
+            picker.auto_scroll_preview = false;
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 60)).unwrap();
+            terminal
+                .draw(|frame| picker.render_preview(frame, frame.area()))
+                .unwrap();
+            assert!(
+                markdown::center_code_blocks(),
+                "preview must restore chat context"
+            );
+            let cache = picker.preview_cache.as_ref().unwrap();
+            for needle in [
+                "tool:",
+                "Verify structured preview alignment",
+                "Reviewing the weak points",
+                "Check structured preview alignment",
+                "All alignment checks passed",
+            ] {
+                let line = cache
+                    .wrapped_lines
+                    .iter()
+                    .find(|line| line_text(line).contains(needle))
+                    .unwrap_or_else(|| panic!("missing {needle}"));
+                let text = line_text(line);
+                assert_eq!(line.alignment, Some(Alignment::Left), "{needle}: {line:?}");
+                assert!(
+                    text.chars().take_while(|c| *c == ' ').count() <= 4,
+                    "unwanted centering at width {width}: {text:?}"
+                );
+            }
+        });
+    }
+}
+
+#[test]
 fn test_preview_pane_shows_scrollbar_when_overflowing() {
     let session = make_session_with_many_turns("preview_scroll", 60);
     let mut picker = SessionPicker::new(vec![session]);
@@ -1852,11 +2003,10 @@ fn test_preview_sticky_prompt_header_appears_after_scrolling() {
     // The header marker is a prompt number followed by the chevron.
     assert!(
         header_row
-            .trim_start()
             .chars()
             .next()
             .is_some_and(|c| c.is_ascii_digit()),
-        "sticky header should begin with a prompt number:\nrow={header_row:?}"
+        "sticky header should begin flush left with a prompt number:\nrow={header_row:?}"
     );
 }
 

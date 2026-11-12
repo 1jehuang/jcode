@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 const RELOAD_HANDOFF_EVENT_POLL_MS: i32 = 100;
 
 pub fn reload_marker_path() -> PathBuf {
@@ -95,6 +95,14 @@ pub fn publish_reload_socket_ready() {
 
     let current_pid = std::process::id();
     if state.phase == ReloadPhase::Starting && state.pid == current_pid {
+        super::reload_trace::record_value(
+            &state.request_id,
+            "socket_ready",
+            serde_json::json!({
+                "hash": &state.hash,
+                "detail": &state.detail,
+            }),
+        );
         write_reload_state(
             &state.request_id,
             &state.hash,

@@ -29,13 +29,13 @@ pub enum ErrorKind {
     JcodeNotFound,
     /// The private bridge exited before its socket became ready.
     StartupFailed,
-    /// The private bridge did not become ready before its deadline.
+    /// The private bridge or SSH startup/handshake missed its deadline.
     StartupTimeout,
     /// An instance home was unsafe or aliased the user's own home.
     InvalidInstanceHome,
     /// An option was outside its documented range.
     InvalidOption,
-    /// An operation requires a cloneable native socket transport.
+    /// An operation requires a reconnectable native socket or SSH transport.
     UnsupportedTransport,
     /// A global event consumer fell behind its bounded queue.
     EventBufferOverflow,

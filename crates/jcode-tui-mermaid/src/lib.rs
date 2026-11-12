@@ -48,7 +48,7 @@ use ratatui::widgets::StatefulWidget;
 use ratatui_image::{
     CropOptions, Resize, ResizeEncodeRender, StatefulImage,
     picker::{Picker, ProtocolType, cap_parser::Parser},
-    protocol::StatefulProtocol,
+    protocol::{ImageSource, StatefulProtocol, StatefulProtocolType, sixel::Sixel},
 };
 use serde::Serialize;
 use std::borrow::Cow;
@@ -240,9 +240,10 @@ pub use content_render::terminal_theme;
 pub use content_render::{
     INLINE_DIAGRAM_MAX_ROWS, INLINE_FIT_MIN_ROWS, MermaidContent, TERMINAL_IMAGE_FALLBACK_NOTE,
     diagram_placeholder_lines, error_to_lines, estimate_image_height,
-    image_widget_placeholder_markdown, inline_fit_geometry, inline_image_placeholder_lines,
-    inline_transcript_aspect_goal, inline_transcript_aspect_goal_with_font,
-    parse_image_placeholder, parse_inline_image_placeholder, result_to_content, result_to_lines,
+    image_widget_placeholder_markdown, inline_fit_geometry, inline_fit_geometry_upscaled,
+    inline_image_placeholder_lines, inline_transcript_aspect_goal,
+    inline_transcript_aspect_goal_with_font, parse_image_placeholder,
+    parse_inline_image_placeholder, result_to_content, result_to_lines,
     text_image_fallback_note_line, transcript_preferred_aspect_ratio,
     transcript_preferred_aspect_ratio_with_font, write_video_export_marker,
 };
@@ -415,6 +416,9 @@ static VIDEO_EXPORT_MODE: AtomicBool = AtomicBool::new(false);
 /// Initialized once on first use
 static PICKER: OnceLock<Option<Picker>> = OnceLock::new();
 
+/// Whether the current tmux client can parse and retain sixel images itself.
+static TMUX_NATIVE_SIXEL: OnceLock<bool> = OnceLock::new();
+
 /// Track whether cache eviction has run
 static CACHE_EVICTED: OnceLock<()> = OnceLock::new();
 
@@ -426,6 +430,111 @@ static RENDER_CACHE: LazyLock<Mutex<MermaidCache>> =
 /// UI markdown caches key off this so placeholder-only cached entries are
 /// naturally refreshed on the next redraw.
 static DEFERRED_RENDER_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+/// Mermaid source keyed by the same content hash used by inline image markers.
+/// This lets transcript clicks copy editable Mermaid text instead of PNG pixels.
+static MERMAID_SOURCE_BY_HASH: LazyLock<Mutex<HashMap<u64, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static MERMAID_INLINE_EXPAND_LEVEL: LazyLock<Mutex<HashMap<u64, u8>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static MERMAID_INLINE_EXPAND_EPOCH: AtomicU64 = AtomicU64::new(0);
+/// Placeholder `(rows, cols)` for each inline expand level.
+type InlineLevelGeometry = [(u16, u16); 3];
+static MERMAID_INLINE_LEVEL_GEOMETRY: LazyLock<Mutex<HashMap<u64, InlineLevelGeometry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub fn mermaid_source_for_hash(hash: u64) -> Option<String> {
+    MERMAID_SOURCE_BY_HASH
+        .lock()
+        .ok()
+        .and_then(|sources| sources.get(&hash).cloned())
+}
+
+pub fn set_mermaid_inline_expand_level(hash: u64, level: u8) {
+    if let Ok(mut levels) = MERMAID_INLINE_EXPAND_LEVEL.lock() {
+        let previous = levels.get(&hash).copied().unwrap_or(0);
+        let level = level.min(2);
+        if level == 0 {
+            levels.remove(&hash);
+        } else {
+            levels.insert(hash, level);
+        }
+        if previous != level {
+            MERMAID_INLINE_EXPAND_EPOCH.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+pub fn mermaid_inline_expand_epoch() -> u64 {
+    MERMAID_INLINE_EXPAND_EPOCH.load(Ordering::Relaxed)
+}
+
+pub fn next_distinct_mermaid_inline_level(hash: u64, current: u8) -> u8 {
+    let Some(geometries) = MERMAID_INLINE_LEVEL_GEOMETRY
+        .lock()
+        .ok()
+        .and_then(|all| all.get(&hash).copied())
+    else {
+        return (current + 1) % 3;
+    };
+    let current = current.min(2);
+    for offset in 1..=3 {
+        let candidate = (current + offset) % 3;
+        if geometries[candidate as usize] != geometries[current as usize] {
+            return candidate;
+        }
+    }
+    0
+}
+
+pub fn register_inline_level_geometries(hash: u64, geometries: [(u16, u16); 3]) {
+    if let Ok(mut all) = MERMAID_INLINE_LEVEL_GEOMETRY.lock() {
+        all.insert(hash, geometries);
+    }
+}
+
+#[cfg(test)]
+mod distinct_level_tests {
+    use super::*;
+
+    #[test]
+    fn skips_duplicate_levels_in_two_size_cycle() {
+        let hash = 0xd157_1ac7;
+        register_inline_level_geometries(hash, [(10, 20), (20, 40), (20, 40)]);
+        assert_eq!(next_distinct_mermaid_inline_level(hash, 0), 1);
+        assert_eq!(next_distinct_mermaid_inline_level(hash, 1), 0);
+    }
+
+    #[test]
+    fn preserves_three_distinct_levels_and_collapses_one_size_cycle() {
+        let three = 0xd157_1ac8;
+        register_inline_level_geometries(three, [(10, 20), (20, 40), (30, 60)]);
+        assert_eq!(next_distinct_mermaid_inline_level(three, 0), 1);
+        assert_eq!(next_distinct_mermaid_inline_level(three, 1), 2);
+        assert_eq!(next_distinct_mermaid_inline_level(three, 2), 0);
+
+        let one = 0xd157_1ac9;
+        register_inline_level_geometries(one, [(10, 20); 3]);
+        assert_eq!(next_distinct_mermaid_inline_level(one, 0), 0);
+    }
+}
+
+pub(crate) fn mermaid_inline_expand_level(hash: u64) -> u8 {
+    MERMAID_INLINE_EXPAND_LEVEL
+        .lock()
+        .ok()
+        .and_then(|levels| levels.get(&hash).copied())
+        .unwrap_or(0)
+}
+
+pub(crate) fn remember_mermaid_source(hash: u64, content: &str) {
+    if let Ok(mut sources) = MERMAID_SOURCE_BY_HASH.lock() {
+        if sources.len() >= RENDER_CACHE_MAX && !sources.contains_key(&hash) {
+            sources.clear();
+        }
+        sources.insert(hash, content.to_string());
+    }
+}
 
 /// Count of `path.exists()`/`read_dir` filesystem stat syscalls performed by
 /// the render-cache lookup paths. The inline-image scroll hot path used to pay

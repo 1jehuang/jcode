@@ -10,6 +10,7 @@ import worker from "../src/worker.js";
 
 const EVENT_URL = "https://telemetry.example/v1/event";
 const HEALTH_URL = "https://telemetry.example/v1/health";
+const TRANSCRIPT_URL = "https://telemetry.example/v1/transcript";
 
 function makeBody(overrides = {}) {
   return {
@@ -91,6 +92,36 @@ function postRequest(body, url = EVENT_URL) {
   });
 }
 
+function makeTranscriptBody(overrides = {}) {
+  return {
+    id: "11111111-2222-4333-8444-555555555555",
+    event: "transcript",
+    upload_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    consent_version: 1,
+    schema_version: 6,
+    version: "0.0.0-test",
+    os: "linux",
+    arch: "x86_64",
+    provider: "test-provider",
+    model: "test-model",
+    end_reason: "normal_exit",
+    message_count: 1,
+    messages: [{ role: "user", content: [{ type: "text", text: "private prompt" }] }],
+    ...overrides,
+  };
+}
+
+function makeR2() {
+  const puts = [];
+  const deletes = [];
+  return {
+    puts,
+    deletes,
+    async put(key, value, options) { puts.push({ key, value, options }); },
+    async delete(key) { deletes.push(key); },
+  };
+}
+
 // Minimal D1 mock. `plan` lets tests fail specific statements or set the
 // reported database size.
 function makeDb(plan = {}) {
@@ -107,7 +138,7 @@ function makeDb(plan = {}) {
               if (plan.failInserts && /^INSERT/i.test(sql.trim())) {
                 throw new Error(plan.failureMessage || "generic transient error");
               }
-              return { meta: { changes: 1, size_after: sizeAfter } };
+              return { meta: { changes: /^DELETE/i.test(sql.trim()) ? 0 : 1, size_after: sizeAfter } };
             },
             async all() {
               executed.push({ sql, values });
@@ -206,6 +237,81 @@ function makeDb(plan = {}) {
   };
 }
 
+test("consented transcript is stored in private R2 with D1 metadata", async () => {
+  const db = makeDb();
+  const r2 = makeR2();
+  const response = await worker.fetch(
+    postRequest(makeTranscriptBody(), TRANSCRIPT_URL),
+    { DB: db, TRANSCRIPTS: r2 },
+    {},
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(r2.puts.length, 1);
+  assert.match(r2.puts[0].key, /^transcripts\/\d{4}-\d{2}\/aaaaaaaa-/);
+  assert.match(r2.puts[0].value, /private prompt/);
+  assert.equal(r2.puts[0].options.customMetadata.consent_version, "1");
+  assert.ok(db.executed.some(({ sql }) => /INSERT INTO transcript_uploads/.test(sql)));
+});
+
+test("transcript storage redacts credentials but preserves ordinary code", async () => {
+  const r2 = makeR2();
+  const secret = "sk-ant-oat01-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  const bearer = "Bearer abcdefghijklmnopqrstuvwxyz0123456789";
+  const code = "fn add(a: i32, b: i32) -> i32 { a + b }";
+  const body = makeTranscriptBody({
+    messages: [{
+      role: "user",
+      content: [{
+        type: "tool_use",
+        input: {
+          source: code,
+          api_key: secret,
+          command: `curl -H 'Authorization: ${bearer}'\n${code}`,
+        },
+      }],
+    }],
+  });
+
+  const response = await worker.fetch(
+    postRequest(body, TRANSCRIPT_URL),
+    { DB: makeDb(), TRANSCRIPTS: r2 },
+    {},
+  );
+  assert.equal(response.status, 200);
+  const stored = r2.puts[0].value;
+  assert.ok(!stored.includes(secret));
+  assert.ok(!stored.includes("abcdefghijklmnopqrstuvwxyz0123456789"));
+  assert.match(stored, /\[REDACTED_SECRET\]/);
+  assert.match(stored, /fn add\(a: i32, b: i32\)/);
+});
+
+test("transcript endpoint rejects missing explicit consent version", async () => {
+  const response = await worker.fetch(
+    postRequest(makeTranscriptBody({ consent_version: 0 }), TRANSCRIPT_URL),
+    { DB: makeDb(), TRANSCRIPTS: makeR2() },
+    {},
+  );
+  assert.equal(response.status, 400);
+  assert.match(await response.text(), /Unsupported consent version/);
+});
+
+test("transcript endpoint fails closed when private storage is unavailable", async () => {
+  const response = await worker.fetch(
+    postRequest(makeTranscriptBody(), TRANSCRIPT_URL),
+    { DB: makeDb() },
+    {},
+  );
+  assert.equal(response.status, 503);
+});
+
+test("transcript endpoint rejects declared oversized payload before parsing", async () => {
+  const request = postRequest(makeTranscriptBody(), TRANSCRIPT_URL);
+  request.headers.set("content-length", String(9 * 1024 * 1024));
+  const response = await worker.fetch(request, { DB: makeDb(), TRANSCRIPTS: makeR2() }, {});
+  assert.equal(response.status, 413);
+});
+
 function makeFirehose() {
   const points = [];
   return {
@@ -260,6 +366,49 @@ test("event is dual-written: firehose point + D1 insert", async () => {
   assert.equal(point.doubles.length, 20);
 
   assert.ok(db.executed.some(({ sql }) => /INSERT OR IGNORE INTO events/.test(sql)));
+});
+
+test("prompt_submitted is accepted and marks meaningful daily activity", async () => {
+  const db = makeDb();
+  const response = await worker.fetch(
+    postRequest(makeBody({
+      event: "prompt_submitted",
+      event_id: "prompt-1",
+      session_id: "session-1",
+      turn_index: 1,
+      build_channel: "release",
+    })),
+    { DB: db },
+    makeCtx(),
+  );
+
+  assert.equal(response.status, 200);
+  const eventInsert = db.executed.find(({ sql }) => /INSERT OR IGNORE INTO events/.test(sql));
+  assert.ok(eventInsert, "prompt event should be persisted");
+  const rollup = db.executed.find(({ sql }) => /INSERT INTO daily_active_users/.test(sql));
+  assert.ok(rollup, "prompt event should update daily activity");
+  assert.equal(rollup.values[2], 1, "prompt activity should be meaningful");
+  assert.equal(rollup.values[4], 1, "release prompt activity should be meaningful release activity");
+});
+
+test("telemetry_opt_out is accepted and persists only coarse metadata", async () => {
+  const db = makeDb();
+  const response = await worker.fetch(
+    postRequest(makeBody({
+      event: "telemetry_opt_out",
+      event_id: "opt-out-1",
+      step: "telemetry_settings",
+    })),
+    { DB: db },
+    makeCtx(),
+  );
+
+  assert.equal(response.status, 200);
+  const insert = db.executed.find(({ sql }) => /INSERT OR IGNORE INTO events/.test(sql));
+  assert.ok(insert, "opt-out event should be persisted");
+  assert.ok(columnIndex(insert.sql, "step") >= 0);
+  assert.equal(insert.values[columnIndex(insert.sql, "step")], "telemetry_settings");
+  assert.equal(columnIndex(insert.sql, "session_id"), -1);
 });
 
 test("session_end persists todo telemetry into session_details", async () => {
@@ -379,6 +528,27 @@ test("discovery telemetry accepts the catalog suggest phase", async () => {
   assert.equal(detailInsert.values[columns.indexOf("phase")], "suggest");
 });
 
+test("discovery telemetry accepts and persists the catalog details phase", async () => {
+  const db = makeDb();
+  const discoveryFirehose = makeFirehose();
+  const response = await worker.fetch(
+    postRequest(makeDiscoveryBody({
+      phase: "details",
+      selected_tool: "agentcard",
+      result_count: 1,
+    })),
+    { DB: db, FIREHOSE_DISCOVERY: discoveryFirehose },
+    makeCtx(),
+  );
+  assert.equal(response.status, 200);
+  assert.equal(discoveryFirehose.points[0].blobs[8], "details");
+  assert.equal(discoveryFirehose.points[0].blobs[10], "agentcard");
+  const detailInsert = db.executed.find(({ sql }) => /INSERT OR IGNORE INTO discovery_details/.test(sql));
+  const columns = detailInsert.sql.match(/\(([^)]+)\)/)[1].split(", ");
+  assert.equal(detailInsert.values[columns.indexOf("phase")], "details");
+  assert.equal(detailInsert.values[columns.indexOf("selected_tool")], "agentcard");
+});
+
 test("discovery event rejects unknown failure classifications", async () => {
   const response = await worker.fetch(
     postRequest(makeDiscoveryBody({ outcome: "failure", failure_reason: "raw secret error" })),
@@ -481,7 +651,7 @@ test("health endpoint reports database size vs soft limit", async () => {
   assert.equal(response.status, 200);
   assert.equal(json.ok, true);
   assert.equal(json.db_size_bytes, 12345678);
-  assert.equal(json.db_soft_limit_bytes, 4_500_000_000);
+  assert.equal(json.db_soft_limit_bytes, 8_000_000_000);
   assert.equal(json.over_soft_limit, false);
 });
 
@@ -499,7 +669,7 @@ test("paid-plan database size below the budget guardrail is healthy", async () =
 });
 
 test("database size above the paid-plan budget guardrail is reported", async () => {
-  const db = makeDb({ sizeAfter: 4_600_000_000 });
+  const db = makeDb({ sizeAfter: 8_100_000_000 });
   const response = await worker.fetch(
     new Request(HEALTH_URL, { method: "GET" }),
     { DB: db },
@@ -507,7 +677,7 @@ test("database size above the paid-plan budget guardrail is reported", async () 
   );
   const json = await response.json();
 
-  assert.equal(json.db_size_bytes, 4_600_000_000);
+  assert.equal(json.db_size_bytes, 8_100_000_000);
   assert.equal(json.over_soft_limit, true);
 });
 
@@ -1053,6 +1223,30 @@ test("lifecycle events stamp last_country on the DAU rollup", async () => {
   // last_country is the final bound placeholder (raw_active is a literal 1, so
   // column positions and bind positions are intentionally not aligned).
   assert.equal(dau.values[dau.values.length - 1], "JP");
+});
+
+test("CI-built artifacts count as releases without becoming runtime CI", async () => {
+  const db = makeDb();
+  const response = await worker.fetch(
+    postRequest(makeBody({
+      event: "session_end",
+      event_id: "se-ci-built-release",
+      build_channel: "ci_release",
+      is_ci: false,
+      turns: 1,
+    })),
+    { DB: db },
+    makeCtx(),
+  );
+  assert.equal(response.status, 200);
+
+  const dau = db.executed.find(({ sql }) => /INSERT INTO daily_active_users/.test(sql));
+  assert.ok(dau, "daily_active_users rollup should be written");
+  assert.equal(dau.values[3], 1, "CI-built binary remains release activity");
+  assert.equal(dau.values[4], 1, "meaningful CI-built work remains release activity");
+  assert.equal(dau.values[9], 0, "build provenance must not imply runtime CI");
+  assert.equal(dau.values[10], 0, "last runtime CI flag remains false");
+  assert.equal(dau.values[11], "ci_release");
 });
 
 test("client-supplied country is ignored and bogus codes are dropped", async () => {

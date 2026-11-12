@@ -1,0 +1,22 @@
+{
+  "version": "0.76.0",
+  "date": "2026-08-14",
+  "title": "Transcript privacy and broader provider support",
+  "highlights": [
+    "Opt-in transcript telemetry now supports privacy-preserving collection with automatic secret redaction",
+    "Anthropic-compatible provider profiles can now connect to additional compatible services",
+    "Grok Build login can now be completed directly inside the TUI"
+  ],
+  "improvements": [
+    "Startup update checks can now be disabled in configuration",
+    "Transient provider retries are more resilient and configurable",
+    "Z.AI Coding Plan supports reasoning effort controls and safely handles text-only models"
+  ],
+  "fixes": [
+    "OpenRouter responses preserve tool outputs even when the corresponding tool call is unavailable",
+    "Prompt files are deduplicated and oversized skill context is clipped",
+    "Repeated paste placeholders expand correctly",
+    "Self-development builds promote artifacts to the correct paths",
+    "Grok model lists refresh after login and use the current managed backend"
+  ]
+}

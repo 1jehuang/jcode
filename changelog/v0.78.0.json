@@ -1,0 +1,13 @@
+{
+  "version": "0.78.0",
+  "date": "2026-08-18",
+  "highlights": [
+    "Harness API and SDK clients can now receive images embedded in transcript messages"
+  ],
+  "improvements": [
+    "Todo quality checks now give shorter, clearer guidance and avoid repeatedly blocking final responses"
+  ],
+  "fixes": [
+    "Completed hook observers are now cleaned up reliably instead of accumulating over time"
+  ]
+}

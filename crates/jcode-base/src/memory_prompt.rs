@@ -40,7 +40,8 @@ fn format_content_block_for_relevance(block: &crate::message::ContentBlock) -> O
         crate::message::ContentBlock::Reasoning { .. }
         | crate::message::ContentBlock::ReasoningTrace { .. }
         | crate::message::ContentBlock::AnthropicThinking { .. }
-        | crate::message::ContentBlock::OpenAIReasoning { .. } => None,
+        | crate::message::ContentBlock::OpenAIReasoning { .. }
+        | crate::message::ContentBlock::ToolReference { .. } => None,
         crate::message::ContentBlock::Image { .. } => Some("[Image]".to_string()),
         crate::message::ContentBlock::OpenAICompaction { .. } => {
             Some("[OpenAI native compaction]".to_string())
@@ -78,7 +79,8 @@ fn format_content_block_for_extraction(block: &crate::message::ContentBlock) -> 
         crate::message::ContentBlock::Reasoning { .. }
         | crate::message::ContentBlock::ReasoningTrace { .. }
         | crate::message::ContentBlock::AnthropicThinking { .. }
-        | crate::message::ContentBlock::OpenAIReasoning { .. } => None,
+        | crate::message::ContentBlock::OpenAIReasoning { .. }
+        | crate::message::ContentBlock::ToolReference { .. } => None,
         crate::message::ContentBlock::Image { .. } => Some("[Image]".to_string()),
         crate::message::ContentBlock::OpenAICompaction { .. } => {
             Some("[OpenAI native compaction]".to_string())

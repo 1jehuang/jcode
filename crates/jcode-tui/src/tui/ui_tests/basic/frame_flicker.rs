@@ -1,4 +1,51 @@
 #[test]
+fn test_reset_available_hint_renders_and_keeps_redrawing_at_deep_idle() {
+    let _lock = viewport_snapshot_test_lock();
+    let mut state = TestState {
+        display_messages: vec![DisplayMessage::system("seed")],
+        time_since_activity: Some(crate::tui::REDRAW_DEEP_IDLE_AFTER + Duration::from_secs(1)),
+        openai_reset_hint: Some(
+            "2 resets available · expiry unknown (2 resets) · /reset usage limits openai",
+        ),
+        ..Default::default()
+    };
+    assert!(crate::tui::TuiState::has_notification(&state));
+    assert!(crate::tui::periodic_redraw_required(&state));
+    assert_ne!(
+        crate::tui::redraw_interval(&state),
+        crate::tui::REDRAW_DEEP_IDLE
+    );
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 3)).unwrap();
+    terminal
+        .draw(|frame| input_ui::draw_notification(frame, &state, Rect::new(0, 1, 80, 1)))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let rows: Vec<String> = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect()
+        })
+        .collect();
+    assert!(
+        rows[1].contains(
+            "2 resets available · expiry unknown (2 resets) · /reset usage limits openai"
+        )
+    );
+    assert!(rows[0].trim().is_empty());
+    assert!(rows[2].trim().is_empty());
+
+    state.openai_reset_hint = None;
+    assert!(!crate::tui::TuiState::has_notification(&state));
+    assert!(!crate::tui::periodic_redraw_required(&state));
+    assert_eq!(
+        crate::tui::redraw_interval(&state),
+        crate::tui::REDRAW_DEEP_IDLE
+    );
+}
+
+#[test]
 fn test_redraw_interval_uses_low_frequency_during_remote_startup_phase() {
     let idle = TestState {
         anim_elapsed: 10.0,
@@ -85,6 +132,7 @@ fn test_cold_cache_warning_keeps_redrawing_at_deep_idle() {
         display_messages: vec![DisplayMessage::system("seed".to_string())],
         time_since_activity: Some(deep_idle),
         cache_ttl_status: Some(crate::tui::CacheTtlInfo {
+            is_estimate: false,
             remaining_secs: 0,
             ttl_secs: 300,
             is_cold: true,
@@ -108,6 +156,7 @@ fn test_cold_cache_warning_keeps_redrawing_at_deep_idle() {
         display_messages: vec![DisplayMessage::system("seed".to_string())],
         time_since_activity: Some(deep_idle),
         cache_ttl_status: Some(crate::tui::CacheTtlInfo {
+            is_estimate: false,
             remaining_secs: 30,
             ttl_secs: 300,
             is_cold: false,
@@ -127,6 +176,7 @@ fn test_cold_cache_warning_keeps_redrawing_at_deep_idle() {
         display_messages: vec![DisplayMessage::system("seed".to_string())],
         time_since_activity: Some(deep_idle),
         cache_ttl_status: Some(crate::tui::CacheTtlInfo {
+            is_estimate: false,
             remaining_secs: 300,
             ttl_secs: 3600,
             is_cold: false,
@@ -145,6 +195,7 @@ fn test_cold_cache_warning_keeps_redrawing_at_deep_idle() {
         display_messages: vec![DisplayMessage::system("seed".to_string())],
         time_since_activity: Some(deep_idle),
         cache_ttl_status: Some(crate::tui::CacheTtlInfo {
+            is_estimate: false,
             remaining_secs: 200,
             ttl_secs: 300,
             is_cold: false,
@@ -991,4 +1042,133 @@ fn test_flicker_frame_history_ignores_manual_scroll_feedback() {
     let payload = debug_flicker_frame_history(8);
     assert_eq!(payload["buffered_samples"], 3);
     assert_eq!(payload["buffered_events"], 0);
+}
+
+#[test]
+fn test_cache_retention_estimates_never_create_proactive_expiry_ui() {
+    let _lock = viewport_snapshot_test_lock();
+    for ttl_secs in [300, 1800, 86400] {
+        for remaining_secs in [ttl_secs, 180, 30, 0] {
+            let info = crate::tui::CacheTtlInfo {
+                is_estimate: true,
+                remaining_secs,
+                ttl_secs,
+                is_cold: remaining_secs == 0,
+                cold_for_secs: 90,
+                cached_tokens: Some(4000),
+            };
+            assert!(!info.expiring_soon());
+            assert!(!info.expiry_notification_active());
+            let state = TestState {
+                display_messages: vec![DisplayMessage::system("seed")],
+                time_since_activity: Some(
+                    crate::tui::REDRAW_DEEP_IDLE_AFTER + Duration::from_secs(1),
+                ),
+                cache_ttl_status: Some(info),
+                ..Default::default()
+            };
+            let text = crate::tui::ui::input_ui::build_notification_spans(&state)
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            assert!(
+                !text.contains("cache"),
+                "estimated TTL {ttl_secs}, remaining {remaining_secs}: {text}"
+            );
+            assert!(!crate::tui::TuiState::has_notification(&state));
+            assert!(!crate::tui::periodic_redraw_required(&state));
+            assert_eq!(
+                crate::tui::redraw_interval(&state),
+                crate::tui::REDRAW_DEEP_IDLE
+            );
+        }
+    }
+}
+
+#[test]
+fn test_cache_explicit_ttls_keep_expiry_notifications() {
+    let _lock = viewport_snapshot_test_lock();
+    for ttl_secs in [300, 3600] {
+        for (remaining_secs, expected) in [(30, "cache 30s"), (0, "cache cold")] {
+            let state = TestState {
+                cache_ttl_status: Some(crate::tui::CacheTtlInfo {
+                    is_estimate: false,
+                    remaining_secs,
+                    ttl_secs,
+                    is_cold: remaining_secs == 0,
+                    cold_for_secs: 10,
+                    cached_tokens: Some(4000),
+                }),
+                ..Default::default()
+            };
+            assert!(crate::tui::TuiState::has_notification(&state));
+            let text = crate::tui::ui::input_ui::build_notification_spans(&state)
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            assert!(text.contains(expected), "{text}");
+        }
+    }
+}
+
+#[test]
+fn test_reset_expiry_notification_wraps_without_losing_details() {
+    let _lock = viewport_snapshot_test_lock();
+    let hint = "2 resets available · expires 2099-05-01 00:00 UTC, expires 2099-06-01 00:00 UTC · /reset usage limits openai";
+    for width in [30, 47, 80, 160] {
+        let state = TestState {
+            openai_reset_hint: Some(hint),
+            ..Default::default()
+        };
+        let height = input_ui::notification_height(&state, width);
+        assert!(height > 0);
+        if width < 100 {
+            assert!(height > 1);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                input_ui::draw_notification(frame, &state, Rect::new(0, 0, width, height))
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered: String = (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .map(|cell| buffer[cell].symbol())
+            .collect();
+        // Whitespace may change at wrap boundaries, but no content may disappear.
+        assert_eq!(
+            rendered.split_whitespace().collect::<String>(),
+            hint.split_whitespace().collect::<String>()
+        );
+    }
+}
+
+#[test]
+fn test_reset_expiry_notification_full_frame_reserves_wrapped_height() {
+    let _lock = viewport_snapshot_test_lock();
+    let hint = "2 resets available · expires 2099-05-01 00:00 UTC, expires 2099-06-01 00:00 UTC · /reset usage limits openai";
+    for width in [30, 47, 80] {
+        clear_flicker_frame_history_for_tests();
+        let state = TestState {
+            display_messages: vec![DisplayMessage::assistant("quota exhausted")],
+            messages_version: 1,
+            openai_reset_hint: Some(hint),
+            ..Default::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &state))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered: String = (0..24)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .map(|cell| buffer[cell].symbol())
+            .collect();
+        let compact = rendered.split_whitespace().collect::<String>();
+        assert!(
+            compact.contains(&hint.split_whitespace().collect::<String>()),
+            "reset details clipped at width {width}: {rendered}"
+        );
+    }
 }

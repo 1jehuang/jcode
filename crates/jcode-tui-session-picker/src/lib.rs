@@ -36,6 +36,9 @@ pub use jcode_session_types::ResumeTarget;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SessionFilterMode {
     All,
+    /// Sessions whose working directory matches the directory `/resume` was
+    /// opened from.
+    CurrentDir,
     CatchUp,
     Saved,
     /// Sessions with a live process right now (from the active-pid registry),
@@ -56,7 +59,8 @@ pub enum SessionFilterMode {
 impl SessionFilterMode {
     pub fn next(self) -> Self {
         match self {
-            Self::All => Self::CatchUp,
+            Self::All => Self::CurrentDir,
+            Self::CurrentDir => Self::CatchUp,
             Self::CatchUp => Self::Saved,
             Self::Saved => Self::Active,
             Self::Active => Self::ClaudeCode,
@@ -74,7 +78,8 @@ impl SessionFilterMode {
     pub fn previous(self) -> Self {
         match self {
             Self::All => Self::Cursor,
-            Self::CatchUp => Self::All,
+            Self::CurrentDir => Self::All,
+            Self::CatchUp => Self::CurrentDir,
             Self::Saved => Self::CatchUp,
             Self::Active => Self::Saved,
             Self::ClaudeCode => Self::Active,
@@ -89,6 +94,7 @@ impl SessionFilterMode {
     pub fn label(self) -> Option<&'static str> {
         match self {
             Self::All => None,
+            Self::CurrentDir => Some("📁 current dir"),
             Self::CatchUp => Some("⏭ catch up"),
             Self::Saved => Some("📌 saved"),
             Self::Active => Some("⚡ active"),

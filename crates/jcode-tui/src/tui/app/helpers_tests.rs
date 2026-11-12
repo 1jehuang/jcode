@@ -1,7 +1,8 @@
 use super::{
-    build_resume_command, effort_display_label, extract_bracketed_system_message,
-    format_countdown_until, gather_ambient_info_inner, inferred_reasoning_efforts,
-    partition_queued_messages, resume_invocation_args, resumed_window_title,
+    build_resume_command, effort_display_label, effort_display_label_with_root,
+    extract_bracketed_system_message, format_countdown_until, gather_ambient_info_inner,
+    inferred_reasoning_efforts, partition_queued_messages, resume_invocation_args,
+    resumed_window_title,
 };
 use crate::ambient::{AmbientManager, Priority, ScheduleRequest, ScheduleTarget};
 use crate::terminal_launch::{detected_resume_terminal, shell_command};
@@ -160,16 +161,40 @@ fn inferred_reasoning_efforts_use_provider_specific_order_and_max_semantics() {
 }
 
 #[test]
-fn swarm_effort_display_labels_are_marked_beta() {
+fn swarm_effort_display_labels_use_configured_root_and_preserve_modes() {
+    for (level, title) in [
+        ("none", "None"),
+        ("minimal", "Minimal"),
+        ("low", "Low"),
+        ("medium", "Medium"),
+        ("high", "High"),
+        ("xhigh", "xHigh"),
+        ("max", "Max"),
+    ] {
+        assert_eq!(
+            effort_display_label_with_root("swarm", Some(level)),
+            format!("Swarm ({title} + light fan-out) [Beta]")
+        );
+        assert_eq!(
+            effort_display_label_with_root("swarm-deep", Some(level)),
+            format!("Swarm Deep ({title} + task graph) [Beta]")
+        );
+        assert_eq!(effort_display_label_with_root("high", Some(level)), "High");
+    }
+}
+
+#[test]
+fn swarm_effort_display_labels_default_to_max() {
     assert_eq!(
-        effort_display_label("swarm"),
-        "Swarm (light fan-out) [Beta]"
+        effort_display_label_with_root("swarm", None),
+        "Swarm (Max + light fan-out) [Beta]"
     );
     assert_eq!(
-        effort_display_label("swarm-deep"),
+        effort_display_label_with_root("swarm-deep", None),
         "Swarm Deep (Max + task graph) [Beta]"
     );
     assert_eq!(effort_display_label("high"), "High");
+    assert_eq!(effort_display_label("future"), "future");
 }
 
 #[cfg(unix)]

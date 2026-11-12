@@ -13,6 +13,11 @@ pub const DEFAULT_MODEL: &str = "composer-2.5";
 
 pub const AVAILABLE_MODELS: &[&str] = &[
     "composer-2.5",
+    // Cursor's /v0/models catalog lags its backend: these serve fine but are
+    // not advertised. Verified live against api2.cursor.sh on 2026-09-22.
+    // Only the bare slugs resolve; `-high`/`-fast` suffixed forms 404.
+    "grok-4.7",
+    "grok-4.6",
     "composer-2-fast",
     "composer-2",
     "gpt-5.4-high",

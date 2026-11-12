@@ -81,19 +81,10 @@ impl ProtectedPaths {
 /// This is lexical only: it never touches the filesystem, so it is safe to call
 /// on paths that do not exist and cannot be slowed down by a hostile argument.
 pub fn expand(raw: &str, ctx: &RiskContext) -> PathBuf {
-    let mut text = raw.to_string();
-
-    if let Some(home) = &ctx.home_dir {
-        let home_str = home.to_string_lossy().to_string();
-        // Order matters: replace the longer forms first.
-        for var in ["${HOME}", "$HOME"] {
-            text = text.replace(var, &home_str);
-        }
-        if text == "~" {
-            text = home_str.clone();
-        } else if let Some(rest) = text.strip_prefix("~/") {
-            text = format!("{home_str}/{rest}");
-        }
+    let text = expand_known_prefix(raw, ctx);
+    // Never normalize unresolved substitutions away (e.g. `$UNKNOWN/..`).
+    if text.contains(['$', '`']) {
+        return PathBuf::from(text);
     }
 
     let path = PathBuf::from(&text);
@@ -104,6 +95,33 @@ pub fn expand(raw: &str, ctx: &RiskContext) -> PathBuf {
         Some(cwd) => normalize(&cwd.join(path)),
         None => path,
     }
+}
+
+/// Expand only complete, known leading variables. Prefix lookalikes such as
+/// `$HOME_BACKUP` and shell parameter operators remain unresolved.
+fn expand_known_prefix(raw: &str, ctx: &RiskContext) -> String {
+    for (name, value) in [
+        ("HOME", &ctx.home_dir),
+        ("JCODE_SCRATCH_DIR", &ctx.scratch_dir),
+    ] {
+        let Some(value) = value else { continue };
+        for prefix in [format!("${name}"), format!("${{{name}}}")] {
+            if let Some(rest) = raw.strip_prefix(&prefix)
+                && (rest.is_empty() || rest.starts_with('/'))
+            {
+                return format!("{}{rest}", value.display());
+            }
+        }
+    }
+    if let Some(home) = &ctx.home_dir {
+        if raw == "~" {
+            return home.display().to_string();
+        }
+        if let Some(rest) = raw.strip_prefix("~/") {
+            return format!("{}/{rest}", home.display());
+        }
+    }
+    raw.to_string()
 }
 
 /// Lexically remove `.` and `..` so `/home/u/../..` is seen as `/`.
@@ -180,7 +198,9 @@ pub fn classify_target(
 ) -> Option<RiskFinding> {
     // Glob and variable expansion we did not perform: we cannot know the
     // footprint, so escalate rather than guess.
-    if raw.contains('*') || raw.contains('?') {
+    if (raw.contains('*') || raw.contains('?'))
+        && !expand_known_prefix(raw, ctx).contains(['$', '`'])
+    {
         // A bare `/*` or `~/*` is catastrophic in effect even though no single
         // resolved path is protected.
         if let Some(parent_of_glob) = expanded.parent()
@@ -192,6 +212,24 @@ pub fn classify_target(
                 reason: "would destroy the entire contents of a protected directory".to_string(),
                 target: Some(raw.to_string()),
             });
+        }
+        // A glob in a filename cannot escape its concrete parent directory.
+        // Keep wildcard directory components conservative because their parent
+        // is not the actual expansion boundary (`/home/u/*/node_modules`).
+        if let Some(parent) = expanded.parent()
+            && !parent.to_string_lossy().contains(['*', '?'])
+        {
+            let inside_cwd = ctx
+                .working_dir
+                .as_ref()
+                .is_some_and(|cwd| parent.starts_with(normalize(cwd)));
+            if inside_cwd || is_temp_path(parent) {
+                return Some(RiskFinding {
+                    level: RiskLevel::Low,
+                    reason: "glob is bounded to the working or temporary directory".to_string(),
+                    target: Some(raw.to_string()),
+                });
+            }
         }
         return Some(RiskFinding {
             level: RiskLevel::Confirm,
@@ -215,7 +253,7 @@ pub fn classify_target(
         });
     }
 
-    if raw.contains('$') || raw.contains('`') {
+    if expand_known_prefix(raw, ctx).contains(['$', '`']) {
         return Some(RiskFinding {
             level: RiskLevel::Confirm,
             reason: "target is computed at runtime (variable or command \
@@ -258,9 +296,14 @@ pub fn classify_target(
         return None;
     }
 
+    // A concrete path being outside the workspace is not, by itself, a reason
+    // to interrupt the agent. Protected home/system paths and unknown targets
+    // have already returned above. Keep this as Low so the operation remains
+    // visible in risk logs without requiring a justification retry.
     Some(RiskFinding {
-        level: RiskLevel::Confirm,
-        reason: "targets a path outside the working directory".to_string(),
+        level: RiskLevel::Low,
+        reason: "destructive operation targets a concrete path outside the working directory"
+            .to_string(),
         target: Some(expanded.display().to_string()),
     })
 }

@@ -52,6 +52,8 @@ fn explicit_context_window_still_wins_over_the_ollama_clamp() {
         models: vec![jcode_base::config::NamedProviderModelConfig {
             id: "qwen3:35b".to_string(),
             context_window: Some(65_536),
+            reasoning: None,
+            reasoning_effort: None,
             input: Vec::new(),
         }],
         ..Default::default()
@@ -63,4 +65,23 @@ fn explicit_context_window_still_wins_over_the_ollama_clamp() {
         OpenRouterProvider::new_named_openai_compatible("ollama", &config).expect("provider");
 
     assert_eq!(provider.context_window(), 65_536);
+}
+
+#[test]
+fn ollama_cloud_model_is_not_clamped_to_the_local_runner_default() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let mut config = jcode_base::config::NamedProviderConfig {
+        base_url: "http://localhost:11434/v1".to_string(),
+        auth: jcode_base::config::NamedProviderAuth::None,
+        default_model: Some("glm-5.2:cloud".to_string()),
+        ..Default::default()
+    };
+    config.model_catalog = false;
+    config.requires_api_key = Some(false);
+
+    let provider =
+        OpenRouterProvider::new_named_openai_compatible("ollama", &config).expect("provider");
+
+    assert_eq!(provider.context_window(), 1_000_000);
 }

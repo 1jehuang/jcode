@@ -12,6 +12,12 @@ use std::time::Instant;
 static ANTHROPIC_USAGE_CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, UsageData>>> =
     std::sync::OnceLock::new();
 
+static OPENAI_USAGE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(super) fn openai_usage_generation() -> u64 {
+    OPENAI_USAGE_GENERATION.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Shared OpenAI usage cache keyed by account label/token prefix.
 static OPENAI_ACCOUNT_USAGE_CACHE: std::sync::OnceLock<
     std::sync::Mutex<HashMap<String, OpenAIUsageData>>,
@@ -23,6 +29,50 @@ fn anthropic_usage_cache() -> &'static std::sync::Mutex<HashMap<String, UsageDat
 
 fn openai_usage_cache() -> &'static std::sync::Mutex<HashMap<String, OpenAIUsageData>> {
     OPENAI_ACCOUNT_USAGE_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+pub(super) fn invalidate_openai_usage_after_reset(access_token: &str, account_label: Option<&str>) {
+    if let Ok(mut map) = openai_usage_cache().lock() {
+        OPENAI_USAGE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if account_label.is_none() && access_token.is_empty() {
+            // A daemon cannot receive the TUI's bearer token over the protocol.
+            // Legacy/external OAuth caches have token keys, not account labels.
+            map.retain(|key, _| !key.starts_with("token:"));
+        } else {
+            map.remove(&openai_usage_cache_key(access_token, account_label));
+            map.remove(&openai_usage_cache_key(access_token, None));
+        }
+    }
+    if let Some(cache) = super::PROVIDER_USAGE_CACHE.get()
+        && let Ok(mut map) = cache.lock()
+    {
+        // Removing just OpenAI can leave an all-fresh map of other providers,
+        // causing fetch_all_provider_usage to skip fetching OpenAI entirely.
+        // Their per-account caches remain intact, so clearing this aggregate is cheap.
+        map.clear();
+    }
+}
+
+/// Forget one Claude login's quota after a session-limit reset so the next
+/// check fetches fresh limits. `None` clears token-keyed (unlabelled) entries.
+pub(super) fn invalidate_anthropic_usage_after_reset(account_label: Option<&str>) {
+    if let Ok(mut map) = anthropic_usage_cache().lock() {
+        match account_label
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+        {
+            Some(label) => {
+                map.remove(&format!("label:{label}"));
+            }
+            None => map.retain(|key, _| !key.starts_with("token:") && key != "label:default"),
+        }
+    }
+    if let Some(cache) = super::PROVIDER_USAGE_CACHE.get()
+        && let Ok(mut map) = cache.lock()
+    {
+        // As for OpenAI: a partially cleared aggregate would skip the refetch.
+        map.clear();
+    }
 }
 
 pub(super) fn anthropic_usage_cache_key(access_token: &str, account_label: Option<&str>) -> String {
@@ -77,8 +127,21 @@ pub(super) fn cached_openai_usage(cache_key: &str) -> Option<OpenAIUsageData> {
     (!cached.is_stale()).then_some(cached)
 }
 
+#[cfg(test)]
 pub(super) fn store_openai_usage(cache_key: String, data: OpenAIUsageData) {
+    store_openai_usage_for_generation(openai_usage_generation(), cache_key, data);
+}
+
+pub(super) fn store_openai_usage_for_generation(
+    generation: u64,
+    cache_key: String,
+    data: OpenAIUsageData,
+) {
     if let Ok(mut map) = openai_usage_cache().lock() {
+        // A request begun before a reset must not reinstate the old exhausted quota.
+        if generation != openai_usage_generation() {
+            return;
+        }
         let previous = map.get(&cache_key).cloned();
         let previous_exhausted = previous
             .as_ref()
@@ -168,6 +231,8 @@ pub(super) fn provider_report_from_usage_data(
         limits,
         extra_info,
         hard_limit_reached: false,
+        openai_reset_credits: None,
+        anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
     }
@@ -237,6 +302,11 @@ pub(super) fn usage_data_from_provider_report(report: &ProviderUsage) -> UsageDa
 pub(super) fn openai_usage_data_from_provider_report(report: &ProviderUsage) -> OpenAIUsageData {
     let mut data = classify_openai_limits(&report.limits);
     data.hard_limit_reached = report.hard_limit_reached;
+    data.openai_reset_credits = if report.error.is_none() {
+        report.openai_reset_credits.clone()
+    } else {
+        None
+    };
     data.fetched_at = Some(Instant::now());
     data.last_error = report.error.clone();
     data
@@ -282,6 +352,8 @@ pub(super) fn provider_report_from_openai_usage_data(
         limits,
         extra_info: Vec::new(),
         hard_limit_reached: data.hard_limit_reached,
+        openai_reset_credits: data.openai_reset_credits.clone(),
+        anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
     }

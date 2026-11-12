@@ -48,7 +48,8 @@ fn test_skill_prompt_integration() {
     let prompt = build_system_prompt(Some(skill_prompt), &[]);
 
     // The prompt should contain our default system prompt
-    assert!(prompt.contains("Your name is Jcode."));
+    // Identity line reworded in 24838926e ("docs: refine base agent guidance").
+    assert!(prompt.contains("You are Jcode."));
 
     // The prompt should contain the skill prompt
     assert!(prompt.contains(skill_prompt));
@@ -61,6 +62,61 @@ fn test_skill_prompt_integration() {
         !default_lower.contains("claude code"),
         "DEFAULT_SYSTEM_PROMPT should NOT identify as 'Claude Code'"
     );
+}
+
+#[test]
+fn skill_description_collapses_whitespace_without_clipping_short_text() {
+    assert_eq!(
+        clip_skill_description("  Build\n\tand   test the project.  "),
+        "Build and test the project."
+    );
+}
+
+#[test]
+fn skill_description_clips_to_the_character_limit_with_ellipsis() {
+    let clipped = clip_skill_description(&"a".repeat(SKILL_DESC_MAX_CHARS + 20));
+
+    assert_eq!(clipped.chars().count(), SKILL_DESC_MAX_CHARS);
+    assert!(clipped.ends_with('…'));
+}
+
+#[test]
+fn skill_description_clipping_is_utf8_safe() {
+    let clipped = clip_skill_description(&"ж".repeat(SKILL_DESC_MAX_CHARS + 20));
+
+    assert_eq!(clipped.chars().count(), SKILL_DESC_MAX_CHARS);
+    assert_eq!(
+        clipped
+            .chars()
+            .filter(|character| *character == 'ж')
+            .count(),
+        SKILL_DESC_MAX_CHARS - 1
+    );
+    assert!(clipped.ends_with('…'));
+}
+
+#[test]
+fn full_and_split_prompt_builders_use_the_same_one_line_skill_descriptions() {
+    let skills = vec![SkillInfo {
+        name: "example".to_string(),
+        description: format!("First line\n\t{}", "д".repeat(SKILL_DESC_MAX_CHARS + 20)),
+    }];
+    let expected = build_available_skills_section(&skills).expect("skills section");
+
+    let (full, full_info) = build_system_prompt_full(None, &skills, false, None, None);
+    let (split, split_info) = build_system_prompt_split(None, &skills, false, None, None);
+
+    assert!(full.contains(&expected));
+    assert!(split.static_part.contains(&expected));
+    assert_eq!(full_info.skills_chars, expected.len());
+    assert_eq!(split_info.skills_chars, expected.len());
+    assert!(expected.contains("First line "));
+    assert!(!expected.contains("First line\n"));
+    let entry = expected
+        .lines()
+        .find(|line| line.starts_with("- `/example `"))
+        .expect("example skill entry");
+    assert!(entry.ends_with('…'));
 }
 
 #[test]
@@ -86,6 +142,20 @@ fn test_load_agents_md_files_uses_sandboxed_global_files() {
     assert!(!content.contains("~/.AGENTS.md"));
     assert!(content.contains("sandboxed global agents instructions"));
 
+    let sandboxed_home = temp.path().join("external");
+    let (content, info) = load_agents_md_files_from_dir(Some(&sandboxed_home));
+    let content = content.expect("deduplicated home instructions");
+    assert!(info.has_project_agents_md);
+    assert!(!info.has_global_agents_md);
+    assert!(content.contains("# Project Instructions (AGENTS.md)"));
+    assert!(!content.contains("# Global Instructions (~/AGENTS.md)"));
+    assert_eq!(
+        content
+            .matches("sandboxed global agents instructions")
+            .count(),
+        1
+    );
+
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);
     } else {
@@ -94,16 +164,168 @@ fn test_load_agents_md_files_uses_sandboxed_global_files() {
 }
 
 #[test]
+fn agents_md_same_canonical_file_is_loaded_only_as_project_instructions() {
+    let project_dir = tempfile::TempDir::new().unwrap();
+    let agents_md = project_dir.path().join("AGENTS.md");
+    std::fs::write(&agents_md, "shared instructions").unwrap();
+
+    let (content, info) = load_agents_md_files_from_dirs(project_dir.path(), Some(&agents_md));
+    let content = content.expect("project instructions");
+
+    assert!(info.has_project_agents_md);
+    assert!(!info.has_global_agents_md);
+    assert!(content.contains("# Project Instructions (AGENTS.md)"));
+    assert!(!content.contains("# Global Instructions (~/AGENTS.md)"));
+    assert_eq!(content.matches("shared instructions").count(), 1);
+}
+
+#[test]
+fn agents_md_distinct_project_and_global_files_are_both_loaded() {
+    let project_dir = tempfile::TempDir::new().unwrap();
+    let global_dir = tempfile::TempDir::new().unwrap();
+    let global_agents_md = global_dir.path().join("AGENTS.md");
+    std::fs::write(project_dir.path().join("AGENTS.md"), "project instructions").unwrap();
+    std::fs::write(&global_agents_md, "global instructions").unwrap();
+
+    let (content, info) =
+        load_agents_md_files_from_dirs(project_dir.path(), Some(&global_agents_md));
+    let content = content.expect("project and global instructions");
+
+    assert!(info.has_project_agents_md);
+    assert!(info.has_global_agents_md);
+    assert!(content.contains("project instructions"));
+    assert!(content.contains("global instructions"));
+}
+
+#[test]
+fn captured_agents_md_keeps_split_prompt_stable_after_file_write() {
+    let project_dir = tempfile::TempDir::new().unwrap();
+    let agents_md = project_dir.path().join("AGENTS.md");
+    std::fs::write(&agents_md, "original session instructions").unwrap();
+    let snapshot = load_agents_md_files_from_dirs(project_dir.path(), None);
+
+    let (before, _) = build_system_prompt_split_with_agents_md(
+        None,
+        &[],
+        false,
+        None,
+        Some(project_dir.path()),
+        snapshot.clone(),
+    );
+    std::fs::write(&agents_md, "instructions written during the session").unwrap();
+    let (after, _) = build_system_prompt_split_with_agents_md(
+        None,
+        &[],
+        false,
+        None,
+        Some(project_dir.path()),
+        snapshot,
+    );
+
+    assert_eq!(before.static_part, after.static_part);
+    assert!(after.static_part.contains("original session instructions"));
+    assert!(
+        !after
+            .static_part
+            .contains("instructions written during the session")
+    );
+
+    // A new session/workspace boundary captures a fresh snapshot rather than
+    // pinning the old instructions forever.
+    let fresh_snapshot = load_agents_md_files_from_dirs(project_dir.path(), None);
+    let (next_session, _) = build_system_prompt_split_with_agents_md(
+        None,
+        &[],
+        false,
+        None,
+        Some(project_dir.path()),
+        fresh_snapshot,
+    );
+    assert!(
+        next_session
+            .static_part
+            .contains("instructions written during the session")
+    );
+    assert_ne!(before.static_part, next_session.static_part);
+}
+
+#[test]
+fn agents_md_missing_global_file_keeps_project_instructions() {
+    let project_dir = tempfile::TempDir::new().unwrap();
+    let global_dir = tempfile::TempDir::new().unwrap();
+    let missing_global_agents_md = global_dir.path().join("missing-AGENTS.md");
+    std::fs::write(project_dir.path().join("AGENTS.md"), "project only").unwrap();
+
+    let (content, info) =
+        load_agents_md_files_from_dirs(project_dir.path(), Some(&missing_global_agents_md));
+    let content = content.expect("project instructions");
+
+    assert!(info.has_project_agents_md);
+    assert!(!info.has_global_agents_md);
+    assert!(content.contains("project only"));
+    assert!(!content.contains("# Global Instructions (~/AGENTS.md)"));
+}
+
+#[cfg(unix)]
+#[test]
+fn agents_md_symlink_alias_is_deduplicated_by_canonical_file_path() {
+    use std::os::unix::fs::symlink;
+
+    let project_dir = tempfile::TempDir::new().unwrap();
+    let global_dir = tempfile::TempDir::new().unwrap();
+    let global_agents_md = global_dir.path().join("AGENTS.md");
+    std::fs::write(&global_agents_md, "symlinked instructions").unwrap();
+    symlink(&global_agents_md, project_dir.path().join("AGENTS.md")).unwrap();
+
+    let (content, info) =
+        load_agents_md_files_from_dirs(project_dir.path(), Some(&global_agents_md));
+    let content = content.expect("project instructions through symlink");
+
+    assert!(info.has_project_agents_md);
+    assert!(!info.has_global_agents_md);
+    assert_eq!(content.matches("symlinked instructions").count(), 1);
+}
+
+#[test]
 fn test_session_context_includes_time_timezone_and_system_info() {
     let context = build_session_context(None);
     assert!(context.contains("# Session Context"));
     assert!(context.contains("Time: "));
-    assert!(context.contains("Timezone: UTC"));
+    assert!(context.contains("Timezone: "));
     assert!(context.contains("OS: "));
     assert!(context.contains("Architecture: "));
     assert!(context.contains("Jcode version: "));
     assert!(!context.contains("Working directory: "));
     assert!(!context.contains("Git:"));
+}
+
+#[test]
+fn session_datetime_uses_the_supplied_local_date_time_and_offset() {
+    use chrono::TimeZone;
+
+    let local = chrono::FixedOffset::east_opt(5 * 60 * 60 + 30 * 60)
+        .unwrap()
+        .with_ymd_and_hms(2026, 8, 23, 0, 10, 9)
+        .unwrap();
+
+    assert_eq!(
+        format_session_datetime(local),
+        ["Date: 2026-08-23", "Time: 00:10:09", "Timezone: +05:30",]
+    );
+}
+
+#[test]
+fn session_datetime_formats_utc_fallback_deterministically() {
+    use chrono::TimeZone;
+
+    let utc = chrono::Utc
+        .with_ymd_and_hms(2026, 8, 22, 18, 40, 6)
+        .unwrap();
+
+    assert_eq!(
+        format_session_datetime(utc),
+        ["Date: 2026-08-22", "Time: 18:40:06", "Timezone: UTC"]
+    );
 }
 
 #[test]
@@ -303,15 +525,6 @@ fn test_selfdev_prompt_uses_full_selfdev_instructions() {
 }
 
 #[test]
-fn test_selfdev_prompt_uses_desktop_focus_for_desktop_working_dir() {
-    let desktop_dir = std::path::Path::new("/tmp/jcode/crates/jcode-desktop2/src");
-    let (prompt, _info) = build_system_prompt_full(None, &[], true, None, Some(desktop_dir));
-    assert!(prompt.contains("launched from the jcode-desktop2"));
-    assert!(prompt.contains("selfdev build target=desktop2"));
-    assert!(!prompt.contains("launched from the TUI/root jcode context"));
-}
-
-#[test]
 fn test_split_selfdev_prompt_defaults_to_tui_focus_for_repo_root() {
     let repo_dir = std::path::Path::new("/tmp/jcode");
     let (split, _info) = build_system_prompt_split(None, &[], true, None, Some(repo_dir));
@@ -333,6 +546,20 @@ fn test_selfdev_prompt_prefers_publish_flow_for_active_builds() {
     assert!(prompt.contains("scripts/dev_cargo.sh build --profile selfdev -p jcode --bin jcode"));
     assert!(prompt.contains("remote build host is configured"));
     assert!(prompt.contains("Do not wait for user input"));
+}
+
+#[test]
+fn test_selfdev_prompt_welcomes_outside_contributions() {
+    let full = build_system_prompt_with_selfdev(None, &[], true);
+    let (split, _) = build_system_prompt_split(None, &[], true, None, None);
+
+    for prompt in [&full, &split.static_part] {
+        assert!(prompt.contains("Pull requests from everyone are welcome"));
+        assert!(prompt.contains("Good PRs can be merged directly after review and validation"));
+        assert!(prompt.contains("Do not require a maintainer-authored rewrite"));
+        assert!(prompt.contains("preserve unrelated changes"));
+        assert!(prompt.contains("merge a PR without user authorization"));
+    }
 }
 
 #[test]
@@ -420,15 +647,6 @@ fn classify_effort_distinguishes_reasoning_from_swarm_modes() {
 }
 
 #[test]
-fn test_selfdev_prompt_uses_desktop2_focus_for_desktop2_working_dir() {
-    let desktop2_dir = std::path::Path::new("/tmp/jcode/crates/jcode-desktop2/src");
-    let (prompt, _info) = build_system_prompt_full(None, &[], true, None, Some(desktop2_dir));
-    assert!(prompt.contains("launched from the jcode-desktop2"));
-    assert!(prompt.contains("selfdev build target=desktop2"));
-    assert!(!prompt.contains("launched from the TUI/root jcode context"));
-}
-
-#[test]
 fn project_system_prompt_file_replaces_default_base_prompt() {
     use crate::prompt::load_base_system_prompt;
 
@@ -455,4 +673,227 @@ fn project_system_prompt_file_replaces_default_base_prompt() {
     assert_eq!(load_base_system_prompt(Some(&dir)), DEFAULT_SYSTEM_PROMPT);
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+fn desktop_prompt_checkout() -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("crates/jcode-desktop-ui/src")).unwrap();
+    std::fs::write(
+        root.path().join("Cargo.toml"),
+        "[package]\nname = 'jcode-desktop'\nversion = '0.1.0'\n",
+    )
+    .unwrap();
+    root
+}
+
+#[test]
+fn desktop_prompt_auto_detects_and_overrides_cli_in_full_and_split_modes() {
+    let root = desktop_prompt_checkout();
+    for relative in ["", "crates/jcode-desktop-ui/src"] {
+        let cwd = root.path().join(relative);
+        for cli_selfdev in [false, true] {
+            let (full, full_info) =
+                build_system_prompt_full(None, &[], cli_selfdev, None, Some(&cwd));
+            let (split, split_info) =
+                build_system_prompt_split(None, &[], cli_selfdev, None, Some(&cwd));
+            for prompt in [&full, &split.static_part] {
+                assert!(prompt.contains("# Jcode Desktop Self-Development Mode"));
+                assert!(prompt.contains(DESKTOP_SELFDEV_MODE_PROMPT));
+                assert!(!prompt.contains("# Self-Development Mode"));
+                assert!(!prompt.contains("selfdev build target=tui"));
+                assert!(!prompt.contains("You are working on the jcode codebase itself."));
+            }
+            assert!(
+                !split
+                    .dynamic_part
+                    .contains("# Jcode Desktop Self-Development Mode")
+            );
+            assert_eq!(full_info.selfdev_chars, DESKTOP_SELFDEV_MODE_PROMPT.len());
+            assert_eq!(split_info.selfdev_chars, DESKTOP_SELFDEV_MODE_PROMPT.len());
+        }
+        assert!(build_session_context(Some(&cwd)).contains("Self-development mode: desktop"));
+    }
+}
+
+#[test]
+fn desktop_prompt_leaves_normal_and_cli_sessions_unchanged() {
+    assert!(!is_desktop_working_dir(None));
+    let unrelated = tempfile::tempdir().unwrap();
+    for cli_selfdev in [false, true] {
+        let (full, full_info) =
+            build_system_prompt_full(None, &[], cli_selfdev, None, Some(unrelated.path()));
+        let (split, split_info) =
+            build_system_prompt_split(None, &[], cli_selfdev, None, Some(unrelated.path()));
+        for prompt in [&full, &split.static_part] {
+            assert!(!prompt.contains("# Jcode Desktop Self-Development Mode"));
+            assert_eq!(prompt.contains("# Self-Development Mode"), cli_selfdev);
+        }
+        assert_eq!(full_info.selfdev_chars > 0, cli_selfdev);
+        assert_eq!(split_info.selfdev_chars > 0, cli_selfdev);
+    }
+    assert!(
+        !build_session_context(Some(unrelated.path())).contains("Self-development mode: desktop")
+    );
+}
+
+#[test]
+fn desktop_prompt_documents_safe_product_specific_workflow() {
+    for action in [
+        "status",
+        "build",
+        "reload",
+        "build-reload",
+        "reload-bridge",
+        "test",
+        "screenshot",
+        "inspect",
+    ] {
+        assert!(DESKTOP_SELFDEV_MODE_PROMPT.contains(&format!("`{action}`")));
+    }
+    for instruction in [
+        "desktop_selfdev",
+        "Ctrl+R",
+        "must not rebuild the CLI",
+        "preserving the current application state",
+        "require a safe restart, not UI hot reload",
+        "scripts/screenshot.py",
+        "Do not depend on niri",
+    ] {
+        assert!(
+            DESKTOP_SELFDEV_MODE_PROMPT.contains(instruction),
+            "missing {instruction}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn desktop_prompt_detects_symlinked_nested_working_directory() {
+    let root = desktop_prompt_checkout();
+    let links = tempfile::tempdir().unwrap();
+    let link = links.path().join("renamed-ui");
+    std::os::unix::fs::symlink(root.path().join("crates/jcode-desktop-ui/src"), &link).unwrap();
+    let (full, _) = build_system_prompt_full(None, &[], false, None, Some(&link));
+    let (split, _) = build_system_prompt_split(None, &[], false, None, Some(&link));
+    assert!(full.contains(DESKTOP_SELFDEV_MODE_PROMPT));
+    assert!(split.static_part.contains(DESKTOP_SELFDEV_MODE_PROMPT));
+}
+
+// Restore JCODE_HOME even when a regression assertion panics.
+fn with_prompt_guidance_home(test: impl FnOnce(&Path)) {
+    let _guard = crate::storage::lock_test_env();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => crate::env::set_var("JCODE_HOME", value),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    let home = tempfile::TempDir::new().unwrap();
+    let jcode_dir = home.path().join(".jcode");
+    std::fs::create_dir(&jcode_dir).unwrap();
+    crate::env::set_var("JCODE_HOME", &jcode_dir);
+    test(home.path());
+}
+
+#[test]
+fn prompt_guidance_same_project_and_global_paths_are_loaded_once() {
+    with_prompt_guidance_home(|home| {
+        let overlay = "shared overlay marker\n";
+        let tools = "shared preferred tools marker\n";
+        std::fs::write(home.join(".jcode/prompt-overlay.md"), overlay).unwrap();
+        std::fs::write(home.join(".jcode/preferred-tools.md"), tools).unwrap();
+
+        let (full, full_info) = build_system_prompt_full(None, &[], false, None, Some(home));
+        let (split, split_info) = build_system_prompt_split(None, &[], false, None, Some(home));
+        for prompt in [&full, &split.static_part] {
+            assert_eq!(prompt.matches(overlay.trim()).count(), 1);
+            assert_eq!(prompt.matches(tools.trim()).count(), 1);
+            assert!(prompt.contains("Project Prompt Overlay"));
+            assert!(prompt.contains("Project Preferred Tools"));
+            assert!(!prompt.contains("Global Prompt Overlay"));
+            assert!(!prompt.contains("Global Preferred Tools"));
+        }
+        for info in [full_info, split_info] {
+            assert_eq!(info.prompt_overlay_chars, overlay.len());
+            assert_eq!(info.preferred_tools_chars, tools.len());
+        }
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn prompt_guidance_symlink_aliases_are_loaded_once() {
+    with_prompt_guidance_home(|home| {
+        let project = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(project.path().join(".jcode")).unwrap();
+        for name in ["prompt-overlay.md", "preferred-tools.md"] {
+            let global = home.join(".jcode").join(name);
+            std::fs::write(&global, "shared symlink guidance").unwrap();
+            std::os::unix::fs::symlink(&global, project.path().join(".jcode").join(name)).unwrap();
+        }
+        for (content, size) in [
+            load_prompt_overlay_files_from_dir(Some(project.path())),
+            load_preferred_tools_files_from_dir(Some(project.path())),
+        ] {
+            let content = content.unwrap();
+            assert_eq!(content.matches("shared symlink guidance").count(), 1);
+            assert!(content.starts_with("# Project"));
+            assert!(!content.contains("# Global"));
+            assert_eq!(size, "shared symlink guidance".len());
+        }
+    });
+}
+
+#[test]
+fn prompt_guidance_distinct_files_with_identical_contents_are_both_loaded() {
+    with_prompt_guidance_home(|home| {
+        let project = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(project.path().join(".jcode")).unwrap();
+        for name in ["prompt-overlay.md", "preferred-tools.md"] {
+            for root in [home, project.path()] {
+                std::fs::write(root.join(".jcode").join(name), "identical guidance").unwrap();
+            }
+        }
+        for (content, size) in [
+            load_prompt_overlay_files_from_dir(Some(project.path())),
+            load_preferred_tools_files_from_dir(Some(project.path())),
+        ] {
+            let content = content.unwrap();
+            assert_eq!(content.matches("identical guidance").count(), 2);
+            assert!(content.find("# Project").unwrap() < content.find("# Global").unwrap());
+            assert_eq!(size, 2 * "identical guidance".len());
+        }
+    });
+}
+
+#[test]
+fn prompt_guidance_missing_or_unreadable_project_keeps_global_content() {
+    with_prompt_guidance_home(|home| {
+        let project = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(project.path().join(".jcode")).unwrap();
+        for name in ["prompt-overlay.md", "preferred-tools.md"] {
+            std::fs::write(home.join(".jcode").join(name), "global only").unwrap();
+        }
+        for unreadable in [false, true] {
+            if unreadable {
+                for name in ["prompt-overlay.md", "preferred-tools.md"] {
+                    std::fs::write(project.path().join(".jcode").join(name), [0xff]).unwrap();
+                }
+            }
+            for (content, size) in [
+                load_prompt_overlay_files_from_dir(Some(project.path())),
+                load_preferred_tools_files_from_dir(Some(project.path())),
+            ] {
+                let content = content.unwrap();
+                assert_eq!(content.matches("global only").count(), 1);
+                assert!(content.starts_with("# Global"));
+                assert!(!content.contains("# Project"));
+                assert_eq!(size, "global only".len());
+            }
+        }
+    });
 }

@@ -5,7 +5,7 @@ pub(super) fn memory_active_summary(state: &MemoryState) -> Option<String> {
     match state {
         MemoryState::Idle => None,
         MemoryState::Embedding => Some("searching".to_string()),
-        MemoryState::SidecarChecking { count } => Some(format!("verify {count}")),
+        MemoryState::SidecarChecking { count } => Some(format!("Jev {count}")),
         MemoryState::FoundRelevant { count } => Some(format!("ready {count}")),
         MemoryState::Extracting { reason } => Some(if reason.trim().is_empty() {
             "extracting".to_string()
@@ -48,7 +48,9 @@ pub(super) fn memory_state_detail(state: &MemoryState) -> Option<String> {
     match state {
         MemoryState::Idle => None,
         MemoryState::Embedding => Some("embedding search".to_string()),
-        MemoryState::SidecarChecking { count } => Some(format!("checking {} candidate(s)", count)),
+        MemoryState::SidecarChecking { count } => {
+            Some(format!("Jev relevance: {} candidate(s)", count))
+        }
         MemoryState::FoundRelevant { count } => Some(format!("found {} relevant", count)),
         MemoryState::Extracting { reason } => Some(if reason.trim().is_empty() {
             "extracting".to_string()

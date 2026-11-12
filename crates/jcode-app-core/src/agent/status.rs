@@ -1,6 +1,11 @@
 use super::*;
 
 impl Agent {
+    /// Read-only source for splitting a new session before its first persistence.
+    pub(crate) fn session_for_split(&self) -> &Session {
+        &self.session
+    }
+
     pub fn session_memory_profile_snapshot(
         &mut self,
     ) -> crate::session::SessionMemoryProfileSnapshot {
@@ -76,7 +81,8 @@ impl Agent {
                     ContentBlock::Reasoning { .. }
                     | ContentBlock::ReasoningTrace { .. }
                     | ContentBlock::AnthropicThinking { .. }
-                    | ContentBlock::OpenAIReasoning { .. } => {}
+                    | ContentBlock::OpenAIReasoning { .. }
+                    | ContentBlock::ToolReference { .. } => {}
                     ContentBlock::Image { .. } => {
                         transcript.push_str("[Image]\n");
                     }
@@ -157,8 +163,47 @@ impl Agent {
         self.provider.display_name()
     }
 
+    /// Reasoning effort the active provider is running with, if any.
+    pub fn provider_reasoning_effort(&self) -> Option<String> {
+        self.provider.reasoning_effort()
+    }
+
     pub fn provider_model(&self) -> String {
-        self.provider.model().to_string()
+        let model = self.provider.model();
+        self.provider
+            .explicit_provider_pin_for_current_model()
+            .map(|pin| format!("{model}@{pin}"))
+            .unwrap_or(model)
+    }
+
+    pub(super) fn provider_key_for_new_session(&self) -> Option<String> {
+        if self
+            .provider
+            .explicit_provider_pin_for_current_model()
+            .is_some()
+        {
+            // Provider pins are explicit OpenRouter route identity. Prefer that
+            // over ambient runtime env state when a CLI-created Agent snapshots
+            // a provider that was configured before the Agent existed.
+            return crate::provider::MultiProvider::session_provider_key_for_model_request(
+                &self.provider_model(),
+                self.provider.name(),
+            );
+        }
+
+        crate::session::derive_session_provider_key(self.provider.name())
+    }
+
+    pub(super) fn reconcile_explicit_provider_pin_route(&mut self) {
+        if self
+            .provider
+            .explicit_provider_pin_for_current_model()
+            .is_some()
+        {
+            self.session.model = Some(self.provider_model());
+            self.session.provider_key = Some("openrouter".to_string());
+            self.session.route_api_method = Some("openrouter".to_string());
+        }
     }
 
     /// Get the short/friendly name for this session (e.g., "fox")

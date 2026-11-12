@@ -1,6 +1,13 @@
 use super::*;
 
 #[test]
+fn summary_compaction_stays_disabled_until_prompt_truncation_is_safe() {
+    let provider = CursorCliProvider::new();
+    assert!(!provider.supports_compaction());
+    assert!(!provider.uses_jcode_compaction());
+}
+
+#[test]
 fn available_models_include_composer_models() {
     let provider = CursorCliProvider::new();
     let models = provider.available_models();

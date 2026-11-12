@@ -175,6 +175,29 @@ pub fn transcript_preferred_aspect_ratio(
 /// for the inline-fit pipeline: prepare-time placeholders and the draw-time
 /// scale use the same math so borders and labels hug the rendered pixels.
 pub fn inline_fit_geometry(width: u32, height: u32, chat_width: u16, cap_rows: u16) -> (u16, u16) {
+    inline_fit_geometry_impl(width, height, chat_width, cap_rows, false)
+}
+
+/// Expanded inline geometry may grow beyond the source's native pixel size.
+/// This matters especially for Mermaid renders, whose cached PNG can be smaller
+/// than the terminal pane: changing only the row cap would otherwise update the
+/// UI state and toast while leaving the displayed diagram exactly the same size.
+pub fn inline_fit_geometry_upscaled(
+    width: u32,
+    height: u32,
+    chat_width: u16,
+    cap_rows: u16,
+) -> (u16, u16) {
+    inline_fit_geometry_impl(width, height, chat_width, cap_rows, true)
+}
+
+fn inline_fit_geometry_impl(
+    width: u32,
+    height: u32,
+    chat_width: u16,
+    cap_rows: u16,
+    allow_upscale: bool,
+) -> (u16, u16) {
     if width == 0 || height == 0 {
         return (INLINE_FIT_MIN_ROWS, chat_width.min(2));
     }
@@ -192,7 +215,11 @@ pub fn inline_fit_geometry(width: u32, height: u32, chat_width: u16, cap_rows: u
 
     // Scale to fit *both* the width and the row cap, preserving aspect ratio,
     // exactly like the draw-time fit does.
-    let scale_num_w = avail_px.min(width);
+    let scale_num_w = if allow_upscale {
+        avail_px
+    } else {
+        avail_px.min(width)
+    };
     let scaled_h_by_w = height.saturating_mul(scale_num_w) / width.max(1);
     let (final_w_px, final_h_px) = if scaled_h_by_w <= cap_px {
         (scale_num_w, scaled_h_by_w)
@@ -253,8 +280,13 @@ fn result_to_lines_with_capabilities(
                 return image_placeholder_lines(width, height);
             }
             let chat_width = max_width.map(|w| w as u16).unwrap_or(80);
-            let (rows, cols) =
-                inline_fit_geometry(width, height, chat_width, INLINE_DIAGRAM_MAX_ROWS);
+            let geometries = [
+                inline_fit_geometry(width, height, chat_width, 16),
+                inline_fit_geometry_upscaled(width, height, chat_width, INLINE_DIAGRAM_MAX_ROWS),
+                inline_fit_geometry_upscaled(width, height, chat_width, 200),
+            ];
+            crate::register_inline_level_geometries(hash, geometries);
+            let (rows, cols) = geometries[crate::mermaid_inline_expand_level(hash) as usize];
             let mut lines = inline_image_placeholder_lines(hash, rows, cols);
             if uses_text_fallback {
                 lines.push(text_image_fallback_note_line());
@@ -262,57 +294,6 @@ fn result_to_lines_with_capabilities(
             lines
         }
         RenderResult::Error(msg) => error_to_lines(&msg),
-    }
-}
-
-#[cfg(test)]
-mod fallback_note_tests {
-    use super::*;
-
-    #[test]
-    fn fallback_note_explains_why_the_image_is_text() {
-        let text = text_image_fallback_note_line()
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-        assert!(text.contains("terminal cannot render inline images"));
-        assert!(text.contains("text fallback"));
-    }
-
-    fn image_result() -> RenderResult {
-        RenderResult::Image {
-            hash: 0x1234,
-            path: PathBuf::from("test.png"),
-            width: 640,
-            height: 480,
-        }
-    }
-
-    #[test]
-    fn halfblock_result_attaches_note_after_image_placeholder() {
-        let lines = result_to_lines_with_capabilities(image_result(), Some(80), false, true, true);
-        assert!(parse_inline_image_placeholder(&lines[0]).is_some());
-        let note = lines
-            .last()
-            .expect("fallback result should end with a note")
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-        assert!(note.contains(TERMINAL_IMAGE_FALLBACK_NOTE));
-    }
-
-    #[test]
-    fn native_protocol_result_starts_with_image_placeholder_without_note() {
-        let lines = result_to_lines_with_capabilities(image_result(), Some(80), false, true, false);
-        assert!(parse_inline_image_placeholder(&lines[0]).is_some());
-        assert!(lines.iter().all(|line| {
-            !line
-                .spans
-                .iter()
-                .any(|span| span.content.contains(TERMINAL_IMAGE_FALLBACK_NOTE))
-        }));
     }
 }
 
@@ -598,5 +579,80 @@ pub fn terminal_theme() -> Theme {
         pie_outer_stroke_width: 1.6,
         pie_outer_stroke_color: "#45475a".to_string(),
         pie_opacity: 0.92,
+    }
+}
+
+#[cfg(test)]
+mod fallback_note_tests {
+    use super::*;
+
+    #[test]
+    fn fallback_note_explains_why_the_image_is_text() {
+        let text = text_image_fallback_note_line()
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("terminal cannot render inline images"));
+        assert!(text.contains("text fallback"));
+    }
+
+    fn image_result() -> RenderResult {
+        RenderResult::Image {
+            hash: 0x1234,
+            path: PathBuf::from("test.png"),
+            width: 640,
+            height: 480,
+        }
+    }
+
+    #[test]
+    fn clicked_mermaid_expand_level_changes_placeholder_height() {
+        let hash = 0x9a11_ce55_u64;
+        let result = || RenderResult::Image {
+            hash,
+            path: PathBuf::from("diagram.png"),
+            width: 1500,
+            height: 1125,
+        };
+
+        crate::set_mermaid_inline_expand_level(hash, 0);
+        let fit = result_to_lines_with_capabilities(result(), Some(95), false, true, false);
+        crate::set_mermaid_inline_expand_level(hash, 1);
+        let large = result_to_lines_with_capabilities(result(), Some(95), false, true, false);
+        crate::set_mermaid_inline_expand_level(hash, 0);
+
+        assert!(
+            large.len() > fit.len(),
+            "click expansion must change Mermaid placeholder height: fit={}, large={}",
+            fit.len(),
+            large.len()
+        );
+    }
+
+    #[test]
+    fn halfblock_result_attaches_note_after_image_placeholder() {
+        let lines = result_to_lines_with_capabilities(image_result(), Some(80), false, true, true);
+        assert!(parse_inline_image_placeholder(&lines[0]).is_some());
+        let note = lines
+            .last()
+            .expect("fallback result should end with a note")
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(note.contains(TERMINAL_IMAGE_FALLBACK_NOTE));
+    }
+
+    #[test]
+    fn native_protocol_result_starts_with_image_placeholder_without_note() {
+        let lines = result_to_lines_with_capabilities(image_result(), Some(80), false, true, false);
+        assert!(parse_inline_image_placeholder(&lines[0]).is_some());
+        assert!(lines.iter().all(|line| {
+            !line
+                .spans
+                .iter()
+                .any(|span| span.content.contains(TERMINAL_IMAGE_FALLBACK_NOTE))
+        }));
     }
 }

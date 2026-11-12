@@ -1,0 +1,32 @@
+{
+  "version": "0.86.0",
+  "date": "2026-09-20",
+  "title": "Smarter task handling and clearer session feedback",
+  "highlights": [
+    "Jev browser handoff now handles whole multi-step tasks, continuing through uncertain pages and returning to the parent only when finished or blocked",
+    "Memory recall uses Jev to select relevant project and global memories without loading a local embedding model at startup",
+    "Save Anthropic prompt-cache retention preferences with /cache extend and see clearer cache usage, retention estimates, and provider-specific limits"
+  ],
+  "improvements": [
+    "Use /merge to integrate the current branch into the repository primary branch with validation of the combined result",
+    "Terminal tab titles show session edit-line counts and elapsed time for the current or most recent work period",
+    "Jev features prefer the included subscription route when the gateway and account support it, instead of automatically charging a separate API key",
+    "Adds gated remote-compilation client support on Linux and macOS, requiring a provisioned service and cloud-compute credits, with access checked before source uploads",
+    "Native voice APIs add bounded microphone capture and Nari streaming for clients with a Nari API key, alongside clearer handling of requests to use the newest conversation",
+    "Rust and TypeScript clients can distinguish assistant messages, final answers, and replacement text from retries",
+    "Independent SDK clients can share an authenticated SSH connection without one client closing the others",
+    "The pinned diff side panel has been removed while inline diffs remain available"
+  ],
+  "fixes": [
+    "OpenAI WebSocket conversations recover when earlier tool outputs change or a continuation reports a missing tool result",
+    "Cache-write tokens are retained in usage reporting and OpenAI cost estimates no longer double-count them",
+    "Estimated cache retention no longer triggers misleading expiry countdowns or warnings for inactive provider routes",
+    "Drag-to-copy follows the visible text on wrapped lines, including narrow terminal layouts",
+    "Todo quality checks avoid unnecessary ownership and confidence follow-ups for completed work",
+    "Edit results preserve file-position diffs and distinguish a known unchanged file from an unavailable snapshot",
+    "Fresh-session history stays available during active turns and socket messages survive interrupted reads",
+    "Scheduled tasks reach attached sessions, and local client skills load before the initial history",
+    "MCP calls preserve dynamic arguments, and completed non-image file drops are normalized correctly",
+    "Source checkouts without an upstream no longer perform misleading update checks, and empty API session directories are handled gracefully"
+  ]
+}

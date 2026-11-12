@@ -326,6 +326,44 @@ fn render_and_snap(
 }
 
 #[test]
+fn test_blockquote_paragraph_border_is_continuous_in_terminal_cells() {
+    let _lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_blockquote_copy_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram_pane_enabled = false;
+    app.display_messages[1].content =
+        "Draft only:\n\n> Hello,\n>\n> A quoted paragraph.\n>\n> Thanks,\n> Someone\n\nOutside the quote."
+            .to_string();
+    app.bump_display_messages_version();
+    let screen = render_and_snap(&app, &mut terminal);
+    let rows: Vec<_> = screen.lines().collect();
+    let start = rows
+        .iter()
+        .position(|line| line.contains("│ Hello,"))
+        .unwrap();
+    let end = rows
+        .iter()
+        .position(|line| line.contains("│ Someone"))
+        .unwrap();
+    let gutter_x = rows[start].chars().position(|ch| ch == '│').unwrap();
+    assert_eq!(end - start, 5, "paragraph spacing changed:\n{screen}");
+    let buffer = terminal.backend().buffer();
+    for y in start..=end {
+        assert_eq!(
+            buffer[(gutter_x as u16, y as u16)].symbol(),
+            "│",
+            "gap on row {y}:\n{screen}"
+        );
+    }
+    assert_eq!(buffer[(gutter_x as u16, (start - 1) as u16)].symbol(), " ");
+    assert_eq!(buffer[(gutter_x as u16, (end + 1) as u16)].symbol(), " ");
+    eprintln!(
+        "Verified six continuous quote-border cells, including two paragraph separators:\n{}",
+        rows[start..=end].join("\n")
+    );
+}
+
+#[test]
 fn test_armed_new_session_mode_shows_input_hint_and_indicator() {
     let _lock = scroll_render_test_lock();
 
@@ -894,6 +932,7 @@ fn test_images_do_not_drive_side_panel_visibility() {
     app.is_remote = true;
     app.side_panel = crate::side_panel::SidePanelSnapshot::default();
     app.remote_side_pane_images.push(crate::session::RenderedImage {
+        history_message_index: None,
         media_type: "image/png".to_string(),
         data: "image-data".to_string(),
         label: Some("preview.png".to_string()),
@@ -925,6 +964,36 @@ fn test_remote_alt_m_toggles_side_panel_visibility() {
         .unwrap();
     assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("plan"));
     assert_eq!(app.status_notice(), Some("Side panel: Plan".to_string()));
+}
+
+#[test]
+fn test_remote_alt_y_toggles_copy_selection_instead_of_typing() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    rt.block_on(app.handle_remote_key(KeyCode::Char('y'), KeyModifiers::ALT, &mut remote))
+        .unwrap();
+
+    assert!(app.copy_selection_mode);
+    assert!(app.input.is_empty(), "Alt+Y must not insert text");
+}
+
+#[test]
+fn test_remote_alt_i_toggles_info_widget_instead_of_typing() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let initially_enabled = crate::tui::info_widget::is_enabled();
+
+    rt.block_on(app.handle_remote_key(KeyCode::Char('i'), KeyModifiers::ALT, &mut remote))
+        .unwrap();
+
+    assert_ne!(crate::tui::info_widget::is_enabled(), initially_enabled);
+    assert!(app.input.is_empty(), "Alt+I must not insert text");
+    crate::tui::info_widget::toggle_enabled();
 }
 
 #[test]
@@ -1138,6 +1207,8 @@ fn test_chat_overscroll_reveals_status_line_then_rebounds() {
     let _lock = scroll_render_test_lock();
 
     let (mut app, mut terminal) = create_scroll_test_app(80, 14, 0, 36);
+    // Exercise the elastic reveal explicitly (the default pins the line on).
+    app.overscroll_status_mode = crate::config::OverscrollStatusMode::Overscroll;
 
     // Give the app some context so the overscroll line has a percentage to show.
     app.context_info = crate::prompt::ContextInfo {
@@ -1184,5 +1255,84 @@ fn test_chat_overscroll_reveals_status_line_then_rebounds() {
     assert!(
         !app.chat_overscroll_active(),
         "scrolling up should cancel the overscroll line"
+    );
+}
+
+#[test]
+fn renderer_publishes_the_prepared_frame_as_geometry() {
+    let _lock = scroll_render_test_lock();
+    let (app, mut terminal) = create_scroll_test_app(100, 30, 0, 60);
+    render_and_snap(&app, &mut terminal);
+
+    // The retained frame *is* the published geometry: its total must agree with
+    // the scalar the rest of the code reads, and its section ranges must tile
+    // the wrapped row vector with no gaps so an anchor can index into it.
+    let frame = crate::tui::ui::last_chat_frame().expect("frame published after a render");
+    assert_eq!(
+        frame.total_wrapped_lines(),
+        crate::tui::ui::last_total_wrapped_lines()
+    );
+    let mut next_start = 0;
+    for section in &frame.sections {
+        assert_eq!(
+            section.line_start, next_start,
+            "section ranges must be contiguous"
+        );
+        next_start += section.prepared.wrapped_lines.len();
+    }
+    assert_eq!(next_start, frame.total_wrapped_lines());
+
+    // A narrower window re-lays the frame out: same handle, new ranges.
+    let mut narrow = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 30)).unwrap();
+    render_and_snap(&app, &mut narrow);
+    let narrow_frame = crate::tui::ui::last_chat_frame().expect("frame published after a render");
+    assert_eq!(
+        narrow_frame.total_wrapped_lines(),
+        crate::tui::ui::last_total_wrapped_lines()
+    );
+    assert!(
+        narrow_frame.total_wrapped_lines() > frame.total_wrapped_lines(),
+        "narrowing must wrap into more rows: {} vs {}",
+        narrow_frame.total_wrapped_lines(),
+        frame.total_wrapped_lines()
+    );
+}
+
+#[test]
+fn retained_frame_row_matches_the_rendered_screen() {
+    // Integration check across the draw boundary: a consumer outside `draw`
+    // resolves a row index against the retained frame, so that row has to be
+    // what is actually rendered at the top of the chat viewport.
+    let _lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_scroll_test_app(100, 30, 0, 60);
+    app.auto_scroll_paused = false;
+    render_and_snap(&app, &mut terminal);
+    app.scroll_up(20);
+    render_and_snap(&app, &mut terminal);
+
+    let scroll = crate::tui::ui::last_resolved_chat_scroll();
+    assert!(scroll > 0, "fixture must be scrolled into history");
+    let frame = crate::tui::ui::last_chat_frame().expect("frame published after a render");
+    let top_row = frame
+        .wrapped_plain_line(scroll)
+        .expect("resolved row is in range")
+        .trim()
+        .to_string();
+
+    let area = crate::tui::ui::last_layout_snapshot()
+        .expect("layout snapshot")
+        .messages_area;
+    let first_chat_line = buffer_to_text(&terminal)
+        .lines()
+        .skip(area.y as usize)
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    assert!(!top_row.is_empty(), "frame row must carry text");
+    assert_eq!(
+        first_chat_line, top_row,
+        "the retained frame's row must be the line rendered at the top of the viewport"
     );
 }

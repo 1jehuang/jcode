@@ -1,4 +1,5 @@
 use super::*;
+use crate::browser_detect::BrowserKind;
 
 #[test]
 fn test_is_browser_command() {
@@ -59,6 +60,8 @@ fn test_should_prompt_extension_install_only_before_setup_complete() {
     let incomplete = BrowserStatus {
         backend: "firefox_agent_bridge",
         browser: "firefox",
+        detected_via: "test",
+        connected_browser: None,
         setup_complete: false,
         binary_installed: true,
         responding: false,
@@ -85,6 +88,53 @@ fn test_should_prompt_extension_install_only_before_setup_complete() {
         ..incomplete
     };
     assert!(should_prompt_extension_install(&complete_but_dead));
+}
+
+#[test]
+fn test_should_attempt_firefox_launch_only_when_firefox_closed_and_bridge_silent() {
+    let installed_but_silent = BrowserStatus {
+        backend: "firefox_agent_bridge",
+        browser: "firefox",
+        detected_via: "test",
+        connected_browser: None,
+        setup_complete: true,
+        binary_installed: true,
+        responding: false,
+        compatible: false,
+        missing_actions: vec![],
+        ready: false,
+    };
+
+    // Bridge installed and silent, Firefox closed: launch Firefox rather than
+    // pushing the agent toward one-time setup/repair.
+    assert!(should_attempt_firefox_launch(&installed_but_silent, false));
+
+    // Firefox already running: launching another instance will not help.
+    assert!(!should_attempt_firefox_launch(&installed_but_silent, true));
+
+    // Binaries missing: this genuinely needs setup, not a Firefox launch.
+    let not_installed = BrowserStatus {
+        binary_installed: false,
+        setup_complete: false,
+        ..installed_but_silent.clone()
+    };
+    assert!(!should_attempt_firefox_launch(&not_installed, false));
+
+    // Bridge responding (even if incompatible): Firefox is clearly up.
+    let responding = BrowserStatus {
+        responding: true,
+        ..installed_but_silent.clone()
+    };
+    assert!(!should_attempt_firefox_launch(&responding, false));
+
+    // Already ready: nothing to do.
+    let ready = BrowserStatus {
+        responding: true,
+        compatible: true,
+        ready: true,
+        ..installed_but_silent
+    };
+    assert!(!should_attempt_firefox_launch(&ready, false));
 }
 
 #[test]
@@ -121,7 +171,7 @@ async fn test_inspect_browser_status_without_binary() {
     let _guard = crate::storage::lock_test_env();
     let status = inspect_browser_status().await.unwrap();
     assert_eq!(status.backend, "firefox_agent_bridge");
-    assert_eq!(status.browser, "firefox");
+    assert!(BrowserKind::parse(status.browser).is_some());
     if !browser_binary_path().exists() {
         assert!(!status.binary_installed);
         assert!(!status.ready);
@@ -135,7 +185,7 @@ async fn test_ensure_browser_ready_noninteractive_without_binary() {
     let _guard = crate::storage::lock_test_env();
     let status = ensure_browser_ready_noninteractive().await.unwrap();
     assert_eq!(status.backend, "firefox_agent_bridge");
-    assert_eq!(status.browser, "firefox");
+    assert!(BrowserKind::parse(status.browser).is_some());
     if !browser_binary_path().exists() {
         assert!(!status.binary_installed);
         assert!(!status.ready);
@@ -283,6 +333,8 @@ fn status_fixture(setup_complete: bool, binary_installed: bool, responding: bool
     BrowserStatus {
         backend: "test",
         browser: "firefox",
+        detected_via: "test",
+        connected_browser: None,
         setup_complete,
         binary_installed,
         responding,
@@ -322,4 +374,123 @@ fn completed_setup_without_the_binary_does_not_prompt() {
     assert!(!should_prompt_extension_install(&status_fixture(
         true, false, false
     )));
+}
+
+#[test]
+fn chromium_native_host_manifest_allows_the_stable_extension_origin() {
+    let manifest = native_host_manifest_json(BrowserKind::Chrome, "/opt/host");
+    assert_eq!(manifest["name"], "firefox_agent_bridge");
+    assert_eq!(manifest["path"], "/opt/host");
+    assert_eq!(
+        manifest["allowed_origins"][0],
+        "chrome-extension://ijifgeepmnbalajhfjnpbnobfobflfkk/"
+    );
+    assert!(manifest.get("allowed_extensions").is_none());
+
+    let firefox = native_host_manifest_json(BrowserKind::Firefox, "/opt/host");
+    assert!(firefox.get("allowed_origins").is_none());
+    assert!(
+        firefox["allowed_extensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id == "browser-agent-bridge@1jehuang.github.io")
+    );
+}
+
+#[test]
+fn stale_firefox_manifest_is_not_valid_for_chrome() {
+    let temp = tempfile::tempdir().unwrap();
+    let host = temp.path().join("host");
+    std::fs::write(&host, "x").unwrap();
+    let firefox = native_host_manifest_json(BrowserKind::Firefox, &host.to_string_lossy());
+    assert!(native_host_manifest_is_valid(
+        BrowserKind::Firefox,
+        &firefox
+    ));
+    assert!(!native_host_manifest_is_valid(
+        BrowserKind::Chrome,
+        &firefox
+    ));
+    let chrome = native_host_manifest_json(BrowserKind::Chrome, &host.to_string_lossy());
+    assert!(native_host_manifest_is_valid(BrowserKind::Edge, &chrome));
+    let missing_host = native_host_manifest_json(BrowserKind::Chrome, "/definitely/missing/host");
+    assert!(!native_host_manifest_is_valid(
+        BrowserKind::Chrome,
+        &missing_host
+    ));
+}
+
+#[test]
+fn ping_reports_are_matched_by_browser_family() {
+    let chrome = serde_json::json!({"pong": true, "browser": "chrome"});
+    assert!(ping_matches(&chrome, BrowserKind::Chrome));
+    assert!(ping_matches(&chrome, BrowserKind::Brave));
+    assert!(!ping_matches(&chrome, BrowserKind::Firefox));
+    // Pre-0.10 extensions do not report a browser and only exist for Firefox.
+    let legacy = serde_json::json!({"pong": true});
+    assert!(ping_matches(&legacy, BrowserKind::Firefox));
+    assert!(!ping_matches(&legacy, BrowserKind::Safari));
+}
+
+#[test]
+fn extract_zip_unpacks_deflate_and_rejects_traversal() {
+    use std::io::Write;
+    fn build_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut central = Vec::new();
+        for (name, data) in entries {
+            let mut enc =
+                flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+            enc.write_all(data).unwrap();
+            let compressed = enc.finish().unwrap();
+            let offset = out.len() as u32;
+            let crc = 0u32; // extractor does not verify CRCs
+            out.extend_from_slice(&[0x50, 0x4b, 0x03, 0x04, 20, 0, 0, 0, 8, 0, 0, 0, 0, 0]);
+            out.extend_from_slice(&crc.to_le_bytes());
+            out.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+            out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(&compressed);
+            central
+                .extend_from_slice(&[0x50, 0x4b, 0x01, 0x02, 20, 0, 20, 0, 0, 0, 8, 0, 0, 0, 0, 0]);
+            central.extend_from_slice(&crc.to_le_bytes());
+            central.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+            central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            central.extend_from_slice(&[0; 12]);
+            central.extend_from_slice(&offset.to_le_bytes());
+            central.extend_from_slice(name.as_bytes());
+        }
+        let cd_offset = out.len() as u32;
+        out.extend_from_slice(&central);
+        out.extend_from_slice(&[0x50, 0x4b, 0x05, 0x06, 0, 0, 0, 0]);
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+        out.extend_from_slice(&cd_offset.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let zip = build_zip(&[
+        ("manifest.json", b"{\"manifest_version\":3}"),
+        ("icons/a.png", b"png"),
+    ]);
+    extract_zip(&zip, temp.path()).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("manifest.json")).unwrap(),
+        "{\"manifest_version\":3}"
+    );
+    assert_eq!(
+        std::fs::read(temp.path().join("icons/a.png")).unwrap(),
+        b"png"
+    );
+
+    let evil = build_zip(&[("../escape.txt", b"x")]);
+    assert!(extract_zip(&evil, &temp.path().join("sub")).is_err());
+    assert!(!temp.path().join("escape.txt").exists());
 }

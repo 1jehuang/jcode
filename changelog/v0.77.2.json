@@ -1,0 +1,13 @@
+{
+  "version": "0.77.2",
+  "date": "2026-08-18",
+  "improvements": [
+    "Inline diff previews now show the affected file path for clearer review context"
+  ],
+  "fixes": [
+    "One-shot sessions now close automatically after completing their response",
+    "Ambient launches now fall back gracefully when opening a visible terminal fails",
+    "Spawned agents keep their prompt when an explicitly blank initial message is supplied",
+    "MiniMax authentication now uses the correct API key variable while preserving existing credentials"
+  ]
+}

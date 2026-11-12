@@ -74,17 +74,26 @@ pub fn macos_option_char_to_ascii_key(code: KeyCode) -> Option<char> {
         '∂' => Some('d'),
         '´' => Some('e'),
         'ƒ' => Some('f'),
+        '©' => Some('g'),
         '˙' => Some('h'),
         'ˆ' => Some('i'),
         '∆' => Some('j'),
         '˚' => Some('k'),
         '¬' => Some('l'),
         'µ' => Some('m'),
+        '˜' => Some('n'),
+        'ø' => Some('o'),
+        'π' => Some('p'),
+        'œ' => Some('q'),
+        '®' => Some('r'),
         'ß' => Some('s'),
         '†' => Some('t'),
         '¨' => Some('u'),
         '√' => Some('v'),
+        '∑' => Some('w'),
+        '≈' => Some('x'),
         '¥' => Some('y'),
+        'Ω' => Some('z'),
         _ => None,
     }
 }
@@ -297,6 +306,12 @@ fn normalize_key(code: KeyCode, modifiers: KeyModifiers) -> (KeyCode, KeyModifie
         && c.is_ascii_uppercase()
     {
         return (KeyCode::Char(c.to_ascii_lowercase()), modifiers);
+    }
+    // Legacy terminal input commonly reports Shift+; as the produced ':'
+    // character and omits the SHIFT modifier. Normalize it to the physical key
+    // encoding used by configured bindings and the Kitty keyboard protocol.
+    if code == KeyCode::Char(':') {
+        return (KeyCode::Char(';'), modifiers | KeyModifiers::SHIFT);
     }
     (code, modifiers)
 }
@@ -593,6 +608,15 @@ mod tests {
             binding.matches_for_platform(code, mods, true),
             "Cmd+Shift+; kitty sequence must trigger the new_terminal binding"
         );
+    }
+
+    #[test]
+    fn legacy_alt_shift_semicolon_sequence_matches_new_terminal_binding() {
+        // Legacy terminals may report Alt+Shift+; as the produced ':' character
+        // with ALT set but without an explicit SHIFT modifier.
+        let binding = parse_keybinding("alt+shift+;").expect("alt+shift+; parses");
+        assert!(binding.matches(KeyCode::Char(':'), KeyModifiers::ALT));
+        assert!(binding.matches(KeyCode::Char(';'), KeyModifiers::ALT | KeyModifiers::SHIFT));
     }
 
     #[test]
@@ -941,17 +965,26 @@ mod tests {
             ('∂', 'd'),
             ('´', 'e'),
             ('ƒ', 'f'),
+            ('©', 'g'),
             ('˙', 'h'),
             ('ˆ', 'i'),
             ('∆', 'j'),
             ('˚', 'k'),
             ('¬', 'l'),
             ('µ', 'm'),
+            ('˜', 'n'),
+            ('ø', 'o'),
+            ('π', 'p'),
+            ('œ', 'q'),
+            ('®', 'r'),
             ('ß', 's'),
             ('†', 't'),
             ('¨', 'u'),
             ('√', 'v'),
+            ('∑', 'w'),
+            ('≈', 'x'),
             ('¥', 'y'),
+            ('Ω', 'z'),
         ] {
             assert_eq!(
                 macos_option_char_to_ascii_key(KeyCode::Char(option_char)),

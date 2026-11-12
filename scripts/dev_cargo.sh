@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-cd "$repo_root"
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 
 # `selfdev test` installs a shell-level `cargo` shim so raw `cargo test/check`
 # commands receive this wrapper's memory, linker, feature, and toolchain policy.
 # Exporting this recursion guard makes the final `cargo` invocation below bypass
 # that shim and resolve the real Cargo binary.
 export JCODE_IN_DEV_CARGO=1
+
+# The exported BashTool shim survives `cd` and child shells. Do not redirect
+# Cargo back here when the caller has moved to a different checkout. Compare
+# physical paths so entering this checkout through a symlink still works.
+case "$(pwd -P)" in
+  "$repo_root"|"$repo_root"/*) cd "$repo_root" ;;
+  *) exec cargo "$@" ;;
+esac
 
 # shellcheck source=scripts/remote_config.sh
 source "$repo_root/scripts/remote_config.sh"
@@ -25,6 +32,7 @@ rust_action_log_started_ns=""
 rust_action_log_started_at=""
 rust_action_log_path=""
 rust_action_log_execution="local"
+cargo_gate_wait_ms=0
 
 start_rust_action_log() {
   case "${JCODE_RUST_ACTION_LOG:-1}" in
@@ -53,6 +61,7 @@ record_rust_action_log() {
 
   JCODE_LOG_STARTED_AT="$rust_action_log_started_at" \
   JCODE_LOG_DURATION_MS="$duration_ms" \
+  JCODE_LOG_GATE_WAIT_MS="$cargo_gate_wait_ms" \
   JCODE_LOG_EXIT_CODE="$exit_code" \
   JCODE_LOG_ACTION="$action" \
   JCODE_LOG_PROFILE="$profile" \
@@ -67,6 +76,12 @@ path = sys.argv[1]
 record = {
     "started_at": os.environ["JCODE_LOG_STARTED_AT"],
     "duration_ms": int(os.environ["JCODE_LOG_DURATION_MS"]),
+    "gate_wait_ms": int(os.environ["JCODE_LOG_GATE_WAIT_MS"]),
+    "execution_duration_ms": max(
+        0,
+        int(os.environ["JCODE_LOG_DURATION_MS"])
+        - int(os.environ["JCODE_LOG_GATE_WAIT_MS"]),
+    ),
     "exit_code": int(os.environ["JCODE_LOG_EXIT_CODE"]),
     "success": os.environ["JCODE_LOG_EXIT_CODE"] == "0",
     "action": os.environ["JCODE_LOG_ACTION"],
@@ -361,6 +376,49 @@ meminfo_kib() {
   awk -v key="$key" '$1 == key ":" { print $2; exit }' /proc/meminfo 2>/dev/null || true
 }
 
+macos_available_memory_kib() {
+  command -v vm_stat >/dev/null 2>&1 || return 1
+
+  local stats page_size free_pages inactive_pages speculative_pages
+  stats=$(LC_ALL=C vm_stat 2>/dev/null) || return 1
+  page_size=$(printf '%s\n' "$stats" \
+    | sed -n '1s/.*page size of \([0-9][0-9]*\) bytes.*/\1/p')
+  free_pages=$(printf '%s\n' "$stats" \
+    | awk '$1 == "Pages" && $2 == "free:" { sub(/\.$/, "", $3); print $3; exit }')
+  inactive_pages=$(printf '%s\n' "$stats" \
+    | awk '$1 == "Pages" && $2 == "inactive:" { sub(/\.$/, "", $3); print $3; exit }')
+  speculative_pages=$(printf '%s\n' "$stats" \
+    | awk '$1 == "Pages" && $2 == "speculative:" { sub(/\.$/, "", $3); print $3; exit }')
+
+  [[ "$page_size" =~ ^[0-9]+$ && "$page_size" -gt 0 ]] || return 1
+  [[ "$free_pages" =~ ^[0-9]+$ ]] || return 1
+  [[ "$inactive_pages" =~ ^[0-9]+$ ]] || return 1
+  [[ "$speculative_pages" =~ ^[0-9]+$ ]] || return 1
+
+  # Inactive and speculative pages are reclaimable without swapping. Purgeable
+  # pages are intentionally not added because they can already be represented in
+  # those categories, and double-counting would make the job limit less safe.
+  printf '%s\n' "$(( (free_pages + inactive_pages + speculative_pages) * page_size / 1024 ))"
+}
+
+available_memory_kib() {
+  local value
+  case "$(uname -s)" in
+    Linux)
+      [[ -r /proc/meminfo ]] || return 1
+      value=$(meminfo_kib MemAvailable)
+      ;;
+    Darwin)
+      value=$(macos_available_memory_kib) || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  [[ "$value" =~ ^[0-9]+$ && "$value" -gt 0 ]] || return 1
+  printf '%s\n' "$value"
+}
+
 selfdev_low_memory_default_needed() {
   [[ "$(uname -s)" == "Linux" ]] || return 1
   [[ -r /proc/meminfo ]] || return 1
@@ -402,7 +460,8 @@ cpu_count() {
 # off before earlyoom SIGTERMs it. Clamp into [1, cpus]. On an idle 15 GiB
 # machine this still uses ~7 of 8 cores; under memory pressure a fresh build
 # backs off further. An explicit CARGO_BUILD_JOBS / JCODE_BUILD_JOBS always
-# wins, and non-Linux hosts fall back to the cargo/.cargo default.
+# wins. Linux reads MemAvailable; macOS conservatively sums reclaimable vm_stat
+# pages. Unsupported hosts and failed probes fall back to Cargo's configuration.
 select_build_jobs() {
   # Respect an explicit override from either env var.
   local override="${JCODE_BUILD_JOBS:-${CARGO_BUILD_JOBS:-}}"
@@ -417,17 +476,14 @@ select_build_jobs() {
     unset CARGO_BUILD_JOBS
   fi
 
-  # Adaptive sizing only on Linux where /proc/meminfo is available; elsewhere we
-  # leave cargo to honor the .cargo/config.toml default.
-  if [[ "$(uname -s)" != "Linux" || ! -r /proc/meminfo ]]; then
+  local mem_available_kib
+  if ! mem_available_kib=$(available_memory_kib); then
     build_jobs_status="cargo-default"
     return
   fi
 
-  local cpus mem_available_kib mib_per_job_default mib_per_job
+  local cpus mib_per_job_default mib_per_job
   cpus=$(cpu_count)
-  mem_available_kib=$(meminfo_kib MemAvailable)
-  [[ -n "$mem_available_kib" && "$mem_available_kib" =~ ^[0-9]+$ ]] || mem_available_kib=0
 
   # Per-job memory budget (MiB). Sized with a cushion above the largest measured
   # rustc unit (jcode-base, ~1.6 GiB RSS sampled) so an idle machine uses nearly
@@ -706,6 +762,8 @@ print_setup() {
   if [[ -n "${JCODE_DEV_FEATURE_PROFILE:-}" && "${JCODE_DEV_FEATURE_PROFILE}" != "default" ]]; then
     feature_profile_status="${JCODE_DEV_FEATURE_PROFILE}"
   fi
+  local cargo_gate_mode="${JCODE_CARGO_GATE:-on}"
+  local cargo_gate_dir="${JCODE_CARGO_GATE_DIR:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}}"
   cat <<EOF
 repo_root=$repo_root
 os=$(uname -s)
@@ -715,6 +773,8 @@ selfdev_low_memory_status=$selfdev_low_memory_status
 parallel_frontend_status=$parallel_frontend_status
 build_jobs_status=$build_jobs_status
 cargo_build_jobs=${CARGO_BUILD_JOBS:-<unset>}
+cargo_gate_mode=$cargo_gate_mode
+cargo_gate_path=${JCODE_CARGO_GATE_PATH:-$cargo_gate_dir/jcode-cargo-build.lock}
 build_tmpdir_status=$build_tmpdir_status
 tmpdir=${TMPDIR:-<unset>}
 feature_profile_status=$feature_profile_status
@@ -973,19 +1033,81 @@ run_local_cargo() {
   cargo "${cargo_argv[@]}"
 }
 
+cargo_action_needs_gate() {
+  case "${cargo_argv[0]:-}" in
+    build|check|clippy|test|bench|run|rustc|rustdoc) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Cargo's own package-cache and target-dir locks only coordinate processes that
+# happen to share those exact directories. Jcode agents also build from scratch
+# worktrees, different target directories, and different toolchains, so several
+# memory-heavy rustc processes can still run at once. On this 15 GiB development
+# machine that makes every build slower and can trigger earlyoom.
+#
+# Serialize compile-capable local Cargo actions across all jcode worktrees. A
+# single Cargo invocation can still use all jobs selected by select_build_jobs,
+# so this trades harmful process-level competition for useful crate-level
+# parallelism. Nested wrapper calls inherit JCODE_CARGO_GATE_HELD and cannot
+# deadlock. Set JCODE_CARGO_GATE=off for an intentional concurrency experiment.
+acquire_cargo_gate() {
+  cargo_gate_status="not-needed"
+  cargo_gate_wait_ms=0
+  cargo_action_needs_gate || return 0
+
+  case "${JCODE_CARGO_GATE:-on}" in
+    0|false|no|off|disabled)
+      cargo_gate_status="disabled"
+      return 0
+      ;;
+  esac
+  if [[ "${JCODE_CARGO_GATE_HELD:-0}" == "1" ]]; then
+    cargo_gate_status="inherited"
+    return 0
+  fi
+  if ! command -v flock >/dev/null 2>&1; then
+    cargo_gate_status="unavailable"
+    log "flock is unavailable; running without the host-wide Cargo gate"
+    return 0
+  fi
+
+  local gate_dir gate_path wait_started_ns wait_finished_ns waited_seconds
+  gate_dir="${JCODE_CARGO_GATE_DIR:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}}"
+  mkdir -p "$gate_dir"
+  gate_path="${JCODE_CARGO_GATE_PATH:-$gate_dir/jcode-cargo-build.lock}"
+  exec {cargo_gate_fd}>"$gate_path"
+  if ! flock -n "$cargo_gate_fd"; then
+    log "waiting for the host-wide Cargo gate ($gate_path)"
+    wait_started_ns=$(date +%s%N)
+    waited_seconds=0
+    # Avoid one silent, unbounded flock call. Periodic notes make it clear that
+    # the process is alive and blocked behind another compiler rather than hung.
+    while ! flock -w 30 "$cargo_gate_fd"; do
+      waited_seconds=$((waited_seconds + 30))
+      log "still waiting for the host-wide Cargo gate (${waited_seconds}s elapsed)"
+    done
+    wait_finished_ns=$(date +%s%N)
+    cargo_gate_wait_ms=$(( (wait_finished_ns - wait_started_ns) / 1000000 ))
+  fi
+  export JCODE_CARGO_GATE_HELD=1
+  cargo_gate_status="acquired"
+  log "acquired host-wide Cargo gate (waited ${cargo_gate_wait_ms}ms)"
+}
+
 validate_feature_profile
 configure_build_tmpdir
 export_git_build_metadata
 maybe_configure_low_memory_selfdev "$@"
 maybe_enable_sccache "$@"
 configure_parallel_frontend "$@"
-select_build_jobs
 
 if [[ "$(uname -s)" == "Linux" ]] && [[ "$(uname -m)" == "x86_64" ]]; then
   configure_linux_linker
 fi
 
 if [[ "${1:-}" == "--print-setup" ]]; then
+  select_build_jobs
   print_setup
   exit 0
 fi
@@ -1012,4 +1134,9 @@ if [[ "${JCODE_REMOTE_CARGO:-0}" == "1" ]]; then
   fi
 fi
 
+acquire_cargo_gate
+# Size the in-process parallelism only after competing jcode Cargo processes
+# have drained. Measuring before the wait would preserve an unnecessarily low
+# one-job decision even after memory becomes available.
+select_build_jobs
 run_local_cargo

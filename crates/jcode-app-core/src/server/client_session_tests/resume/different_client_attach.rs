@@ -129,6 +129,7 @@ async fn handle_resume_session_allows_attach_from_different_client_instance() ->
         &event_history,
         &event_counter,
         &swarm_event_tx,
+        false,
     )
     .await?;
 

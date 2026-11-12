@@ -6,14 +6,15 @@ pub(super) use jcode_provider_core::{ActiveProvider, ProviderAvailability};
 pub(crate) enum ConfigProviderSelection {
     BuiltIn(ActiveProvider),
     OpenAiCompatibleProfile(&'static str),
-    NamedProfile(String),
+    NamedProfile(String, ActiveProvider),
 }
 
 impl ConfigProviderSelection {
     pub(crate) fn active_provider(&self) -> ActiveProvider {
         match self {
             Self::BuiltIn(provider) => *provider,
-            Self::OpenAiCompatibleProfile(_) | Self::NamedProfile(_) => ActiveProvider::OpenRouter,
+            Self::OpenAiCompatibleProfile(_) => ActiveProvider::OpenRouter,
+            Self::NamedProfile(_, provider) => *provider,
         }
     }
 
@@ -31,7 +32,7 @@ impl ConfigProviderSelection {
                     None => format!("OpenAI-compatible profile {}", profile_id),
                 }
             }
-            Self::NamedProfile(profile) => format!("provider profile '{}'", profile),
+            Self::NamedProfile(profile, _) => format!("provider profile '{}'", profile),
         }
     }
 }
@@ -101,6 +102,7 @@ impl MultiProvider {
             LoginProviderTarget::AutoImport
             | LoginProviderTarget::Jcode
             | LoginProviderTarget::Azure
+            | LoginProviderTarget::GrokBuild
             | LoginProviderTarget::Google => None,
         }
     }
@@ -146,6 +148,7 @@ impl MultiProvider {
         };
         let model_spec = match &api_method_kind {
             ModelRouteApiMethod::Copilot => format!("copilot:{}", bare_name),
+            ModelRouteApiMethod::GrokBuild => crate::provider::grok_build_model_spec(bare_name),
             ModelRouteApiMethod::ClaudeOAuth => format!("claude-oauth:{}", bare_name),
             ModelRouteApiMethod::AnthropicApiKey if provider_display == "Anthropic" => {
                 format!("claude-api:{}", bare_name)
@@ -166,6 +169,7 @@ impl MultiProvider {
 
         let provider_key = match &api_method_kind {
             ModelRouteApiMethod::JcodeSubscription => Some("jcode".to_string()),
+            ModelRouteApiMethod::GrokBuild => Some("grok-build".to_string()),
             ModelRouteApiMethod::AnthropicApiKey
                 if provider_display == "Anthropic"
                     && crate::provider::provider_for_model(bare_name) == Some("claude") =>
@@ -361,6 +365,18 @@ impl MultiProvider {
             return model.to_string();
         }
 
+        // An `@provider` suffix is an explicit OpenRouter upstream pin. It is
+        // stronger route identity than older/stale `provider_key` metadata.
+        // In particular, sessions created through the public CLI could retain
+        // an `openai-api` key from process-level runtime state while correctly
+        // persisting `z-ai/glm-5.2@Novita` as their model. Restoring through the
+        // stale key sent the pinned model to OpenAI and left the resumed run on
+        // its default model instead. Reconstruct the explicit OpenRouter route
+        // first so both the provider and pin survive resume.
+        if model.contains('@') {
+            return format!("openrouter:{model}");
+        }
+
         if let Some((prefix, rest)) = model.split_once(':') {
             let prefix = prefix.trim();
             if !prefix.is_empty()
@@ -437,12 +453,21 @@ impl MultiProvider {
         if model.is_empty() {
             return String::new();
         }
+        // The model itself carries explicit OpenRouter route identity. Honor it
+        // before persisted route metadata, which may come from an older buggy
+        // session and contradict the pin.
+        if crate::provider::explicit_model_provider_prefix(model).is_none() && model.contains('@') {
+            return format!("openrouter:{model}");
+        }
         if let Some(api_method) = route_api_method
             .map(str::trim)
             .filter(|api_method| !api_method.is_empty())
         {
             match ModelRouteApiMethod::parse(api_method) {
                 ModelRouteApiMethod::JcodeSubscription => return model.to_string(),
+                ModelRouteApiMethod::GrokBuild => {
+                    return crate::provider::grok_build_model_spec(model);
+                }
                 ModelRouteApiMethod::ClaudeOAuth => return format!("claude-oauth:{model}"),
                 ModelRouteApiMethod::AnthropicApiKey => return format!("claude-api:{model}"),
                 ModelRouteApiMethod::OpenAIOAuth => return format!("openai-oauth:{model}"),
@@ -481,8 +506,19 @@ impl MultiProvider {
             return Some(ConfigProviderSelection::OpenAiCompatibleProfile(profile.id));
         }
 
-        if cfg.providers.contains_key(trimmed) {
-            return Some(ConfigProviderSelection::NamedProfile(trimmed.to_string()));
+        if let Some(profile) = cfg.providers.get(trimmed) {
+            let provider = if matches!(
+                profile.provider_type,
+                crate::config::NamedProviderType::AnthropicCompatible
+            ) {
+                ActiveProvider::Claude
+            } else {
+                ActiveProvider::OpenRouter
+            };
+            return Some(ConfigProviderSelection::NamedProfile(
+                trimmed.to_string(),
+                provider,
+            ));
         }
 
         // Accept the dual-auth `--provider` vocabulary (`anthropic-api`,

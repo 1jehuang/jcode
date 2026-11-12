@@ -541,10 +541,10 @@ pub(crate) fn render_system_message(
     width: u16,
     _diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
-    if let Some(title) = msg.title.as_deref() {
-        if title == "Connection" {
-            return render_connection_system_message(msg, width);
-        }
+    if let Some(title) = msg.title.as_deref()
+        && title == "Connection"
+    {
+        return render_connection_system_message(msg, width);
     }
 
     if msg
@@ -1435,7 +1435,7 @@ fn wrap_todo_detail(value: &str, width: usize) -> Vec<String> {
     chunks
 }
 
-/// Plan-level intent lines shown once above the todo groups.
+/// Plan-level assessment lines shown once above the todo groups.
 fn push_todo_plan_details(
     lines: &mut Vec<Line<'static>>,
     plan: &crate::todo::TodoPlan,
@@ -1443,31 +1443,34 @@ fn push_todo_plan_details(
     inner_width: usize,
     compact_details: bool,
 ) {
-    if let Some(state) = plan.understands_user_intent {
-        lines.push(todo_card_line(
-            vec![
-                Span::styled(
-                    "Understands user intent ",
-                    Style::default().fg(todo_label_color()),
-                ),
-                Span::styled(
-                    state.as_str().to_string(),
-                    Style::default().fg(todo_score_color()),
-                ),
-            ],
-            base_indent,
-            inner_width,
-        ));
-    }
-    if let Some(intention) = plan
+    let intention = plan
         .user_intention
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+        .filter(|value| !value.is_empty());
+    if let Some(state) = plan.understands_user_intent {
+        let state_color = match state {
+            crate::todo::IntentUnderstanding::Uncertain => todo_failure_color(),
+            crate::todo::IntentUnderstanding::Partial => todo_warning_color(),
+            crate::todo::IntentUnderstanding::Clear
+            | crate::todo::IntentUnderstanding::Complete => todo_score_color(),
+        };
+        let mut spans = vec![
+            Span::styled("Intent ", Style::default().fg(todo_label_color())),
+            Span::styled(state.as_str().to_string(), Style::default().fg(state_color)),
+            Span::styled(": ", Style::default().fg(todo_label_color())),
+        ];
+        if let Some(intention) = intention {
+            spans.push(Span::styled(
+                intention.to_string(),
+                Style::default().fg(todo_meta_color()),
+            ));
+        }
+        lines.push(todo_card_line(spans, base_indent, inner_width));
+    } else if let Some(intention) = intention {
         push_todo_detail(
             lines,
-            "User intention",
+            "Intent",
             intention,
             base_indent,
             inner_width,
@@ -1642,6 +1645,22 @@ fn render_todo_plan_update(
     let Some(update) = plan_update else {
         return Vec::new();
     };
+    let intent_is_unclear = !crate::todo::intent_understanding_passes(
+        update
+            .after
+            .as_ref()
+            .and_then(|plan| plan.understands_user_intent),
+    );
+    if !update
+        .fields
+        .contains(&crate::todo::TodoPlanField::UnderstandsUserIntent)
+        && !(intent_is_unclear
+            && update
+                .fields
+                .contains(&crate::todo::TodoPlanField::UserIntention))
+    {
+        return Vec::new();
+    }
     let centered = markdown::center_code_blocks();
     let card_width = if centered {
         (width.saturating_sub(4) as usize).min(120)
@@ -1678,16 +1697,19 @@ fn render_todo_plan_update(
                 base_indent,
                 inner_width,
             ),
-            crate::todo::TodoPlanField::UserIntention => push_todo_text_update(
-                &mut lines,
-                "User intention",
-                update
-                    .after
-                    .as_ref()
-                    .and_then(|plan| plan.user_intention.as_deref()),
-                base_indent,
-                inner_width,
-            ),
+            crate::todo::TodoPlanField::UserIntention if intent_is_unclear => {
+                push_todo_text_update(
+                    &mut lines,
+                    "User intention",
+                    update
+                        .after
+                        .as_ref()
+                        .and_then(|plan| plan.user_intention.as_deref()),
+                    base_indent,
+                    inner_width,
+                )
+            }
+            crate::todo::TodoPlanField::UserIntention => {}
         }
     }
 
@@ -4152,6 +4174,25 @@ pub(crate) fn render_tool_message(
         }
     }
 
+    if tools_ui::canonical_tool_name(&tc.name) == "bash"
+        && tools_ui::show_bash_output()
+        && msg.content.trim() != "Command completed successfully (no output)"
+    {
+        const MAX_COLLAPSED_OUTPUT_LINES: usize = 3;
+        let output_lines = msg.content.lines().filter(|line| !line.trim().is_empty());
+        let total = output_lines.clone().count();
+        for output in output_lines.skip(total.saturating_sub(MAX_COLLAPSED_OUTPUT_LINES)) {
+            let output_line = Line::from(vec![
+                Span::raw("      "),
+                Span::styled(output.to_string(), Style::default().fg(dim_color())),
+            ]);
+            lines.push(super::truncate_line_with_ellipsis_to_width(
+                &output_line,
+                row_width,
+            ));
+        }
+    }
+
     if tc.name == "batch"
         && let Some(calls) = tc.input.get("tool_calls").and_then(|v| v.as_array())
     {
@@ -4271,17 +4312,14 @@ pub(crate) fn render_tool_message(
                 tc.input
                     .get("patch_text")
                     .and_then(|v| v.as_str())
-                    .and_then(|patch_text| match tools_ui::canonical_tool_name(&tc.name) {
-                        "apply_patch" => tools_ui::extract_apply_patch_primary_file(patch_text),
-                        "patch" => tools_ui::extract_unified_patch_primary_file(patch_text),
-                        _ => None,
-                    })
+                    .and_then(
+                        |patch_text| match tools_ui::edit_render_name(&tc.name, &tc.input) {
+                            "apply_patch" => tools_ui::extract_apply_patch_primary_file(patch_text),
+                            "patch" => tools_ui::extract_unified_patch_primary_file(patch_text),
+                            _ => None,
+                        },
+                    )
             });
-        let file_ext = file_path_for_ext
-            .as_deref()
-            .and_then(|p| std::path::Path::new(p).extension())
-            .and_then(|e| e.to_str());
-
         const MAX_DIFF_LINES: usize = MAX_INLINE_DIFF_LINES;
         let total_changes = change_lines.len();
         let additions = change_lines
@@ -4305,15 +4343,24 @@ pub(crate) fn render_tool_message(
 
         let pad_str = "";
 
+        let diff_file_path =
+            |line: &ParsedDiffLine| line.file_path.clone().or_else(|| file_path_for_ext.clone());
+        let first_file_path = display_lines.first().and_then(|line| diff_file_path(line));
+        let diff_header = |prefix: &str, file_path: Option<&str>| match file_path {
+            Some(path) => format!("{pad_str}{prefix} diff · {path}"),
+            None => format!("{pad_str}{prefix} diff"),
+        };
+
         lines.push(
             Line::from(Span::styled(
-                format!("{}┌─ diff", pad_str),
+                diff_header("┌─", first_file_path.as_deref()),
                 Style::default().fg(dim_color()),
             ))
             .alignment(ratatui::layout::Alignment::Left),
         );
 
         let mut shown_truncation = false;
+        let mut previous_file_path = first_file_path;
 
         for (i, line) in display_lines.iter().enumerate() {
             if truncated && !shown_truncation && i >= half_point {
@@ -4327,6 +4374,18 @@ pub(crate) fn render_tool_message(
                 );
                 shown_truncation = true;
             }
+
+            let current_file_path = diff_file_path(line);
+            if i > 0 && current_file_path != previous_file_path {
+                lines.push(
+                    Line::from(Span::styled(
+                        diff_header("├─", current_file_path.as_deref()),
+                        Style::default().fg(dim_color()),
+                    ))
+                    .alignment(ratatui::layout::Alignment::Left),
+                );
+            }
+            previous_file_path = current_file_path.clone();
 
             let base_color = if line.kind == DiffLineKind::Add {
                 diff_add_color()
@@ -4346,6 +4405,10 @@ pub(crate) fn render_tool_message(
 
             if !line.content.is_empty() {
                 let content = &line.content;
+                let file_ext = current_file_path
+                    .as_deref()
+                    .and_then(|p| std::path::Path::new(p).extension())
+                    .and_then(|e| e.to_str());
                 let content_vis_width = unicode_width::UnicodeWidthStr::width(content.as_str());
                 if !full_inline && max_content_width > 1 && content_vis_width > max_content_width {
                     let mut end = 0;

@@ -1,6 +1,25 @@
 use super::*;
 
 impl App {
+    /// Open the harmless update preview from anywhere in the TUI. Terminals may
+    /// report Alt+_ as either Alt+_ or Alt+Shift+_, so accept both forms.
+    pub(super) fn handle_update_sim_shortcut(
+        &mut self,
+        code: crossterm::event::KeyCode,
+        modifiers: crossterm::event::KeyModifiers,
+    ) -> bool {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        if code != KeyCode::Char('_')
+            || (modifiers != KeyModifiers::ALT
+                && modifiers != KeyModifiers::ALT | KeyModifiers::SHIFT)
+        {
+            return false;
+        }
+        self.restart_update_simulator();
+        true
+    }
+
     fn client_maintenance_busy_message(
         current: crate::bus::ClientMaintenanceAction,
         requested: crate::bus::ClientMaintenanceAction,
@@ -100,6 +119,10 @@ impl App {
         action: crate::bus::ClientMaintenanceAction,
         session_id: String,
     ) {
+        if crate::tui::is_ssh_remote() {
+            self.set_status_notice("Update the client and SSH server separately, then reconnect");
+            return;
+        }
         if let Some(current) = self.background_client_action {
             let message = Self::client_maintenance_busy_message(current, action);
             self.set_status_notice(&message);
@@ -186,7 +209,7 @@ impl App {
                     ),
                 );
             }
-            UpdateStatus::UpToDate => {
+            UpdateStatus::UpToDate | UpdateStatus::Skipped { .. } => {
                 if self.background_client_action == Some(action) {
                     self.background_client_action = None;
                 }
@@ -220,6 +243,9 @@ impl App {
     }
 
     pub(super) fn maybe_finish_background_client_reload(&mut self) -> bool {
+        if crate::tui::is_ssh_remote() {
+            return false;
+        }
         if self.is_processing {
             return false;
         }

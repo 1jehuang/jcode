@@ -43,8 +43,10 @@ impl BackgroundTaskProgress {
     pub fn normalize(mut self) -> Self {
         if let (Some(current), Some(total)) = (self.current, self.total)
             && total > 0
-            && self.percent.is_none()
         {
+            // Counts are the directly measurable work units, so they are the
+            // source of truth when a producer also supplies a percentage. This
+            // prevents contradictory updates such as `2/10` paired with 80%.
             let computed = (current as f64 / total as f64) * 100.0;
             self.percent = Some(((computed * 100.0).round() / 100.0) as f32);
         }
@@ -61,6 +63,29 @@ impl BackgroundTaskProgress {
         }
 
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn measurable_counts_override_a_conflicting_reported_percent() {
+        let progress = BackgroundTaskProgress {
+            kind: BackgroundTaskProgressKind::Determinate,
+            percent: Some(80.0),
+            message: None,
+            current: Some(2),
+            total: Some(10),
+            unit: Some("tests".into()),
+            eta_seconds: None,
+            updated_at: "now".into(),
+            source: BackgroundTaskProgressSource::Reported,
+        }
+        .normalize();
+
+        assert_eq!(progress.percent, Some(20.0));
     }
 }
 
@@ -85,6 +110,29 @@ pub struct BackgroundTaskCompleted {
     pub output_preview: String,
     pub output_file: PathBuf,
     pub duration_secs: f64,
+    pub notify: bool,
+    pub wake: bool,
+}
+
+/// Event sent when a stall watchdog notices a background task has produced no
+/// output bytes and no progress events for its configured stall window.
+///
+/// This is a "check on me" signal, not a terminal event: the task is still
+/// running as far as the manager can tell. The watchdog fires at most once per
+/// silence episode; new output or progress re-arms it.
+#[derive(Debug, Clone)]
+pub struct BackgroundTaskStalled {
+    pub task_id: String,
+    pub tool_name: String,
+    pub display_name: Option<String>,
+    pub session_id: String,
+    /// Configured stall window in seconds.
+    pub stall_wake_seconds: u64,
+    /// How long the task has been running when the watchdog fired.
+    pub running_secs: f64,
+    /// Tail of the output file at fire time (already truncated).
+    pub output_tail: String,
+    pub output_file: PathBuf,
     pub notify: bool,
     pub wake: bool,
 }

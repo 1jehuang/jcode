@@ -34,6 +34,7 @@ pub enum LoginProviderTarget {
     Azure,
     OpenAiCompatible(OpenAiCompatibleProfile),
     Cursor,
+    GrokBuild,
     Copilot,
     Gemini,
     Antigravity,
@@ -53,6 +54,7 @@ pub enum LoginProviderAuthStateKey {
     Gemini,
     Antigravity,
     Cursor,
+    GrokBuild,
     Google,
 }
 
@@ -331,6 +333,33 @@ mod tests {
     }
 
     #[test]
+    fn zai_login_identifies_coding_plan_subscription_key() {
+        let provider = resolve_login_provider("zai").expect("Z.AI provider");
+        assert_eq!(provider.auth_kind, LoginProviderAuthKind::ApiKey);
+        assert_eq!(provider.menu_detail, "Coding Plan subscription API key");
+
+        let LoginProviderTarget::OpenAiCompatible(profile) = provider.target else {
+            panic!("Z.AI must use its OpenAI-compatible Coding Plan endpoint");
+        };
+        assert_eq!(profile.api_base, "https://api.z.ai/api/coding/paas/v4");
+        assert_eq!(profile.setup_url, "https://docs.z.ai/devpack/quick-start");
+    }
+
+    #[test]
+    fn orcarouter_login_identifies_openai_compatible_endpoint() {
+        let provider = resolve_login_selection("orcarouter", &cli_login_providers())
+            .expect("OrcaRouter CLI login provider");
+        let LoginProviderTarget::OpenAiCompatible(profile) = provider.target else {
+            panic!("OrcaRouter should use the OpenAI-compatible runtime");
+        };
+
+        assert_eq!(profile.id, "orcarouter");
+        assert_eq!(profile.api_base, "https://api.orcarouter.ai/v1");
+        assert_eq!(profile.api_key_env, "ORCAROUTER_API_KEY");
+        assert!(profile.requires_api_key);
+    }
+
+    #[test]
     fn normalize_api_base_accepts_private_http_hosts() {
         assert_eq!(
             normalize_api_base("http://192.168.1.25:8000/v1/").as_deref(),
@@ -421,7 +450,44 @@ mod tests {
     #[test]
     fn minimax_profile_uses_official_openai_compatible_configuration() {
         assert_eq!(MINIMAX_PROFILE.api_base, "https://api.minimax.io/v1");
-        assert_eq!(MINIMAX_PROFILE.api_key_env, "OPENAI_API_KEY");
+        assert_eq!(MINIMAX_PROFILE.api_key_env, "MINIMAX_API_KEY");
+    }
+
+    #[test]
+    fn novita_profile_and_login_are_available_on_all_surfaces() {
+        assert_eq!(NOVITA_PROFILE.api_base, "https://api.novita.ai/openai");
+        assert_eq!(NOVITA_PROFILE.api_key_env, "NOVITA_API_KEY");
+        assert_eq!(NOVITA_PROFILE.env_file, "novita.env");
+        assert_eq!(NOVITA_PROFILE.default_model, Some("zai-org/glm-5.3"));
+        const { assert!(NOVITA_PROFILE.requires_api_key) };
+        assert!(openai_compatible_profiles().contains(&NOVITA_PROFILE));
+        for input in ["novita", "novita-ai", "novita.ai", " NOVITA "] {
+            assert_eq!(resolve_login_provider(input), Some(NOVITA_LOGIN_PROVIDER));
+        }
+        assert_eq!(
+            resolve_login_provider_loose("Novita AI"),
+            Some(NOVITA_LOGIN_PROVIDER)
+        );
+        assert_eq!(
+            NOVITA_LOGIN_PROVIDER.auth_kind,
+            LoginProviderAuthKind::ApiKey
+        );
+        assert_eq!(
+            NOVITA_LOGIN_PROVIDER.target,
+            LoginProviderTarget::OpenAiCompatible(NOVITA_PROFILE)
+        );
+        for providers in [
+            cli_login_providers(),
+            tui_login_providers(),
+            server_bootstrap_login_providers(),
+            auto_init_login_providers(),
+            auth_status_login_providers(),
+        ] {
+            assert_eq!(
+                resolve_login_selection("novita", &providers),
+                Some(NOVITA_LOGIN_PROVIDER)
+            );
+        }
     }
 
     #[test]
@@ -467,6 +533,27 @@ mod tests {
             CEREBRAS_LOGIN_PROVIDER.target,
             LoginProviderTarget::OpenAiCompatible(profile) if profile.id == "cerebras"
         ));
+    }
+
+    #[test]
+    fn belvedir_profile_uses_official_inference_router_configuration() {
+        assert_eq!(BELVEDIR_PROFILE.id, "belvedir");
+        assert_eq!(BELVEDIR_PROFILE.display_name, "Belvedir");
+        assert_eq!(
+            BELVEDIR_PROFILE.api_base,
+            "https://platform.belvedir.ai/api/v1/route"
+        );
+        assert_eq!(BELVEDIR_PROFILE.api_key_env, "BELVEDIR_API_KEY");
+        assert_eq!(BELVEDIR_PROFILE.env_file, "belvedir.env");
+        assert_eq!(BELVEDIR_PROFILE.default_model, Some("auto"));
+        const { assert!(BELVEDIR_PROFILE.requires_api_key) };
+
+        let provider = resolve_login_provider("belvedir.ai").expect("Belvedir alias resolves");
+        assert_eq!(provider.id, "belvedir");
+        assert_eq!(
+            provider.target,
+            LoginProviderTarget::OpenAiCompatible(BELVEDIR_PROFILE)
+        );
     }
 
     #[test]

@@ -302,7 +302,11 @@ pub(super) async fn handle_debug_client(
 
         match request {
             Request::Ping { id } => {
-                let event = ServerEvent::Pong { id };
+                let event = ServerEvent::Pong {
+                    id,
+                    native_ssh_protocol: Some(1),
+                    capabilities: vec!["session_tools".into()],
+                };
                 let json = encode_event(&event);
                 writer.write_all(json.as_bytes()).await?;
             }

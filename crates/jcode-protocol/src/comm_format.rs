@@ -233,12 +233,21 @@ pub fn format_comm_members(current_session_id: &str, members: &[AgentInfo]) -> S
             };
 
             // Model line.
+            let effort_suffix = member
+                .provider_effort
+                .as_deref()
+                .map(str::trim)
+                .filter(|effort| !effort.is_empty())
+                .map(|effort| format!(" ({effort})"))
+                .unwrap_or_default();
             let model_suffix = match (
                 member.provider_name.as_deref(),
                 member.provider_model.as_deref(),
             ) {
-                (Some(provider), Some(model)) => format!("\n    Model: {}/{}", provider, model),
-                (None, Some(model)) => format!("\n    Model: {}", model),
+                (Some(provider), Some(model)) => {
+                    format!("\n    Model: {}/{}{}", provider, model, effort_suffix)
+                }
+                (None, Some(model)) => format!("\n    Model: {}{}", model, effort_suffix),
                 _ => String::new(),
             };
 
@@ -681,6 +690,7 @@ mod truncation_tests {
             "probe must straddle a code point"
         );
         let messages = vec![HistoryMessage {
+            response_stats: None,
             role: "user".to_string(),
             content,
             tool_calls: None,

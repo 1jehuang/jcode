@@ -52,9 +52,9 @@ mod util;
 pub(super) use self::await_members_state::AwaitMembersRuntime;
 use self::background_tasks::{
     dispatch_background_task_completion, dispatch_background_task_progress,
-    dispatch_swarm_await_completion, dispatch_swarm_batch_progress, dispatch_swarm_output_tail,
-    dispatch_swarm_runtime_status, dispatch_swarm_todo_progress, dispatch_swarm_tool_activity,
-    dispatch_ui_activity,
+    dispatch_background_task_stalled, dispatch_swarm_await_completion,
+    dispatch_swarm_batch_progress, dispatch_swarm_output_tail, dispatch_swarm_runtime_status,
+    dispatch_swarm_todo_progress, dispatch_swarm_tool_activity, dispatch_ui_activity,
 };
 use self::debug::{ClientConnectionInfo, ClientDebugState};
 use self::debug_jobs::DebugJob;
@@ -109,6 +109,20 @@ use tokio::sync::{Mutex, OnceCell, RwLock, broadcast, mpsc};
 pub(super) type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
 pub(super) type ChannelSubscriptions =
     Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
+
+fn idle_monitor_should_start(client_count: usize, has_live_headless_worker: bool) -> bool {
+    client_count == 0 && !has_live_headless_worker
+}
+
+async fn has_live_headless_worker(sessions: &SessionAgents, swarm_state: &SwarmState) -> bool {
+    let live_sessions: HashSet<String> = sessions.read().await.keys().cloned().collect();
+    swarm_state
+        .members
+        .read()
+        .await
+        .values()
+        .any(|member| member.is_headless && live_sessions.contains(&member.session_id))
+}
 
 /// Remove a live server session and its process-presence marker as one
 /// lifecycle operation. Server-owned sessions all share the long-running
@@ -612,7 +626,7 @@ pub use self::util::ServerIdentity;
 pub(crate) use self::util::server_has_newer_binary;
 use self::util::{
     debug_control_allowed, embedding_idle_unload_secs, git_common_dir_for, reload_exec_target,
-    startup_headless_recovery_test_delay, swarm_id_for_dir,
+    startup_headless_recovery_test_delay, swarm_id_for_dir, swarm_id_for_session,
 };
 
 mod file_activity;
@@ -640,6 +654,27 @@ const IDLE_TIMEOUT_SECS: u64 = 300;
 /// comfortably below the default idle threshold so reclamation is prompt and
 /// predictable rather than delayed by another full sampling interval.
 const EMBEDDING_IDLE_CHECK_SECS: u64 = 10;
+
+#[cfg(test)]
+mod idle_monitor_tests {
+    use super::idle_monitor_should_start;
+
+    #[test]
+    fn shared_idle_monitor_preserves_live_headless_worker() {
+        assert!(!idle_monitor_should_start(0, true));
+    }
+
+    #[test]
+    fn temporary_idle_monitor_preserves_live_headless_worker() {
+        assert!(!idle_monitor_should_start(0, true));
+    }
+
+    #[test]
+    fn idle_monitor_starts_only_without_clients_or_headless_workers() {
+        assert!(idle_monitor_should_start(0, false));
+        assert!(!idle_monitor_should_start(1, false));
+    }
+}
 
 /// How often the retained-heap watchdog samples allocator retention.
 const HEAP_RETENTION_CHECK_SECS: u64 = 120;
@@ -1222,33 +1257,8 @@ impl Server {
         server_start_time: Instant,
         temporary_server_policy: Option<lifecycle::TemporaryServerPolicy>,
     ) {
-        // Preload the embedding model in background so warm startups get fast
-        // memory recall. On a cold install, skip eager preload because the
-        // first-time model download can make the first spawned client look hung
-        // while the daemon finishes bootstrapping.
-        if crate::embedding::is_model_available() {
-            tokio::task::spawn_blocking(|| {
-                let start = std::time::Instant::now();
-                match crate::embedding::get_embedder() {
-                    Ok(_) => {
-                        crate::logging::info(&format!(
-                            "Embedding model preloaded in {}ms",
-                            start.elapsed().as_millis()
-                        ));
-                    }
-                    Err(e) => {
-                        crate::logging::info(&format!(
-                            "Embedding model preload failed (non-fatal): {}",
-                            e
-                        ));
-                    }
-                }
-            });
-        } else {
-            crate::logging::info(
-                "Embedding model not installed yet; skipping eager preload during server startup",
-            );
-        }
+        // Jev memory recall does not need a local embedding model. Optional
+        // embedding consumers (such as semantic compaction) load it on demand.
 
         // Warm the lightweight session-search index after daemon startup. This
         // keeps the first agent `session_search` call from paying the cold
@@ -1297,6 +1307,7 @@ impl Server {
                 if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
                     sigterm.recv().await;
                     crate::logging::info("Server received SIGTERM, shutting down gracefully");
+                    crate::lid_override::release_for_exiting_process();
                     let _ = crate::registry::unregister_server(&sigterm_server_name).await;
                     std::process::exit(0);
                 }
@@ -1768,6 +1779,8 @@ impl Server {
         if let Some(policy) = temporary_server_policy {
             lifecycle::spawn_temporary_lifecycle_monitor(
                 Arc::clone(&self.client_count),
+                Arc::clone(&self.sessions),
+                self.swarm_state.clone(),
                 self.socket_path.clone(),
                 self.debug_socket_path.clone(),
                 self.identity.name.clone(),
@@ -1777,6 +1790,8 @@ impl Server {
             crate::logging::info("Debug control enabled; idle timeout monitor disabled.");
         } else {
             let idle_client_count = Arc::clone(&self.client_count);
+            let idle_sessions = Arc::clone(&self.sessions);
+            let idle_swarm_state = self.swarm_state.clone();
             let idle_server_name = self.identity.name.clone();
             tokio::spawn(async move {
                 let mut idle_since: Option<std::time::Instant> = None;
@@ -1786,8 +1801,10 @@ impl Server {
                     check_interval.tick().await;
 
                     let count = *idle_client_count.read().await;
+                    let has_live_headless_worker =
+                        has_live_headless_worker(&idle_sessions, &idle_swarm_state).await;
 
-                    if count == 0 {
+                    if idle_monitor_should_start(count, has_live_headless_worker) {
                         // No clients connected
                         if idle_since.is_none() {
                             idle_since = Some(std::time::Instant::now());
@@ -1804,6 +1821,7 @@ impl Server {
                                     "Server idle for {} minutes with no clients. Shutting down.",
                                     idle_duration / 60
                                 ));
+                                crate::lid_override::release_for_exiting_process();
                                 let _ = crate::registry::unregister_server(&idle_server_name).await;
                                 std::process::exit(EXIT_IDLE_TIMEOUT);
                             }
@@ -1877,12 +1895,18 @@ impl Server {
             let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut last_active: Option<bool> = None;
+            // macOS/Windows have no process-scoped lid lock, so lid-close
+            // blocking there changes a persistent setting that this journals
+            // and restores (including after a crash of a previous daemon).
+            let mut lid_override = crate::lid_override::LidOverride::for_current_platform();
             loop {
                 interval.tick().await;
 
                 // Re-evaluate the config each tick so toggling it at runtime
                 // takes effect without restarting the daemon.
-                let enabled = crate::config::config().power.prevent_sleep_while_streaming;
+                let power = &crate::config::config().power;
+                let enabled = power.prevent_sleep_while_streaming;
+                let block_lid = enabled && power.block_lid_close;
 
                 let active = enabled && Self::any_session_streaming(&swarm_members).await;
                 if last_active != Some(active) {
@@ -1894,6 +1918,9 @@ impl Server {
                     last_active = Some(active);
                 }
                 inhibitor.set_active(active);
+                if let Some(lid) = lid_override.as_mut() {
+                    lid.set_active(active && block_lid);
+                }
             }
         });
     }
@@ -2178,6 +2205,19 @@ impl Server {
                 Ok(BusEvent::BackgroundTaskProgress(task)) => {
                     dispatch_background_task_progress(&task, &swarm_members).await;
                 }
+                Ok(BusEvent::BackgroundTaskStalled(task)) => {
+                    dispatch_background_task_stalled(
+                        &task,
+                        &sessions,
+                        &soft_interrupt_queues,
+                        &swarm_members,
+                        &swarms_by_id,
+                        &event_history,
+                        &event_counter,
+                        &swarm_event_tx,
+                    )
+                    .await;
+                }
                 Ok(BusEvent::SwarmAwaitCompleted(event)) => {
                     dispatch_swarm_await_completion(
                         &event,
@@ -2272,6 +2312,14 @@ impl Server {
             Err(error) => crate::logging::warn(&format!(
                 "Reload recovery GC failed during startup: {error}"
             )),
+        }
+
+        let (pruned_active_pids, failed_active_pids) =
+            crate::storage::prune_active_pids_owned_by(std::process::id());
+        if pruned_active_pids + failed_active_pids > 0 {
+            crate::logging::info(&format!(
+                "Pruned {pruned_active_pids} stale active-pid marker(s); {failed_active_pids} could not be removed"
+            ));
         }
 
         // Restrict socket files to owner-only so other local users cannot connect.

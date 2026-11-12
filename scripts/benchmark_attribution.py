@@ -15,8 +15,9 @@ whether the catalog data itself carries a working attribution mechanism:
                              server, API key), attribution does not depend
                              solely on a browser cookie: either the setup
                              routes account creation through the marked URL,
-                             or the sponsor declares a non-cookie mechanism
-                             (e.g. signup-code, utm-forwarding) in
+                             or the setup contains the configured marker for a
+                             non-cookie mechanism (e.g. cli-flag, signup-code)
+                             declared in
                              scripts/attribution_benchmark_sponsors.json.
 5. live_url_resolves       - (optional, --live-web) the marked URL returns a
                              2xx/3xx response and the marker survives
@@ -80,13 +81,14 @@ CLI_VERDICTS = {
 
 URL_RE = re.compile(r"https?://[^\s`'\")\]>]+")
 CLI_SETUP_RE = re.compile(
-    r"(npx |npm |pipx? |uvx? |cargo |brew |curl |mcp|api[ _-]?key|cli)",
+    r"(npx |npm |pipx? |python(?:3)? |uvx? |cargo |brew |curl |mcp|api[ _-]?key|cli)",
     re.IGNORECASE,
 )
 SIGNUPISH_PATH_RE = re.compile(r"(signup|sign-up|register|get[-_]?started|join)", re.IGNORECASE)
 
 KNOWN_MECHANISMS = {
     "referral-link",      # ?via= / ?ref= cookie-based affiliate tracking
+    "cli-flag",           # a partner/referrer flag supplied to a CLI signup
     "signup-code",        # a code or coupon the agent supplies at signup
     "utm-forwarding",     # sponsor ingests utm/query params server-side
     "api-partner-id",     # partner id embedded in the API/MCP setup itself
@@ -177,10 +179,18 @@ def load_sponsor_expectations(path: Path) -> tuple[str, list[dict[str, Any]]]:
         if tool in seen:
             raise AttributionError(f"duplicate sponsor expectation: {tool}")
         marker = str(raw.get("marker", default_marker)).strip()
-        if not marker:
-            raise AttributionError(f"sponsor {tool} has no attribution marker")
+        listing_marker = str(raw.get("listing_marker", default_marker)).strip()
+        if not marker or not listing_marker:
+            raise AttributionError(f"sponsor {tool} has no attribution/listing marker")
         seen.add(tool)
-        sponsors.append({**raw, "tool": tool, "category": category, "mechanism": mechanism, "marker": marker})
+        sponsors.append({
+            **raw,
+            "tool": tool,
+            "category": category,
+            "mechanism": mechanism,
+            "marker": marker,
+            "listing_marker": listing_marker,
+        })
     return default_marker, sponsors
 
 
@@ -251,6 +261,7 @@ def check_sponsor(
 ) -> SponsorReport:
     report = SponsorReport(tool=sponsor["tool"], category=sponsor["category"], mechanism=sponsor["mechanism"])
     marker = sponsor["marker"]
+    listing_marker = sponsor.get("listing_marker", marker)
 
     if entry is None:
         report.checks.append(CheckResult("catalog_entry_present", "fail", "sponsor not found in catalog"))
@@ -263,10 +274,10 @@ def check_sponsor(
     # 1. listing URL marked
     if not url:
         report.checks.append(CheckResult("listing_url_marked", "fail", "no URL in catalog entry"))
-    elif marker_in_url(url, marker):
+    elif marker_in_url(url, listing_marker):
         report.checks.append(CheckResult("listing_url_marked", "pass", url))
     else:
-        report.checks.append(CheckResult("listing_url_marked", "fail", f"URL lacks marker {marker!r}: {url}"))
+        report.checks.append(CheckResult("listing_url_marked", "fail", f"URL lacks marker {listing_marker!r}: {url}"))
 
     # 2/3. setup URLs preserve the marker
     if not setup:
@@ -282,7 +293,7 @@ def check_sponsor(
             # Docs hosts and API endpoints do not set referral cookies.
             non_browser = host.startswith(("docs.", "api.")) or "/api" in parts.path or "/oauth" in parts.path
             signupish = SIGNUPISH_PATH_RE.search(parts.path or "")
-            if same_vendor and signupish and not non_browser and not marker_in_url(setup_url, marker):
+            if same_vendor and signupish and not non_browser and not marker_in_url(setup_url, listing_marker):
                 unmarked.append(setup_url)
         if unmarked:
             report.checks.append(
@@ -294,10 +305,23 @@ def check_sponsor(
     # 4. CLI-first flows must not depend solely on a browser cookie
     if setup and CLI_SETUP_RE.search(setup):
         setup_urls = urls_in_text(setup)
-        setup_has_marked_url = any(marker_in_url(u, marker) for u in setup_urls)
-        if sponsor["mechanism"] != "referral-link":
+        setup_has_marked_url = any(marker_in_url(u, listing_marker) for u in setup_urls)
+        setup_has_non_cookie_marker = marker.lower() in setup.lower()
+        if sponsor["mechanism"] != "referral-link" and setup_has_non_cookie_marker:
             report.checks.append(
-                CheckResult("cli_flow_attributable", "pass", f"non-cookie mechanism: {sponsor['mechanism']}")
+                CheckResult(
+                    "cli_flow_attributable",
+                    "pass",
+                    f"setup contains {sponsor['mechanism']} marker {marker!r}",
+                )
+            )
+        elif sponsor["mechanism"] != "referral-link":
+            report.checks.append(
+                CheckResult(
+                    "cli_flow_attributable",
+                    "fail",
+                    f"setup omits configured {sponsor['mechanism']} marker {marker!r}",
+                )
             )
         elif setup_has_marked_url:
             report.checks.append(CheckResult("cli_flow_attributable", "pass", "setup routes signup through marked URL"))
@@ -314,12 +338,12 @@ def check_sponsor(
         report.checks.append(CheckResult("cli_flow_attributable", "skip", "setup is not CLI-first or unavailable"))
 
     # 5. live web resolution
-    if live_web and url and marker_in_url(url, marker):
+    if live_web and url and marker_in_url(url, listing_marker):
         try:
             status, final_url, _ = http_get(url, timeout)
             if status >= 400:
                 report.checks.append(CheckResult("live_url_resolves", "fail", f"HTTP {status}"))
-            elif not marker_in_url(final_url, marker) and final_url != url:
+            elif not marker_in_url(final_url, listing_marker) and final_url != url:
                 report.checks.append(
                     CheckResult("live_url_resolves", "fail", f"redirect dropped marker: {url} -> {final_url}")
                 )

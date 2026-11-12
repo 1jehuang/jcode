@@ -27,6 +27,7 @@ impl Config {
 - Prompt up: `{}`
 - Prompt down: `{}`
 - Scroll bookmark: `{}`
+- Auto-poke toggle: `{}`
 - Workspace left: `{}`
 - Workspace down: `{}`
 - Workspace up: `{}`
@@ -44,7 +45,6 @@ impl Config {
 - Markdown spacing: {}
 - LaTeX rendering: {}
 - Pin images: {}
-- Diff line wrap: {}
 - Queue mode: {}
 - Auto server reload: {}
 - Mouse capture: {}
@@ -66,6 +66,7 @@ impl Config {
 - Custom colors: {}
 
 **Features:**
+- Check updates: {}
 - Memory: {}
 - Swarm: {}
 - Auto-poke: {}
@@ -79,6 +80,8 @@ impl Config {
 - Enabled allow-list: {}
 - Disabled tools: {}
 - Disable base tools: {}
+- MCP tools: {}
+- MCP auto threshold: {} tokens
 
 **Provider:**
 - Default model: {}
@@ -94,11 +97,13 @@ impl Config {
 **Agent models:**
 - Swarm / subagent: {}
 - Swarm spawn mode: {}
+- Swarm root effort: {}
+- Deep swarm root effort: {}
 - Spawn hook: {}
 - Review: {}
 - Judge: {}
-- Memory: {}
-- Memory sidecar: {}
+- Memory recall: Jev ({})
+- Memory extraction sidecar: {}
 - Ambient: {}
 
 **Gateway:**
@@ -142,6 +147,11 @@ impl Config {
             self.keybindings.scroll_prompt_up,
             self.keybindings.scroll_prompt_down,
             self.keybindings.scroll_bookmark,
+            if self.keybindings.auto_poke_toggle.trim().is_empty() {
+                "disabled"
+            } else {
+                self.keybindings.auto_poke_toggle.trim()
+            },
             self.keybindings.workspace_left,
             self.keybindings.workspace_down,
             self.keybindings.workspace_up,
@@ -164,7 +174,6 @@ impl Config {
             self.display.markdown_spacing.label(),
             self.display.latex_rendering.as_str(),
             self.display.pin_images,
-            self.display.diff_line_wrap,
             self.display.queue_mode,
             self.display.auto_server_reload,
             self.display.mouse_capture,
@@ -213,6 +222,7 @@ impl Config {
                         .join(", ")
                 )
             },
+            self.features.check_updates,
             self.features.memory,
             self.features.swarm,
             self.features.auto_poke,
@@ -236,6 +246,8 @@ impl Config {
                 effective_disabled_tools.join(", ")
             },
             self.tools.disable_base_tools,
+            self.tools.mcp_tools.as_str(),
+            self.tools.mcp_tools_token_threshold,
             self.provider
                 .default_model
                 .as_deref()
@@ -268,6 +280,8 @@ impl Config {
                 .as_deref()
                 .unwrap_or("(inherit current session)"),
             self.agents.swarm_spawn_mode.as_str(),
+            self.agents.root_effort_for_swarm(false),
+            self.agents.root_effort_for_swarm(true),
             self.terminal
                 .spawn_hook
                 .as_deref()
@@ -280,10 +294,7 @@ impl Config {
                 .model
                 .as_deref()
                 .unwrap_or("(inherit current session)"),
-            self.agents
-                .memory_model
-                .as_deref()
-                .unwrap_or("(sidecar auto-select)"),
+            self.agents.memory_jev_provider,
             if self.agents.memory_sidecar_enabled {
                 "enabled"
             } else {

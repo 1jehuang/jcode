@@ -1,0 +1,18 @@
+{
+  "version": "0.75.1",
+  "date": "2026-08-11",
+  "title": "More reliable autonomous runs",
+  "highlights": [
+    "Todo completion synonyms such as done and finished no longer trigger false auto-poke loops",
+    "Grok Build is available as an ACP provider"
+  ],
+  "improvements": [
+    "Todo status values are documented and constrained in the tool schema",
+    "Desktop and SDK clients expose provider request lifecycle status"
+  ],
+  "fixes": [
+    "Todo statuses are normalized on write and compared case-insensitively during headless run completion checks",
+    "Codex quota windows no longer appear more than once",
+    "Pinned todo configuration tests no longer leak process-global configuration"
+  ]
+}

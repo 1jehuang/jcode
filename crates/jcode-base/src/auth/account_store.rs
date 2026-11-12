@@ -31,8 +31,26 @@ pub fn runtime_active_override(prefix: &str) -> Option<String> {
         .and_then(|overrides| overrides.get(prefix).cloned())
 }
 
+/// Memorable, provider-independent account names. Keeping this list fixed makes
+/// labels stable across restarts and gives the same ordinal account the same
+/// animal for every provider (for example `claude-otter` and `openai-otter`).
+const ACCOUNT_ANIMALS: &[&str] = &[
+    "otter", "fox", "panda", "wolf", "owl", "lynx", "badger", "raven", "tiger", "koala", "falcon",
+    "gecko", "bison", "heron", "moose", "orca", "rabbit", "yak", "zebra", "beaver", "cougar",
+    "dolphin", "ibis", "jaguar", "lemur", "marten", "newt", "quail", "seal", "wombat", "alpaca",
+    "penguin",
+];
+
 pub fn canonical_account_label(prefix: &str, index: usize) -> String {
-    format!("{prefix}-{index}")
+    let animal = index
+        .checked_sub(1)
+        .and_then(|index| ACCOUNT_ANIMALS.get(index).copied());
+    match animal {
+        Some(animal) => format!("{prefix}-{animal}"),
+        // Extremely large account sets remain unique without making the common
+        // case less friendly.
+        None => format!("{prefix}-animal-{index}"),
+    }
 }
 
 pub fn next_account_label(prefix: &str, account_count: usize) -> String {
@@ -240,12 +258,12 @@ mod tests {
         );
 
         assert!(outcome.changed);
-        assert_eq!(accounts[0].label, "openai-1");
-        assert_eq!(accounts[1].label, "openai-2");
-        assert_eq!(active.as_deref(), Some("openai-2"));
+        assert_eq!(accounts[0].label, "openai-otter");
+        assert_eq!(accounts[1].label, "openai-fox");
+        assert_eq!(active.as_deref(), Some("openai-fox"));
         assert_eq!(
             outcome.canonical_override_label.as_deref(),
-            Some("openai-1")
+            Some("openai-otter")
         );
     }
 
@@ -265,8 +283,16 @@ mod tests {
             |account, label| account.label = label,
         );
 
-        assert_eq!(label, "claude-1");
-        assert_eq!(accounts[0].label, "claude-1");
-        assert_eq!(active.as_deref(), Some("claude-1"));
+        assert_eq!(label, "claude-otter");
+        assert_eq!(accounts[0].label, "claude-otter");
+        assert_eq!(active.as_deref(), Some("claude-otter"));
+    }
+
+    #[test]
+    fn account_labels_use_animals_and_stay_unique_after_the_named_pool() {
+        assert_eq!(canonical_account_label("claude", 1), "claude-otter");
+        assert_eq!(canonical_account_label("claude", 2), "claude-fox");
+        assert_eq!(canonical_account_label("openai", 32), "openai-penguin");
+        assert_eq!(canonical_account_label("openai", 33), "openai-animal-33");
     }
 }

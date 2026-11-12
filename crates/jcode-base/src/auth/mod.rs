@@ -1,3 +1,4 @@
+pub mod account_pool;
 pub mod account_store;
 pub mod active_method;
 pub mod antigravity;
@@ -13,6 +14,7 @@ pub mod external;
 pub mod gemini;
 pub mod google;
 pub(crate) mod google_oauth;
+pub mod grok_build;
 pub mod integration;
 pub mod lifecycle;
 pub mod login_diagnostics;
@@ -23,6 +25,7 @@ pub mod refresh_state;
 mod status_types;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_sandbox;
+pub mod transfer;
 pub mod validation;
 
 pub(crate) use commands::command_exists;
@@ -399,6 +402,8 @@ impl AuthStatus {
             || self.antigravity == AuthState::Available
             || self.gemini == AuthState::Available
             || self.cursor == AuthState::Available
+            || self.grok_build == AuthState::Available
+            || self.openai_compatible_any == AuthState::Available
     }
 
     /// Emit a structured, non-secret snapshot of which providers currently have
@@ -434,6 +439,7 @@ impl AuthStatus {
                 ("antigravity", self.antigravity.label().to_string()),
                 ("gemini", self.gemini.label().to_string()),
                 ("cursor", self.cursor.label().to_string()),
+                ("grok_build", self.grok_build.label().to_string()),
             ],
         );
     }
@@ -466,6 +472,7 @@ impl AuthStatus {
             LoginProviderAuthStateKey::Antigravity => self.antigravity,
             LoginProviderAuthStateKey::Gemini => self.gemini,
             LoginProviderAuthStateKey::Cursor => self.cursor,
+            LoginProviderAuthStateKey::GrokBuild => self.grok_build,
             LoginProviderAuthStateKey::Google => self.google,
         }
     }
@@ -530,6 +537,7 @@ impl AuthStatus {
                     AuthState::NotConfigured
                 }
             }
+            crate::provider_catalog::LoginProviderTarget::GrokBuild => self.grok_build,
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
                 if crate::provider_catalog::openai_compatible_profile_is_configured(profile) {
                     AuthState::Available
@@ -599,6 +607,13 @@ impl AuthStatus {
                     }
                 } else {
                     "not configured".to_string()
+                }
+            }
+            crate::provider_catalog::LoginProviderTarget::GrokBuild => {
+                if self.grok_build == AuthState::Available {
+                    "Grok CLI subscription login (xAI OIDC, auto-refreshed)".to_string()
+                } else {
+                    "not configured (run `jcode login --provider grok-build`)".to_string()
                 }
             }
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
@@ -825,6 +840,21 @@ impl AuthStatus {
                     AuthValidationMethod::PresenceCheck,
                 )
             }
+            crate::provider_catalog::LoginProviderTarget::GrokBuild => (
+                if state == AuthState::Available {
+                    AuthCredentialSource::LocalCliSession
+                } else {
+                    AuthCredentialSource::None
+                },
+                if state == AuthState::Available {
+                    "Grok CLI OIDC session in $GROK_HOME/auth.json".to_string()
+                } else {
+                    "Grok Build subscription login not configured".to_string()
+                },
+                AuthExpiryConfidence::Unknown,
+                AuthRefreshSupport::Automatic,
+                AuthValidationMethod::PresenceCheck,
+            ),
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
                 // Prefer the active named config profile's credential location
                 // (set via `--provider-profile`) over the built-in profile env
@@ -958,7 +988,7 @@ fn build_auth_status_uncached(mode: AuthProbeMode) -> (AuthStatus, Vec<(&'static
         // An official Gemini Developer API key is a static credential with no
         // expiry handshake, so treat its presence as immediately Available and
         // fall back to OAuth token state otherwise.
-        status.gemini = if gemini::has_api_key() {
+        status.gemini = if gemini::uses_api_key() {
             AuthState::Available
         } else {
             refreshable_token_state(
@@ -970,6 +1000,24 @@ fn build_auth_status_uncached(mode: AuthProbeMode) -> (AuthStatus, Vec<(&'static
     });
     record_auth_probe_step(&mut timings, "cursor", || {
         probe_cursor_status(&mut status, mode)
+    });
+    record_auth_probe_step(&mut timings, "grok_build", || {
+        status.grok_build = if grok_build::has_cached_login() {
+            AuthState::Available
+        } else {
+            AuthState::NotConfigured
+        }
+    });
+    record_auth_probe_step(&mut timings, "openai_compatible", || {
+        let configured = crate::provider_catalog::openai_compatible_profiles()
+            .iter()
+            .copied()
+            .any(crate::provider_catalog::openai_compatible_profile_is_configured);
+        status.openai_compatible_any = if configured {
+            AuthState::Available
+        } else {
+            AuthState::NotConfigured
+        };
     });
     record_auth_probe_step(&mut timings, "google", || probe_google_status(&mut status));
 
@@ -1058,7 +1106,7 @@ fn probe_anthropic_status(status: &mut AuthStatus) {
 }
 
 fn probe_openrouter_status(status: &mut AuthStatus) {
-    if crate::provider::openrouter::has_credentials() {
+    if crate::provider::openrouter::has_openrouter_credentials() {
         status.openrouter = AuthState::Available;
     }
 }
@@ -1122,9 +1170,7 @@ fn probe_cursor_status(status: &mut AuthStatus, mode: AuthProbeMode) {
         AuthProbeMode::Full => {
             let cursor_has_api_key = cursor::has_cursor_api_key();
             let cursor_has_native_auth = cursor::has_cursor_native_auth();
-            let cursor_has_cli_auth =
-                !cursor_has_native_auth && cursor::has_authenticated_cli_session();
-            status.cursor = if cursor_has_native_auth || cursor_has_cli_auth {
+            status.cursor = if cursor_has_native_auth {
                 AuthState::Available
             } else if cursor_has_api_key {
                 AuthState::Expired
@@ -1133,7 +1179,7 @@ fn probe_cursor_status(status: &mut AuthStatus, mode: AuthProbeMode) {
             };
         }
         AuthProbeMode::Fast => {
-            // Avoid the vscdb/sqlite and CLI probes in fast UI paths.
+            // Avoid the vscdb probe in fast UI paths.
             let cursor_has_api_key = cursor::has_cursor_api_key();
             let cursor_has_file_or_env_auth = cursor::load_access_token_from_env_or_file().is_ok();
             status.cursor = if cursor_has_file_or_env_auth || cursor_has_api_key {
@@ -1278,6 +1324,21 @@ fn assessment_for_key(
                 AuthValidationMethod::CompositeProbe,
             )
         }
+        LoginProviderAuthStateKey::GrokBuild => (
+            if state == AuthState::Available {
+                AuthCredentialSource::LocalCliSession
+            } else {
+                AuthCredentialSource::None
+            },
+            if state == AuthState::Available {
+                "Grok CLI OIDC session".to_string()
+            } else {
+                "Grok Build subscription login not configured".to_string()
+            },
+            AuthExpiryConfidence::Unknown,
+            AuthRefreshSupport::Automatic,
+            AuthValidationMethod::PresenceCheck,
+        ),
         LoginProviderAuthStateKey::Google => {
             let (source, detail) = summarize_sources(vec![google_source()]);
             (

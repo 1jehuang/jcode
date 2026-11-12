@@ -128,12 +128,23 @@ impl App {
 /// is re-sent once the turn is proven idle after reconnect, which is the
 /// queue's contract.
 pub(super) fn recover_undelivered_queued_continuation(app: &mut App, reason: &str) -> bool {
+    recover_queued_continuation(app, reason, false)
+}
+
+/// A busy rejection proves the send was not accepted, including automatic
+/// reminders. Unlike a disconnect, it is safe to queue these without risking
+/// replaying a continuation that the server is already running.
+pub(super) fn recover_rejected_queued_continuation(app: &mut App) -> bool {
+    recover_queued_continuation(app, "server busy rejection", true)
+}
+
+fn recover_queued_continuation(app: &mut App, reason: &str, rejected: bool) -> bool {
     let is_recoverable = app
         .rate_limit_pending_message
         .as_ref()
         .is_some_and(|pending| {
             pending.is_system
-                && !pending.auto_retry
+                && (rejected || !pending.auto_retry)
                 && (!pending.content.trim().is_empty() || pending.system_reminder.is_some())
         });
     if !is_recoverable {

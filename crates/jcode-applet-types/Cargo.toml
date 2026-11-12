@@ -1,0 +1,10 @@
+[package]
+name = "jcode-applet-types"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Versioned, validated wire types for Jcode applets: declarative custom UI hosted by Jcode Desktop"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

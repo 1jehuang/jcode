@@ -224,12 +224,13 @@ fn full_and_fast_auth_status_document_cursor_cli_exception() {
     let (full, _) = build_auth_status_uncached(AuthProbeMode::Full);
     let (fast, _) = build_auth_status_uncached(AuthProbeMode::Fast);
 
-    assert_eq!(full.cursor, AuthState::Available);
+    // Since 203c5cc95 (native Cursor auth), neither full nor fast auth treats an
+    // authenticated cursor-agent CLI session as usable credentials.
+    assert_eq!(full.cursor, AuthState::NotConfigured);
     assert_eq!(fast.cursor, AuthState::NotConfigured);
     assert_eq!(
-        full.cursor,
-        AuthState::Available,
-        "Full auth probes cursor-agent status; fast auth intentionally skips CLI/vscdb probes"
+        full.cursor, fast.cursor,
+        "cursor-agent CLI sessions are no longer probed by full or fast auth"
     );
 
     for (key, value) in saved {
@@ -560,6 +561,60 @@ fn openrouter_like_status_is_provider_specific() {
 }
 
 #[test]
+fn openrouter_status_excludes_shared_compatible_transport() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let keys = [
+        "JCODE_HOME",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
+    ];
+    let saved = keys
+        .into_iter()
+        .map(|key| (key, std::env::var_os(key)))
+        .collect::<Vec<_>>();
+
+    for key in keys {
+        crate::env::remove_var(key);
+    }
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    crate::env::set_var("OPENAI_API_KEY", "openai-test-key");
+    assert!(!crate::provider::openrouter::has_openrouter_credentials());
+    AuthStatus::invalidate_cache();
+    assert_eq!(
+        AuthStatus::check_fast().openrouter,
+        AuthState::NotConfigured
+    );
+
+    crate::env::set_var("JCODE_OPENROUTER_API_BASE", "https://example.test/v1");
+    crate::env::set_var("JCODE_OPENROUTER_API_KEY_NAME", "OPENAI_API_KEY");
+    assert!(crate::provider::openrouter::has_credentials());
+    assert!(!crate::provider::openrouter::has_openrouter_credentials());
+
+    crate::env::remove_var("JCODE_OPENROUTER_API_BASE");
+    crate::env::remove_var("JCODE_OPENROUTER_API_KEY_NAME");
+    crate::env::remove_var("OPENAI_API_KEY");
+    crate::env::set_var("OPENROUTER_API_KEY", "openrouter-test-key");
+    assert!(crate::provider::openrouter::has_openrouter_credentials());
+    AuthStatus::invalidate_cache();
+    assert_eq!(AuthStatus::check_fast().openrouter, AuthState::Available);
+
+    for (key, value) in saved {
+        restore_env_var(key, value);
+    }
+    AuthStatus::invalidate_cache();
+}
+
+#[test]
 fn azure_readiness_distinguishes_credentials_from_deployment_validation() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("create temp dir");
@@ -710,8 +765,10 @@ fn cursor_status_is_available_for_authenticated_cli_session() {
     crate::env::set_var("JCODE_CURSOR_CLI_PATH", &mock_cli);
     AuthStatus::invalidate_cache();
 
+    // Since 203c5cc95 jcode uses native Cursor auth only; a cursor-agent CLI
+    // session alone must not report Cursor as available.
     let status = AuthStatus::check();
-    assert_eq!(status.cursor, AuthState::Available);
+    assert_eq!(status.cursor, AuthState::NotConfigured);
 
     restore_env_var("CURSOR_API_KEY", prev_api_key);
     restore_env_var("JCODE_CURSOR_CLI_PATH", prev_cli_path);

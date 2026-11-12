@@ -16,6 +16,7 @@ struct MessageCacheKey {
     mermaid_epoch: u64,
     mermaid_aspect_bucket: Option<u16>,
     show_agentgrep_output: bool,
+    show_bash_output: bool,
     tool_call_details: bool,
 }
 
@@ -66,6 +67,7 @@ pub struct MessageCacheContext {
     pub mermaid_epoch: u64,
     pub mermaid_aspect_bucket: Option<u16>,
     pub show_agentgrep_output: bool,
+    pub show_bash_output: bool,
     pub tool_call_details: bool,
 }
 
@@ -116,6 +118,7 @@ where
         mermaid_epoch: context.mermaid_epoch,
         mermaid_aspect_bucket: context.mermaid_aspect_bucket,
         show_agentgrep_output: context.show_agentgrep_output,
+        show_bash_output: context.show_bash_output,
         tool_call_details: context.tool_call_details,
     };
 

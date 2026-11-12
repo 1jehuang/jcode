@@ -512,6 +512,7 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 enabled: None,
                 disabled: None,
+                timeout_secs: None,
             },
         );
         let pool = SharedMcpPool::new(config);

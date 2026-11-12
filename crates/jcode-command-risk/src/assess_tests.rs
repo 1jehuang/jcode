@@ -11,11 +11,27 @@ fn ctx() -> RiskContext {
     RiskContext {
         working_dir: Some(PathBuf::from("/home/u/proj")),
         home_dir: Some(PathBuf::from("/home/u")),
+        scratch_dir: None,
     }
 }
 
 fn level(command: &str) -> RiskLevel {
     assess(command, &ctx()).level
+}
+
+#[test]
+fn issue_922_heredoc_payload_does_not_trip_the_gate() {
+    for command in [
+        "cat >> log.md <<'EOF'\nO(n^2) time and O(n) space\nEOF",
+        "cat > helper.sh <<'EOF'\n#!/bin/bash\nrm -f \"$SOME_VAR\"\nEOF",
+    ] {
+        assert!(level(command).runs_immediately(), "{command:?}");
+    }
+
+    assert_eq!(
+        level("cat <<'EOF'\nrm -rf ~\nEOF\nrm -rf ~"),
+        RiskLevel::Catastrophic
+    );
 }
 
 #[test]
@@ -89,9 +105,9 @@ fn routine_cleanup_inside_the_project_is_not_blocked() {
 }
 
 #[test]
-fn deleting_outside_the_project_asks_for_justification() {
+fn deleting_concrete_paths_outside_the_project_runs_immediately() {
     for command in ["rm -rf /home/u/other-project", "rm -rf /srv/data"] {
-        assert_eq!(level(command), RiskLevel::Confirm, "{command:?}");
+        assert_eq!(level(command), RiskLevel::Low, "{command:?}");
     }
 }
 
@@ -99,13 +115,16 @@ fn deleting_outside_the_project_asks_for_justification() {
 fn non_rm_destructive_tools_are_covered() {
     // A name-based denylist would miss all of these.
     assert_eq!(level("find /home/u -delete"), RiskLevel::Catastrophic);
-    assert!(level("dd if=/dev/zero of=/dev/sda").runs_immediately() == false);
-    assert!(level("shred /home/u/other/secrets.txt") >= RiskLevel::Confirm);
+    assert!(!level("dd if=/dev/zero of=/dev/sda").runs_immediately());
+    assert_eq!(level("shred /home/u/other/secrets.txt"), RiskLevel::Low);
 }
 
 #[test]
-fn truncating_redirect_outside_cwd_is_caught() {
-    assert!(level("echo '' > /home/u/other/important.conf") >= RiskLevel::Confirm);
+fn concrete_truncating_redirect_outside_cwd_runs_immediately() {
+    assert_eq!(
+        level("echo '' > /home/u/other/important.conf"),
+        RiskLevel::Low
+    );
 }
 
 #[test]
@@ -304,7 +323,6 @@ fn wrapper_commands_do_not_hide_the_real_program() {
 
 #[test]
 fn nested_wrappers_are_unwrapped_all_the_way_down() {
-    let ctx = ctx();
     assert_eq!(
         level("sudo env nice -n 5 rm -rf ~"),
         RiskLevel::Catastrophic
@@ -358,7 +376,6 @@ fn piped_deletes_cannot_launder_their_targets() {
 fn files_inside_system_directories_are_protected_too() {
     // Exact-root matching left /etc/passwd merely "Confirm", and apply_patch
     // consults only the catastrophic tier, so it would have deleted it.
-    let ctx = ctx();
     for path in [
         "rm -f /etc/passwd",
         "rm -rf /usr/bin/env",
@@ -373,7 +390,6 @@ fn files_inside_system_directories_are_protected_too() {
 fn user_directories_under_home_root_stay_workable() {
     // /home and /Users must not become recursive, or every project path under
     // them would be blocked.
-    let ctx = ctx();
     assert!(level("rm -rf /home/u/proj/target").runs_immediately());
     assert_eq!(level("rm -rf /home"), RiskLevel::Catastrophic);
 }
@@ -405,4 +421,247 @@ fn ordinary_wrapped_commands_still_run_immediately() {
         noisy.is_empty(),
         "gate became noisy on normal work: {noisy:#?}"
     );
+}
+
+#[test]
+fn read_only_find_with_stderr_redirect_is_safe() {
+    let command = "find ~/.jcode -maxdepth 3 -type f \\
+                   \\( -name '*.log' -o -name '*events*' \\) \\
+                   -printf '%T@ %p\\n' 2>/dev/null | sort -nr | head -20";
+    let assessment = assess(command, &ctx());
+    assert_eq!(assessment.level, RiskLevel::Safe, "{assessment:#?}");
+    assert!(assessment.findings.is_empty(), "{assessment:#?}");
+}
+
+#[test]
+fn harmless_command_operands_are_not_redirect_targets() {
+    for command in [
+        "grep needle /home/u/.jcode/config 2>/dev/null",
+        "find / -name '*.conf' 2>/dev/null",
+        "printf '%s\\n' /home/u/.ssh/id_ed25519 >/tmp/list",
+    ] {
+        let assessment = assess(command, &ctx());
+        assert_eq!(
+            assessment.level,
+            RiskLevel::Safe,
+            "{command}: {assessment:#?}"
+        );
+    }
+}
+
+#[test]
+fn safe_redirect_sink_does_not_make_explicit_deletion_safe() {
+    assert_eq!(level("rm /dev/null"), RiskLevel::Catastrophic);
+}
+
+#[test]
+fn shell_constructs_do_not_hide_catastrophic_commands() {
+    for command in [
+        "(rm -rf ~)",
+        "x=$(rm -rf ~)",
+        "case x in y) rm -rf ~;; esac",
+        "if true; then rm -rf ~; fi",
+        "while true; do rm -rf ~; done",
+    ] {
+        assert_eq!(level(command), RiskLevel::Catastrophic, "{command:?}");
+    }
+    assert!(
+        level("rm -rf $(echo ~)") >= RiskLevel::Confirm,
+        "runtime-computed targets must not run immediately"
+    );
+}
+
+#[test]
+fn issue_725_read_only_and_bounded_commands_run_immediately() {
+    for command in [
+        r#"t=$(readlink "$f" 2>/dev/null)"#,
+        "sudo -n ls /sys",
+        "rm -f build-2026-*.json",
+        "rm -f /tmp/jcode-*.json",
+    ] {
+        assert!(
+            level(command).runs_immediately(),
+            "{command:?} should be bounded, got {:?}",
+            level(command)
+        );
+    }
+}
+
+#[test]
+fn wrapper_value_flags_and_unbounded_globs_remain_guarded() {
+    for command in [
+        "nice -n 10 rm -rf ~",
+        "sudo -u root rm -rf ~",
+        "timeout -s KILL 5 rm -rf ~",
+        "xargs -n 1 rm -rf ~",
+        "ionice -c 3 rm -rf ~",
+        "rm -rf /home/u/*/node_modules",
+        "rm -rf /etc/*",
+    ] {
+        assert!(
+            level(command) >= RiskLevel::Confirm,
+            "{command:?} must remain guarded"
+        );
+    }
+}
+
+#[test]
+fn environment_printing_and_command_lookup_are_read_only() {
+    for command in [
+        "env",
+        "env -i",
+        "env FOO=bar",
+        "sudo env",
+        "command -v sudo",
+        "command -V rm",
+        "command -pv sudo env rm",
+        "command -p -V sudo",
+        "env command -v sudo",
+        "command -v rm -rf /",
+    ] {
+        assert_eq!(level(command), RiskLevel::Safe, "{command}");
+    }
+    for command in ["command -p rm -rf ~", "env rm -rf ~", "command -- rm -rf ~"] {
+        assert_eq!(level(command), RiskLevel::Catastrophic, "{command}");
+    }
+}
+
+#[test]
+fn read_only_find_actions_do_not_delete_search_roots() {
+    for action in ["-exec", "-execdir", "-ok", "-okdir"] {
+        for payload in [
+            "cat {}",
+            "/bin/cat -- {}",
+            "readlink -f {}",
+            "sed -n '1,200p' {}",
+            "sed 'p' {}",
+        ] {
+            for root in ["/", "~", "~/.ssh", "/etc"] {
+                for terminator in [r"\;", "+"] {
+                    let command = format!("find {root} -type f {action} {payload} {terminator}");
+                    assert_eq!(level(&command), RiskLevel::Safe, "{command}");
+                }
+            }
+        }
+    }
+    assert_eq!(
+        level(r"find / -exec cat {} \; -exec readlink {} \;"),
+        RiskLevel::Safe
+    );
+}
+
+#[test]
+fn find_mutating_and_unknown_actions_remain_protected() {
+    for action in ["-exec", "-execdir", "-ok", "-okdir"] {
+        for payload in ["rm -rf {}", "sudo rm -rf {}", "shred {}"] {
+            let command = format!(r"find ~ {action} {payload} \;");
+            assert_eq!(level(&command), RiskLevel::Catastrophic, "{command}");
+        }
+        for payload in [
+            "mystery {}",
+            "$PROGRAM {}",
+            "sed -i 's/a/b/' {}",
+            "sed 'w /etc/passwd' {}",
+            "sed 'e rm -rf ~' {}",
+            "sed -n -f script {}",
+            "sh -c '$PAYLOAD' {}",
+        ] {
+            let command = format!(r"find / {action} {payload} \;");
+            assert!(level(&command) >= RiskLevel::Confirm, "{command}");
+        }
+    }
+    for command in [
+        "find ~ -delete",
+        r"find ~ -exec cat {} \; -delete",
+        r"find / -exec cat {} \; -exec rm -rf {} +",
+        r"find . -exec rm -rf /etc \;",
+        "find -L ~ -delete",
+    ] {
+        assert_eq!(level(command), RiskLevel::Catastrophic, "{command}");
+    }
+    for command in [
+        "find / -exec",
+        "find / -exec cat {}",
+        "find / -execdir mystery {} +",
+    ] {
+        assert!(level(command) >= RiskLevel::Confirm, "{command}");
+    }
+}
+
+#[test]
+fn read_only_early_returns_preserve_redirect_checks() {
+    for prefix in [
+        "env",
+        "command -v sudo",
+        r"find / -exec cat {} \;",
+        r"find / -exec sed -n '1p' {} \;",
+        "sh -c 'echo hello'",
+    ] {
+        assert_eq!(
+            level(&format!("{prefix} > /etc/passwd")),
+            RiskLevel::Catastrophic,
+            "{prefix}"
+        );
+        assert_eq!(
+            level(&format!("{prefix} > $UNKNOWN")),
+            RiskLevel::Confirm,
+            "{prefix}"
+        );
+        assert_eq!(
+            level(&format!("{prefix} 2>/dev/null")),
+            RiskLevel::Safe,
+            "{prefix}"
+        );
+    }
+}
+
+#[test]
+fn reassignment_does_not_override_trusted_protection() {
+    for command in ["HOME=/tmp; rm -rf /home/u", "env HOME=/tmp rm -rf ~/.ssh"] {
+        assert_eq!(level(command), RiskLevel::Catastrophic, "{command}");
+    }
+    for command in [
+        "HOME=/etc; rm -rf $HOME/cache",
+        "JCODE_SCRATCH_DIR=/etc; rm -rf $JCODE_SCRATCH_DIR/passwd",
+    ] {
+        assert!(level(command) >= RiskLevel::Confirm, "{command}");
+    }
+    assert_eq!(level("env -u UNUSED rm -rf ~"), RiskLevel::Catastrophic);
+    assert_eq!(level("env -u UNUSED"), RiskLevel::Safe);
+    assert!(level("env -S 'rm -rf ~'") >= RiskLevel::Confirm);
+}
+
+#[test]
+fn env_split_strings_cannot_be_mistaken_for_printing() {
+    for command in [
+        "env -S='rm -rf /'",
+        "env --split-string='rm -rf /'",
+        "env -u FOO -S 'rm -rf /'",
+        "env -iS 'rm -rf /'",
+    ] {
+        assert!(level(command) >= RiskLevel::Confirm, "{command}");
+    }
+}
+
+#[test]
+fn find_output_actions_write_only_their_destinations() {
+    for action in ["-fprint", "-fprint0", "-fls", "-fprintf"] {
+        let suffix = if action == "-fprintf" { " '%p'" } else { "" };
+        for (target, expected) in [
+            ("/etc/passwd", RiskLevel::Catastrophic),
+            ("$UNKNOWN", RiskLevel::Confirm),
+            ("/tmp/find-output", RiskLevel::Safe),
+            ("/dev/null", RiskLevel::Safe),
+        ] {
+            let command = format!("find / {action} {target}{suffix}");
+            assert_eq!(level(&command), expected, "{command}");
+        }
+    }
+    for command in [
+        "find / -name '-delete'",
+        "find / -printf '-delete'",
+        "find / -name '-exec'",
+    ] {
+        assert_eq!(level(command), RiskLevel::Safe, "{command}");
+    }
 }

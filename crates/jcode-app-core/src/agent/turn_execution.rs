@@ -4,13 +4,16 @@ use crate::{terminal_eprintln as eprintln, terminal_println as println};
 impl Agent {
     /// Run a single turn with the given user message
     pub async fn run_once(&mut self, user_message: &str) -> Result<()> {
-        self.add_message(
+        let input_id = self.add_message(
             Role::User,
             vec![ContentBlock::Text {
                 text: user_message.to_string(),
                 cache_control: None,
             }],
         );
+        if !user_message.trim().is_empty() {
+            self.begin_model_usage_turn(&input_id);
+        }
         self.session.save()?;
         if trace_enabled() {
             eprintln!("[trace] session_id {}", self.session.id);
@@ -29,7 +32,7 @@ impl Agent {
         user_message: &str,
         display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<String> {
-        self.add_message_with_display_role(
+        let input_id = self.add_message_with_display_role(
             Role::User,
             vec![ContentBlock::Text {
                 text: user_message.to_string(),
@@ -37,6 +40,9 @@ impl Agent {
             }],
             display_role,
         );
+        if !user_message.trim().is_empty() {
+            self.begin_model_usage_turn(&input_id);
+        }
         self.session.save()?;
         if trace_enabled() {
             eprintln!("[trace] session_id {}", self.session.id);
@@ -132,7 +138,11 @@ impl Agent {
             ));
         }
 
-        self.add_message_with_display_role(Role::User, blocks, display_role);
+        let starts_turn = blocks.len() > 1 || !user_message.trim().is_empty();
+        let input_id = self.add_message_with_display_role(Role::User, blocks, display_role);
+        if starts_turn {
+            self.begin_model_usage_turn(&input_id);
+        }
         self.session.save()
     }
 
@@ -197,13 +207,13 @@ impl Agent {
         let preserve_working_dir = self.session.working_dir.clone();
 
         self.session.mark_closed();
+        self.finish_concurrency_tracking();
         self.persist_session_best_effort("pre-clear session close state");
 
         let mut new_session = Session::create(None, None);
         new_session.mark_active();
-        new_session.model = Some(self.provider.model());
-        new_session.provider_key =
-            crate::session::derive_session_provider_key(self.provider.name());
+        new_session.model = Some(self.provider_model());
+        new_session.provider_key = self.provider_key_for_new_session();
         new_session.is_canary = preserve_canary;
         new_session.testing_build = preserve_testing_build;
         new_session.is_debug = preserve_debug;
@@ -211,6 +221,14 @@ impl Agent {
         new_session.ensure_initial_session_context_message();
 
         self.session = new_session;
+        self.begin_concurrency_tracking();
+        self._tool_policy_registration = crate::tool::register_session_tool_policy(
+            &self.session.id,
+            self.allowed_tools.clone(),
+            self.disabled_tools.clone(),
+        );
+        self.refresh_agents_md_snapshot();
+        self.reconcile_explicit_provider_pin_route();
         self.reset_runtime_state_for_session_change();
         self.provider_session_id = None;
         self.seed_compaction_from_session();
@@ -297,7 +315,10 @@ impl Agent {
     /// Unlock tools if a tool execution may have changed the registry
     /// (e.g., mcp connect/disconnect/reload)
     pub(super) fn unlock_tools_if_needed(&mut self, tool_name: &str) {
-        if tool_name == "mcp" {
+        // With native deferred MCP loading the `mcp` tool only changes the
+        // deferred subset, which is refreshed every turn without touching the
+        // cached prefix. Unlocking would be a needless prompt-cache miss.
+        if tool_name == "mcp" && !self.native_deferred_mcp() {
             self.unlock_tools();
         }
     }
@@ -311,17 +332,21 @@ impl Agent {
     }
 
     pub fn set_canary(&mut self, build_hash: &str) {
+        if !self.session.is_canary {
+            // Self-dev changes the tool surface, including hiding bundled docs.
+            self.unlock_tools();
+        }
         self.session.set_canary(build_hash);
         if let Err(err) = self.session.save() {
             logging::error(&format!("Failed to persist canary session state: {}", err));
         }
     }
 
-    /// Mark this session as a debug/test session
-    /// Set a custom system prompt override (used by ambient mode).
+    /// Set a persisted custom system prompt override (also used by ambient mode).
     /// When set, this replaces the normal system prompt entirely.
     pub fn set_system_prompt(&mut self, prompt: &str) {
-        self.system_prompt_override = Some(prompt.to_string());
+        self.session.system_prompt = Some(prompt.to_string());
+        self.persist_session_best_effort("system prompt override");
     }
 
     pub fn set_debug(&mut self, is_debug: bool) {
@@ -378,9 +403,63 @@ impl Agent {
         self.stdin_request_tx = Some(tx);
     }
 
+    /// Prepare the static provider prefix while a client is idle. Unlike
+    /// `tool_definitions`, this does not pin the tool snapshot or consume the
+    /// one-shot late-MCP-discovery check before the first real turn.
+    pub(crate) async fn prewarm_provider(&self) {
+        if self.session.is_canary {
+            self.registry.register_selfdev_tools().await;
+        }
+        let tools = match &self.locked_tools {
+            Some(tools) => tools.clone(),
+            None => self.build_filtered_tool_definitions().await,
+        };
+        let prompt = self.build_system_prompt_split(None);
+        self.provider.prewarm(&tools, &prompt.static_part).await;
+    }
+
     pub(super) async fn tool_definitions(&mut self) -> Vec<ToolDefinition> {
         if self.session.is_canary {
             self.registry.register_selfdev_tools().await;
+        }
+
+        // Account sign-in/out and verified entitlement changes must reach the
+        // model even when the tool list is frozen (including deferred MCP).
+        // Only update this definition when its guidance actually changes.
+        if !crate::tool::sdk::custom(&self.session.id, "compile_remote")
+            && self
+                .locked_tools
+                .as_ref()
+                .is_some_and(|tools| tools.iter().any(|tool| tool.name == "compile_remote"))
+            && let Some(fresh) = self.registry.remote_compile_definition().await
+            && let Some(locked) = self.locked_tools.as_mut()
+            && let Some(previous) = locked.iter_mut().find(|tool| tool.name == "compile_remote")
+            && (previous.description != fresh.description
+                || previous.input_schema != fresh.input_schema)
+        {
+            *previous = fresh;
+            self.cache_tracker.reset();
+        }
+
+        // Provider-native deferred MCP loading: MCP definitions live outside
+        // the cached prefix, so the eager snapshot never changes when servers
+        // connect, reconnect, or register late. Refresh the deferred subset
+        // every turn instead of unlocking.
+        let native = self.native_deferred_mcp();
+        if self.locked_tools.is_some() && self.locked_tools_native_deferred != native {
+            // The active provider's deferred-loading capability changed (model
+            // or provider switch). The prefix changes with the provider anyway,
+            // so rebuilding costs nothing extra and keeps MCP usable.
+            logging::info(&format!(
+                "Rebuilding tool snapshot: native deferred MCP loading {} after provider change",
+                if native { "enabled" } else { "disabled" }
+            ));
+            self.locked_tools = None;
+            self.mcp_late_register_resolved = false;
+            self.cache_tracker.reset();
+        }
+        if native {
+            return self.native_deferred_tool_definitions().await;
         }
 
         // Return locked tools if available (prevents cache invalidation from
@@ -401,6 +480,22 @@ impl Agent {
         // prompt-cache miss (the turn MCP tools first appear). The
         // `mcp_late_register_resolved` flag makes this a one-shot check so we do
         // not rescan the registry on every subsequent turn.
+        let locked_uses_fixed_mcp_surface = self.locked_tools.as_ref().is_some_and(|locked| {
+            locked
+                .iter()
+                .any(|tool| matches!(tool.name.as_str(), "mcp_search" | "mcp_call"))
+                && !locked.iter().any(|tool| tool.name.starts_with("mcp__"))
+        });
+        if (self.mcp_tools_mode == crate::config::McpToolsMode::Deferred
+            || locked_uses_fixed_mcp_surface)
+            && let Some(locked) = self.locked_tools.clone()
+        {
+            // Per-server tools may continue registering in the background, but
+            // deferred mode's fixed surface cannot change as a result. Avoid an
+            // unnecessary provider cache reset and registry scan.
+            self.mcp_late_register_resolved = true;
+            return locked;
+        }
         if let Some(ref locked) = self.locked_tools {
             if self.mcp_late_register_resolved {
                 return locked.clone();
@@ -436,33 +531,160 @@ impl Agent {
             tools.len()
         ));
         self.locked_tools = Some(tools.clone());
+        self.locked_tools_native_deferred = false;
+        tools
+    }
+
+    /// Whether this session exposes MCP tools through provider-native deferred
+    /// loading (see [`ToolDefinition::defer_loading`]). Eager mode keeps
+    /// top-level definitions; every other mode prefers the native path when
+    /// the active provider supports it, and falls back to the fixed
+    /// `mcp_search`/`mcp_call` surface otherwise.
+    pub(crate) fn native_deferred_mcp(&self) -> bool {
+        self.mcp_tools_mode != crate::config::McpToolsMode::Eager
+            && self.provider.supports_deferred_tools()
+    }
+
+    /// Tool list for the native deferred MCP path.
+    ///
+    /// The eager part is locked exactly like the regular path. MCP
+    /// definitions are appended as deferred on every turn from the live
+    /// registry. They never enter the cached prefix, so adding, removing, or
+    /// reconnecting servers costs no prompt-cache miss.
+    async fn native_deferred_tool_definitions(&mut self) -> Vec<ToolDefinition> {
+        let current = self.build_filtered_tool_definitions().await;
+        let eager = match &self.locked_tools {
+            // A snapshot locked before switching to the native path may still
+            // carry eager MCP definitions; keep them eager for cache stability
+            // (they are still callable) but never duplicate them as deferred.
+            Some(locked) => locked.clone(),
+            None => {
+                let eager = ToolDefinition::eager(&current);
+                logging::info(&format!(
+                    "Locking eager tool list at {} tools for cache stability (MCP tools deferred)",
+                    eager.len()
+                ));
+                self.locked_tools = Some(eager.clone());
+                self.locked_tools_native_deferred = true;
+                eager
+            }
+        };
+        self.mcp_late_register_resolved = true;
+        let mut tools = eager;
+        let eager_names: HashSet<String> = tools.iter().map(|t| t.name.clone()).collect();
+        tools.extend(
+            current
+                .into_iter()
+                .filter(|t| t.defer_loading && !eager_names.contains(&t.name)),
+        );
         tools
     }
 
     /// Build the agent's tool definitions from the registry, applying the
     /// session's `allowed_tools`, `disabled_tools`, and self-dev filters.
     async fn build_filtered_tool_definitions(&self) -> Vec<ToolDefinition> {
-        let mut tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
-        if !self.disabled_tools.is_empty() {
-            tools.retain(|tool| !self.disabled_tools.contains(&tool.name));
+        let sdk = crate::tool::sdk::config(&self.session.id);
+        let enabled = sdk
+            .as_ref()
+            .and_then(|c| c.enabled.as_ref())
+            .map(|names| names.iter().cloned().collect());
+        let allowed = enabled.as_ref().or(self.allowed_tools.as_ref());
+        let mut tools = self.registry.definitions(allowed).await;
+        if enabled.is_none() && !self.disabled_tools.is_empty() {
+            tools.retain(|tool| {
+                !self
+                    .registry
+                    .tool_is_disabled(&self.disabled_tools, &tool.name)
+            });
         }
-        Self::apply_selfdev_tool_surface(&mut tools, self.session.is_canary);
+        Self::apply_selfdev_tool_surface(
+            &mut tools,
+            self.session.is_canary,
+            self.is_desktop_selfdev(),
+        );
+        self.apply_mcp_tool_exposure(&mut tools);
+        let mut tools = crate::tool::sdk::apply_definitions(&self.session.id, tools);
+        if let Some(config) = sdk.as_ref() {
+            let disabled = config.disabled.iter().cloned().collect();
+            tools.retain(|tool| !self.registry.tool_is_disabled(&disabled, &tool.name));
+        }
         tools
     }
 
-    /// Tailor the `selfdev` tool definition to the session mode.
+    /// Replace per-server MCP definitions with the fixed search/call surface
+    /// according to the configured mode. Auto mode estimates the actual
+    /// serialized, already-filtered definitions the provider would receive.
+    fn apply_mcp_tool_exposure(&self, tools: &mut Vec<ToolDefinition>) {
+        if self.native_deferred_mcp() {
+            // Keep `mcp_search` eager for discovery (its results load the
+            // matching definitions via tool references). Every MCP definition
+            // is deferred, and so is `mcp_call`: discovered tools are called
+            // natively, but a stable deferred entry matters for caching. Some
+            // models (observed on Opus 4.8) rebuild the prefix when the
+            // deferred set goes from empty to non-empty, while changes within
+            // a non-empty deferred set keep the cache. `mcp_call` stays in the
+            // set for the whole session, so the first server connecting later
+            // is still cache-neutral.
+            for tool in tools.iter_mut() {
+                if tool.name.starts_with("mcp__") || tool.name == "mcp_call" {
+                    tool.defer_loading = true;
+                }
+            }
+            return;
+        }
+        let mcp_definitions: Vec<ToolDefinition> = tools
+            .iter()
+            .filter(|tool| tool.name.starts_with("mcp__"))
+            .cloned()
+            .collect();
+        let estimated_tokens = ToolDefinition::aggregate_prompt_token_estimate(&mcp_definitions);
+        let deferred = match self.mcp_tools_mode {
+            crate::config::McpToolsMode::Auto => estimated_tokens > self.mcp_tools_token_threshold,
+            crate::config::McpToolsMode::Eager => false,
+            crate::config::McpToolsMode::Deferred => true,
+        };
+
+        if deferred {
+            tools.retain(|tool| !tool.name.starts_with("mcp__"));
+        } else {
+            tools.retain(|tool| !matches!(tool.name.as_str(), "mcp_search" | "mcp_call"));
+        }
+    }
+
+    /// Expose the `selfdev` tool only while running in self-development mode.
+    /// Self-dev agents use the working tree rather than bundled `jcode_docs`,
+    /// which can lag behind the source they are editing.
     ///
-    /// The registry stores a single shared `selfdev` tool with a default
-    /// (non-self-dev) schema. Self-dev sessions get the full build/test/reload
-    /// surface; every other session keeps the lightweight on-ramp surface
-    /// (`enter`, `setup`, `reload`, `status`, `find-config`). The tool stays
-    /// available in all sessions so the agent can always enter self-dev mode.
-    fn apply_selfdev_tool_surface(tools: &mut [ToolDefinition], is_canary: bool) {
+    /// The registry keeps the implementation available for self-dev sessions,
+    /// but regular agents should not spend tool-list context on an internal
+    /// development surface.
+    fn apply_selfdev_tool_surface(
+        tools: &mut Vec<ToolDefinition>,
+        is_canary: bool,
+        is_desktop: bool,
+    ) {
+        // Desktop development is a separate product mode, not a CLI canary.
+        // Never advertise CLI build/reload or TUI debug sockets in that mode.
+        if is_desktop {
+            tools.retain(|tool| {
+                !matches!(
+                    tool.name.as_str(),
+                    "selfdev" | "debug_socket" | "jcode_docs"
+                )
+            });
+            return;
+        }
+        tools.retain(|tool| tool.name != "desktop_selfdev");
+        if !is_canary {
+            tools.retain(|tool| tool.name != "selfdev");
+            return;
+        }
+        tools.retain(|tool| tool.name != "jcode_docs");
         for tool in tools.iter_mut() {
             if tool.name == "selfdev" {
                 tool.description =
-                    crate::tool::selfdev::SelfDevTool::description_for(is_canary).to_string();
-                tool.input_schema = crate::tool::selfdev::SelfDevTool::schema_for(is_canary);
+                    crate::tool::selfdev::SelfDevTool::description_for(true).to_string();
+                tool.input_schema = crate::tool::selfdev::SelfDevTool::schema_for(true);
             }
         }
     }
@@ -475,10 +697,18 @@ impl Agent {
         let allowed = self.allowed_tools.as_ref();
         registry_names.iter().any(|name| {
             name.starts_with("mcp__")
-                && allowed.map(|set| set.contains(name)).unwrap_or(true)
-                && !self.disabled_tools.contains(name)
+                && allowed
+                    .map(|set| self.registry.tool_is_allowed(set, name))
+                    .unwrap_or(true)
+                && !self.registry.tool_is_disabled(&self.disabled_tools, name)
                 && !locked.iter().any(|t| &t.name == name)
         })
+    }
+
+    pub(crate) fn invalidate_sdk_tools(&mut self) {
+        self.mcp_late_register_resolved = false;
+        self.locked_tools = None;
+        self.cache_tracker.reset();
     }
 
     pub async fn tool_names(&self) -> Vec<String> {
@@ -494,12 +724,7 @@ impl Agent {
         if self.session.is_canary {
             self.registry.register_selfdev_tools().await;
         }
-        let mut tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
-        if !self.disabled_tools.is_empty() {
-            tools.retain(|tool| !self.disabled_tools.contains(&tool.name));
-        }
-        Self::apply_selfdev_tool_surface(&mut tools, self.session.is_canary);
-        tools
+        self.build_filtered_tool_definitions().await
     }
 
     pub async fn execute_tool(
@@ -576,12 +801,59 @@ impl Agent {
     }
 
     pub(super) fn validate_tool_allowed(&self, name: &str) -> Result<()> {
+        let unqualified_name = name.strip_prefix("functions.").unwrap_or(name);
+        let name = if crate::tool::sdk::custom(&self.session.id, unqualified_name) {
+            unqualified_name
+        } else {
+            Registry::resolve_tool_name(unqualified_name)
+        };
+        let mut sdk_enabled = false;
+        if let Some(config) = crate::tool::sdk::config(&self.session.id) {
+            let disabled = config.disabled.into_iter().collect();
+            anyhow::ensure!(
+                !self.registry.tool_is_disabled(&disabled, name),
+                "Tool '{}' is disabled",
+                name
+            );
+            if config.custom.iter().any(|t| t.name == name) {
+                return Ok(());
+            }
+            if let Some(enabled) = config.enabled {
+                let allowed = enabled.into_iter().collect();
+                anyhow::ensure!(
+                    self.registry.tool_is_allowed(&allowed, name),
+                    "Tool '{}' is not allowed",
+                    name
+                );
+                sdk_enabled = true;
+            }
+        }
+        let is_desktop = self.is_desktop_selfdev();
+        if is_desktop && matches!(name, "selfdev" | "debug_socket") {
+            return Err(anyhow::anyhow!(
+                "Tool '{}' targets Jcode CLI, not Desktop. Use 'desktop_selfdev' in Desktop self-development mode.",
+                name
+            ));
+        }
+        if !is_desktop && name == "desktop_selfdev" {
+            return Err(anyhow::anyhow!(
+                "Tool 'desktop_selfdev' is only available in a Jcode Desktop source checkout."
+            ));
+        }
+        if (self.session.is_canary || is_desktop) && name == "jcode_docs" {
+            return Err(anyhow::anyhow!(
+                "Tool 'jcode_docs' is disabled in self-development mode. Read the working tree documentation instead."
+            ));
+        }
+        if sdk_enabled {
+            return Ok(());
+        }
         if let Some(allowed) = self.allowed_tools.as_ref()
-            && !allowed.contains(name)
+            && !self.registry.tool_is_allowed(allowed, name)
         {
             return Err(anyhow::anyhow!("Tool '{}' is not allowed", name));
         }
-        if self.disabled_tools.contains(name) {
+        if self.registry.tool_is_disabled(&self.disabled_tools, name) {
             return Err(anyhow::anyhow!("Tool '{}' is disabled", name));
         }
         Ok(())
@@ -615,12 +887,14 @@ impl Agent {
         let previous_status = session.status.clone();
 
         let assign_start = Instant::now();
-        let previous_session_id = self.session.id.clone();
+        // A failed load must leave the current Agent and its concurrency lease
+        // alive. Close it only after the replacement is ready to install.
+        self.mark_closed();
         // Restore provider_session_id for Claude CLI session resume
         self.provider_session_id = session.provider_session_id.clone();
         self.session = session;
-        crate::tool::clear_session_tool_policy(&previous_session_id);
-        crate::tool::set_session_tool_policy(
+        self.refresh_agents_md_snapshot();
+        self._tool_policy_registration = crate::tool::register_session_tool_policy(
             &self.session.id,
             self.allowed_tools.clone(),
             self.disabled_tools.clone(),
@@ -647,15 +921,18 @@ impl Agent {
                     "Failed to restore session model '{}' via '{}': {}",
                     model, model_request, e
                 ));
+            } else {
+                self.reconcile_explicit_provider_pin_route();
             }
         } else {
-            self.session.model = Some(self.provider.model());
+            self.session.model = Some(self.provider_model());
         }
         self.restore_reasoning_effort_from_session();
         let model_ms = model_start.elapsed().as_millis();
 
         let mark_active_start = Instant::now();
         self.session.mark_active();
+        self.begin_concurrency_tracking();
         let mark_active_ms = mark_active_start.elapsed().as_millis();
         self.sync_memory_dedup_state_from_session();
 
@@ -709,6 +986,7 @@ impl Agent {
         crate::session::render_messages(&self.session)
             .into_iter()
             .map(|msg| HistoryMessage {
+                response_stats: msg.response_stats,
                 role: msg.role,
                 content: msg.content,
                 tool_calls: if msg.tool_calls.is_empty() {
@@ -728,6 +1006,7 @@ impl Agent {
         let history = messages
             .into_iter()
             .map(|msg| HistoryMessage {
+                response_stats: msg.response_stats,
                 role: msg.role,
                 content: msg.content,
                 tool_calls: if msg.tool_calls.is_empty() {
@@ -757,6 +1036,7 @@ impl Agent {
         let history = messages
             .into_iter()
             .map(|msg| HistoryMessage {
+                response_stats: msg.response_stats,
                 role: msg.role,
                 content: msg.content,
                 tool_calls: if msg.tool_calls.is_empty() {
@@ -888,6 +1168,9 @@ impl Agent {
             for block in &msg.content {
                 match block {
                     ContentBlock::Text { text, .. } => {
+                        if text.trim_start().starts_with("<system-reminder>") {
+                            continue;
+                        }
                         transcript.push_str(text);
                         transcript.push('\n');
                     }
@@ -905,7 +1188,8 @@ impl Agent {
                     ContentBlock::Reasoning { .. }
                     | ContentBlock::ReasoningTrace { .. }
                     | ContentBlock::AnthropicThinking { .. }
-                    | ContentBlock::OpenAIReasoning { .. } => {}
+                    | ContentBlock::OpenAIReasoning { .. }
+                    | ContentBlock::ToolReference { .. } => {}
                     ContentBlock::Image { .. } => {
                         transcript.push_str("[Image]\n");
                     }

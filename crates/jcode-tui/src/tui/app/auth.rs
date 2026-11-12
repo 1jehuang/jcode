@@ -16,7 +16,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use std::sync::Arc;
 
 impl App {
-    fn open_auth_browser(url: &str) -> bool {
+    pub(super) fn open_auth_browser(url: &str) -> bool {
         // Honors --no-browser/NO_BROWSER/JCODE_NO_BROWSER and never opens real
         // browser windows from test binaries (login flows are exercised by TUI
         // tests; without this guard a test run pops OAuth pages on the
@@ -561,6 +561,9 @@ impl App {
                 self.start_openai_compatible_profile_login(profile)
             }
             crate::provider_catalog::LoginProviderTarget::Cursor => self.start_cursor_login(),
+            crate::provider_catalog::LoginProviderTarget::GrokBuild => {
+                self.start_grok_build_login()
+            }
             crate::provider_catalog::LoginProviderTarget::Copilot => self.start_copilot_login(),
             crate::provider_catalog::LoginProviderTarget::Gemini => self.start_gemini_login(),
             crate::provider_catalog::LoginProviderTarget::Antigravity => {
@@ -1770,6 +1773,72 @@ impl App {
         ));
     }
 
+    fn start_grok_build_login(&mut self) {
+        self.set_status_notice("Grok Build: preparing sign-in...");
+        self.begin_pending_login(PendingLogin::GrokBuild);
+        self.push_display_message(DisplayMessage::system(
+            "Grok Build Login\n\nRequesting an xAI sign-in URL and device code. They will appear here. You do not need to install the Grok CLI.\n\nType /cancel to dismiss this login."
+                .to_string(),
+        ));
+
+        let session_id = self.session.id.clone();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                provider: "grok-build".to_string(),
+                success: false,
+                message: "Grok Build login requires the async runtime.".to_string(),
+            }));
+            return;
+        };
+        handle.spawn(async move {
+            let publish_progress = |message: String, status: &'static str| {
+                Bus::global().publish(BusEvent::UiActivity(crate::bus::UiActivity::auth(
+                    Some(session_id.clone()),
+                    message,
+                    Some(status),
+                )));
+            };
+
+            let client = crate::provider::shared_http_client();
+            let authorization = match crate::auth::grok_build::initiate_device_login(&client).await {
+                Ok(authorization) => authorization,
+                Err(error) => {
+                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                        provider: "grok-build".to_string(),
+                        success: false,
+                        message: format!("Failed to start Grok Build login: {error:#}"),
+                    }));
+                    return;
+                }
+            };
+            let url = authorization.verification_uri_complete.as_deref()
+                .unwrap_or(&authorization.verification_uri);
+            let _ = Self::open_auth_browser(url);
+            publish_progress(format!(
+                "Grok Build Login\n\nOpen: {}\n\nConfirm code: {}\n\nWaiting for authorization...",
+                authorization.verification_uri, authorization.user_code
+            ), "Grok Build: waiting for browser approval");
+
+            match crate::auth::grok_build::complete_device_login(&client, &authorization).await {
+                Ok(()) => {
+                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                        provider: "grok-build".to_string(),
+                        success: true,
+                        message: "Grok Build login complete. Jcode is refreshing the provider and model list."
+                            .to_string(),
+                    }));
+                }
+                Err(error) => {
+                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                        provider: "grok-build".to_string(),
+                        success: false,
+                        message: format!("Grok Build login failed: {error}"),
+                    }));
+                }
+            }
+        });
+    }
+
     fn start_antigravity_login(&mut self) {
         let (verifier, challenge) = crate::auth::oauth::generate_pkce_public();
         let expected_state = crate::auth::oauth::generate_state_public();
@@ -1980,6 +2049,10 @@ impl App {
         }
 
         match pending {
+            PendingLogin::Remote => {
+                // SSH input must never fall through to laptop credential handlers.
+                self.append_ssh_login_input(&input);
+            }
             PendingLogin::ClaudeAccount {
                 verifier,
                 label,
@@ -2367,9 +2440,15 @@ impl App {
                             success: true,
                             message: format!(
                                 "{}.\n\n\
-                                 Stored at ~/.config/jcode/{}.\n\
+                                 Stored at {}.\n\
                                  {}{}",
-                                saved_label, env_file, guidance, model_hint
+                                saved_label,
+                                crate::storage::app_config_dir()
+                                    .expect("config directory resolved while saving API key")
+                                    .join(&env_file)
+                                    .display(),
+                                guidance,
+                                model_hint
                             ),
                         }));
                     }
@@ -2562,10 +2641,15 @@ impl App {
                         Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
                             provider: "cursor".to_string(),
                             success: true,
-                            message: "Cursor API key saved.\n\n\
-                             Stored at ~/.config/jcode/cursor.env.\n\
-                             jcode will use it with the native Cursor HTTPS transport."
-                                .to_string(),
+                            message: format!(
+                                "Cursor API key saved.\n\n\
+                                 Stored at {}.\n\
+                                 jcode will use it with the native Cursor HTTPS transport.",
+                                crate::storage::app_config_dir()
+                                    .expect("config directory resolved while saving Cursor API key")
+                                    .join("cursor.env")
+                                    .display()
+                            ),
                         }));
                     }
                     Err(e) => {
@@ -2592,6 +2676,13 @@ impl App {
                         .to_string(),
                 ));
                 self.pending_login = Some(PendingLogin::Copilot);
+            }
+            PendingLogin::GrokBuild => {
+                self.push_display_message(DisplayMessage::system(
+                    "Grok Build login is waiting for browser authorization. Complete the xAI login in your browser, or type /cancel to dismiss."
+                        .to_string(),
+                ));
+                self.pending_login = Some(PendingLogin::GrokBuild);
             }
             PendingLogin::AutoImportSelection { candidates } => {
                 let selected = match crate::external_auth::parse_external_auth_review_selection(
@@ -2734,8 +2825,9 @@ impl App {
                             ))
                         } else {
                             let current_model = provider.model();
-                            crate::auth::lifecycle::provider_model_to_select_after_auth(
+                            crate::auth::lifecycle::provider_model_to_select_after_auth_with_configured_default(
                                 &activation,
+                                crate::config::config().provider.default_model.as_deref(),
                                 Some(&current_model),
                                 &routes,
                             )
@@ -2807,8 +2899,9 @@ impl App {
                     }
                 } else {
                     let current_model = provider.model();
-                    if let Some(model) = crate::auth::lifecycle::provider_model_to_select_after_auth(
+                    if let Some(model) = crate::auth::lifecycle::provider_model_to_select_after_auth_with_configured_default(
                         &activation,
+                        crate::config::config().provider.default_model.as_deref(),
                         Some(&current_model),
                         &routes,
                     ) {
@@ -3349,10 +3442,13 @@ impl App {
             success: true,
             message: format!(
                 "Azure OpenAI configuration saved.\n\n\
-                 Stored at ~/.config/jcode/{}.\n\
+                 Stored at {}.\n\
                  {}\n\n\
                  Use /model after your Azure deployment exists. If the model list looks stale, run /refresh-model-list.",
-                crate::auth::azure::ENV_FILE,
+                crate::storage::app_config_dir()
+                    .expect("config directory resolved while saving Azure configuration")
+                    .join(crate::auth::azure::ENV_FILE)
+                    .display(),
                 auth_note,
             ),
         }));

@@ -846,8 +846,17 @@ fn build_header_lines_with_auth(
 
     // Auth inventory: `/login` heading, then one provider per line (dim
     // hollow dot for unconfigured providers).
-    let auth_lines = build_auth_status_lines(auth, active);
-    let login_heading = "/login to add provider".to_string();
+    let (login_heading, auth_lines) = if let Some(host) = crate::tui::ssh_remote_host() {
+        // The native protocol reports the active route, not a complete remote
+        // credential inventory. Do not render the laptop's (or an empty)
+        // inventory as if it described providers configured on the server.
+        (format!("/login to authenticate on {host}"), Vec::new())
+    } else {
+        (
+            "/login to add provider".to_string(),
+            build_auth_status_lines(auth, active),
+        )
+    };
     lines.push(
         Line::from(Span::styled(
             login_heading,
@@ -982,7 +991,7 @@ pub(super) fn build_updates_box_lines(width: u16, max_lines: usize) -> Vec<Line<
 /// Build both header sections from one authentication snapshot. Credential
 /// discovery can touch several files on Windows, so the render path must not
 /// repeat it for the persistent and secondary portions of the same frame.
-pub(super) fn build_header_sections(
+pub(in crate::tui) fn build_header_sections(
     app: &dyn TuiState,
     width: u16,
 ) -> (Vec<Line<'static>>, Vec<Line<'static>>) {

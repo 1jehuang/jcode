@@ -724,7 +724,22 @@ pub fn publish_local_current_build(repo_dir: &std::path::Path) -> Result<PathBuf
 
 /// Promote an already installed immutable version onto the shared server channel.
 pub fn promote_version_to_shared_server(version: &str) -> Result<Option<String>> {
+    if version.is_empty()
+        || version.trim() != version
+        || version == "."
+        || version == ".."
+        || version.contains(['/', '\\', ':'])
+    {
+        anyhow::bail!("Invalid installed version label: {version:?}");
+    }
     let previous = read_shared_server_version()?;
+    if previous.as_deref() == Some(version) {
+        let target = version_binary_path(version)?;
+        if !target.exists() {
+            anyhow::bail!("Version binary not found at {:?}", target);
+        }
+        return Ok(previous);
+    }
     update_shared_server_symlink(version)?;
     Ok(previous)
 }

@@ -236,6 +236,7 @@ fn test_handle_server_event_remote_observe_tracks_tool_exec_and_done() {
     );
     app.handle_server_event(
         crate::protocol::ServerEvent::ToolInput {
+            id: None,
             delta: r#"{"file_path":"src/main.rs","start_line":1,"end_line":10}"#.to_string(),
         },
         &mut remote,
@@ -318,6 +319,7 @@ fn test_handle_remote_event_redraws_observe_tool_exec_immediately() {
             &mut remote,
             &mut state,
             crate::tui::backend::RemoteRead::Event(crate::protocol::ServerEvent::ToolInput {
+                id: None,
                 delta: r#"{"file_path":"src/main.rs","start_line":1,"end_line":10}"#.to_string(),
             }),
         ))
@@ -440,6 +442,7 @@ fn test_handle_remote_event_redraws_observe_tool_done_immediately() {
             &mut remote,
             &mut state,
             crate::tui::backend::RemoteRead::Event(crate::protocol::ServerEvent::ToolInput {
+                id: None,
                 delta: r#"{"file_path":"src/main.rs","start_line":1,"end_line":10}"#.to_string(),
             }),
         ))
@@ -704,7 +707,7 @@ fn test_handle_server_event_soft_interrupt_injected_unrelated_content_keeps_pend
 }
 
 #[test]
-fn test_handle_server_event_soft_interrupt_injected_background_task_renders_card_role() {
+fn test_handle_server_event_soft_interrupt_injected_background_task_retains_row_only() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -720,19 +723,20 @@ fn test_handle_server_event_soft_interrupt_injected_background_task_renders_card
         &mut remote,
     );
 
-    let last = app
-        .display_messages()
-        .last()
-        .expect("missing injected background task message");
-    assert_eq!(last.role, "background_task");
-    assert!(last.content.contains("**Background task** `abc123`"));
+    assert!(app.display_messages().is_empty());
+    assert_eq!(
+        app.background_task_rows_ref()[0].status,
+        crate::tui::BackgroundTaskRowStatus::Completed
+    );
 }
 
 #[test]
-fn test_handle_server_event_notification_background_task_scope_uses_card_rendering() {
+fn test_handle_server_event_notification_background_task_scope_uses_failed_row() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
     app.set_centered(true);
+    app.session.short_name = Some("test".to_string());
+    app.push_display_message(DisplayMessage::assistant("ordinary transcript content"));
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
@@ -751,25 +755,23 @@ fn test_handle_server_event_notification_background_task_scope_uses_card_renderi
         &mut remote,
     );
 
-    let last = app
-        .display_messages()
-        .last()
-        .expect("missing background task notification message");
-    assert_eq!(last.role, "background_task");
-
     let backend = ratatui::backend::TestBackend::new(42, 12);
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
     let text = render_and_snap(&app, &mut terminal);
 
-    assert!(
-        text.contains("╭") && text.contains("╰"),
-        "expected rounded background-task card in render, got:\n{}",
-        text
+    assert_eq!(app.display_messages().len(), 1);
+    assert!(!app
+        .display_messages()
+        .iter()
+        .any(|message| message.role == "background_task"));
+    assert_eq!(
+        app.background_task_rows_ref()[0].status,
+        crate::tui::BackgroundTaskRowStatus::Failed
     );
+    assert!(text.contains("× bg bash"), "missing compact failed row:\n{text}");
     assert!(
-        !text.contains("◦ Background task"),
-        "background-task notifications should not render as generic swarm items:\n{}",
-        text
+        !text.contains("Background task failed") && !text.contains("[stderr] line one"),
+        "unexpected expanded background task card:\n{text}"
     );
 }
 
@@ -880,7 +882,7 @@ fn test_swarm_await_notification_inserts_only_compact_summary() {
 }
 
 #[test]
-fn test_background_task_markdown_renders_card_even_if_role_was_lost() {
+fn test_background_task_markdown_is_suppressed_even_if_role_was_lost() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
     app.set_centered(true);
@@ -893,21 +895,18 @@ fn test_background_task_markdown_renders_card_even_if_role_was_lost() {
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
     let text = render_and_snap(&app, &mut terminal);
 
-    assert!(
-        text.contains("╭") && text.contains("╰"),
-        "expected inferred background-task card rendering, got:\n{}",
-        text
-    );
-    assert!(
-        text.contains("✗ bg Run jcode library tests afte failed · 594967sj63"),
-        "expected background-task card title, got:\n{}",
-        text
-    );
-    assert!(
-        !text.contains("**Background task**"),
-        "raw markdown should not be shown when the background-task role is inferred:\n{}",
-        text
-    );
+    // The card itself must not render: no task id, no bordered tool card, and
+    // no fragment of the background-task markdown.
+    //
+    // Deliberately not asserting the frame has no box-drawing characters at
+    // all. Info-widget overlays (overview/context) legitimately draw their own
+    // bordered box in the right margin, and whether they are docked yet
+    // depends on how many frames the process has already rendered, which makes
+    // that assertion order-dependent rather than a statement about this test.
+    assert!(!text.contains("594967sj63"), "task id leaked:\n{text}");
+    assert!(!text.contains("Background task"), "card leaked:\n{text}");
+    assert!(!text.contains("Full output"), "card body leaked:\n{text}");
+    assert!(app.display_messages().is_empty());
     assert_eq!(app.display_user_message_count(), 0);
 }
 

@@ -62,6 +62,7 @@ mod tests {
         assert!(help.contains("message_async:<text>"));
         assert!(help.contains("client:frame"));
         assert!(help.contains("client:picker"));
+        assert!(help.contains("agent:context"));
     }
 
     #[test]

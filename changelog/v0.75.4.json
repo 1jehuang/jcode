@@ -1,0 +1,19 @@
+{
+  "version": "0.75.4",
+  "date": "2026-08-12",
+  "title": "More reliable remote sessions, providers, and automation",
+  "highlights": [
+    "Remote sessions now preserve active skills and recover cleanly after clearing session state",
+    "OpenAI-compatible and OpenRouter streams handle transient failures and fallback tool calls more reliably"
+  ],
+  "improvements": [
+    "ACP sessions tolerate host-provided MCP servers and report turn token usage",
+    "Shifted keyboard symbols report their alternate keys consistently",
+    "Development builds choose safer job counts based on available memory"
+  ],
+  "fixes": [
+    "Background commands no longer inherit stdin unexpectedly",
+    "Telemetry respects opt-out before install events and isolates tests from user configuration",
+    "Fallback tool-call identifiers remain unique when providers omit IDs"
+  ]
+}

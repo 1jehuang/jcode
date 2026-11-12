@@ -409,6 +409,7 @@ mod tests {
             swarm_info: None,
             background_info: None,
             usage_info: None,
+            usage_display_used: false,
             tokens_per_second: None,
             provider_name: None,
             auth_method: crate::tui::info_widget::AuthMethod::Unknown,
@@ -450,6 +451,25 @@ mod tests {
         assert!(independent.contains("[fast]"));
         assert!(overview.contains("(hi)"));
         assert!(overview.contains("[fast]"));
+    }
+
+    #[test]
+    fn openai_fast_badge_follows_service_tier_not_model_name() {
+        let rect = Rect::new(0, 0, 40, 8);
+        let mut data = data();
+        data.provider_name = Some("OpenAI".to_string());
+        data.model = Some("gpt-future-model".to_string());
+
+        for (tier, badge) in [(Some("priority"), "[fast]"), (Some("flex"), "[flex]")] {
+            data.service_tier = tier.map(str::to_string);
+            assert!(first_line_text(render_model_widget(&data, rect)).contains(badge));
+            assert!(first_line_text(render_model_info(&data, rect)).contains(badge));
+        }
+        for tier in [None, Some("off"), Some("default")] {
+            data.service_tier = tier.map(str::to_string);
+            assert!(!first_line_text(render_model_widget(&data, rect)).contains("[fast]"));
+            assert!(!first_line_text(render_model_info(&data, rect)).contains("[fast]"));
+        }
     }
 
     #[test]

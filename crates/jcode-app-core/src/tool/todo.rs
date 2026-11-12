@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
 use super::{Tool, ToolContext, ToolOutput};
 use crate::bus::{Bus, BusEvent, TodoEvent};
 use crate::todo::{
@@ -7,7 +8,7 @@ use crate::todo::{
     feedback_loop_passes, intent_understanding_passes, load_goals, load_plan, load_todos,
     save_goals, save_plan, save_todos, update_todo_review_cycle,
 };
-use anyhow::Result;
+use anyhow::{Result, bail};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -70,6 +71,21 @@ struct TodoInput {
     todos: Option<Vec<TodoItem>>,
     goals: Option<Vec<TodoGoal>>,
     plan: Option<TodoPlan>,
+}
+
+fn parse_todo_input(input: Value) -> Result<TodoInput> {
+    let params: TodoInput = serde_json::from_value(normalize_todo_input(input))?;
+    if let Some(todo) = params.todos.as_ref().and_then(|todos| {
+        todos
+            .iter()
+            .find(|todo| crate::todo::canonical_todo_status(&todo.status).is_none())
+    }) {
+        bail!(
+            "invalid todo status {:?}; expected one of: pending, in_progress, completed, cancelled",
+            todo.status
+        );
+    }
+    Ok(params)
 }
 
 /// Normalize a goal's group label: trimmed, with empty/whitespace collapsed
@@ -656,6 +672,12 @@ fn normalize_todo_input(mut input: Value) -> Value {
                 let Some(fields) = item.as_object_mut() else {
                     continue;
                 };
+                if key == "todos"
+                    && let Some(Value::String(status)) = fields.get_mut("status")
+                    && let Some(canonical) = crate::todo::canonical_todo_status(status)
+                {
+                    *status = canonical.to_string();
+                }
                 for key in [
                     "confidence",
                     "completion_confidence",
@@ -706,7 +728,8 @@ impl Tool for TodoTool {
         // deliberately handwritten. Never generate it from gate constants or
         // interpolate private thresholds, because that would teach the model
         // how to target the evaluator instead of reporting an honest assessment.
-        "Read or update structured todo items and optional goal-level assessments."
+        "Read or update structured todo items and optional goal-level assessments. \
+         Use it very often: plan non-trivial work up front and update statuses as you go."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -727,7 +750,8 @@ impl Tool for TodoTool {
                             },
                             "status": {
                                 "type": "string",
-                                "description": "Status."
+                                "enum": ["pending", "in_progress", "completed", "cancelled"],
+                                "description": "Status. Use completed when the task is done."
                             },
                             "priority": {
                                 "type": "string",
@@ -798,12 +822,12 @@ impl Tool for TodoTool {
                             "feedback_loop_coverage": {
                                 "type": "string",
                                 "enum": ["narrow", "main_paths", "edge_and_integration_paths"],
-                                "description": "How broadly the checks exercise main workflows, integration boundaries, edge cases, packaging, and likely failure modes."
+                                "description": "Coverage of integration boundaries, edge cases, packaging, and likely failure modes."
                             },
                             "feedback_loop_traceability": {
                                 "type": "string",
                                 "enum": ["unmapped", "partial", "complete"],
-                                "description": "How completely requirements map to evidence. unmapped = requirements are not tied to checks; partial = only some explicit requirements or changed public outputs have concrete checks and observed results; complete = every explicit requirement and changed public output has a concrete check and observed result. Aggregate test counts alone do not establish complete traceability."
+                                "description": "How completely each requirement and changed output maps to a concrete check and observed result."
                             },
                             "delivery_state": {
                                 "type": "string",
@@ -837,7 +861,7 @@ impl Tool for TodoTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
-        let params: TodoInput = serde_json::from_value(normalize_todo_input(input))?;
+        let params = parse_todo_input(input)?;
         let is_write = params.todos.is_some() || params.goals.is_some() || params.plan.is_some();
         let operation = if is_write { "write" } else { "read" };
         let result = if is_write {
@@ -1070,14 +1094,12 @@ mod tests {
             .expect("alignment score should describe representation coverage");
         assert!(alignment_description.contains("what the user wants"));
         assert!(alignment_description.contains("when guessing"));
-        // The detailed calibration rubric moved out of the always-on schema
-        // into deferred turn-finish continuation messages, which are paid only
-        // when the completed turn needs another quality pass.
+        // Deferred continuation messages are intentionally concise. Preserve
+        // their actionable guidance without requiring the legacy long rubric.
         for required_concept in [
-            "requirement inventory",
-            "outcomes, deliverables, constraints, prohibited actions",
-            "integration paths, edge cases, and necessary follow-through",
-            "Do not ask the user",
+            "Understand the user's intent better",
+            "Try to avoid asking the user",
+            "Make sure the todo is up to date",
         ] {
             assert!(
                 crate::todo::TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE
@@ -1102,9 +1124,9 @@ mod tests {
             "feedback_loop description omitted per-requirement check coverage: {feedback_description}"
         );
         for required_concept in [
-            "reports back on each requirement",
-            "run tests, verify, or review count only",
-            "non-testable requirements",
+            "Your feedback loop isn't good enough",
+            "Think about what feedback loops you need",
+            "Make sure the todo is up to date",
         ] {
             assert!(
                 crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE
@@ -1178,8 +1200,8 @@ mod tests {
         }
     }
 
-    fn parse(input: Value) -> Result<TodoInput, serde_json::Error> {
-        serde_json::from_value(normalize_todo_input(input))
+    fn parse(input: Value) -> Result<TodoInput> {
+        parse_todo_input(input)
     }
 
     #[test]
@@ -1220,6 +1242,39 @@ mod tests {
             todos[1].confidence,
             Some(crate::todo::ConfidenceState::Plausible)
         );
+    }
+
+    #[test]
+    fn normalizes_natural_and_case_varied_todo_statuses() {
+        let parsed = parse(json!({
+            "todos": [
+                {"content": "a", "status": "done", "priority": "high", "id": "1", "confidence": "verified"},
+                {"content": "b", "status": " Finished ", "priority": "low", "id": "2", "confidence": "validated"},
+                {"content": "c", "status": "Canceled", "priority": "low", "id": "3", "confidence": "plausible"}
+            ]
+        }))
+        .expect("status synonyms should parse");
+        let statuses: Vec<_> = parsed
+            .todos
+            .expect("todos present")
+            .into_iter()
+            .map(|todo| todo.status)
+            .collect();
+        assert_eq!(statuses, ["completed", "completed", "cancelled"]);
+    }
+
+    #[test]
+    fn rejects_unknown_todo_statuses_with_valid_vocabulary() {
+        let error = parse(json!({
+            "todos": [
+                {"content": "a", "status": "blocked", "priority": "high", "id": "1", "confidence": "plausible"}
+            ]
+        }))
+        .err()
+        .expect("unknown status should be rejected");
+        let message = error.to_string();
+        assert!(message.contains("invalid todo status \"blocked\""));
+        assert!(message.contains("pending, in_progress, completed, cancelled"));
     }
 
     #[test]
@@ -1970,7 +2025,7 @@ mod tests {
             ..before.clone()
         };
 
-        let changes = goal_changes(&[before.clone()], &[after.clone()]);
+        let changes = goal_changes(std::slice::from_ref(&before), std::slice::from_ref(&after));
 
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].before.as_ref(), Some(&before));

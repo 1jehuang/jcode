@@ -1,6 +1,50 @@
 # jcode Telemetry
 
-jcode collects **anonymous, minimal usage statistics** to help understand how many people use jcode, what providers/models are popular, whether onboarding works, which feature families are used, how often sessions succeed, and whether performance/regressions are improving. This data helps prioritize development. **We do not collect your prompts, your code, or your conversation transcripts.**
+jcode collects **anonymous, minimal usage statistics** to help understand how many people use jcode, what providers/models are popular, whether onboarding works, which feature families are used, how often sessions succeed, and whether performance/regressions are improving. This data helps prioritize development. Ordinary telemetry does **not** contain prompts, source code, model responses, or conversation transcripts.
+
+Jcode also offers a separate, optional transcript-sharing program. It is off by
+default and requires choosing **Share full transcripts** in the telemetry
+settings. This consent is independent of ordinary usage telemetry and is
+versioned so an older preference cannot silently opt a user into a newly
+introduced content program.
+
+### Optional Full Transcript Event
+
+When transcript sharing is explicitly enabled, one upload is queued when a
+non-empty session closes or crashes. The upload contains the complete structured
+conversation: user prompts, model responses and reasoning retained by Jcode,
+source code present in messages, tool names and inputs, and tool results. Images
+remain represented by their transcript content-block metadata; Jcode does not
+add local files that were not already present in the conversation.
+
+Before upload, Jcode recursively replaces likely credentials with
+`[REDACTED_SECRET]`. This covers sensitive JSON fields (API keys, tokens,
+passwords, authorization headers, cookies, private keys, and client secrets),
+known provider-token formats, bearer tokens, JWTs, AWS access-key IDs, private
+key blocks, and common environment-variable assignments. The receiving Worker
+runs the same classes of checks again before writing to R2. Ordinary source code
+is retained. Secret detection is defense in depth rather than a mathematical
+guarantee, so users should still avoid intentionally pasting live credentials.
+
+| Field | Purpose |
+|-------|---------|
+| `upload_id` | Random identifier for this upload |
+| `id` | Installation telemetry ID, used to honor deletion requests |
+| `consent_version` | Version of the explicit content-sharing consent |
+| `provider` / `model` / `end_reason` | Session metadata |
+| `message_count` / `messages` | Complete structured conversation |
+
+Transcript uploads use the dedicated `/v1/transcript` endpoint and are stored
+in a private R2 bucket, separate from Analytics Engine and ordinary D1 event
+rows. D1 stores only upload metadata and the private object key. Uploads are
+limited to 8 MiB and the R2 bucket must have a 30-day deletion lifecycle rule.
+Access should be restricted to specifically authorized maintainers working on
+quality evaluation. Transcript data must not be sold or shared with unrelated
+third parties.
+
+Disable transcript sharing at any time from `/telemetry` by selecting **No
+prompts or transcripts** or **Send nothing**. `JCODE_NO_TELEMETRY` and
+`DO_NOT_TRACK` override the content setting and prevent uploads.
 
 Recent telemetry additions also include: coarse onboarding steps, explicit thumbs-up / thumbs-down feedback, build-channel / dev-mode cleanup flags, session/workflow/tool-category summaries, coarse project language buckets, retention helpers like active days in the last 7 / 30 days, workflow cadence fields for session timing and multi-sessioning, privacy-safe per-turn timing/outcome metrics, schema v5 agent-time / autonomy / pain-attribution metrics, and numeric-only todo progress aggregates.
 
@@ -51,9 +95,17 @@ Recent telemetry additions also include: coarse onboarding steps, explicit thumb
 | Field | Example | Purpose |
 |-------|---------|----------|
 | `event` | `"feedback"` | Event type |
-| `feedback_text` | `"The model switcher is confusing"` | Freeform feedback explicitly submitted with `/feedback ...` |
+| `feedback_text` | `"The model switcher is confusing"` | Freeform feedback submitted with `/feedback ...` or the `maintainer_feedback` agent tool |
 | `feedback_rating` | `"up"` / `"down"` | Legacy explicit product sentiment, if present |
 | `feedback_reason` | `"slow"` | Legacy optional coarse reason bucket, if present |
+
+The `maintainer_feedback` tool is available only as another explicit telemetry
+path: it obeys the same telemetry opt-out as `/feedback` and sends no event when
+telemetry is disabled. Its schema tells the agent to paraphrase, omit secrets and
+private data, and label whether the report originated with the user, the agent,
+or both. User-originated and mixed reports are rejected unless the user explicitly
+approved sharing them; agent-only technical observations do not need per-report
+approval. Jcode does not attach transcript content, repository files, or paths.
 
 ### Sponsored Discovery Event
 
@@ -66,9 +118,9 @@ without exposing prompts or a persistent telemetry identifier to that service.
 |-------|---------|----------|
 | `event` | `"discovery"` | Event type |
 | `request_id` | `"9a23..."` | Random correlation ID scoped to one request |
-| `phase` | `"browse"` / `"select"` / `"suggest"` / `"unknown"` | Discovery funnel stage; `suggest` records a missing catalog capability proposal |
+| `phase` | `"browse"` / `"details"` / `"select"` / `"suggest"` / `"unknown"` | Discovery funnel stage; `details` records investigation without selection and `suggest` records a missing catalog capability proposal |
 | `category` | `"payments"` | Fixed discovery category, when valid |
-| `selected_tool` | `"agentcard"` | Public catalog tool name in the select phase |
+| `selected_tool` | `"agentcard"` | Public catalog tool name in the details or select phase |
 | `outcome` | `"success"` / `"failure"` | Attempt result |
 | `failure_reason` | `"timeout"` | Allowlisted coarse failure class only |
 | `http_status` | `200` | Discovery service response status, if received |
@@ -274,10 +326,17 @@ Most events also carry a few coarse quality / cleanup fields:
 | `event_id` | `"uuid"` | Deduplication |
 | `session_id` | `"uuid"` | Joins session-scoped events together |
 | `schema_version` | `3` | Forward-compatible parsing |
-| `build_channel` | `"release"` / `"selfdev"` / `"local_build"` | Filter out dev/test usage |
+| `build_channel` | `"release"` / `"ci_release"` / `"selfdev"` / `"local_build"` | Separate installed releases, CI/CD-built releases, and dev/test usage |
 | `is_git_checkout` | `true/false` | Distinguish source-tree usage from installed usage |
 | `is_ci` | `true/false` | Filter CI noise |
 | `ran_from_cargo` | `true/false` | Filter local dev launches |
+
+CI/CD jobs should set `JCODE_CI=1` when running jcode. `JCODE_CI=0` explicitly
+marks a run as non-CI and overrides inherited provider variables. When this
+setting is absent, jcode falls back to common provider markers such as `CI`,
+`GITHUB_ACTIONS`, `GITLAB_CI`, and `BUILDKITE`. Build provenance is independent:
+official release workflows set `JCODE_CI_BUILD=1` while compiling, producing the
+`ci_release` channel without classifying later end-user executions as CI.
 
 ## What We Do NOT Collect
 
@@ -320,6 +379,21 @@ We do **not** sell event-level telemetry, and we do not collect conversation con
 sell or to train models. If that ever changes, it will be a separate, clearly disclosed,
 **opt-in** program rather than a silent change to this document.
 
+### De-identified usage data for investor due diligence
+
+We may share de-identified, per-installation usage summaries with prospective investors
+under confidentiality, for evaluating Jcode only. These summaries contain a random label
+for each installation (not the telemetry ID), and per day: session counts, token counts,
+and the estimated list-price value of model usage, plus the first day of activity. They
+contain no telemetry IDs, prompts, code, model responses, file paths, account details,
+country, operating system, or other device information, and the labels cannot be linked
+back to an installation without our internal mapping, which we never share. Recipients may
+not attempt to re-identify anyone or use the data for any other purpose.
+
+If you would rather your usage not be included, turn off telemetry (see
+[How to Opt Out](#how-to-opt-out)). Installations with telemetry disabled are never
+included.
+
 We do not attempt to re-identify users from telemetry, and the client does not link
 telemetry to account identity.
 
@@ -340,8 +414,10 @@ The telemetry endpoint is a Cloudflare Worker that stores events in a D1 databas
 ## Changes to This Policy
 
 The version of this document in the repository is the current policy. If we ever want to
-collect conversation content, or to share or sell anything beyond aggregate statistics,
-that will require a separate opt-in rather than a quiet edit here.
+collect conversation content, or to sell telemetry or share it beyond aggregate statistics
+and the confidential, de-identified investor summaries described above, that will require
+a separate opt-in rather than a quiet edit here. Changes to this document are visible in its
+git history.
 
 ### Schema v5 deployment note
 
@@ -352,13 +428,23 @@ Agent-time, autonomy, and pain-attribution fields require the D1 migration in `t
 Any of these methods will disable telemetry completely:
 
 ```bash
-# Option 1: Environment variable
+# Option 1: Persistent CLI setting
+jcode telemetry disable
+
+# Inspect the current setting without creating a telemetry ID
+jcode telemetry status
+jcode telemetry status --json
+
+# Re-enable telemetry
+jcode telemetry enable
+
+# Option 2: Environment variable
 export JCODE_NO_TELEMETRY=1
 
-# Option 2: Standard DO_NOT_TRACK (https://consoledonottrack.com/)
+# Option 3: Standard DO_NOT_TRACK (https://consoledonottrack.com/)
 export DO_NOT_TRACK=1
 
-# Option 3: File-based opt-out
+# Option 4: File-based opt-out
 touch ~/.jcode/no_telemetry
 ```
 
@@ -366,10 +452,10 @@ When opted out, zero network requests are made. The telemetry module short-circu
 
 ## Verification
 
-This is open source. The entire telemetry implementation is in [`src/telemetry.rs`](./src/telemetry.rs) - you can read exactly what gets sent. There are no other network calls related to telemetry anywhere in the codebase.
+This is open source. The telemetry implementation is in [`crates/jcode-telemetry-core/src/`](./crates/jcode-telemetry-core/src/) - you can read exactly what gets sent. There are no other network calls related to telemetry anywhere in the codebase.
 
 ## Data Retention
 
-Telemetry data is used in aggregate (install count, active users, provider distribution, session success/crash rates, feature-level counts). Individual event records are retained for up to 12 months and then deleted.
+Telemetry data is used in aggregate (install count, active users, provider distribution, session success/crash rates, feature-level counts), and in the de-identified investor summaries described under [How We Use and Share Data](#how-we-use-and-share-data). Individual event records are retained for up to 12 months and then deleted.
 
 High-volume raw events are pruned earlier on a nightly schedule, after their aggregate signal has been captured in a compact daily-activity rollup: per-turn and per-session-start records and onboarding-step records are kept for about 30 days, upgrade records for about 60 days, and auth-success records for about 180 days. Session summary records (the per-session aggregate counts described above) are kept for up to 12 months.

@@ -1,0 +1,31 @@
+{
+  "version": "0.85.0",
+  "date": "2026-09-18",
+  "title": "Configurable swarm effort and richer client workflows",
+  "highlights": [
+    "Configure root-model reasoning effort independently for swarm and deep swarm, with the selected effort shown in the effort switcher",
+    "Delegate multi-step browser tasks to a bounded Jev browser session that returns control to the parent agent",
+    "Create and manage separate panels from Markdown or linked PDFs, with bounded PDF payloads and safe Markdown fallback for older TUI clients"
+  ],
+  "improvements": [
+    "Model pickers remember route usage and use shared usage-aware ranking across clients",
+    "Gemini adds project and OAuth-route configuration, and context compaction can be capped below a model's full window",
+    "Native SDK clients gain cancellable OAuth login, local Git worktree operations, per-turn response and edit statistics, swarm lifecycle metadata, and side-panel snapshots",
+    "Light terminal themes have clearer contrast while preserving custom colors, with better-aligned resume previews and Markdown blockquote gutters",
+    "OpenAI tool details begin streaming earlier, and DeepSeek Flash supports image input",
+    "Desktop source checkouts receive dedicated self-development tools and instructions",
+    "The initiative command is temporarily unavailable, while existing initiative data is retained"
+  ],
+  "fixes": [
+    "Active turns survive client reconnects, and restored image attachments retain their positions and batching",
+    "Grok login and model switching preserve the selected authentication route",
+    "OAuth-backed Bash calls honor their configured timeouts",
+    "Ambient configuration changes take effect without restarting the session",
+    "Development builds are protected against unintended backward updates",
+    "Gemini retains tool thought signatures and retries transient Code Assist failures without confusing provider sessions with Jcode sessions",
+    "MCP tools with colliding normalized names remain independently callable without losing their tool policies",
+    "Compatible tmux sessions request extended keys so Shift+Enter reaches the input editor",
+    "Project and global prompt guidance no longer appears twice when it resolves to the same source",
+    "Logs, history and usage displays identify the active provider profile rather than an unrelated route"
+  ]
+}

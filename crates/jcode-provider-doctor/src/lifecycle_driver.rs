@@ -473,6 +473,7 @@ impl AuthLifecycleDriver {
                 api_method: format!("openai-compatible:{}", spec.provider_id),
                 available: true,
                 detail: "fixture live-catalog route".to_string(),
+                usage: None,
                 cheapness: None,
             })
             .collect()
@@ -717,6 +718,7 @@ mod tests {
             api_method: "openai".to_string(),
             available: true,
             detail: "stale route".to_string(),
+            usage: None,
             cheapness: None,
         }
     }
@@ -1085,6 +1087,7 @@ mod tests {
                 api_method: "openai-compatible:other-provider".to_string(),
                 available: true,
                 detail: "wrong namespace".to_string(),
+                usage: None,
                 cheapness: None,
             },
             ModelRoute {
@@ -1093,6 +1096,7 @@ mod tests {
                 api_method: "openai-compatible:cerebras".to_string(),
                 available: true,
                 detail: "correct namespace".to_string(),
+                usage: None,
                 cheapness: None,
             },
             ModelRoute {
@@ -1101,6 +1105,7 @@ mod tests {
                 api_method: "openai-compatible:cerebras".to_string(),
                 available: true,
                 detail: "correct namespace".to_string(),
+                usage: None,
                 cheapness: None,
             },
         ];
@@ -1173,6 +1178,7 @@ mod tests {
             api_method: "openai-compatible:cerebras".to_string(),
             available: true,
             detail: "https://api.cerebras.ai/v1".to_string(),
+            usage: None,
             cheapness: None,
         });
         result.catalog_report = validate_catalog_invariants(

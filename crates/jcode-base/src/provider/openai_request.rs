@@ -1,5 +1,5 @@
 pub use jcode_provider_openai::{
-    OPENAI_ENCRYPTED_CONTENT_SAFE_MAX_CHARS, build_tools,
+    OPENAI_ENCRYPTED_CONTENT_SAFE_MAX_CHARS, build_tools, insert_additional_tools,
     is_openai_encrypted_content_too_large_error, openai_encrypted_content_fallback_summary,
     openai_encrypted_content_is_sendable,
 };

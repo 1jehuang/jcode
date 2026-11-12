@@ -44,6 +44,10 @@ pub(crate) struct PromptHistorySearchState {
 }
 
 pub(crate) fn history_file_path() -> Option<PathBuf> {
+    if crate::tui::is_ssh_remote() {
+        // Keep recall in-memory for this attachment, not mixed with local hosts.
+        return None;
+    }
     crate::storage::jcode_dir()
         .ok()
         .map(|dir| dir.join("prompt-history.jsonl"))

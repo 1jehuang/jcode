@@ -134,3 +134,29 @@ pub fn set_center_code_blocks(centered: bool) {
 pub fn center_code_blocks() -> bool {
     CENTER_CODE_BLOCKS.with(|ctx| ctx.get())
 }
+
+/// Override markdown block alignment for one render, restoring the caller's
+/// setting afterwards (including during unwinding).
+pub fn with_center_code_blocks<T>(centered: bool, f: impl FnOnce() -> T) -> T {
+    CENTER_CODE_BLOCKS.with(|ctx| with_scoped_cell_value(ctx, centered, f))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn centered_scope_restores_nested_and_panicking_overrides() {
+        let original = center_code_blocks();
+        with_center_code_blocks(true, || {
+            with_center_code_blocks(false, || assert!(!center_code_blocks()));
+            assert!(center_code_blocks());
+            let result = std::panic::catch_unwind(|| {
+                with_center_code_blocks(false, || panic!("test unwind"));
+            });
+            assert!(result.is_err());
+            assert!(center_code_blocks());
+        });
+        assert_eq!(center_code_blocks(), original);
+    }
+}

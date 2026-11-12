@@ -222,9 +222,9 @@ fn multi_account_active_switch_works() {
     })
     .unwrap();
 
-    assert_eq!(active_account_label().as_deref(), Some("openai-1"));
-    set_active_account("openai-2").unwrap();
-    assert_eq!(active_account_label().as_deref(), Some("openai-2"));
+    assert_eq!(active_account_label().as_deref(), Some("openai-otter"));
+    set_active_account("openai-fox").unwrap();
+    assert_eq!(active_account_label().as_deref(), Some("openai-fox"));
 
     let creds = load_credentials().unwrap();
     assert_eq!(creds.access_token, "at_work");
@@ -396,7 +396,7 @@ fn load_credentials_reads_legacy_oauth_without_changing_external_permissions() {
 }
 
 #[test]
-fn load_auth_file_renames_existing_labels_to_numbered_scheme() {
+fn load_auth_file_renames_existing_labels_to_animal_scheme() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
@@ -429,7 +429,7 @@ fn load_auth_file_renames_existing_labels_to_numbered_scheme() {
             .iter()
             .map(|account| account.label.as_str())
             .collect::<Vec<_>>(),
-        vec!["openai-1", "openai-2"]
+        vec!["openai-otter", "openai-fox"]
     );
-    assert_eq!(auth.active_openai_account.as_deref(), Some("openai-2"));
+    assert_eq!(auth.active_openai_account.as_deref(), Some("openai-fox"));
 }

@@ -83,8 +83,9 @@ fn test_expand_badge_shortcut_toggles_inline_diff_and_pulses_key() {
 
 #[test]
 fn test_alt_shift_i_toggles_inline_images_and_persists() {
-    let _render_lock = scroll_render_test_lock();
+    // App setup also takes the render lock, so always acquire env first.
     let _env_guard = crate::storage::lock_test_env();
+    let _render_lock = scroll_render_test_lock();
     let temp = tempfile::tempdir().expect("tempdir");
     let prev_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp.path());
@@ -93,6 +94,7 @@ fn test_alt_shift_i_toggles_inline_images_and_persists() {
     app.is_remote = true;
     app.remote_side_pane_images
         .push(crate::session::RenderedImage {
+            history_message_index: None,
             media_type: "image/png".to_string(),
             data: "image-data".to_string(),
             label: Some("preview.png".to_string()),
@@ -140,6 +142,7 @@ fn text_only_transcript_updates_keep_inline_image_signature_cached() {
     app.is_remote = true;
     app.remote_side_pane_images = (0..24)
         .map(|index| crate::session::RenderedImage {
+            history_message_index: None,
             media_type: "image/png".to_string(),
             // Large enough to make accidental payload cloning/re-rendering costly,
             // without bloating the test process excessively.
@@ -176,6 +179,7 @@ fn inline_image_signature_distinguishes_labels_and_same_prefix_payloads() {
         hasher.finish()
     };
     let base = crate::session::RenderedImage {
+        history_message_index: None,
         media_type: "image/png".to_string(),
         data: format!("{}tail-a", "A".repeat(128)),
         label: Some("first.png".to_string()),
@@ -367,6 +371,44 @@ fn test_expand_badge_rendered_shortcut_expands_with_alt_lowercase_event() {
     assert_rendered_expand_badge_shortcut_expands_to_full_diff(
         KeyCode::Char('e'),
         KeyModifiers::ALT,
+    );
+}
+
+#[test]
+fn test_clicking_expand_edit_badge_expands_to_full_diff() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = make_edit_badge_test_app(20);
+    render_and_snap(&app, &mut terminal);
+
+    let buf = terminal.backend().buffer();
+    let area = *buf.area();
+    let mut badge = None;
+    'rows: for row in 0..area.height {
+        let line = (0..area.width)
+            .map(|col| buf[(col, row)].symbol())
+            .collect::<String>();
+        if let Some(byte) = line.find("[E] expand") {
+            badge = Some((line[..byte].chars().count() as u16, row));
+            break 'rows;
+        }
+    }
+    let (column, row) = badge.expect("expand edit badge must be visible");
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        app.handle_mouse_event(MouseEvent {
+            kind,
+            column: column + 1,
+            row,
+            modifiers: KeyModifiers::empty(),
+        });
+    }
+
+    assert_eq!(app.diff_mode, crate::config::DiffDisplayMode::FullInline);
+    assert_eq!(
+        app.status_notice(),
+        Some("Expanded edit diffs · Diffs: Inline Full".to_string())
     );
 }
 
@@ -563,6 +605,71 @@ fn test_try_open_link_at_opens_clicked_url_and_sets_notice() {
 }
 
 #[test]
+fn test_repository_markdown_link_opens_in_focused_side_panel() {
+    let _render_lock = scroll_render_test_lock();
+    let repository = tempfile::tempdir().unwrap();
+    std::fs::create_dir(repository.path().join("docs")).unwrap();
+    std::fs::write(
+        repository.path().join("docs/guide.md"),
+        "# Repository guide\n",
+    )
+    .unwrap();
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repository.path().to_string_lossy().into_owned());
+    crate::tui::ui::clear_copy_viewport_snapshot();
+    crate::tui::ui::record_copy_viewport_snapshot(
+        std::sync::Arc::new(vec!["Read the guide".to_string()]),
+        std::sync::Arc::new(vec![0]),
+        std::sync::Arc::new(vec!["Read the [guide](docs/guide.md#setup)".to_string()]),
+        std::sync::Arc::new(vec![crate::tui::ui::WrappedLineMap {
+            raw_line: 0,
+            start_col: 0,
+            end_col: 40,
+        }]),
+        0,
+        1,
+        Rect::new(0, 0, 80, 5),
+        &[0],
+    );
+
+    assert!(app.try_open_link_at(10, 0));
+
+    let page = app
+        .side_panel
+        .focused_page()
+        .expect("focused Markdown page");
+    assert_eq!(page.title, "guide.md");
+    assert_eq!(page.content, "# Repository guide\n");
+    assert_eq!(
+        page.source,
+        crate::side_panel::SidePanelPageSource::LinkedFile
+    );
+    assert!(app.diff_pane_focus);
+    assert!(!app.side_panel_user_hidden);
+    assert_eq!(
+        app.status_notice(),
+        Some("Opened Markdown: guide.md".to_string())
+    );
+}
+
+#[test]
+fn test_repository_markdown_link_cannot_escape_working_directory() {
+    let parent = tempfile::tempdir().unwrap();
+    let repository = parent.path().join("repo");
+    std::fs::create_dir(&repository).unwrap();
+    std::fs::write(parent.path().join("outside.md"), "secret").unwrap();
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repository.to_string_lossy().into_owned());
+
+    assert!(app.try_open_repository_markdown_link("../outside.md"));
+    assert!(app.side_panel.focused_page().is_none());
+    assert_eq!(
+        app.status_notice(),
+        Some("Refused to open a Markdown file outside the repository".to_string())
+    );
+}
+
+#[test]
 fn test_mouse_click_in_input_moves_cursor_to_clicked_position() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
@@ -603,12 +710,14 @@ fn test_mouse_click_in_main_chat_switches_focus_from_side_panel() {
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.diff_pane_focus = true;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: String::new(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "hello".to_string(),
             updated_at_ms: 1,
@@ -648,12 +757,14 @@ fn test_mouse_click_in_input_switches_focus_from_side_panel() {
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.diff_pane_focus = true;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: String::new(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "hello".to_string(),
             updated_at_ms: 1,
@@ -807,7 +918,8 @@ fn test_click_on_inline_image_label_line_cycles_level() {
     );
     assert_eq!(app.status_notice(), Some("Image size: large".to_string()));
 
-    // Further label clicks continue the cycle: Large -> Full -> Fit.
+    // Large and Full have identical geometry for this landscape image, so the
+    // redundant Full state is skipped and the next click returns to Fit.
     let click_label = |app: &mut App| {
         app.handle_mouse_event(MouseEvent {
             kind: MouseEventKind::Up(MouseButton::Left),
@@ -819,14 +931,8 @@ fn test_click_on_inline_image_label_line_cycles_level() {
     click_label(&mut app);
     assert_eq!(
         app.image_expand_level(IMAGE_ID),
-        ImageExpandLevel::Full,
-        "second click should expand Large -> Full"
-    );
-    click_label(&mut app);
-    assert_eq!(
-        app.image_expand_level(IMAGE_ID),
         ImageExpandLevel::Fit,
-        "cycle should wrap Full -> Fit"
+        "second click should skip duplicate Full geometry and return to Fit"
     );
 }
 
@@ -1246,18 +1352,13 @@ fn test_click_on_inline_image_body_cycles_level() {
         "clicking the image body should expand Fit -> Large"
     );
 
-    // Clicking the body again advances the cycle.
-    click(&mut app, body_col, body_row);
-    assert_eq!(
-        app.image_expand_level(IMAGE_ID),
-        ImageExpandLevel::Full,
-        "second body click should expand Large -> Full"
-    );
+    // Large and Full resolve to the same geometry for this landscape image, so
+    // the click cycle must omit Full rather than showing a duplicate size.
     click(&mut app, body_col, body_row);
     assert_eq!(
         app.image_expand_level(IMAGE_ID),
         ImageExpandLevel::Fit,
-        "third body click should wrap Full -> Fit"
+        "second body click should skip duplicate Full geometry and return to Fit"
     );
 
     // A click in the blank space to the right of the image must stay inert.

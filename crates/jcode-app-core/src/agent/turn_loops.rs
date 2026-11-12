@@ -2,6 +2,20 @@ use super::*;
 use crate::{terminal_eprintln as eprintln, terminal_print as print, terminal_println as println};
 
 impl Agent {
+    /// Speculatively prewarm the provider while a newly created session is idle.
+    ///
+    /// This deliberately bypasses `tool_definitions`, whose cache lock is only
+    /// appropriate once an actual turn starts. Late MCP registration or user
+    /// customization can therefore still change the foreground tool snapshot;
+    /// the provider is responsible for discarding an incompatible warmup.
+    pub(crate) async fn prewarm_provider_idle(&self) {
+        let tools = self.tool_definitions_for_debug().await;
+        let split_prompt = self.build_system_prompt_split(None);
+        self.provider
+            .prewarm(&tools, &split_prompt.static_part)
+            .await;
+    }
+
     /// Run turns until no more tool calls
     /// Maximum number of context-limit compaction retries before giving up.
     pub(super) const MAX_CONTEXT_LIMIT_RETRIES: u32 = 5;
@@ -28,8 +42,17 @@ impl Agent {
         pending && batch_available
     }
 
+    pub(super) fn plan_limit_reminder(
+        notice: &crate::subscription_notice::QuotaExceeded,
+    ) -> String {
+        format!(
+            "<system-reminder>Jcode plan limit: {notice} Briefly tell the user this in your reply, including the upgrade link if one is given. Do not open checkout or purchase anything. Continue the task without that feature.</system-reminder>"
+        )
+    }
+
     pub(super) async fn run_turn(&mut self, print_output: bool) -> Result<String> {
         self.set_log_context();
+        let usage_turn_id = self.model_usage_turn_id();
         crate::session_metrics::record_turn(&self.session.id);
         // Mark this session as actively streaming for presence UIs (e.g. the
         // macOS menu bar indicator). Cleared automatically on every exit path.
@@ -64,6 +87,14 @@ impl Agent {
                     repaired
                 ));
             }
+            // Start provider transport setup before deriving and potentially
+            // compacting the request history. This is the first point where the
+            // stable request settings are available.
+            let mut tools = self.tool_definitions().await;
+            let mut split_prompt = self.build_system_prompt_split(None);
+            self.provider
+                .prewarm(&tools, &split_prompt.static_part)
+                .await;
             let (messages, compaction_event) = self.messages_for_provider();
             if let Some(event) = compaction_event {
                 // Reset cache tracker and tool lock on compaction since the message history changes
@@ -80,15 +111,17 @@ impl Agent {
                         tokens_str
                     );
                 }
+                // Compaction clears the tool lock, so rebuild the foreground
+                // request metadata rather than relying on the pre-compaction snapshot.
+                tools = self.tool_definitions().await;
+                split_prompt = self.build_system_prompt_split(None);
             }
 
-            let tools = self.tool_definitions().await;
             let messages: std::sync::Arc<[Message]> = messages.into();
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_pending =
                 self.build_memory_prompt_nonblocking_shared(std::sync::Arc::clone(&messages), None);
             // Use split prompt for better caching - static content cached, dynamic not
-            let split_prompt = self.build_system_prompt_split(None);
             self.log_prompt_prefix_accounting(&split_prompt, &tools);
 
             // Check for client-side cache violations before memory injection.
@@ -121,6 +154,12 @@ impl Agent {
                 messages_with_memory.push(Message::user(Self::BATCH_NUDGE));
                 batch_nudge_pending = false;
                 sequential_single_tool_rounds = 0;
+            }
+            // Background features (memory recall) can hit a plan limit with no
+            // visible failure. Surface it once through the agent so every UI
+            // shows the upgrade prompt instead of silently degrading.
+            if let Some(notice) = crate::subscription_notice::take() {
+                messages_with_memory.push(Message::user(&Self::plan_limit_reminder(&notice)));
             }
 
             logging::info(&format!(
@@ -205,8 +244,8 @@ impl Agent {
 
             let mut text_content = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
-            let mut current_tool: Option<ToolCall> = None;
-            let mut current_tool_input = String::new();
+            let mut current_tool: Option<String> = None;
+            let mut streaming_tools: HashMap<String, (ToolCall, String)> = HashMap::new();
             let mut generated_image_contexts: Vec<Vec<ContentBlock>> = Vec::new();
             let mut usage_input: Option<u64> = None;
             let mut usage_output: Option<u64> = None;
@@ -271,6 +310,11 @@ impl Agent {
                     }
                 };
 
+                let input_tool_id = match &event {
+                    StreamEvent::ToolInputDeltaFor { id, .. }
+                    | StreamEvent::ToolUseEndFor { id } => Some(id.clone()),
+                    _ => current_tool.clone(),
+                };
                 match event {
                     StreamEvent::ThinkingStart => {
                         // Track start but don't print - wait for ThinkingDone
@@ -308,6 +352,11 @@ impl Agent {
                         text_content.push_str(&text);
                     }
                     StreamEvent::ToolUseStart { id, name } => {
+                        if streaming_tools.contains_key(&id)
+                            || tool_calls.iter().any(|tool: &ToolCall| tool.id == id)
+                        {
+                            continue;
+                        }
                         if trace {
                             eprintln!("\n[trace] tool_use_start name={} id={}", name, id);
                         }
@@ -315,20 +364,34 @@ impl Agent {
                             print!("\n[{}] ", name);
                             io::stdout().flush()?;
                         }
-                        current_tool = Some(ToolCall {
-                            id,
-                            name,
-                            input: serde_json::Value::Null,
-                            intent: None,
-                            thought_signature: None,
+                        current_tool = Some(id.clone());
+                        streaming_tools.entry(id.clone()).or_insert_with(|| {
+                            (
+                                ToolCall {
+                                    id,
+                                    name,
+                                    input: serde_json::Value::Null,
+                                    intent: None,
+                                    thought_signature: None,
+                                },
+                                String::new(),
+                            )
                         });
-                        current_tool_input.clear();
                     }
-                    StreamEvent::ToolInputDelta(delta) => {
-                        current_tool_input.push_str(&delta);
+                    StreamEvent::ToolInputDelta(delta)
+                    | StreamEvent::ToolInputDeltaFor { delta, .. } => {
+                        if let Some((_, input)) = input_tool_id
+                            .as_ref()
+                            .and_then(|id| streaming_tools.get_mut(id))
+                        {
+                            input.push_str(&delta);
+                        }
                     }
-                    StreamEvent::ToolUseEnd => {
-                        if let Some(mut tool) = current_tool.take() {
+                    StreamEvent::ToolUseEnd | StreamEvent::ToolUseEndFor { .. } => {
+                        if let Some((mut tool, current_tool_input)) = input_tool_id
+                            .as_ref()
+                            .and_then(|id| streaming_tools.remove(id))
+                        {
                             // Parse the accumulated JSON
                             let tool_input =
                                 ToolCall::parse_streamed_input_to_object(&current_tool_input);
@@ -356,7 +419,20 @@ impl Agent {
                             }
 
                             tool_calls.push(tool);
-                            current_tool_input.clear();
+                            if current_tool == input_tool_id {
+                                current_tool = None;
+                            }
+                        }
+                    }
+                    StreamEvent::ToolUseSignatureFor { id, signature } => {
+                        if !signature.is_empty() {
+                            if let Some((tool, _)) = streaming_tools.get_mut(&id) {
+                                tool.thought_signature = Some(signature);
+                            } else if let Some(tool) =
+                                tool_calls.iter_mut().find(|tool| tool.id == id)
+                            {
+                                tool.thought_signature = Some(signature);
+                            }
                         }
                     }
                     StreamEvent::ToolUseSignature(signature) => {
@@ -504,7 +580,7 @@ impl Agent {
                         text_content.clear();
                         tool_calls.clear();
                         current_tool = None;
-                        current_tool_input.clear();
+                        streaming_tools.clear();
                         sdk_tool_results.clear();
                         generated_image_contexts.clear();
                         reasoning_content.clear();
@@ -514,6 +590,7 @@ impl Agent {
                         saw_message_end = false;
                         stop_reason = None;
                     }
+                    StreamEvent::TextDone => {}
                     StreamEvent::MessageEnd {
                         stop_reason: reason,
                     } => {
@@ -778,17 +855,17 @@ impl Agent {
                 content_blocks.extend(openai_reasoning_items.iter().cloned());
             }
             for tc in &tool_calls {
-                content_blocks.push(ContentBlock::ToolUse {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    input: tc.input.clone(),
-                    thought_signature: tc.thought_signature.clone(),
-                });
+                content_blocks.push(tc.to_tool_use_block());
             }
 
             let assistant_message_id = if !content_blocks.is_empty() {
                 crate::telemetry::record_assistant_response();
                 let token_usage = Some(crate::session::StoredTokenUsage {
+                    prompt_tokens: Some(self.effective_context_tokens_from_usage(
+                        self.last_usage.input_tokens,
+                        self.last_usage.cache_read_input_tokens,
+                        self.last_usage.cache_creation_input_tokens,
+                    )),
                     input_tokens: self.last_usage.input_tokens,
                     output_tokens: self.last_usage.output_tokens,
                     cache_read_input_tokens: self.last_usage.cache_read_input_tokens,
@@ -798,6 +875,7 @@ impl Agent {
                     self.add_message_ext(Role::Assistant, content_blocks, None, token_usage);
                 self.push_embedding_snapshot_if_semantic(&text_content);
                 self.session.save()?;
+                self.record_model_turn_usage(&usage_turn_id);
                 Some(message_id)
             } else {
                 None
@@ -1256,5 +1334,21 @@ mod tests {
         assert!(!Agent::should_inject_batch_nudge(true, false));
         assert!(Agent::BATCH_NUDGE.contains("use the batch tool"));
         assert!(Agent::BATCH_NUDGE.contains("result is required"));
+    }
+
+    #[test]
+    fn plan_limit_reminder_relays_upgrade_link_without_purchasing() {
+        let reminder = Agent::plan_limit_reminder(&crate::subscription_notice::QuotaExceeded {
+            feature: "memory".into(),
+            tier: Some("plus".into()),
+            upgrade_tier: Some("pro".into()),
+            upgrade_url: Some("https://jcode.sh/pricing".into()),
+            resets_at: None,
+        });
+        assert!(reminder.starts_with("<system-reminder>"));
+        assert!(reminder.contains("Daily memory recall limit reached on your Plus plan"));
+        assert!(reminder.contains("Upgrade to Pro"));
+        assert!(reminder.contains("https://jcode.sh/pricing"));
+        assert!(reminder.contains("Do not open checkout"));
     }
 }

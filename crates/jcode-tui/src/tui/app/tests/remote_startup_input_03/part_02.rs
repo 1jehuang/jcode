@@ -127,6 +127,7 @@ fn test_initial_history_bootstrap_preserves_restored_interleave_state() {
 
         restored.handle_server_event(
             crate::protocol::ServerEvent::History {
+            applets: Default::default(),
                 id: 1,
                 session_id: session_id.to_string(),
                 messages: vec![],
@@ -213,9 +214,11 @@ fn test_initial_history_bootstrap_skips_resubmit_when_prompt_already_in_history(
 
         restored.handle_server_event(
             crate::protocol::ServerEvent::History {
+            applets: Default::default(),
                 id: 1,
                 session_id: session_id.to_string(),
                 messages: vec![crate::protocol::HistoryMessage {
+                    response_stats: None,
                     role: "user".to_string(),
                     content: "continue implementing the fix".to_string(),
                     tool_calls: None,

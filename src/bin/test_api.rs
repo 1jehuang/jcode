@@ -1,12 +1,12 @@
 use futures::StreamExt;
 use jcode::message::{ContentBlock, Message, ToolDefinition};
 use jcode::provider::Provider;
-use jcode_provider_claude_cli_runtime::ClaudeProvider;
+use jcode_provider_anthropic_runtime::AnthropicProvider;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    println!("Testing deprecated legacy Claude CLI provider...");
-    let provider = ClaudeProvider::new();
+    println!("Testing direct Anthropic provider (Claude OAuth or ANTHROPIC_API_KEY)...");
+    let provider = AnthropicProvider::new();
 
     let messages = vec![Message {
         role: jcode::message::Role::User,

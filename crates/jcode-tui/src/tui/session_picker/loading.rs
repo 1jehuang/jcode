@@ -58,7 +58,7 @@ fn include_old_saved_sessions_on_initial_load() -> bool {
 }
 
 const SESSION_LIST_CACHE_TTL: Duration = Duration::from_secs(5);
-const SESSION_LIST_DISK_CACHE_VERSION: u32 = 1;
+const SESSION_LIST_DISK_CACHE_VERSION: u32 = 2;
 const SESSION_LIST_DISK_CACHE_MAX_AGE_SECONDS: i64 = 7 * 24 * 60 * 60;
 const SAVED_METADATA_TAIL_SCAN_BYTES: u64 = 64 * 1024;
 const INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES: usize = 64 * 1024;
@@ -178,7 +178,7 @@ pub fn invalidate_session_list_cache() {
 }
 
 fn session_list_disk_cache_path() -> Result<PathBuf> {
-    Ok(storage::jcode_dir()?.join("cache/session-picker-list-v1.json"))
+    Ok(storage::jcode_dir()?.join("cache/session-picker-list-v2.json"))
 }
 
 fn session_list_disk_cache_is_usable(
@@ -259,6 +259,66 @@ fn push_with_byte_budget(dst: &mut String, src: &str, budget: &mut usize) {
     *budget = budget.saturating_sub(end);
 }
 
+fn suffix_at_most(value: &str, max_bytes: usize) -> &str {
+    let mut start = value.len().saturating_sub(max_bytes);
+    while start < value.len() && !value.is_char_boundary(start) {
+        start += 1;
+    }
+    &value[start..]
+}
+
+/// Keep a bounded sample from both ends of a growing transcript. Keeping only
+/// the first 64 KiB made `/resume` search silently blind to every later turn in
+/// a long session. The first half retains titles and early prompts while the
+/// second half continuously follows the newest transcript content.
+fn push_sampled_search_text(dst: &mut String, src: &str, limit: usize) {
+    if src.is_empty() || limit == 0 {
+        return;
+    }
+    if dst.len().saturating_add(1).saturating_add(src.len()) <= limit {
+        dst.push(' ');
+        dst.push_str(src);
+        return;
+    }
+
+    // An oversized first message has no existing session head to preserve. Keep
+    // both ends of that message instead of retaining only its suffix.
+    if dst.is_empty() {
+        let head_budget = limit / 2;
+        let mut head_end = src.len().min(head_budget);
+        while head_end > 0 && !src.is_char_boundary(head_end) {
+            head_end -= 1;
+        }
+        dst.push_str(&src[..head_end]);
+        dst.push_str(suffix_at_most(src, limit.saturating_sub(head_end)));
+        return;
+    }
+
+    let head_budget = limit / 2;
+    let mut head_end = dst.len().min(head_budget);
+    while head_end > 0 && !dst.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let head = dst[..head_end].to_string();
+
+    let tail_budget = limit.saturating_sub(head.len());
+    let tail = if src.len().saturating_add(1) >= tail_budget {
+        suffix_at_most(src, tail_budget).to_string()
+    } else {
+        let old_budget = tail_budget.saturating_sub(src.len() + 1);
+        let old_tail = suffix_at_most(&dst[head_end..], old_budget);
+        let mut tail = String::with_capacity(old_tail.len() + 1 + src.len());
+        tail.push_str(old_tail);
+        tail.push(' ');
+        tail.push_str(src);
+        tail
+    };
+
+    dst.clear();
+    dst.push_str(&head);
+    dst.push_str(&tail);
+}
+
 pub(super) fn build_search_index(
     id: &str,
     short_name: &str,
@@ -300,22 +360,14 @@ pub(super) fn build_search_index(
     combined.to_lowercase()
 }
 
-fn push_raw_search_excerpt(dst: &mut String, raw: &str, budget: &mut usize) {
-    if *budget == 0 || raw.is_empty() {
-        return;
-    }
-    dst.push(' ');
-    push_with_byte_budget(dst, raw, budget);
-}
-
 fn raw_value_search_excerpt(raw: &RawValue, budget: usize) -> Option<String> {
     if budget == 0 {
         return None;
     }
     let raw = raw.get();
-    let mut budget = budget.min(MESSAGE_SEARCH_EXCERPT_BYTES);
+    let budget = budget.min(MESSAGE_SEARCH_EXCERPT_BYTES);
     let mut excerpt = String::new();
-    push_with_byte_budget(&mut excerpt, raw, &mut budget);
+    push_sampled_search_text(&mut excerpt, raw, budget);
     (!excerpt.is_empty()).then_some(excerpt)
 }
 
@@ -1225,10 +1277,12 @@ impl SessionMessageSummaryData {
                 .estimated_tokens
                 .saturating_add(usage.total_tokens() as usize);
         }
-        let mut remaining =
-            INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES.saturating_sub(self.search_text.len());
         if let Some(raw_content) = message.content_raw.as_deref() {
-            push_raw_search_excerpt(&mut self.search_text, raw_content, &mut remaining);
+            push_sampled_search_text(
+                &mut self.search_text,
+                raw_content,
+                INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES,
+            );
         }
     }
 
@@ -1246,9 +1300,11 @@ impl SessionMessageSummaryData {
         if self.first_user_prompt.is_none() {
             self.first_user_prompt = other.first_user_prompt;
         }
-        let mut remaining =
-            INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES.saturating_sub(self.search_text.len());
-        push_raw_search_excerpt(&mut self.search_text, &other.search_text, &mut remaining);
+        push_sampled_search_text(
+            &mut self.search_text,
+            &other.search_text,
+            INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES,
+        );
     }
 }
 
@@ -1276,11 +1332,10 @@ impl<'de> Visitor<'de> for SessionMessageSummaryDataVisitor {
     {
         let mut counts = SessionMessageSummaryData::default();
         loop {
-            let remaining = INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES
-                .saturating_sub(counts.search_text.len())
-                .min(MESSAGE_SEARCH_EXCERPT_BYTES);
             let Some(message) = seq.next_element_seed(SessionMessageSummarySeed {
-                content_excerpt_budget: remaining,
+                // Keep sampling each turn even after the session-wide index is
+                // full. `add_message` retains a bounded head + moving tail.
+                content_excerpt_budget: MESSAGE_SEARCH_EXCERPT_BYTES,
             })?
             else {
                 break;

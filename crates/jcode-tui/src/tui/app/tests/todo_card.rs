@@ -205,6 +205,12 @@ impl PinTodosEnvGuard {
         crate::config::invalidate_config_cache();
         Self
     }
+
+    fn disable() -> Self {
+        crate::env::set_var("JCODE_PIN_TODOS", "0");
+        crate::config::invalidate_config_cache();
+        Self
+    }
 }
 
 impl Drop for PinTodosEnvGuard {
@@ -219,6 +225,7 @@ impl Drop for PinTodosEnvGuard {
 #[test]
 fn pinned_todos_payload_stays_empty_when_config_off() {
     let _env_lock = crate::storage::lock_test_env();
+    let _pin_guard = PinTodosEnvGuard::disable();
     let mut app = create_test_app();
     let session_id = app.session.id.clone();
     crate::todo::save_todos(&session_id, &[pinned_band_todo("t1", "pin me", "pending")]).unwrap();
@@ -255,6 +262,70 @@ fn pinned_todos_payload_refreshes_and_clears_with_config_and_todos() {
     crate::todo::save_todos(&session_id, &[]).unwrap();
     app.refresh_pinned_todos_now();
     assert!(app.pinned_todos_payload_ref().is_none());
+}
+
+#[test]
+fn pinned_todos_are_omitted_from_info_widgets() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _pin = PinTodosEnvGuard::enable();
+    let app = create_test_app();
+    let session_id = app.session.id.clone();
+    crate::todo::save_todos(
+        &session_id,
+        &[pinned_band_todo("t1", "only in pinned band", "pending")],
+    )
+    .unwrap();
+
+    let info = app.info_widget_data();
+    assert!(info.todos.is_empty());
+    assert!(info.todo_goals.is_empty());
+    assert!(!info.has_data_for(crate::tui::info_widget::WidgetKind::Todos));
+
+    crate::todo::save_todos(&session_id, &[]).unwrap();
+}
+
+#[test]
+fn pinned_todos_hide_todo_tool_messages_from_the_transcript() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _pin = PinTodosEnvGuard::enable();
+    let mut app = create_test_app();
+    let session_id = app.session.id.clone();
+    crate::todo::save_todos(
+        &session_id,
+        &[pinned_band_todo("pinned", "PINNED_ONLY", "in_progress")],
+    )
+    .unwrap();
+    app.refresh_pinned_todos_now();
+    app.display_messages = vec![
+        DisplayMessage::tool(
+            "duplicate todo transcript card",
+            crate::message::ToolCall {
+                id: "todo-tool".to_string(),
+                name: "todo".to_string(),
+                input: serde_json::json!({"todos": []}),
+                intent: None,
+                thought_signature: None,
+            },
+        ),
+        DisplayMessage::tool(
+            "ordinary tool remains visible",
+            crate::message::ToolCall {
+                id: "read-tool".to_string(),
+                name: "read".to_string(),
+                input: serde_json::json!({"file_path": "README.md"}),
+                intent: None,
+                thought_signature: None,
+            },
+        ),
+    ];
+    app.bump_display_messages_version();
+    app.session.short_name = Some("test".to_string());
+    let backend = ratatui::backend::TestBackend::new(80, 40);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    let transcript = render_and_snap(&app, &mut terminal);
+    assert!(!transcript.contains("duplicate todo transcript card"));
+    assert!(transcript.contains("PINNED_ONLY"), "{transcript}");
+    let _ = crate::todo::save_todos(&session_id, &[]);
 }
 
 #[test]
@@ -300,6 +371,16 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
 
     let backend = ratatui::backend::TestBackend::new(60, 16);
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+
+    app.auto_scroll_paused = true;
+    let top_text = render_and_snap(&app, &mut terminal);
+    assert!(
+        top_text.lines().take(6).any(|row| row.contains("pinned band item")),
+        "pinned todo should remain visible at the top of scrollback, got:\n{}",
+        top_text
+    );
+
+    app.auto_scroll_paused = false;
     let text = render_and_snap(&app, &mut terminal);
 
     let first_rows = text.lines().take(6).collect::<Vec<_>>();
@@ -323,4 +404,192 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
     );
 
     let _ = crate::todo::save_todos(&session_id, &[]);
+}
+
+#[test]
+fn background_task_rows_render_without_todos_or_transcript_cards() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let mut app = create_test_app();
+    app.session.short_name = Some("test".to_string());
+    app.push_display_message(DisplayMessage::assistant("ordinary transcript content"));
+    app.upsert_running_background_task(
+        "running".to_string(),
+        "cargo test".to_string(),
+        Some(42.0),
+    );
+    app.finish_background_task(
+        "done".to_string(),
+        "release build".to_string(),
+        crate::tui::BackgroundTaskRowStatus::Completed,
+    );
+    app.finish_background_task(
+        "failed".to_string(),
+        "integration tests".to_string(),
+        crate::tui::BackgroundTaskRowStatus::Failed,
+    );
+
+    let backend = ratatui::backend::TestBackend::new(80, 20);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    let rendered = render_and_snap(&app, &mut terminal);
+
+    assert!(
+        rendered.contains("✓ bg release build  ━━━━━━ 100%"),
+        "missing completed task row:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("× bg integration tests  ────── failed"),
+        "missing failed task row:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("◌ bg cargo test"),
+        "only the two most recent task rows should render:\n{rendered}"
+    );
+    assert!(!rendered.contains("Background tasks"));
+    assert!(!rendered.contains("Background task started"));
+    assert!(!rendered.contains("Background task progress"));
+    assert!(!rendered.contains("Background task completed"));
+}
+
+#[test]
+fn background_task_rows_retain_the_two_most_recently_active_tasks() {
+    let mut app = create_test_app();
+    app.upsert_running_background_task("first".to_string(), "first task".to_string(), None);
+    app.upsert_running_background_task("second".to_string(), "second task".to_string(), None);
+    app.upsert_running_background_task(
+        "first".to_string(),
+        "first task updated".to_string(),
+        Some(50.0),
+    );
+    app.upsert_running_background_task("third".to_string(), "third task".to_string(), None);
+
+    assert_eq!(
+        app.background_task_rows_ref()
+            .iter()
+            .map(|row| row.task_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["first", "third"]
+    );
+}
+
+#[test]
+fn indeterminate_background_update_preserves_last_known_percent() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let mut app = create_test_app();
+    app.session.short_name = Some("test".to_string());
+    app.push_display_message(DisplayMessage::assistant("ordinary transcript content"));
+    app.upsert_running_background_task(
+        "build".to_string(),
+        "cargo build".to_string(),
+        Some(42.0),
+    );
+
+    // A later phase-only parser update carries no percentage. It should update
+    // activity/label state without resetting the visible bar to zero.
+    app.upsert_running_background_task("build".to_string(), "Compiling jcode".to_string(), None);
+
+    let row = app
+        .background_task_rows_ref()
+        .iter()
+        .find(|row| row.task_id == "build")
+        .expect("background row should remain present");
+    assert_eq!(row.percent, Some(42.0));
+    assert_eq!(row.label, "Compiling jcode");
+
+    let backend = ratatui::backend::TestBackend::new(80, 20);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    let rendered = render_and_snap(&app, &mut terminal);
+    assert!(
+        rendered.contains("Compiling jcode") && rendered.contains("42%"),
+        "phase-only update reset or hid the visible percentage:\n{rendered}"
+    );
+}
+
+#[test]
+fn completed_background_tasks_clear_after_they_stop_being_relevant() {
+    let mut app = create_test_app();
+    app.finish_background_task(
+        "failed".to_string(),
+        "integration tests".to_string(),
+        crate::tui::BackgroundTaskRowStatus::Failed,
+    );
+    app.upsert_running_background_task("running".to_string(), "cargo test".to_string(), None);
+    app.finish_background_task(
+        "done".to_string(),
+        "release build".to_string(),
+        crate::tui::BackgroundTaskRowStatus::Completed,
+    );
+
+    app.background_task_rows
+        .iter_mut()
+        .find(|row| row.task_id == "done")
+        .unwrap()
+        .completed_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(13));
+
+    assert!(app.prune_irrelevant_background_tasks());
+    assert_eq!(
+        app.background_task_rows_ref()
+            .iter()
+            .map(|row| row.task_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["running"]
+    );
+    assert!(!app.prune_irrelevant_background_tasks());
+}
+
+#[test]
+fn clicking_pinned_todo_more_row_expands_the_band() {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let mut app = create_test_app();
+    app.pinned_todos_expanded = false;
+    crate::tui::ui::viewport::set_pinned_todo_more_area_for_test(Some(ratatui::layout::Rect {
+        x: 2,
+        y: 4,
+        width: 20,
+        height: 1,
+    }));
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 8,
+        row: 4,
+        modifiers: KeyModifiers::NONE,
+    });
+
+    assert!(app.pinned_todos_expanded);
+    crate::tui::ui::viewport::set_pinned_todo_more_area_for_test(None);
+}
+
+#[test]
+fn pinned_todo_card_shows_tasks_without_expanding() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let _pin = PinTodosEnvGuard::enable();
+    let mut app = create_test_app();
+    app.session.short_name = Some("test".to_string());
+    let todos = vec![
+        pinned_band_todo("done", "Finished task", "completed"),
+        pinned_band_todo("active", "Current task", "in_progress"),
+        pinned_band_todo("next", "Queued task", "pending"),
+    ];
+    app.pinned_todos_payload = Some(serde_json::json!({"todos": todos}).to_string());
+    app.push_display_message(DisplayMessage::assistant("ordinary transcript content"));
+    for width in [40, 80, 120] {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 40)).unwrap();
+        let rendered = render_and_snap(&app, &mut terminal);
+        for label in ["Finished task", "Current task", "Queued task"] {
+            assert!(rendered.contains(label), "missing {label}:\n{rendered}");
+        }
+        assert!(!rendered.contains("▸ todo"), "{rendered}");
+        assert!(!rendered.contains("▾ todo"), "{rendered}");
+        assert!(crate::tui::ui::viewport::pinned_todo_more_area().is_none());
+        println!(
+            "{width}x40: all 3 todo states visible on first render, no expansion required or summary toggle"
+        );
+    }
 }

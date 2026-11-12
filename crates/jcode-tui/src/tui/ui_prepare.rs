@@ -664,7 +664,11 @@ pub(super) fn prepare_messages(
         width,
         height,
         diff_mode: app.diff_mode(),
-        messages_version: app.display_messages_version(),
+        // Pinning changes which tool messages participate in the transcript.
+        messages_version: app
+            .display_messages_version()
+            .wrapping_mul(2)
+            .wrapping_add(u64::from(crate::config::config().display.pin_todos)),
         diagram_mode: app.diagram_mode(),
         centered: app.centered_mode(),
         mermaid_aspect_bucket: crate::tui::mermaid::current_preferred_aspect_ratio_bucket(),
@@ -1109,7 +1113,11 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
     let key = BodyCacheKey {
         width,
         diff_mode: app.diff_mode(),
-        messages_version: app.display_messages_version(),
+        // Pinning changes which tool messages participate in the transcript.
+        messages_version: app
+            .display_messages_version()
+            .wrapping_mul(2)
+            .wrapping_add(u64::from(crate::config::config().display.pin_todos)),
         diagram_mode: app.diagram_mode(),
         centered: app.centered_mode(),
         mermaid_aspect_bucket: crate::tui::mermaid::current_preferred_aspect_ratio_bucket(),
@@ -1370,6 +1378,18 @@ fn render_message_into(
     let centered = ctx.centered;
     let app = ctx.app;
     let role = msg.effective_role();
+    // The pinned band is the canonical todo presentation while enabled. Keep
+    // todo tool messages in display_messages for history/session fidelity, but
+    // omit their duplicate cards from the prepared transcript.
+    if role == "tool"
+        && crate::config::config().display.pin_todos
+        && msg
+            .tool_data
+            .as_ref()
+            .is_some_and(|tool| tools_ui::canonical_tool_name(&tool.name) == "todo")
+    {
+        return;
+    }
     let align = default_message_alignment(role, centered);
 
     if (acc.body_has_content || !acc.lines.is_empty())
@@ -1526,7 +1546,7 @@ fn render_message_into(
                                 .get("patch_text")
                                 .and_then(|v| v.as_str())
                                 .and_then(|patch_text| {
-                                    match tools_ui::canonical_tool_name(&tc.name) {
+                                    match tools_ui::edit_render_name(&tc.name, &tc.input) {
                                         "apply_patch" => {
                                             tools_ui::extract_apply_patch_primary_file(patch_text)
                                         }
@@ -2437,19 +2457,38 @@ fn wrap_lines(
         let wrap_width = if is_user_line { user_width } else { full_width };
         let new_lines = markdown::wrap_line(line, wrap_width);
         let count = new_lines.len();
-        let mut remaining_copy_offset = line_copy_offsets.get(orig_idx).copied().unwrap_or(0);
+        let first_copy_offset = line_copy_offsets.get(orig_idx).copied().unwrap_or(0);
+        // Continuation rows re-seed the gutter / hanging-indent prefix, so the
+        // row widths sum to `first_copy_offset + raw_width + prefix * (rows - 1)`.
+        // Recover the prefix from that instead of tracking it through the wrapper.
+        let repeated_prefix_width = if count > 1 {
+            new_lines
+                .iter()
+                .map(|line| line.width())
+                .sum::<usize>()
+                .saturating_sub(raw_width)
+                .saturating_sub(first_copy_offset)
+                / (count - 1)
+        } else {
+            0
+        };
         let mut start_col = 0usize;
 
-        for wrapped_line in &new_lines {
+        for (row_idx, wrapped_line) in new_lines.iter().enumerate() {
             let width = wrapped_line.width();
-            let end_col = (start_col + width).min(raw_width);
+            let visual_prefix = if row_idx == 0 {
+                first_copy_offset
+            } else {
+                repeated_prefix_width
+            };
+            let source_width = width.saturating_sub(visual_prefix);
+            let end_col = (start_col + source_width).min(raw_width);
             wrapped_line_map.push(WrappedLineMap {
                 raw_line: orig_idx,
                 start_col,
                 end_col,
             });
-            wrapped_copy_offsets.push(remaining_copy_offset.min(width));
-            remaining_copy_offset = remaining_copy_offset.saturating_sub(width);
+            wrapped_copy_offsets.push(visual_prefix.min(width));
             start_col = end_col;
         }
 
@@ -2538,19 +2577,37 @@ fn wrap_lines_with_map(
         let wrap_width = if is_user_line { user_width } else { full_width };
         let new_lines = markdown::wrap_line(line, wrap_width);
         let count = new_lines.len();
-        let mut remaining_copy_offset = line_copy_offsets.get(orig_idx).copied().unwrap_or(0);
+        let first_copy_offset = line_copy_offsets.get(orig_idx).copied().unwrap_or(0);
+        // Same invariant as `wrap_lines`: the row widths sum to the source span
+        // plus the first row's gutter and one re-seeded prefix per later row.
+        let repeated_prefix_width = if count > 1 {
+            new_lines
+                .iter()
+                .map(|line| line.width())
+                .sum::<usize>()
+                .saturating_sub(end_col.saturating_sub(start_col))
+                .saturating_sub(first_copy_offset)
+                / (count - 1)
+        } else {
+            0
+        };
         let mut segment_start = start_col;
 
-        for wrapped_line in &new_lines {
+        for (row_idx, wrapped_line) in new_lines.iter().enumerate() {
             let width = wrapped_line.width();
-            let segment_end = (segment_start + width).min(end_col);
+            let visual_prefix = if row_idx == 0 {
+                first_copy_offset
+            } else {
+                repeated_prefix_width
+            };
+            let source_width = width.saturating_sub(visual_prefix);
+            let segment_end = (segment_start + source_width).min(end_col);
             wrapped_line_map.push(WrappedLineMap {
                 raw_line,
                 start_col: segment_start,
                 end_col: segment_end,
             });
-            wrapped_copy_offsets.push(remaining_copy_offset.min(width));
-            remaining_copy_offset = remaining_copy_offset.saturating_sub(width);
+            wrapped_copy_offsets.push(visual_prefix.min(width));
             segment_start = segment_end;
         }
 

@@ -26,6 +26,7 @@ serde_json = { version = "1", features = ["raw_value"] }
 bytes = "1"
 tokio = { version = "1", features = ["sync", "time", "rt"] }
 tokio-stream = "0.1"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 # The migrated openrouter tests use jcode-base's test-env sandbox.

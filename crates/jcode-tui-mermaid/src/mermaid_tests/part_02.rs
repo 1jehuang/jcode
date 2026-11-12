@@ -449,7 +449,7 @@ fn inline_transcript_aspect_goal_produces_expected_bucketed_profile() {
 
     // The goal flows through the standard profile bucketing (per-mille).
     let bucket =
-        crate::with_preferred_aspect_ratio(goal, || crate::current_preferred_aspect_ratio_bucket());
+        crate::with_preferred_aspect_ratio(goal, crate::current_preferred_aspect_ratio_bucket);
     assert_eq!(bucket, Some(1750));
 
     // Narrow terminals floor at the 4:3 sizing default instead of requesting

@@ -55,10 +55,10 @@ pub async fn connect_socket(path: &std::path::Path) -> Result<Stream> {
     match Stream::connect(path).await {
         Ok(stream) => Ok(stream),
         Err(err) if err.kind() == std::io::ErrorKind::ConnectionRefused && path.exists() => {
-            anyhow::bail!(
+            Err(anyhow::Error::new(err).context(format!(
                 "Socket exists but refused the connection at {}. Retry, or remove it after confirming no jcode server is running.",
                 path.display()
-            )
+            )))
         }
         Err(err) if err.raw_os_error() == Some(libc::EMFILE) => Err(anyhow::anyhow!(
             "{} ({})",
