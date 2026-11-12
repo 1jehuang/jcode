@@ -130,6 +130,7 @@ pub fn models_dev_provider_id(jcode_provider: &str) -> Option<&'static str> {
         "nebius" => "nebius",
         "scaleway" => "scaleway",
         "stackit" => "stackit",
+        "runcrate" => "runcrate",
         "huggingface" => "huggingface",
         "baseten" => "baseten",
         "chutes" => "chutes",
