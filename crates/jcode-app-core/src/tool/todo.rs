@@ -1489,7 +1489,7 @@ impl Tool for TodoTool {
         item["additionalProperties"] = json!(false);
         schema["properties"]["phases"] = json!({
             "type": "array",
-            "description": "Initialize the plan here, then patch by unique task name. Replaces entire plan; [] clears. Phases are sequential, lanes parallel, items ordered.",
+            "description": "Creates or replaces the whole plan; [] clears. Use once, then change items with update/add/remove. Phases are sequential, lanes parallel, items ordered.",
             "items": {"type": "object", "required": ["phase", "lanes"], "additionalProperties": false,
                 "properties": {"phase": {"type": "integer", "minimum": 1}, "lanes": {
                     "type": "array", "minItems": 1, "items": {"type": "object", "required": ["lane", "items"], "additionalProperties": false,
