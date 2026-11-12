@@ -1777,9 +1777,12 @@ fn renamed_deepseek_model_receives_configured_reasoning_effort() {
         supports_provider_features: false,
         supports_model_catalog: true,
         send_openrouter_headers: false,
-        static_reasoning_config: [("qwen/qwen3.8-27b-fp8".to_string(), (Some(true), Some("none".to_string())))]
-            .into_iter()
-            .collect(),
+        static_reasoning_config: [(
+            "qwen/qwen3.8-27b-fp8".to_string(),
+            (Some(true), Some("none".to_string())),
+        )]
+        .into_iter()
+        .collect(),
         ..make_custom_compatible_provider()
     };
     // The per-model config must enable effort for this model even though its id

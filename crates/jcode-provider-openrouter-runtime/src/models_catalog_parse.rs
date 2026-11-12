@@ -392,10 +392,9 @@ mod tests {
 
     #[test]
     fn max_input_only_is_parsed() {
-        let models = parse_openai_compatible_models_response(
-            r#"{"data":[{"id":"m","max_input":4096}]}"#,
-        )
-        .unwrap();
+        let models =
+            parse_openai_compatible_models_response(r#"{"data":[{"id":"m","max_input":4096}]}"#)
+                .unwrap();
         assert_eq!(models[0].context_length, Some(4_096));
     }
 
