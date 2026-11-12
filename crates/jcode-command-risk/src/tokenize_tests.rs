@@ -179,3 +179,45 @@ fn parentheses_split_subshell_and_command_substitution_bodies() {
         vec![vec!["x=$"], vec!["rm", "-rf", "~"], vec!["echo", "ok"]]
     );
 }
+
+/// #932: a redirect's operands are shell syntax. The file descriptor prefix is
+/// not a word, and every destination is flagged so callers can skip it.
+#[test]
+fn issue_932_redirect_operands_are_not_command_words() {
+    assert_eq!(
+        texts("rm -rf build 2>/dev/null"),
+        vec!["rm", "-rf", "build", "/dev/null"]
+    );
+
+    for cmd in [
+        "rm -rf build 2>/dev/null",
+        "rm -rf build 2>>/dev/null",
+        "rm -rf build <input.txt",
+        "rm -rf build >&out.log",
+    ] {
+        let destination = tokenize(cmd)
+            .into_iter()
+            .find(|t| t.is_redirect_target)
+            .unwrap_or_else(|| panic!("{cmd} must flag one redirect destination"));
+        assert!(
+            matches!(
+                destination.text.as_str(),
+                "/dev/null" | "out.log" | "input.txt"
+            ),
+            "{cmd}: {}",
+            destination.text
+        );
+    }
+
+    // `>&N` duplicates an fd and names no destination at all.
+    assert!(
+        !tokenize("rm -rf build 2>&1")
+            .iter()
+            .any(|t| t.is_redirect_target)
+    );
+
+    // A word that merely starts with digits and is not followed by a redirect
+    // operator stays a word.
+    assert_eq!(texts("rm -rf 2files"), vec!["rm", "-rf", "2files"]);
+    assert_eq!(texts("rm -rf 2 > out"), vec!["rm", "-rf", "2", "out"]);
+}
