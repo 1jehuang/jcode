@@ -431,6 +431,7 @@ pub(super) async fn spawn_swarm_agent(
         requested_effort.as_deref(),
         agents_config.swarm_effort.as_deref(),
         coordinator.reasoning_effort.as_deref(),
+        Some(agents_config.root_effort_for_swarm()),
     );
     crate::logging::info(&format!(
         "Swarm spawn model resolution: requested_model={:?} requested_effort={:?} configured_swarm_effort={:?} configured_swarm_model={:?} coordinator_model={:?} coordinator_provider_key={:?} coordinator_route={:?} -> spawn_model={:?} spawn_provider_key={:?} spawn_route={:?}",
