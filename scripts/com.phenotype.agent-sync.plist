@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+        agent-sync LaunchAgent
+        Bidirectional sync of jcode/codex/forge config between
+        laptop and `desk` (Windows via Tailscale+SSH).
+        Runs every 5 minutes; logs to ~/Library/logs/agent-sync/.
+        Use `launchctl unload` and `launchctl load -w` after editing.
+    -->
+    <key>Label</key>
+    <string>com.phenotype.agent-sync</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>/Users/<REDACTED>/.local/bin/agent-sync --quiet</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/<REDACTED>/Library/logs/agent-sync/launchd.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/<REDACTED>/Library/logs/agent-sync/launchd.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/<REDACTED>/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/<REDACTED></string>
+    </dict>
+</dict>
+</plist>

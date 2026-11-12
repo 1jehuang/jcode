@@ -1,0 +1,548 @@
+#!/usr/bin/env bash
+# agent-sync — bidirectional sync of jcode/codex/forge config between
+# laptop ↔ desk over Tailscale+SSH.
+#
+# Usage:
+#   agent-sync [options] [target-name ...]
+#
+# Options:
+#   -p PEER       SSH alias for the other side (default: from config)
+#   -d, --dry-run Show what would transfer without making changes
+#   -n, --no-act  Same as --dry-run
+#   -v, --verbose Verbose rsync output
+#   -q, --quiet   Suppress per-file output (errors only)
+#   -h, --help    Show this help
+#   --push-only   Sync local → remote only (skip the return sweep)
+#   --pull-only   Sync remote → local only (skip the forward push)
+#   --status      Show sync status without running rsync
+#   --list        List configured targets
+#   --init        Create local skeleton for missing targets (idempotent)
+#
+# When invoked with no arguments, all configured targets are synced.
+# Targets can be specified by name (substring match) to sync a subset.
+#
+# Config: $HOME/.config/agent-sync/config.toml
+# State:  $HOME/.local/state/agent-sync/  (logs, last-run summary)
+#
+# Exit codes: 0 success, 1 partial failure, 2 total failure, 64 usage error.
+
+set -u
+
+# ---------- Defaults --------------------------------------------------------
+CONFIG_PATH="${AGENT_SYNC_CONFIG:-$HOME/.config/agent-sync/config.toml}"
+STATE_DIR="${AGENT_SYNC_STATE:-$HOME/.local/state/agent-sync}"
+LOG_DIR="$STATE_DIR/logs"
+LAST_RUN="$STATE_DIR/last-run.json"
+
+PEER=""
+DRY_RUN=0
+VERBOSE=0
+QUIET=0
+PUSH_ONLY=0
+PULL_ONLY=0
+STATUS_ONLY=0
+LIST_ONLY=0
+INIT_ONLY=0
+INCLUDE_MANUAL=0
+TARGET_FILTER=()
+
+# ---------- Help ------------------------------------------------------------
+usage() {
+  cat <<'EOF'
+agent-sync — bidirectional jcode/codex/forge config sync over Tailscale+SSH.
+
+USAGE
+  agent-sync [options] [target-substring ...]
+
+OPTIONS
+  -p PEER       SSH alias for the peer (default: from config)
+  -d, --dry-run Show what would transfer; do not change anything
+  -v, --verbose Verbose rsync output (passes -v -v)
+  -q, --quiet   Suppress per-file output; errors only
+      --push-only   Sync local → remote only (skip the return sweep)
+      --pull-only   Sync remote → local only (skip the forward push)
+      --status      Show sync status without running rsync
+      --list        List configured targets and exit
+      --init        Create local skeleton for missing targets
+      --include-manual
+                   Also sync targets marked manual = true in config
+                   (use for explicit one-direction config copies)
+  -h, --help    Show this help and exit
+
+ARGUMENTS
+  When one or more target-substring arguments are given, only matching
+  targets are synced (substring, case-sensitive). With none, all targets.
+
+CONFIG
+  $HOME/.config/agent-sync/config.toml
+
+STATE
+  $HOME/.local/state/agent-sync/
+
+EXAMPLES
+  agent-sync                         # sync everything
+  agent-sync jcode                   # sync jcode-* targets
+  agent-sync --pull-only codex-mcp   # pull codex-mcp only
+  agent-sync -p other-laptop         # sync to a different peer
+
+EOF
+}
+
+# ---------- Arg parsing -----------------------------------------------------
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -p) PEER="${2:-}"; shift 2 ;;
+    -d|--dry-run|-n|--no-act) DRY_RUN=1; shift ;;
+    -v|--verbose) VERBOSE=1; shift ;;
+    -q|--quiet) QUIET=1; shift ;;
+    --push-only) PUSH_ONLY=1; shift ;;
+    --pull-only) PULL_ONLY=1; shift ;;
+    --status) STATUS_ONLY=1; shift ;;
+    --list) LIST_ONLY=1; shift ;;
+    --init) INIT_ONLY=1; shift ;;
+    --include-manual) INCLUDE_MANUAL=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; while [[ $# -gt 0 ]]; do TARGET_FILTER+=("$1"); shift; done ;;
+    -*) echo "agent-sync: unknown option: $1" >&2; exit 64 ;;
+    *)  TARGET_FILTER+=("$1"); shift ;;
+  esac
+done
+
+mkdir -p "$LOG_DIR"
+
+# ---------- Logging ---------------------------------------------------------
+ts() { date +"%Y-%m-%dT%H:%M:%S%z"; }
+log() {
+  [[ $QUIET -eq 1 ]] && return 0
+  printf '[%s] %s\n' "$(ts)" "$*"
+}
+err() { printf '[%s] ERROR: %s\n' "$(ts)" "$*" >&2; }
+
+# ---------- Config parsing (TOML, minimal) ----------------------------------
+# We avoid a python dependency for portability. The schema is fixed; a small
+# purpose-built parser is sufficient and avoids jq/toml-tool dependencies.
+
+parse_config() {
+  [[ -r "$CONFIG_PATH" ]] || { err "config not readable: $CONFIG_PATH"; return 1; }
+
+  python3 - "$CONFIG_PATH" <<'PYEOF' || { err "config parse failed"; return 1; }
+import sys, re, json
+
+path = sys.argv[1]
+text = open(path).read()
+
+# Strip comments (# and ;) and blank lines (we only need a structural pass)
+lines = []
+for raw in text.splitlines():
+    s = raw.strip()
+    if not s or s.startswith('#'):
+        continue
+    lines.append(raw)
+
+cfg = {
+    "connect": {"default_peer": "desk", "ssh_opts": ["-o", "BatchMode=yes"]},
+    "windows_home": "",
+    "remote_home": "",
+    "local_rsync": "/usr/bin/rsync",
+    "remote_rsync": "/usr/bin/rsync",
+    "global_excludes": [],
+    "targets": [],
+}
+
+i = 0
+cur_section = None
+while i < len(lines):
+    line = lines[i].strip()
+    if line.startswith('[') and line.endswith(']]'):
+        # [[targets]] block start
+        if line == '[[targets]]':
+            cur_section = "targets_block"
+            cur_target = {"name": "", "description": "", "local": "", "remote": "", "excludes": [], "manual": False}
+            cfg["targets"].append(cur_target)
+        elif line.startswith('[') and line.endswith(']'):
+            cur_section = line[1:-1]
+        i += 1
+        continue
+    if line.startswith('[') and line.endswith(']'):
+        cur_section = line[1:-1]
+        i += 1
+        continue
+
+    # key = value (string, list, or inline table)
+    m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$', line)
+    if not m:
+        i += 1
+        continue
+    key, rest = m.group(1), m.group(2).rstrip(',')
+
+    if rest.startswith('"') and rest.endswith('"'):
+        val = rest[1:-1]
+    elif rest in ("true", "false"):
+        val = (rest == "true")
+    elif rest.startswith('['):
+        # Inline list: gather until matching ]
+        buf = rest
+        depth = buf.count('[') - buf.count(']')
+        while depth > 0 and i + 1 < len(lines):
+            i += 1
+            buf += ' ' + lines[i].strip().rstrip(',')
+            depth = buf.count('[') - buf.count(']')
+        items = re.findall(r'"([^"]*)"', buf)
+        val = items
+    elif rest.startswith('{'):
+        # Inline table — not used in our schema; fall through
+        val = {}
+    else:
+        val = rest
+
+    if cur_section == "connect":
+        cfg["connect"][key] = val
+    elif cur_section == "windows_home":
+        # top-level scalar
+        pass
+    elif cur_section == "global_excludes":
+        # not a real section, but we treat top-level scalars after [connect]
+        if key in ("windows_home", "remote_home", "local_rsync", "remote_rsync", "global_excludes"):
+            cfg[key] = val
+        else:
+            # ignore unknown top-level
+            pass
+    elif cur_section is None or cur_section == "":
+        if key in ("windows_home", "remote_home", "local_rsync", "remote_rsync", "global_excludes"):
+            cfg[key] = val
+    elif cur_section == "targets_block":
+        cur_target[key] = val
+    i += 1
+
+print(json.dumps(cfg))
+PYEOF
+}
+
+if [[ ! -r "$CONFIG_PATH" ]]; then
+  err "config not found: $CONFIG_PATH"
+  err "create it (see ~/.config/agent-sync/config.toml.example for a template)"
+  exit 2
+fi
+
+CFG_JSON="$(parse_config "$CONFIG_PATH")" || exit 2
+
+# Pull config values into shell. Many of these keys live inside the
+# [connect] block in the config (so the user can keep everything scoped).
+# Look up by key in connect first, then fall back to top-level.
+cfg_get() {
+  printf '%s' "$CFG_JSON" | python3 -c "
+import sys, json
+cfg = json.load(sys.stdin)
+key = sys.argv[1]
+v = cfg.get('connect', {}).get(key, '')
+if not v:
+    v = cfg.get(key, '')
+print(v if v else '')
+" "$1"
+}
+
+DEFAULT_PEER=$(cfg_get default_peer)
+SSH_OPTS_RAW=$(printf '%s' "$CFG_JSON" | python3 -c 'import sys,json;print(json.dumps(json.load(sys.stdin)["connect"].get("ssh_opts", [])))')
+WINDOWS_HOME=$(cfg_get windows_home)
+REMOTE_HOME=$(cfg_get remote_home)
+LOCAL_RSYNC=$(cfg_get local_rsync)
+REMOTE_RSYNC=$(cfg_get remote_rsync)
+GLOBAL_EXCLUDES=$(printf '%s' "$CFG_JSON" | python3 -c '
+import sys, json
+cfg = json.load(sys.stdin)
+v = cfg.get("connect", {}).get("global_excludes", cfg.get("global_excludes", []))
+print(json.dumps(v))')
+
+# SSH_OPTS array
+SSH_OPTS=()
+while IFS= read -r item; do SSH_OPTS+=("$item"); done < <(printf '%s' "$SSH_OPTS_RAW" | python3 -c 'import sys,json;[print(x) for x in json.load(sys.stdin)]')
+
+# GLOBAL_EXCLUDES array
+GLOBAL_EX=()
+while IFS= read -r item; do GLOBAL_EX+=("$item"); done < <(printf '%s' "$GLOBAL_EXCLUDES" | python3 -c 'import sys,json;[print(x) for x in json.load(sys.stdin)]')
+
+[[ -z "$PEER" ]] && PEER="$DEFAULT_PEER"
+
+# ---------- List / status handling ------------------------------------------
+if [[ $LIST_ONLY -eq 1 ]]; then
+  # Write CFG_JSON to a temp file, then have python read it
+  TMPF=$(mktemp)
+  printf '%s' "$CFG_JSON" > "$TMPF"
+  AGENT_SYNC_CFG="$TMPF" AGENT_SYNC_INCLUDE_MANUAL="$INCLUDE_MANUAL" python3 << 'PYEOF'
+import sys, json, os
+cfg_path = os.environ["AGENT_SYNC_CFG"]
+include_manual = os.environ.get("AGENT_SYNC_INCLUDE_MANUAL") == "1"
+with open(cfg_path) as _f:
+    cfg = json.load(_f)
+for t in cfg["targets"]:
+    if t.get("manual") and not include_manual:
+        continue
+    name = t["name"]; desc = t["description"]
+    localp = t["local"]; remotep = t["remote"]
+    tag = " [manual]" if t.get("manual") else ""
+    print("  {:<24} {}{}".format(name, desc, tag))
+    print("    local:  " + localp)
+    print("    remote: " + remotep)
+PYEOF
+  rm -f "$TMPF"
+  exit 0
+fi
+
+# ---------- Path resolution -------------------------------------------------
+# Resolve a "~" or "/home/<user>" path. The interpretation depends on which
+# side this script runs on:
+#
+#   - running on macOS laptop: local-side is $HOME; remote-side is WSL,
+#     so "~/foo" on the remote expands to $WINDOWS_HOME/foo.
+#   - running on WSL on desk: local-side is WSL, so "~/foo" expands to
+#     $WINDOWS_HOME/foo; remote-side is the macOS laptop, so "~/foo"
+#     on the remote expands to ... we don't know without more context.
+#
+# To keep the math symmetric and the config file the same on both sides,
+# we introduce a `remote_home` concept:
+#
+#   - on macOS: REMOTE_HOME defaults to $WINDOWS_HOME (since the peer
+#     runs in WSL where $HOME is the Windows profile).
+#   - on WSL: REMOTE_HOME defaults to whatever the desk-side ssh config
+#     says (the laptop user), i.e. /Users/<laptop-user>.
+#
+# The user can override [path].remote_home in the config when needed.
+
+resolve_local() {
+  local p="$1"
+  case "$p" in
+    "~"|"~/"*) p="$(printf '%s' "$p" | sed "s#^~/#$HOME/#; s#^~\$#$HOME#")" ;;
+    "/home/"*)
+      if [[ -n "$WINDOWS_HOME" ]]; then
+        rel="${p#/home/}"
+        rel="${rel#*/}"
+        p="$WINDOWS_HOME/$rel"
+      fi
+      ;;
+  esac
+  printf '%s' "$p"
+}
+
+resolve_remote() {
+  # Same as resolve_local but uses REMOTE_HOME instead of HOME for "~".
+  local p="$1"
+  case "$p" in
+    "~"|"~/"*)
+      if [[ -n "$REMOTE_HOME" ]]; then
+        p="$(printf '%s' "$p" | sed "s#^~/#$REMOTE_HOME/#; s#^~\$#$REMOTE_HOME#")"
+      fi
+      ;;
+    "/home/"*)
+      if [[ -n "$WINDOWS_HOME" ]]; then
+        rel="${p#/home/}"
+        rel="${rel#*/}"
+        p="$WINDOWS_HOME/$rel"
+      elif [[ -n "$REMOTE_HOME" ]]; then
+        rel="${p#/home/}"
+        rel="${rel#*/}"
+        p="$REMOTE_HOME/$rel"
+      fi
+      ;;
+  esac
+  printf '%s' "$p"
+}
+
+# ---------- Target selection ------------------------------------------------
+# Drop targets marked manual=true unless INCLUDE_MANUAL=1.
+TARGETS_JSON=$(printf '%s' "$CFG_JSON" | python3 -c '
+import sys, json
+cfg = json.load(sys.stdin)
+include_manual = (len(sys.argv) > 1 and sys.argv[1] == "1")
+filter = sys.argv[2].split(",") if (len(sys.argv) > 2 and sys.argv[2]) else []
+out = []
+for t in cfg["targets"]:
+    if t.get("manual") and not include_manual:
+        continue
+    if not filter:
+        out.append(t)
+    else:
+        for f in filter:
+            if f and f in t["name"]:
+                out.append(t)
+                break
+print(json.dumps(out))
+' "$INCLUDE_MANUAL" "$(IFS=,; echo "${TARGET_FILTER[*]:-}")")
+
+# ---------- Pre-flight: peer reachability -----------------------------------
+log "agent-sync starting (peer=$PEER dry=$DRY_RUN push=$PUSH_ONLY pull=$PULL_ONLY)"
+
+if [[ $STATUS_ONLY -eq 1 ]]; then
+  TMPF=$(mktemp)
+  printf '%s' "$TARGETS_JSON" > "$TMPF"
+  AGENT_SYNC_TARGETS="$TMPF" AGENT_SYNC_REMOTE_HOME="$REMOTE_HOME" python3 << 'PYEOF'
+import sys, json, os
+with open(os.environ["AGENT_SYNC_TARGETS"]) as _f:
+    targets = json.load(_f)
+local_home = os.path.expanduser("~")
+remote_home = os.environ.get("AGENT_SYNC_REMOTE_HOME") or ""
+def resolve(p, home):
+    if p.startswith("~/"):
+        return home + p[1:]
+    if p == "~":
+        return home
+    return p
+for t in targets:
+    L = resolve(t["local"], local_home)
+    R = resolve(t["remote"], remote_home) if remote_home else t["remote"]
+    name = t["name"]
+    tag = " [manual]" if t.get("manual") else ""
+    print("  {:<24} L:{}  R:{}{}".format(name, L, R, tag))
+PYEOF
+  rm -f "$TMPF"
+  exit 0
+fi
+
+if ! command -v "$LOCAL_RSYNC" >/dev/null 2>&1; then
+  err "local rsync not found: $LOCAL_RSYNC"
+  exit 2
+fi
+if ! command -v ssh >/dev/null 2>&1; then
+  err "ssh client not found"
+  exit 2
+fi
+
+# Test SSH to peer (one connection, before the rsync loop) — skip if --init
+if [[ $INIT_ONLY -eq 0 ]] && ! ssh "${SSH_OPTS[@]}" -o BatchMode=yes "$PEER" true 2>/dev/null; then
+  err "cannot reach peer '$PEER' via ssh"
+  exit 2
+fi
+
+# ---------- Build rsync flags ----------------------------------------------
+# -a       archive (recursive, preserves perms, times, symlinks, etc.)
+# -t       preserve mtimes (so newer-wins works)
+# -u       skip files that are newer on receiver
+# --delete remove files on receiver that don't exist on sender
+# -i       itemized changes (we use this for logging)
+# -z       compress over the wire
+# -h       human-readable numbers
+# -P       keep partial + show progress
+RSYNC_BASE=(-a -t -u --delete -i -z)
+[[ $VERBOSE -eq 1 ]] && RSYNC_BASE+=(-v -v --progress)
+[[ $QUIET -eq 1   ]] && RSYNC_BASE+=(--quiet)
+
+# ---------- Build excludes --------------------------------------------------
+EXCLUDES=()
+for pat in "${GLOBAL_EX[@]}"; do EXCLUDES+=(--exclude="$pat"); done
+
+# ---------- Run -------------------------------------------------------------
+LOG_FILE="$LOG_DIR/$(date +%Y%m%d-%H%M%S).log"
+: > "$LOG_FILE"
+
+TOTAL=0
+OK=0
+FAIL=0
+declare -a FAILED_NAMES=()
+
+run_one_dir() {
+  # run_one_dir <name> <local> <remote>
+  local name="$1" localp="$2" remotep="$3"
+  local ll rr
+  ll="$(resolve_local "$localp")"
+  rr="$(resolve_remote "$remotep")"
+
+  # For a single-file path, rsync wants the parent dir + filename.
+  local src_mode="dir"
+  if [[ -f "$ll" ]]; then
+    src_mode="file"
+  fi
+
+  log "[$name] local=$ll remote=${PEER}:$rr ($src_mode)"
+
+  if [[ $INIT_ONLY -eq 1 ]]; then
+    # Create local skeleton if missing
+    if [[ $src_mode == "dir" ]]; then
+      [[ -d "$ll" ]] || { mkdir -p "$ll"; log "  init: mkdir -p $ll"; }
+    else
+      [[ -e "$ll" ]] || { mkdir -p "$(dirname "$ll")"; : > "$ll"; log "  init: created $ll"; }
+    fi
+    return 0
+  fi
+
+  # PUSH (local → remote): rsync -a local/ peer:remote/
+  if [[ $PULL_ONLY -eq 0 ]]; then
+    local ssh_cmd="ssh ${SSH_OPTS[*]}"
+    local cmd=("$LOCAL_RSYNC" "${RSYNC_BASE[@]}" "${EXCLUDES[@]}")
+    if [[ $src_mode == "file" ]]; then
+      # Single file: rsync local peer:remote
+      cmd+=("$ll" "${PEER}:${rr}")
+    else
+      # Directory: rsync local/ peer:remote/  (trailing slashes critical)
+      cmd+=("$ll/" "${PEER}:${rr}/")
+    fi
+    log "  push: ${cmd[*]}"
+    if [[ $DRY_RUN -eq 1 ]]; then
+      "${cmd[@]}" --dry-run 2>&1 | tee -a "$LOG_FILE" >/dev/null || {
+        err "[$name] push failed"; FAIL=$((FAIL+1)); FAILED_NAMES+=("$name"); return 1; }
+    else
+      "${cmd[@]}" 2>&1 | tee -a "$LOG_FILE" >/dev/null || {
+        err "[$name] push failed"; FAIL=$((FAIL+1)); FAILED_NAMES+=("$name"); return 1; }
+    fi
+  fi
+
+  # PULL (remote → local): rsync -a peer:remote/ local/
+  if [[ $PUSH_ONLY -eq 0 ]]; then
+    local cmd=("$LOCAL_RSYNC" "${RSYNC_BASE[@]}" "${EXCLUDES[@]}")
+    if [[ $src_mode == "file" ]]; then
+      cmd+=("${PEER}:${rr}" "$ll")
+    else
+      cmd+=("${PEER}:${rr}/" "$ll/")
+    fi
+    log "  pull: ${cmd[*]}"
+    if [[ $DRY_RUN -eq 1 ]]; then
+      "${cmd[@]}" --dry-run 2>&1 | tee -a "$LOG_FILE" >/dev/null || {
+        err "[$name] pull failed"; FAIL=$((FAIL+1)); FAILED_NAMES+=("$name"); return 1; }
+    else
+      "${cmd[@]}" 2>&1 | tee -a "$LOG_FILE" >/dev/null || {
+        err "[$name] pull failed"; FAIL=$((FAIL+1)); FAILED_NAMES+=("$name"); return 1; }
+    fi
+  fi
+
+  OK=$((OK+1))
+  return 0
+}
+
+# Iterate targets via python (cleaner than bash loop over JSON)
+TMPF=$(mktemp)
+printf '%s' "$TARGETS_JSON" > "$TMPF"
+AGENT_SYNC_TARGETS="$TMPF" python3 << 'PYEOF' | while IFS=$'\t' read -r name lp rp; do
+import sys, json, os
+with open(os.environ["AGENT_SYNC_TARGETS"]) as _f:
+    targets = json.load(_f)
+for t in targets:
+    name = t["name"]; local = t["local"]; remote = t["remote"]
+    print("{}\t{}\t{}".format(name, local, remote))
+PYEOF
+  [[ -z "$name" ]] && continue
+  TOTAL=$((TOTAL+1))
+  run_one_dir "$name" "$lp" "$rp"
+done
+rm -f "$TMPF"
+
+# ---------- Summary ---------------------------------------------------------
+SUMMARY=$(cat <<EOJSON
+{
+  "ts": "$(ts)",
+  "peer": "$PEER",
+  "dry_run": $DRY_RUN,
+  "ok": $OK,
+  "fail": $FAIL,
+  "log_file": "$LOG_FILE"
+}
+EOJSON
+)
+printf '%s\n' "$SUMMARY" > "$LAST_RUN"
+
+log "agent-sync done: ok=$OK fail=$FAIL log=$LOG_FILE"
+
+if [[ $FAIL -eq 0 ]]; then
+  exit 0
+elif [[ $OK -gt 0 ]]; then
+  exit 1
+else
+  exit 2
+fi

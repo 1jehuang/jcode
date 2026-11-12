@@ -1,0 +1,177 @@
+# agent-sync: bidirectional sync configuration
+#
+# Each [[targets]] entry describes one path-pair that should be kept in
+# sync between this machine and the peer. The same config file works on
+# both laptop and desk — `local` is always THIS side.
+#
+# On the desk's WSL bash, paths under $HOME are rewritten so that the
+# same "~/.jcode/skills" resolves to /mnt/c/Users/koosh/.jcode/skills
+# instead of /home/user/.jcode/skills (which doesn't exist there).
+#
+# IMPORTANT — config files (config.toml / .forge.toml):
+#   These intentionally differ between laptop and desk (desk has custom
+#   provider routing; laptop has the canonical native default). Bidir
+#   sync of these files can clobber a working setup on either side.
+#   Use `agent-sync jcode-config --pull-only` or `--push-only` to
+#   deliberately copy in one direction when you have confirmed the
+#   remote copy is what you want. Default `agent-sync` skips them
+#   because the entries below are tagged `manual = true`.
+
+[connect]
+default_peer = "desk"
+ssh_opts = [
+  "-o", "BatchMode=yes",
+  "-o", "ConnectTimeout=10",
+  "-o", "ServerAliveInterval=15",
+  "-o", "ServerAliveCountMax=3",
+]
+
+# On WSL on the desk, the Windows user's home lives at this path.
+# When this file is read inside WSL, paths beginning with the user's
+# home are rewritten from /home/<user>/<rel> → <windows_home>/<rel>.
+# Leave empty on macOS.
+windows_home = "/mnt/c/Users/koosh"
+
+# The HOME directory of the PEER (used to expand "~/foo" on the remote side
+# of an rsync command). On macOS, set this to windows_home because the
+# peer (desk) runs rsync from inside WSL where $HOME points at the Windows
+# profile. On WSL, set this to the laptop user's $HOME.
+#
+# Leave empty to fall back to using `~/.foo` literally in the rsync URL
+# (works if the peer's shell expands ~ to its $HOME for you).
+remote_home = "/mnt/c/Users/koosh"
+
+# rsync binaries
+local_rsync  = "/usr/bin/rsync"
+remote_rsync = "/usr/bin/rsync"
+
+# Patterns excluded from every target.
+global_excludes = [
+  ".DS_Store",
+  "Thumbs.db",
+  "*.swp",
+  "*.bak",
+  "*.tmp",
+  "node_modules",
+  "__pycache__",
+  ".cache",
+  "*.pyc",
+]
+
+# ---- jcode -----------------------------------------------------------------
+[[targets]]
+name        = "jcode-skills"
+description = "jcode: SKILL.md catalogs (~/.jcode/skills/)"
+local       = "~/.jcode/skills"
+remote      = "~/.jcode/skills"
+excludes    = []
+
+[[targets]]
+name        = "jcode-memory"
+description = "jcode: persistent memory (~/.jcode/memory/)"
+local       = "~/.jcode/memory"
+remote      = "~/.jcode/memory"
+excludes    = []
+
+[[targets]]
+name        = "jcode-memories"
+description = "jcode: project-scoped memories (~/.jcode/memories/)"
+local       = "~/.jcode/memories"
+remote      = "~/.jcode/memories"
+excludes    = []
+
+[[targets]]
+name        = "jcode-mcp"
+description = "jcode: MCP server config (~/.jcode/mcp.json)"
+local       = "~/.jcode/mcp.json"
+remote      = "~/.jcode/mcp.json"
+excludes    = []
+
+[[targets]]
+name        = "jcode-config"
+description = "jcode: top-level config.toml — DIVERGENT between sides; manual only"
+local       = "~/.jcode/config.toml"
+remote      = "~/.jcode/config.toml"
+excludes    = []
+manual      = true
+
+# ---- Codex (pheno-flavored) ------------------------------------------------
+[[targets]]
+name        = "codex-skills"
+description = "Codex: SKILL.md catalogs (~/.codex/skills/)"
+local       = "~/.codex/skills"
+remote      = "~/.codex/skills"
+excludes    = []
+
+[[targets]]
+name        = "codex-memories"
+description = "Codex: persistent memories (~/.codex/memories/)"
+local       = "~/.codex/memories"
+remote      = "~/.codex/memories"
+excludes    = []
+
+[[targets]]
+name        = "codex-mcp"
+description = "Codex: MCP server config (~/.codex/mcp.toml)"
+local       = "~/.codex/mcp.toml"
+remote      = "~/.codex/mcp.toml"
+excludes    = []
+
+[[targets]]
+name        = "codex-mcp-json"
+description = "Codex: MCP server config JSON (~/.codex/mcp.json)"
+local       = "~/.codex/mcp.json"
+remote      = "~/.codex/mcp.json"
+excludes    = []
+
+[[targets]]
+name        = "codex-config"
+description = "Codex: top-level config.toml — DIVERGENT between sides; manual only"
+local       = "~/.codex/config.toml"
+remote      = "~/.codex/config.toml"
+excludes    = []
+manual      = true
+
+[[targets]]
+name        = "codex-agents-md"
+description = "Codex: top-level AGENTS.md"
+local       = "~/.codex/AGENTS.md"
+remote      = "~/.codex/AGENTS.md"
+excludes    = []
+
+# ---- ForgeCode -------------------------------------------------------------
+[[targets]]
+name        = "forge-mcp"
+description = "ForgeCode: MCP server config (~/.forge/.mcp.json)"
+local       = "~/.forge/.mcp.json"
+remote      = "~/.forge/.mcp.json"
+excludes    = []
+
+[[targets]]
+name        = "forge-config"
+description = "ForgeCode: top-level .forge.toml — DIVERGENT between sides; manual only"
+local       = "~/.forge/.forge.toml"
+remote      = "~/.forge/.forge.toml"
+excludes    = []
+manual      = true
+
+[[targets]]
+name        = "forge-agents-md"
+description = "ForgeCode: top-level AGENTS.md"
+local       = "~/.forge/AGENTS.md"
+remote      = "~/.forge/AGENTS.md"
+excludes    = []
+
+[[targets]]
+name        = "forge-commands"
+description = "ForgeCode: command specs (~/.forge/commands/)"
+local       = "~/.forge/commands"
+remote      = "~/.forge/commands"
+excludes    = []
+
+[[targets]]
+name        = "forge-sessions"
+description = "ForgeCode: session/state snapshots (~/.forge/sessions/)"
+local       = "~/.forge/sessions"
+remote      = "~/.forge/sessions"
+excludes    = ["snap-*.db", "snap-*.db-wal", "snap-*.db-shm"]
