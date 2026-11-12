@@ -52,6 +52,65 @@ fn ssh_session_tokens_do_not_claim_skills_or_paths() {
 }
 
 #[test]
+fn ssh_fork_hotkey_forks_on_the_host_and_stages_the_prompt() {
+    if crate::tui::app::commands_dispatch::ssh_test_runs_in_child(
+        "ssh_fork_hotkey_forks_on_the_host_and_stages_the_prompt",
+    ) {
+        return;
+    }
+    use crossterm::event::{KeyCode, KeyModifiers};
+    crate::env::set_var("JCODE_SSH_BINARY", "/opt/jcode");
+    crate::env::set_var("JCODE_SSH_WORKING_DIR", "/srv/repo");
+    crate::env::remove_var("JCODE_SSH_SERVER_SOCKET");
+    let mut app = crate::tui::app::tests::create_test_app();
+    app.is_remote = true;
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let mut remote = RemoteConnection::dummy();
+        remote.set_session_id("remote-parent".into());
+        remote.mark_history_loaded();
+        let peer = remote.take_dummy_peer().unwrap();
+        let (reader, _writer) = peer.into_split();
+        let mut reader = BufReader::new(reader);
+
+        app.handle_remote_key(KeyCode::Char(' '), KeyModifiers::SUPER, &mut remote)
+            .await
+            .unwrap();
+        assert!(app.route_next_prompt_to_new_session, "hotkey must arm over SSH");
+        app.input = "work on this in a fork".into();
+        app.cursor_pos = app.input.len();
+        app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote)
+            .await
+            .unwrap();
+        let id = match read_request(&mut reader).await {
+            Request::Split { id, .. } => id,
+            other => panic!("{other:?}"),
+        };
+        assert!(app.input.is_empty());
+
+        let response = ServerEvent::SplitResponse {
+            id,
+            new_session_id: "remote-fork".into(),
+            new_session_name: "fork".into(),
+        };
+        assert!(!handle_event(&mut app, &mut remote, &response).await.unwrap());
+        handle_server_event(&mut app, response, &mut remote);
+        assert!(app.pending_split_prompt.is_none());
+        assert!(!app.is_processing, "the parent stays idle");
+        assert_eq!(remote.session_id(), Some("remote-parent"), "parent stays attached");
+        let staged = App::restore_input_for_reload("remote-fork").expect("prompt staged for child");
+        assert_eq!(staged.input, "work on this in a fork");
+        assert!(staged.submit_on_restore);
+        let shown = &app.display_messages.last().unwrap().content;
+        assert!(!shown.contains("unavailable in SSH mode"), "{shown}");
+        assert!(
+            shown.contains("jcode --ssh test-remote --ssh-binary /opt/jcode --remote-working-dir /srv/repo --resume remote-fork"),
+            "{shown}"
+        );
+    });
+}
+
+#[test]
 fn ssh_session_wire_controls_and_navigation() {
     if crate::tui::app::commands_dispatch::ssh_test_runs_in_child(
         "ssh_session_wire_controls_and_navigation",

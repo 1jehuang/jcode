@@ -62,6 +62,12 @@ fn classify_text(text: &str) -> Option<String> {
         "connection closed before message completed",
         "unexpected eof",
         "end of file before message completed",
+        // HTTP/2 faults on an established connection. A Wi-Fi roam breaks the
+        // multiplexed stream without any timeout or reset wording: "client
+        // error (SendRequest): http2 error: stream error received: unspecific
+        // protocol error detected".
+        "client error (sendrequest)",
+        "http2 error",
     ];
     if network_markers.iter().any(|marker| text.contains(marker)) {
         return Some("the network connection appears to have dropped".to_string());
@@ -209,6 +215,10 @@ mod tests {
             "Failed to send request to Anthropic API: error sending request for url \
              (https://api.anthropic.com/v1/messages): client error (SendRequest): \
              http2 error: keep-alive timed out: operation timed out",
+            // Wi-Fi roam between access points mid-request.
+            "Failed to send request to Anthropic API: error sending request for url \
+             (https://api.anthropic.com/v1/messages?beta=true): client error (SendRequest): \
+             http2 error: stream error received: unspecific protocol error detected",
             // rustls abrupt-close shape (docs URL spells "unexpected-eof" so
             // the plain "unexpected eof" marker never matched it).
             "error sending request for url (https://generativelanguage.googleapis.com/v1beta/models): \

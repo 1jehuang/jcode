@@ -569,8 +569,12 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
     }
     progress("starting harness API bridge...");
     let standalone_bridge = sibling_exe("jcode-harness-api-bridge");
-    let (bridge, bridge_args) =
-        shared_bridge_launch(&jcode, &standalone_bridge, options.binary.is_some());
+    let (bridge, bridge_args) = shared_bridge_launch(
+        &jcode,
+        &standalone_bridge,
+        options.binary.is_some(),
+        CLI_SERVES_API_BRIDGE,
+    );
     spawn_detached(bridge, bridge_args).map_err(|error| {
         Error::new(
             ErrorKind::LaunchFailed,
@@ -580,14 +584,27 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
     wait_for_socket(&api, "harness API bridge", options.start_timeout)
 }
 
+/// Whether the `jcode` CLI on this platform has the `api-bridge` subcommand.
+/// It is compiled for Unix only, so elsewhere `jcode api-bridge` exits on an
+/// unknown subcommand and no API socket ever appears.
+const CLI_SERVES_API_BRIDGE: bool = cfg!(unix);
+
 /// Keep the bridge aligned with the selected runtime. An old standalone left
 /// beside Desktop must not silently disable newer routing and identity support.
 /// Standalone-only bundles remain supported when no CLI companion was selected.
+///
+/// Where the CLI cannot serve the bridge (Windows), the packaged standalone is
+/// the only bridge there is, so it wins whenever it exists. Preferring the CLI
+/// there left Desktop waiting for a socket that nothing was going to create.
 fn shared_bridge_launch<'a>(
     jcode: &'a Path,
     standalone: &'a Path,
     explicit_runtime: bool,
+    cli_serves_bridge: bool,
 ) -> (&'a Path, &'static [&'static str]) {
+    if !cli_serves_bridge && standalone.is_file() {
+        return (standalone, &[]);
+    }
     if explicit_runtime || jcode.is_file() || !standalone.is_file() {
         (jcode, &["api-bridge"])
     } else {

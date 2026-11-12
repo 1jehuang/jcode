@@ -124,7 +124,11 @@ async fn run_unix(args: Args) -> Result<()> {
     let working_dir = connection.remote_working_dir().to_owned();
     // The TUI stays local. Preserve its workspace separately from the VM's,
     // and share the exact managed-host config with read-only metadata probes.
-    let explicit_source = std::env::var_os("JCODE_SSH_LOCAL_WORKING_DIR").is_some();
+    // A client opened from another SSH client inherits that client's cached
+    // cwd. The marker says so, and is consumed so it reaches no further.
+    let inherited = std::env::var_os("JCODE_SSH_LOCAL_INHERITED").is_some();
+    crate::env::remove_var("JCODE_SSH_LOCAL_INHERITED");
+    let explicit_source = !inherited && std::env::var_os("JCODE_SSH_LOCAL_WORKING_DIR").is_some();
     crate::env::set_var(
         "JCODE_SSH_LOCAL_IS_SOURCE",
         if explicit_source { "1" } else { "0" },
