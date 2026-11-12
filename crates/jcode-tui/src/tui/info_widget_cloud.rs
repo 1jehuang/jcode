@@ -14,8 +14,8 @@ fn fit(line: Line<'static>, width: u16) -> Line<'static> {
     if width == 0 {
         return Line::default();
     }
-    let truncated = line.width() > usize::from(width);
-    let mut left = usize::from(width).saturating_sub(usize::from(truncated));
+    // Cut at the widget edge with no ellipsis so every cell carries content.
+    let mut left = usize::from(width);
     let mut spans = Vec::new();
     for span in line.spans {
         let mut text = String::new();
@@ -37,9 +37,6 @@ fn fit(line: Line<'static>, width: u16) -> Line<'static> {
         if left == 0 {
             break;
         }
-    }
-    if truncated {
-        spans.push(Span::styled("…", value_style()));
     }
     Line::from(spans)
 }

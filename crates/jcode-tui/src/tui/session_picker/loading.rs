@@ -417,9 +417,11 @@ fn send_session_list_updates_with_discovery(
 mod search_text;
 pub(super) use super::transcript_search::source::SourceBuckets;
 use super::transcript_search::source::{BucketSink, Source, Walk, message_role_source, push_mark};
+#[cfg(test)]
+use search_text::raw_value_search_excerpt;
 pub(super) use search_text::{
     build_search_index, classified_search_excerpt, classify_json_into, push_sampled_search_text,
-    raw_value_display_text, raw_value_search_excerpt,
+    raw_value_display_text,
 };
 
 #[cfg(test)]
@@ -2069,7 +2071,10 @@ fn load_external_sessions(enabled: bool, scan_limit: usize) -> Vec<SessionInfo> 
 
         let mut external = Vec::new();
         for handle in [claude, codex, pi, opencode, cursor] {
-            external.extend(handle.join().unwrap_or_default());
+            match handle.join() {
+                Ok(sessions) => external.extend(sessions),
+                Err(_) => crate::logging::warn("External session loader panicked"),
+            }
         }
         external
     })
@@ -2152,6 +2157,7 @@ fn load_external_claude_code_sessions(scan_limit: usize) -> Vec<SessionInfo> {
         .collect()
 }
 
+#[cfg(test)]
 pub(super) fn load_claude_code_preview_from_path(path: &Path) -> Option<Vec<PreviewMessage>> {
     load_claude_code_external_preview(path).map(|preview| preview.messages)
 }
@@ -2200,6 +2206,7 @@ pub(super) fn load_claude_code_external_preview(path: &Path) -> Option<ExternalP
     out.non_empty()
 }
 
+#[cfg(test)]
 pub(super) fn load_claude_code_preview(session_id: &str) -> Option<Vec<PreviewMessage>> {
     let sessions = match crate::import::list_claude_code_sessions() {
         Ok(sessions) => sessions,
@@ -2351,6 +2358,7 @@ fn find_codex_session_file(session_id: &str) -> Option<PathBuf> {
     None
 }
 
+#[cfg(test)]
 pub(super) fn load_codex_preview_from_path(path: &Path) -> Option<Vec<PreviewMessage>> {
     load_codex_external_preview(path).map(|preview| preview.messages)
 }
@@ -2412,6 +2420,7 @@ pub(super) fn load_codex_external_preview(path: &Path) -> Option<ExternalPreview
     out.non_empty()
 }
 
+#[cfg(test)]
 pub(super) fn load_codex_preview(session_id: &str) -> Option<Vec<PreviewMessage>> {
     let path = find_codex_session_file(session_id)?;
     load_codex_preview_from_path(&path)
@@ -2424,7 +2433,9 @@ pub(super) fn load_codex_external_preview_by_id(session_id: &str) -> Option<Exte
 #[path = "loading/pi_sessions.rs"]
 mod pi_sessions;
 use pi_sessions::load_external_pi_sessions;
-pub(super) use pi_sessions::{load_pi_external_preview, load_pi_preview_from_path};
+pub(super) use pi_sessions::load_pi_external_preview;
+#[cfg(test)]
+pub(super) use pi_sessions::load_pi_preview_from_path;
 fn load_external_opencode_sessions(scan_limit: usize) -> Vec<SessionInfo> {
     let Ok(root) = crate::storage::user_home_path(".local/share/opencode/storage/session") else {
         return Vec::new();
@@ -2442,6 +2453,7 @@ fn load_external_opencode_sessions(scan_limit: usize) -> Vec<SessionInfo> {
     .collect()
 }
 
+#[cfg(test)]
 pub(super) fn load_opencode_preview_from_path(path: &Path) -> Option<Vec<PreviewMessage>> {
     load_opencode_external_preview(path).map(|preview| preview.messages)
 }
@@ -2721,6 +2733,7 @@ fn load_external_cursor_sessions(scan_limit: usize) -> Vec<SessionInfo> {
         .collect()
 }
 
+#[cfg(test)]
 pub(super) fn load_cursor_preview_from_path(path: &Path) -> Option<Vec<PreviewMessage>> {
     load_cursor_external_preview(path).map(|preview| preview.messages)
 }

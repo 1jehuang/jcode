@@ -23,7 +23,7 @@ pub(super) fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Framed
         .and_then(|activity| render_memory_last_trace_line(activity, max_width))
         .unwrap_or_else(|| {
             Line::from(Span::styled(
-                truncate_with_ellipsis(
+                clip(
                     &format!(
                         "{} project · {} global",
                         info.project_count, info.global_count
@@ -58,7 +58,7 @@ pub(super) fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Framed
             "sidecar offline".into()
         };
         lines.push(Line::from(Span::styled(
-            truncate_with_ellipsis(&detail, max_width),
+            clip(&detail, max_width),
             Style::default().fg(rgb(120, 120, 130)),
         )));
     }
@@ -71,7 +71,7 @@ fn render_memory_header_line(info: &MemoryInfo, max_width: usize) -> Line<'stati
     Line::from(vec![
         Span::styled("🧠 ", Style::default().fg(rgb(200, 150, 255))),
         Span::styled(
-            truncate_with_ellipsis(&title, max_width.saturating_sub(3).max(6)),
+            clip(&title, max_width.saturating_sub(3).max(6)),
             Style::default().fg(rgb(210, 210, 220)).bold(),
         ),
     ])
@@ -288,7 +288,7 @@ fn render_memory_status_line(activity: &MemoryActivity, max_width: usize) -> Lin
     let mut spans = vec![
         Span::styled(prefix, Style::default().fg(rgb(120, 120, 130))),
         Span::styled(
-            truncate_smart(&summary, available),
+            clip(&summary, available),
             Style::default().fg(badge_color).bold(),
         ),
     ];
@@ -469,7 +469,7 @@ fn render_memory_last_trace_line(
         Span::styled("Trace: ", Style::default().fg(rgb(120, 120, 130))),
         Span::styled(format!("{} ", icon), Style::default().fg(color)),
         Span::styled(
-            truncate_with_ellipsis(&text, max_width.saturating_sub(7)),
+            clip(&text, max_width.saturating_sub(7)),
             Style::default().fg(rgb(160, 160, 170)),
         ),
     ]))
@@ -545,10 +545,7 @@ fn render_memory_step_line(
             },
         ),
         Span::styled("  ", Style::default().fg(rgb(100, 100, 110))),
-        Span::styled(
-            truncate_smart(&detail, available),
-            Style::default().fg(detail_color),
-        ),
+        Span::styled(clip(&detail, available), Style::default().fg(detail_color)),
     ])
 }
 
@@ -650,7 +647,7 @@ pub(super) fn render_memory_compact(info: &MemoryInfo, inner_width: u16) -> Vec<
     if show_activity {
         spans.push(Span::styled(" · ", Style::default().fg(rgb(100, 100, 110))));
         spans.push(Span::styled(
-            truncate_with_ellipsis(&summary, summary_width.max(8)),
+            clip(&summary, summary_width.max(8)),
             Style::default().fg(accent),
         ));
     }

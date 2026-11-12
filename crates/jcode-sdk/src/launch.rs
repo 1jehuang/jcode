@@ -566,14 +566,8 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
     }
     progress("starting harness API bridge...");
     let standalone_bridge = sibling_exe("jcode-harness-api-bridge");
-    let (bridge, bridge_args): (&Path, &[&str]) = if standalone_bridge.is_file() {
-        (&standalone_bridge, &[])
-    } else {
-        // Current Jcode distributions host the bridge as a CLI subcommand so a
-        // desktop bundle only needs to ship one companion executable. Keep the
-        // standalone lookup above for compatibility with older installations.
-        (&jcode, &["api-bridge"])
-    };
+    let (bridge, bridge_args) =
+        shared_bridge_launch(&jcode, &standalone_bridge, options.binary.is_some());
     spawn_detached(bridge, bridge_args).map_err(|error| {
         Error::new(
             ErrorKind::LaunchFailed,
@@ -581,6 +575,21 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
         )
     })?;
     wait_for_socket(&api, "harness API bridge", options.start_timeout)
+}
+
+/// Keep the bridge aligned with the selected runtime. An old standalone left
+/// beside Desktop must not silently disable newer routing and identity support.
+/// Standalone-only bundles remain supported when no CLI companion was selected.
+fn shared_bridge_launch<'a>(
+    jcode: &'a Path,
+    standalone: &'a Path,
+    explicit_runtime: bool,
+) -> (&'a Path, &'static [&'static str]) {
+    if explicit_runtime || jcode.is_file() || !standalone.is_file() {
+        (jcode, &["api-bridge"])
+    } else {
+        (standalone, &[])
+    }
 }
 
 fn spawn_detached(program: &Path, args: &[&str]) -> std::io::Result<()> {
@@ -837,6 +846,40 @@ fn launch_io(error: std::io::Error) -> Error {
 #[cfg(test)]
 mod executable_tests {
     use super::*;
+
+    #[test]
+    fn selected_runtime_bridge_wins_over_stale_standalone() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = root.path().join("jcode");
+        let standalone = root.path().join("jcode-harness-api-bridge");
+        fs::write(&standalone, b"obsolete bridge").unwrap();
+        // An explicit command can also be a bare name resolved through PATH.
+        assert_eq!(
+            shared_bridge_launch(&runtime, &standalone, true),
+            (runtime.as_path(), &["api-bridge"][..])
+        );
+        fs::write(&runtime, b"current runtime").unwrap();
+        assert_eq!(
+            shared_bridge_launch(&runtime, &standalone, false),
+            (runtime.as_path(), &["api-bridge"][..])
+        );
+    }
+
+    #[test]
+    fn standalone_only_bundle_and_path_runtime_remain_supported() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = root.path().join("jcode");
+        let standalone = root.path().join("jcode-harness-api-bridge");
+        assert_eq!(
+            shared_bridge_launch(&runtime, &standalone, false),
+            (runtime.as_path(), &["api-bridge"][..])
+        );
+        fs::write(&standalone, b"standalone-only bundle").unwrap();
+        assert_eq!(
+            shared_bridge_launch(&runtime, &standalone, false),
+            (standalone.as_path(), &[][..])
+        );
+    }
 
     #[test]
     fn sibling_executable_uses_platform_suffix_in_bundle_with_spaces() {

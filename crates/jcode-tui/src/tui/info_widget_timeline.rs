@@ -7,7 +7,7 @@
 //! and is fed off the render path from `App::note_tool_completed`.
 
 use super::InfoWidgetData;
-use super::text::truncate_smart;
+use super::text::clip;
 use crate::tui::color_support::rgb;
 use ratatui::prelude::*;
 use std::collections::VecDeque;
@@ -202,7 +202,7 @@ fn render_event_line(ev: &TimelineEvent, width: usize, is_last: bool) -> Line<'s
             spans.push(Span::styled("● ", Style::default().fg(rgb(130, 170, 250))));
             let max = width.saturating_sub(2 + reserved).max(4);
             spans.push(Span::styled(
-                truncate_smart(&ev.label, max),
+                clip(&ev.label, max),
                 Style::default().fg(rgb(195, 195, 210)),
             ));
         }
@@ -212,7 +212,7 @@ fn render_event_line(ev: &TimelineEvent, width: usize, is_last: bool) -> Line<'s
             let text = ev.detail.as_deref().unwrap_or(&ev.label);
             let max = width.saturating_sub(4 + reserved).max(4);
             spans.push(Span::styled(
-                truncate_smart(text, max),
+                clip(text, max),
                 Style::default().fg(rgb(150, 150, 165)),
             ));
         }
@@ -229,7 +229,7 @@ fn render_event_line(ev: &TimelineEvent, width: usize, is_last: bool) -> Line<'s
             }
             let max = width.saturating_sub(used + reserved).max(4);
             spans.push(Span::styled(
-                truncate_smart(&ev.label, max),
+                clip(&ev.label, max),
                 Style::default().fg(rgb(185, 185, 195)),
             ));
         }
@@ -304,7 +304,7 @@ pub(super) fn render_timeline_compact(data: &InfoWidgetData) -> Vec<Line<'static
     let mut spans = vec![
         Span::styled("⟳ ", Style::default().fg(rgb(130, 170, 250))),
         Span::styled(
-            truncate_smart(last, 24),
+            clip(last, 24),
             Style::default().fg(rgb(185, 185, 200)),
         ),
     ];

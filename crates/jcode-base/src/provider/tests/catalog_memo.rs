@@ -1,5 +1,146 @@
 use super::*;
 
+/// Run explicitly with `--ignored --nocapture`. Both paths execute the real
+/// key construction, generation reads, TTL checks and instance memo lock. The
+/// baseline recreates the former two deep-cloned entries used by a snapshot,
+/// rather than timing an isolated Arc clone against an isolated Vec clone.
+#[test]
+#[ignore = "representative route memo hit-path benchmark"]
+fn benchmark_route_memo_snapshot_hit_path() {
+    with_clean_provider_test_env(|| {
+        let rt = enter_test_runtime();
+        let _runtime_guard = rt.enter();
+        let provider = test_multi_provider_with_openai();
+        let routes: Vec<_> = (0..4_000)
+            .map(|index| {
+                build_openai_api_key_route(
+                    &format!("gpt-future-benchmark-{index}"),
+                    true,
+                    "representative cached catalog route",
+                )
+            })
+            .collect();
+        *provider.routes_memo.lock().unwrap() = Some(Arc::new(RoutesMemoEntry {
+            built_at: std::time::Instant::now(),
+            scope_key: provider.routes_memo_key(),
+            auth_generation: pricing::auth_pricing_generation(),
+            catalog_generation: catalog_generation(),
+            listable_models: listable_model_names_from_routes(&routes),
+            routes,
+        }));
+        let baseline = || {
+            let models_entry = (*provider.fresh_routes_memo_entry()).clone();
+            let routes_entry = (*provider.fresh_routes_memo_entry()).clone();
+            jcode_provider_core::ModelCatalogSnapshot::new(
+                Some(provider.display_name()),
+                Some(provider.model()),
+                models_entry.listable_models,
+                routes_entry.routes,
+            )
+        };
+        assert_eq!(baseline(), provider.model_catalog_snapshot());
+        let measure = |old: bool| {
+            let start = std::time::Instant::now();
+            for _ in 0..250 {
+                std::hint::black_box(if old {
+                    baseline()
+                } else {
+                    provider.model_catalog_snapshot()
+                });
+            }
+            start.elapsed()
+        };
+        for round in 0..4 {
+            let (old, shared) = if round % 2 == 0 {
+                (measure(true), measure(false))
+            } else {
+                let shared = measure(false);
+                (measure(true), shared)
+            };
+            eprintln!(
+                "route memo snapshot round {round}: 4000 routes x 250 hits, old deep-clone {old:?}, shared {shared:?}, ratio {:.2}x",
+                old.as_secs_f64() / shared.as_secs_f64()
+            );
+        }
+    });
+}
+
+#[test]
+fn route_memo_arc_shares_local_and_fork_hits_and_invalidates_generations() {
+    with_clean_provider_test_env(|| {
+        let rt = enter_test_runtime();
+        let _runtime_guard = rt.enter();
+        let provider = test_multi_provider_with_openai();
+        let mut fork = test_multi_provider_with_openai();
+        fork.catalog_scope = provider.catalog_scope;
+        assert_eq!(provider.routes_memo_key(), fork.routes_memo_key());
+        let first = provider.fresh_routes_memo_entry();
+        assert!(Arc::ptr_eq(&first, &provider.fresh_routes_memo_entry()));
+        let shared = fork.fresh_routes_memo_entry();
+        assert!(Arc::ptr_eq(&first, &shared));
+        assert!(Arc::ptr_eq(&shared, &fork.fresh_routes_memo_entry()));
+
+        crate::auth::AuthStatus::invalidate_cache();
+        let after_auth = provider.fresh_routes_memo_entry();
+        assert!(!Arc::ptr_eq(&first, &after_auth));
+        assert!(Arc::ptr_eq(&after_auth, &fork.fresh_routes_memo_entry()));
+        bump_catalog_generation();
+        let after_catalog = fork.fresh_routes_memo_entry();
+        assert!(!Arc::ptr_eq(&after_auth, &after_catalog));
+        assert!(Arc::ptr_eq(
+            &after_catalog,
+            &provider.fresh_routes_memo_entry()
+        ));
+    });
+}
+
+#[test]
+fn route_memo_snapshot_preserves_future_catalog_models_and_output_isolation() {
+    with_clean_provider_test_env(|| {
+        let rt = enter_test_runtime();
+        let _runtime_guard = rt.enter();
+        let provider = test_multi_provider_with_openai();
+        let future = "gpt-arbitrary-future-catalog-model-2099";
+        let scope = openai_catalog_scope_for_credential(false, "sk-test-openai-api-key");
+        persist_openai_model_catalog_for_scope(
+            &scope,
+            &models::OpenAIModelCatalog {
+                available_models: vec![future.to_string()],
+                ..Default::default()
+            },
+        );
+        bump_catalog_generation();
+        let entry = provider.fresh_routes_memo_entry();
+        let expected = provider.model_catalog_snapshot();
+        assert_eq!(expected.provider_name, Some(provider.display_name()));
+        assert_eq!(expected.provider_model, Some(provider.model()));
+        assert!(
+            expected
+                .available_models
+                .iter()
+                .any(|model| model == future)
+        );
+        assert!(
+            expected
+                .model_routes
+                .iter()
+                .any(|route| route.model == future)
+        );
+        assert_eq!(expected.model_routes, entry.routes);
+        assert_eq!(expected.available_models, entry.listable_models);
+
+        let mut changed = provider.model_catalog_snapshot();
+        changed.available_models.clear();
+        changed.model_routes[0].model = "mutated-output".to_string();
+        let mut routes = provider.model_routes();
+        routes.clear();
+        let mut models = provider.available_models_display();
+        models.clear();
+        assert!(Arc::ptr_eq(&entry, &provider.fresh_routes_memo_entry()));
+        assert_eq!(expected, provider.model_catalog_snapshot());
+    });
+}
+
 #[test]
 fn catalog_sharing_identity_fresh_sessions_share_equivalent_configuration() {
     with_clean_provider_test_env(|| {

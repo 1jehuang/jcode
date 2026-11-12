@@ -66,6 +66,7 @@ pub fn save_context(
                 crate::usage::cached_account_usage_snapshot(provider, label)
                     .filter(|usage| usage.label == label)
                     .map(|usage| jcode_protocol::AccountUsageSnapshot {
+                        additional_windows: usage.additional_windows,
                         label: usage.label,
                         email: None,
                         exhausted: usage.exhausted,

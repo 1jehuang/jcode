@@ -152,12 +152,11 @@ fn provider_catalog_snapshot(provider: &dyn Provider) -> ModelCatalogSnapshot {
         .explicit_provider_pin_for_current_model()
         .map(|pin| format!("{model}@{pin}"))
         .unwrap_or(model);
-    let mut snapshot = ModelCatalogSnapshot::new(
-        Some(provider.display_name()),
-        Some(model),
-        provider.available_models_display(),
-        provider.model_routes(),
-    );
+    let mut snapshot = ModelCatalogSnapshot::from_provider(provider);
+    // Server selection metadata includes explicit upstream pins, independently
+    // of how a provider obtains its shared catalog contents.
+    snapshot.provider_name = Some(provider.display_name());
+    snapshot.provider_model = Some(model);
     crate::model_usage::enrich_routes(&mut snapshot.model_routes);
     snapshot
 }

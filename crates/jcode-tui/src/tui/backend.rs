@@ -305,6 +305,11 @@ const READ_BUFFER_SHRINK_THRESHOLD: usize = 256 * 1024;
 /// grow/shrink thrash.
 const READ_BUFFER_RETAIN_CAPACITY: usize = 64 * 1024;
 
+/// Caller id attached to a TUI soft interrupt, derived from its request id.
+pub(crate) fn soft_interrupt_client_id(request_id: u64) -> String {
+    format!("tui-{request_id}")
+}
+
 fn account_usage_poll_due(last_poll: Option<Instant>, now: Instant) -> bool {
     last_poll.is_none_or(|last| now.saturating_duration_since(last) >= Duration::from_secs(30))
 }
@@ -687,7 +692,12 @@ impl RemoteConnection {
                     drop(w);
                     pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
                     let failed = result.is_err();
-                    let _ = done.send(result.map_err(|error| error.to_string()));
+                    if done
+                        .send(result.map_err(|error| error.to_string()))
+                        .is_err()
+                    {
+                        crate::logging::debug("Remote write acknowledgement receiver closed");
+                    }
                     if failed {
                         crate::logging::warn("Remote writer task stopped after write error");
                         break;
@@ -696,17 +706,17 @@ impl RemoteConnection {
             });
             *slot = Some(tx);
         }
+        let sender = slot
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("remote connection writer unavailable"))?;
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
         self.outbound_pending
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        slot.as_ref()
-            .expect("outbound sender initialized")
-            .send((bytes, done_tx))
-            .map_err(|_| {
-                self.outbound_pending
-                    .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-                anyhow::anyhow!("remote connection writer closed")
-            })?;
+        sender.send((bytes, done_tx)).map_err(|_| {
+            self.outbound_pending
+                .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            anyhow::anyhow!("remote connection writer closed")
+        })?;
         Ok(done_rx)
     }
 
@@ -1283,10 +1293,27 @@ impl RemoteConnection {
             content,
             images,
             urgent,
-            client_id: None,
+            // Named so stranded-interrupt recovery can ask the server exactly
+            // which interrupts are still queued instead of guessing.
+            client_id: Some(soft_interrupt_client_id(id)),
         };
         self.next_request_id += 1;
         self.send_request_with_interrupt_trigger(request, Some("soft_interrupt"))
+            .await?;
+        Ok(id)
+    }
+
+    /// Cancel only the named soft interrupts. The server answers with
+    /// `SoftInterruptsCancelled`, splitting the ids into still-queued (now
+    /// removed) and not-queued (already injected or started as a turn).
+    pub async fn cancel_soft_interrupts_by_id(&mut self, client_ids: Vec<String>) -> Result<u64> {
+        let id = self.next_request_id;
+        let request = Request::CancelSoftInterrupts {
+            id,
+            client_ids: Some(client_ids),
+        };
+        self.next_request_id += 1;
+        self.send_request_with_interrupt_trigger(request, Some("cancel_soft_interrupts"))
             .await?;
         Ok(id)
     }

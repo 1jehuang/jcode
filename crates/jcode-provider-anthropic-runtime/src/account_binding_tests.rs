@@ -115,6 +115,31 @@ async fn active_oauth_email_follows_cached_unbound_credentials_not_global_accoun
     assert_eq!(provider.active_oauth_account_email(), None);
 }
 
+/// Switching to a saved account must identify it immediately, before the
+/// first request repopulates the token cache.
+#[test]
+fn active_oauth_email_is_known_right_after_binding_an_account() {
+    let _lock = jcode_base::storage::lock_test_env();
+    let _sandbox = AccountSandbox::new();
+    let personal = save_account("new-personal", "personal-access", "personal-refresh");
+    let work = save_account("new-work", "work-access", "work-refresh");
+    auth::claude::update_account_profile(&personal, Some("personal@example.com".into())).unwrap();
+    auth::claude::update_account_profile(&work, Some("work@example.com".into())).unwrap();
+    auth::claude::set_active_account(&personal).unwrap();
+    let provider = AnthropicProvider::new();
+    provider
+        .set_credential_mode(AnthropicCredentialMode::OAuth)
+        .unwrap();
+    provider.set_oauth_account(Some(&work)).unwrap();
+    assert_eq!(
+        provider.active_oauth_account_email().as_deref(),
+        Some("work@example.com")
+    );
+    // Unbinding returns to unknown rather than the global active account.
+    provider.set_oauth_account(None).unwrap();
+    assert_eq!(provider.active_oauth_account_email(), None);
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn oauth_account_binding_survives_global_switch_refresh_and_fork() {

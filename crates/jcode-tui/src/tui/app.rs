@@ -432,6 +432,8 @@ struct PendingFallbackOffer {
 /// one-keypress accept can resend it after the route switch completes.
 #[derive(Debug, Clone)]
 struct FallbackResendPayload {
+    /// Automatic retry budget already spent by this turn, across routes.
+    retry_attempts: u8,
     /// Expanded message content that was sent to the server.
     content: String,
     /// Inline image attachments that accompanied the message.
@@ -1607,6 +1609,7 @@ pub struct App {
     pending_route_selection: Option<crate::provider::RouteSelection>,
     pending_automatic_failover_route: Option<crate::provider::RouteSelection>,
     pending_automatic_failover_request_id: Option<u64>,
+    pending_automatic_failover_started: Option<Instant>,
     // Reasoning-effort variant chosen together with a model in the picker
     // (e.g. "gpt-5.5 (high)"), staged for remote mode alongside the model
     // switch. Without forwarding this to the server, it keeps its configured
@@ -1725,6 +1728,11 @@ pub struct App {
     pending_soft_interrupts: Vec<String>,
     // Soft interrupts written to the socket but not yet acknowledged by the server.
     pending_soft_interrupt_requests: Vec<(u64, String)>,
+    // Every soft interrupt still shown as pending, by request id. Unlike the
+    // list above this survives the ack, so recovery can name them to the server.
+    sent_soft_interrupts: Vec<(u64, String)>,
+    // In-flight by-id cancel used to recover stranded soft interrupts.
+    soft_interrupt_recovery: Option<(u64, Instant)>,
     // Whether the current remote turn should trigger autoreview after completion.
     autoreview_after_current_turn: bool,
     // Whether the current remote turn should trigger autojudge after completion.

@@ -8,7 +8,7 @@ mod power;
 mod session;
 pub use session::{HibernationMode, SessionConfig};
 pub use {
-    display::{DisplayConfig, ResumeTimeMode},
+    display::{DisplayConfig, ResumeOpenElsewhere, ResumeTimeMode},
     menubar::MenubarConfig,
     power::PowerConfig,
 };
@@ -1251,9 +1251,24 @@ pub struct ProviderConfig {
     pub preserve_reasoning_context: bool,
     /// How to handle cross-provider failover when the same input would be resent elsewhere.
     pub cross_provider_failover: CrossProviderFailoverMode,
+    /// Skip the cross-provider countdown for definitive exhausted usage only.
+    /// Manual cross-provider failover still disables automatic switching.
+    pub exhausted_usage_immediate_failover: bool,
+    /// Prefer bounded same-account retries for recoverable Anthropic rate limits
+    /// before rotating to another account. Long reset delays still yield.
+    pub anthropic_retry_recoverable_rate_limits: bool,
     /// Whether jcode should automatically try another account on the same provider
     /// before falling back to a different provider.
     pub same_provider_account_failover: bool,
+    /// Automatically redeem an earned OpenAI banked reset when weekly OAuth
+    /// usage is exhausted. Never purchases credits. Enabled by default.
+    pub openai_auto_banked_reset: bool,
+    /// Automatically redeem earned Anthropic Fable resets for exhausted weekly
+    /// OAuth usage. Never purchases credits. Disabled by default.
+    pub anthropic_auto_fable_reset: bool,
+    /// Preserve earned resets while the account pool router has another ready route.
+    /// Applies to both OpenAI and Anthropic automatic resets. Default: true.
+    pub auto_reset_only_when_no_routes: bool,
     /// Copilot premium request mode: "normal", "one", or "zero"
     /// "zero" means all requests are free (no premium requests consumed)
     pub copilot_premium: Option<String>,
@@ -1306,7 +1321,12 @@ impl Default for ProviderConfig {
             openai_native_compaction_threshold_tokens: 200_000,
             preserve_reasoning_context: true,
             cross_provider_failover: CrossProviderFailoverMode::Countdown,
+            exhausted_usage_immediate_failover: true,
+            anthropic_retry_recoverable_rate_limits: true,
             same_provider_account_failover: true,
+            openai_auto_banked_reset: true,
+            anthropic_auto_fable_reset: false,
+            auto_reset_only_when_no_routes: true,
             copilot_premium: None,
             gemini_force_oauth: false,
             gemini_project: None,
@@ -1578,3 +1598,32 @@ pub struct LaunchHotkeysConfig {
 #[cfg(test)]
 #[path = "reasoning_display_defaults_tests.rs"]
 mod reasoning_display_defaults_tests;
+
+#[cfg(test)]
+mod exhausted_usage_failover_tests {
+    use super::*;
+
+    #[test]
+    fn exhaustion_immediate_defaults_on_and_is_independent_of_manual_mode() {
+        let defaults: ProviderConfig = serde_json::from_str("{}").unwrap();
+        assert!(defaults.exhausted_usage_immediate_failover);
+        assert!(defaults.anthropic_retry_recoverable_rate_limits);
+        let rotate: ProviderConfig =
+            serde_json::from_str(r#"{"anthropic_retry_recoverable_rate_limits":false}"#).unwrap();
+        assert!(!rotate.anthropic_retry_recoverable_rate_limits);
+        let countdown: ProviderConfig =
+            serde_json::from_str(r#"{"exhausted_usage_immediate_failover":false}"#).unwrap();
+        assert!(!countdown.exhausted_usage_immediate_failover);
+        assert_eq!(
+            countdown.cross_provider_failover,
+            CrossProviderFailoverMode::Countdown
+        );
+        let manual: ProviderConfig =
+            serde_json::from_str(r#"{"cross_provider_failover":"manual"}"#).unwrap();
+        assert!(manual.exhausted_usage_immediate_failover);
+        assert_eq!(
+            manual.cross_provider_failover,
+            CrossProviderFailoverMode::Manual
+        );
+    }
+}

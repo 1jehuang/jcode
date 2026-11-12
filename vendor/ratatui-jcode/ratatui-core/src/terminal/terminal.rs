@@ -3,6 +3,45 @@ use crate::buffer::{Buffer, Cell};
 use crate::layout::{Position, Rect, Size};
 use crate::terminal::{CompletedFrame, Frame, TerminalOptions, Viewport};
 
+#[cfg(test)]
+mod retained_cell_tests {
+    use super::*;
+    use crate::backend::TestBackend;
+    use crate::style::Style;
+
+    #[test]
+    fn retained_cell_preserves_working_buffer_and_tracks_presented_baseline() {
+        let mut terminal = Terminal::new(TestBackend::new(10, 3)).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.buffer_mut().set_string(0, 0, "界⠋", Style::default());
+            })
+            .unwrap();
+        let slot = terminal.current;
+        let working = terminal.buffers[slot].clone();
+        let position = Position::new(2, 0);
+        for symbol in ["⠙", "⠋", "⠋", "⠹"] {
+            let mut cell = terminal.buffers[1 - slot][position].clone();
+            let changed = cell.symbol() != symbol;
+            cell.set_symbol(symbol);
+            assert!(terminal.draw_retained_cell(position, cell.clone()).unwrap());
+            assert_eq!(terminal.current, slot);
+            assert_eq!(terminal.buffers[slot], working);
+            assert_eq!(terminal.buffers[1 - slot][position], cell);
+            assert_eq!(terminal.backend().buffer(), &terminal.buffers[1 - slot]);
+            assert_eq!(terminal.last_flush_updates(), usize::from(changed));
+            assert_eq!(terminal.last_known_cursor_pos, position);
+        }
+        terminal
+            .draw(|frame| {
+                frame.buffer_mut().set_string(0, 0, "界⠋", Style::default());
+            })
+            .unwrap();
+        assert_eq!(terminal.backend().buffer()[(2, 0)].symbol(), "⠋");
+        assert_ne!(terminal.current, slot);
+    }
+}
+
 /// An interface to interact and draw [`Frame`]s on the user's terminal.
 ///
 /// This is the main entry point for Ratatui. It is responsible for drawing and maintaining the
@@ -283,6 +322,43 @@ where
             self.last_known_cursor_pos = Position { x: *col, y: *row };
         }
         self.backend.draw(updates.into_iter())
+    }
+
+    /// Patch one nonblank, single-column cell in the last presented frame.
+    ///
+    /// Returns `false` without drawing when the cell cannot be patched safely.
+    /// In particular, blank old symbols are excluded because they may be the
+    /// continuation of a wide grapheme in a well-formed buffer. Skipped and
+    /// multi-column cells must use a normal full draw instead.
+    ///
+    /// Unlike [`Self::flush`], this updates the authoritative previous buffer
+    /// after the backend accepts the update, leaving the working buffer and its
+    /// alternating-buffer lifecycle untouched. Call only between completed
+    /// frames, not while assembling a frame. The caller still owns backend
+    /// flushing, synchronization and cursor visibility/position policy.
+    pub fn draw_retained_cell(&mut self, position: Position, cell: Cell) -> Result<bool, B::Error> {
+        let previous = &mut self.buffers[1 - self.current];
+        let Some(old) = previous.cell_mut(position) else {
+            return Ok(false);
+        };
+        if old.skip
+            || cell.skip
+            || old.symbol() == " "
+            || crate::fast::symbol_width(old.symbol()) != 1
+            || crate::fast::symbol_width(cell.symbol()) != 1
+        {
+            return Ok(false);
+        }
+        if *old == cell {
+            self.last_flush_updates = 0;
+            return Ok(true);
+        }
+        self.backend
+            .draw(core::iter::once((position.x, position.y, &cell)))?;
+        *old = cell;
+        self.last_flush_updates = 1;
+        self.last_known_cursor_pos = position;
+        Ok(true)
     }
 
     /// Updates the Terminal so that internal buffers match the requested area.

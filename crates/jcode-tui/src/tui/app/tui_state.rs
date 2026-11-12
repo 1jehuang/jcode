@@ -2589,7 +2589,7 @@ fn spawn_swarm_agent_window(
         cwd,
         context,
         is_ssh_remote,
-        |command, cwd| jcode_app_core::terminal_launch::spawn_command_in_new_terminal(command, cwd),
+        jcode_app_core::terminal_launch::spawn_command_in_new_terminal,
         |exe, session_id, cwd| {
             let socket = std::env::var("JCODE_SOCKET").ok();
             super::spawn_in_new_terminal(exe, session_id, cwd, socket.as_deref())

@@ -2,6 +2,84 @@ use super::*;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[test]
+fn automatic_reset_receipts_survive_retries_and_fail_closed_on_corruption() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("receipt.json");
+    assert_eq!(recent_auto_reset(&path, 1000).unwrap(), None);
+    write_auto_reset_receipt(&path, 1000, false).unwrap();
+    assert_eq!(recent_auto_reset(&path, 1001).unwrap(), Some(false));
+    assert_eq!(recent_auto_reset(&path, 1299).unwrap(), Some(false));
+    assert_eq!(recent_auto_reset(&path, 1300).unwrap(), None);
+    write_auto_reset_receipt(&path, 1300, true).unwrap();
+    assert_eq!(recent_auto_reset(&path, 1301).unwrap(), Some(true));
+    // Clock rollback must not allow another spend.
+    assert_eq!(recent_auto_reset(&path, 1200).unwrap(), Some(true));
+    std::fs::write(&path, b"interrupted write").unwrap();
+    assert!(recent_auto_reset(&path, 1301).is_err());
+}
+
+fn exhausted_weekly_usage() -> OpenAIUsageData {
+    OpenAIUsageData {
+        seven_day: Some(OpenAIUsageWindow {
+            usage_ratio: 1.0,
+            ..Default::default()
+        }),
+        hard_limit_reached: true,
+        fetched_at: Some(Instant::now()),
+        openai_reset_credits: Some(OpenAiResetCredits {
+            available_count: 1,
+            available_expirations: vec![None],
+            account_label: Some("work".into()),
+            ordinary_usage_allowed: Some(false),
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn automatic_reset_requires_enforced_weekly_limit_and_matching_account() {
+    let mut usage = exhausted_weekly_usage();
+    assert!(auto_reset_eligible(&usage, Some("work")));
+    assert!(!auto_reset_eligible(&usage, Some("personal")));
+    assert!(!auto_reset_eligible(&usage, None));
+    usage.seven_day.as_mut().unwrap().usage_ratio = 0.999;
+    assert!(!auto_reset_eligible(&usage, Some("work")));
+    usage.seven_day = None;
+    usage.five_hour = Some(OpenAIUsageWindow {
+        usage_ratio: 1.0,
+        ..Default::default()
+    });
+    assert!(!auto_reset_eligible(&usage, Some("work")));
+}
+
+#[test]
+fn automatic_reset_rejects_rounded_allowed_unknown_stale_or_failed_usage() {
+    let mut usage = exhausted_weekly_usage();
+    usage
+        .openai_reset_credits
+        .as_mut()
+        .unwrap()
+        .ordinary_usage_allowed = Some(true);
+    assert!(!auto_reset_eligible(&usage, Some("work")));
+    usage
+        .openai_reset_credits
+        .as_mut()
+        .unwrap()
+        .ordinary_usage_allowed = None;
+    usage.hard_limit_reached = false;
+    assert!(!auto_reset_eligible(&usage, Some("work")));
+    usage = exhausted_weekly_usage();
+    usage.fetched_at = None;
+    assert!(!auto_reset_eligible(&usage, Some("work")));
+    usage = exhausted_weekly_usage();
+    usage.last_error = Some("network failure".into());
+    assert!(!auto_reset_eligible(&usage, Some("work")));
+    usage = exhausted_weekly_usage();
+    usage.openai_reset_credits.as_mut().unwrap().available_count = 0;
+    assert!(!auto_reset_eligible(&usage, Some("work")));
+}
+
 fn credentials() -> auth::codex::CodexCredentials {
     auth::codex::CodexCredentials {
         access_token: "test-access-secret".into(),

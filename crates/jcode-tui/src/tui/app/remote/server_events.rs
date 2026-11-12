@@ -164,6 +164,14 @@ pub(in crate::tui::app) fn handle_server_event(
     event: ServerEvent,
     remote: &mut impl RemoteEventState,
 ) -> bool {
+    // Route mutation errors are control responses, not failed conversation
+    // turns. Handle them before the scoped-turn terminal fence.
+    if let ServerEvent::Error { id, message, .. } = &event
+        && app.pending_automatic_failover_request_id == Some(*id)
+    {
+        super::fail_pending_automatic_failover(app, message);
+        return true;
+    }
     let (event, identity) = match event {
         ServerEvent::TurnState {
             session_id,
@@ -1018,6 +1026,11 @@ fn handle_server_event_inner(
             let _ = app.acknowledge_pending_soft_interrupt(id);
             false
         }
+        ServerEvent::SoftInterruptsCancelled {
+            id,
+            cancelled,
+            not_queued,
+        } => app.finish_soft_interrupt_recovery(id, &cancelled, &not_queued),
         ServerEvent::Interrupted => {
             crate::logging::info(&format!(
                 "REMOTE_INTERRUPT_EVENT_RECEIVED kind=interrupted session={:?} current_message_id={:?} is_processing={} status={:?} streaming_text_bytes={} pending_soft_interrupts={} queued_messages={}",
@@ -1255,6 +1268,19 @@ fn handle_server_event_inner(
                 app.set_status_notice("Agent model update failed");
                 return false;
             }
+            // Exhaustion can be reported again while the route switch is staged
+            // or awaiting acknowledgement. It belongs to the failed route, not
+            // a new turn: do not print it again or replace the held payload.
+            if (app.pending_provider_failover.is_some()
+                || app.pending_automatic_failover_route.is_some()
+                || app.pending_automatic_failover_request_id.is_some()
+                || (app.pending_route_selection.is_some() && app.pending_fallback_resend.is_some()))
+                && (crate::provider::parse_failover_prompt_message(&message).is_some()
+                    || jcode_provider_core::classify_failover_error_message(&message)
+                        .should_mark_provider_unavailable())
+            {
+                return false;
+            }
             app.refresh_openai_usage_after_quota_error(&message);
             // The server rejects a Message request with this error while its
             // previous turn is still running. This typically happens when a
@@ -1357,6 +1383,7 @@ fn handle_server_event_inner(
                     images: pending.images.clone(),
                     is_system: pending.is_system,
                     auto_retry: pending.auto_retry,
+                    retry_attempts: pending.retry_attempts,
                     system_reminder: pending.system_reminder.clone(),
                     raw_input: app.last_submitted_input.clone(),
                 }
@@ -1403,7 +1430,10 @@ fn handle_server_event_inner(
                 app.clear_pending_remote_retry();
                 crate::tui::app::commands::disable_auto_poke(app);
                 app.overnight_auto_poke = None;
-                if app.pending_provider_failover.is_none() {
+                if app.pending_provider_failover.is_none()
+                    && app.pending_automatic_failover_route.is_none()
+                    && app.pending_automatic_failover_request_id.is_none()
+                {
                     app.restore_failed_input_to_box();
                 }
                 return false;
@@ -2614,6 +2644,15 @@ fn handle_server_event_inner(
             context_window,
             ..
         } => {
+            // A resume/catalog acknowledgement can arrive before the staged
+            // route request has even been sent. It cannot authorize a resend.
+            if app.pending_automatic_failover_request_id.is_none()
+                && (app.pending_automatic_failover_route.is_some()
+                    || (app.pending_route_selection.is_some()
+                        && app.pending_fallback_resend.is_some()))
+            {
+                return false;
+            }
             if app
                 .pending_automatic_failover_request_id
                 .is_some_and(|expected| expected != id)
@@ -2621,8 +2660,38 @@ fn handle_server_event_inner(
                 return false;
             }
             app.pending_automatic_failover_request_id = None;
+            app.pending_automatic_failover_started = None;
             app.remote_model_switch_in_flight = false;
             let automatic_route = app.pending_automatic_failover_route.take();
+            let error = error.or_else(|| {
+                let selection = automatic_route.as_ref()?;
+                use jcode_provider_core::{ResolvedCredential, RuntimeKey};
+                let expected_credential = match selection.runtime_key {
+                    RuntimeKey::ClaudeOAuth | RuntimeKey::OpenAIOAuth => {
+                        Some(ResolvedCredential::Oauth)
+                    }
+                    RuntimeKey::AnthropicApiKey | RuntimeKey::OpenAIApiKey => {
+                        Some(ResolvedCredential::ApiKey)
+                    }
+                    _ => None,
+                };
+                let expected_provider =
+                    jcode_provider_core::parse_provider_hint(&selection.provider_label);
+                let actual_provider = provider_name
+                    .as_deref()
+                    .and_then(jcode_provider_core::parse_provider_hint);
+                let matches = selection.model == model
+                    && selection.account_label().is_none_or(|label| {
+                        provider_oauth_account_label.as_deref() == Some(label)
+                    })
+                    && expected_credential.is_none_or(|credential| {
+                        resolved_credential == Some(credential)
+                    })
+                    && expected_provider.is_none_or(|provider| actual_provider == Some(provider));
+                (!matches).then(|| {
+                    "The server did not confirm the requested failover model/account. Automatic resend stopped. Use /model to choose a route and resend.".to_string()
+                })
+            });
             if let Some(err) = error {
                 let account_switch_failed = app.pending_account_switch_target.take().is_some();
                 if let Some(prepared) = app.pending_prompt_after_model_switch.take() {
@@ -2677,6 +2746,7 @@ fn handle_server_event_inner(
                 if let Some(ref pname) = provider_name {
                     app.remote_provider_name = Some(pname.clone());
                 }
+                let automatic_failover = automatic_route.is_some();
                 if let Some(selection) = automatic_route {
                     app.session.route_api_method = Some(selection.api_method);
                 }
@@ -2737,10 +2807,15 @@ fn handle_server_event_inner(
                             .filter(|_| is_oauth)
                             .map(|email| email.as_str()),
                     );
-                    app.push_display_message(DisplayMessage::system(format!(
-                        "✓ Switched to model: {}{}",
-                        model, suffix
-                    )));
+                    // One line for an automatic failover: the confirmed route
+                    // replaces the in-flight "Switching to" line and absorbs
+                    // a usage-limit error as its cause.
+                    let message = if automatic_failover {
+                        app.confirmed_failover_message(&model, &suffix)
+                    } else {
+                        format!("✓ Switched to model: {}{}", model, suffix)
+                    };
+                    app.push_display_message(DisplayMessage::system(message));
                 }
                 if model_actually_changed {
                     app.set_status_notice(format!("Model → {}", model));

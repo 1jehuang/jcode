@@ -34,7 +34,7 @@ pub use auth_mode::{
 pub use catalog_refresh::{ModelCatalogRefreshSummary, summarize_model_catalog_refresh};
 pub use failover::{
     FailoverDecision, ProviderFailoverPrompt, classify_failover_error_message,
-    parse_failover_prompt_message,
+    is_definitive_usage_exhaustion, parse_failover_prompt_message,
 };
 pub use fallback_pick::{
     FallbackPickOptions, error_looks_like_credential_failure, model_generation_rank,
@@ -286,6 +286,17 @@ pub trait Provider: Send + Sync {
     /// Get all model routes for the unified picker.
     fn model_routes(&self) -> Vec<ModelRoute> {
         Vec::new()
+    }
+
+    /// Capture the owned catalog at a single provider boundary. Providers with
+    /// shared catalog storage can override this to reuse one memo lookup.
+    fn model_catalog_snapshot(&self) -> ModelCatalogSnapshot {
+        ModelCatalogSnapshot::new(
+            Some(self.display_name()),
+            Some(self.model()),
+            self.available_models_display(),
+            self.model_routes(),
+        )
     }
 
     /// Prefetch any dynamic model lists (default: no-op).
@@ -609,7 +620,7 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
                     model,
                     source: anyhow::anyhow!(
                         "simple completion stopped by provider guardrail (stop_reason={})",
-                        stop_reason.as_deref().unwrap_or_default()
+                        stop_reason.as_deref().unwrap_or("")
                     ),
                 }
                 .into());
@@ -1455,15 +1466,7 @@ impl ModelCatalogSnapshot {
     }
 
     pub fn from_provider(provider: &dyn Provider) -> Self {
-        // Note: on multi-providers both calls below build the same route
-        // catalog; MultiProvider memoizes it (short TTL) so this stays one
-        // build instead of two.
-        Self::new(
-            Some(provider.display_name()),
-            Some(provider.model()),
-            provider.available_models_display(),
-            provider.model_routes(),
-        )
+        provider.model_catalog_snapshot()
     }
 
     pub fn has_routes(&self) -> bool {
@@ -1651,3 +1654,6 @@ mod saved_account_route_tests;
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod catalog_snapshot_tests;

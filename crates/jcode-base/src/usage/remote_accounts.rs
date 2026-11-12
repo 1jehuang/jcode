@@ -119,6 +119,7 @@ pub fn remote_account_list() -> Option<(Vec<AccountUsageSnapshot>, Vec<AccountUs
     let convert = |list: &[jcode_protocol::AccountUsageSnapshot]| {
         list.iter()
             .map(|data| AccountUsageSnapshot {
+                additional_windows: data.additional_windows.clone(),
                 label: data.label.clone(),
                 email: data.email.clone(),
                 exhausted: data.exhausted,
@@ -164,6 +165,7 @@ impl RemoteAccounts {
         };
         let data = accounts.iter().find(|data| data.label == label.trim())?;
         Some(AccountUsageSnapshot {
+            additional_windows: data.additional_windows.clone(),
             label: data.label.clone(),
             email: data.email.clone(),
             exhausted: data.exhausted,
@@ -250,6 +252,11 @@ mod tests {
                 .is_none()
         );
         state.openai.push(jcode_protocol::AccountUsageSnapshot {
+            additional_windows: vec![jcode_protocol::AccountUsageWindow {
+                label: "Future monthly".into(),
+                usage_ratio: 0.23,
+                resets_at: None,
+            }],
             label: "remote".into(),
             email: None,
             exhausted: false,
@@ -269,6 +276,13 @@ mod tests {
                 .unwrap()
                 .five_hour_ratio,
             Some(0.4)
+        );
+        assert_eq!(
+            state
+                .lookup(MultiAccountProviderKind::OpenAI, "remote", now)
+                .unwrap()
+                .additional_windows,
+            state.openai[0].additional_windows,
         );
         assert!(
             state

@@ -3316,7 +3316,11 @@ fn resume_terminal_after_editor() {
     // signal arriving while these modes are re-armed runs the full cleanup.
     // Re-enter the TUI before returning to the event loop. The existing
     // ratatui Terminal remains usable and the next loop iteration redraws it.
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(ratatui::init));
+    if let Err(error) = jcode_tui_style::init_terminal() {
+        crate::logging::warn(&format!(
+            "failed to re-enter the TUI after the editor: {error}"
+        ));
+    }
     let policy = crate::perf::tui_policy();
     let _ = crossterm::execute!(std::io::stdout(), EnableBracketedPaste);
     if policy.enable_focus_change {

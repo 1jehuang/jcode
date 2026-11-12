@@ -383,3 +383,34 @@ fn pinned_todo_regression_hidden_message_has_zero_length_cache_boundary() {
         );
     });
 }
+
+/// tmux users squeeze a pane to a row or two until they need it again. Every
+/// such size must draw cleanly rather than rely on draw-panic recovery.
+#[test]
+fn tiny_panes_draw_without_a_recovered_panic() {
+    with_pinned_todos_config(|| {
+        let state = TestState {
+            pinned_todos_payload: Some(todo_payload()),
+            display_messages: vec![
+                DisplayMessage::user("resize the tmux pane"),
+                DisplayMessage::assistant("line\n".repeat(60)),
+            ],
+            ..Default::default()
+        };
+        for width in [1, 2, 8, 54, 120] {
+            for height in 1..=6 {
+                let before = draw_recovery::recovered_panic_count();
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal
+                    .draw(|frame| crate::tui::ui::draw(frame, &state))
+                    .unwrap();
+                assert_eq!(
+                    draw_recovery::recovered_panic_count(),
+                    before,
+                    "draw panicked at {width}x{height}:\n{}",
+                    terminal_text(&terminal)
+                );
+            }
+        }
+    });
+}

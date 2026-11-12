@@ -21,8 +21,10 @@ pub enum ErrorKind {
     UnexpectedReply,
     /// The harness answered with an error frame. Carries the wire code.
     Harness(jcode_harness_api::ErrorCode),
-    /// I/O or JSON trouble on the transport.
+    /// I/O trouble on the transport.
     Transport,
+    /// The peer sent a malformed frame. Reconnecting may replay the same corrupt data.
+    Protocol,
     /// Starting a runtime (daemon or bridge) failed.
     LaunchFailed,
     /// The configured jcode executable could not be started.
@@ -60,6 +62,7 @@ impl ErrorKind {
             Self::Disconnected => "disconnected",
             Self::UnexpectedReply => "unexpected_reply",
             Self::Transport => "transport",
+            Self::Protocol => "protocol",
             Self::LaunchFailed => "launch_failed",
             Self::JcodeNotFound => "jcode_not_found",
             Self::StartupFailed => "startup_failed",
@@ -116,6 +119,12 @@ impl From<jcode_harness_api::FrameError> for Error {
     fn from(error: jcode_harness_api::FrameError) -> Self {
         let kind = match error {
             jcode_harness_api::FrameError::Eof => ErrorKind::Disconnected,
+            jcode_harness_api::FrameError::Json(_) => ErrorKind::Protocol,
+            jcode_harness_api::FrameError::Io(ref error)
+                if error.kind() == std::io::ErrorKind::InvalidData =>
+            {
+                ErrorKind::Protocol
+            }
             _ => ErrorKind::Transport,
         };
         Self::new(kind, error.to_string())

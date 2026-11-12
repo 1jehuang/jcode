@@ -55,23 +55,29 @@ streaming() {{
 }}
 deadline=$(( $(date +%s) + {wait_secs} ))
 last=""
-if [ {force} = 0 ]; then
+# A daemon with managed live reload keeps in-flight turns across the re-exec,
+# so it never needs to wait for idle. Only the restart fallback does.
+daemon=$(pgrep -u "$(id -u)" -f '/opt/jcode-cloud/.* serve( |$)' | head -n1)
+live_capable=0
+if [ -n "$daemon" ] && grep -qa {marker} "/proc/$daemon/exe" 2>/dev/null; then live_capable=1; fi
+wait_idle() {{
+  [ {force} = 1 ] && return 0
   while :; do
     n=$(streaming) || {{ say "cannot verify cloud activity; not restarting"; exit 3; }}
-    [ "$n" = 0 ] && break
+    [ "$n" = 0 ] && return 0
     if [ "$(date +%s)" -ge "$deadline" ]; then say "still $n session(s) mid-turn after {wait_secs}s; not restarting. Retry later or use --force."; exit 3; fi
     [ "$n" != "$last" ] && say "waiting for $n session(s) to finish their turn"
     last=$n; sleep 5
   done
-fi
+}}
+if [ "$live_capable" = 0 ]; then wait_idle; fi
 before=$(readlink /opt/jcode-cloud/jcode)
 pending=0
 sudo -n /usr/local/sbin/jcode-cloud-runtime status 2>/dev/null | grep -q '"pending": {{' && pending=1
 # Live path: a daemon built with managed live reload re-execs the selected
 # runtime in place, so sessions, clients and in-flight turns survive the same
 # way a local self-dev reload does. Older daemons fall through to a restart.
-daemon=$(pgrep -u "$(id -u)" -f '/opt/jcode-cloud/.* serve( |$)' | head -n1)
-if [ -n "$daemon" ] && grep -qa {marker} "/proc/$daemon/exe" 2>/dev/null; then
+if [ "$live_capable" = 1 ]; then
   live_ok=1
   if [ "$pending" = 1 ]; then
     sudo -n /usr/local/sbin/jcode-cloud-runtime activate-live >/dev/null || live_ok=0
@@ -92,6 +98,8 @@ if [ -n "$daemon" ] && grep -qa {marker} "/proc/$daemon/exe" 2>/dev/null; then
     pending=0
   fi
   before=$(readlink /opt/jcode-cloud/jcode)
+  # The restart fallback interrupts turns, so it still requires idle.
+  wait_idle
 fi
 say "restarting cloud daemon"
 # A daemon may have handed itself off outside systemd on an earlier stop. If it
@@ -371,6 +379,11 @@ mod tests {
         assert!(script.contains(&format!("grep -qa {LIVE_RELOAD_MARKER} ")));
         assert!(script.contains("activate-live"));
         assert!(script.contains("rollback-live"));
+        // Live reload keeps in-flight turns, so only the restart fallback waits.
+        assert!(script.contains(r#"if [ "$live_capable" = 0 ]; then wait_idle; fi"#));
+        let fallback = script.split("live reload did not land").nth(1).unwrap();
+        let restart = fallback.split("restarting cloud daemon").next().unwrap();
+        assert!(restart.contains("wait_idle"));
     }
 
     #[test]

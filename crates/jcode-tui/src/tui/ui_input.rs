@@ -1371,18 +1371,15 @@ pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>>
             && cache_info.expiry_notification_active()
         {
             if cache_info.is_cold {
-                let tokens_str = cache_info
-                    .cached_tokens
-                    .map(|t| {
-                        if t >= 1_000_000 {
-                            format!(" ({:.1}M tok)", t as f64 / 1_000_000.0)
-                        } else if t >= 1_000 {
-                            format!(" ({}K tok)", t / 1000)
-                        } else {
-                            format!(" ({} tok)", t)
-                        }
-                    })
-                    .unwrap_or_default();
+                let tokens_str = cache_info.cached_tokens.map_or_else(String::new, |t| {
+                    if t >= 1_000_000 {
+                        format!(" ({:.1}M tok)", t as f64 / 1_000_000.0)
+                    } else if t >= 1_000 {
+                        format!(" ({}K tok)", t / 1000)
+                    } else {
+                        format!(" ({} tok)", t)
+                    }
+                });
                 push_sep(&mut spans);
                 spans.push(Span::styled(
                     format!("🧊 cache cold{}", tokens_str),
@@ -1397,16 +1394,13 @@ pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>>
                     Style::default().fg(dim_color()),
                 ));
             } else if cache_info.expiring_soon() {
-                let tokens_str = cache_info
-                    .cached_tokens
-                    .map(|t| {
-                        if t >= 1_000 {
-                            format!(" {}K", t / 1000)
-                        } else {
-                            format!(" {}", t)
-                        }
-                    })
-                    .unwrap_or_default();
+                let tokens_str = cache_info.cached_tokens.map_or_else(String::new, |t| {
+                    if t >= 1_000 {
+                        format!(" {}K", t / 1000)
+                    } else {
+                        format!(" {}", t)
+                    }
+                });
                 // Above a minute, a raw seconds count is hard to read at a
                 // glance; show minutes granularity instead.
                 let remaining = cache_info.remaining_secs;
@@ -1573,6 +1567,7 @@ pub(crate) fn preview_overscroll_line(
 }
 
 /// The host belongs to the selected preview, never the attached live session.
+#[cfg(test)]
 pub(crate) fn preview_overscroll_line_for_host(
     data: &crate::tui::info_widget::InfoWidgetData,
     width: u16,
@@ -2139,6 +2134,7 @@ fn overscroll_context_percentage(used: usize, limit: usize) -> Span<'static> {
 
 /// The idle resume composer uses the live input wrapper, but never reads the
 /// currently open session's draft, queue, selection, or cursor state.
+#[cfg(test)]
 pub(crate) fn draw_preview_input(frame: &mut Frame, area: Rect, next_prompt: usize) {
     let number = next_prompt.to_string();
     let prompt = "> ";
@@ -2658,6 +2654,7 @@ pub(crate) fn wrap_input_text<'a>(
     )
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn wrap_input_text_with_images<'a>(
     input: &str,

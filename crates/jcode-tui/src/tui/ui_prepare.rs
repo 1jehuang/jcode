@@ -290,6 +290,19 @@ fn first_mermaid_pending_message(prepared: &PreparedMessages) -> Option<usize> {
     )
 }
 
+fn active_codemode(app: &dyn TuiState) -> Option<crate::message::ToolCall> {
+    // Connection-phase and nested-tool events can replace RunningTool while
+    // the parent call is still live. ToolDone removes it from this list, so
+    // pending tool calls, not the transient status label, own its lifetime.
+    if !app.is_processing() {
+        return None;
+    }
+    app.streaming_tool_calls()
+        .into_iter()
+        .rev()
+        .find(|tool| tools_ui::canonical_tool_name(&tool.name) == "codemode")
+}
+
 fn active_batch_progress(app: &dyn TuiState) -> Option<crate::bus::BatchProgress> {
     match app.status() {
         ProcessingStatus::RunningTool(name) if name == "batch" => app.batch_progress(),
@@ -298,6 +311,14 @@ fn active_batch_progress(app: &dyn TuiState) -> Option<crate::bus::BatchProgress
 }
 
 pub(super) fn active_batch_progress_hash(app: &dyn TuiState) -> u64 {
+    if let Some(tool) = active_codemode(app) {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        tool.id.hash(&mut hasher);
+        tool.input.to_string().hash(&mut hasher);
+        tool.intent.hash(&mut hasher);
+        super::activity_indicator_frame_index(app.animation_elapsed(), 12.5).hash(&mut hasher);
+        return hasher.finish();
+    }
     let Some(progress) = active_batch_progress(app) else {
         return 0;
     };
@@ -389,6 +410,46 @@ fn prepare_active_batch_progress(
     width: u16,
     prefix_blank: bool,
 ) -> PreparedMessages {
+    if let Some(tool) = active_codemode(app) {
+        let block_width = if app.centered_mode() {
+            super::centered_content_block_width(width, 96)
+        } else {
+            width as usize
+        };
+        let row_width = block_width.saturating_sub(1);
+        let spinner = super::activity_indicator(app.animation_elapsed(), 12.5);
+        let mut lines = Vec::new();
+        if prefix_blank {
+            lines.push(Line::from(""));
+        }
+        let mut header = vec![
+            Span::styled(
+                format!("  {spinner} "),
+                Style::default().fg(rgb(255, 193, 94)),
+            ),
+            Span::styled("codemode", Style::default().fg(tool_color())),
+        ];
+        if let Some(intent) = tool
+            .intent
+            .as_deref()
+            .filter(|intent| !intent.trim().is_empty())
+        {
+            header.push(Span::styled(" · ", Style::default().fg(dim_color())));
+            header.push(Span::styled(
+                intent.to_owned(),
+                Style::default().fg(tool_color()),
+            ));
+        }
+        lines.push(super::truncate_line_with_ellipsis_to_width(
+            &Line::from(header),
+            row_width,
+        ));
+        lines.extend(tools_ui::codemode_preview(&tool, row_width));
+        if app.centered_mode() {
+            super::left_pad_lines_to_block_width(&mut lines, width, block_width);
+        }
+        return wrap_lines_with_map(lines, &[], &[], &[], &[], &[], width, &[], &[], &[]);
+    }
     let Some(progress) = active_batch_progress(app) else {
         return empty_prepared_messages();
     };
@@ -634,7 +695,7 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     };
 
     let batch_start = Instant::now();
-    let has_batch_progress = active_batch_progress(app).is_some();
+    let has_batch_progress = active_batch_progress(app).is_some() || active_codemode(app).is_some();
     let batch_prefix_blank = has_batch_progress && !body_prepared.wrapped_lines.is_empty();
     let batch_progress_prepared = if has_batch_progress {
         Arc::new(prepare_active_batch_progress(
@@ -1184,6 +1245,7 @@ struct BodyRenderCtx<'a> {
 /// Render saved history through the live dispatcher and wrapping pipeline.
 /// No active App is borrowed: expansion state, images and in-flight swarm work
 /// from the session behind the picker must never leak into this transcript.
+#[cfg(test)]
 pub(crate) fn prepare_history_preview(
     messages: &[DisplayMessage],
     hidden_prompts: usize,
@@ -1194,12 +1256,14 @@ pub(crate) fn prepare_history_preview(
         .unwrap_or_else(|| preview_fallback::unavailable(width))
 }
 
+#[cfg(test)]
 #[path = "ui_prepare/preview_fallback.rs"]
 mod preview_fallback;
 
 /// Choose scrollbar width without fully rendering overflowing history twice.
 /// The budget excludes caller-owned header and padding rows. The flag is the
 /// wide layout's strict overflow decision, not a second narrow-layout decision.
+#[cfg(test)]
 pub(crate) fn prepare_history_preview_for_viewport(
     messages: &[DisplayMessage],
     hidden_prompts: usize,
@@ -1229,6 +1293,7 @@ pub(crate) fn prepare_history_preview_for_viewport(
     )
 }
 
+#[cfg(test)]
 fn prepare_history_preview_bounded(
     messages: &[DisplayMessage],
     hidden_prompts: usize,
@@ -2560,10 +2625,6 @@ fn wrap_lines(
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Wrapped-line preparation carries explicit render state to avoid hidden coupling"
-)]
 /// Drop spare span and line capacity before a body is cached. Wrapping builds
 /// lines by pushing spans, so a long session kept ~1.7x the span slots it used,
 /// and these bodies live in the body cache for the session's lifetime.
@@ -2574,6 +2635,10 @@ fn shrink_wrapped_lines(wrapped_lines: &mut Vec<Line<'static>>) {
     wrapped_lines.shrink_to_fit();
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Wrapped-line preparation carries explicit render state to avoid hidden coupling"
+)]
 fn wrap_lines_with_map(
     lines: Vec<Line<'static>>,
     seeded_raw_plain_lines: &[String],
