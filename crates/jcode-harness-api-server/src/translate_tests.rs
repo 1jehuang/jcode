@@ -473,6 +473,57 @@ fn wake_request_is_forwarded_with_explicit_session_and_payload() {
     );
 }
 
+// Shaped like the daemon's `SwarmMemberStatus`, which carries more than the API.
+#[test]
+fn swarm_status_reaches_the_attached_session_with_its_members() {
+    let roster = json!({
+        "type": "swarm_status",
+        "members": [{
+            "session_id": "session_fox_1",
+            "friendly_name": "fox",
+            "status": "running",
+            "detail": "running cargo test",
+            "task_label": "Fix the parser",
+            "role": "agent",
+            "is_headless": true,
+            "output_tail": "Reading parser.rs",
+            "report_back_to_session_id": "s1",
+            "todo_items": [{"content": "Read", "status": "done"}],
+            "runtime": {}
+        }],
+    });
+    let frames = state_with_session().legacy_event_to_api(&roster);
+    assert_eq!(frames.len(), 1);
+    assert_eq!(
+        frames[0].event,
+        ApiEvent::SwarmStatus {
+            session_id: "s1".into(),
+            members: vec![jcode_harness_api::SwarmMemberInfo {
+                session_id: "session_fox_1".into(),
+                friendly_name: Some("fox".into()),
+                status: "running".into(),
+                detail: Some("running cargo test".into()),
+                task_label: Some("Fix the parser".into()),
+                role: Some("agent".into()),
+                report_back_to_session_id: Some("s1".into()),
+                output_tail: Some("Reading parser.rs".into()),
+                status_age_secs: None,
+            }],
+        }
+    );
+    assert!(
+        BridgeState::default()
+            .legacy_event_to_api(&roster)
+            .is_empty()
+    );
+    let malformed = json!({"type": "swarm_status", "members": [{"status": "running"}]});
+    assert!(
+        state_with_session()
+            .legacy_event_to_api(&malformed)
+            .is_empty()
+    );
+}
+
 #[test]
 fn api_sessions_enable_server_account_routing_on_create_attach_and_reconnect() {
     let mut state = BridgeState::default();

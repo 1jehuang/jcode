@@ -2170,6 +2170,17 @@ impl BridgeState {
                 }));
                 frames
             }
+            // Members are the daemon's own status records; fields the API
+            // does not carry are dropped, and a malformed roster is skipped.
+            "swarm_status" if self.session_id.is_some() => {
+                match serde_json::from_value(event["members"].clone()) {
+                    Ok(members) => vec![ServerFrame::event(ApiEvent::SwarmStatus {
+                        session_id: session(self),
+                        members,
+                    })],
+                    Err(_) => vec![],
+                }
+            }
             "wake_requested" => vec![ServerFrame::event(ApiEvent::WakeRequested {
                 session_id: event["session_id"]
                     .as_str()
