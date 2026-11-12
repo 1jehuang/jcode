@@ -398,8 +398,14 @@ pub(super) async fn spawn_swarm_agent(
     client_connections: &ClientConnections,
 ) -> anyhow::Result<String> {
     let agents_config = &crate::config::config().agents;
+    // "inherit" / "coordinator" are resolution sentinels handled by
+    // resolve_swarm_spawn_selection, not agent-selected model overrides.
+    // They must pass validation regardless of swarm_model_selection state.
+    let validation_model = requested_model
+        .as_deref()
+        .filter(|model| !is_inherit_sentinel(model));
     agents_config
-        .validate_swarm_model_request(requested_model.as_deref())
+        .validate_swarm_model_request(validation_model)
         .map_err(anyhow::Error::msg)?;
     let resolved_working_dir =
         resolve_spawn_working_dir(working_dir, req_session_id, sessions, swarm_members).await;
