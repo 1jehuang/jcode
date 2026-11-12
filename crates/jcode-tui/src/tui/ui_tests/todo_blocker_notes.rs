@@ -143,8 +143,7 @@ fn blocked_reason_lives_below_response_not_in_pinned_todos() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        text.find("The launcher is repaired.").unwrap()
-            < text.find("Needs your authorization:").unwrap()
+        text.find("The launcher is repaired.").unwrap() < text.find("Needs your login:").unwrap()
     );
     assert!(text.contains(reason));
     assert_eq!(text.matches(reason).count(), 1);

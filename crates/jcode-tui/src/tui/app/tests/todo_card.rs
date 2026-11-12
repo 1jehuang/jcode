@@ -1199,7 +1199,7 @@ fn debug_inject_todos_preserves_role_and_renders_fixture() {
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
     let text = render_and_snap(&app, &mut terminal);
     assert!(
-        text.contains("✋") && text.contains("Needs your authorization"),
+        text.contains("✋") && text.contains("Needs your login"),
         "{text}"
     );
 }

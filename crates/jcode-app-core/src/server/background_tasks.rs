@@ -680,7 +680,7 @@ pub(super) fn todo_runtime_projection(
             .collect::<Vec<_>>()
             .join("; ")
     })
-    .map(|reason| format!("Needs your authorization: {reason}"));
+    .map(|reason| format!("Needs your login: {reason}"));
     (statuses, reason)
 }
 

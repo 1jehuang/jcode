@@ -303,7 +303,7 @@ async fn user_auth_cli_pauses_only_that_todo_and_keeps_peers_actionable() {
     let notice = run_blocked_notice(&[blocked.clone()], &[]).unwrap();
     assert_eq!(
         notice,
-        "✋ Needs your authorization.\nblocked: Required source data no longer exists"
+        "✋ Needs your login.\nblocked: Required source data no longer exists"
     );
 
     let independent = dependency_todo("independent", &[]);
@@ -327,7 +327,7 @@ async fn user_auth_cli_pauses_only_that_todo_and_keeps_peers_actionable() {
 fn cli_notice_reports_user_auth_and_goal_that_cannot_complete() {
     let mut blocked = dependency_todo("blocked", &[]);
     blocked.requires_user_auth = Some(crate::todo::TodoUserAuth {
-        reason: "Approve the production deploy".into(),
+        reason: "Log in to the deploy dashboard".into(),
     });
     let mut abandoned = dependency_todo("service", &[]);
     abandoned.group = Some("migration".into());
@@ -339,7 +339,7 @@ fn cli_notice_reports_user_auth_and_goal_that_cannot_complete() {
     // The declared goal covers only its own group's todos.
     assert!(run_cannot_complete_notice(&[blocked.clone()], &goals).is_none());
     let notice = run_blocked_notice(&[blocked.clone(), abandoned.clone()], &goals).unwrap();
-    assert!(notice.contains("Needs your authorization."));
+    assert!(notice.contains("Needs your login."));
     assert!(notice.contains("Goal cannot be completed."));
     assert!(notice.contains("Source data was deleted upstream"));
     for status in ["completed", "cancelled"] {

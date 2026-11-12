@@ -429,7 +429,9 @@ semantic_state! {
     }
 }
 
-/// The todo is paused until the user authorizes the named action.
+/// The todo is paused until the user completes an authentication the agent
+/// has no access to (a login, 2FA prompt, or credential). Not for approvals
+/// or decisions.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoUserAuth {
     #[serde(deserialize_with = "deserialize_nonempty_auth_reason")]
@@ -505,7 +507,7 @@ pub struct TodoItem {
     /// pair as one `{ids, reason}` object. Meaningless without dependencies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_reason: Option<String>,
-    /// Paused until the user authorizes. Items have no other block: legacy
+    /// Paused until the user authenticates. Items have no other block: legacy
     /// `external_blocker` and `completely_blocked` fields are ignored on load,
     /// so old sessions resume as ordinary actionable work.
     #[serde(default, skip_serializing_if = "Option::is_none")]

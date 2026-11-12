@@ -72,8 +72,8 @@ fn normalize_item_pauses(input: &mut Value) -> Result<()> {
                 if fields.get(removed).is_some_and(|value| !value.is_null()) {
                     bail!(
                         "{removed} was removed: todos cannot be blocked. Use waiting_on for \
-                         running tasks or other agents, requires_user_auth when only the user \
-                         can authorize the step, or the goal's cannot_complete when the goal \
+                         running tasks or other agents, requires_user_auth when the step needs a login \
+                         or credential only the user has, or the goal's cannot_complete when the goal \
                          is impossible. Otherwise keep working."
                     );
                 }
@@ -1369,7 +1369,7 @@ impl Tool for TodoTool {
                             },
                             "requires_user_auth": {
                                 "type": ["object", "null"],
-                                "description": "Pause until the user authorizes a step only they can approve. Retries, decisions you can make yourself, and waits on other agents (use waiting_on) do not qualify; a todo with neither pause stays yours to continue. null clears.",
+                                "description": "Pause until the user completes an authentication you have no access to, such as a login, 2FA prompt, or credential. Approvals, decisions, retries, and waits on other agents (use waiting_on) do not qualify; a todo with neither pause stays yours to continue. null clears.",
                                 "required": ["reason"],
                                 "additionalProperties": false,
                                 "properties": {

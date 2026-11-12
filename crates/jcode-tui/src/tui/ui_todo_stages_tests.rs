@@ -486,7 +486,7 @@ fn complete_blocker_overrides_live_workers_and_has_two_cell_phase_and_lane_pips(
         "blocked state already appears in the phase pips"
     );
     let note = Line::from(lane_note_spans(&[&item], &workers)).to_string();
-    assert_eq!(note, "Needs your authorization");
+    assert_eq!(note, "Needs your login");
     for width in 0..120 {
         let mut pips = Vec::new();
         push_stage_pips(&mut pips, &[&item], width);
@@ -521,7 +521,7 @@ fn complete_blocker_requires_reason_and_never_marks_terminal_todos() {
         assert!(
             !Line::from(lane_note_spans(&[&item], &[]))
                 .to_string()
-                .contains("Needs your authorization")
+                .contains("Needs your login")
         );
     }
 }

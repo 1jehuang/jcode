@@ -799,7 +799,7 @@ fn format_todo_compact_markdown(todo: &TodoItem) -> String {
         .unwrap_or_default();
     let blocker_detail = if crate::todo::todo_requires_user_auth(todo) {
         match todo.requires_user_auth.as_ref() {
-            Some(blocker) => format!("\n  ✋ **Needs your authorization**: {}\n", blocker.reason),
+            Some(blocker) => format!("\n  ✋ **Needs your login**: {}\n", blocker.reason),
             None => {
                 crate::logging::warn("Todo requires user authorization without a reason");
                 String::new()
@@ -1022,7 +1022,7 @@ mod tests {
         assert_ne!(before, after);
         let markdown = format_todo_compact_markdown(&item);
         assert!(markdown.contains("✋"));
-        assert!(markdown.contains("Needs your authorization"));
+        assert!(markdown.contains("Needs your login"));
         assert!(!markdown.contains("Approve access"));
         assert!(markdown.contains("Keep this entire explanation."));
         item.requires_user_auth.as_mut().unwrap().reason.push('!');

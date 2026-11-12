@@ -391,7 +391,7 @@ mod tests {
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("✋ Needs your authorization: Only the owner can approve"));
+        assert!(text.contains("✋ Needs your login: Only the owner can approve"));
         assert!(text.contains("Only the owner can approve"));
         for width in 0..100 {
             assert!(

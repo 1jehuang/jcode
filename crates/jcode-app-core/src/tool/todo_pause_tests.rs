@@ -45,7 +45,7 @@ async fn requires_user_auth_validates_updates_clears_and_ends_with_the_todo() {
     let dir = tempfile::tempdir().unwrap();
     crate::env::set_var("JCODE_HOME", dir.path());
     let tool = TodoTool::new();
-    let auth = json!({"reason":"Approve the production deploy"});
+    let auth = json!({"reason":"Log in to the deploy dashboard"});
     tool.execute(json!({"add":[item(json!({}))]}), context())
         .await
         .unwrap();
@@ -253,8 +253,8 @@ fn pause_schema_is_shared_strict_and_carries_the_guidance() {
     let auth = update["requires_user_auth"]["description"]
         .as_str()
         .unwrap();
-    assert!(auth.starts_with("Pause until the user authorizes"));
-    assert!(auth.contains("Retries, decisions you can make yourself"));
+    assert!(auth.starts_with("Pause until the user completes an authentication"));
+    assert!(auth.contains("Approvals, decisions, retries"));
     assert!(auth.contains("use waiting_on"));
     let goal = &properties["goals"]["items"]["properties"]["cannot_complete"];
     assert_eq!(goal["type"], "string");

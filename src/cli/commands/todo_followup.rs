@@ -114,7 +114,7 @@ pub(super) fn run_user_auth_notice(todos: &[crate::todo::TodoItem]) -> Option<St
                 .map(|blocker| format!("{}: {}", todo.id, blocker.reason))
         })
         .collect();
-    (!blockers.is_empty()).then(|| format!("✋ Needs your authorization.\n{}", blockers.join("\n")))
+    (!blockers.is_empty()).then(|| format!("✋ Needs your login.\n{}", blockers.join("\n")))
 }
 
 /// Why a headless run stopped with unfinished work nobody is waiting on a

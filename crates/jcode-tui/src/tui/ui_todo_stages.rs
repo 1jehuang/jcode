@@ -628,7 +628,7 @@ fn lane_note_spans(
         .any(|todo| crate::todo::todo_requires_user_auth(todo))
     {
         return vec![Span::styled(
-            "Needs your authorization",
+            "Needs your login",
             Style::default().fg(rgb(225, 165, 90)),
         )];
     }

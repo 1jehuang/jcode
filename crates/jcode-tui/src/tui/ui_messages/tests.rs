@@ -1321,7 +1321,7 @@ fn complete_blocker_row_precedes_background_clock_and_preserves_reason() {
     assert!(
         !render_todo_card_item_line(&todo, "", 240)
             .to_string()
-            .contains("Needs your authorization")
+            .contains("Needs your login")
     );
     for status in ["completed", "cancelled"] {
         todo.status = status.into();
@@ -1340,13 +1340,13 @@ fn complete_blocker_row_precedes_background_clock_and_preserves_reason() {
 fn user_auth_detail_names_the_authorization_and_flattens_the_reason() {
     let todo = crate::todo::TodoItem {
         requires_user_auth: Some(crate::todo::TodoUserAuth {
-            reason: "Approve the\nproduction deploy".into(),
+            reason: "Log in to the\ndeploy dashboard".into(),
         }),
         ..Default::default()
     };
     assert_eq!(
         todo_complete_blocker_detail(&todo),
-        "Needs your authorization: Approve the production deploy"
+        "Needs your login: Log in to the deploy dashboard"
     );
 }
 

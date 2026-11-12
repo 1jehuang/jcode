@@ -2334,7 +2334,7 @@ pub(super) fn todo_complete_blocker_detail(todo: &crate::todo::TodoItem) -> Stri
     todo.requires_user_auth
         .as_ref()
         .map(|blocker| {
-            format!("Needs your authorization: {}", blocker.reason)
+            format!("Needs your login: {}", blocker.reason)
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ")
