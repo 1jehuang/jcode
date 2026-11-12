@@ -341,11 +341,10 @@ impl SshConnection {
         } else {
             (STARTUP_TIMEOUT, 1)
         };
-        let mut last = match Self::spawn(options.command(), deadline).await {
-            Ok(connection) => return Ok(connection),
-            Err(error) => error,
-        };
-        for _ in 1..attempts {
+        let mut last = anyhow::anyhow!("no SSH connection attempt was made");
+        for _ in 0..attempts {
+            // Sessions on the shared master skip authorization and key exchange.
+            super::cloud_mux::ensure(&options.host, deadline).await;
             match Self::spawn(options.command(), deadline).await {
                 Ok(connection) => return Ok(connection),
                 Err(error) => last = error,
@@ -547,6 +546,7 @@ async fn accept_connections(
                 let initial = initial.take();
                 connections.spawn(async move {
                     let established = initial.is_some();
+                    if !established { super::cloud_mux::ensure(&options.host, STARTUP_TIMEOUT).await; }
                     let mut ssh = match initial.map(Ok).unwrap_or_else(|| SshConnection::spawn_process(options.command())) {
                         Ok(ssh) => ssh,
                         Err(error) => {
