@@ -432,19 +432,24 @@ fn compute_tier(
 }
 
 fn detect_wsl() -> bool {
-    if std::env::var("WSL_DISTRO_NAME").is_ok() || std::env::var("WSLENV").is_ok() {
-        return true;
-    }
+    let env_marker = std::env::var("WSL_DISTRO_NAME").is_ok() || std::env::var("WSLENV").is_ok();
+
     #[cfg(target_os = "linux")]
     {
-        if let Ok(v) = std::fs::read_to_string("/proc/version") {
-            let lower = v.to_ascii_lowercase();
-            if lower.contains("microsoft") || lower.contains("wsl") {
-                return true;
-            }
-        }
+        env_marker || proc_version_reports_wsl()
     }
-    false
+    #[cfg(not(target_os = "linux"))]
+    {
+        env_marker
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn proc_version_reports_wsl() -> bool {
+    std::fs::read_to_string("/proc/version").is_ok_and(|v| {
+        let lower = v.to_ascii_lowercase();
+        lower.contains("microsoft") || lower.contains("wsl")
+    })
 }
 
 fn detect_terminal() -> String {
