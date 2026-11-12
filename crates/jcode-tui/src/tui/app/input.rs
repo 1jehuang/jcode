@@ -2726,6 +2726,8 @@ pub(super) fn handle_scroll_overlay_key(app: &mut App, code: KeyCode) -> Result<
         if matches!(code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
             app.close_panel_image_preview();
         }
+    } else if app.calculator_overlay.is_some() {
+        app.handle_calculator_key(code)?;
     } else if app.commit_log_overlay.is_some() {
         app.handle_commit_log_key(code)?;
     } else if app.changelog_scroll.is_some() {

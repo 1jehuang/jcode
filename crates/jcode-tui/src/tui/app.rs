@@ -59,7 +59,9 @@ mod auth;
 mod auth_account_picker_saved_accounts;
 mod auth_remote;
 mod cache_diagnostics;
+mod calculator;
 mod catchup;
+pub(crate) use calculator::{CalculatorBase, CalculatorMode, CalculatorOverlay, CalculatorTheme};
 mod commands;
 mod commit_log;
 pub(crate) use commit_log::CommitLogOverlay;
@@ -1846,6 +1848,8 @@ pub struct App {
     model_status_content: String,
     /// Commit log overlay (None = not visible)
     commit_log_overlay: Option<commit_log::CommitLogOverlay>,
+    /// Scientific and programmer calculator overlay (None = not visible)
+    calculator_overlay: Option<calculator::CalculatorOverlay>,
     /// Session picker overlay (None = not visible)
     session_picker_overlay: Option<RefCell<super::session_picker::SessionPicker>>,
     session_picker_mode: SessionPickerMode,

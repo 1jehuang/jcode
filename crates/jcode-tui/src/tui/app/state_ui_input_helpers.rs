@@ -122,6 +122,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
         "/latex",
         "Toggle LaTeX images (on/off/status/none/unicode/image)",
     ),
+    RegisteredCommand::public("/calc", "Open the scientific and programmer calculator"),
     RegisteredCommand::public(
         "/thinking-display",
         "Show/hide the model's thinking text (off/full/current)",

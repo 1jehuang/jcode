@@ -2221,6 +2221,10 @@ impl crate::tui::TuiState for App {
         self.commit_log_overlay.as_ref()
     }
 
+    fn calculator_overlay(&self) -> Option<&crate::tui::app::CalculatorOverlay> {
+        self.calculator_overlay.as_ref()
+    }
+
     fn session_picker_overlay(
         &self,
     ) -> Option<&RefCell<crate::tui::session_picker::SessionPicker>> {

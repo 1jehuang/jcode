@@ -32,6 +32,7 @@ fn known_aliases_are_registered() {
         "/hotkeys",
         "/keys",
         "/latex",
+        "/calc",
     ] {
         assert!(names.contains(alias), "{alias} is not registered");
     }

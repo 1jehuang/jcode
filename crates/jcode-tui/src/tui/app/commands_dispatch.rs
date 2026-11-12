@@ -27,6 +27,7 @@ pub(super) fn ssh_presentation_command(input: &str) -> bool {
             | "/keybindings"
             | "/alignment"
             | "/latex"
+            | "/calc"
             | "/reasoning"
             | "/thinking"
             | "/thinking-display"
@@ -96,6 +97,7 @@ pub(super) fn handle_ssh_presentation_command(app: &mut App, input: &str) -> boo
         || super::commands::handle_keys_command(app, input)
         || super::commands::handle_display_settings_command(app, input)
         || super::commands::handle_latex_command(app, input)
+        || app.handle_calculator_command(input)
         || super::commands_colors::handle_colors_command(app, input)
 }
 
@@ -289,6 +291,7 @@ fn dispatch_single_local_command(app: &mut App, trimmed: &str) -> bool {
         || super::commands::handle_dictation_command(app, trimmed)
         || super::commands::handle_config_command(app, trimmed)
         || super::commands::handle_latex_command(app, trimmed)
+        || app.handle_calculator_command(trimmed)
         || super::commands_colors::handle_colors_command(app, trimmed)
         || super::commands::handle_log_command(app, trimmed)
         || super::commands::handle_diff_command(app, trimmed)
@@ -493,6 +496,7 @@ mod tests {
             "/keybindings",
             "/alignment left",
             "/latex unicode",
+            "/calc",
             "/reasoning off",
             "/thinking full",
             "/thinking-display current",
@@ -550,6 +554,7 @@ mod tests {
         app.is_remote = true;
         for command in [
             "/latex status",
+            "/calc 1+2",
             "/alignment",
             "/thinking-display",
             "/compact-notifications",

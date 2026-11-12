@@ -78,6 +78,7 @@ include!("tests/merge_command.rs");
 include!("tests/skill_invocation_multi_word.rs");
 include!("tests/remote_header_hint_facts.rs");
 include!("tests/slash_command_boundaries.rs");
+include!("tests/calculator.rs");
 include!("tests/prompt_history_cross_session.rs");
 include!("tests/ssh_remote.rs");
 include!("tests/skill_startup.rs");

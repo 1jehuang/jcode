@@ -102,6 +102,7 @@ impl App {
         self.help_scroll = None;
         self.model_status_scroll = None;
         self.commit_log_overlay = None;
+        self.calculator_overlay = None;
         self.session_picker_overlay = None;
         self.session_picker_mode = SessionPickerMode::Resume;
         self.pending_session_picker_load = None;
