@@ -19,6 +19,9 @@ to evaluate everything that can be checked locally.
 | 8b | Offline demo mode (Guideline 2.1) | `DemoTransportTests` + demo entry/banner/exit greps | PASS |
 | 8c | Optimistic send survives a racing history payload | `OptimisticHistoryTests` | PASS |
 | 8d | Readable column on iPad (universal app) | `readableColumn()` applied; iPad screenshots reviewed | PASS |
+| 8e | Real server: app connects and its message reaches the server | `./TestHarness/run_real_gateway.sh` (also `JCODE_BIN=<released jcode>` for the old-server hint) | PASS |
+| 8f | One-command pairing (gateway off, server running or not) | `./TestHarness/pair_flow_test.sh` and `PREEXISTING_SERVER=0 ./TestHarness/pair_flow_test.sh` | PASS |
+| 8g | Outdated server shows an update hint, not endless Offline | `outdatedServerRejectionStopsWithUpdateHint` test + screenshot vs v0.88.0 | PASS |
 
 ## App Store submission requirements
 

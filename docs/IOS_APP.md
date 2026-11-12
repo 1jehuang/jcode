@@ -79,13 +79,22 @@ Rules:
 
 ## Protocol
 
-Server side (already shipped, unchanged):
+Server side:
 
-- `jcode pair` CLI generates a 6-digit code (5 min TTL) and QR with
-  `jcode://pair?host=H&port=P&code=C`.
+- `jcode pair` is the whole setup. It enables the gateway in config if
+  needed, starts the background server (or hot-reloads a running one, keeping
+  sessions) so the port is actually open, confirms `/health`, then prints a
+  6-digit code (5 min TTL) and QR with `jcode://pair?host=H&port=P&code=C`.
+  In a terminal it waits and confirms when the phone pairs. The host is the
+  Tailscale MagicDNS name when available (including the macOS app bundle CLI).
 - `POST http://host:7643/pair` with `{code, device_id, device_name}` returns
-  `{token, server_name, server_version}`. Token is stored hashed server-side.
-- `GET /health` for reachability checks.
+  `{token, server_name, server_version, working_dir}`. Token is stored hashed
+  server-side.
+- `GET /health` for reachability checks; also advertises `working_dir`.
+- A phone has no directory on the host, so the gateway fills in a default
+  `working_dir` on any `subscribe` that omits one. App builds that predate the
+  field therefore still connect. Servers older than this reject the subscribe;
+  the app detects that and tells the user to run `jcode update`.
 - `ws://host:7643/ws?token=...` upgrades to a WebSocket carrying the same
   newline-delimited JSON protocol as Unix-socket TUI clients
   (`crates/jcode-protocol/src/wire.rs`, `#[serde(tag = "type")]`).

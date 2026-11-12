@@ -168,3 +168,54 @@ fn test_authorize_ws_device_rejects_unknown_and_revoked_with_401() {
         auth::authorize_ws_device(&registry, &token).expect_err("revoked token must be rejected");
     assert_eq!(err.status(), 401);
 }
+
+#[test]
+fn subscribe_without_working_dir_gets_server_default() {
+    let line = r#"{"type":"subscribe","id":1}"#;
+    let rewritten = fill_subscribe_working_dir_with(line, || "/Users/me".to_string())
+        .expect("subscribe without working_dir is rewritten");
+    let value: serde_json::Value = serde_json::from_str(&rewritten).unwrap();
+    assert_eq!(value["type"], "subscribe");
+    assert_eq!(value["id"], 1);
+    assert_eq!(value["working_dir"], "/Users/me");
+}
+
+#[test]
+fn subscribe_with_blank_working_dir_gets_server_default() {
+    let line = r#"{"type":"subscribe","id":1,"working_dir":"  "}"#;
+    let rewritten = fill_subscribe_working_dir_with(line, || "/srv".to_string()).unwrap();
+    assert!(rewritten.contains(r#""working_dir":"/srv""#));
+}
+
+#[test]
+fn subscribe_with_working_dir_is_forwarded_unchanged() {
+    let line = r#"{"type":"subscribe","id":1,"working_dir":"/repo"}"#;
+    assert_eq!(
+        fill_subscribe_working_dir_with(line, || unreachable!("must not compute default")),
+        None
+    );
+}
+
+#[test]
+fn non_subscribe_requests_are_forwarded_unchanged() {
+    for line in [
+        r#"{"type":"message","id":2,"content":"say \"subscribe\""}"#,
+        r#"{"type":"ping","id":3}"#,
+        "not json at all \"subscribe\"",
+    ] {
+        assert_eq!(
+            fill_subscribe_working_dir_with(line, || unreachable!()),
+            None,
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn default_client_working_dir_is_absolute_and_not_root_when_home_exists() {
+    let dir = default_client_working_dir();
+    assert!(std::path::Path::new(&dir).is_absolute());
+    if dirs::home_dir().is_some() {
+        assert_ne!(dir, "/");
+    }
+}

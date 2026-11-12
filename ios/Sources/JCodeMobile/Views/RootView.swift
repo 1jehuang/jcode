@@ -56,6 +56,18 @@ struct RootView: View {
             // Auto-connect to the most recent server on launch.
             if let server = model.activeServer, !model.isConnected {
                 model.connect(to: server)
+                // `-jcodeAutoPrompt "..."` sends one message through the real
+                // composer path once connected. Only the real-gateway E2E
+                // harness passes it, to prove app -> server -> app end to end.
+                if let prompt = UserDefaults.standard.string(forKey: "jcodeAutoPrompt"),
+                    !prompt.isEmpty
+                {
+                    for _ in 0..<150 where !model.isConnected {
+                        try? await Task.sleep(nanoseconds: 100_000_000)
+                    }
+                    model.draft = prompt
+                    model.sendDraft()
+                }
             }
         }
         .onOpenURL { url in

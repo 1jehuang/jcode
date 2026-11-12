@@ -454,7 +454,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             commands::run_cloud_command(map_cloud_subcommand(subcmd))?;
         }
         Some(Command::Pair { list, revoke }) => {
-            commands::run_pair_command(list, revoke)?;
+            commands::run_pair_command(list, revoke).await?;
         }
         Some(Command::Permissions) => {
             tui::permissions::run_permissions()?;

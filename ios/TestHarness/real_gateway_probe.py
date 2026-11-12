@@ -64,6 +64,12 @@ def main():
         help="Absolute dir to subscribe against. Defaults to whatever /health advertises, "
         "matching what the app does with the value from /pair.",
     )
+    ap.add_argument(
+        "--omit-working-dir",
+        action="store_true",
+        help="Subscribe without working_dir, like app builds that predate the field. "
+        "The server must still accept the subscription.",
+    )
     ap.add_argument("--prompt", default="Reply with exactly: REAL_GATEWAY_OK")
     ap.add_argument("--expect", default="")
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
@@ -81,7 +87,9 @@ def main():
             failures.append(name)
 
     working_dir = args.working_dir
-    if not working_dir:
+    if args.omit_working_dir:
+        working_dir = ""
+    elif not working_dir:
         import http.client
 
         conn = http.client.HTTPConnection(args.host, args.port, timeout=5)
@@ -89,7 +97,8 @@ def main():
         health = json.loads(conn.getresponse().read().decode())
         conn.close()
         working_dir = health.get("working_dir") or ""
-    check("server advertises a working_dir", bool(working_dir), working_dir)
+    if not args.omit_working_dir:
+        check("server advertises a working_dir", bool(working_dir), working_dir)
 
     sock = ws_connect(args.host, args.port, args.token)
     check("websocket upgrade accepted by real gateway", True)
@@ -112,13 +121,19 @@ def main():
             session_id[0] = event["session_id"]
         # Any of these prove the real server accepted the subscription.
         # `state` is the server's post-subscribe snapshot (ServerEvent::State).
-        return etype in ("state", "session_id", "history")
+        # The subscribe's own `done` is the definitive end of the handshake.
+        if etype == "done" and event.get("id") == SUBSCRIBE_ID:
+            return True
+        return etype in ("state", "session_id", "history", "error")
 
     got_preamble = drain(sock, deadline, watch_preamble)
+    subscribe_errors = [
+        e.get("message", "") for e in raw_events if e.get("type") == "error"
+    ]
     check(
-        "real server responded to subscribe",
-        got_preamble or bool(seen_types),
-        f"types={sorted(set(seen_types))[:6]}",
+        "real server accepted subscribe",
+        got_preamble and not subscribe_errors,
+        "; ".join(subscribe_errors) or f"types={sorted(set(seen_types))[:6]}",
     )
 
     # Real model turn.
@@ -180,6 +195,14 @@ def main():
         print(f"  model said: {body.strip()[:200]!r}")
     if failures:
         print(f"FAILED: {', '.join(failures)}")
+        # The connection path worked end to end, but the server has no usable
+        # model credentials. That is the host's setup, not a client bug, so
+        # report it with its own exit code instead of a generic failure.
+        auth_markers = ("API key", "token refresh failed", "OAuth", "login", "credential")
+        connection_ok = "real server accepted subscribe" not in failures
+        if connection_ok and error[0] and any(m in error[0] for m in auth_markers):
+            print("PROVIDER CREDENTIALS UNAVAILABLE (connection path OK)")
+            return 3
         return 1
     print("LIVE TURN OK")
     return 0

@@ -203,6 +203,11 @@ public actor Connection {
                     case .sessionCloseRequested(let reason):
                         closeRequestedReason =
                             reason.isEmpty ? "Server closed this session" : reason
+                    case .error(_, let message, _)
+                    where Self.isOutdatedServerRejection(message):
+                        // Reconnecting can never fix this, so stop and say why
+                        // instead of cycling through "Offline" forever.
+                        closeRequestedReason = Self.outdatedServerMessage
                     default:
                         break
                     }
@@ -215,5 +220,16 @@ public actor Connection {
 
     private func yield(_ output: ConnectionOutput) {
         continuation?.yield(output)
+    }
+
+    /// Shown when the computer runs a jcode release that cannot host a phone
+    /// session (it rejects the subscribe for lacking a host directory).
+    public static let outdatedServerMessage =
+        "jcode on your computer is out of date. Run \u{201C}jcode update\u{201D} there, then tap Retry."
+
+    /// Whether a server error means the server predates remote-client support.
+    public static func isOutdatedServerRejection(_ message: String) -> Bool {
+        message.contains("Subscribe requires the client's working directory")
+            || message.contains("Subscribe working_dir must be an absolute path")
     }
 }

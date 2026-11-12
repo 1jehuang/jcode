@@ -263,3 +263,40 @@ private func makeConnection(transport: FakeTransport) -> Connection {
 
     await connection.stop()
 }
+
+/// A jcode release that predates remote clients rejects the subscribe because
+/// a phone has no host directory. Retrying cannot fix that, so the connection
+/// must stop and tell the user to update instead of showing "Offline" forever.
+@Test func outdatedServerRejectionStopsWithUpdateHint() async throws {
+    let transport = FakeTransport()
+    let connection = makeConnection(transport: transport)
+    let stream = await connection.start()
+
+    var iterator = stream.makeAsyncIterator()
+    #expect(await iterator.next() == .phase(.connecting))
+    #expect(await iterator.next() == .phase(.connected))
+
+    await transport.push(
+        #"{"type":"error","id":1,"message":"Subscribe requires the client's working directory"}"#)
+
+    var sawFailed = false
+    while let output = await iterator.next() {
+        if case .phase(.reconnecting) = output {
+            Issue.record("must not reconnect after an outdated-server rejection")
+            break
+        }
+        if case .phase(.failed(let reason)) = output {
+            #expect(reason == Connection.outdatedServerMessage)
+            sawFailed = true
+            break
+        }
+    }
+    #expect(sawFailed)
+    await connection.stop()
+}
+
+@Test func ordinaryErrorsAreNotTreatedAsOutdatedServer() {
+    #expect(!Connection.isOutdatedServerRejection("No Anthropic API key found"))
+    #expect(Connection.isOutdatedServerRejection(
+        "Subscribe working_dir must be an absolute path"))
+}

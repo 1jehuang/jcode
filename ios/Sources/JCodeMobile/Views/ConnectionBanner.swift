@@ -28,6 +28,8 @@ struct ConnectionBanner: View {
         case .reconnecting(let attempt):
             "Connection lost, retrying (attempt \(attempt))"
         case .failed:
+            // The specific reason (re-pair, update jcode) is shown by the
+            // error banner below, so keep this one short.
             "Connection failed"
         default:
             "Offline"

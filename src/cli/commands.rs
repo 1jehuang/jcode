@@ -1829,7 +1829,7 @@ async fn run_memory_command_for_dir(
     Ok(())
 }
 
-pub fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
+pub async fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
     let mut registry = gateway::DeviceRegistry::load();
 
     if list {
@@ -1864,15 +1864,28 @@ pub fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
         return Ok(());
     }
 
-    let gw_config = &crate::config::config().gateway;
-
-    if !gw_config.enabled {
-        eprintln!("\x1b[33m⚠\x1b[0m  Gateway is disabled. Enable it in ~/.jcode/config.toml:\n");
-        eprintln!("    \x1b[2m[gateway]\x1b[0m");
-        eprintln!("    \x1b[2menabled = true\x1b[0m");
-        eprintln!("    \x1b[2mport = {}\x1b[0m\n", gw_config.port);
-        eprintln!("  Then restart the jcode server.\n");
+    // Pairing should be one command: turn remote access on, make sure a server
+    // is actually listening, then show the code. Anything the user would have
+    // to do by hand here is a place the phone silently fails to connect.
+    if !crate::config::config().gateway.enabled {
+        match gateway::set_gateway_enabled(true) {
+            Ok(_) => {
+                crate::config::invalidate_config_cache();
+                eprintln!(
+                    "\x1b[32m✓\x1b[0m Enabled remote access (gateway) in ~/.jcode/config.toml"
+                );
+            }
+            Err(error) => {
+                eprintln!(
+                    "\x1b[31m✗\x1b[0m Could not enable the gateway: {}\n  Set `[gateway] enabled = true` in ~/.jcode/config.toml and retry.",
+                    crate::util::format_error_chain(&error)
+                );
+                return Ok(());
+            }
+        }
     }
+    let gw_config = crate::config::Config::load().gateway;
+    let gateway_ready = ensure_gateway_listening(&gw_config).await;
 
     let code = registry.generate_pairing_code();
     let connect_host = resolve_connect_host(&gw_config.bind_addr);
@@ -1923,7 +1936,115 @@ pub fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
     }
     eprintln!();
 
+    if !gateway_ready {
+        eprintln!(
+            "  \x1b[33m⚠\x1b[0m  The gateway is not answering on port {}. Another program may be using it;\n     set `[gateway] port` in ~/.jcode/config.toml, then run `jcode server reload`.\n",
+            gw_config.port
+        );
+        return Ok(());
+    }
+
+    // Stay up until the phone pairs so the user gets confirmation here instead
+    // of guessing whether it worked. Non-interactive callers just get the code.
+    if !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        return Ok(());
+    }
+    let known: std::collections::HashSet<String> =
+        registry.devices.iter().map(|d| d.id.clone()).collect();
+    eprintln!("  \x1b[2mWaiting for your phone to pair... (Ctrl+C to stop)\x1b[0m");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5 * 60);
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if let Some(device) = gateway::DeviceRegistry::load()
+            .devices
+            .into_iter()
+            .find(|d| !known.contains(&d.id))
+        {
+            eprintln!(
+                "\n  \x1b[32m✓\x1b[0m Paired \x1b[1m{}\x1b[0m. It will reconnect automatically from now on.\n",
+                device.name
+            );
+            return Ok(());
+        }
+    }
+    eprintln!("\n  Pairing code expired. Run `jcode pair` again for a new one.\n");
+
     Ok(())
+}
+
+/// Makes sure a jcode server with the WebSocket gateway is answering, starting
+/// or reloading the background server as needed. Returns whether `/health`
+/// responds.
+///
+/// The gateway listener binds at server startup, so a server that was already
+/// running when the gateway got enabled has to be reloaded. A reload hands live
+/// sessions to the new process, so this never loses work.
+async fn ensure_gateway_listening(gw_config: &crate::config::GatewayConfig) -> bool {
+    let probe_host = if gateway::control::is_wildcard_bind(&gw_config.bind_addr) {
+        "127.0.0.1"
+    } else {
+        gw_config.bind_addr.as_str()
+    };
+    let health_url = format!("http://{}:{}/health", probe_host, gw_config.port);
+    let healthy = || async {
+        let Ok(client) = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .no_proxy()
+            .build()
+        else {
+            return false;
+        };
+        match client.get(&health_url).send().await {
+            Ok(response) if response.status().is_success() => response
+                .text()
+                .await
+                .is_ok_and(|body| body.contains("\"gateway\"")),
+            _ => false,
+        }
+    };
+    let wait_healthy = |secs: u64| async move {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        while std::time::Instant::now() < deadline {
+            if healthy().await {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+        false
+    };
+
+    if healthy().await {
+        return true;
+    }
+
+    let socket = crate::server::socket_path();
+    if crate::server::has_live_listener(&socket).await {
+        eprintln!(
+            "  Restarting the jcode server so it listens for your phone (sessions are kept)..."
+        );
+        if let Err(error) = server_reload(true, ReloadOutput::Silent).await {
+            crate::logging::warn(&format!("pair: server reload failed: {error:#}"));
+        }
+    } else {
+        eprintln!("  Starting the jcode server...");
+        if let Err(error) =
+            super::dispatch::spawn_server(&super::provider_init::ProviderChoice::Auto, None, None)
+                .await
+        {
+            crate::logging::warn(&format!("pair: server spawn failed: {error:#}"));
+        }
+    }
+
+    // First launch of a freshly installed binary can be slow (macOS verifies
+    // the signature of a large executable), so allow a generous window.
+    let ready = wait_healthy(60).await;
+    if ready {
+        eprintln!(
+            "\x1b[32m✓\x1b[0m Gateway listening on port {}",
+            gw_config.port
+        );
+    }
+    ready
 }
 
 pub use gateway::{detect_tailscale_dns_name, parse_tailscale_dns_name, resolve_connect_host};
@@ -2172,6 +2293,26 @@ pub fn run_server_promote_command(version: Option<&str>, emit_json: bool) -> Res
 /// - If no server is running, this is a successful no-op so installers can call
 ///   it unconditionally.
 pub async fn run_server_reload_command(force: bool, emit_json: bool) -> Result<()> {
+    server_reload(
+        force,
+        if emit_json {
+            ReloadOutput::Json
+        } else {
+            ReloadOutput::Text
+        },
+    )
+    .await
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReloadOutput {
+    Text,
+    Json,
+    /// Used when another command drives the reload and reports its own status.
+    Silent,
+}
+
+async fn server_reload(force: bool, output: ReloadOutput) -> Result<()> {
     use crate::protocol::ServerEvent;
     use std::time::Duration;
 
@@ -2189,10 +2330,10 @@ pub async fn run_server_reload_command(force: bool, emit_json: bool) -> Result<(
     }
 
     let emit = |report: ServerReloadReport| -> Result<()> {
-        if emit_json {
-            println!("{}", serde_json::to_string_pretty(&report)?);
-        } else if !report.detail.is_empty() {
-            println!("{}", report.detail);
+        match output {
+            ReloadOutput::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+            ReloadOutput::Text if !report.detail.is_empty() => println!("{}", report.detail),
+            _ => {}
         }
         Ok(())
     };

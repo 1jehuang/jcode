@@ -15,7 +15,9 @@
 #
 # Usage:
 #   ./TestHarness/run_real_gateway.sh [--device "iPhone 17"] [--port 7644]
-#                                     [--prompt "..."] [--keep] [--no-build]
+#                                     [--prompt "..."] [--provider NAME]
+#                                     [--keep] [--no-build]
+#   JCODE_BIN=/path/to/jcode overrides which server binary is tested.
 #
 set -euo pipefail
 
@@ -28,6 +30,10 @@ PROMPT="Reply with exactly: REAL_GATEWAY_OK"
 EXPECT="REAL_GATEWAY_OK"
 KEEP=""
 NO_BUILD=""
+# Provider for the live turn. Defaults to the developer's configured one; pass
+# e.g. `--provider openai` when that provider's credentials live outside
+# ~/.jcode (keychain, Claude Code) and so are not copied into the sandbox.
+PROVIDER=""
 OUT_DIR="${JCODE_SCRATCH_DIR:-${TMPDIR:-/tmp}}/jcode-ios-real"
 
 while [[ $# -gt 0 ]]; do
@@ -36,6 +42,7 @@ while [[ $# -gt 0 ]]; do
     --port) PORT="$2"; shift 2 ;;
     --prompt) PROMPT="$2"; shift 2 ;;
     --expect) EXPECT="$2"; shift 2 ;;
+    --provider) PROVIDER="$2"; shift 2 ;;
     --keep) KEEP="1"; shift ;;
     --no-build) NO_BUILD="1"; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
@@ -50,7 +57,9 @@ mkdir -p "$SANDBOX"
 log()  { printf '\033[36m[real]\033[0m %s\n' "$*"; }
 pass() { printf '\033[32m  ok\033[0m %s\n' "$*"; }
 fail() { printf '\033[31m  FAIL\033[0m %s\n' "$*"; FAILED=1; }
+warn() { printf '\033[33m  WARN\033[0m %s\n' "$*"; }
 FAILED=0
+PROVIDER_UNAVAILABLE=0
 
 SERVER_PID=""
 cleanup() {
@@ -67,15 +76,17 @@ trap cleanup EXIT
 # ---------------------------------------------------------------------------
 # 1. Locate a jcode binary. Prefer the current self-dev build.
 # ---------------------------------------------------------------------------
-JCODE_BIN=""
-# Prefer a freshly built binary from this worktree over the installed one so
-# server-side changes are exercised by the same run that tests the client.
+JCODE_BIN="${JCODE_BIN:-}"
+# Set JCODE_BIN to test a specific server (e.g. the release users have).
+# Otherwise prefer a freshly built binary from this worktree over the installed
+# one so server-side changes are exercised by the same run that tests the client.
 for cand in \
   "$REPO_ROOT/target/selfdev/jcode" \
   "$HOME/.jcode/builds/current/jcode" \
   "$REPO_ROOT/target/debug/jcode" \
   "$(command -v jcode || true)"
 do
+  [[ -n "$JCODE_BIN" ]] && break
   if [[ -n "$cand" && -x "$cand" ]]; then JCODE_BIN="$cand"; break; fi
 done
 if [[ -z "$JCODE_BIN" ]]; then
@@ -99,7 +110,11 @@ done
 if [[ -d "$HOME/.jcode/external" ]]; then
   cp -R "$HOME/.jcode/external" "$SANDBOX/external" 2>/dev/null || true
 fi
-MODEL_LINE="$(grep -E '^default_model|^default_provider' "$HOME/.jcode/config.toml" 2>/dev/null || true)"
+if [[ -n "$PROVIDER" ]]; then
+  MODEL_LINE="default_provider = \"$PROVIDER\""
+else
+  MODEL_LINE="$(grep -E '^default_model|^default_provider' "$HOME/.jcode/config.toml" 2>/dev/null || true)"
+fi
 {
   echo "[gateway]"
   echo "enabled = true"
@@ -197,7 +212,27 @@ python3 "TestHarness/real_gateway_probe.py" \
   --json-out "$OUT_DIR/probe.json" | sed 's/^/  /'
 PROBE_RC=$?
 set -e
-[[ $PROBE_RC -eq 0 ]] && pass "real model turn streamed and matched" || fail "live turn probe failed"
+report_probe() {  # rc, success label, failure label
+  case "$1" in
+    0) pass "$2" ;;
+    3) PROVIDER_UNAVAILABLE=1
+       warn "connection OK, but the server has no working model credentials (live turn skipped)" ;;
+    *) fail "$3" ;;
+  esac
+}
+report_probe "$PROBE_RC" "real model turn streamed and matched" "live turn probe failed"
+
+# App builds already in users' hands may subscribe without working_dir. The
+# gateway must default it rather than reject the session.
+log "legacy client (no working_dir) subscribe"
+set +e
+python3 "TestHarness/real_gateway_probe.py" \
+  --port "$PORT" --token "$TOKEN" --prompt "$PROMPT" --expect "$EXPECT" \
+  --omit-working-dir --json-out "$OUT_DIR/probe-legacy.json" | sed 's/^/  /'
+LEGACY_RC=$?
+set -e
+report_probe "$LEGACY_RC" "server accepted a subscribe without working_dir" \
+  "server rejected a legacy subscribe without working_dir"
 
 # ---------------------------------------------------------------------------
 # 6. Drive the real app against the real gateway in the simulator.
@@ -240,8 +275,9 @@ json.dump([{
 PY
 
 log "launching app"
-xcrun simctl launch "$DEVICE" "$BUNDLE_ID" >/dev/null
-sleep 8
+APP_PROMPT="Reply with exactly: APP_TURN_OK"
+xcrun simctl launch "$DEVICE" "$BUNDLE_ID" -jcodeAutoPrompt "$APP_PROMPT" >/dev/null
+sleep 12
 SHOT="$OUT_DIR/real-chat.png"
 xcrun simctl io "$DEVICE" screenshot "$SHOT" >/dev/null 2>&1
 pass "screenshot: $SHOT"
@@ -256,7 +292,7 @@ APP_CONNECTS="$(grep -c "Harness Simulator connected" "$GW_LOG" 2>/dev/null | tr
 APP_CONNECTS="${APP_CONNECTS:-0}"
 # Count only gateway WebSocket rejections. Provider API errors (e.g. an expired
 # OpenAI key in memory extraction) also log "401 Unauthorized" and are not the app.
-UNAUTHORIZED="$(grep "401 Unauthorized" "$GW_LOG" 2>/dev/null | { grep -ivc "API error" || true; } | tr -d ' ')"
+UNAUTHORIZED="$( { grep "401 Unauthorized" "$GW_LOG" 2>/dev/null || true; } | { grep -ivc "API error" || true; } | tr -d ' ')"
 UNAUTHORIZED="${UNAUTHORIZED:-0}"
 
 # The probe accounts for exactly one connection; anything beyond that is the app.
@@ -276,9 +312,23 @@ else
   pass "every subscribe carried a working_dir"
 fi
 
+# The app itself sent a message through its composer: the server must have
+# received it on a gateway connection and started a turn for it.
+# The server logs request size, not content, so match the prompt's length on a
+# `message` request beyond the two the probes sent.
+APP_MSG_CHARS="${#APP_PROMPT}"
+if [[ "$(grep -c "content_chars=$APP_MSG_CHARS " "$GW_LOG" 2>/dev/null | tr -d ' ')" -ge 1 ]]; then
+  pass "message typed in the app reached the server"
+else
+  fail "the app's message never reached the server"
+fi
+
 log "gateway log: $GW_LOG"
 if [[ $FAILED -eq 0 ]]; then
   printf '\033[32mREAL GATEWAY CHECKS PASSED\033[0m\n'
+  if [[ $PROVIDER_UNAVAILABLE -eq 1 ]]; then
+    echo "(model turn not exercised: log in to a provider with \`jcode login\` to cover it)"
+  fi
 else
   printf '\033[31mREAL GATEWAY CHECKS FAILED\033[0m\n'
   exit 1

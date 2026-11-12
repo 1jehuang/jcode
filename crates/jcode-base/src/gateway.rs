@@ -237,6 +237,10 @@ async fn handle_ws_connection(
         while let Some(msg) = ws_source.next().await {
             match msg {
                 Ok(Message::Text(text)) => {
+                    // Remote clients (phones, browsers) have no directory on this
+                    // host. Fill one in so a subscribe from any client version
+                    // is accepted instead of failing with a protocol error.
+                    let text = fill_default_subscribe_working_dir(&text).unwrap_or(text);
                     let mut writer = writer_for_ws.lock().await;
                     if text.ends_with('\n') {
                         if writer.write_all(text.as_bytes()).await.is_err() {
@@ -545,16 +549,30 @@ pub fn parse_tailscale_dns_name(status_json: &[u8]) -> Option<String> {
 
 /// Best-effort MagicDNS name for this machine, if Tailscale is installed.
 pub fn detect_tailscale_dns_name() -> Option<String> {
-    let output = std::process::Command::new("tailscale")
-        .args(["status", "--json"])
-        .output()
-        .ok()?;
+    tailscale_cli_candidates().into_iter().find_map(|cli| {
+        let output = std::process::Command::new(cli)
+            .args(["status", "--json"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        parse_tailscale_dns_name(&output.stdout)
+    })
+}
 
-    if !output.status.success() {
-        return None;
+/// Places the Tailscale CLI lives. The Mac App Store and standalone Tailscale
+/// apps do not put `tailscale` on `PATH`, but ship the CLI inside the bundle.
+/// Missing that meant QR codes encoded `*.local` instead of the tailnet name,
+/// which a phone off the LAN cannot reach.
+fn tailscale_cli_candidates() -> Vec<&'static str> {
+    let mut candidates = vec!["tailscale"];
+    if cfg!(target_os = "macos") {
+        candidates.push("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
     }
-
-    parse_tailscale_dns_name(&output.stdout)
+    candidates
 }
 
 /// Resolve the address a remote client should actually dial.
@@ -627,10 +645,45 @@ fn system_hostname() -> Option<String> {
 fn default_client_working_dir() -> String {
     std::env::current_dir()
         .ok()
-        .filter(|p| p.is_absolute())
-        .or_else(|| dirs::home_dir())
+        // A daemonized server often runs from `/`, which is never a useful
+        // project directory for a phone session. Prefer home in that case.
+        .filter(|p| p.is_absolute() && p.parent().is_some())
+        .or_else(dirs::home_dir)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| "/".to_string())
+}
+
+/// Returns a rewritten request line when it is a `subscribe` that omits
+/// `working_dir`, or `None` when the line should be forwarded unchanged.
+fn fill_default_subscribe_working_dir(line: &str) -> Option<String> {
+    fill_subscribe_working_dir_with(line, default_client_working_dir)
+}
+
+fn fill_subscribe_working_dir_with(
+    line: &str,
+    default_dir: impl FnOnce() -> String,
+) -> Option<String> {
+    // Cheap pre-check so ordinary traffic is never parsed twice.
+    if !line.contains("\"subscribe\"") {
+        return None;
+    }
+    let mut value: serde_json::Value = serde_json::from_str(line.trim_end()).ok()?;
+    let object = value.as_object_mut()?;
+    if object.get("type").and_then(|t| t.as_str()) != Some("subscribe") {
+        return None;
+    }
+    let has_dir = object
+        .get("working_dir")
+        .and_then(|d| d.as_str())
+        .is_some_and(|d| !d.trim().is_empty());
+    if has_dir {
+        return None;
+    }
+    object.insert(
+        "working_dir".to_string(),
+        serde_json::Value::String(default_dir()),
+    );
+    Some(value.to_string())
 }
 
 #[cfg(test)]
