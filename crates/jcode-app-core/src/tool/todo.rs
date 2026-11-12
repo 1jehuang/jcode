@@ -1268,14 +1268,8 @@ impl Tool for TodoTool {
         // deliberately handwritten. Never generate it from gate constants or
         // interpolate private thresholds, because that would teach the model
         // how to target the evaluator instead of reporting an honest assessment.
-        "Use the todo tool very frequently. Read/update todos and goal assessments. \
-         Initialize with phases, then patch by unique task name. \
-         Keep status current. Phases are sequential, lanes parallel, items ordered. \
-         Block only for an indispensable action by someone else with no safe workaround: \
-         name who must do what and why you cannot proceed. Uncertainty, task size, and \
-         agent coordination are not blockers. Continue independent work. \
-         external_blocker keeps work pending/in_progress and schedules reassessment at review_at \
-         instead of a separate schedule call; null clears it. completely_blocked means no way forward."
+        "Track this session's work as a phased todo plan with goal assessments; \
+         use it very frequently and keep status current."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -1327,6 +1321,7 @@ impl Tool for TodoTool {
                             },
                             "completely_blocked": {
                                 "type": ["object", "null"],
+                                "description": "No way forward. Block only for an indispensable action by someone else with no safe workaround: name who must do what and why you cannot proceed. Uncertainty, task size, and agent coordination are not blockers. Continue independent work.",
                                 "required": ["reason"],
                                 "additionalProperties": false,
                                 "properties": {
@@ -1335,6 +1330,7 @@ impl Tool for TodoTool {
                             },
                             "external_blocker": {
                                 "type": ["object", "null"],
+                                "description": "Same bar as completely_blocked. Keeps work pending/in_progress and schedules reassessment at review_at instead of a separate schedule call; null clears it.",
                                 "required": ["reason", "review_at"],
                                 "additionalProperties": false,
                                 "properties": {
@@ -1493,7 +1489,7 @@ impl Tool for TodoTool {
         item["additionalProperties"] = json!(false);
         schema["properties"]["phases"] = json!({
             "type": "array",
-            "description": "Replace entire plan; [] clears. Prefer patches after initialization.",
+            "description": "Initialize the plan here, then patch by unique task name. Replaces entire plan; [] clears. Phases are sequential, lanes parallel, items ordered.",
             "items": {"type": "object", "required": ["phase", "lanes"], "additionalProperties": false,
                 "properties": {"phase": {"type": "integer", "minimum": 1}, "lanes": {
                     "type": "array", "minItems": 1, "items": {"type": "object", "required": ["lane", "items"], "additionalProperties": false,

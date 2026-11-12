@@ -148,15 +148,19 @@ fn completely_blocked_schema_is_shared_and_strict() {
             &properties["phases"]["items"]["properties"]["lanes"]["items"]["properties"]["items"]["items"]
                 ["properties"][field]
         );
-        assert!(canonical.get("description").is_none());
+        assert!(canonical["description"].is_string());
         assert!(
             canonical["properties"]["reason"]
                 .get("description")
                 .is_none()
         );
     }
-    let tool = TodoTool::new();
-    let guidance = tool.description();
+    // Blocking rules live on the fields, not in the one-sentence tool description.
+    let description = TodoTool::new().description().to_string();
+    assert!(!description.contains("block"), "{description}");
+    assert_eq!(description.matches(['.', ';']).count(), 2, "{description}");
+    let guidance = update["description"].as_str().unwrap();
+    assert!(guidance.starts_with("No way forward."));
     assert!(guidance.contains("indispensable action by someone else with no safe workaround"));
     assert!(guidance.contains("name who must do what and why you cannot proceed"));
     assert!(guidance.contains("agent coordination are not blockers"));
@@ -167,11 +171,12 @@ fn completely_blocked_schema_is_shared_and_strict() {
             .get("requires_user_action")
             .is_none()
     );
-    assert!(
-        TodoTool::new()
-            .description()
-            .contains("completely_blocked means no way forward.")
-    );
+    let external = schema["properties"]["update"]["items"]["properties"]["external_blocker"]
+        ["description"]
+        .as_str()
+        .unwrap();
+    assert!(external.contains("Same bar as completely_blocked."));
+    assert!(external.contains("schedules reassessment at review_at"));
 }
 
 #[tokio::test]

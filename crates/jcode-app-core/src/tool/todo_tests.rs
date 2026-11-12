@@ -279,7 +279,9 @@ fn model_facing_descriptions_stay_compact() {
         "todo description bytes: {bytes}; schema bytes: {}",
         schema.to_string().len()
     );
-    assert!(bytes < 3_500, "todo descriptions grew to {bytes} bytes");
+    // Blocker guidance lives on the item fields, which the schema repeats for
+    // phases, add, and update, so it is counted three times here.
+    assert!(bytes < 4_000, "todo descriptions grew to {bytes} bytes");
     for route in ["add", "update"] {
         let properties = &schema["properties"][route]["items"]["properties"];
         for field in ["description", "status", "priority", "lane", "phase"] {
