@@ -366,6 +366,16 @@ This writes `[providers.my-api]` in `~/.jcode/config.toml` and stores the key in
 
 Notable presets include:
 
+### LLMTR
+- Login: `jcode login --provider llmtr` (alias `llmtr.com`)
+- Stored env file: `~/.config/jcode/llmtr.env`
+- API key env var: `LLMTR_API_KEY` (keys start with `llmtr-`)
+- Base URL: `https://llmtr.com/v1`
+- Default model hint: `qwen/qwen3.8-27b-free` (free; completion cap 16384). `llmtr/qwen3-8-27b` is the Turkey-hosted chat model.
+- Requests use `POST /v1/chat/completions`. Model ids that start with `llmtr/` are sent whole.
+- `GET /v1/models` returns 200 without a valid key. A one-token chat request is the key check; 401 or 403 means the key is invalid.
+- Docs: <https://llmtr.com/llms.txt>
+
 ### Fireworks
 - Login: `jcode login --provider fireworks`
 - Stored env file: `~/.config/jcode/fireworks.env`

@@ -539,6 +539,25 @@ mod tests {
     }
 
     #[test]
+    fn llmtr_stays_on_chat_completions_even_for_responses_family_ids() {
+        // LLMTR serves most models, including GPT and Grok ids, on chat
+        // completions. A family guess must not move this profile to /responses.
+        for model in [
+            "qwen/qwen3.8-27b-free",
+            "llmtr/qwen3-8-27b",
+            "openai/gpt-5.5",
+            "xai/grok-4.6",
+            "grok-4.7",
+            "gpt-5.6-luna",
+        ] {
+            assert!(
+                !model_uses_responses_api("https://llmtr.com/v1", Some("llmtr"), model),
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
     fn native_muse_responses_route_is_scoped_to_its_official_endpoint() {
         assert!(model_uses_responses_api(
             "https://api.meta.ai/v1",
