@@ -2516,8 +2516,7 @@ fn handle_server_event_inner(
             session_id,
             payload,
         } => {
-            app.receive_remote_todos(session_id, payload);
-            true
+            app.receive_remote_todos(session_id, payload)
         }
         ServerEvent::SwarmStatus { members } => {
             if app.swarm_enabled {

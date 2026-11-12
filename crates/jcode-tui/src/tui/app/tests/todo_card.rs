@@ -87,7 +87,11 @@ fn resumed_local_snapshot_keeps_polling_so_card_does_not_go_stale() {
         .to_string()
     };
     // Resume seeds an authoritative snapshot, after which disk is ignored.
-    app.receive_remote_todos("resumed-local-snapshot".into(), payload("in_progress"));
+    assert!(app.receive_remote_todos("resumed-local-snapshot".into(), payload("in_progress")));
+    assert!(
+        !app.receive_remote_todos("resumed-local-snapshot".into(), payload("in_progress")),
+        "an identical poll answer must not ask for a repaint"
+    );
     app.toggle_todo_card();
     assert!(
         app.remote_todos_refresh_due(),
@@ -275,8 +279,8 @@ fn refresh_todo_card_updates_content_when_todos_change() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(70)),
         completion_confidence: None,
         confidence_history: Vec::new(),
-        external_blocker: None,
-        completely_blocked: None,
+        waiting_reason: None,
+        requires_user_auth: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -326,8 +330,8 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
         completion_confidence: None,
         confidence_history: Vec::new(),
-        external_blocker: None,
-        completely_blocked: None,
+        waiting_reason: None,
+        requires_user_auth: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -390,8 +394,8 @@ fn pinned_band_todo(id: &str, content: &str, status: &str) -> crate::todo::TodoI
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
         completion_confidence: None,
         confidence_history: Vec::new(),
-        external_blocker: None,
-        completely_blocked: None,
+        waiting_reason: None,
+        requires_user_auth: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
