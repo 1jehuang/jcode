@@ -646,11 +646,12 @@ impl JcodeClient {
     /// `ErrorKind::Protocol` so callers can stop retrying corrupt history.
     /// An ordinary EOF remains reconnectable (`ErrorKind::Disconnected`).
     pub fn disconnect_reason(&self) -> Option<Error> {
-        self.inner
-            .disconnect_reason
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        // A poisoned lock still holds the recorded cause. Report it rather
+        // than degrading to a generic disconnect.
+        match self.inner.disconnect_reason.lock() {
+            Ok(reason) => reason.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
 
     fn disconnect_error(&self) -> Error {

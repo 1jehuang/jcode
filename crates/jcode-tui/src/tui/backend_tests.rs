@@ -804,15 +804,39 @@ async fn cloud_expiry_revokes_without_midturn_protocol_write() {
 #[test]
 fn account_usage_poll_is_immediate_then_throttled() {
     let now = Instant::now();
-    assert!(account_usage_poll_due(None, now));
-    assert!(!account_usage_poll_due(Some(now), now));
+    let focused = account_usage_poll_interval(true);
+    assert!(account_usage_poll_due(None, now, focused));
+    assert!(!account_usage_poll_due(Some(now), now, focused));
     assert!(!account_usage_poll_due(
         Some(now),
-        now + Duration::from_secs(29)
+        now + Duration::from_secs(29),
+        focused
     ));
     assert!(account_usage_poll_due(
         Some(now),
-        now + Duration::from_secs(30)
+        now + Duration::from_secs(30),
+        focused
+    ));
+}
+
+#[test]
+fn account_usage_poll_is_slow_unfocused_and_catches_up_on_focus() {
+    let now = Instant::now();
+    let unfocused = account_usage_poll_interval(false);
+    // A window that has never polled still gets its first snapshot.
+    assert!(account_usage_poll_due(None, now, unfocused));
+    let later = now + Duration::from_secs(120);
+    assert!(!account_usage_poll_due(Some(now), later, unfocused));
+    // The same elapsed time is overdue the moment the window is focused.
+    assert!(account_usage_poll_due(
+        Some(now),
+        later,
+        account_usage_poll_interval(true)
+    ));
+    assert!(account_usage_poll_due(
+        Some(now),
+        now + Duration::from_secs(300),
+        unfocused
     ));
 }
 

@@ -311,8 +311,8 @@ mod tests {
             completion_confidence: None,
             confidence_history: Vec::new(),
             blocked_by: Vec::new(),
-            completely_blocked: None,
-            external_blocker: None,
+            requires_user_auth: None,
+            waiting_reason: None,
             waiting_on: Vec::new(),
             assigned_to: None,
             stage: None,
@@ -472,10 +472,10 @@ fn sync_lanes_after_save(session_id: &str, todos: &[TodoItem]) {
             let mut lane = stages::lane_todos_for_worker(todos, &link.lane);
             load_todos(&link.worker).and_then(|current| {
                 for todo in &mut lane {
-                    todo.waiting_on = current
+                    (todo.waiting_on, todo.waiting_reason) = current
                         .iter()
                         .find(|old| old.id == todo.id)
-                        .map(|old| old.waiting_on.clone())
+                        .map(|old| (old.waiting_on.clone(), old.waiting_reason.clone()))
                         .unwrap_or_default();
                 }
                 if lane.is_empty() || current == lane {
@@ -615,8 +615,8 @@ mod lane_sync_tests {
             content: "add lexer tests".into(),
             status: "pending".into(),
             priority: "high".into(),
-            completely_blocked: None,
-            external_blocker: None,
+            requires_user_auth: None,
+            waiting_reason: None,
             waiting_on: vec!["fox-new-task".into()],
             ..Default::default()
         });

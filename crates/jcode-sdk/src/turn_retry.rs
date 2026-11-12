@@ -236,14 +236,15 @@ fn parse_retry_after(lower: &str) -> Option<Duration> {
     // Match the exact JSON field, never a sibling such as max_rpm.
     if lower.contains("\"retry_after_seconds\"") {
         return lower.match_indices('{').take(8).find_map(|(idx, _)| {
-            // A brace may start an incomplete object; keep scanning candidates.
-            let Some(Ok(value)) = serde_json::Deserializer::from_str(&lower[idx..])
+            // Text before the JSON body can contain a stray brace. A candidate
+            // that does not parse is skipped so the next one is tried.
+            match serde_json::Deserializer::from_str(&lower[idx..])
                 .into_iter::<serde_json::Value>()
-                .next()
-            else {
-                return None;
-            };
-            structured_retry_after(&value)
+                .next()?
+            {
+                Ok(value) => structured_retry_after(&value),
+                Err(_) => None,
+            }
         });
     }
     let tail = &lower[lower.find("retry")?..];

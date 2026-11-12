@@ -693,6 +693,18 @@ fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
         assert!(app.pending_turn);
         assert_eq!(active_provider.lock().unwrap().as_str(), "openai");
         assert_eq!(app.session.model.as_deref(), Some("gpt-5.4"));
+        // Cause, switch and retry collapse into one line.
+        let added = &app.display_messages[before..];
+        assert_eq!(added.len(), 1, "{added:?}");
+        assert!(
+            added[0]
+                .content
+                .starts_with("✓ Usage limit reached. Switched to model: gpt-5.4"),
+            "{}",
+            added[0].content
+        );
+        assert!(added[0].content.ends_with(". Retrying."));
+        assert!(!added[0].content.contains('\n'));
         let last = app.display_messages.last().expect("display message");
         assert!(!last.content.contains("cross_provider_failover"));
         assert!(last.content.lines().count() <= 2);

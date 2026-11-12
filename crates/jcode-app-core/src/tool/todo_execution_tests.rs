@@ -39,8 +39,8 @@ async fn background_dependencies_validate_session_and_arm_wake() {
         })
         .await;
     let item = TodoItem {
-        completely_blocked: None,
-        external_blocker: None,
+        requires_user_auth: None,
+        waiting_reason: None,
         waiting_on: vec![task.task_id.clone()],
         ..Default::default()
     };
@@ -55,8 +55,8 @@ async fn background_dependencies_validate_session_and_arm_wake() {
         .is_err()
     );
     let unknown = TodoItem {
-        completely_blocked: None,
-        external_blocker: None,
+        requires_user_auth: None,
+        waiting_reason: None,
         waiting_on: vec!["missing-task".into()],
         ..Default::default()
     };
@@ -83,7 +83,7 @@ async fn background_dependencies_validate_session_and_arm_wake() {
         );
     }
     let mut blocked = item.clone();
-    blocked.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+    blocked.requires_user_auth = Some(crate::todo::TodoUserAuth {
         reason: "Required data is permanently unavailable".into(),
     });
     prepare_background_dependencies(&manager, &session, &[], std::slice::from_ref(&blocked))
@@ -92,9 +92,9 @@ async fn background_dependencies_validate_session_and_arm_wake() {
     let delivery = manager.status(&task.task_id).await.unwrap();
     assert!(
         !delivery.notify && !delivery.wake,
-        "completely blocked todos must retain dependencies without arming delivery"
+        "todos awaiting user authorization keep dependencies without arming delivery"
     );
-    // A peer can still need the same task: the completely blocked condition must
+    // A peer can still need the same task: the authorization pause must
     // not disable delivery for another actionable todo.
     prepare_background_dependencies(&manager, &session, &[], &[blocked, item.clone()])
         .await
@@ -142,8 +142,8 @@ async fn await_dependencies_validate_before_delivery_and_accept_terminal_race() 
     crate::storage::write_json_fast(&path, &state).unwrap();
     let manager = crate::background::BackgroundTaskManager::new();
     let item = TodoItem {
-        completely_blocked: None,
-        external_blocker: None,
+        requires_user_auth: None,
+        waiting_reason: None,
         waiting_on: vec![id.clone()],
         ..Default::default()
     };
@@ -153,8 +153,8 @@ async fn await_dependencies_validate_before_delivery_and_accept_terminal_race() 
             .is_err()
     );
     let invalid = TodoItem {
-        completely_blocked: None,
-        external_blocker: None,
+        requires_user_auth: None,
+        waiting_reason: None,
         waiting_on: vec!["await-unknown-1".into()],
         ..Default::default()
     };
@@ -260,8 +260,8 @@ async fn missing_historical_dependencies_allow_unrelated_writes_but_not_new_refs
             content: "old".into(),
             status: "completed".into(),
             priority: "high".into(),
-            completely_blocked: None,
-            external_blocker: None,
+            requires_user_auth: None,
+            waiting_reason: None,
             waiting_on: vec!["removed-bg-task".into()],
             ..Default::default()
         },

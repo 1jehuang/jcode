@@ -7,20 +7,23 @@ pub(super) fn stable_hash_str(value: &str) -> u64 {
     hasher.finish()
 }
 
+/// The one place cache signatures encode JSON. A value that cannot be
+/// serialized signs as the empty string, the same as before.
+fn encode_json<T: serde::Serialize + ?Sized>(value: &T) -> String {
+    serde_json::to_string(value).unwrap_or_default()
+}
+
 #[cfg(test)]
 fn stable_hash_json<T: serde::Serialize + ?Sized>(value: &T) -> u64 {
-    let encoded = serde_json::to_string(value).unwrap_or_default();
-    stable_hash_str(&encoded)
+    stable_hash_str(&encode_json(value))
 }
 
 pub(super) fn stable_json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
-    serde_json::to_string(value)
-        .map(|encoded| encoded.len())
-        .unwrap_or_default()
+    encode_json(value).len()
 }
 
 fn json_hash_and_len<T: serde::Serialize + ?Sized>(value: &T) -> (u64, usize) {
-    let encoded = serde_json::to_string(value).unwrap_or_default();
+    let encoded = encode_json(value);
     (stable_hash_str(&encoded), encoded.len())
 }
 
@@ -36,7 +39,7 @@ fn projected_message_hashes(messages: &[Message]) -> (u64, Vec<u64>) {
             aggregate.write(b",");
         }
         let projected = crate::message::cache_relevant_message_value(message);
-        let encoded = projected.to_string();
+        let encoded = encode_json(&projected);
         hashes.push(stable_hash_str(&encoded));
         aggregate.write(encoded.as_bytes());
     }

@@ -376,6 +376,14 @@ fn probe_wake() -> &'static tokio::sync::Notify {
 /// regaining focus or a repo-mutating tool wakes the workers immediately.
 #[cfg(not(test))]
 fn probe_period() -> Duration {
+    // Seed once from the state carried across a client re-exec, so a window
+    // that was already in the background keeps the slow period.
+    static SEED: std::sync::Once = std::sync::Once::new();
+    SEED.call_once(|| {
+        if !crate::tui::focus_carryover::initial_focus() {
+            CLIENT_FOCUSED.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
     if CLIENT_FOCUSED.load(std::sync::atomic::Ordering::Relaxed) {
         Duration::from_secs(5)
     } else {

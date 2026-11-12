@@ -293,24 +293,22 @@ fn dependency_todo(id: &str, dependencies: &[&str]) -> crate::todo::TodoItem {
 }
 
 #[tokio::test]
-async fn completely_blocked_cli_pauses_without_review_and_keeps_peers_actionable() {
+async fn user_auth_cli_pauses_only_that_todo_and_keeps_peers_actionable() {
     let temp = tempfile::tempdir().unwrap();
     let manager = crate::background::BackgroundTaskManager::with_output_dir(temp.path().into());
     let mut blocked = dependency_todo("blocked", &[]);
-    blocked.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+    blocked.requires_user_auth = Some(crate::todo::TodoUserAuth {
         reason: "Required source data no longer exists".into(),
     });
     let (actionable, resumed) =
         prepare_run_todo_follow_up(&manager, "owner", &[blocked.clone()], true).await;
     assert!(actionable.is_empty());
     assert!(resumed.is_none());
-    let notice = run_blocked_notice(&[blocked.clone()]).unwrap();
+    let notice = run_blocked_notice(&[blocked.clone()], &[]).unwrap();
     assert_eq!(
         notice,
-        "✋ Completely blocked. No way forward.\nblocked: Required source data no longer exists"
+        "✋ Needs your login.\nblocked: Required source data no longer exists"
     );
-    assert!(!notice.contains("review deadline"));
-    assert!(run_external_blocker_notice(&[blocked.clone()]).is_none());
 
     let independent = dependency_todo("independent", &[]);
     let all = vec![blocked.clone(), independent];
@@ -321,66 +319,42 @@ async fn completely_blocked_cli_pauses_without_review_and_keeps_peers_actionable
     assert!(poke.contains("independent"));
     assert!(!poke.contains("Required source data"));
 
-    blocked.completely_blocked = None;
+    blocked.requires_user_auth = None;
     let (actionable, _) =
         prepare_run_todo_follow_up(&manager, "owner", &[blocked.clone()], true).await;
     assert_eq!(actionable.len(), 1);
     assert_eq!(actionable[0].status, "pending");
-    assert!(run_completely_blocked_notice(&[blocked]).is_none());
+    assert!(run_user_auth_notice(&[blocked]).is_none());
 }
 
 #[test]
-fn completely_blocked_cli_ignores_terminal_tasks_and_keeps_external_notice() {
+fn cli_notice_reports_user_auth_and_goal_that_cannot_complete() {
     let mut blocked = dependency_todo("blocked", &[]);
-    blocked.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
-        reason: "Required source data no longer exists".into(),
+    blocked.requires_user_auth = Some(crate::todo::TodoUserAuth {
+        reason: "Log in to the deploy dashboard".into(),
     });
-    let mut external = dependency_todo("service", &[]);
-    external.external_blocker = Some(crate::todo::TodoExternalBlocker {
-        reason: "Service is unavailable".into(),
-        review_at: chrono::Utc::now() + chrono::Duration::minutes(10),
-    });
-    let notice = run_blocked_notice(&[blocked.clone(), external]).unwrap();
-    assert!(notice.contains("Completely blocked. No way forward."));
-    assert!(notice.contains("Service is unavailable"));
+    let mut abandoned = dependency_todo("service", &[]);
+    abandoned.group = Some("migration".into());
+    let goals = vec![crate::todo::TodoGoal {
+        group: Some("migration".into()),
+        cannot_complete: Some("Source data was deleted upstream".into()),
+        ..Default::default()
+    }];
+    // The declared goal covers only its own group's todos.
+    assert!(run_cannot_complete_notice(&[blocked.clone()], &goals).is_none());
+    let notice = run_blocked_notice(&[blocked.clone(), abandoned.clone()], &goals).unwrap();
+    assert!(notice.contains("Needs your login."));
+    assert!(notice.contains("Goal cannot be completed."));
+    assert!(notice.contains("Source data was deleted upstream"));
     for status in ["completed", "cancelled"] {
         blocked.status = status.into();
-        assert!(run_completely_blocked_notice(&[blocked.clone()]).is_none());
+        abandoned.status = status.into();
+        assert!(run_blocked_notice(&[blocked.clone(), abandoned.clone()], &goals).is_none());
         assert_eq!(
             run_actionable_todos(&[blocked.clone()], &[], "owner").len(),
             1
         );
     }
-}
-
-#[tokio::test]
-async fn external_blocker_cli_suppresses_only_blocked_work_and_reports_durable_review() {
-    let temp = tempfile::tempdir().unwrap();
-    let manager = crate::background::BackgroundTaskManager::with_output_dir(temp.path().into());
-    let mut blocked = dependency_todo("acceptance", &[]);
-    blocked.external_blocker = Some(crate::todo::TodoExternalBlocker {
-        reason: "Coordinator acceptance".into(),
-        review_at: chrono::Utc::now() + chrono::Duration::minutes(10),
-    });
-    let (actionable, resumed) =
-        prepare_run_todo_follow_up(&manager, "owner", &[blocked.clone()], true).await;
-    assert!(actionable.is_empty());
-    assert!(resumed.is_none(), "durable scheduler owns the review wake");
-    let notice = run_external_blocker_notice(&[blocked.clone()]).unwrap();
-    assert!(notice.contains("Coordinator acceptance") && notice.contains("review"));
-    let mixed = vec![blocked.clone(), dependency_todo("independent", &[])];
-    let (actionable, _) = prepare_run_todo_follow_up(&manager, "owner", &mixed, true).await;
-    assert_eq!(actionable.len(), 1);
-    assert_eq!(actionable[0].id, "independent");
-    blocked.external_blocker.as_mut().unwrap().review_at =
-        chrono::Utc::now() - chrono::Duration::seconds(1);
-    let (actionable, _) = prepare_run_todo_follow_up(&manager, "owner", &[blocked], true).await;
-    assert_eq!(
-        actionable.len(),
-        1,
-        "deadline restores reassessment, never completes"
-    );
-    assert_eq!(actionable[0].status, "pending");
 }
 
 #[tokio::test]

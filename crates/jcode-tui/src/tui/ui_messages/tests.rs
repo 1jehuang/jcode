@@ -1289,7 +1289,7 @@ fn complete_blocker_row_precedes_background_clock_and_preserves_reason() {
         content: "Connect account".into(),
         status: "in_progress".into(),
         waiting_on: vec!["build".into()],
-        completely_blocked: Some(crate::todo::TodoCompleteBlocker {
+        requires_user_auth: Some(crate::todo::TodoUserAuth {
             reason: "Only you can authorize\nthis account ✋".into(),
         }),
         ..Default::default()
@@ -1308,7 +1308,7 @@ fn complete_blocker_row_precedes_background_clock_and_preserves_reason() {
         let row = render_todo_item_line_with_background(&todo, &[], &tasks, "", width);
         assert!(row.width() <= width, "{width}: {row:?}");
     }
-    todo.completely_blocked = None;
+    todo.requires_user_auth = None;
     assert!(
         render_todo_item_line_with_background(&todo, &[], &tasks, "", 240)
             .to_string()
@@ -1318,11 +1318,11 @@ fn complete_blocker_row_precedes_background_clock_and_preserves_reason() {
     assert!(
         !render_todo_card_item_line(&todo, "", 240)
             .to_string()
-            .contains("Completely blocked")
+            .contains("Needs your login")
     );
     for status in ["completed", "cancelled"] {
         todo.status = status.into();
-        todo.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+        todo.requires_user_auth = Some(crate::todo::TodoUserAuth {
             reason: "Only you".into(),
         });
         assert!(
@@ -1334,28 +1334,26 @@ fn complete_blocker_row_precedes_background_clock_and_preserves_reason() {
 }
 
 #[test]
-fn complete_blocker_detail_displays_reason_without_user_action_framing() {
+fn user_auth_detail_names_the_authorization_and_flattens_the_reason() {
     let todo = crate::todo::TodoItem {
-        completely_blocked: Some(crate::todo::TodoCompleteBlocker {
-            reason: "No way forward.".into(),
+        requires_user_auth: Some(crate::todo::TodoUserAuth {
+            reason: "Log in to the\ndeploy dashboard".into(),
         }),
         ..Default::default()
     };
     assert_eq!(
         todo_complete_blocker_detail(&todo),
-        "Completely blocked: No way forward."
+        "Needs your login: Log in to the deploy dashboard"
     );
 }
 
 #[test]
-fn external_blocker_todo_row_shows_reason_deadline_and_never_wraps() {
+fn waiting_todo_row_shows_its_reason_and_never_wraps() {
     let mut todo = crate::todo::TodoItem {
         content: "Acceptance".into(),
         status: "pending".into(),
-        external_blocker: Some(crate::todo::TodoExternalBlocker {
-            reason: "Frozen source awaiting coordinator".into(),
-            review_at: chrono::Utc::now() + chrono::Duration::hours(1),
-        }),
+        waiting_on: vec!["bench".into()],
+        waiting_reason: Some("Benchmark rerun in progress".into()),
         ..Default::default()
     };
     let wide = extract_line_text(&render_todo_item_line_with_background(
@@ -1366,25 +1364,30 @@ fn external_blocker_todo_row_shows_reason_deadline_and_never_wraps() {
         160,
     ));
     assert!(
-        wide.contains("blocked: Frozen source awaiting coordinator"),
+        wide.contains("waiting: Benchmark rerun in progress"),
         "{wide}"
     );
-    assert!(wide.contains("review ") && wide.contains("UTC"));
+    assert!(!wide.contains('⊘') && !wide.contains("blocked"), "{wide}");
     for width in 0..160 {
         let line = render_todo_item_line_with_background(&todo, &[], &[], "", width);
         assert!(extract_line_text(&line).width() <= width);
     }
-    todo.external_blocker.as_mut().unwrap().review_at =
-        chrono::Utc::now() - chrono::Duration::seconds(1);
-    let expired = extract_line_text(&render_todo_item_line_with_background(
-        &todo,
-        &[],
-        &[],
-        "",
-        160,
-    ));
-    assert!(expired.contains("review due"));
-    assert_eq!(todo.status, "pending");
+    // The reason belongs to the wait: no IDs or a finished todo, no note.
+    for (ids, status) in [
+        (vec![], "pending"),
+        (vec!["bench".to_string()], "completed"),
+    ] {
+        todo.waiting_on = ids;
+        todo.status = status.into();
+        let text = extract_line_text(&render_todo_item_line_with_background(
+            &todo,
+            &[],
+            &[],
+            "",
+            160,
+        ));
+        assert!(!text.contains("waiting:"), "{text}");
+    }
 }
 
 #[test]
@@ -1464,8 +1467,8 @@ fn render_todos_message_shows_grouped_card_with_status_glyphs() {
             completion_confidence: (status == "completed")
                 .then_some(crate::todo::ConfidenceState::from_legacy_score(95)),
             confidence_history: Vec::new(),
-            external_blocker: None,
-            completely_blocked: None,
+            waiting_reason: None,
+            requires_user_auth: None,
             waiting_on: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,
@@ -1549,8 +1552,8 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
         group: Some("todo rendering".to_string()),
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
         completion_confidence: None,
-        external_blocker: None,
-        completely_blocked: None,
+        waiting_reason: None,
+        requires_user_auth: None,
         waiting_on: Vec::new(),
         confidence_history: vec![
             crate::todo::ConfidenceState::from_legacy_score(80),
@@ -1613,8 +1616,8 @@ fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
         confidence: None,
         completion_confidence: None,
         confidence_history: Vec::new(),
-        external_blocker: None,
-        completely_blocked: None,
+        waiting_reason: None,
+        requires_user_auth: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -1701,8 +1704,8 @@ fn render_todos_message_uses_readable_semantic_colors() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
         completion_confidence: None,
         confidence_history: Vec::new(),
-        external_blocker: None,
-        completely_blocked: None,
+        waiting_reason: None,
+        requires_user_auth: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -1902,8 +1905,8 @@ fn render_todos_message_collapses_passing_quality_gates() {
         confidence: None,
         completion_confidence: Some(crate::todo::ConfidenceState::Validated),
         confidence_history: Vec::new(),
-        external_blocker: None,
-        completely_blocked: None,
+        waiting_reason: None,
+        requires_user_auth: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -1959,8 +1962,8 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
         completion_confidence: None,
         confidence_history: Vec::new(),
-        external_blocker: None,
-        completely_blocked: None,
+        waiting_reason: None,
+        requires_user_auth: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -2005,8 +2008,8 @@ fn render_todos_message_packs_multiple_goal_gates_per_row() {
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
         completion_confidence: None,
         confidence_history: Vec::new(),
-        external_blocker: None,
-        completely_blocked: None,
+        waiting_reason: None,
+        requires_user_auth: None,
         waiting_on: Vec::new(),
         blocked_by: Vec::new(),
         assigned_to: None,
@@ -2078,8 +2081,8 @@ fn render_todo_tool_result_uses_boxed_card_with_goal_scores() {
         group: Some("todo rendering".to_string()),
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(92)),
         completion_confidence: None,
-        external_blocker: None,
-        completely_blocked: None,
+        waiting_reason: None,
+        requires_user_auth: None,
         waiting_on: Vec::new(),
         confidence_history: vec![
             crate::todo::ConfidenceState::from_legacy_score(85),

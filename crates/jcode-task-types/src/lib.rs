@@ -429,29 +429,23 @@ semantic_state! {
     }
 }
 
+/// The todo is paused until the user completes an authentication the agent
+/// has no access to (a login, 2FA prompt, or credential). Not for approvals
+/// or decisions.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TodoExternalBlocker {
-    /// Concrete external condition preventing useful work. Not a completion.
-    pub reason: String,
-    /// Finite deadline to reassess the blocker, not permission to assume it resolved.
-    pub review_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// No way forward.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TodoCompleteBlocker {
-    #[serde(deserialize_with = "deserialize_nonempty_blocker_reason")]
+pub struct TodoUserAuth {
+    #[serde(deserialize_with = "deserialize_nonempty_auth_reason")]
     pub reason: String,
 }
 
-fn deserialize_nonempty_blocker_reason<'de, D>(deserializer: D) -> Result<String, D::Error>
+fn deserialize_nonempty_auth_reason<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let value = String::deserialize(deserializer)?;
     if value.trim().is_empty() {
         return Err(serde::de::Error::custom(
-            "completely blocked reason must be nonempty",
+            "requires_user_auth reason must be nonempty",
         ));
     }
     Ok(value)
@@ -509,11 +503,15 @@ pub struct TodoItem {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub waiting_on: Vec<String>,
+    /// Why this todo waits on `waiting_on`. The tool boundary presents the
+    /// pair as one `{ids, reason}` object. Meaningless without dependencies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub external_blocker: Option<TodoExternalBlocker>,
-    /// No way forward.
+    pub waiting_reason: Option<String>,
+    /// Paused until the user authenticates. Items have no other block: legacy
+    /// `external_blocker` and `completely_blocked` fields are ignored on load,
+    /// so old sessions resume as ordinary actionable work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completely_blocked: Option<TodoCompleteBlocker>,
+    pub requires_user_auth: Option<TodoUserAuth>,
     /// Worker session ID, or reserved `@self` for an explicit start by this
     /// todo list's agent. Absence means ownership is unknown, not local.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -734,6 +732,11 @@ pub struct TodoGoal {
     /// research or open-ended goal is marked complete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopping_evidence: Option<String>,
+    /// Why this goal is impossible to complete. The only way to stop
+    /// continuation for unfinished work that is neither waiting nor awaiting
+    /// user authorization. `None` means the goal is still being pursued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cannot_complete: Option<String>,
 }
 
 /// A goal field changed by a todo-tool update. This lets transcript renderers
@@ -752,6 +755,7 @@ pub enum TodoGoalField {
     Autonomy,
     IterationMaturity,
     StoppingEvidence,
+    CannotComplete,
 }
 
 /// Before/after state for one changed todo goal.
@@ -828,6 +832,23 @@ mod semantic_state_tests {
             payload["waiting_on"] = invalid;
             assert!(serde_json::from_value::<TodoItem>(payload).is_err());
         }
+    }
+
+    #[test]
+    fn legacy_item_blockers_are_ignored_on_load() {
+        let todo: TodoItem = serde_json::from_value(serde_json::json!({
+            "id": "a", "content": "A", "status": "pending", "priority": "high",
+            "external_blocker": {"reason": "old", "review_at": "2020-01-01T00:00:00Z"},
+            "completely_blocked": {"reason": "old"}
+        }))
+        .unwrap();
+        assert_eq!(todo.requires_user_auth, None);
+        let saved = serde_json::to_value(&todo).unwrap();
+        assert!(saved.get("external_blocker").is_none());
+        assert!(saved.get("completely_blocked").is_none());
+        assert!(
+            serde_json::from_value::<TodoUserAuth>(serde_json::json!({"reason": " "})).is_err()
+        );
     }
 
     #[test]
