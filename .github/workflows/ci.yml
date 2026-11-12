@@ -214,19 +214,58 @@ jobs:
       - name: Install mold linker (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq mold
+          # mold is an optimisation, not a requirement to reach this point. A
+          # runner image without sudo or a package manager aborted the job with
+          # exit 127 ("sudo: command not found") before the build started.
+          # Install it when the runner allows it; otherwise warn and let the
+          # Build step fall back to the default linker.
+          if command -v mold >/dev/null 2>&1; then
+            echo "mold already present: $(mold --version | head -1)"
+            exit 0
+          fi
+          SUDO=""
+          if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi
+          if command -v apt-get >/dev/null 2>&1; then
+            $SUDO apt-get update -qq || true
+            $SUDO apt-get install -y -qq mold || true
+          elif command -v dnf >/dev/null 2>&1; then
+            $SUDO dnf install -y mold || true
+          elif command -v apk >/dev/null 2>&1; then
+            $SUDO apk add --no-cache mold || true
+          fi
+          if command -v mold >/dev/null 2>&1; then
+            echo "mold installed: $(mold --version | head -1)"
+          else
+            echo "::warning::mold is unavailable on this runner; the build will use the default linker"
+          fi
 
       - name: Build
         shell: bash
         run: |
           mkdir -p .cargo
           if [ "$RUNNER_OS" = "Linux" ]; then
-            cat > .cargo/config.toml << 'EOF'
-          [target.x86_64-unknown-linux-gnu]
-          linker = "clang"
-          rustflags = ["-C", "link-arg=-fuse-ld=mold"]
-          EOF
+            # Both mold and clang are optional here. A config that names a linker the
+            # runner does not have fails the very first build script:
+            #   error: linker `clang` not found
+            #   error: could not compile `proc-macro2` (build script)
+            # The desk-linux image carries whatever the image recipe bakes in, so only
+            # advertise the tools actually present on this runner.
+            LINKER_LINE=""
+            if command -v clang >/dev/null 2>&1; then
+              LINKER_LINE='linker = "clang"'
+            fi
+            RUSTFLAGS_LINE=""
+            if command -v mold >/dev/null 2>&1; then
+              RUSTFLAGS_LINE='rustflags = ["-C", "link-arg=-fuse-ld=mold"]'
+            fi
+            if [ -n "$LINKER_LINE" ] || [ -n "$RUSTFLAGS_LINE" ]; then
+              echo "[target.x86_64-unknown-linux-gnu]" > .cargo/config.toml
+              if [ -n "$LINKER_LINE" ]; then echo "$LINKER_LINE" >> .cargo/config.toml; fi
+              if [ -n "$RUSTFLAGS_LINE" ]; then echo "$RUSTFLAGS_LINE" >> .cargo/config.toml; fi
+              cat .cargo/config.toml
+            else
+              echo "::warning::neither clang nor mold is available on this runner; using cargo's default linker"
+            fi
           fi
           # NOTE: intentionally NOT exporting RUSTC_WRAPPER=sccache here. Only this
           # step used sccache while the later `cargo test --no-run` steps did not,
