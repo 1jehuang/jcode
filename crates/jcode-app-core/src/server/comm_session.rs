@@ -367,9 +367,7 @@ async fn register_visible_spawned_member(
 mod spawn_policy;
 use spawn_policy::inherit_coordinator_selection;
 pub(crate) use spawn_policy::is_inherit_sentinel;
-pub(super) use spawn_policy::{
-    resolve_swarm_spawn_effort, resolve_swarm_spawn_mode,
-};
+pub(super) use spawn_policy::{resolve_swarm_spawn_effort, resolve_swarm_spawn_mode};
 #[expect(
     clippy::too_many_arguments,
     reason = "server-side swarm spawning needs session, swarm state, provider, and event sinks together"
