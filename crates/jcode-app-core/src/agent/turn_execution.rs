@@ -697,6 +697,23 @@ impl Agent {
             let disabled = config.disabled.iter().cloned().collect();
             tools.retain(|tool| !self.registry.tool_is_disabled(&disabled, &tool.name));
         }
+        // Rarely used built-ins ride the same native deferred path as MCP
+        // tools, so the snapshot rebuild on a provider change covers them too.
+        // An SDK tool that reuses a built-in name is the caller's own and stays.
+        let loader = crate::tool::load_tools::LOAD_TOOLS_NAME;
+        let sdk_disabled: HashSet<String> = sdk
+            .as_ref()
+            .map(|config| config.disabled.iter().cloned().collect())
+            .unwrap_or_default();
+        let loader_allowed = allowed.is_none_or(|set| self.registry.tool_is_allowed(set, loader))
+            && !self.registry.tool_is_disabled(&self.disabled_tools, loader)
+            && !self.registry.tool_is_disabled(&sdk_disabled, loader);
+        crate::tool::load_tools::apply_deferral(
+            &mut tools,
+            self.native_deferred_mcp(),
+            loader_allowed,
+            |name| crate::tool::sdk::custom(&self.session.id, name),
+        );
         tools
     }
 

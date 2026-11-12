@@ -32,6 +32,7 @@ pub mod applet;
 mod goal;
 pub mod inflight;
 mod jcode_docs;
+pub(crate) mod load_tools;
 pub use jcode_docs::{BundledDocs, bundled_docs, register_bundled_docs};
 pub mod mcp;
 mod memory;
@@ -502,6 +503,12 @@ impl Registry {
             Self::insert_tool_timed(&mut m, &mut timings, "bash", bash::BashTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "browser", browser::BrowserTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "open", open::OpenTool::new);
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                load_tools::LOAD_TOOLS_NAME,
+                load_tools::LoadToolsTool::new,
+            );
             #[cfg(target_os = "macos")]
             Self::insert_tool_timed(
                 &mut m,
