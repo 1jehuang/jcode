@@ -24,6 +24,12 @@ const QUERY_INTERVAL: Duration = Duration::from_secs(5);
 /// of parked clients each asking the terminal every five seconds also woke the
 /// terminal emulator for every one of them.
 const UNFOCUSED_QUERY_INTERVAL: Duration = Duration::from_secs(60);
+/// A client with no user input for this long is treated like a background
+/// pane for query cadence. Focus reports alone are not enough: a terminal may
+/// not send them, and a client that missed FocusLost believes it is focused
+/// forever. Each query also costs a reply that wakes the input thread and the
+/// event loop, which measured about one wakeup a second per parked client.
+const INPUT_IDLE_AFTER: Duration = Duration::from_secs(60);
 /// How often to re-check whether runtime queries became enabled (config
 /// change) when nothing else needs the timer.
 const DISABLED_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
@@ -215,6 +221,8 @@ struct RuntimeTheme {
     /// True once the terminal reported FocusLost. Terminals without focus
     /// reporting never send it, so they keep the focused cadence.
     unfocused: bool,
+    /// When the last user event was delivered. Color reports never count.
+    last_input: Option<Instant>,
 }
 
 impl RuntimeTheme {
@@ -226,8 +234,17 @@ impl RuntimeTheme {
         }
     }
 
-    fn timer_query_interval(&self) -> Duration {
-        if self.unfocused {
+    fn note_input(&mut self, event: &Event, now: Instant) {
+        if *event != Event::FocusLost {
+            self.last_input = Some(now);
+        }
+    }
+
+    fn timer_query_interval(&self, now: Instant) -> Duration {
+        let input_idle = self
+            .last_input
+            .is_none_or(|at| now.saturating_duration_since(at) >= INPUT_IDLE_AFTER);
+        if self.unfocused || input_idle {
             UNFOCUSED_QUERY_INTERVAL
         } else {
             QUERY_INTERVAL
@@ -248,7 +265,7 @@ impl RuntimeTheme {
         if self.queries_enabled {
             at = at.min(
                 self.last_query
-                    .map_or(now, |last| last + self.timer_query_interval()),
+                    .map_or(now, |last| last + self.timer_query_interval(now)),
             );
         }
         at
@@ -339,7 +356,7 @@ fn query_if_due(state: &mut RuntimeTheme, now: Instant, focused: bool) {
     let interval = if focused {
         Duration::from_secs(1)
     } else {
-        state.timer_query_interval()
+        state.timer_query_interval(now)
     };
     if state
         .last_query
@@ -381,7 +398,9 @@ fn take_event(state: &mut RuntimeTheme) -> Option<Event> {
             return Some(Event::Resize(width, height));
         }
     }
-    state.reports.ready.pop_front()
+    let event = state.reports.ready.pop_front()?;
+    state.note_input(&event, Instant::now());
+    Some(event)
 }
 
 /// Nonblocking burst drain with the same report filter as [`EventStream`].
@@ -521,8 +540,21 @@ mod tests {
         state.queries_enabled = true;
         assert_eq!(state.next_wake(now), now, "first query is due at once");
         state.last_query = Some(now);
+        // No user input yet: a parked client keeps the slow cadence even if it
+        // believes it is focused.
+        assert_eq!(state.next_wake(now), now + UNFOCUSED_QUERY_INTERVAL);
+        state.note_input(&key('x', KeyModifiers::NONE), now);
         assert_eq!(state.next_wake(now), now + QUERY_INTERVAL);
         assert!(QUERY_INTERVAL > PREFIX_TIMEOUT * 4);
+        // Input went quiet: back to the slow cadence. Typing again makes the
+        // overdue query due at once.
+        let later = now + INPUT_IDLE_AFTER;
+        assert_eq!(state.next_wake(later), now + UNFOCUSED_QUERY_INTERVAL);
+        state.note_input(&key('x', KeyModifiers::NONE), later);
+        assert_eq!(state.next_wake(later), now + QUERY_INTERVAL);
+        state.note_input(&Event::FocusLost, later + INPUT_IDLE_AFTER);
+        assert_eq!(state.last_input, Some(later), "losing focus is not input");
+        state.note_input(&key('x', KeyModifiers::NONE), now);
 
         state.note_focus(&Event::FocusLost);
         assert_eq!(state.next_wake(now), now + UNFOCUSED_QUERY_INTERVAL);
@@ -536,6 +568,7 @@ mod tests {
         let mut state = RuntimeTheme {
             queries_enabled: true,
             last_query: Some(now),
+            last_input: Some(now),
             ..RuntimeTheme::default()
         };
         // An Alt+] chord is held as a possible report prefix and must be
