@@ -23,6 +23,9 @@ impl Agent {
     }
 
     pub(super) fn note_compaction_applied(&mut self) {
+        // Compaction may have dropped the skill announcement, so the next
+        // invocation must re-add the instructions even for identical text.
+        self.active_skill_render = None;
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
         self.locked_tools = None;
@@ -188,6 +191,7 @@ impl Agent {
             }
         };
 
+        self.active_skill_render = None;
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
         self.locked_tools = None;

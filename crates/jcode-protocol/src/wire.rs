@@ -59,6 +59,10 @@ pub enum Request {
         /// daemon resolves the name against its own skill registry.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         active_skill: Option<String>,
+        /// Arguments typed after `/skill` on the request that invokes it.
+        /// Substituted into `$ARGUMENTS` placeholders in the skill body.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        skill_arguments: Option<String>,
         /// Append the user message as context only. The daemon persists it and
         /// acknowledges it without starting a model turn.
         #[serde(default, skip_serializing_if = "is_false")]

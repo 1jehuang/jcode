@@ -15,6 +15,7 @@ mod prompting;
 mod provider;
 mod response_recovery;
 mod runtime_recovery;
+mod skill_activation;
 mod status;
 mod streaming;
 #[cfg(test)]
@@ -270,6 +271,7 @@ pub struct Agent {
     skills: Arc<SkillRegistry>,
     session: Session,
     active_skill: Option<String>,
+    active_skill_render: Option<String>,
     allowed_tools: Option<HashSet<String>>,
     disabled_tools: HashSet<String>,
     /// Generation-scoped ownership of this Agent's global tool-policy entry.
@@ -465,6 +467,7 @@ impl Agent {
             skills,
             session,
             active_skill: None,
+            active_skill_render: None,
             allowed_tools,
             disabled_tools,
             _tool_policy_registration: tool_policy_registration,
@@ -804,6 +807,7 @@ impl Agent {
 
     fn reset_runtime_state_for_session_change(&mut self) {
         self.active_skill = None;
+        self.active_skill_render = None;
         self.last_upstream_provider = None;
         self.last_connection_type = None;
         self.last_status_detail = None;
@@ -820,46 +824,6 @@ impl Agent {
         self.locked_tools = None;
         self.mcp_late_register_resolved = false;
         self.rewind_undo_snapshot = None;
-    }
-
-    /// Synchronize the remote client's selected skill, accepting only names
-    /// present in the daemon's own registry snapshot.
-    pub(super) fn set_remote_active_skill(&mut self, active_skill: Option<String>) -> bool {
-        let skills = self.current_skills_snapshot();
-        let recognized = active_skill
-            .as_ref()
-            .is_none_or(|name| skills.get(name).is_some());
-        let next = active_skill.filter(|name| skills.get(name).is_some());
-        if next != self.active_skill {
-            self.active_skill = next;
-            self.announce_active_skill();
-        }
-        recognized
-    }
-
-    /// Record the newly active skill's instructions as a hidden transcript
-    /// message. The system prompt stays byte-identical across skill changes.
-    pub(crate) fn announce_active_skill(&mut self) {
-        let Some(name) = self.active_skill.clone() else {
-            return;
-        };
-        let skills = self.current_skills_snapshot();
-        let Some(skill) = skills.get(&name) else {
-            return;
-        };
-        let text = format!(
-            "<system-reminder>\n# Active Skill\n\n{}\n</system-reminder>",
-            skill.get_prompt().trim()
-        );
-        self.add_message_with_display_role(
-            Role::User,
-            vec![ContentBlock::Text {
-                text,
-                cache_control: None,
-            }],
-            Some(StoredDisplayRole::System),
-        );
-        self.persist_session_best_effort("active skill announcement");
     }
 
     fn sync_session_compaction_state_from_manager(

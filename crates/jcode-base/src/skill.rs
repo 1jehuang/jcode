@@ -8,8 +8,11 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::sync::RwLock;
 
+mod arguments;
 mod invocation;
+mod list_value;
 pub use invocation::SkillInvocation;
+use list_value::ListValue;
 
 /// A skill definition from SKILL.md
 #[derive(Debug, Clone)]
@@ -17,6 +20,7 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub allowed_tools: Option<Vec<String>>,
+    pub arguments: Vec<String>,
     pub content: String,
     pub path: PathBuf,
     /// Normalized search text, built on first use. Normalizing every skill
@@ -30,14 +34,8 @@ struct SkillFrontmatter {
     name: String,
     description: String,
     #[serde(rename = "allowed-tools")]
-    allowed_tools: Option<AllowedTools>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum AllowedTools {
-    CommaDelimited(String),
-    Sequence(Vec<String>),
+    allowed_tools: Option<ListValue>,
+    arguments: Option<ListValue>,
 }
 
 /// Registry of available skills
@@ -517,19 +515,15 @@ impl SkillRegistry {
             name,
             description,
             allowed_tools,
+            arguments,
         } = frontmatter;
 
-        let allowed_tools = allowed_tools.map(|tools| match tools {
-            AllowedTools::CommaDelimited(tools) => tools
-                .split(',')
-                .map(|tool| tool.trim().to_string())
-                .collect(),
-            AllowedTools::Sequence(tools) => tools,
-        });
+        let allowed_tools = allowed_tools.map(ListValue::into_comma_list);
         Ok(Skill {
             name,
             description,
             allowed_tools,
+            arguments: arguments.map_or_else(Vec::new, ListValue::into_names),
             content: body,
             path: path.to_path_buf(),
             search_text: std::sync::OnceLock::new(),
