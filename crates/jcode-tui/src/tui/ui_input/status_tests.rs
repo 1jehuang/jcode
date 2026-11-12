@@ -858,7 +858,10 @@ fn voice_waveform_row_never_exceeds_width() {
         assert!(text.width() <= width.max(1), "width {width}: {text:?}");
     }
     let wide = line_text(&voice_waveform_line(&preview, 120));
-    assert!(wide.contains("0:07") && wide.contains("Esc cancel"), "{wide}");
+    assert!(
+        wide.contains("0:07") && wide.contains("Esc cancel"),
+        "{wide}"
+    );
     let narrow = line_text(&voice_waveform_line(&preview, 20));
     assert!(!narrow.contains("Esc"), "hint dropped first: {narrow}");
     let transcribing = line_text(&voice_waveform_line(&voice_preview(false, vec![]), 80));

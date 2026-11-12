@@ -186,7 +186,11 @@ pub(crate) const MANAGED_CLOUD_LAUNCHER: &str = "/opt/jcode-cloud/jcode";
 const MANAGED_CLOUD_RELEASES: &str = "/opt/jcode-cloud/releases/";
 
 fn managed_cloud_reload_target(running: Option<&Path>) -> Option<(PathBuf, &'static str)> {
-    managed_cloud_reload_target_in(running, Path::new(MANAGED_CLOUD_LAUNCHER), MANAGED_CLOUD_RELEASES)
+    managed_cloud_reload_target_in(
+        running,
+        Path::new(MANAGED_CLOUD_LAUNCHER),
+        MANAGED_CLOUD_RELEASES,
+    )
 }
 
 fn managed_cloud_reload_target_in(
@@ -390,8 +394,13 @@ mod managed_cloud_target_tests {
         let launcher = dir.path().join("jcode");
         std::fs::write(&launcher, b"bin").unwrap();
         let local = dir.path().join("builds/versions/x/jcode");
-        assert!(managed_cloud_reload_target_in(Some(&local), &launcher, "/opt/jcode-cloud/releases/").is_none());
-        assert!(managed_cloud_reload_target_in(None, &launcher, "/opt/jcode-cloud/releases/").is_none());
+        assert!(
+            managed_cloud_reload_target_in(Some(&local), &launcher, "/opt/jcode-cloud/releases/")
+                .is_none()
+        );
+        assert!(
+            managed_cloud_reload_target_in(None, &launcher, "/opt/jcode-cloud/releases/").is_none()
+        );
     }
 }
 

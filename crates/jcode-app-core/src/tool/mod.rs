@@ -12,7 +12,6 @@ mod browser;
 mod calendar;
 mod codemode;
 mod communicate;
-mod compile_remote;
 #[cfg(target_os = "macos")]
 mod computer;
 mod config_edit_notice;
@@ -439,12 +438,6 @@ impl Registry {
                 apply_patch::ApplyPatchTool::new,
             );
             Self::insert_tool_timed(&mut m, &mut timings, "bash", bash::BashTool::new);
-            Self::insert_tool_timed(
-                &mut m,
-                &mut timings,
-                "compile_remote",
-                compile_remote::CompileRemoteTool::new,
-            );
             Self::insert_tool_timed(&mut m, &mut timings, "browser", browser::BrowserTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "open", open::OpenTool::new);
             #[cfg(target_os = "macos")]

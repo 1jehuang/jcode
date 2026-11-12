@@ -312,7 +312,8 @@ async fn test_stdin_reader_gets_eof_immediately() {
 
     // Commands are non-interactive: a stdin reader sees EOF right away, and no
     // input request is ever raised.
-    let input = json!({"command": "if read -r line; then echo got; else echo eof_ok; fi", "timeout": 5000});
+    let input =
+        json!({"command": "if read -r line; then echo got; else echo eof_ok; fi", "timeout": 5000});
     let ctx = make_ctx(Some(tx));
     let started = std::time::Instant::now();
     let result = tool.execute(input, ctx).await.unwrap();

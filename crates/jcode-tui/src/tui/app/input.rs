@@ -3443,7 +3443,12 @@ impl App {
     /// release, which doubled the frames drawn while typing.
     pub(super) fn key_release_visible_state(
         &self,
-    ) -> (bool, bool, Option<char>, Option<super::voice_input::VoicePhase>) {
+    ) -> (
+        bool,
+        bool,
+        Option<char>,
+        Option<super::voice_input::VoicePhase>,
+    ) {
         // Badges render only through the `*_is_active` gates (the held key
         // only shows under Alt+Shift), so compare those, not raw fields.
         let now = std::time::Instant::now();

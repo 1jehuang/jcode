@@ -61,11 +61,25 @@ mod inherited_serve_flags_tests {
     #[test]
     fn keeps_provider_and_model_before_serve_only() {
         assert_eq!(
-            inherited_serve_flags(args(&["jcode", "--provider", "jcode", "serve", "--socket", "/x"])),
+            inherited_serve_flags(args(&[
+                "jcode",
+                "--provider",
+                "jcode",
+                "serve",
+                "--socket",
+                "/x"
+            ])),
             args(&["--provider", "jcode"])
         );
         assert_eq!(
-            inherited_serve_flags(args(&["jcode", "--no-update", "--model=x", "serve", "--provider", "y"])),
+            inherited_serve_flags(args(&[
+                "jcode",
+                "--no-update",
+                "--model=x",
+                "serve",
+                "--provider",
+                "y"
+            ])),
             args(&["--model=x"])
         );
         assert!(inherited_serve_flags(args(&["jcode", "serve"])).is_empty());
