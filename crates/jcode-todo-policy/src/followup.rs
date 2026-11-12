@@ -92,26 +92,34 @@ pub fn todo_waits_on_running_task(
     todo.waiting_on.iter().any(|task_id| is_running(task_id))
 }
 
-/// Explicit external waits remain incomplete. Their review time only restores
-/// actionability so the agent can reassess, never marks them done.
-pub fn todo_has_external_blocker_at(todo: &TodoItem, now: chrono::DateTime<chrono::Utc>) -> bool {
-    is_incomplete_todo(todo)
-        && todo
-            .external_blocker
-            .as_ref()
-            .is_some_and(|blocker| !blocker.reason.trim().is_empty() && blocker.review_at > now)
+/// The declared reason a goal is impossible to complete, if any.
+pub fn goal_cannot_complete(goal: &TodoGoal) -> Option<&str> {
+    goal.cannot_complete
+        .as_deref()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
 }
 
-pub fn todo_has_external_blocker(todo: &TodoItem) -> bool {
-    todo_has_external_blocker_at(todo, chrono::Utc::now())
+/// Items carry no block of their own. Unfinished work stops being continued
+/// only when its whole goal was declared impossible to complete.
+pub fn todo_goal_cannot_complete(todo: &TodoItem, goals: &[TodoGoal]) -> bool {
+    is_incomplete_todo(todo) && todo_cannot_complete_reason(todo, goals).is_some()
 }
 
-/// Only valid, incomplete complete blockers suppress work. Programmatically
-/// constructed snapshots may bypass the persisted type's field validation.
-pub fn todo_completely_blocked(todo: &TodoItem) -> bool {
+pub fn todo_cannot_complete_reason<'a>(todo: &TodoItem, goals: &'a [TodoGoal]) -> Option<&'a str> {
+    let group = crate::normalized_group(todo.group.as_deref());
+    goals
+        .iter()
+        .find(|goal| crate::normalized_group(goal.group.as_deref()) == group)
+        .and_then(goal_cannot_complete)
+}
+
+/// Only a valid authorization request on unfinished work pauses it.
+/// Programmatically constructed snapshots may bypass field validation.
+pub fn todo_requires_user_auth(todo: &TodoItem) -> bool {
     is_incomplete_todo(todo)
         && todo
-            .completely_blocked
+            .requires_user_auth
             .as_ref()
             .is_some_and(|required| !required.reason.trim().is_empty())
 }
@@ -292,8 +300,8 @@ impl FollowUpPolicy {
             .iter()
             .copied()
             .filter(|todo| {
-                !todo_completely_blocked(todo)
-                    && !todo_has_external_blocker(todo)
+                !todo_requires_user_auth(todo)
+                    && !todo_goal_cannot_complete(todo, goals)
                     && !todo_waits_on_running_task(todo, |id| {
                         snapshot
                             .running_background_tasks

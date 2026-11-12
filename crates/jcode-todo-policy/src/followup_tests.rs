@@ -34,10 +34,10 @@ fn kind(decision: &Decision) -> Option<FollowUpKind> {
 #[test]
 fn completely_blocked_pauses_retries_but_not_independent_work() {
     let mut blocked = todo("no-way-forward", "pending");
-    blocked.completely_blocked = Some(crate::TodoCompleteBlocker {
+    blocked.requires_user_auth = Some(crate::TodoUserAuth {
         reason: "Required data is permanently unavailable".into(),
     });
-    assert!(todo_completely_blocked(&blocked));
+    assert!(todo_requires_user_auth(&blocked));
     let mut state = snapshot(vec![blocked]);
     state.long_session_review_due = true;
     let mut policy = FollowUpPolicy::new(true);
@@ -50,37 +50,37 @@ fn completely_blocked_pauses_retries_but_not_independent_work() {
     assert!(followup.message.contains("independent"));
     assert!(!followup.message.contains("no-way-forward"));
     state.todos.pop();
-    state.todos[0].completely_blocked = None;
+    state.todos[0].requires_user_auth = None;
     assert_eq!(
         kind(&policy.decide(&state)),
         Some(FollowUpKind::IncompleteTodos)
     );
     for status in ["completed", "cancelled", "done"] {
         state.todos[0].status = status.into();
-        state.todos[0].completely_blocked = Some(crate::TodoCompleteBlocker::default());
-        assert!(!todo_completely_blocked(&state.todos[0]));
+        state.todos[0].requires_user_auth = Some(crate::TodoUserAuth::default());
+        assert!(!todo_requires_user_auth(&state.todos[0]));
     }
 }
 
 #[test]
-fn completely_blocked_ignores_invalid_programmatic_snapshots() {
+fn user_auth_ignores_invalid_programmatic_snapshots() {
     for reason in ["", " \n\t"] {
         let mut item = todo("still actionable", "pending");
-        item.completely_blocked = Some(crate::TodoCompleteBlocker {
+        item.requires_user_auth = Some(crate::TodoUserAuth {
             reason: reason.into(),
         });
-        assert!(!todo_completely_blocked(&item));
+        assert!(!todo_requires_user_auth(&item));
         let mut policy = FollowUpPolicy::new(true);
         let decision = policy.decide(&snapshot(vec![item]));
         assert_eq!(kind(&decision), Some(FollowUpKind::IncompleteTodos));
     }
     let mut valid = todo("owner approval", "pending");
-    valid.completely_blocked = Some(crate::TodoCompleteBlocker {
+    valid.requires_user_auth = Some(crate::TodoUserAuth {
         reason: " Required data is permanently unavailable ".into(),
     });
-    assert!(todo_completely_blocked(&valid));
+    assert!(todo_requires_user_auth(&valid));
     valid.status = "completed".into();
-    assert!(!todo_completely_blocked(&valid));
+    assert!(!todo_requires_user_auth(&valid));
 }
 
 #[test]
@@ -90,7 +90,7 @@ fn removed_user_action_condition_does_not_pause_work() {
         "requires_user_action": {"action": "Choose an option", "reason": "Preference"}
     }))
     .unwrap();
-    assert!(item.completely_blocked.is_none());
+    assert!(item.requires_user_auth.is_none());
     let mut policy = FollowUpPolicy::new(true);
     assert_eq!(
         kind(&policy.decide(&snapshot(vec![item]))),
@@ -99,13 +99,13 @@ fn removed_user_action_condition_does_not_pause_work() {
 }
 
 #[test]
-fn completely_blocked_serialization_rejects_missing_or_blank_fields() {
+fn user_auth_serialization_rejects_missing_or_blank_fields() {
     let legacy =
         serde_json::json!({"id":"a", "content":"A", "status":"pending", "priority":"high"});
     assert!(
         serde_json::from_value::<TodoItem>(legacy.clone())
             .unwrap()
-            .completely_blocked
+            .requires_user_auth
             .is_none()
     );
     for required in [
@@ -114,78 +114,73 @@ fn completely_blocked_serialization_rejects_missing_or_blank_fields() {
         serde_json::json!({}),
     ] {
         let mut value = legacy.clone();
-        value["completely_blocked"] = required;
+        value["requires_user_auth"] = required;
         assert!(serde_json::from_value::<TodoItem>(value).is_err());
     }
     let mut value = legacy;
-    value["completely_blocked"] = serde_json::json!({"reason":"No implementation exists"});
+    value["requires_user_auth"] = serde_json::json!({"reason":"No implementation exists"});
     let item: TodoItem = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(
-        serde_json::to_value(item).unwrap()["completely_blocked"],
-        value["completely_blocked"]
+        serde_json::to_value(item).unwrap()["requires_user_auth"],
+        value["requires_user_auth"]
     );
 }
 
 #[test]
-fn external_blocker_pauses_only_blocked_todos_without_spending_review_budget() {
-    let now = chrono::Utc::now();
-    let mut blocked = todo("await acceptance", "pending");
-    blocked.external_blocker = Some(crate::TodoExternalBlocker {
-        reason: "Coordinator must accept frozen source".into(),
-        review_at: now + chrono::Duration::minutes(5),
-    });
-    let mut state = snapshot(vec![blocked.clone()]);
+fn goal_that_cannot_complete_stops_only_its_own_todos_without_spending_budget() {
+    let mut abandoned = todo("migrate data", "pending");
+    abandoned.group = Some("migration".into());
+    let mut state = snapshot(vec![abandoned.clone()]);
+    state.goals = vec![TodoGoal {
+        group: Some(" migration ".into()),
+        cannot_complete: Some("Source data was deleted upstream".into()),
+        ..Default::default()
+    }];
     state.long_session_review_due = true;
     let mut policy = FollowUpPolicy::new(true);
     for _ in 0..10 {
         assert_eq!(policy.decide(&state), Decision::default());
     }
-    assert!(is_incomplete_todo(&blocked));
-    assert!(todo_has_external_blocker_at(&blocked, now));
-    assert!(!todo_has_external_blocker_at(
-        &blocked,
-        now + chrono::Duration::minutes(5)
-    ));
+    assert!(is_incomplete_todo(&abandoned));
+    assert!(todo_goal_cannot_complete(&abandoned, &state.goals));
+    assert_eq!(
+        todo_cannot_complete_reason(&abandoned, &state.goals),
+        Some("Source data was deleted upstream")
+    );
     state.long_session_review_due = false;
+    // Ungrouped work belongs to a different goal and stays actionable.
     state.todos.push(todo("independent", "pending"));
+    assert!(!todo_goal_cannot_complete(&state.todos[1], &state.goals));
     let followup = policy.decide(&state).follow_up.unwrap();
     assert!(followup.message.contains("independent"));
-    assert!(!followup.message.contains("await acceptance"));
+    assert!(!followup.message.contains("migrate data"));
     state.todos.pop();
-    state.todos[0].external_blocker.as_mut().unwrap().review_at =
-        now - chrono::Duration::seconds(1);
+    // A blank reason is not a declaration, and clearing it resumes the work.
+    for cleared in [Some(" \n".to_string()), None] {
+        state.goals[0].cannot_complete = cleared;
+        assert!(!todo_goal_cannot_complete(&state.todos[0], &state.goals));
+    }
     let followup = policy.decide(&state).follow_up.unwrap();
     assert_eq!(followup.kind, FollowUpKind::IncompleteTodos);
-    assert!(followup.message.contains("await acceptance"));
-    assert_eq!(
-        state.todos[0].status, "pending",
-        "expiry reassesses, never completes"
-    );
-    state.todos[0].external_blocker = None;
-    assert!(!todo_has_external_blocker(&state.todos[0]));
+    assert!(followup.message.contains("migrate data"));
+    assert_eq!(state.todos[0].status, "pending");
 }
 
 #[test]
-fn external_blocker_requires_typed_finite_deadline_and_preserves_legacy_todos() {
-    let mut value =
-        serde_json::json!({"id":"a", "content":"A", "status":"pending", "priority":"high"});
-    let legacy: TodoItem = serde_json::from_value(value.clone()).unwrap();
-    assert!(legacy.external_blocker.is_none());
-    for blocker in [
-        serde_json::json!({"reason":"wait"}),
-        serde_json::json!({"review_at":"soon", "reason":"wait"}),
-        serde_json::json!({"review_at":"2026-10-26T00:00:00Z"}),
-    ] {
-        value["external_blocker"] = blocker;
-        assert!(serde_json::from_value::<TodoItem>(value.clone()).is_err());
-    }
-    value["external_blocker"] =
-        serde_json::json!({"reason":"wait", "review_at":"2026-10-26T00:00:00Z"});
-    let loaded: TodoItem = serde_json::from_value(value.clone()).unwrap();
-    assert!(loaded.external_blocker.is_some());
+fn removed_item_blockers_never_pause_work() {
+    // Old sessions stored item-level blockers. They load as ordinary
+    // actionable todos instead of failing or staying silently suppressed.
+    let loaded: TodoItem = serde_json::from_value(serde_json::json!({
+        "id":"a", "content":"A", "status":"pending", "priority":"high",
+        "external_blocker": {"reason":"wait", "review_at":"2099-01-01T00:00:00Z"},
+        "completely_blocked": {"reason":"No way forward"}
+    }))
+    .unwrap();
+    assert!(loaded.requires_user_auth.is_none());
+    let mut policy = FollowUpPolicy::new(true);
     assert_eq!(
-        serde_json::to_value(loaded).unwrap()["external_blocker"],
-        value["external_blocker"]
+        kind(&policy.decide(&snapshot(vec![loaded]))),
+        Some(FollowUpKind::IncompleteTodos)
     );
 }
 
@@ -193,8 +188,8 @@ fn external_blocker_requires_typed_finite_deadline_and_preserves_legacy_todos() 
 fn running_dependencies_pause_without_consuming_budget_or_reviews() {
     let mut policy = FollowUpPolicy::new(true);
     let mut state = snapshot(vec![TodoItem {
-        completely_blocked: None,
-        external_blocker: None,
+        requires_user_auth: None,
+        waiting_reason: None,
         waiting_on: vec!["build".into()],
         ..todo("validate", "in_progress")
     }]);
@@ -227,8 +222,8 @@ fn mixed_dependencies_poke_only_actionable_todos() {
     let mut policy = FollowUpPolicy::new(true);
     let mut state = snapshot(vec![
         TodoItem {
-            completely_blocked: None,
-            external_blocker: None,
+            requires_user_auth: None,
+            waiting_reason: None,
             waiting_on: vec!["build".into()],
             ..todo("blocked-validation", "pending")
         },
@@ -249,8 +244,8 @@ fn mixed_dependencies_poke_only_actionable_todos() {
 #[test]
 fn dependencies_only_block_when_runtime_confirms_running() {
     let todo = TodoItem {
-        completely_blocked: None,
-        external_blocker: None,
+        requires_user_auth: None,
+        waiting_reason: None,
         waiting_on: vec!["first".into(), "second".into()],
         ..todo("work", "pending")
     };

@@ -1819,6 +1819,10 @@ pub struct App {
     // CPU animating screens nobody is looking at. Defaults to true because not
     // every terminal reports focus events.
     client_focused: bool,
+    // Whether a focus report or an input event has confirmed `client_focused`
+    // since this process started. Until then focus is only presumed; see
+    // `expire_presumed_focus`.
+    client_focus_confirmed: bool,
     // Optional client runtime memory logger for low-overhead attribution journaling.
     runtime_memory_log: Option<RuntimeMemoryLogController>,
     // Once-per-idle-period retained-heap trim state (see idle_heap_release.rs).

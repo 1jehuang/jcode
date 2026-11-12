@@ -279,7 +279,9 @@ fn model_facing_descriptions_stay_compact() {
         "todo description bytes: {bytes}; schema bytes: {}",
         schema.to_string().len()
     );
-    assert!(bytes < 3_500, "todo descriptions grew to {bytes} bytes");
+    // Blocker guidance lives on the item fields, which the schema repeats for
+    // phases, add, and update, so it is counted three times here.
+    assert!(bytes < 4_000, "todo descriptions grew to {bytes} bytes");
     for route in ["add", "update"] {
         let properties = &schema["properties"][route]["items"]["properties"];
         for field in ["description", "status", "priority", "lane", "phase"] {
@@ -399,7 +401,8 @@ fn schema_advertises_intent_and_todos() {
     assert!(!goal_props.contains_key("user_intention"));
     assert!(!goal_props.contains_key("alignment_score"));
     assert!(!goal_props.contains_key("objective"));
-    assert_eq!(goal_props.len(), 11);
+    assert!(goal_props.contains_key("cannot_complete"));
+    assert_eq!(goal_props.len(), 12);
     assert_eq!(
         goal_props["feedback_loop_relevance"]["enum"],
         json!([

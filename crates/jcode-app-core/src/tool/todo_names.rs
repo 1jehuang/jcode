@@ -4,10 +4,9 @@ use super::*;
 /// Keep the existing leniency for providers that stringify tool arguments.
 /// Item fields where an explicit null is a documented "clear" instruction.
 const NULL_CLEARS: &[&str] = &[
-    "completely_blocked",
-    "external_blocker",
     "lane_dependencies",
     "lane_after",
+    "requires_user_auth",
     "waiting_on",
 ];
 

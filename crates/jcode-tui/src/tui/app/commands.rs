@@ -413,6 +413,7 @@ pub(super) fn create_transfer_session_from_parent(
     // not foreign dependencies, and leave the parent's durable todos intact.
     for todo in &mut todos {
         todo.waiting_on.clear();
+        todo.waiting_reason = None;
     }
     let mut child = crate::session::Session::create(Some(parent_session_id.to_string()), None);
     child.messages.clear();

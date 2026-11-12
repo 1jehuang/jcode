@@ -253,11 +253,19 @@ impl App {
         &self.background_task_rows
     }
 
-    /// User-only blockers and live waits suppress all automatic continuations.
+    /// Todos awaiting user authorization and live waits suppress automatic
+    /// continuations, as does a goal declared impossible to complete.
     /// Disk state survives a TUI reload and overrides stale retained UI rows.
     pub(super) fn todo_is_paused_for_auto_followup(&self, todo: &crate::todo::TodoItem) -> bool {
-        crate::todo::todo_completely_blocked(todo)
-            || crate::todo::todo_has_external_blocker(todo)
+        let session_id = self
+            .remote_session_id
+            .as_deref()
+            .unwrap_or(&self.session.id);
+        crate::todo::todo_requires_user_auth(todo)
+            || crate::todo::todo_goal_cannot_complete(
+                todo,
+                &crate::todo::load_goals(session_id).unwrap_or_default(),
+            )
             || crate::todo::todo_waits_on_running_task(todo, |task_id| {
                 self.running_todo_await_dependency(task_id)
                     || self.running_todo_background_dependency(task_id).is_some()

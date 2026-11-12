@@ -34,46 +34,61 @@ pub(super) fn cached_todo_payload(content: &str) -> Option<std::sync::Arc<TodoCa
     TODO_PAYLOAD_CACHE.with_borrow_mut(|cache| cache.get(content))
 }
 
-pub(super) fn todo_blocker_footer_at(
-    payload: Option<&str>,
-    width: u16,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Vec<Line<'static>> {
-    let Some(payload) = payload.and_then(cached_todo_payload) else {
-        return Vec::new();
-    };
-    render_todo_blocker_footer(&payload, width, now)
-}
-
-fn render_todo_blocker_footer(
+pub(super) fn render_todo_blocker_footer(
     payload: &TodoCardPayload,
     width: u16,
-    now: chrono::DateTime<chrono::Utc>,
 ) -> Vec<Line<'static>> {
-    payload
-        .todos()
+    let row = |text: String| {
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        super::truncate_line_with_ellipsis_to_width(
+            &Line::styled(text, Style::default().fg(todo_warning_color())),
+            usize::from(width),
+        )
+    };
+    let todos = payload.todos();
+    let goals = match payload {
+        TodoCardPayload::Current { goals, .. } => goals.as_slice(),
+        TodoCardPayload::Legacy(_) => &[],
+    };
+    let mut lines: Vec<Line<'static>> = todos
         .iter()
         .filter(|todo| crate::todo::is_incomplete_todo(todo))
         .filter_map(|todo| {
-            let reason = if crate::todo::todo_completely_blocked(todo) {
-                todo.completely_blocked.as_ref().map(|b| b.reason.clone())
-            } else if crate::todo::todo_has_external_blocker_at(todo, now) {
-                todo.external_blocker.as_ref().map(|b| b.reason.clone())
+            if crate::todo::todo_requires_user_auth(todo) {
+                let reason = &todo.requires_user_auth.as_ref()?.reason;
+                Some(row(format!("✋ Needs you · {}: {}", todo.content, reason)))
             } else if !todo.blocked_by.is_empty() {
-                Some(format!("waiting on {}", todo.blocked_by.join(", ")))
+                Some(row(format!(
+                    "Blocked · {}: waiting on {}",
+                    todo.content,
+                    todo.blocked_by.join(", ")
+                )))
             } else {
                 None
-            }?;
-            let text = format!("Blocked · {}: {}", todo.content, reason)
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            Some(super::truncate_line_with_ellipsis_to_width(
-                &Line::styled(text, Style::default().fg(todo_warning_color())),
-                usize::from(width),
-            ))
+            }
         })
-        .collect()
+        .collect();
+    // A goal declared impossible stops its todos, so say so once per goal
+    // while any of that goal's work is still open.
+    for goal in goals {
+        let Some(reason) = crate::todo::goal_cannot_complete(goal) else {
+            continue;
+        };
+        let open = todos.iter().any(|todo| {
+            crate::todo::is_incomplete_todo(todo)
+                && crate::todo::todo_goal_cannot_complete(todo, std::slice::from_ref(goal))
+        });
+        if open {
+            let label = goal
+                .group
+                .as_deref()
+                .map(str::trim)
+                .filter(|group| !group.is_empty())
+                .unwrap_or("goal");
+            lines.push(row(format!("Cannot complete · {label}: {reason}")));
+        }
+    }
+    lines
 }
 
 #[cfg(test)]

@@ -307,8 +307,23 @@ const READ_BUFFER_SHRINK_THRESHOLD: usize = 256 * 1024;
 /// grow/shrink thrash.
 const READ_BUFFER_RETAIN_CAPACITY: usize = 64 * 1024;
 
-fn account_usage_poll_due(last_poll: Option<Instant>, now: Instant) -> bool {
-    last_poll.is_none_or(|last| now.saturating_duration_since(last) >= Duration::from_secs(30))
+/// Usage poll period for a window the user is looking at.
+const ACCOUNT_USAGE_POLL: Duration = Duration::from_secs(30);
+/// Usage poll period for an unfocused window. The quota display there is not
+/// being read, and focusing the window polls on the next tick. With 34 parked
+/// clients the 30s poll alone sent the shared server a request every second.
+const ACCOUNT_USAGE_POLL_UNFOCUSED: Duration = Duration::from_secs(300);
+
+fn account_usage_poll_interval(focused: bool) -> Duration {
+    if focused {
+        ACCOUNT_USAGE_POLL
+    } else {
+        ACCOUNT_USAGE_POLL_UNFOCUSED
+    }
+}
+
+fn account_usage_poll_due(last_poll: Option<Instant>, now: Instant, interval: Duration) -> bool {
+    last_poll.is_none_or(|last| now.saturating_duration_since(last) >= interval)
 }
 
 fn remote_protocol_frame_exceeds_limit(buffered: usize, incoming: usize) -> bool {
@@ -980,8 +995,14 @@ impl RemoteConnection {
     /// Request account quotas from the daemon, never from the render thread.
     /// The daemon shares in-flight fetches and applies provider retry backoff.
     pub async fn poll_account_usage(&mut self) -> Result<()> {
+        self.poll_account_usage_for_focus(true).await
+    }
+
+    /// Periodic poll from the tick loop, paced by whether the window is focused.
+    pub async fn poll_account_usage_for_focus(&mut self, focused: bool) -> Result<()> {
         let now = Instant::now();
-        if !account_usage_poll_due(self.last_account_usage_poll, now) {
+        let interval = account_usage_poll_interval(focused);
+        if !account_usage_poll_due(self.last_account_usage_poll, now, interval) {
             return Ok(());
         }
         // Throttle failed sends too, so a slow connection cannot flood retries.

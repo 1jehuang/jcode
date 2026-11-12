@@ -262,7 +262,7 @@ pub fn lane_todos_for_worker(coordinator_todos: &[TodoItem], lane: &str) -> Vec<
         .map(|todo| TodoItem {
             assigned_to: None,
             blocked_by: Vec::new(),
-            external_blocker: None,
+            waiting_reason: None,
             waiting_on: Vec::new(),
             ..todo.clone()
         })
@@ -331,13 +331,14 @@ pub fn merge_worker_lane(
             }
             // Background task IDs belong to the destination session, not the
             // worker. New items get no references from the source session.
-            item.waiting_on = match coordinator_todos
+            // The reason describes those IDs, so it travels with them.
+            (item.waiting_on, item.waiting_reason) = match coordinator_todos
                 .iter()
                 .find(|old| lane_id(old) == link.lane && old.id == item.id)
             {
-                Some(old) => old.waiting_on.clone(),
+                Some(old) => (old.waiting_on.clone(), old.waiting_reason.clone()),
                 // A newly introduced worker item cannot inherit another session's waits.
-                None => Vec::new(),
+                None => (Vec::new(), None),
             };
             item
         })

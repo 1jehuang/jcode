@@ -2623,10 +2623,7 @@ fn handle_server_event_inner(
         ServerEvent::Todos {
             session_id,
             payload,
-        } => {
-            app.receive_remote_todos(session_id, payload);
-            true
-        }
+        } => app.receive_remote_todos(session_id, payload),
         ServerEvent::SwarmStatus { members } => {
             if app.swarm_enabled {
                 // Surface member lifecycle transitions (done/failed/blocked/
@@ -2854,6 +2851,7 @@ fn handle_server_event_inner(
                 if let Some(ref pname) = provider_name {
                     app.remote_provider_name = Some(pname.clone());
                 }
+                let automatic_failover = automatic_route.is_some();
                 if let Some(selection) = automatic_route {
                     app.session.route_api_method = Some(selection.api_method);
                 }
@@ -2915,10 +2913,15 @@ fn handle_server_event_inner(
                             .filter(|_| is_oauth)
                             .map(|email| email.as_str()),
                     );
-                    app.push_display_message(DisplayMessage::system(format!(
-                        "✓ Switched to model: {}{}",
-                        model, suffix
-                    )));
+                    // One line for an automatic failover: the confirmed route
+                    // replaces the in-flight "Switching to" line and absorbs
+                    // a usage-limit error as its cause.
+                    let message = if automatic_failover {
+                        app.confirmed_failover_message(&model, &suffix)
+                    } else {
+                        format!("✓ Switched to model: {}{}", model, suffix)
+                    };
+                    app.push_display_message(DisplayMessage::system(message));
                 }
                 if model_actually_changed {
                     app.set_status_notice(format!("Model → {}", model));

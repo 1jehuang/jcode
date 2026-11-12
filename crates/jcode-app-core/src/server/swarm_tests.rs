@@ -386,7 +386,7 @@ async fn live_status_fanout_projects_worker_events_into_broadcast() {
             id: "login".into(),
             content: "Authenticate".into(),
             status: "pending".into(),
-            completely_blocked: Some(crate::todo::TodoCompleteBlocker {
+            requires_user_auth: Some(crate::todo::TodoUserAuth {
                 reason: "Required data is permanently unavailable".into(),
             }),
             ..Default::default()
@@ -409,7 +409,7 @@ async fn live_status_fanout_projects_worker_events_into_broadcast() {
             .unwrap()
             .contains("Required data is permanently unavailable")
     );
-    assert_eq!(latest.todo_statuses, vec!["completely_blocked"]);
+    assert_eq!(latest.todo_statuses, vec!["requires_user_auth"]);
     todos.todos.push(crate::todo::TodoItem {
         id: "independent".into(),
         content: "Run tests".into(),

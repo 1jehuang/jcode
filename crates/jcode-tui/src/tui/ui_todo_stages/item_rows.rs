@@ -10,7 +10,7 @@ pub(crate) fn render_todo_item_line(
     base_indent: &str,
     inner_width: usize,
 ) -> Line<'static> {
-    if crate::todo::todo_completely_blocked(todo)
+    if crate::todo::todo_requires_user_auth(todo)
         || todo.status != "in_progress"
         || todo
             .group
@@ -96,7 +96,7 @@ pub(crate) fn todo_wait_note(
     todo: &crate::todo::TodoItem,
     agents: &[TodoCardAgent],
 ) -> Option<String> {
-    if crate::todo::todo_completely_blocked(todo) || is_done(todo) {
+    if crate::todo::todo_requires_user_auth(todo) || is_done(todo) {
         return None;
     }
     let agent = todo
@@ -127,7 +127,7 @@ pub(crate) fn render_todo_item_line_with_background(
 ) -> Line<'static> {
     let dependencies = todo_running_dependencies(todo, tasks);
     let wait_note = todo_wait_note(todo, agents);
-    if dependencies.is_empty() || crate::todo::todo_completely_blocked(todo) {
+    if dependencies.is_empty() || crate::todo::todo_requires_user_auth(todo) {
         let mut line = render_todo_item_line(todo, agents, base_indent, inner_width);
         if let Some(note) = wait_note {
             line.spans.push(Span::styled(
