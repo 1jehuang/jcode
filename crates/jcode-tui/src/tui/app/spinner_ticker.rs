@@ -10,7 +10,11 @@
 //! showing the session, focused or not.
 //!
 //! A plain thread that sleeps from frame to frame and nudges the loop through a
-//! channel costs one wakeup per frame on each side and paints the same frames.
+//! channel paints the same frames for less. Measured the same way, 10s windows
+//! in which the spinner stayed on screen throughout: 53.3, 53.7 and 59.1
+//! wakeups/s with the runtime timer, 33.9 to 41.7 over five runs with this
+//! thread (about 14 on the main thread, 14 on this one, and 5 to 13 left on a
+//! runtime worker from the loop's other timers).
 //!
 //! The thread free-runs while its ticks are being collected, so the loop never
 //! has to wake it to ask for the next one. Once two ticks in a row find the
