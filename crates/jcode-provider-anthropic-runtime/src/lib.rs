@@ -19,6 +19,7 @@ mod reasoning_request;
 mod usage_recording;
 
 mod catalog;
+mod key_pool;
 
 use jcode_base::auth;
 use jcode_base::auth::oauth;
@@ -498,9 +499,8 @@ pub struct AnthropicProvider {
     oauth_session_id: String,
     oauth_preflight_done: Arc<AtomicBool>,
     direct_transport: DirectTransportConfig,
-    /// Named profiles pin their credential at runtime construction so another
-    /// session/profile cannot redirect this runtime to a different process env.
-    profile_api_key: Option<std::result::Result<String, String>>,
+    /// Named profile keys, resolved at construction. Each session pins one key of the pool.
+    key_pool: key_pool::KeyPool,
     profile_models: Option<Vec<String>>,
 }
 
@@ -620,8 +620,7 @@ impl AnthropicProvider {
             .map(|effort| Self::store_effort_for_model(&model, &effort));
 
         let direct_transport = DirectTransportConfig::from_env();
-        let profile_api_key = std::env::var_os("JCODE_ANTHROPIC_API_BASE")
-            .map(|_| load_anthropic_api_key().map_err(|err| format!("{err:#}")));
+        let key_pool = key_pool::KeyPool::from_env();
         let profile_models = active_anthropic_profile_models();
 
         Self {
@@ -639,17 +638,13 @@ impl AnthropicProvider {
             oauth_session_id: Uuid::new_v4().to_string(),
             oauth_preflight_done: Arc::new(AtomicBool::new(false)),
             direct_transport,
-            profile_api_key,
+            key_pool,
             profile_models,
         }
     }
 
     fn direct_api_key(&self) -> Result<String> {
-        match &self.profile_api_key {
-            Some(Ok(key)) => Ok(key.clone()),
-            Some(Err(err)) => anyhow::bail!(err.clone()),
-            None => load_anthropic_api_key(),
-        }
+        self.key_pool.key()
     }
 
     fn normalized_model_key(model: &str) -> String {
@@ -1680,6 +1675,10 @@ impl Provider for AnthropicProvider {
         self.direct_transport.api_url == API_URL
     }
 
+    fn set_session_id(&self, session_id: &str) {
+        self.key_pool.bind(session_id);
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self {
             client: self.client.clone(),
@@ -1701,7 +1700,7 @@ impl Provider for AnthropicProvider {
                 self.oauth_preflight_done.load(Ordering::Relaxed),
             )),
             direct_transport: self.direct_transport.clone(),
-            profile_api_key: self.profile_api_key.clone(),
+            key_pool: self.key_pool.fork(),
             profile_models: self.profile_models.clone(),
         })
     }

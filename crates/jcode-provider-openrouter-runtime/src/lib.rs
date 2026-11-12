@@ -55,6 +55,9 @@ use tokio_stream::wrappers::ReceiverStream;
 mod catalog_fetch;
 use catalog_fetch::fetch_models_from_api;
 
+mod key_pool;
+use key_pool::KeyPool;
+
 mod openai_compatible_runtime;
 
 mod request_headers;
@@ -860,6 +863,8 @@ pub struct OpenRouterProvider {
     endpoints_cache: Arc<RwLock<EndpointsCache>>,
     /// Background refresh state for per-model endpoint data
     endpoint_refresh: Arc<Mutex<EndpointRefreshTracker>>,
+    /// Named profile key pool. A session pins one entry of `api_key_envs`.
+    key_pool: Option<KeyPool>,
 }
 
 impl OpenRouterProvider {
@@ -1354,44 +1359,11 @@ impl OpenRouterProvider {
         let api_base = normalize_api_base(&profile.base_url).ok_or_else(|| {
             anyhow::anyhow!("Provider profile '{}' has invalid base_url", profile_name)
         })?;
-        let auth_profile = profile.clone();
-        let auth: AuthResolver = Arc::new(move || {
-            let key_env = auth_profile
-                .api_key_env
-                .as_deref()
-                .map(str::trim)
-                .filter(|v| !v.is_empty());
-            let key_label = key_env.unwrap_or("inline api_key").to_string();
-            let key = key_env
-                .and_then(|name| load_named_profile_api_key(name, &auth_profile))
-                .or_else(|| auth_profile.api_key.clone());
-            Ok(match auth_profile.auth {
-                jcode_base::config::NamedProviderAuth::None => ProviderAuth::None {
-                    label: "local endpoint (no auth)".to_string(),
-                },
-                jcode_base::config::NamedProviderAuth::Bearer => {
-                    ProviderAuth::AuthorizationBearer {
-                        token: key.ok_or_else(|| {
-                            anyhow::anyhow!("{} not found in environment", key_label)
-                        })?,
-                        label: key_label,
-                    }
-                }
-                jcode_base::config::NamedProviderAuth::Header => ProviderAuth::HeaderValue {
-                    header_name: HeaderName::from_bytes(
-                        auth_profile
-                            .auth_header
-                            .as_deref()
-                            .unwrap_or("api-key")
-                            .as_bytes(),
-                    )?,
-                    value: key
-                        .ok_or_else(|| anyhow::anyhow!("{} not found in environment", key_label))?,
-                    label: key_label,
-                },
-            })
-        });
-        auth()?;
+        let key_pool = KeyPool::new(profile_name, profile)?;
+        let auth = key_pool.auth();
+        if profile.api_key_envs.is_empty() {
+            auth()?;
+        }
         let model = profile
             .default_model
             .clone()
@@ -1487,6 +1459,7 @@ impl OpenRouterProvider {
             provider_pin: Arc::new(Mutex::new(None)),
             endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
             endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
+            key_pool: Some(key_pool),
         };
         let initial_effort = if provider.supports_any_reasoning_effort() {
             provider.configured_effort_for_model()
@@ -1729,6 +1702,7 @@ impl OpenRouterProvider {
             provider_pin: Arc::new(Mutex::new(None)),
             endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
             endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
+            key_pool: None,
         })
     }
 
@@ -1786,6 +1760,7 @@ impl OpenRouterProvider {
             provider_pin: Arc::new(Mutex::new(None)),
             endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
             endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
+            key_pool: None,
         }
     }
 
@@ -1835,6 +1810,7 @@ impl OpenRouterProvider {
             provider_pin: Arc::new(Mutex::new(None)),
             endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
             endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
+            key_pool: None,
         })
     }
 
@@ -2042,6 +2018,7 @@ impl OpenRouterProvider {
                 provider_pin: Arc::new(Mutex::new(None)),
                 endpoints_cache,
                 endpoint_refresh: Arc::clone(&refresh_state),
+                key_pool: None,
             };
 
             match provider.fetch_endpoints(&model_name).await {
@@ -2541,7 +2518,7 @@ impl OpenRouterProvider {
     fn get_api_key() -> Option<String> {
         let key_name = configured_api_key_name();
         let env_file = configured_env_file_name();
-        jcode_base::provider_catalog::load_runtime_api_key(&key_name, &env_file)
+        jcode_base::provider_catalog::load_openai_compatible_slot_key(&key_name, &env_file)
     }
 
     /// Replace the stale built-in placeholder (`DEFAULT_MODEL`) with the newest

@@ -691,6 +691,7 @@ pub struct Config {
     /// type = "openai-compatible"
     /// base_url = "https://llm.example.com/v1"
     /// api_key_env = "MY_GATEWAY_API_KEY"
+    /// api_key_envs = ["MY_GATEWAY_KEY_1", "MY_GATEWAY_KEY_2"]
     pub providers: BTreeMap<String, NamedProviderConfig>,
 
     /// Agent-specific model defaults
