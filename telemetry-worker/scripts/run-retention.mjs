@@ -38,22 +38,26 @@ if (!apply) {
   const env = Object.fromEntries(bindings.map(([, name, id]) => [name, {
     prepare(sql) {
       const execute = async (params = []) => {
-        const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/d1/database/${id}/query`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ sql, params }),
-          signal: AbortSignal.timeout(120_000),
-        });
-        const body = await response.json();
-        if (!response.ok || !body.success || !body.result?.every((result) => result.success)) {
+        try {
+          const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/d1/database/${id}/query`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ sql, params }),
+            signal: AbortSignal.timeout(120_000),
+          });
+          const body = await response.json();
+          if (!response.ok || !body.success || !body.result?.every((result) => result.success)) {
+            throw new Error(`D1 ${name}: ${JSON.stringify(body.errors || response.status)}`);
+          }
+          const result = body.result.at(-1);
+          statements++;
+          changed += result.meta?.changes || 0;
+          if (result.meta?.changes) console.log(`${name}: ${result.meta.changes} rows changed`);
+          return result;
+        } catch (error) {
           failures++;
-          throw new Error(`D1 ${name}: ${JSON.stringify(body.errors || response.status)}`);
+          throw error;
         }
-        const result = body.result.at(-1);
-        statements++;
-        changed += result.meta?.changes || 0;
-        if (result.meta?.changes) console.log(`${name}: ${result.meta.changes} rows changed`);
-        return result;
       };
       return { run: () => execute(), bind: (...params) => ({ run: () => execute(params) }) };
     },
