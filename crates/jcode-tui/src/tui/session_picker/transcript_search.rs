@@ -86,6 +86,8 @@ pub(super) fn literal_metadata_rank(index: &str, tokens: &[String]) -> SearchRan
 }
 
 #[cfg(test)]
+// Retired by the master search rework; kept for the transcript search tests.
+#[allow(dead_code)]
 pub(super) fn exact_metadata_field(session: &SessionInfo, query: &str) -> bool {
     [&session.title, &session.short_name, &session.id]
         .iter()
@@ -115,6 +117,8 @@ pub(super) fn lowercase_field(field: &str) -> std::borrow::Cow<'_, str> {
 
 impl SearchRank {
     #[cfg(test)]
+    // Retired by the master search rework; kept for the transcript search tests.
+    #[allow(dead_code)]
     pub(super) fn with_intent_terms(mut self, terms: usize) -> Self {
         self.intent_terms = terms;
         self
@@ -298,6 +302,8 @@ fn build_candidates(
 /// Per-token metadata origins for the UI-thread ranking of sessions the worker
 /// has not ranked yet. Uses the already lowercased intent fields.
 #[cfg(test)]
+// Retired by the master search rework; kept for the transcript search tests.
+#[allow(dead_code)]
 pub(super) fn metadata_source_weight(
     intent_fields: &[&str],
     index: &str,
@@ -587,6 +593,8 @@ impl TranscriptSearch {
 
     /// Rarity weights for the current query, once the worker computed them.
     #[cfg(test)]
+    // Retired by the master search rework; kept for the transcript search tests.
+    #[allow(dead_code)]
     pub(super) fn idf(&self) -> &[u32] {
         self.idf.get().map_or(&[], Vec::as_slice)
     }
