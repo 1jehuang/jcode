@@ -22,6 +22,34 @@ pub fn remote_model_routes_fallback(
             .collect();
     }
 
+    // Cursor ACP advertises foundation models from multiple vendors
+    // (`claude-*`, `gpt-*`, `gemini-*`, ...) under one provider. The prefix
+    // heuristics below would split them into Anthropic/OpenAI/Gemini routes
+    // and synthesize local credential rows, hiding the real ACP route. When
+    // the remote provider is Cursor ACP, label every advertised model as a
+    // Cursor ACP route so the picker matches `jcode model list -p cursor-acp`.
+    // Same dual-match as `simplified_model_routes_for_picker`: the remote
+    // provider name may be the runtime key ("cursor-acp") or the display
+    // label ("Cursor ACP") depending on which code path built the snapshot.
+    if remote_provider_name.is_some_and(|name| {
+        name.eq_ignore_ascii_case(crate::provider::external::CURSOR_ACP_RUNTIME)
+            || name.eq_ignore_ascii_case("Cursor ACP")
+    }) {
+        return remote_available_entries
+            .iter()
+            .filter(|model| is_listable_model_name(model))
+            .map(|model| ModelRoute {
+                model: model.clone(),
+                provider: "Cursor ACP".to_string(),
+                api_method: crate::provider::external::CURSOR_ACP_RUNTIME.to_string(),
+                available: true,
+                detail: "Cursor CLI ACP routing · managed server-side".to_string(),
+                cheapness: None,
+                usage: None,
+            })
+            .collect();
+    }
+
     let auth = AuthStatus::check_fast();
     let mut routes = Vec::new();
     for model in remote_available_entries {
@@ -213,8 +241,18 @@ pub fn remote_model_routes_lightweight_fallback(
     let is_jcode_subscription = remote_provider_name.is_some_and(|name| {
         name.eq_ignore_ascii_case(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME)
     });
+    let is_cursor_acp = remote_provider_name.is_some_and(|name| {
+        name.eq_ignore_ascii_case(crate::provider::external::CURSOR_ACP_RUNTIME)
+            || name.eq_ignore_ascii_case("Cursor ACP")
+    });
     let provider = remote_provider_name
-        .map(str::to_string)
+        .map(|name| {
+            if is_cursor_acp {
+                "Cursor ACP".to_string()
+            } else {
+                name.to_string()
+            }
+        })
         .unwrap_or_else(|| "remote".to_string());
     let mut routes = Vec::new();
     for model in remote_available_entries {
@@ -226,12 +264,16 @@ pub fn remote_model_routes_lightweight_fallback(
             provider: provider.clone(),
             api_method: if is_jcode_subscription {
                 crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string()
+            } else if is_cursor_acp {
+                crate::provider::external::CURSOR_ACP_RUNTIME.to_string()
             } else {
                 "remote-catalog".to_string()
             },
             available: true,
             detail: if is_jcode_subscription {
                 "jcode subscription routing · managed server-side".to_string()
+            } else if is_cursor_acp {
+                "Cursor CLI ACP routing · managed server-side".to_string()
             } else {
                 "refreshing route details…".to_string()
             },

@@ -132,7 +132,7 @@ fn test_cursor_models_are_included_in_model_routes_when_configured() {
         let routes = provider.model_routes();
         assert!(routes.iter().any(|route| {
             route.model == "composer-2-fast"
-                && route.provider == "Cursor"
+                && route.provider == "Cursor (API)"
                 && route.api_method == "cursor"
                 && route.available
         }));
@@ -181,12 +181,14 @@ fn test_initial_provider_allows_cross_provider_switch_and_reports_target_credent
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            cursor_acp: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(None),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
             active_openai_compatible_profile: RwLock::new(None),
             session_id: RwLock::new(None),
             active: RwLock::new(ActiveProvider::OpenAI),
+            active_external: RwLock::new(None),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: Some(ActiveProvider::OpenAI),
             catalog_scope: next_catalog_scope(),
@@ -299,12 +301,14 @@ fn test_no_provider_error_mentions_tokens_and_details() {
         antigravity: RwLock::new(None),
         gemini: RwLock::new(None),
         cursor: RwLock::new(None),
+        cursor_acp: RwLock::new(None),
         bedrock: RwLock::new(None),
         openrouter: RwLock::new(None),
         openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
         active_openai_compatible_profile: RwLock::new(None),
         session_id: RwLock::new(None),
         active: RwLock::new(ActiveProvider::OpenAI),
+        active_external: RwLock::new(None),
         startup_notices: RwLock::new(Vec::new()),
         initial_provider: None,
         catalog_scope: next_catalog_scope(),
@@ -339,12 +343,14 @@ fn test_active_compat_profile_counts_as_configured_openrouter_slot() {
                 antigravity: RwLock::new(None),
                 gemini: RwLock::new(None),
                 cursor: RwLock::new(None),
+                cursor_acp: RwLock::new(None),
                 bedrock: RwLock::new(None),
                 openrouter: RwLock::new(None),
                 openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
                 active_openai_compatible_profile: RwLock::new(None),
                 session_id: RwLock::new(None),
                 active: RwLock::new(ActiveProvider::OpenRouter),
+                active_external: RwLock::new(None),
                 startup_notices: RwLock::new(Vec::new()),
                 initial_provider: None,
                 catalog_scope: next_catalog_scope(),
