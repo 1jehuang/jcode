@@ -1209,6 +1209,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             let images = app.take_pending_image_payloads();
             let prepared = input::PreparedInput {
                 raw_input: prompt.to_string(),
+                file_chips: Vec::new(),
                 expanded: prompt.to_string(),
                 images,
             };
