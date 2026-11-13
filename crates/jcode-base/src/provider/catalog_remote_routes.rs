@@ -355,26 +355,12 @@ pub(super) fn named_provider_profile_route_for_model_in(
         return None;
     }
     for (profile_name, profile_config) in providers {
-        if !named_provider_profile_routes(profile_name, profile_config)
-            .iter()
-            .any(|route| route.model == model)
+        if let Some(route) = named_provider_profile_routes(profile_name, profile_config)
+            .into_iter()
+            .find(|route| route.model == model)
         {
-            continue;
+            return Some(route);
         }
-        let detail = if profile_config.base_url.trim().is_empty() {
-            "configured provider profile".to_string()
-        } else {
-            profile_config.base_url.trim().to_string()
-        };
-        return Some(ModelRoute {
-            model: model.to_string(),
-            provider: profile_name.clone(),
-            api_method: format!("openai-compatible:{}", profile_name),
-            available: true,
-            detail,
-            usage: None,
-            cheapness: None,
-        });
     }
     None
 }
@@ -421,4 +407,106 @@ pub fn remote_model_is_server_copilot_only(model: &str) -> bool {
             provider_for_model(model),
             Some("claude" | "openai" | "gemini" | "cursor")
         )
+}
+
+/// Effort ladder the client UI should offer when the session runs a named
+/// provider profile with per-model reasoning configuration (`reasoning_map`
+/// or the `reasoning` override).
+///
+/// Remote TUI sessions cannot ask the server-side provider for
+/// `available_efforts()`: they only know the provider display name and the
+/// model id. When that identity resolves to a configured named profile whose
+/// model has a `reasoning_map`, the map is authoritative for the ladder
+/// (enabled rungs in ladder order plus the swarm sentinels), so this returns
+/// it. A model with `reasoning = true` but no map gets the server's OpenAI
+/// ladder (see `supports_openai_reasoning_effort`), so the same ladder is
+/// returned here to keep the client picker and `/effort` in sync with what
+/// the server actually accepts. Returns `None` when the identity matches no
+/// per-model reasoning configuration, letting callers fall back to the
+/// built-in family inference.
+///
+/// The provider name is matched against both the profile key and the
+/// profile's user-configured `display_name`, because the server reports
+/// `display_name()` as the provider name for named profiles.
+pub fn configured_reasoning_efforts(
+    provider_name: Option<&str>,
+    model_name: Option<&str>,
+) -> Option<Vec<String>> {
+    configured_reasoning_efforts_in(
+        provider_name,
+        model_name,
+        &crate::config::config().providers,
+    )
+}
+
+pub(super) fn configured_reasoning_efforts_in(
+    provider_name: Option<&str>,
+    model_name: Option<&str>,
+    providers: &std::collections::BTreeMap<String, crate::config::NamedProviderConfig>,
+) -> Option<Vec<String>> {
+    let provider = provider_name?.trim();
+    let model = model_name?.trim();
+    if provider.is_empty() || model.is_empty() {
+        return None;
+    }
+    let provider_lower = provider.to_ascii_lowercase();
+    let model_lower = model.to_ascii_lowercase();
+    for (profile_name, profile_config) in providers {
+        let profile_label = profile_config
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(profile_name);
+        if profile_name.to_ascii_lowercase() != provider_lower
+            && profile_label.to_ascii_lowercase() != provider_lower
+        {
+            continue;
+        }
+        let model_config = profile_config
+            .models
+            .iter()
+            .find(|entry| entry.id.trim().to_ascii_lowercase() == model_lower)?;
+        let map = model_config.reasoning_map.as_ref();
+        if let Some(map) = map.filter(|map| !map.is_empty()) {
+            let mut efforts: Vec<String> = map
+                .rungs()
+                .filter(|(_, rung)| !rung.disabled)
+                .map(|(key, _)| key.to_string())
+                .collect();
+            if efforts.is_empty() {
+                return None;
+            }
+            efforts.extend(
+                jcode_provider_core::SWARM_EFFORTS
+                    .iter()
+                    .map(|s| s.to_string()),
+            );
+            return Some(efforts);
+        }
+        // No map: the per-model `reasoning` override still enables effort on
+        // the server. `reasoning = true` on a non-DeepSeek model gets the
+        // OpenAI ladder there (DeepSeek-family ids keep the DeepSeek ladder,
+        // matching `supports_deepseek_reasoning_effort`); mirror it so the
+        // client offers the same rungs and does not report the effort as
+        // fixed. The deep-swarm sentinel is only appended when the shared
+        // ladder still carries it.
+        if model_config.reasoning == Some(true) {
+            let deepseek_family = model_lower.contains("deepseek");
+            let base = if deepseek_family {
+                jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS
+            } else {
+                jcode_provider_core::OPENAI_SELECTABLE_EFFORTS
+            };
+            let mut efforts: Vec<String> = base.iter().map(|s| s.to_string()).collect();
+            for sentinel in jcode_provider_core::SWARM_EFFORTS {
+                if !efforts.iter().any(|effort| effort == *sentinel) {
+                    efforts.push(sentinel.to_string());
+                }
+            }
+            return Some(efforts);
+        }
+        return None;
+    }
+    None
 }
