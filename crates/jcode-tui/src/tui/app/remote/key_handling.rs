@@ -593,11 +593,9 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             return Ok(());
         }
 
-        if trimmed.starts_with("/subagent-model") {
-            let rest = trimmed
-                .strip_prefix("/subagent-model")
-                .unwrap_or_default()
-                .trim();
+        if let Some(rest) =
+            app_mod::commands::slash_command_rest(trimmed, "/subagent-model").map(str::trim)
+        {
             if rest.is_empty() || matches!(rest, "show" | "status") {
                 let current_model = app
                     .remote_provider_model
@@ -637,8 +635,9 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             return Ok(());
         }
 
-        if trimmed.starts_with("/subagent") {
-            let rest = trimmed.strip_prefix("/subagent").unwrap_or_default().trim();
+        if let Some(rest) =
+            app_mod::commands::slash_command_rest(trimmed, "/subagent").map(str::trim)
+        {
             if rest.is_empty() {
                 app.push_display_message(DisplayMessage::error(
                             "Usage: /subagent [--type <kind>] [--model <name>] [--continue <session_id>] <prompt>",

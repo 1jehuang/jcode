@@ -786,9 +786,9 @@ fn launch_manual_subagent(app: &mut App, spec: ManualSubagentSpec) {
 }
 
 fn handle_subagent_model_command(app: &mut App, trimmed: &str) -> bool {
-    if !trimmed.starts_with("/subagent-model") {
+    let Some(rest) = slash_command_rest(trimmed, "/subagent-model").map(str::trim) else {
         return false;
-    }
+    };
 
     if app.is_remote {
         app.push_display_message(DisplayMessage::error(
@@ -796,11 +796,6 @@ fn handle_subagent_model_command(app: &mut App, trimmed: &str) -> bool {
         ));
         return true;
     }
-
-    let rest = trimmed
-        .strip_prefix("/subagent-model")
-        .unwrap_or_default()
-        .trim();
 
     if rest.is_empty() || matches!(rest, "show" | "status") {
         app.push_display_message(DisplayMessage::system(format!(
@@ -832,9 +827,9 @@ fn handle_subagent_model_command(app: &mut App, trimmed: &str) -> bool {
 }
 
 fn handle_subagent_command(app: &mut App, trimmed: &str) -> bool {
-    if !trimmed.starts_with("/subagent") || trimmed.starts_with("/subagent-model") {
+    let Some(rest) = slash_command_rest(trimmed, "/subagent").map(str::trim) else {
         return false;
-    }
+    };
 
     if app.is_remote {
         app.push_display_message(DisplayMessage::error(
@@ -843,7 +838,6 @@ fn handle_subagent_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
-    let rest = trimmed.strip_prefix("/subagent").unwrap_or_default().trim();
     if rest.is_empty() {
         app.push_display_message(DisplayMessage::error(
             "Usage: /subagent [--type <kind>] [--model <name>] [--continue <session_id>] <prompt>"
@@ -2582,6 +2576,7 @@ pub(super) fn handle_goals_command(app: &mut App, trimmed: &str) -> bool {
     let Some(trimmed) = trimmed
         .strip_prefix("/initiatives")
         .or_else(|| trimmed.strip_prefix("/goals"))
+        .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
     else {
         return false;
     };
@@ -2723,11 +2718,12 @@ pub(super) fn handle_test_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
-fn slash_command_rest<'a>(trimmed: &'a str, command: &str) -> Option<&'a str> {
-    if trimmed == command {
-        Some("")
+pub(super) fn slash_command_rest<'a>(trimmed: &'a str, command: &str) -> Option<&'a str> {
+    let rest = trimmed.strip_prefix(command)?;
+    if rest.is_empty() {
+        Some(rest)
     } else {
-        trimmed.strip_prefix(&format!("{} ", command))
+        rest.strip_prefix(char::is_whitespace)
     }
 }
 
@@ -3340,11 +3336,9 @@ fn resume_terminal_after_editor() {
 mod interactive_editor_tests;
 
 pub(super) fn handle_agents_command(app: &mut App, trimmed: &str) -> bool {
-    if !trimmed.starts_with("/agents") {
+    let Some(rest) = slash_command_rest(trimmed, "/agents").map(str::trim) else {
         return false;
-    }
-
-    let rest = trimmed.strip_prefix("/agents").unwrap_or_default().trim();
+    };
     let (global, rest) = match rest.split_once(' ') {
         Some(("global" | "default", tail)) => (true, tail.trim()),
         _ if matches!(rest, "global" | "default") => (true, ""),
