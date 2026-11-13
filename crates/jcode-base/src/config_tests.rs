@@ -1757,6 +1757,29 @@ fn cli_config_save_round_trips_desktop_tables() {
     Config::invalidate_cache();
 }
 
+#[test]
+fn global_voice_devices_fall_back_to_desktop_selection() {
+    let desktop: Config =
+        toml::from_str("[desktop.voice]\nglobal_devices = [\"/dev/input/event3\", \"\"]\n")
+            .unwrap();
+    assert_eq!(
+        desktop.global_voice_devices(),
+        vec![std::path::PathBuf::from("/dev/input/event3")]
+    );
+
+    let explicit: Config = toml::from_str(
+        "[dictation]\nglobal_devices = [\"/dev/input/event7\"]\n\n\
+         [desktop.voice]\nglobal_devices = [\"/dev/input/event3\"]\n",
+    )
+    .unwrap();
+    assert_eq!(
+        explicit.global_voice_devices(),
+        vec![std::path::PathBuf::from("/dev/input/event7")]
+    );
+
+    assert!(Config::default().global_voice_devices().is_empty());
+}
+
 #[path = "config_tests/default_provider.rs"]
 mod default_provider;
 
