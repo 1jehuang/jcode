@@ -1681,3 +1681,4 @@ fn test_click_on_inline_image_body_cycles_level() {
 mod image_zoom;
 
 include!("math_selection.rs");
+include!("badge_partial_selection.rs");
