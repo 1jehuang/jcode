@@ -288,6 +288,7 @@ mod tests {
             is_current: false,
             is_default: false,
             is_favorite: false,
+            is_memory_model: false,
             recommended: false,
             recommendation_rank: 0,
             usage_score: 0,
