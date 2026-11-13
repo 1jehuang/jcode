@@ -161,6 +161,11 @@ telemetry silently stopped (June 2026: ~3 days lost). Defenses, in order:
   immediately, bounding a June-style outage to minutes instead of days.
 - Hourly retention gives each event family its own bounded deletion budget,
   so a busy `turn_end` family cannot starve `session_start` or later families.
+  Each family gets two 2,000-row batches per hour (up to 96,000 expired rows
+  per day), about four times the busiest raw family's measured 24,199 daily
+  events on November 13, 2026. This is measured headroom, not unlimited scaling.
+  Attribution expiry uses bounded detail-driven indexed lookups instead of
+  materializing old IDs from the entire event history.
   The separate 04:17 UTC nightly job still performs account expiry, activity
   repair and model-price synchronization once per day.
 - Both the main and bulk databases are independently observed and protected.
@@ -184,14 +189,20 @@ node scripts/run-retention.mjs --apply
 ```
 
 The catch-up runner reuses the worker's scheduled handler instead of keeping a
-second deletion policy. It does not migrate databases, shorten ordinary retention
+second deletion policy. It backs off on D1 overload (code 7429) and circuit-breaks
+an exhausted database after bounded retries rather than flooding it. Its summary
+reports changed rows, failures and retries, and failures produce a nonzero exit.
+It does not migrate databases, shorten ordinary retention
 windows, or delete permanent lifecycle anchors. Check the reported failures and
 recheck the oldest retained events before deciding whether another pass is needed.
-A stable allocated file size after cleanup is expected, not evidence of failure.
+A stable reported size immediately after cleanup is not by itself evidence of
+failure. Verify expired-row counts, continued ingestion, and subsequent size
+observations together.
 
-Note: D1 has no `VACUUM`, so the file never shrinks; deletes only free pages
-internally for reuse. If bloat itself becomes the problem, rotate to a fresh
-database (create new D1 DB, copy live rows, repoint `wrangler.toml`).
+Do not rely on manual `VACUUM` to recover capacity. If retention can no longer
+keep up or durable history approaches the budget, plan a verified migration or
+new shard (create the database, copy and verify live rows, then update bindings).
+Do not repoint a binding before its schema and required data are ready.
 
 ## Setup
 
