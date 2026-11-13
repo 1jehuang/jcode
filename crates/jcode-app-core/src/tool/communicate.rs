@@ -14,7 +14,7 @@ use crate::protocol::{
 };
 use anyhow::Result;
 use async_trait::async_trait;
-use jcode_swarm_core::validate_swarm_tldr;
+use jcode_swarm_core::{derive_swarm_task_label, validate_swarm_tldr};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -1270,10 +1270,7 @@ impl Tool for CommunicateTool {
                 let prompt = params.spawn_initial_message();
                 let (lane_id, seeded_count) = {
                     let todos = crate::todo::load_todos(&ctx.session_id).unwrap_or_default();
-                    let title = prompt
-                        .as_deref()
-                        .and_then(|prompt| prompt.lines().map(str::trim).find(|l| !l.is_empty()))
-                        .map(|line| line.chars().take(60).collect::<String>())
+                    let title = derive_swarm_task_label(&label)
                         .unwrap_or_else(|| label.clone());
                     let (updated, lane_id) = crate::todo::stages::ensure_spawn_lane(
                         &todos,

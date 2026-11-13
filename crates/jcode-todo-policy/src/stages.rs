@@ -627,4 +627,22 @@ mod spawn_lane_tests {
         assert_eq!(id, "lane::fix");
         assert_eq!(out.last().unwrap().stage, None);
     }
+
+    /// Regression test (#2151): the spawn call site passes the derived
+    /// label as the title. Verify that the title becomes the todo's
+    /// `content` and the prompt becomes `details`.
+    #[test]
+    fn spawn_lane_title_becomes_content_prompt_becomes_details() {
+        let todos: Vec<TodoItem> = vec![];
+        let title = "fix parser error";
+        let prompt = "Review the diff\nand fix the bug";
+        let (out, id) = ensure_spawn_lane(&todos, "fix parser", None, title, Some(prompt), "s1");
+        assert_eq!(id, "lane::fix parser");
+        let added = out.last().unwrap();
+        // content must be the derived label, NOT the prompt's first line.
+        assert_eq!(added.content, "fix parser error");
+        assert_ne!(added.content, "Review the diff");
+        // details carries the full prompt.
+        assert_eq!(added.details.as_deref(), Some("Review the diff\nand fix the bug"));
+    }
 }
