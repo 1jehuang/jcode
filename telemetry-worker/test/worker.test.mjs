@@ -138,7 +138,7 @@ function makeDb(plan = {}) {
               if (plan.failInserts && /^INSERT/i.test(sql.trim())) {
                 throw new Error(plan.failureMessage || "generic transient error");
               }
-              return { meta: { changes: /^DELETE/i.test(sql.trim()) ? 0 : 1, size_after: sizeAfter } };
+              return { meta: { changes: /^DELETE/i.test(sql.trim()) ? (plan.deleteChanges ?? 0) : 1, size_after: sizeAfter } };
             },
             async all() {
               executed.push({ sql, values });
@@ -651,6 +651,91 @@ test("D1 failure without firehose binding still returns 500", async () => {
   assert.equal(response.status, 500);
 });
 
+test("bulk size pressure prunes bulk independently of main cooldown", async () => {
+  const db = makeDb({ sizeAfter: 8_100_000_000 });
+  const bulk = makeDb({ sizeAfter: 8_200_000_000 });
+  const env = { DB: db, DB_BULK: bulk };
+  const mainCtx = makeCtx();
+  await worker.fetch(postRequest(makeBody()), env, mainCtx);
+  await Promise.all(mainCtx.waited);
+  const mainDeletes = db.executed.filter(({ sql }) => /DELETE FROM events/.test(sql)).length;
+  assert.ok(mainDeletes > 0);
+
+  const bulkCtx = makeCtx();
+  await worker.fetch(postRequest(makeBody({ event: "prompt_submitted", event_id: "pressure-bulk" })), env, bulkCtx);
+  await Promise.all(bulkCtx.waited);
+  assert.ok(bulk.executed.some(({ sql }) => /DELETE FROM events/.test(sql)));
+  assert.equal(db.executed.filter(({ sql }) => /DELETE FROM events/.test(sql)).length, mainDeletes);
+  const repeated = makeCtx();
+  await worker.fetch(postRequest(makeBody({ event: "prompt_submitted", event_id: "pressure-bulk-2" })), env, repeated);
+  assert.equal(repeated.waited.length, 0, "bulk cooldown prevents repeated emergency pruning");
+});
+
+test("bulk SQLITE_FULL prunes only bulk even below the guardrail", async () => {
+  const db = makeDb();
+  const bulk = makeDb({ failInserts: true, failureMessage: "SQLITE_FULL: database or disk is full" });
+  const ctx = makeCtx();
+  await worker.fetch(postRequest(makeBody({ event: "prompt_submitted", event_id: "full-bulk" })),
+    { DB: db, DB_BULK: bulk, FIREHOSE: makeFirehose() }, ctx);
+  await Promise.all(ctx.waited);
+  assert.ok(bulk.executed.some(({ sql }) => /DELETE FROM events/.test(sql)));
+  assert.ok(!db.executed.some(({ sql }) => /DELETE FROM events/.test(sql)));
+});
+
+test("health distinguishes hard cap, guardrail and independent bulk pressure", async () => {
+  const response = await worker.fetch(new Request(HEALTH_URL), {
+    DB: makeDb({ sizeAfter: 7_700_000_000 }),
+    DB_BULK: makeDb({ sizeAfter: 8_100_000_000 }),
+  }, makeCtx());
+  const json = await response.json();
+  assert.equal(json.db_hard_limit_bytes, 10_000_000_000);
+  assert.equal(json.db_soft_limit_bytes, 8_000_000_000);
+  assert.equal(json.over_soft_limit, false);
+  assert.equal(json.bulk_db_size_bytes, 8_100_000_000);
+  assert.equal(json.bulk_db_hard_limit_bytes, 10_000_000_000);
+  assert.equal(json.bulk_db_soft_limit_bytes, 8_000_000_000);
+  assert.equal(json.bulk_over_soft_limit, true);
+  assert.equal(json.bulk_last_emergency_prune_at_ms, null);
+});
+
+test("hourly retention gives every event family its own bounded budget", async () => {
+  const db = makeDb({ deleteChanges: 10000 });
+  const bulk = makeDb();
+  const ctx = makeCtx();
+  await worker.scheduled({ cron: "17 0-3,5-23 * * *" }, { DB: db, DB_BULK: bulk }, ctx);
+  await Promise.all(ctx.waited);
+  const deletes = db.executed.filter(({ sql }) => /DELETE FROM events/.test(sql));
+  const counts = new Map();
+  for (const { values } of deletes) counts.set(values[0], (counts.get(values[0]) || 0) + 1);
+  for (const family of ["turn_end", "session_start", "onboarding_step", "prompt_submitted"]) {
+    assert.equal(counts.get(family), 12, `${family} gets an independent bounded budget`);
+  }
+  assert.ok(bulk.executed.some(({ sql }) => /DELETE FROM events/.test(sql)));
+  assert.ok(!db.executed.some(({ sql }) => /oauth_accounts|usage_report_ledger|model_prices|INSERT OR IGNORE INTO daily_active_users/.test(sql)));
+});
+
+test("hourly retention escalates bulk pressure without shortening main windows", async () => {
+  const db = makeDb();
+  const bulk = makeDb({ sizeAfter: 8_100_000_000 });
+  const ctx = makeCtx();
+  await worker.scheduled({ cron: "17 0-3,5-23 * * *" }, { DB: db, DB_BULK: bulk }, ctx);
+  await Promise.all(ctx.waited);
+  const windows = (store) => store.executed
+    .filter(({ sql, values }) => /DELETE FROM events/.test(sql) && values[0] === "turn_end")
+    .map(({ values }) => values[1]);
+  assert.deepEqual(windows(db), ["-30 days"]);
+  assert.deepEqual(windows(bulk), ["-30 days", "-15 days"]);
+});
+
+test("missing waitUntil does not consume the database emergency cooldown", async () => {
+  const env = { DB: makeDb({ sizeAfter: 8_100_000_000 }) };
+  await worker.fetch(postRequest(makeBody()), env);
+  const ctx = makeCtx();
+  await worker.fetch(postRequest(makeBody()), env, ctx);
+  await Promise.all(ctx.waited);
+  assert.ok(env.DB.executed.some(({ sql }) => /DELETE FROM events/.test(sql)));
+});
+
 test("missing firehose binding degrades gracefully", async () => {
   const db = makeDb();
   const ctx = makeCtx();
@@ -676,6 +761,8 @@ test("health endpoint reports database size vs soft limit", async () => {
   assert.equal(json.db_size_bytes, 12345678);
   assert.equal(json.db_soft_limit_bytes, 8_000_000_000);
   assert.equal(json.over_soft_limit, false);
+  assert.equal(json.bulk_db_size_bytes, null);
+  assert.equal(json.bulk_over_soft_limit, null);
 });
 
 test("paid-plan database size below the budget guardrail is healthy", async () => {
