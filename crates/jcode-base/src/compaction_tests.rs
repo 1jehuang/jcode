@@ -1349,3 +1349,74 @@ async fn refused_compaction_keeps_original_messages_issue_2089() {
     assert_eq!(manager.compacted_count(), 0);
     assert_eq!(manager.summary_chars(), 0);
 }
+
+#[test]
+fn anthropic_oauth_route_caps_auto_compaction_budget_below_1m_window() {
+    let _lock = crate::storage::lock_test_env();
+    let mut manager = CompactionManager::new();
+    manager.set_route_api_method(Some("claude-oauth@fox"));
+    manager.set_budget(1_000_000);
+    assert_eq!(manager.token_budget(), ANTHROPIC_OAUTH_AUTO_COMPACT_BUDGET);
+    // Survives reset (model switch reseed keeps the route).
+    manager.reset();
+    manager.set_budget(1_000_000);
+    assert_eq!(manager.token_budget(), ANTHROPIC_OAUTH_AUTO_COMPACT_BUDGET);
+    // Reactive trigger fires at ~80k observed tokens.
+    manager.compaction_config = crate::config::CompactionConfig::default();
+    manager.mode = crate::config::CompactionMode::Reactive;
+    let messages: Vec<Message> = (0..(RECENT_TURNS_TO_KEEP + 2))
+        .map(|i| make_text_message(Role::User, &format!("m{i}")))
+        .collect();
+    manager.notify_message_added();
+    manager.update_observed_input_tokens(79_000);
+    assert!(!manager.should_compact_with(&messages));
+    manager.update_observed_input_tokens(80_000);
+    assert!(manager.should_compact_with(&messages));
+    // API-key route keeps the full window.
+    manager.set_route_api_method(Some("claude-api"));
+    assert_eq!(manager.token_budget(), 1_000_000);
+    manager.set_route_api_method(None);
+    assert_eq!(manager.token_budget(), 1_000_000);
+}
+
+#[test]
+fn summary_payload_prunes_tool_output_older_than_last_four_turns() {
+    let big = "y".repeat(COMPACTION_STALE_TOOL_RESULT_MAX_CHARS * 4);
+    let tool = |text: &str| Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: "t".into(),
+            content: text.into(),
+            is_error: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    // 6 user turns each with a large tool result; summarize the first 5.
+    let active: Vec<Message> = (0..6).map(|_| tool(&big)).collect();
+    let mut to_summarize = active[..5].to_vec();
+    let pruned = super::prune_for_summary(&active, &mut to_summarize);
+    // Last 4 turns start at index 2, so indices 0 and 1 are stale.
+    assert_eq!(pruned, 2);
+    for (i, m) in to_summarize.iter().enumerate() {
+        let ContentBlock::ToolResult { content, .. } = &m.content[0] else {
+            panic!()
+        };
+        assert_eq!(content.len() < big.len(), i < 2, "index {i}");
+    }
+}
+
+#[test]
+fn compaction_model_falls_back_to_session_provider_when_unset_or_unswitchable() {
+    let session: Arc<dyn Provider> = Arc::new(MockSummaryProvider);
+    let chosen = super::resolve_compaction_provider("", session.clone());
+    assert!(Arc::ptr_eq(&chosen, &session));
+    // MockSummaryProvider rejects set_model, so the secondary is unavailable.
+    let chosen = super::resolve_compaction_provider("claude-api:claude-haiku-4-5", session.clone());
+    assert!(Arc::ptr_eq(&chosen, &session));
+    // An explicit provider override wins.
+    let mut manager = CompactionManager::new();
+    let secondary: Arc<dyn Provider> = Arc::new(MockSummaryProvider);
+    manager.set_compaction_provider(Some(secondary.clone()));
+    assert!(Arc::ptr_eq(&manager.summarizer(session), &secondary));
+}

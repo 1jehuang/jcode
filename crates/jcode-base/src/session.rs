@@ -1461,6 +1461,24 @@ request in this new forked session, using the inherited conversation only as con
         }
     }
 
+    /// Shorten tool output older than the last `keep_turns` user turns in the
+    /// stored transcript. Used when recovering from an HTTP 429 per-minute
+    /// input-token limit so the retry (and any compaction request) is smaller.
+    pub fn prune_stale_tool_results(&mut self, keep_turns: usize, max_chars: usize) -> usize {
+        let roles: Vec<jcode_message_types::Role> =
+            self.messages.iter().map(|m| m.role.clone()).collect();
+        let cutoff = jcode_compaction_core::prune_cutoff_for_turns(&roles, keep_turns);
+        let mut contents: Vec<&mut Vec<ContentBlock>> =
+            self.messages.iter_mut().map(|m| &mut m.content).collect();
+        let pruned =
+            jcode_compaction_core::truncate_tool_results_before(&mut contents, cutoff, max_chars);
+        if pruned > 0 {
+            self.mark_memory_profile_dirty();
+            self.mark_messages_full_dirty();
+        }
+        pruned
+    }
+
     /// Drop oversized inline images from the stored transcript, oldest-first,
     /// until the total remaining base64 image payload fits within
     /// `target_total_chars`. Used to recover from provider HTTP 413

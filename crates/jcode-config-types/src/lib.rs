@@ -342,6 +342,12 @@ pub struct CompactionConfig {
     /// on large-window providers. This bounds the compaction trigger budget,
     /// not the final request size when recent messages cannot be compacted.
     pub max_context_tokens: usize,
+
+    /// Optional model spec used for summarization requests instead of the
+    /// session model, e.g. `claude-api:claude-haiku-4-5` so compaction is
+    /// billed to a metered API key rather than a throttled subscription
+    /// bucket. Empty = use the session model.
+    pub compaction_model: String,
 }
 
 impl Default for CompactionConfig {
@@ -361,6 +367,7 @@ impl Default for CompactionConfig {
             relevance_keep_threshold: 0.65,
             goal_window_turns: 5,
             max_context_tokens: 0,
+            compaction_model: String::new(),
         }
     }
 }

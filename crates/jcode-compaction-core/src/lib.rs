@@ -21,6 +21,43 @@ pub const RECENT_TURNS_TO_KEEP: usize = 10;
 /// Absolute minimum turns to keep during emergency compaction
 pub const MIN_TURNS_TO_KEEP: usize = 2;
 
+/// Auto-compaction token-budget ceiling for Anthropic subscription (OAuth)
+/// routes.
+///
+/// The reactive trigger is [`COMPACTION_THRESHOLD`] (80%) of the budget, so a
+/// 100k ceiling compacts at roughly 80k tokens. Anthropic subscription logins
+/// are limited per minute on *input* tokens (ITPM), not by the model's context
+/// window. A 1M-window session that only compacts at ~800k exceeds the
+/// per-minute limit on every request and cannot compact its way out, because
+/// the compaction request itself replays most of that context. Capping the
+/// trigger keeps each request under the limit so compaction can actually run.
+pub const ANTHROPIC_OAUTH_AUTO_COMPACT_BUDGET: usize = 100_000;
+
+/// Number of most recent user turns whose tool results are kept verbatim when
+/// stale tool output is pruned for a compaction request.
+pub const COMPACTION_VERBATIM_TURNS: usize = 4;
+
+/// Per-tool-result character cap applied to output older than
+/// [`COMPACTION_VERBATIM_TURNS`] before a compaction request is sent.
+pub const COMPACTION_STALE_TOOL_RESULT_MAX_CHARS: usize = 2_000;
+
+/// Whether `api_method` authenticates with an Anthropic subscription login
+/// (`claude-oauth`, optionally account-qualified as `claude-oauth@label`).
+pub fn is_anthropic_oauth_route(api_method: &str) -> bool {
+    let method = api_method.trim();
+    let base = method.split_once('@').map_or(method, |(base, _)| base);
+    matches!(
+        base.to_ascii_lowercase().as_str(),
+        "claude-oauth" | "anthropic-oauth"
+    )
+}
+
+/// Auto-compaction budget ceiling for a route, when that route has a limit
+/// stricter than its context window.
+pub fn auto_compaction_budget_ceiling(api_method: &str) -> Option<usize> {
+    is_anthropic_oauth_route(api_method).then_some(ANTHROPIC_OAUTH_AUTO_COMPACT_BUDGET)
+}
+
 /// Max chars for a single tool result during emergency truncation
 pub const EMERGENCY_TOOL_RESULT_MAX_CHARS: usize = 4000;
 
@@ -629,6 +666,81 @@ pub fn emergency_truncate_tool_results(messages: &mut [Message], max_chars: usiz
     }
 
     truncated
+}
+
+/// Index of the first message that belongs to one of the last `keep_turns`
+/// user turns. Everything before that index is old enough that its tool output
+/// is stale. `keep_turns == 0` marks the whole transcript as prunable.
+///
+/// A turn starts at a user message, so the retained suffix always includes at
+/// least the whole prompt/tool loop of the current turn.
+pub fn prune_cutoff_for_turns(roles: &[Role], keep_turns: usize) -> usize {
+    if keep_turns == 0 {
+        return roles.len();
+    }
+    let mut seen = 0usize;
+    for (index, role) in roles.iter().enumerate().rev() {
+        if matches!(role, Role::User) {
+            seen += 1;
+            if seen == keep_turns {
+                return index;
+            }
+        }
+    }
+    0
+}
+
+/// Truncate tool results in `contents[..cutoff]` to `max_chars`, keeping the
+/// head and tail. Returns how many tool results were shortened.
+///
+/// Works on content-block vectors directly so the same rule serves provider
+/// messages and the session's stored transcript.
+pub fn truncate_tool_results_before(
+    contents: &mut [&mut Vec<ContentBlock>],
+    cutoff: usize,
+    max_chars: usize,
+) -> usize {
+    let mut truncated = 0;
+    for content in contents.iter_mut().take(cutoff) {
+        for block in content.iter_mut() {
+            if let ContentBlock::ToolResult { content, .. } = block
+                && content.len() > max_chars
+            {
+                *content = emergency_truncated_tool_result(content, max_chars);
+                truncated += 1;
+            }
+        }
+    }
+    truncated
+}
+
+/// Deterministically shorten tool-result output older than the last
+/// `keep_turns` user turns, in place and without any API call.
+///
+/// Compaction requests replay the transcript through a normal completion, so
+/// they are limited by the same per-minute input-token budget as a turn. On a
+/// session that is already at the limit, a compaction request that carries
+/// every stale tool dump can never be sent, which is the deadlock this removes:
+/// the stale output is dropped locally first, so the summarization request is
+/// small enough to go through. Recent turns are untouched.
+pub fn prune_stale_tool_results(
+    messages: &mut [Message],
+    keep_turns: usize,
+    max_chars: usize,
+) -> usize {
+    let roles: Vec<Role> = messages
+        .iter()
+        .map(|message| message.role.clone())
+        .collect();
+    let cutoff = prune_cutoff_for_turns(&roles, keep_turns);
+    if cutoff == 0 {
+        return 0;
+    }
+    let mut contents: Vec<&mut Vec<ContentBlock>> = messages
+        .iter_mut()
+        .map(|message| &mut message.content)
+        .collect();
+    truncate_tool_results_before(&mut contents, cutoff, max_chars)
 }
 
 pub fn emergency_truncate_large_payloads(

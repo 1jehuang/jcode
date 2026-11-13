@@ -34,12 +34,12 @@ pub use auth_mode::{
 pub use catalog_refresh::{ModelCatalogRefreshSummary, summarize_model_catalog_refresh};
 pub use failover::{
     FailoverDecision, ProviderFailoverPrompt, classify_failover_error_message,
-    is_definitive_usage_exhaustion, parse_failover_prompt_message,
+    is_definitive_usage_exhaustion, is_rate_limit_error, parse_failover_prompt_message,
 };
 pub use fallback_pick::{
     FallbackPickOptions, error_looks_like_credential_failure, model_generation_rank,
     pick_next_fallback_route, pick_next_fallback_route_with_options, rank_fallback_routes,
-    route_pool_key,
+    rate_limit_bucket, route_pool_key,
 };
 pub use fingerprint::{log_provider_canonical_input, stable_hash_json, stable_hash_str};
 pub use models::{

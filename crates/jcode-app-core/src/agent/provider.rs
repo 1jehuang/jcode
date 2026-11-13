@@ -178,6 +178,7 @@ impl Agent {
     pub async fn effective_context_budget(&self) -> usize {
         let compaction = self.registry.compaction();
         let mut manager = compaction.write().await;
+        manager.set_route_api_method(self.session_route_api_method().as_deref());
         manager.set_budget(self.provider.context_window());
         manager.token_budget()
     }
@@ -194,6 +195,7 @@ impl Agent {
             return Err(error);
         }
         manager.set_context_cap_override(cap);
+        manager.set_route_api_method(self.session_route_api_method().as_deref());
         manager.set_budget(self.provider.context_window());
         Ok(manager.token_budget())
     }
@@ -201,7 +203,10 @@ impl Agent {
     fn refresh_compaction_budget(&self) {
         let compaction = self.registry.compaction();
         match compaction.try_write() {
-            Ok(mut manager) => manager.set_budget(self.provider.context_window()),
+            Ok(mut manager) => {
+                manager.set_route_api_method(self.session_route_api_method().as_deref());
+                manager.set_budget(self.provider.context_window())
+            }
             Err(_) => crate::logging::warn(
                 "Could not refresh compaction token budget after provider change: compaction manager is busy",
             ),

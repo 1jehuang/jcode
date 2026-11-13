@@ -503,3 +503,123 @@ fn strip_large_images_strips_all_when_single_image_exceeds_budget() {
     assert_eq!(stripped, 1);
     assert!(matches!(messages[0].content[0], ContentBlock::Text { .. }));
 }
+
+#[test]
+fn anthropic_oauth_routes_get_the_automatically_capped_budget() {
+    // Subscription logins are limited per minute on input tokens, not by the
+    // 1M context window, so the compaction trigger must fire far earlier.
+    for method in [
+        "claude-oauth",
+        "claude-oauth@claude-fox",
+        "anthropic-oauth",
+        " Claude-OAuth@Work ",
+    ] {
+        assert_eq!(
+            auto_compaction_budget_ceiling(method),
+            Some(ANTHROPIC_OAUTH_AUTO_COMPACT_BUDGET),
+            "{method}"
+        );
+    }
+    // Metered API keys, other providers, and unknown routes keep the model
+    // window: their limit is not the subscription ITPM bucket.
+    for method in [
+        "claude-api",
+        "anthropic-api-key",
+        "openai-oauth@work",
+        "openai-api",
+        "openrouter",
+        "",
+    ] {
+        assert_eq!(auto_compaction_budget_ceiling(method), None, "{method}");
+    }
+    // 80% of the capped budget is the documented ~80k trigger.
+    assert_eq!(
+        (ANTHROPIC_OAUTH_AUTO_COMPACT_BUDGET as f32 * COMPACTION_THRESHOLD) as usize,
+        80_000
+    );
+}
+
+fn tool_result_message(text: &str) -> Message {
+    Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: "tool_1".to_string(),
+            content: text.to_string(),
+            is_error: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }
+}
+
+#[test]
+fn prune_cutoff_keeps_the_last_user_turns() {
+    let roles = vec![
+        Role::User,      // turn 1
+        Role::Assistant, //
+        Role::User,      // turn 2
+        Role::Assistant, //
+        Role::User,      // turn 3
+        Role::Assistant, //
+        Role::User,      // turn 4
+        Role::Assistant, //
+    ];
+    // Keep the last 2 turns (indices 4..), prune everything before index 4.
+    assert_eq!(prune_cutoff_for_turns(&roles, 2), 4);
+    assert_eq!(prune_cutoff_for_turns(&roles, 4), 0);
+    assert_eq!(prune_cutoff_for_turns(&roles, 0), roles.len());
+    // Fewer turns than requested: nothing is stale.
+    assert_eq!(prune_cutoff_for_turns(&roles, 99), 0);
+    // A tool loop inside a turn stays with its turn.
+    let roles = vec![
+        Role::User,
+        Role::Assistant,
+        Role::User,
+        Role::Assistant,
+        Role::Assistant,
+    ];
+    assert_eq!(prune_cutoff_for_turns(&roles, 1), 2);
+}
+
+#[test]
+fn prune_stale_tool_results_truncates_only_output_older_than_kept_turns() {
+    let long = "x".repeat(COMPACTION_STALE_TOOL_RESULT_MAX_CHARS * 3);
+    let mut messages = vec![
+        tool_result_message(&long), // turn 1, stale
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "turn 2".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        tool_result_message(&long), // turn 2, still recent enough to keep
+    ];
+    let pruned = prune_stale_tool_results(&mut messages, 1, COMPACTION_STALE_TOOL_RESULT_MAX_CHARS);
+    assert_eq!(pruned, 1, "only the stale tool result is shortened");
+    let ContentBlock::ToolResult { content, .. } = &messages[0].content[0] else {
+        panic!("expected tool result");
+    };
+    assert!(content.contains("chars truncated for context recovery"));
+    assert!(content.len() < long.len());
+    let ContentBlock::ToolResult { content, .. } = &messages[2].content[0] else {
+        panic!("expected tool result");
+    };
+    assert_eq!(content.len(), long.len(), "recent output stays verbatim");
+}
+
+#[test]
+fn prune_stale_tool_results_is_a_noop_without_stale_output() {
+    let mut messages = vec![tool_result_message("short")];
+    assert_eq!(
+        prune_stale_tool_results(&mut messages, COMPACTION_VERBATIM_TURNS, 2000),
+        0
+    );
+    // No user turns at all: there is no turn boundary, so nothing is pruned.
+    assert_eq!(
+        prune_cutoff_for_turns(&[Role::Assistant, Role::Assistant], 4),
+        0
+    );
+}

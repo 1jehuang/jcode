@@ -60,6 +60,43 @@ pub struct FallbackPickOptions {
     /// - when the failed api_method is unknown, all same-provider routes are
     ///   excluded because any of them could share the broken credential.
     pub credential_failure: bool,
+
+    /// The failure was a transient rate limit (HTTP 429 / per-minute ITPM).
+    /// The limit is charged per (provider, account) bucket, so every model
+    /// behind the same bucket is throttled at the same moment: those routes are
+    /// excluded, metered API-key routes are preferred over subscription logins,
+    /// and only then does an alternate provider come into play.
+    pub rate_limit_failure: bool,
+
+    /// Server-requested wait attached to the failure, when one is known. It is
+    /// carried so the caller can hold the turn for the hint instead of
+    /// re-sending into the same bucket; ranking never shortens the server's
+    /// hint.
+    pub retry_after_secs: Option<u64>,
+}
+
+/// The provider-side rate-limit bucket a route consumes.
+///
+/// Anthropic/OpenAI subscription logins are throttled per account across every
+/// model behind that login, so the bucket is (provider, account). A metered API
+/// key is its own bucket. An unlabeled OAuth route names no account, so the
+/// provider's whole OAuth login is treated as one bucket: any sibling route
+/// could be the same account.
+pub fn rate_limit_bucket(provider: &str, api_method: &str) -> String {
+    let normalized = provider.trim().to_ascii_lowercase();
+    let provider_key = if matches!(normalized.as_str(), "anthropic" | "claude") {
+        "claude"
+    } else {
+        normalized.as_str()
+    };
+    if api_method_is_oauth(&ModelRouteApiMethod::parse(api_method)) {
+        match crate::oauth_account_label(api_method) {
+            Some(label) => format!("{provider_key}:oauth:{label}"),
+            None => format!("{provider_key}:oauth"),
+        }
+    } else {
+        format!("{provider_key}:api")
+    }
 }
 
 /// Whether `error` looks like a credential/auth failure for the active route's
@@ -160,6 +197,17 @@ pub fn pick_next_fallback_route_with_options(
                 return None;
             }
 
+            // A per-minute rate limit is charged to the whole
+            // (provider, account) bucket, so a sibling model on the same login
+            // would 429 identically. Only a different bucket can help.
+            if options.rate_limit_failure
+                && (rate_limit_bucket(&route.provider, &route.api_method)
+                    == rate_limit_bucket(current_provider, current_api_method)
+                    || (unknown_method && same_provider))
+            {
+                return None;
+            }
+
             let tier = if same_model && !same_method {
                 0
             } else if same_provider {
@@ -169,10 +217,15 @@ pub fn pick_next_fallback_route_with_options(
             };
 
             // Within a tier, prefer subscription (OAuth) logins, then preserve
-            // the catalog's original ordering for determinism.
-            let prefers_oauth = u8::from(!api_method_is_oauth(&ModelRouteApiMethod::parse(
-                &route.api_method,
-            )));
+            // the catalog's original ordering for determinism. A rate-limited
+            // subscription login is the one thing that will not work, so
+            // invert that preference: a metered API key is a different bucket.
+            let oauth_rank = api_method_is_oauth(&ModelRouteApiMethod::parse(&route.api_method));
+            let prefers_oauth = u8::from(if options.rate_limit_failure {
+                oauth_rank
+            } else {
+                !oauth_rank
+            });
 
             Some((
                 tier,
@@ -303,6 +356,7 @@ mod tests {
         ];
         let options = FallbackPickOptions {
             credential_failure: true,
+            ..Default::default()
         };
         let pick = pick_next_fallback_route_with_options(
             &routes,
@@ -325,6 +379,7 @@ mod tests {
         ];
         let options = FallbackPickOptions {
             credential_failure: true,
+            ..Default::default()
         };
         let pick = pick_next_fallback_route_with_options(
             &routes,
@@ -349,6 +404,7 @@ mod tests {
         ];
         let options = FallbackPickOptions {
             credential_failure: true,
+            ..Default::default()
         };
         let pick = pick_next_fallback_route_with_options(&routes, "gpt-5.5", "OpenAI", "", options)
             .expect("a fallback should exist");
@@ -474,6 +530,17 @@ pub fn rank_fallback_routes(
             if options.credential_failure && same_provider && (same_method || unknown_method) {
                 return None;
             }
+            // A per-minute rate limit drains one (provider, account) bucket.
+            // Sibling models on that bucket 429 identically, so they are not
+            // fallbacks; a different account, a metered API key, or another
+            // provider is.
+            if options.rate_limit_failure
+                && (rate_limit_bucket(&route.provider, &route.api_method)
+                    == rate_limit_bucket(current_provider, current_api_method)
+                    || (unknown_method && same_provider))
+            {
+                return None;
+            }
             let pool_position = route_pool_key(&route.api_method)
                 .and_then(|key| pool_members.iter().position(|member| *member == key))
                 .unwrap_or(usize::MAX);
@@ -484,9 +551,14 @@ pub fn rank_fallback_routes(
             } else {
                 2
             };
-            let prefers_oauth = u8::from(!api_method_is_oauth(&ModelRouteApiMethod::parse(
-                &route.api_method,
-            )));
+            // A throttled subscription login must not be preferred; invert the
+            // usual OAuth-first tie-break so a metered API key wins.
+            let oauth_rank = api_method_is_oauth(&ModelRouteApiMethod::parse(&route.api_method));
+            let prefers_oauth = u8::from(if options.rate_limit_failure {
+                oauth_rank
+            } else {
+                !oauth_rank
+            });
             Some((
                 (
                     pool_position,
@@ -568,9 +640,119 @@ mod unified_rank_account_tests {
             "claude-oauth@claude-fox",
             FallbackPickOptions {
                 credential_failure: true,
+                ..Default::default()
             },
             &["claude:claude-fox".into(), "claude:claude-otter".into()],
         );
         assert_eq!(ranked, vec![0]);
+    }
+}
+
+#[cfg(test)]
+mod rate_limit_bucket_tests {
+    use super::*;
+
+    fn route(model: &str, provider: &str, api_method: &str) -> ModelRoute {
+        ModelRoute {
+            model: model.into(),
+            provider: provider.into(),
+            api_method: api_method.into(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        }
+    }
+
+    fn rate_limited() -> FallbackPickOptions {
+        FallbackPickOptions {
+            rate_limit_failure: true,
+            retry_after_secs: Some(30),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn buckets_are_provider_and_account() {
+        assert_eq!(
+            rate_limit_bucket("Anthropic", "claude-oauth@fox"),
+            rate_limit_bucket("claude", "claude-oauth@fox")
+        );
+        assert_ne!(
+            rate_limit_bucket("Anthropic", "claude-oauth@fox"),
+            rate_limit_bucket("Anthropic", "claude-oauth@otter")
+        );
+        assert_ne!(
+            rate_limit_bucket("Anthropic", "claude-oauth@fox"),
+            rate_limit_bucket("Anthropic", "claude-api")
+        );
+    }
+
+    #[test]
+    fn rate_limit_skips_sibling_models_on_same_oauth_bucket_and_prefers_api_key() {
+        let routes = vec![
+            route("claude-sonnet-4", "Anthropic", "claude-oauth@fox"), // same bucket
+            route("claude-opus-4", "Anthropic", "claude-oauth@fox"),   // same bucket
+            route("gpt-5", "OpenAI", "openai-oauth"),
+            route("claude-opus-4", "Anthropic", "claude-api"),
+        ];
+        let pick = pick_next_fallback_route_with_options(
+            &routes,
+            "claude-opus-4",
+            "Anthropic",
+            "claude-oauth@fox",
+            rate_limited(),
+        )
+        .expect("fallback");
+        assert_eq!(routes[pick].api_method, "claude-api");
+
+        let ranked = rank_fallback_routes(
+            &routes,
+            "claude-opus-4",
+            "Anthropic",
+            "claude-oauth@fox",
+            rate_limited(),
+            &[],
+        );
+        assert!(!ranked.contains(&0) && !ranked.contains(&1));
+        assert_eq!(routes[ranked[0]].api_method, "claude-api");
+    }
+
+    #[test]
+    fn rate_limit_allows_another_account_or_provider() {
+        let routes = vec![
+            route("claude-sonnet-4", "Anthropic", "claude-oauth@fox"),
+            route("claude-sonnet-4", "Anthropic", "claude-oauth@otter"),
+            route("gpt-5", "OpenAI", "openai-oauth"),
+        ];
+        let ranked = rank_fallback_routes(
+            &routes,
+            "claude-opus-4",
+            "Anthropic",
+            "claude-oauth@fox",
+            rate_limited(),
+            &[],
+        );
+        assert_eq!(ranked.len(), 2);
+        assert!(!ranked.contains(&0));
+        // Unknown failed method: the whole provider may be the same bucket.
+        let pick = pick_next_fallback_route_with_options(
+            &routes,
+            "claude-opus-4",
+            "Anthropic",
+            "",
+            rate_limited(),
+        )
+        .expect("fallback");
+        assert_eq!(routes[pick].provider, "OpenAI");
+    }
+
+    #[test]
+    fn rate_limit_classifier_excludes_exhaustion() {
+        assert!(crate::is_rate_limit_error(
+            "Anthropic API error (429 Too Many Requests): rate_limit_error input tokens per minute"
+        ));
+        assert!(!crate::is_rate_limit_error("usage_limit_reached"));
+        assert!(!crate::is_rate_limit_error("version 4290"));
     }
 }

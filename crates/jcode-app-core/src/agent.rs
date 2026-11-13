@@ -709,6 +709,7 @@ impl Agent {
         manager.reset();
         manager.set_context_cap_override(self.session.context_cap);
         let budget = self.provider.context_window();
+        manager.set_route_api_method(self.session_route_api_method().as_deref());
         manager.set_budget(budget);
         if let Some(state) = self.session.compaction.as_ref() {
             manager.restore_persisted_stored_state_with(state, &self.session.messages);
@@ -920,6 +921,7 @@ impl Agent {
         self.session.compaction = Some(state.clone());
         let mut post_tokens = None;
         if let Ok(mut manager) = compaction.try_write() {
+            manager.set_route_api_method(self.session_route_api_method().as_deref());
             manager.set_budget(self.provider.context_window());
             manager.restore_persisted_stored_state_with(&state, &self.session.messages);
             post_tokens =

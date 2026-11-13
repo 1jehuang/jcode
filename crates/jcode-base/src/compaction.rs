@@ -27,12 +27,13 @@ use std::time::Instant;
 use tokio::task::JoinHandle;
 
 pub use jcode_compaction_core::{
-    CHARS_PER_TOKEN, COMPACTION_THRESHOLD, CRITICAL_THRESHOLD, CompactionAction, CompactionEvent,
-    CompactionStats, DEFAULT_TOKEN_BUDGET, EMBED_MAX_CHARS_PER_MSG, EMBEDDING_HISTORY_WINDOW,
-    EMERGENCY_IMAGE_MAX_CHARS, EMERGENCY_TOOL_RESULT_MAX_CHARS, MANUAL_COMPACT_MIN_THRESHOLD,
-    MIN_TURNS_TO_KEEP, PAYLOAD_IMAGE_CHAR_BUDGET, RECENT_TURNS_TO_KEEP,
-    SEMANTIC_EMBED_CACHE_CAPACITY, SUMMARY_PROMPT, SYSTEM_OVERHEAD_TOKENS, Summary,
-    TOKEN_HISTORY_WINDOW, build_compaction_prompt, build_emergency_summary_text,
+    ANTHROPIC_OAUTH_AUTO_COMPACT_BUDGET, CHARS_PER_TOKEN, COMPACTION_STALE_TOOL_RESULT_MAX_CHARS,
+    COMPACTION_THRESHOLD, COMPACTION_VERBATIM_TURNS, CRITICAL_THRESHOLD, CompactionAction,
+    CompactionEvent, CompactionStats, DEFAULT_TOKEN_BUDGET, EMBED_MAX_CHARS_PER_MSG,
+    EMBEDDING_HISTORY_WINDOW, EMERGENCY_IMAGE_MAX_CHARS, EMERGENCY_TOOL_RESULT_MAX_CHARS,
+    MANUAL_COMPACT_MIN_THRESHOLD, MIN_TURNS_TO_KEEP, PAYLOAD_IMAGE_CHAR_BUDGET,
+    RECENT_TURNS_TO_KEEP, SEMANTIC_EMBED_CACHE_CAPACITY, SUMMARY_PROMPT, SYSTEM_OVERHEAD_TOKENS,
+    Summary, TOKEN_HISTORY_WINDOW, build_compaction_prompt, build_emergency_summary_text,
     compacted_summary_text_block, content_char_count, effective_context_tokens_from_usage,
     emergency_strip_large_images, emergency_truncate_large_payloads, estimate_compaction_tokens,
     is_image_rejection_error, is_request_payload_too_large_error, mean_embedding,
@@ -174,6 +175,15 @@ pub struct CompactionManager {
     /// Per-session ceiling, replacing the global cap when set.
     context_cap_override: Option<usize>,
 
+    /// Ceiling imposed by the active route's rate limits (Anthropic OAuth
+    /// per-minute input tokens), applied on top of every other cap.
+    route_budget_ceiling: Option<usize>,
+
+    /// Optional provider used for summarization requests instead of the
+    /// session provider (e.g. a metered API-key model, so compaction does not
+    /// draw from the throttled subscription bucket).
+    compaction_provider: Option<Arc<dyn Provider>>,
+
     /// Provider-reported input token usage from the latest request.
     /// Used to trigger compaction with real token counts instead of only heuristics.
     observed_input_tokens: Option<u64>,
@@ -228,6 +238,8 @@ impl CompactionManager {
             token_budget: Self::capped_budget(&cfg, DEFAULT_TOKEN_BUDGET),
             model_token_budget: DEFAULT_TOKEN_BUDGET,
             context_cap_override: None,
+            route_budget_ceiling: None,
+            compaction_provider: None,
             observed_input_tokens: None,
             last_compaction: None,
             mode,
@@ -242,7 +254,11 @@ impl CompactionManager {
 
     /// Reset all compaction state
     pub fn reset(&mut self) {
+        let route_budget_ceiling = self.route_budget_ceiling;
+        let compaction_provider = self.compaction_provider.take();
         *self = Self::new();
+        self.route_budget_ceiling = route_budget_ceiling;
+        self.compaction_provider = compaction_provider;
     }
 
     pub fn with_budget(mut self, budget: usize) -> Self {
@@ -273,11 +289,37 @@ impl CompactionManager {
         let cap = self
             .context_cap_override
             .unwrap_or(self.compaction_config.max_context_tokens);
-        self.token_budget = if cap > 0 {
+        let budget = if cap > 0 {
             self.model_token_budget.min(cap)
         } else {
             self.model_token_budget
         };
+        self.token_budget = match self.route_budget_ceiling {
+            Some(ceiling) => budget.min(ceiling),
+            None => budget,
+        };
+    }
+
+    /// Apply the active route's rate-limit ceiling (see
+    /// [`jcode_compaction_core::auto_compaction_budget_ceiling`]). Call with the
+    /// route's api_method whenever the route changes.
+    pub fn set_route_api_method(&mut self, api_method: Option<&str>) {
+        self.route_budget_ceiling =
+            api_method.and_then(jcode_compaction_core::auto_compaction_budget_ceiling);
+        self.refresh_context_cap();
+    }
+
+    /// Route summarization to a dedicated provider (None = session provider).
+    pub fn set_compaction_provider(&mut self, provider: Option<Arc<dyn Provider>>) {
+        self.compaction_provider = provider;
+    }
+
+    fn summarizer(&self, session_provider: Arc<dyn Provider>) -> Arc<dyn Provider> {
+        if let Some(provider) = self.compaction_provider.clone() {
+            return provider;
+        }
+        let spec = crate::config::config().compaction.compaction_model.clone();
+        resolve_compaction_provider(&spec, session_provider)
     }
 
     /// Apply `[compaction] max_context_tokens` so a large-window model cannot
@@ -932,7 +974,9 @@ impl CompactionManager {
         }
 
         // Snapshot messages to summarize (must clone for the async task)
-        let messages_to_summarize: Vec<Message> = active[..cutoff].to_vec();
+        let mut messages_to_summarize: Vec<Message> = active[..cutoff].to_vec();
+        prune_for_summary(active, &mut messages_to_summarize);
+        let provider = self.summarizer(provider);
         let msg_count = messages_to_summarize.len();
         let existing_summary = self.active_summary.clone();
         let mode_label = self.mode_trigger_label().to_string();
@@ -1159,7 +1203,9 @@ impl CompactionManager {
             return Err("Cannot compact - would split tool call/result pairs".to_string());
         }
 
-        let messages_to_summarize: Vec<Message> = active[..cutoff].to_vec();
+        let mut messages_to_summarize: Vec<Message> = active[..cutoff].to_vec();
+        prune_for_summary(active, &mut messages_to_summarize);
+        let provider = self.summarizer(provider);
         let msg_count = messages_to_summarize.len();
         let existing_summary = self.active_summary.clone();
 
@@ -1719,6 +1765,52 @@ impl Default for CompactionManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Provider for summarization: a fork of the session provider switched to the
+/// configured `[compaction] compaction_model`, or the session provider itself
+/// when none is configured or the switch fails (compaction must never break
+/// because the secondary route is unavailable).
+pub(crate) fn resolve_compaction_provider(
+    spec: &str,
+    session_provider: Arc<dyn Provider>,
+) -> Arc<dyn Provider> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return session_provider;
+    }
+    let forked = session_provider.fork();
+    match forked.set_model(spec) {
+        Ok(()) => forked,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "[compaction] compaction_model '{spec}' unavailable ({error}); using session model"
+            ));
+            session_provider
+        }
+    }
+}
+
+/// Shorten tool output older than the last
+/// [`jcode_compaction_core::COMPACTION_VERBATIM_TURNS`] user turns of `active`
+/// inside the summarization payload, locally and deterministically, so the
+/// compaction request stays small even when the session is at its per-minute
+/// input-token limit. `to_summarize` is a prefix of `active`.
+pub(crate) fn prune_for_summary(active: &[Message], to_summarize: &mut [Message]) -> usize {
+    let roles: Vec<Role> = active.iter().map(|message| message.role.clone()).collect();
+    let stale = jcode_compaction_core::prune_cutoff_for_turns(
+        &roles,
+        jcode_compaction_core::COMPACTION_VERBATIM_TURNS,
+    );
+    let mut contents: Vec<&mut Vec<ContentBlock>> = to_summarize
+        .iter_mut()
+        .map(|message| &mut message.content)
+        .collect();
+    jcode_compaction_core::truncate_tool_results_before(
+        &mut contents,
+        stale,
+        jcode_compaction_core::COMPACTION_STALE_TOOL_RESULT_MAX_CHARS,
+    )
 }
 
 /// Generate summary using the provider

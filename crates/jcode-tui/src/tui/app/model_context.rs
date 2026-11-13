@@ -711,6 +711,11 @@ impl App {
             credential_failure: crate::provider::error_looks_like_credential_failure(error)
                 || failover_decision.should_mark_provider_unavailable()
                 || crate::provider::parse_failover_prompt_message(error).is_some(),
+            // A per-minute 429 throttles the whole (provider, account) bucket:
+            // never offer a sibling on it. With no other bucket the offer is
+            // skipped and the rate-limit hold waits out `retry-after`.
+            rate_limit_failure: jcode_provider_core::is_rate_limit_error(error),
+            retry_after_secs: super::parse_rate_limit_error(error).map(|wait| wait.as_secs()),
         };
         if !self.is_remote
             && failover_decision.should_mark_provider_unavailable()
@@ -1208,6 +1213,7 @@ impl App {
         {
             let compaction = self.registry.compaction();
             if let Ok(mut manager) = compaction.try_write() {
+                manager.set_route_api_method(self.current_route_api_method().as_deref());
                 manager.set_budget(limit);
             };
         }
@@ -1225,6 +1231,7 @@ impl App {
         self.context_warning_shown = false;
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
+            manager.set_route_api_method(self.current_route_api_method().as_deref());
             manager.set_budget(limit);
         };
     }

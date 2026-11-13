@@ -93,6 +93,8 @@ pub(super) fn pick_failover_target(agent: &Agent, error: &str) -> Option<Failove
         &current_api_method,
         crate::provider::FallbackPickOptions {
             credential_failure: true,
+            rate_limit_failure: jcode_provider_core::is_rate_limit_error(error),
+            retry_after_secs: None,
         },
         &pool.ordered_members(),
     );

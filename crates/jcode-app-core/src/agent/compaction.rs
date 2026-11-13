@@ -130,6 +130,13 @@ impl Agent {
     /// Performs a synchronous hard compaction and resets provider session state,
     /// allowing the caller to retry the same turn immediately.
     pub(super) fn try_auto_compact_after_context_limit(&mut self, error: &str) -> bool {
+        if jcode_provider_core::is_rate_limit_error(error) {
+            // A per-minute input-token 429: shrink the next request locally,
+            // but return false so the caller still waits out retry-after
+            // instead of re-sending into the same throttled bucket.
+            self.prune_stale_tool_results_after_rate_limit();
+            return false;
+        }
         if crate::provider::openai_request::is_openai_encrypted_content_too_large_error(error)
             && self.try_recover_oversized_openai_native_compaction()
         {
@@ -211,6 +218,25 @@ impl Agent {
         );
 
         true
+    }
+
+    /// Deterministically shorten tool output older than the last few turns
+    /// after an HTTP 429, so the retried request (and the compaction request)
+    /// carries far fewer input tokens. Returns how many results were shortened.
+    pub(super) fn prune_stale_tool_results_after_rate_limit(&mut self) -> usize {
+        let pruned = self.session.prune_stale_tool_results(
+            crate::compaction::COMPACTION_VERBATIM_TURNS,
+            crate::compaction::COMPACTION_STALE_TOOL_RESULT_MAX_CHARS,
+        );
+        if pruned > 0 {
+            self.reset_after_transcript_image_rewrite();
+            self.persist_session_best_effort("rate-limit tool-result pruning");
+            logging::warn(&format!(
+                "Rate limited; pruned {pruned} stale tool result(s) older than the last {} turns",
+                crate::compaction::COMPACTION_VERBATIM_TURNS
+            ));
+        }
+        pruned
     }
 
     /// Client notice for the context-limit auto-recovery that just ran,
@@ -312,6 +338,7 @@ impl Agent {
             let provider_messages = self.session.messages_for_provider();
             manager.reset();
             manager.set_context_cap_override(self.session.context_cap);
+            manager.set_route_api_method(self.session_route_api_method().as_deref());
             manager.set_budget(self.provider.context_window());
             if let Some(state) = self.session.compaction.as_ref() {
                 manager.restore_persisted_state_with(state, &provider_messages);

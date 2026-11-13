@@ -94,6 +94,30 @@ pub fn is_definitive_usage_exhaustion(message: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
+/// Whether `message` is a *transient* rate limit (HTTP 429 / per-minute or
+/// per-request throttling), as opposed to plan/quota exhaustion that a retry
+/// cannot clear.
+///
+/// The distinction matters because a transient limit is charged per
+/// (provider, account) bucket: every model behind that bucket is throttled at
+/// the same time, while a different account or a metered API key is not.
+pub fn is_rate_limit_error(message: &str) -> bool {
+    if is_definitive_usage_exhaustion(message) {
+        return false;
+    }
+    let lower = message.to_ascii_lowercase();
+    [
+        "rate limit",
+        "rate_limit",
+        "rate-limited",
+        "too many requests",
+        "throttl",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+        || contains_independent_status_code(&lower, "429")
+}
+
 pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
     let lower = message.to_ascii_lowercase();
 
