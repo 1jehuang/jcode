@@ -1764,7 +1764,8 @@ fn test_deepseek_direct_profile_supports_reasoning_effort_via_multi_provider() {
                     "medium",
                     "high",
                     "max",
-                    "swarm"
+                    "swarm",
+                    "swarm-deep"
                 ]
             );
             provider
@@ -2244,5 +2245,67 @@ fn bare_openai_compatible_model_ids_route_to_their_profile_not_the_active_provid
             provider.fork_model_switch_request(provider.active_provider(), &provider.model()),
             "celeris:celeris-1"
         );
+    });
+}
+
+/// The model picker routes a named profile's model by its `display_name`
+/// when one is configured (`named_provider_profile_routes`). For
+/// AnthropicCompatible profiles the runtime only accepts raw model ids,
+/// so `set_model` must resolve the display label back to the raw id
+/// before handing it to the anthropic runtime (greptile F2, PR 1879:
+/// selecting such a model bailed with "not supported by Anthropic").
+#[test]
+fn anthropic_compatible_named_profile_resolves_display_name_to_raw_id() {
+    with_clean_provider_test_env(|| {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        crate::config::Config::invalidate_cache();
+
+        let config_path = crate::config::Config::path().expect("config path");
+        std::fs::create_dir_all(config_path.parent().expect("config parent"))
+            .expect("create config dir");
+        std::fs::write(
+            &config_path,
+            r#"
+[providers.corporate-claude]
+type = "anthropic-compatible"
+base_url = "https://gateway.example.com/anthropic/v1/"
+api_key_env = "CORPORATE_CLAUDE_TOKEN"
+default_model = "claude-sonnet-4-6"
+
+[[providers.corporate-claude.models]]
+id = "claude-sonnet-4-6"
+name = "Corporate Sonnet"
+"#,
+        )
+        .expect("write config");
+        crate::env::set_var("CORPORATE_CLAUDE_TOKEN", "test-token");
+        crate::config::Config::invalidate_cache();
+
+        let provider = MultiProvider::new();
+        // The picker emits the display label after the profile prefix.
+        provider
+            .set_model("corporate-claude:Corporate Sonnet")
+            .expect("display-name selection must resolve to the raw profile model id");
+
+        let anthropic = provider
+            .anthropic
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .expect("anthropic runtime should be bound");
+        assert_eq!(
+            anthropic.model(),
+            "claude-sonnet-4-6",
+            "the raw id must reach the anthropic runtime, not the display label"
+        );
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+        crate::config::Config::invalidate_cache();
     });
 }
