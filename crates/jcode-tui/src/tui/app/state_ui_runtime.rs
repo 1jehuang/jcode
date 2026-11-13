@@ -478,19 +478,34 @@ impl App {
     }
 
     pub(super) fn toggle_input_stash(&mut self) {
-        if let Some((stashed, stashed_cursor)) = self.stashed_input.take() {
-            let current_input = std::mem::replace(&mut self.input, stashed);
-            let current_cursor = std::mem::replace(&mut self.cursor_pos, stashed_cursor);
+        if let Some(stashed) = self.stashed_input.take() {
+            let current_input = std::mem::replace(&mut self.input, stashed.input);
+            let current_cursor = std::mem::replace(&mut self.cursor_pos, stashed.cursor_pos);
+            // Chips stay with the text they are attached to. The incoming
+            // text is restored first, reset_tab_completion prunes the
+            // outgoing chips against it, then the stash's chips are
+            // re-attached after the prune (voice-stash ordering, greptile A3).
+            self.reset_tab_completion();
+            let current_chips = std::mem::replace(&mut self.file_chips, stashed.file_chips);
+            self.sync_model_picker_preview_from_input();
             if current_input.is_empty() {
                 self.set_status_notice("📋 Input restored from stash");
             } else {
-                self.stashed_input = Some((current_input, current_cursor));
+                self.stashed_input = Some(InputUndoEntry {
+                    input: current_input,
+                    cursor_pos: current_cursor,
+                    file_chips: current_chips,
+                });
                 self.set_status_notice("📋 Swapped input with stash");
             }
         } else if !self.input.is_empty() {
             let input = std::mem::take(&mut self.input);
             let cursor = std::mem::replace(&mut self.cursor_pos, 0);
-            self.stashed_input = Some((input, cursor));
+            self.stashed_input = Some(InputUndoEntry {
+                input,
+                cursor_pos: cursor,
+                file_chips: std::mem::take(&mut self.file_chips),
+            });
             self.set_status_notice("📋 Input stashed");
         }
     }
