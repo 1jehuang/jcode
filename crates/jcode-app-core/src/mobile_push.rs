@@ -67,6 +67,10 @@ pub struct PushPayload {
     pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_title: Option<String>,
+    /// The session's own name. The API shows it on the notification's second
+    /// line, leaving `session_title` as a short where/what/how-long headline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_name: Option<String>,
     pub body: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<u64>,
@@ -265,18 +269,10 @@ pub fn build_payload_with(
         truncate_words(&collapsed, BODY_MAX_CHARS)
     };
     let duration_secs = labels.elapsed.map(|elapsed| elapsed.as_secs());
-    // The run time leads the body, which has several lines of room. In the
-    // one-line title it would crowd out the session name.
-    let body = match labels.elapsed {
-        Some(elapsed) => {
-            let lead = format!("{}{LABEL_SEPARATOR}", humanize_duration(elapsed));
-            let room = BODY_MAX_CHARS.saturating_sub(lead.chars().count());
-            format!("{lead}{}", truncate_words(&body, room))
-        }
-        None => body,
-    };
-    // Title order is what survives lock-screen truncation: where the session
-    // runs, which repo, a per-kind marker, then the session name.
+    // Each line has one job. The headline says where the session runs, which
+    // repo, what happened and how long it took, and is short enough to fit a
+    // lock screen. The session name gets the second line to itself and the
+    // body carries only the result.
     let clean_label = |label: &Option<String>| {
         label
             .as_deref()
@@ -285,20 +281,25 @@ pub fn build_payload_with(
     };
     let origin = clean_label(&labels.origin);
     let repo = clean_label(&labels.repo);
-    let name = title.as_deref().unwrap_or("jcode");
-    let mut prefix = String::new();
-    for label in [origin.as_deref(), repo.as_deref()].into_iter().flatten() {
-        prefix.push_str(label);
-        prefix.push_str(LABEL_SEPARATOR);
-    }
-    prefix.push_str(kind_marker(kind));
-    prefix.push(' ');
-    let room = TITLE_MAX_CHARS.saturating_sub(prefix.chars().count());
-    let title = Some(format!("{prefix}{}", truncate_chars(name, room.max(8))));
+    let run_time = labels.elapsed.map(humanize_duration);
+    let status = match (kind_status(kind), run_time) {
+        // A finished turn needs no word beyond its check mark and run time.
+        (_, Some(time)) if kind == PushKind::TurnDone => format!("{} {time}", kind_marker(kind)),
+        (word, Some(time)) => format!("{} {word}{LABEL_SEPARATOR}{time}", kind_marker(kind)),
+        (word, None) => format!("{} {word}", kind_marker(kind)),
+    };
+    let headline = [origin.clone(), repo.clone(), Some(status)]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(LABEL_SEPARATOR);
+    let session_name = title;
+    let title = Some(truncate_chars(&headline, TITLE_MAX_CHARS));
     PushPayload {
         kind,
         session_id: session_id.to_string(),
         session_title: title,
+        session_name,
         body,
         // Message ids are random u64s. JSON numbers above 2^53 lose precision
         // in JavaScript and the API rejects them, so fold into the safe range.
@@ -317,6 +318,16 @@ pub fn kind_marker(kind: PushKind) -> &'static str {
         PushKind::TurnError => "\u{274C}",  // cross mark
         PushKind::NeedsInput => "\u{2753}", // question mark
         PushKind::Wake => "\u{23F0}",       // alarm clock
+    }
+}
+
+/// The word that follows the marker in the headline.
+fn kind_status(kind: PushKind) -> &'static str {
+    match kind {
+        PushKind::TurnDone => "Done",
+        PushKind::TurnError => "Failed",
+        PushKind::NeedsInput => "Needs input",
+        PushKind::Wake => "Update",
     }
 }
 
@@ -478,6 +489,13 @@ fn trailing_question(text: &str) -> Option<String> {
 /// Errors arrive as `context: cause: cause`. Drop JSON blobs and noise, keep
 /// the most specific readable cause.
 fn summarize_error(text: &str) -> String {
+    // A provider failover prompt is machine-readable; say it in plain words.
+    if let Some(prompt) = jcode_provider_core::failover::parse_failover_prompt_message(text) {
+        return format!(
+            "{} is unavailable. Open the session to continue on {}.",
+            prompt.from_label, prompt.to_label
+        );
+    }
     static JSON: std::sync::OnceLock<Option<regex::Regex>> = std::sync::OnceLock::new();
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let Some(json) = cached_regex(&JSON, r"\{.*\}") else {
@@ -645,6 +663,41 @@ impl Suppression {
         };
     }
 }
+
+/// How long an identical error for the same session stays quiet.
+const REPEAT_ERROR_QUIET: Duration = Duration::from_secs(10 * 60);
+
+/// Remembers the last error pushed per session so a retry loop that keeps
+/// failing the same way notifies once, not on every attempt.
+#[derive(Debug, Default)]
+pub struct RepeatGuard {
+    last: std::collections::HashMap<String, (String, Instant)>,
+}
+
+impl RepeatGuard {
+    /// True when this exact error was already pushed for the session inside
+    /// the quiet window. Otherwise records it and returns false.
+    pub fn is_repeat(&mut self, session_id: &str, body: &str, now: Instant) -> bool {
+        self.last
+            .retain(|_, (_, at)| now.saturating_duration_since(*at) < REPEAT_ERROR_QUIET);
+        match self.last.get(session_id) {
+            Some((last, _)) if last == body => true,
+            _ => {
+                self.last
+                    .insert(session_id.to_string(), (body.to_string(), now));
+                false
+            }
+        }
+    }
+
+    /// Any other notification for the session ends the quiet window.
+    pub fn clear(&mut self, session_id: &str) {
+        self.last.remove(session_id);
+    }
+}
+
+static REPEAT_ERRORS: std::sync::LazyLock<Mutex<RepeatGuard>> =
+    std::sync::LazyLock::new(|| Mutex::new(RepeatGuard::default()));
 
 static SUPPRESSION: Mutex<Suppression> = Mutex::new(Suppression { until: None });
 
@@ -830,6 +883,21 @@ pub fn notify_turn(
         &PushLabels::for_session(session_id, working_dir, elapsed),
     );
     let source = body.to_string();
+    if let Ok(mut guard) = REPEAT_ERRORS.lock() {
+        if payload.kind != PushKind::TurnError {
+            guard.clear(session_id);
+        } else if guard.is_repeat(session_id, &payload.body, Instant::now()) {
+            record(
+                requested,
+                Some(&payload),
+                &source,
+                "skipped",
+                Some("same error already pushed for this session (10 min quiet window)"),
+                None,
+            );
+            return;
+        }
+    }
     handle.spawn(async move {
         let Some((key, base)) = credentials() else {
             record(
@@ -1216,7 +1284,8 @@ mod tests {
             serde_json::json!({
                 "kind": "turn_done",
                 "session_id": "session_x",
-                "session_title": "\u{2705} Fix login",
+                "session_title": "\u{2705} Done",
+                "session_name": "Fix login",
                 "body": "Done. All tests pass",
                 "turn_id": 42
             })
@@ -1243,8 +1312,9 @@ mod tests {
             serde_json::json!({
                 "kind": "turn_done",
                 "session_id": "session_x",
-                "session_title": "XPS 14 \u{00B7} jcode-mobile \u{00B7} \u{2705} Fix login",
-                "body": "4m 12s \u{00B7} Done.",
+                "session_title": "XPS 14 \u{00B7} jcode-mobile \u{00B7} \u{2705} 4m 12s",
+                "session_name": "Fix login",
+                "body": "Done.",
                 "turn_id": 7,
                 "origin": "XPS 14",
                 "repo": "jcode-mobile",
@@ -1259,8 +1329,9 @@ mod tests {
         let p = build_payload_with(PushKind::Wake, "s", Some("Nightly"), "x", None, &cloud);
         assert_eq!(
             p.session_title.as_deref(),
-            Some("Cloud \u{00B7} \u{23F0} Nightly")
+            Some("Cloud \u{00B7} \u{23F0} Update")
         );
+        assert_eq!(p.session_name.as_deref(), Some("Nightly"));
         assert_eq!(p.duration_secs, None);
         // A question at the end still reports how long the turn ran.
         let p = build_payload_with(
@@ -1274,17 +1345,65 @@ mod tests {
         assert_eq!(p.kind, PushKind::NeedsInput);
         assert_eq!(
             p.session_title.as_deref(),
-            Some("XPS 14 \u{00B7} jcode-mobile \u{00B7} \u{2753} T")
+            Some("XPS 14 \u{00B7} jcode-mobile \u{00B7} \u{2753} Needs input \u{00B7} 4m 12s")
         );
-        assert_eq!(p.body, "4m 12s \u{00B7} Should I deploy it now?");
+        assert_eq!(p.body, "Should I deploy it now?");
         // Labels never push the title or body past the API's limits.
         let long = "word ".repeat(60);
         let p = build_payload_with(PushKind::TurnError, "s", Some(&long), &long, None, &labels);
-        let title = p.session_title.unwrap();
-        assert_eq!(title.chars().count(), TITLE_MAX_CHARS);
-        assert!(title.starts_with("XPS 14 \u{00B7} jcode-mobile \u{00B7} \u{274C} word"));
+        assert_eq!(
+            p.session_title.as_deref(),
+            Some("XPS 14 \u{00B7} jcode-mobile \u{00B7} \u{274C} Failed \u{00B7} 4m 12s")
+        );
+        assert!(p.session_name.unwrap().chars().count() <= TITLE_MAX_CHARS);
         assert!(p.body.chars().count() <= BODY_MAX_CHARS);
-        assert!(p.body.starts_with("4m 12s \u{00B7} word"));
+        assert!(p.body.starts_with("word word"));
+    }
+
+    #[test]
+    fn mobile_push_failover_prompt_reads_as_plain_words() {
+        let prompt = jcode_provider_core::failover::ProviderFailoverPrompt {
+            from_provider: "claude".into(),
+            from_label: "Anthropic (claude-fox)".into(),
+            to_provider: "claude".into(),
+            to_label: "Anthropic (claude-otter)".into(),
+            target_route: None,
+            reason: "503".into(),
+            estimated_input_chars: 676703,
+            estimated_input_tokens: 169175,
+        };
+        let p = build_payload(
+            PushKind::TurnError,
+            "s",
+            Some("T"),
+            &prompt.to_error_message(),
+            None,
+        );
+        assert_eq!(
+            p.body,
+            "Anthropic (claude-fox) is unavailable. Open the session to continue on Anthropic (claude-otter)."
+        );
+    }
+
+    #[test]
+    fn mobile_push_repeat_guard_quiets_identical_errors_only() {
+        let mut guard = RepeatGuard::default();
+        let t0 = Instant::now();
+        assert!(!guard.is_repeat("a", "503", t0));
+        assert!(guard.is_repeat("a", "503", t0 + Duration::from_secs(60)));
+        // Another session, a different error, or any other push in between
+        // is news.
+        assert!(!guard.is_repeat("b", "503", t0));
+        assert!(!guard.is_repeat("a", "401", t0 + Duration::from_secs(61)));
+        assert!(guard.is_repeat("a", "401", t0 + Duration::from_secs(62)));
+        guard.clear("a");
+        assert!(!guard.is_repeat("a", "401", t0 + Duration::from_secs(63)));
+        // The quiet window ends on its own.
+        assert!(!guard.is_repeat(
+            "a",
+            "401",
+            t0 + Duration::from_secs(64) + REPEAT_ERROR_QUIET
+        ));
     }
 
     #[test]
@@ -1327,7 +1446,8 @@ mod tests {
         let p = build_payload(PushKind::NeedsInput, "s", Some("  "), "", None);
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(v["kind"], "needs_input");
-        assert_eq!(v["session_title"], "\u{2753} jcode");
+        assert_eq!(v["session_title"], "\u{2753} Needs input");
+        assert!(v.get("session_name").is_none());
         assert!(v.get("turn_id").is_none());
         assert_eq!(v["body"], "Waiting for your input");
         let long = "a".repeat(500);
@@ -1360,17 +1480,18 @@ mod tests {
         let answer = "## Summary\n\nFixed the **login** bug in `auth.rs`; all 12 tests pass.\n\n- detail one\n- detail two\n\n```rust\nfn x() {}\n```";
         let p = build_payload(PushKind::TurnDone, "s", Some("Fix `login`"), answer, None);
         assert_eq!(p.body, "Fixed the login bug in auth.rs; all 12 tests pass.");
-        assert_eq!(p.session_title.as_deref(), Some("\u{2705} Fix login"));
+        assert_eq!(p.session_title.as_deref(), Some("\u{2705} Done"));
+        assert_eq!(p.session_name.as_deref(), Some("Fix login"));
         for (kind, body, marker) in [
-            (PushKind::TurnDone, "done", "\u{2705}"),
-            (PushKind::TurnDone, "Should I push?", "\u{2753}"),
-            (PushKind::TurnError, "boom", "\u{274C}"),
-            (PushKind::Wake, "bash completed", "\u{23F0}"),
+            (PushKind::TurnDone, "done", "\u{2705} Done"),
+            (PushKind::TurnDone, "Should I push?", "\u{2753} Needs input"),
+            (PushKind::TurnError, "boom", "\u{274C} Failed"),
+            (PushKind::Wake, "bash completed", "\u{23F0} Update"),
         ] {
             let t = build_payload(kind, "s", Some("T"), body, None)
                 .session_title
                 .unwrap();
-            assert_eq!(t, format!("{marker} T"));
+            assert_eq!(t, marker);
         }
         let bullets = "- Updated parser\n- Added tests\n- Shipped v2 to production servers today";
         assert_eq!(
