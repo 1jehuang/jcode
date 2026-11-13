@@ -130,6 +130,16 @@ fn safe_truncate(s: &str, max_chars: usize) -> &str {
         .unwrap_or(s)
 }
 
+/// Fit a fixed render string into `width` display cells, appending an
+/// ellipsis when it had to be cut. Rows rendered into the narrow picker
+/// columns used to clip silently instead.
+pub(super) fn fit_to_width(s: &str, width: usize) -> String {
+    if s.chars().count() <= width {
+        return s.to_string();
+    }
+    format!("{}…", safe_truncate(s, width.saturating_sub(1)))
+}
+
 /// Normalize a working directory string for equality comparison: trim trailing
 /// slashes (except root) and surrounding whitespace so `/foo/bar` and
 /// `/foo/bar/` match.
@@ -227,6 +237,11 @@ struct LoadedSessionPreview {
     /// Source-classified search text for external transcripts, whose preview
     /// messages flatten tool blocks into the surrounding role.
     search: Option<loading::SourceBuckets>,
+    /// Model/provider the preview pass extracted from the full transcript;
+    /// when present they beat the stub's bounded-prefix guess so `model:`/
+    /// `provider:` searches match on what the session actually ran.
+    model: Option<String>,
+    provider_key: Option<String>,
 }
 
 /// Fingerprint of every input that affects the *content* of the preview pane
@@ -629,14 +644,22 @@ impl SessionPicker {
     }
 
     /// Record the working directory `/resume` was opened from so sessions that
-    /// share it can be visually highlighted in the list.
+    /// share it can be visually highlighted in the list. Rebuilds the items
+    /// when the value actually changes, so callers that set this right after
+    /// construction (before the first render) still get the pinned group on
+    /// the first frame instead of waiting for an unrelated rebuild.
     pub fn set_current_dir(&mut self, dir: Option<String>) {
-        self.current_dir = dir.map(|d| normalize_dir(&d));
+        let normalized = dir.map(|d| normalize_dir(&d));
+        if normalized == self.current_dir {
+            return;
+        }
+        self.current_dir = normalized;
         self.current_repo = self
             .current_dir
             .as_deref()
             .and_then(|dir| git_common_dir(Path::new(dir)));
         self.same_project_cache.borrow_mut().clear();
+        self.rebuild_items();
     }
 
     /// Whether the given session belongs to the project the picker was opened
@@ -844,7 +867,11 @@ impl SessionPicker {
 
         // Restore the user's scroll position only when their selection survived
         // the refresh so the view feels stable; otherwise fall back to the
-        // rebuild's defaults.
+        // rebuild's defaults. `auto_scroll_preview` rides along: while the
+        // transcript is still loading the flag is deliberately still armed
+        // (the draw loop only consumes it on real content), so forcing it
+        // off here left the populated preview stuck at the top instead of
+        // snapping to the bottom once the load finished.
         let still_selected = selected_id
             .as_deref()
             .and_then(|id| self.selected_session().map(|s| s.id == id))
@@ -1091,13 +1118,19 @@ impl SessionPicker {
                     info_data: Some(info_data),
                     loaded_at: None,
                 },
+                model: session.model.clone(),
+                provider_key: session.provider_key.clone(),
             });
         }
-        Self::load_external_preview_for_target(resume_target, external_path).map(|preview| {
+        Self::load_external_preview_for_target(resume_target, external_path).map(|result| {
             LoadedSessionPreview {
-                messages: preview.messages,
-                search: Some(preview.search),
-                extras: PreviewExtras::default(),
+                messages: result.preview,
+                // Empty buckets would erase the stub pass's index downstream,
+                // so pass only non-empty search text through.
+                search: (!result.search.is_empty()).then_some(result.search),
+                extras: result.extras,
+                model: result.model,
+                provider_key: result.provider_key,
             }
         })
     }
@@ -1105,54 +1138,70 @@ impl SessionPicker {
     fn load_external_preview_for_target(
         resume_target: ResumeTarget,
         external_path: Option<String>,
-    ) -> Option<loading::ExternalPreview> {
+    ) -> Option<loading::PreviewLoadResult> {
         match resume_target {
             ResumeTarget::JcodeSession { session_id } => {
                 let Ok(session) = Session::load(&session_id) else {
                     return None;
                 };
-                Some(loading::ExternalPreview {
-                    messages: build_messages_preview(&session),
+                Some(loading::PreviewLoadResult {
+                    preview: build_messages_preview(&session),
+                    model: session.model,
+                    provider_key: session.provider_key,
+                    extras: PreviewExtras::default(),
                     search: Default::default(),
                 })
             }
+            // Search-classified external previews (base) are wrapped into
+            // PreviewLoadResult so the model/provider metadata from the stub
+            // scan still flows through.
             ResumeTarget::ClaudeCodeSession { session_id, .. } => external_path
                 .as_deref()
                 .and_then(|path| {
                     loading::load_claude_code_external_preview(std::path::Path::new(path))
                 })
-                .or_else(|| loading::load_claude_code_external_preview_by_id(&session_id)),
+                .or_else(|| loading::load_claude_code_external_preview_by_id(&session_id))
+                .map(loading::PreviewLoadResult::from_external),
             ResumeTarget::CodexSession { session_id, .. } => external_path
                 .as_deref()
                 .and_then(|path| loading::load_codex_external_preview(std::path::Path::new(path)))
-                .or_else(|| loading::load_codex_external_preview_by_id(&session_id)),
+                .or_else(|| loading::load_codex_external_preview_by_id(&session_id))
+                .map(loading::PreviewLoadResult::from_external),
             ResumeTarget::PiSession { session_path } => {
-                loading::load_pi_external_preview(std::path::Path::new(&session_path))
+                loading::load_pi_preview_from_path(std::path::Path::new(&session_path))
             }
             ResumeTarget::OpenCodeSession { .. } => external_path.as_deref().and_then(|path| {
-                loading::load_opencode_external_preview(std::path::Path::new(path))
+                loading::load_opencode_preview_from_path(std::path::Path::new(path))
             }),
             ResumeTarget::CursorSession { .. } => external_path
                 .as_deref()
-                .and_then(|path| loading::load_cursor_external_preview(std::path::Path::new(path))),
+                .and_then(|path| loading::load_cursor_external_preview(std::path::Path::new(path)))
+                .map(loading::PreviewLoadResult::from_external),
         }
     }
 
-    #[cfg(test)]
-    fn apply_session_preview(&mut self, session_id: &str, preview: Vec<PreviewMessage>) {
-        self.apply_session_preview_with_search(session_id, preview, None);
-    }
-
-    fn apply_session_preview_with_search(
-        &mut self,
-        session_id: &str,
-        preview: Vec<PreviewMessage>,
-        search: Option<loading::SourceBuckets>,
-    ) {
+    fn apply_session_preview(&mut self, session_id: &str, preview: LoadedSessionPreview) {
+        let LoadedSessionPreview {
+            messages,
+            search,
+            model,
+            provider_key,
+            extras,
+        } = preview;
         let Some(session_ref) = self.session_ref_for_id(session_id) else {
             return;
         };
         if let Some(s) = self.session_by_ref_mut(session_ref) {
+            // The preview pass read the full transcript, so its model/provider
+            // beat the stub's bounded-prefix guess: refresh the filter fields
+            // so `model:`/`provider:` searches match on what the session
+            // actually ran.
+            if model.is_some() {
+                s.model = model;
+            }
+            if provider_key.is_some() {
+                s.provider_key = provider_key;
+            }
             s.search_index = match search.filter(|search| !search.is_empty()) {
                 Some(search) => loading::build_classified_search_index(
                     &s.id,
@@ -1168,13 +1217,13 @@ impl SessionPicker {
                     &s.title,
                     s.working_dir.as_deref(),
                     s.save_label.as_deref(),
-                    &preview,
+                    &messages,
                 ),
             };
-            s.messages_preview = preview;
+            s.messages_preview = messages;
+            self.preview_extras.insert(session_id.to_string(), extras);
         }
     }
-
     fn poll_preview_load(&mut self) -> bool {
         let recv_result = {
             let Some(pending) = self.pending_preview_load.as_ref() else {
@@ -1192,13 +1241,7 @@ impl SessionPicker {
                     .unwrap_or_default();
                 self.pending_preview_load = None;
                 self.preview_load_failures.remove(&session_id);
-                self.preview_extras
-                    .insert(session_id.clone(), preview.extras);
-                self.apply_session_preview_with_search(
-                    &session_id,
-                    preview.messages,
-                    preview.search,
-                );
+                self.apply_session_preview(&session_id, preview);
                 true
             }
             Ok(None) => {
@@ -1316,9 +1359,7 @@ impl SessionPicker {
             return;
         };
         if let Some(preview) = Self::load_preview_for_target(resume_target, external_path) {
-            self.preview_extras
-                .insert(session_id.clone(), preview.extras);
-            self.apply_session_preview_with_search(&session_id, preview.messages, preview.search);
+            self.apply_session_preview(&session_id, preview);
         }
     }
 
@@ -2023,7 +2064,8 @@ impl SessionPicker {
     /// Apply search-match highlighting to already-built preview lines in place.
     /// Returns the index of the first line that contains a highlighted match, if
     /// any. Each token highlights independently (matching the AND-token filter).
-    #[cfg(test)]
+    // Dead in both builds since the live layout rework; kept for the preview tests.
+    #[allow(dead_code)]
     fn highlight_lines_in_place(lines: &mut [Line<'static>], tokens: &[String]) -> Option<usize> {
         if tokens.is_empty() {
             return None;
@@ -2056,7 +2098,8 @@ impl SessionPicker {
     /// Lines for the pinned "previous prompt" header in the preview pane.
     /// Mirrors the main chat viewport's `prompt_preview`: the last user prompt
     /// whose wrapped start has scrolled above the viewport, drawn dimmed.
-    #[cfg(test)]
+    // Dead in both builds since the live layout rework; kept for the preview tests.
+    #[allow(dead_code)]
     fn preview_prompt_header_lines(
         &self,
         scroll: usize,
@@ -2301,7 +2344,17 @@ impl SessionPicker {
             chunk_idx += 1;
 
             let cursor_char = if self.search_active { "▎" } else { "" };
-            let search_line = Line::from(vec![
+            // Qualifier keys are advertised here, next to the caret, because
+            // this row has room at common widths (unlike the title bar). A
+            // long query can still crowd them out; Ctrl+U clears it.
+            let qualifier_hint =
+                " filters: model: provider: source: dir: saved: debug: canary: after: before: ";
+            let state_suffix = if self.search_active {
+                "  Esc to clear"
+            } else {
+                "  / to edit"
+            };
+            let mut search_spans = vec![
                 Span::styled(" 🔍 ", Style::default().fg(rgb(186, 139, 255))),
                 Span::styled(
                     &self.search_query,
@@ -2310,12 +2363,27 @@ impl SessionPicker {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(cursor_char, Style::default().fg(rgb(186, 139, 255))),
-                if self.search_active {
-                    Span::styled("  Esc to clear", Style::default().fg(rgb(60, 60, 60)))
-                } else {
-                    Span::styled("  / to edit", Style::default().fg(rgb(60, 60, 60)))
-                },
-            ]);
+            ];
+            // The hint plus state suffix overflow narrow terminals and clip
+            // mid-word; trim the hint to whatever cells remain after the icon,
+            // query, caret, and suffix instead of letting it run past the edge.
+            let used_cells = 4
+                + self.search_query.chars().count()
+                + cursor_char.chars().count()
+                + state_suffix.chars().count();
+            let hint_budget = (search_area.width as usize).saturating_sub(used_cells);
+            let hint_text = fit_to_width(qualifier_hint, hint_budget);
+            search_spans.push(Span::styled(
+                state_suffix,
+                Style::default().fg(rgb(60, 60, 60)),
+            ));
+            // Rendered in both states so the qualifier keys stay discoverable
+            // even after Enter commits the query and the bar goes dormant.
+            search_spans.push(Span::styled(
+                hint_text,
+                Style::default().fg(rgb(60, 60, 60)),
+            ));
+            let search_line = Line::from(search_spans);
             let search_widget =
                 Paragraph::new(search_line).style(Style::default().bg(rgb(25, 25, 30)));
             frame.render_widget(search_widget, search_area);

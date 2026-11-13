@@ -157,6 +157,8 @@ fn deliver(picker: &mut SessionPicker, messages: Vec<PreviewMessage>) {
                 hidden_prompts: 7,
                 ..Default::default()
             },
+            model: None,
+            provider_key: None,
         }))
         .unwrap();
     assert!(picker.poll_preview_load());
