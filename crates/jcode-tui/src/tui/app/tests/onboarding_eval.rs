@@ -76,9 +76,19 @@ fn all_onboarding_phases() -> Vec<(&'static str, OnboardingPhase)> {
     ])
     .unwrap();
     vec![
-        ("Login{import}", OnboardingPhase::Login { import: Some(review) }),
+        (
+            "Login{import}",
+            OnboardingPhase::Login {
+                import: Some(review),
+            },
+        ),
         ("Login{recovery}", OnboardingPhase::Login { import: None }),
-        ("LoginOpenAi", OnboardingPhase::LoginOpenAi { yes_highlighted: true }),
+        (
+            "LoginOpenAi",
+            OnboardingPhase::LoginOpenAi {
+                yes_highlighted: true,
+            },
+        ),
         ("ModelSelect", OnboardingPhase::ModelSelect),
         (
             "ContinuePrompt",
@@ -137,8 +147,18 @@ fn entry_paths() -> Vec<Path> {
             weight: 0.40,
             reaches_ready: true,
             steps: vec![
-                Step { phase: "LoginOpenAi", keystrokes: 1, is_decision: true, external_boundary: true },
-                Step { phase: "StartChoice", keystrokes: 1, is_decision: true, external_boundary: false },
+                Step {
+                    phase: "LoginOpenAi",
+                    keystrokes: 1,
+                    is_decision: true,
+                    external_boundary: true,
+                },
+                Step {
+                    phase: "StartChoice",
+                    keystrokes: 1,
+                    is_decision: true,
+                    external_boundary: false,
+                },
             ],
         },
         Path {
@@ -146,8 +166,18 @@ fn entry_paths() -> Vec<Path> {
             weight: 0.10,
             reaches_ready: false,
             steps: vec![
-                Step { phase: "LoginOpenAi", keystrokes: 1, is_decision: true, external_boundary: false },
-                Step { phase: "Done", keystrokes: 0, is_decision: false, external_boundary: false },
+                Step {
+                    phase: "LoginOpenAi",
+                    keystrokes: 1,
+                    is_decision: true,
+                    external_boundary: false,
+                },
+                Step {
+                    phase: "Done",
+                    keystrokes: 0,
+                    is_decision: false,
+                    external_boundary: false,
+                },
             ],
         },
         Path {
@@ -155,8 +185,18 @@ fn entry_paths() -> Vec<Path> {
             weight: 0.20,
             reaches_ready: true,
             steps: vec![
-                Step { phase: "Login{import}", keystrokes: 1, is_decision: true, external_boundary: false },
-                Step { phase: "StartChoice", keystrokes: 1, is_decision: true, external_boundary: false },
+                Step {
+                    phase: "Login{import}",
+                    keystrokes: 1,
+                    is_decision: true,
+                    external_boundary: false,
+                },
+                Step {
+                    phase: "StartChoice",
+                    keystrokes: 1,
+                    is_decision: true,
+                    external_boundary: false,
+                },
             ],
         },
         Path {
@@ -166,17 +206,30 @@ fn entry_paths() -> Vec<Path> {
             steps: vec![
                 // Single-screen checkbox list, all pre-checked: one Enter imports
                 // every detected login at once (no per-candidate page).
-                Step { phase: "Login{import}", keystrokes: 1, is_decision: true, external_boundary: false },
-                Step { phase: "StartChoice", keystrokes: 1, is_decision: true, external_boundary: false },
+                Step {
+                    phase: "Login{import}",
+                    keystrokes: 1,
+                    is_decision: true,
+                    external_boundary: false,
+                },
+                Step {
+                    phase: "StartChoice",
+                    keystrokes: 1,
+                    is_decision: true,
+                    external_boundary: false,
+                },
             ],
         },
         Path {
             name: "Already authenticated at startup",
             weight: 0.20,
             reaches_ready: true,
-            steps: vec![
-                Step { phase: "StartChoice", keystrokes: 1, is_decision: true, external_boundary: false },
-            ],
+            steps: vec![Step {
+                phase: "StartChoice",
+                keystrokes: 1,
+                is_decision: true,
+                external_boundary: false,
+            }],
         },
     ]
 }
@@ -264,7 +317,8 @@ struct ScreenMetrics {
 fn render_phase_screen(label: &'static str, phase: OnboardingPhase) -> ScreenMetrics {
     let app = app_in_phase(phase);
     let text = render_onboarding_text(&app, 80, 30);
-    let is_yesno = text.contains(CANONICAL_YESNO_PILL) || text.contains("Yes") && text.contains("No");
+    let is_yesno =
+        text.contains(CANONICAL_YESNO_PILL) || text.contains("Yes") && text.contains("No");
     // Reading load must be measured from the human body prose only, NOT the raw
     // buffer. The raw buffer also contains the decorative idle donut, whose lit
     // glyph count varies with wall-clock `animation_elapsed()` (so the raw count
@@ -286,8 +340,7 @@ fn render_phase_screen(label: &'static str, phase: OnboardingPhase) -> ScreenMet
     let canonical_pill = text.contains(CANONICAL_YESNO_PILL)
         && text.contains("No \u{25D7}")
         && text.contains(YESNO_PILL_CHEVRON);
-    let canonical_import_list =
-        text.contains('●') && text.contains('○') && text.contains("> ");
+    let canonical_import_list = text.contains('●') && text.contains('○') && text.contains("> ");
     let keyhint_consistent = !is_yesno || canonical_pill || canonical_import_list;
     let lower = text.to_ascii_lowercase();
     let has_escape_hatch = lower.contains("skip")
@@ -353,12 +406,24 @@ fn tier3_screens() -> Vec<ScreenMetrics> {
     use crate::external_auth::ExternalAuthReviewCandidate;
     use crate::tui::app::onboarding_flow::ImportReview;
     let now = std::time::Instant::now();
-    let review =
-        ImportReview::new(vec![ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "Codex auth.json")])
-            .unwrap();
+    let review = ImportReview::new(vec![ExternalAuthReviewCandidate::fixture(
+        "OpenAI/Codex",
+        "Codex auth.json",
+    )])
+    .unwrap();
     vec![
-        render_phase_screen("LoginOpenAi", OnboardingPhase::LoginOpenAi { yes_highlighted: true }),
-        render_phase_screen("Login{import}", OnboardingPhase::Login { import: Some(review) }),
+        render_phase_screen(
+            "LoginOpenAi",
+            OnboardingPhase::LoginOpenAi {
+                yes_highlighted: true,
+            },
+        ),
+        render_phase_screen(
+            "Login{import}",
+            OnboardingPhase::Login {
+                import: Some(review),
+            },
+        ),
         render_phase_screen("Login{recovery}", OnboardingPhase::Login { import: None }),
         render_phase_screen(
             "ContinuePrompt",
@@ -431,14 +496,21 @@ fn terminology_is_consistent(screens: &[(&'static str, String)]) -> bool {
                 // Allowed: the `/login` command token and the "Login N of M"
                 // progress header. Both are recognizable by their surroundings.
                 let is_command = raw.contains('/');
-                let is_progress_header = lower.contains("login 1 of") || lower.contains("login 2 of");
+                let is_progress_header =
+                    lower.contains("login 1 of") || lower.contains("login 2 of");
                 // Allowed: the NOUN "login" (a credential), recognizable when
                 // preceded by a determiner/quantifier ("existing login", "1
                 // login", "a login", "your login").
-                let prev = i.checked_sub(1).and_then(|j| words.get(j)).copied().unwrap_or("");
+                let prev = i
+                    .checked_sub(1)
+                    .and_then(|j| words.get(j))
+                    .copied()
+                    .unwrap_or("");
                 let prev_w = prev.trim_matches(|c: char| !c.is_ascii_alphanumeric());
-                let is_noun = matches!(prev_w, "existing" | "detected" | "saved" | "selected" | "a" | "an" | "your" | "one")
-                    || prev_w.chars().all(|c| c.is_ascii_digit()) && !prev_w.is_empty();
+                let is_noun = matches!(
+                    prev_w,
+                    "existing" | "detected" | "saved" | "selected" | "a" | "an" | "your" | "one"
+                ) || prev_w.chars().all(|c| c.is_ascii_digit()) && !prev_w.is_empty();
                 if !is_command && !is_progress_header && !is_noun {
                     return false;
                 }
@@ -469,7 +541,9 @@ fn tier4_metrics() -> Tier4Metrics {
         ExternalAuthReviewCandidate::fixture("Claude", "Claude Code"),
     ])
     .unwrap();
-    let multi = app_in_phase(OnboardingPhase::Login { import: Some(review) });
+    let multi = app_in_phase(OnboardingPhase::Login {
+        import: Some(review),
+    });
     let multi_text = render_onboarding_text(&multi, 80, 30).to_ascii_lowercase();
     let states_total = multi_text.contains("we found 2 existing logins");
     let lists_all = multi_text.contains("openai/codex") && multi_text.contains("claude");
@@ -507,7 +581,9 @@ fn tier4_metrics() -> Tier4Metrics {
 
     // ---- narrow_terminal_safety: the core Yes/No affordance must still render
     // on a cramped 50-col terminal (real renderer, smaller buffer). ----
-    let narrow = app_in_phase(OnboardingPhase::LoginOpenAi { yes_highlighted: true });
+    let narrow = app_in_phase(OnboardingPhase::LoginOpenAi {
+        yes_highlighted: true,
+    });
     let narrow_text = render_onboarding_text(&narrow, 50, 30);
     let narrow_options_survive = narrow_text.contains("Yes") && narrow_text.contains("No");
 
@@ -626,21 +702,66 @@ struct NodeProps {
 fn node_props(n: GraphNode) -> NodeProps {
     use GraphNode::*;
     match n {
-        Start => NodeProps { is_decision: false, has_default: false, is_ready: false, is_terminal: false },
+        Start => NodeProps {
+            is_decision: false,
+            has_default: false,
+            is_ready: false,
+            is_terminal: false,
+        },
         // Forced Yes/No: there is no timeout default on the OpenAI sign-in prompt.
-        LoginOpenAi => NodeProps { is_decision: true, has_default: false, is_ready: false, is_terminal: false },
+        LoginOpenAi => NodeProps {
+            is_decision: true,
+            has_default: false,
+            is_ready: false,
+            is_terminal: false,
+        },
         // Import review auto-commits the highlighted choice on DECISION_TIMEOUT.
-        LoginImport => NodeProps { is_decision: true, has_default: true, is_ready: false, is_terminal: false },
+        LoginImport => NodeProps {
+            is_decision: true,
+            has_default: true,
+            is_ready: false,
+            is_terminal: false,
+        },
         // Recovery fallback: a single Enter opens the provider picker.
-        LoginRecovery => NodeProps { is_decision: true, has_default: false, is_ready: false, is_terminal: false },
+        LoginRecovery => NodeProps {
+            is_decision: true,
+            has_default: false,
+            is_ready: false,
+            is_terminal: false,
+        },
         // Transient: auto-advances, the user never chooses here.
-        ModelSelect => NodeProps { is_decision: false, has_default: true, is_ready: false, is_terminal: false },
+        ModelSelect => NodeProps {
+            is_decision: false,
+            has_default: true,
+            is_ready: false,
+            is_terminal: false,
+        },
         // Continue prompt auto-opens the resume menu on timeout (default Yes).
-        ContinuePrompt => NodeProps { is_decision: true, has_default: true, is_ready: false, is_terminal: false },
+        ContinuePrompt => NodeProps {
+            is_decision: true,
+            has_default: true,
+            is_ready: false,
+            is_terminal: false,
+        },
         // Choosing either action reaches a ready session.
-        StartChoice => NodeProps { is_decision: true, has_default: false, is_ready: true, is_terminal: false },
-        Suggestions => NodeProps { is_decision: false, has_default: false, is_ready: true, is_terminal: true },
-        Done => NodeProps { is_decision: false, has_default: false, is_ready: false, is_terminal: true },
+        StartChoice => NodeProps {
+            is_decision: true,
+            has_default: false,
+            is_ready: true,
+            is_terminal: false,
+        },
+        Suggestions => NodeProps {
+            is_decision: false,
+            has_default: false,
+            is_ready: true,
+            is_terminal: true,
+        },
+        Done => NodeProps {
+            is_decision: false,
+            has_default: false,
+            is_ready: false,
+            is_terminal: true,
+        },
     }
 }
 
@@ -660,27 +781,79 @@ fn flow_edges() -> Vec<Edge> {
     vec![
         // Entry routing from the virtual Start (zero-cost: chosen by detected
         // environment, not by a keystroke).
-        Edge { from: Start, to: LoginOpenAi, keystrokes: 0 },
-        Edge { from: Start, to: LoginImport, keystrokes: 0 },
-        Edge { from: Start, to: ModelSelect, keystrokes: 0 },
+        Edge {
+            from: Start,
+            to: LoginOpenAi,
+            keystrokes: 0,
+        },
+        Edge {
+            from: Start,
+            to: LoginImport,
+            keystrokes: 0,
+        },
+        Edge {
+            from: Start,
+            to: ModelSelect,
+            keystrokes: 0,
+        },
         // OpenAI sign-in: Yes -> (browser OAuth) -> Suggestions; No -> Done.
-        Edge { from: LoginOpenAi, to: StartChoice, keystrokes: 1 },
-        Edge { from: LoginOpenAi, to: Done, keystrokes: 1 },
+        Edge {
+            from: LoginOpenAi,
+            to: StartChoice,
+            keystrokes: 1,
+        },
+        Edge {
+            from: LoginOpenAi,
+            to: Done,
+            keystrokes: 1,
+        },
         // Import review: accept/decline each candidate, then suggestions. A
         // failed/declined import drops to the recovery fallback.
-        Edge { from: LoginImport, to: StartChoice, keystrokes: 1 },
-        Edge { from: LoginImport, to: LoginRecovery, keystrokes: 1 },
+        Edge {
+            from: LoginImport,
+            to: StartChoice,
+            keystrokes: 1,
+        },
+        Edge {
+            from: LoginImport,
+            to: LoginRecovery,
+            keystrokes: 1,
+        },
         // Recovery: Enter opens the provider picker, ending at suggestions.
-        Edge { from: LoginRecovery, to: StartChoice, keystrokes: 1 },
+        Edge {
+            from: LoginRecovery,
+            to: StartChoice,
+            keystrokes: 1,
+        },
         // Transient model-select auto-advances with no keystroke.
-        Edge { from: ModelSelect, to: StartChoice, keystrokes: 0 },
+        Edge {
+            from: ModelSelect,
+            to: StartChoice,
+            keystrokes: 0,
+        },
         // The two actions either enter the normal blank-session suggestions or
         // finish onboarding while launching the suggested review.
-        Edge { from: StartChoice, to: Suggestions, keystrokes: 1 },
-        Edge { from: StartChoice, to: Done, keystrokes: 1 },
+        Edge {
+            from: StartChoice,
+            to: Suggestions,
+            keystrokes: 1,
+        },
+        Edge {
+            from: StartChoice,
+            to: Done,
+            keystrokes: 1,
+        },
         // Continue prompt: Yes -> resume picker; No -> suggestions.
-        Edge { from: ContinuePrompt, to: StartChoice, keystrokes: 1 },
-        Edge { from: ContinuePrompt, to: Suggestions, keystrokes: 1 },
+        Edge {
+            from: ContinuePrompt,
+            to: StartChoice,
+            keystrokes: 1,
+        },
+        Edge {
+            from: ContinuePrompt,
+            to: Suggestions,
+            keystrokes: 1,
+        },
     ]
 }
 
@@ -735,7 +908,7 @@ fn graph_is_acyclic(edges: &[Edge]) -> bool {
         if let Some(succ) = adj.get(&n) {
             for &m in succ {
                 match state.get(&m).copied().unwrap_or(0) {
-                    1 => return false,            // back-edge -> cycle
+                    1 => return false, // back-edge -> cycle
                     0 => {
                         if !dfs(m, adj, state) {
                             return false;
@@ -800,7 +973,8 @@ fn tier5_metrics() -> Tier5Metrics {
             continue;
         }
         let entry = entry_node_for(p);
-        let min = min_keystrokes_to(entry, &edges, |n| node_props(n).is_ready).unwrap_or(m.keystrokes);
+        let min =
+            min_keystrokes_to(entry, &edges, |n| node_props(n).is_ready).unwrap_or(m.keystrokes);
         excess += (m.keystrokes.saturating_sub(min) as f64) * p.weight;
 
         // first_input_latency: keystrokes spent on steps before the first
@@ -967,7 +1141,11 @@ fn body_prose_lines(text: &str) -> Vec<String> {
 /// Rough syllable count for an English word (vowel-group heuristic with a
 /// silent-e adjustment). Good enough for a Flesch-Kincaid grade estimate.
 fn syllables(word: &str) -> u32 {
-    let w: String = word.chars().filter(|c| c.is_ascii_alphabetic()).collect::<String>().to_ascii_lowercase();
+    let w: String = word
+        .chars()
+        .filter(|c| c.is_ascii_alphabetic())
+        .collect::<String>()
+        .to_ascii_lowercase();
     if w.is_empty() {
         return 0;
     }
@@ -991,7 +1169,14 @@ fn syllables(word: &str) -> u32 {
 /// A small, explicit jargon lexicon: technical terms a brand-new user may not
 /// know without explanation. Kept deliberately short and reviewable.
 const JARGON_TERMS: &[&str] = &[
-    "oauth", "api", "endpoint", "token", "cli", "env", "provider", "transcript",
+    "oauth",
+    "api",
+    "endpoint",
+    "token",
+    "cli",
+    "env",
+    "provider",
+    "transcript",
 ];
 
 /// Domain "concepts" the onboarding introduces, grouped by synonym so a single
@@ -1039,13 +1224,16 @@ fn screen_load(label: &'static str, text: &str) -> ScreenLoad {
     let syllable_total: u32 = words.iter().map(|w| syllables(w)).sum();
 
     // Flesch-Kincaid grade level.
-    let grade_level = 0.39 * (word_count / sentence_count)
-        + 11.8 * (syllable_total as f64 / word_count)
-        - 15.59;
+    let grade_level =
+        0.39 * (word_count / sentence_count) + 11.8 * (syllable_total as f64 / word_count) - 15.59;
 
     // Options (Hick's law): the Yes/No selector exposes 2 choices; other screens
     // are 0 (informational) or measured from a list.
-    let options = if lower.contains("yes") && lower.contains("no") { 2 } else { 0 };
+    let options = if lower.contains("yes") && lower.contains("no") {
+        2
+    } else {
+        0
+    };
 
     let jargon_hits: u32 = JARGON_TERMS
         .iter()
@@ -1066,7 +1254,12 @@ fn screen_load(label: &'static str, text: &str) -> ScreenLoad {
     // counting whole negation words inside sentences).
     let negations = lower
         .split(|c: char| !c.is_ascii_alphabetic())
-        .filter(|w| matches!(*w, "not" | "dont" | "don" | "never" | "cant" | "cannot" | "wont"))
+        .filter(|w| {
+            matches!(
+                *w,
+                "not" | "dont" | "don" | "never" | "cant" | "cannot" | "wont"
+            )
+        })
         .count() as u32;
 
     ScreenLoad {
@@ -1165,16 +1358,24 @@ fn tier6_screen_score_w(m: &ScreenLoad, w: &Tier6Weights) -> f64 {
 /// Imperative verbs an instruction line may open with. Kept explicit so the
 /// check is reviewable and stable.
 const ACTION_VERBS: &[&str] = &[
-    "press", "type", "choose", "select", "log", "import", "continue", "pick",
-    "run", "opt", "enter", "resume", "open",
+    "press", "type", "choose", "select", "log", "import", "continue", "pick", "run", "opt",
+    "enter", "resume", "open",
 ];
 
 /// Phrases that describe what happens next (an outcome / transition).
 const NEXT_STEP_CUES: &[&str] = &[
-    "to choose", "to skip", "to get started", "opens", "auto-selects",
-    "automatically", "to choose a provider", "anytime", "resume",
+    "to choose",
+    "to skip",
+    "to get started",
+    "opens",
+    "auto-selects",
+    "automatically",
+    "to choose a provider",
+    "anytime",
+    "resume",
     // The import screen labels its section and lists the logins to import.
-    "to import", "import:",
+    "to import",
+    "import:",
 ];
 
 #[derive(Clone, Copy)]
@@ -1235,7 +1436,10 @@ fn screen_clarity(label: &'static str, text: &str) -> ScreenClarity {
         let first = l
             .split_whitespace()
             .next()
-            .map(|w| w.trim_matches(|c: char| !c.is_ascii_alphabetic()).to_ascii_lowercase())
+            .map(|w| {
+                w.trim_matches(|c: char| !c.is_ascii_alphabetic())
+                    .to_ascii_lowercase()
+            })
             .unwrap_or_default();
         ACTION_VERBS.contains(&first.as_str())
     });
@@ -1357,7 +1561,9 @@ fn tier8_metrics() -> Tier8Metrics {
         app.onboarding_flow = None;
         app.begin_onboarding_flow_at_login();
         if let Some(flow) = app.onboarding_flow.as_mut() {
-            flow.phase = OnboardingPhase::LoginOpenAi { yes_highlighted: true };
+            flow.phase = OnboardingPhase::LoginOpenAi {
+                yes_highlighted: true,
+            };
         }
         let consumed = app.handle_onboarding_continue_prompt_key(KeyCode::Char('n'));
         // Onboarding reaches a terminal, and the recovery affordance (/login) is
@@ -1394,12 +1600,16 @@ fn tier8_metrics() -> Tier8Metrics {
         let mut app = create_test_app();
         app.onboarding_flow = None;
         app.begin_onboarding_flow_at_login();
-        let mut review =
-            ImportReview::new(vec![ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "Codex auth.json")])
-                .unwrap();
+        let mut review = ImportReview::new(vec![ExternalAuthReviewCandidate::fixture(
+            "OpenAI/Codex",
+            "Codex auth.json",
+        )])
+        .unwrap();
         review.enter_choose_mode();
         if let Some(flow) = app.onboarding_flow.as_mut() {
-            flow.phase = OnboardingPhase::Login { import: Some(review) };
+            flow.phase = OnboardingPhase::Login {
+                import: Some(review),
+            };
         }
         // Uncheck the only login with 'n', then commit the (empty) list from
         // the Continue pill (Enter on a row only toggles that row).
@@ -1429,8 +1639,9 @@ fn tier8_metrics() -> Tier8Metrics {
             OnboardingPhase::Done => false,
         }
     }
-    let no_unconfirmed_destructive =
-        all_onboarding_phases().iter().all(|(_, p)| !phase_is_destructive(p));
+    let no_unconfirmed_destructive = all_onboarding_phases()
+        .iter()
+        .all(|(_, p)| !phase_is_destructive(p));
 
     // ---- timeout_safety: a do-nothing ContinuePrompt timeout lands on a
     // recoverable phase (resume picker / suggestions), never a lossy terminal.
@@ -1587,11 +1798,18 @@ fn tier9_metrics() -> Tier9Metrics {
 fn timed_phase_screens() -> Vec<ScreenMetrics> {
     use crate::external_auth::ExternalAuthReviewCandidate;
     use crate::tui::app::onboarding_flow::ImportReview;
-    let review =
-        ImportReview::new(vec![ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "Codex auth.json")])
-            .unwrap();
+    let review = ImportReview::new(vec![ExternalAuthReviewCandidate::fixture(
+        "OpenAI/Codex",
+        "Codex auth.json",
+    )])
+    .unwrap();
     vec![
-        render_phase_screen("Login{import}", OnboardingPhase::Login { import: Some(review) }),
+        render_phase_screen(
+            "Login{import}",
+            OnboardingPhase::Login {
+                import: Some(review),
+            },
+        ),
         render_phase_screen(
             "ContinuePrompt",
             OnboardingPhase::ContinuePrompt {
@@ -1624,7 +1842,9 @@ fn timed_phases_accept_immediate_commit() -> bool {
         ])
         .unwrap();
         if let Some(flow) = app.onboarding_flow.as_mut() {
-            flow.phase = OnboardingPhase::Login { import: Some(review) };
+            flow.phase = OnboardingPhase::Login {
+                import: Some(review),
+            };
         }
         app.handle_onboarding_continue_prompt_key(KeyCode::Char('y'))
     };
@@ -1793,7 +2013,9 @@ fn selection_uses_noncolor_attribute() -> bool {
             // Build a per-cell symbol list so we can locate the "Yes"/"No"
             // labels by COLUMN, not by byte offset (the lozenge pill caps ◖/◗
             // are multi-byte, so a string byte index would not map to a cell x).
-            let cells: Vec<String> = (0..80u16).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            let cells: Vec<String> = (0..80u16)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect();
             let line: String = cells.concat();
             let lt = line.to_ascii_lowercase();
             if lt.contains("yes") && lt.contains("no") {
@@ -1839,7 +2061,9 @@ fn selection_uses_noncolor_attribute() -> bool {
 /// Confirm the explanatory prose precedes the action row on the LoginOpenAi
 /// screen (logical top-to-bottom order for a linear/screen reader).
 fn action_row_follows_prose() -> bool {
-    let app = app_in_phase(OnboardingPhase::LoginOpenAi { yes_highlighted: true });
+    let app = app_in_phase(OnboardingPhase::LoginOpenAi {
+        yes_highlighted: true,
+    });
     let text = render_onboarding_text(&app, 80, 30);
     let lines: Vec<&str> = text.lines().collect();
     let prose_idx = lines.iter().position(|l| {
@@ -2012,7 +2236,14 @@ fn onboarding_eval_scorecard() {
             t6_sum += s;
             println!(
                 "{:<18} {:>6.1} {:>4} {:>7.1} {:>5} {:>5} {:>4} {:>6.0}",
-                m.label, m.grade_level, m.options, m.jargon_per_100w, m.new_concepts, m.questions, m.negations, s
+                m.label,
+                m.grade_level,
+                m.options,
+                m.jargon_per_100w,
+                m.new_concepts,
+                m.questions,
+                m.negations,
+                s
             );
         }
         let tier6 = t6_sum / loads.len() as f64;
@@ -2032,9 +2263,19 @@ fn onboarding_eval_scorecard() {
                 "{:<18} {:>5} {:>6} {:>6} {:>6} {:>6.0}",
                 m.label,
                 m.primary_actions,
-                if m.verbs_lead_instructions { "ok" } else { "no" },
+                if m.verbs_lead_instructions {
+                    "ok"
+                } else {
+                    "no"
+                },
                 if m.next_step_visible { "ok" } else { "no" },
-                if !m.is_multistep { "n/a" } else if m.expectation_set { "ok" } else { "no" },
+                if !m.is_multistep {
+                    "n/a"
+                } else if m.expectation_set {
+                    "ok"
+                } else {
+                    "no"
+                },
                 s
             );
         }
@@ -2047,7 +2288,10 @@ fn onboarding_eval_scorecard() {
         println!("back-navigation route  : {}", yn(t8.back_navigation_ok));
         println!("error-recovery depth   : {}", t8.error_recovery_depth);
         println!("no repeated prompt     : {}", yn(t8.no_repeated_prompt));
-        println!("no unconfirmed destruct: {}", yn(t8.no_unconfirmed_destructive));
+        println!(
+            "no unconfirmed destruct: {}",
+            yn(t8.no_unconfirmed_destructive)
+        );
         println!("timeout safe (do-noth) : {}", yn(t8.timeout_safe));
 
         // ----- Tier 9: timing & pacing (real constants + rendered copy) -----
@@ -2063,7 +2307,10 @@ fn onboarding_eval_scorecard() {
         let tier10 = tier10_score(&t10);
         println!("\n-- Tier 10: accessibility & robustness --");
         println!("max non-ASCII prose ch : {}", t10.max_nonascii_prose_chars);
-        println!("color-independent sel  : {}", yn(t10.color_independent_selection));
+        println!(
+            "color-independent sel  : {}",
+            yn(t10.color_independent_selection)
+        );
         println!("logical reading order  : {}", yn(t10.logical_reading_order));
 
         // ----- Tier 0 print -----
@@ -2074,7 +2321,9 @@ fn onboarding_eval_scorecard() {
         println!(
             "welcome screens   : {scored_welcome_screens}/{welcome} scored ({screen_coverage_pct:.0}%)"
         );
-        println!("entry paths       : {path_coverage} authored, {paths_reaching_terminal} terminate");
+        println!(
+            "entry paths       : {path_coverage} authored, {paths_reaching_terminal} terminate"
+        );
         println!(
             "surface mix       : welcome={welcome} picker={picker} transient={transient} terminal={terminal}"
         );
@@ -2133,51 +2382,135 @@ fn onboarding_eval_scorecard() {
         assert!(tier3 >= 60.0, "Tier 3 screen score regressed: {tier3:.1}");
         // Tier 4 content/robustness guards: each is a real, currently-passing
         // property; a regression in any of them fails CI with a clear message.
-        assert!(t4.terminology_consistent, "terminology drift: a competing synonym for 'log in' appeared in onboarding prose");
-        assert!(t4.progress_visible, "a multi-step onboarding context stopped showing 'N of M' progress");
-        assert!(t4.default_safe, "a timed decision's default no longer resolves to a recoverable outcome");
-        assert!(t4.narrow_options_survive, "Yes/No options stopped rendering on a narrow (50-col) terminal");
-        assert!(tier4 >= 60.0, "Tier 4 content/robustness score regressed: {tier4:.1}");
+        assert!(
+            t4.terminology_consistent,
+            "terminology drift: a competing synonym for 'log in' appeared in onboarding prose"
+        );
+        assert!(
+            t4.progress_visible,
+            "a multi-step onboarding context stopped showing 'N of M' progress"
+        );
+        assert!(
+            t4.default_safe,
+            "a timed decision's default no longer resolves to a recoverable outcome"
+        );
+        assert!(
+            t4.narrow_options_survive,
+            "Yes/No options stopped rendering on a narrow (50-col) terminal"
+        );
+        assert!(
+            tier4 >= 60.0,
+            "Tier 4 content/robustness score regressed: {tier4:.1}"
+        );
         // Tier 5 path-efficiency guards: the flow must stay a DAG with no
         // dead ends, and no path may carry avoidable keystroke overhead.
         assert!(t5.acyclic, "onboarding flow graph developed a cycle");
-        assert_eq!(t5.dead_end_screens, 0, "a non-terminal screen has no forward transition (dead end)");
-        assert!(t5.first_input_latency == 0, "a user must now spend keystrokes before the first real action");
-        assert!(tier5 >= 60.0, "Tier 5 path-efficiency score regressed: {tier5:.1}");
+        assert_eq!(
+            t5.dead_end_screens, 0,
+            "a non-terminal screen has no forward transition (dead end)"
+        );
+        assert!(
+            t5.first_input_latency == 0,
+            "a user must now spend keystrokes before the first real action"
+        );
+        assert!(
+            tier5 >= 60.0,
+            "Tier 5 path-efficiency score regressed: {tier5:.1}"
+        );
         // Tier 6 cognitive-load guards: no screen should ask more than one
         // question or use confusing negations, and the tier must stay healthy.
         for m in &loads {
-            assert!(m.questions <= 1, "screen '{}' asks {} questions (cognitive overload)", m.label, m.questions);
-            assert!(m.negations == 0, "screen '{}' uses {} negation(s) in prose", m.label, m.negations);
+            assert!(
+                m.questions <= 1,
+                "screen '{}' asks {} questions (cognitive overload)",
+                m.label,
+                m.questions
+            );
+            assert!(
+                m.negations == 0,
+                "screen '{}' uses {} negation(s) in prose",
+                m.label,
+                m.negations
+            );
         }
-        assert!(tier6 >= 60.0, "Tier 6 cognitive-load score regressed: {tier6:.1}");
+        assert!(
+            tier6 >= 60.0,
+            "Tier 6 cognitive-load score regressed: {tier6:.1}"
+        );
         // Tier 7 clarity guards: no screen may carry competing primary actions,
         // instructions must lead with a verb, and the tier must stay healthy.
         for m in &clarities {
-            assert!(m.primary_actions <= 1, "screen '{}' has {} competing primary actions", m.label, m.primary_actions);
-            assert!(m.verbs_lead_instructions, "screen '{}' has an instruction not led by an action verb", m.label);
+            assert!(
+                m.primary_actions <= 1,
+                "screen '{}' has {} competing primary actions",
+                m.label,
+                m.primary_actions
+            );
+            assert!(
+                m.verbs_lead_instructions,
+                "screen '{}' has an instruction not led by an action verb",
+                m.label
+            );
         }
         assert!(tier7 >= 60.0, "Tier 7 clarity score regressed: {tier7:.1}");
         // Tier 8 reversibility guards: every reversibility property must hold and
         // the tier must stay healthy.
-        assert!(t8.back_navigation_ok, "a declined onboarding choice became a dead end (no recovery route)");
-        assert!(t8.no_repeated_prompt, "an answered onboarding decision was re-asked (loop)");
-        assert!(t8.no_unconfirmed_destructive, "an onboarding phase performs an unconfirmed destructive action");
-        assert!(t8.timeout_safe, "a do-nothing timeout no longer lands on a recoverable phase");
-        assert!(tier8 >= 60.0, "Tier 8 reversibility score regressed: {tier8:.1}");
+        assert!(
+            t8.back_navigation_ok,
+            "a declined onboarding choice became a dead end (no recovery route)"
+        );
+        assert!(
+            t8.no_repeated_prompt,
+            "an answered onboarding decision was re-asked (loop)"
+        );
+        assert!(
+            t8.no_unconfirmed_destructive,
+            "an onboarding phase performs an unconfirmed destructive action"
+        );
+        assert!(
+            t8.timeout_safe,
+            "a do-nothing timeout no longer lands on a recoverable phase"
+        );
+        assert!(
+            tier8 >= 60.0,
+            "Tier 8 reversibility score regressed: {tier8:.1}"
+        );
         // Tier 9 timing guards: the timeout must comfortably cover the slowest
         // timed screen, no phase forces a wait, and nothing self-advances later
         // than the timeout.
-        assert!(t9.countdown_slack_secs >= 0.0, "a timed onboarding screen could auto-advance before it can be read: slack {:.1}s", t9.countdown_slack_secs);
-        assert!(t9.no_forced_wait, "a timed onboarding phase ignores an immediate-commit key (forced wait)");
+        assert!(
+            t9.countdown_slack_secs >= 0.0,
+            "a timed onboarding screen could auto-advance before it can be read: slack {:.1}s",
+            t9.countdown_slack_secs
+        );
+        assert!(
+            t9.no_forced_wait,
+            "a timed onboarding phase ignores an immediate-commit key (forced wait)"
+        );
         assert!(tier9 >= 60.0, "Tier 9 timing score regressed: {tier9:.1}");
         // Tier 10 accessibility guards: prose stays ASCII-legible, selection is
         // not color-only, and reading order is logical.
-        assert!(t10.max_nonascii_prose_chars == 0, "load-bearing onboarding prose now depends on a non-ASCII glyph ({} chars)", t10.max_nonascii_prose_chars);
-        assert!(t10.color_independent_selection, "the selected option is no longer distinguished by a non-color attribute (color-only selection)");
-        assert!(t10.logical_reading_order, "an interactive onboarding screen renders its action row before its explanatory prose");
-        assert!(tier10 >= 60.0, "Tier 10 accessibility score regressed: {tier10:.1}");
-        assert!(composite >= 60.0, "composite onboarding score regressed: {composite:.1}");
+        assert!(
+            t10.max_nonascii_prose_chars == 0,
+            "load-bearing onboarding prose now depends on a non-ASCII glyph ({} chars)",
+            t10.max_nonascii_prose_chars
+        );
+        assert!(
+            t10.color_independent_selection,
+            "the selected option is no longer distinguished by a non-color attribute (color-only selection)"
+        );
+        assert!(
+            t10.logical_reading_order,
+            "an interactive onboarding screen renders its action row before its explanatory prose"
+        );
+        assert!(
+            tier10 >= 60.0,
+            "Tier 10 accessibility score regressed: {tier10:.1}"
+        );
+        assert!(
+            composite >= 60.0,
+            "composite onboarding score regressed: {composite:.1}"
+        );
     });
 }
 
@@ -2192,7 +2525,10 @@ fn onboarding_eval_fidelity_real_transitions() {
         app.onboarding_flow = None;
         app.begin_onboarding_flow();
         assert!(
-            matches!(app.onboarding_phase(), Some(OnboardingPhase::StartChoice { .. })),
+            matches!(
+                app.onboarding_phase(),
+                Some(OnboardingPhase::StartChoice { .. })
+            ),
             "authenticated startup must rest on StartChoice"
         );
 
@@ -2202,7 +2538,9 @@ fn onboarding_eval_fidelity_real_transitions() {
         app.onboarding_flow = None;
         app.begin_onboarding_flow_at_login();
         if let Some(flow) = app.onboarding_flow.as_mut() {
-            flow.phase = OnboardingPhase::LoginOpenAi { yes_highlighted: true };
+            flow.phase = OnboardingPhase::LoginOpenAi {
+                yes_highlighted: true,
+            };
         }
         assert!(app.handle_onboarding_continue_prompt_key(crossterm::event::KeyCode::Char('n')));
         assert!(
@@ -2257,10 +2595,15 @@ fn onboarding_eval_graph_fidelity() {
         app.onboarding_flow = None;
         app.begin_onboarding_flow_at_login();
         if let Some(flow) = app.onboarding_flow.as_mut() {
-            flow.phase = OnboardingPhase::LoginOpenAi { yes_highlighted: true };
+            flow.phase = OnboardingPhase::LoginOpenAi {
+                yes_highlighted: true,
+            };
         }
         assert!(app.handle_onboarding_continue_prompt_key(crossterm::event::KeyCode::Char('n')));
-        assert!(app.onboarding_phase().is_none(), "decline reaches terminal Done");
+        assert!(
+            app.onboarding_phase().is_none(),
+            "decline reaches terminal Done"
+        );
 
         // Every graph node maps back from at least one real phase (except the
         // virtual Start), so the node set isn't inventing screens.
@@ -2277,7 +2620,10 @@ fn onboarding_eval_graph_fidelity() {
             GraphNode::Suggestions,
             GraphNode::Done,
         ] {
-            assert!(mapped.contains(&node), "graph node {node:?} has no backing real phase");
+            assert!(
+                mapped.contains(&node),
+                "graph node {node:?} has no backing real phase"
+            );
         }
 
         // Every live entry node is reachable from Start via the edges.
@@ -2369,7 +2715,10 @@ fn meta_tier1_is_monotonic_in_each_signal() {
     // Failing to reach ready -> not higher.
     assert!(tier1_path_score(&pm(1, 1, 2, false)) <= base_s, "ready");
     // The perfect path (0/0/1/ready) is the unique maximum.
-    assert!(tier1_path_score(&pm(0, 0, 1, true)) >= base_s, "best is best");
+    assert!(
+        tier1_path_score(&pm(0, 0, 1, true)) >= base_s,
+        "best is best"
+    );
 }
 
 #[test]
@@ -2377,7 +2726,10 @@ fn meta_tier3_is_monotonic_in_each_signal() {
     let base = sm(60, true, true, true);
     let base_s = tier3_screen_score(&base);
     // More words -> not higher.
-    assert!(tier3_screen_score(&sm(120, true, true, true)) <= base_s, "words");
+    assert!(
+        tier3_screen_score(&sm(120, true, true, true)) <= base_s,
+        "words"
+    );
     // Inconsistent key hint -> not higher.
     assert!(
         tier3_screen_score(&sm(60, true, false, true)) <= base_s,
@@ -2400,10 +2752,34 @@ fn meta_tier4_is_monotonic_in_each_signal() {
     };
     let base_s = tier4_score(&base);
     // Losing any content/robustness property -> never higher.
-    assert!(tier4_score(&Tier4Metrics { terminology_consistent: false, ..base }) <= base_s, "terminology");
-    assert!(tier4_score(&Tier4Metrics { progress_visible: false, ..base }) <= base_s, "progress");
-    assert!(tier4_score(&Tier4Metrics { default_safe: false, ..base }) <= base_s, "default");
-    assert!(tier4_score(&Tier4Metrics { narrow_options_survive: false, ..base }) <= base_s, "narrow");
+    assert!(
+        tier4_score(&Tier4Metrics {
+            terminology_consistent: false,
+            ..base
+        }) <= base_s,
+        "terminology"
+    );
+    assert!(
+        tier4_score(&Tier4Metrics {
+            progress_visible: false,
+            ..base
+        }) <= base_s,
+        "progress"
+    );
+    assert!(
+        tier4_score(&Tier4Metrics {
+            default_safe: false,
+            ..base
+        }) <= base_s,
+        "default"
+    );
+    assert!(
+        tier4_score(&Tier4Metrics {
+            narrow_options_survive: false,
+            ..base
+        }) <= base_s,
+        "narrow"
+    );
     // All-good is the unique maximum.
     assert_eq!(base_s, 100.0, "all-good Tier 4 is perfect");
 }
@@ -2419,11 +2795,41 @@ fn meta_tier5_is_monotonic_in_each_signal() {
     };
     let base_s = tier5_score(&base);
     // Each worse value -> never higher.
-    assert!(tier5_score(&Tier5Metrics { excess_keystrokes: 2.0, ..base }) <= base_s, "excess");
-    assert!(tier5_score(&Tier5Metrics { first_input_latency: 2, ..base }) <= base_s, "latency");
-    assert!(tier5_score(&Tier5Metrics { irreducible_decisions: 3, ..base }) <= base_s, "irreducible");
-    assert!(tier5_score(&Tier5Metrics { dead_end_screens: 1, ..base }) <= base_s, "dead_end");
-    assert!(tier5_score(&Tier5Metrics { acyclic: false, ..base }) <= base_s, "cycle");
+    assert!(
+        tier5_score(&Tier5Metrics {
+            excess_keystrokes: 2.0,
+            ..base
+        }) <= base_s,
+        "excess"
+    );
+    assert!(
+        tier5_score(&Tier5Metrics {
+            first_input_latency: 2,
+            ..base
+        }) <= base_s,
+        "latency"
+    );
+    assert!(
+        tier5_score(&Tier5Metrics {
+            irreducible_decisions: 3,
+            ..base
+        }) <= base_s,
+        "irreducible"
+    );
+    assert!(
+        tier5_score(&Tier5Metrics {
+            dead_end_screens: 1,
+            ..base
+        }) <= base_s,
+        "dead_end"
+    );
+    assert!(
+        tier5_score(&Tier5Metrics {
+            acyclic: false,
+            ..base
+        }) <= base_s,
+        "cycle"
+    );
 }
 
 #[test]
@@ -2438,12 +2844,45 @@ fn meta_tier6_is_monotonic_in_each_signal() {
         negations: 0,
     };
     let base_s = tier6_screen_score(&base);
-    assert!(tier6_screen_score(&ScreenLoad { grade_level: 16.0, ..base }) <= base_s, "grade");
-    assert!(tier6_screen_score(&ScreenLoad { options: 5, ..base }) <= base_s, "options");
-    assert!(tier6_screen_score(&ScreenLoad { jargon_per_100w: 20.0, ..base }) <= base_s, "jargon");
-    assert!(tier6_screen_score(&ScreenLoad { new_concepts: 8, ..base }) <= base_s, "concepts");
-    assert!(tier6_screen_score(&ScreenLoad { questions: 4, ..base }) <= base_s, "questions");
-    assert!(tier6_screen_score(&ScreenLoad { negations: 3, ..base }) <= base_s, "negations");
+    assert!(
+        tier6_screen_score(&ScreenLoad {
+            grade_level: 16.0,
+            ..base
+        }) <= base_s,
+        "grade"
+    );
+    assert!(
+        tier6_screen_score(&ScreenLoad { options: 5, ..base }) <= base_s,
+        "options"
+    );
+    assert!(
+        tier6_screen_score(&ScreenLoad {
+            jargon_per_100w: 20.0,
+            ..base
+        }) <= base_s,
+        "jargon"
+    );
+    assert!(
+        tier6_screen_score(&ScreenLoad {
+            new_concepts: 8,
+            ..base
+        }) <= base_s,
+        "concepts"
+    );
+    assert!(
+        tier6_screen_score(&ScreenLoad {
+            questions: 4,
+            ..base
+        }) <= base_s,
+        "questions"
+    );
+    assert!(
+        tier6_screen_score(&ScreenLoad {
+            negations: 3,
+            ..base
+        }) <= base_s,
+        "negations"
+    );
 }
 
 #[test]
@@ -2457,10 +2896,34 @@ fn meta_tier7_is_monotonic_in_each_signal() {
         is_multistep: true,
     };
     let base_s = tier7_screen_score(&base);
-    assert!(tier7_screen_score(&ScreenClarity { primary_actions: 4, ..base }) <= base_s, "actions");
-    assert!(tier7_screen_score(&ScreenClarity { verbs_lead_instructions: false, ..base }) <= base_s, "verbs");
-    assert!(tier7_screen_score(&ScreenClarity { next_step_visible: false, ..base }) <= base_s, "next");
-    assert!(tier7_screen_score(&ScreenClarity { expectation_set: false, ..base }) <= base_s, "expect");
+    assert!(
+        tier7_screen_score(&ScreenClarity {
+            primary_actions: 4,
+            ..base
+        }) <= base_s,
+        "actions"
+    );
+    assert!(
+        tier7_screen_score(&ScreenClarity {
+            verbs_lead_instructions: false,
+            ..base
+        }) <= base_s,
+        "verbs"
+    );
+    assert!(
+        tier7_screen_score(&ScreenClarity {
+            next_step_visible: false,
+            ..base
+        }) <= base_s,
+        "next"
+    );
+    assert!(
+        tier7_screen_score(&ScreenClarity {
+            expectation_set: false,
+            ..base
+        }) <= base_s,
+        "expect"
+    );
 }
 
 #[test]
@@ -2473,11 +2936,41 @@ fn meta_tier8_is_monotonic_in_each_signal() {
         timeout_safe: true,
     };
     let base_s = tier8_score(&base);
-    assert!(tier8_score(&Tier8Metrics { back_navigation_ok: false, ..base }) <= base_s, "back-nav");
-    assert!(tier8_score(&Tier8Metrics { error_recovery_depth: 5, ..base }) <= base_s, "recovery-depth");
-    assert!(tier8_score(&Tier8Metrics { no_repeated_prompt: false, ..base }) <= base_s, "repeated");
-    assert!(tier8_score(&Tier8Metrics { no_unconfirmed_destructive: false, ..base }) <= base_s, "destructive");
-    assert!(tier8_score(&Tier8Metrics { timeout_safe: false, ..base }) <= base_s, "timeout");
+    assert!(
+        tier8_score(&Tier8Metrics {
+            back_navigation_ok: false,
+            ..base
+        }) <= base_s,
+        "back-nav"
+    );
+    assert!(
+        tier8_score(&Tier8Metrics {
+            error_recovery_depth: 5,
+            ..base
+        }) <= base_s,
+        "recovery-depth"
+    );
+    assert!(
+        tier8_score(&Tier8Metrics {
+            no_repeated_prompt: false,
+            ..base
+        }) <= base_s,
+        "repeated"
+    );
+    assert!(
+        tier8_score(&Tier8Metrics {
+            no_unconfirmed_destructive: false,
+            ..base
+        }) <= base_s,
+        "destructive"
+    );
+    assert!(
+        tier8_score(&Tier8Metrics {
+            timeout_safe: false,
+            ..base
+        }) <= base_s,
+        "timeout"
+    );
 }
 
 #[test]
@@ -2488,9 +2981,27 @@ fn meta_tier9_is_monotonic_in_each_signal() {
         max_blocker_secs: 60,
     };
     let base_s = tier9_score(&base);
-    assert!(tier9_score(&Tier9Metrics { countdown_slack_secs: -10.0, ..base }) <= base_s, "countdown");
-    assert!(tier9_score(&Tier9Metrics { no_forced_wait: false, ..base }) <= base_s, "forced-wait");
-    assert!(tier9_score(&Tier9Metrics { max_blocker_secs: 300, ..base }) <= base_s, "blocker");
+    assert!(
+        tier9_score(&Tier9Metrics {
+            countdown_slack_secs: -10.0,
+            ..base
+        }) <= base_s,
+        "countdown"
+    );
+    assert!(
+        tier9_score(&Tier9Metrics {
+            no_forced_wait: false,
+            ..base
+        }) <= base_s,
+        "forced-wait"
+    );
+    assert!(
+        tier9_score(&Tier9Metrics {
+            max_blocker_secs: 300,
+            ..base
+        }) <= base_s,
+        "blocker"
+    );
 }
 
 #[test]
@@ -2501,9 +3012,27 @@ fn meta_tier10_is_monotonic_in_each_signal() {
         logical_reading_order: true,
     };
     let base_s = tier10_score(&base);
-    assert!(tier10_score(&Tier10Metrics { max_nonascii_prose_chars: 5, ..base }) <= base_s, "unicode");
-    assert!(tier10_score(&Tier10Metrics { color_independent_selection: false, ..base }) <= base_s, "color");
-    assert!(tier10_score(&Tier10Metrics { logical_reading_order: false, ..base }) <= base_s, "order");
+    assert!(
+        tier10_score(&Tier10Metrics {
+            max_nonascii_prose_chars: 5,
+            ..base
+        }) <= base_s,
+        "unicode"
+    );
+    assert!(
+        tier10_score(&Tier10Metrics {
+            color_independent_selection: false,
+            ..base
+        }) <= base_s,
+        "color"
+    );
+    assert!(
+        tier10_score(&Tier10Metrics {
+            logical_reading_order: false,
+            ..base
+        }) <= base_s,
+        "order"
+    );
 }
 
 // ---- Properties 2 + 3: anchoring and discrimination ----
@@ -2536,9 +3065,15 @@ fn meta_anchors_land_in_expected_bands() {
     let bs = tier3_screen_score(&bad_s);
 
     // Good anchors must score high; bad anchors must score low.
-    assert!(gp >= 90.0, "good path anchor should be excellent, got {gp:.1}");
+    assert!(
+        gp >= 90.0,
+        "good path anchor should be excellent, got {gp:.1}"
+    );
     assert!(bp <= 30.0, "bad path anchor should be poor, got {bp:.1}");
-    assert!(gs >= 85.0, "good screen anchor should be excellent, got {gs:.1}");
+    assert!(
+        gs >= 85.0,
+        "good screen anchor should be excellent, got {gs:.1}"
+    );
     assert!(bs <= 30.0, "bad screen anchor should be poor, got {bs:.1}");
 }
 
@@ -2566,7 +3101,10 @@ struct Lcg(u64);
 impl Lcg {
     fn next_f64(&mut self) -> f64 {
         // Numerical Recipes constants.
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         // Top 53 bits -> [0,1).
         ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
     }
@@ -2626,10 +3164,20 @@ fn meta_ranking_is_robust_to_weight_perturbation() {
     for _ in 0..TRIALS {
         let w1 = jittered_tier1_weights(&mut rng, JITTER);
         let w3 = jittered_tier3_weights(&mut rng, JITTER);
-        if !is_nondecreasing(&path_ladder.iter().map(|m| tier1_path_score_w(m, &w1)).collect::<Vec<_>>()) {
+        if !is_nondecreasing(
+            &path_ladder
+                .iter()
+                .map(|m| tier1_path_score_w(m, &w1))
+                .collect::<Vec<_>>(),
+        ) {
             path_violations += 1;
         }
-        if !is_nondecreasing(&screen_ladder.iter().map(|m| tier3_screen_score_w(m, &w3)).collect::<Vec<_>>()) {
+        if !is_nondecreasing(
+            &screen_ladder
+                .iter()
+                .map(|m| tier3_screen_score_w(m, &w3))
+                .collect::<Vec<_>>(),
+        ) {
             screen_violations += 1;
         }
     }
@@ -2656,18 +3204,46 @@ fn meta_every_signal_moves_the_score() {
     // Tier 1: each signal, toggled in isolation, must change the score.
     let base_p = pm(1, 1, 2, true);
     let base_ps = tier1_path_score(&base_p);
-    assert_ne!(tier1_path_score(&pm(2, 1, 2, true)), base_ps, "keystroke signal is dead");
-    assert_ne!(tier1_path_score(&pm(1, 2, 2, true)), base_ps, "decision signal is dead");
-    assert_ne!(tier1_path_score(&pm(1, 1, 3, true)), base_ps, "screen signal is dead");
-    assert_ne!(tier1_path_score(&pm(1, 1, 2, false)), base_ps, "ready signal is dead");
+    assert_ne!(
+        tier1_path_score(&pm(2, 1, 2, true)),
+        base_ps,
+        "keystroke signal is dead"
+    );
+    assert_ne!(
+        tier1_path_score(&pm(1, 2, 2, true)),
+        base_ps,
+        "decision signal is dead"
+    );
+    assert_ne!(
+        tier1_path_score(&pm(1, 1, 3, true)),
+        base_ps,
+        "screen signal is dead"
+    );
+    assert_ne!(
+        tier1_path_score(&pm(1, 1, 2, false)),
+        base_ps,
+        "ready signal is dead"
+    );
 
     // Tier 3: each signal, toggled in isolation, must change the score. Use a
     // base already over the word budget so the word signal is active.
     let base_s = sm(60, true, true, true);
     let base_ss = tier3_screen_score(&base_s);
-    assert_ne!(tier3_screen_score(&sm(80, true, true, true)), base_ss, "word signal is dead");
-    assert_ne!(tier3_screen_score(&sm(60, true, false, true)), base_ss, "keyhint signal is dead");
-    assert_ne!(tier3_screen_score(&sm(60, true, true, false)), base_ss, "escape signal is dead");
+    assert_ne!(
+        tier3_screen_score(&sm(80, true, true, true)),
+        base_ss,
+        "word signal is dead"
+    );
+    assert_ne!(
+        tier3_screen_score(&sm(60, true, false, true)),
+        base_ss,
+        "keyhint signal is dead"
+    );
+    assert_ne!(
+        tier3_screen_score(&sm(60, true, true, false)),
+        base_ss,
+        "escape signal is dead"
+    );
 }
 
 // ---- The meta scorecard ----
@@ -2715,22 +3291,38 @@ fn onboarding_meta_scorecard() {
     // 4. Robustness (small sweep for the report; the #[test] runs the full one).
     let robustness = {
         let path_ladder = [pm(6, 4, 6, false), pm(2, 1, 2, true), pm(0, 0, 1, true)];
-        let screen_ladder = [sm(220, true, false, false), sm(90, true, true, true), sm(30, true, true, true)];
+        let screen_ladder = [
+            sm(220, true, false, false),
+            sm(90, true, true, true),
+            sm(30, true, true, true),
+        ];
         let mut rng = Lcg(0x1234_5678_9ABC_DEF0);
         let mut ok = true;
         for _ in 0..200 {
             let w1 = jittered_tier1_weights(&mut rng, 0.5);
             let w3 = jittered_tier3_weights(&mut rng, 0.5);
-            if !is_nondecreasing(&path_ladder.iter().map(|m| tier1_path_score_w(m, &w1)).collect::<Vec<_>>())
-                || !is_nondecreasing(&screen_ladder.iter().map(|m| tier3_screen_score_w(m, &w3)).collect::<Vec<_>>())
-            {
+            if !is_nondecreasing(
+                &path_ladder
+                    .iter()
+                    .map(|m| tier1_path_score_w(m, &w1))
+                    .collect::<Vec<_>>(),
+            ) || !is_nondecreasing(
+                &screen_ladder
+                    .iter()
+                    .map(|m| tier3_screen_score_w(m, &w3))
+                    .collect::<Vec<_>>(),
+            ) {
                 ok = false;
                 break;
             }
         }
         ok
     };
-    results.push(("robustness", robustness, "ranking stable under +/-50% weights"));
+    results.push((
+        "robustness",
+        robustness,
+        "ranking stable under +/-50% weights",
+    ));
 
     // 5. Signal liveness.
     let liveness = {
@@ -2752,12 +3344,20 @@ fn onboarding_meta_scorecard() {
     println!("\n============ META-EVALUATION (Tier M): is the scorer trustworthy? ============");
     println!("{:<16} {:>6}  guarantees", "property", "result");
     for (name, ok, desc) in &results {
-        println!("{:<16} {:>6}  {}", name, if *ok { "PASS" } else { "FAIL" }, desc);
+        println!(
+            "{:<16} {:>6}  {}",
+            name,
+            if *ok { "PASS" } else { "FAIL" },
+            desc
+        );
     }
     println!("--");
     println!("path good/bad anchors : {gps:.1} vs {bps:.1}  (gap {path_gap:.1})");
     println!("screen good/bad anchors: {gss:.1} vs {bss:.1}  (gap {screen_gap:.1})");
-    println!("META-TRUST            : {meta_trust:.0} / 100 ({passed}/{} properties)", results.len());
+    println!(
+        "META-TRUST            : {meta_trust:.0} / 100 ({passed}/{} properties)",
+        results.len()
+    );
     println!("=============================================================================\n");
 
     assert_eq!(
@@ -2833,73 +3433,313 @@ fn signal_registry() -> Vec<SignalSpec> {
     use SignalStatus::*;
     vec![
         // ---- Scored (wired into Tier 1) ----
-        SignalSpec { name: "keystrokes", status: Scored, rationale: "Tier1.per_keystroke", owns_feature: None },
-        SignalSpec { name: "decisions", status: Scored, rationale: "Tier1.per_decision", owns_feature: InteractiveOptions },
-        SignalSpec { name: "screens", status: Scored, rationale: "Tier1.per_extra_screen", owns_feature: None },
-        SignalSpec { name: "reaches_ready", status: Scored, rationale: "Tier1.not_ready", owns_feature: None },
+        SignalSpec {
+            name: "keystrokes",
+            status: Scored,
+            rationale: "Tier1.per_keystroke",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "decisions",
+            status: Scored,
+            rationale: "Tier1.per_decision",
+            owns_feature: InteractiveOptions,
+        },
+        SignalSpec {
+            name: "screens",
+            status: Scored,
+            rationale: "Tier1.per_extra_screen",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "reaches_ready",
+            status: Scored,
+            rationale: "Tier1.not_ready",
+            owns_feature: None,
+        },
         // ---- Scored (wired into Tier 3) ----
-        SignalSpec { name: "word_count", status: Scored, rationale: "Tier3.per_excess_word (reading load)", owns_feature: None },
-        SignalSpec { name: "keyhint_consistency", status: Scored, rationale: "Tier3.inconsistent_keyhint", owns_feature: None },
-        SignalSpec { name: "escape_hatch", status: Scored, rationale: "Tier3.no_escape_hatch", owns_feature: Command },
-        SignalSpec { name: "countdown_present", status: Scored, rationale: "covered via word_count + keyhint on timed yes/no screens", owns_feature: Countdown },
-        SignalSpec { name: "suggestion_list", status: Scored, rationale: "covered via word_count on the Suggestions screen", owns_feature: List },
+        SignalSpec {
+            name: "word_count",
+            status: Scored,
+            rationale: "Tier3.per_excess_word (reading load)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "keyhint_consistency",
+            status: Scored,
+            rationale: "Tier3.inconsistent_keyhint",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "escape_hatch",
+            status: Scored,
+            rationale: "Tier3.no_escape_hatch",
+            owns_feature: Command,
+        },
+        SignalSpec {
+            name: "countdown_present",
+            status: Scored,
+            rationale: "covered via word_count + keyhint on timed yes/no screens",
+            owns_feature: Countdown,
+        },
+        SignalSpec {
+            name: "suggestion_list",
+            status: Scored,
+            rationale: "covered via word_count on the Suggestions screen",
+            owns_feature: List,
+        },
         // ---- Scored (wired into Tier 4: content & robustness) ----
-        SignalSpec { name: "terminology_consistency", status: Scored, rationale: "Tier4.inconsistent_terminology (one verb for 'log in' across screens)", owns_feature: None },
-        SignalSpec { name: "progress_visibility", status: Scored, rationale: "Tier4.no_progress ('N of M' in multi-step contexts)", owns_feature: None },
-        SignalSpec { name: "default_safety", status: Scored, rationale: "Tier4.unsafe_default (timed auto-commit lands on a recoverable outcome)", owns_feature: None },
-        SignalSpec { name: "narrow_terminal_safety", status: Scored, rationale: "Tier4.narrow_breaks (core Yes/No options survive a 50-col terminal)", owns_feature: None },
+        SignalSpec {
+            name: "terminology_consistency",
+            status: Scored,
+            rationale: "Tier4.inconsistent_terminology (one verb for 'log in' across screens)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "progress_visibility",
+            status: Scored,
+            rationale: "Tier4.no_progress ('N of M' in multi-step contexts)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "default_safety",
+            status: Scored,
+            rationale: "Tier4.unsafe_default (timed auto-commit lands on a recoverable outcome)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "narrow_terminal_safety",
+            status: Scored,
+            rationale: "Tier4.narrow_breaks (core Yes/No options survive a 50-col terminal)",
+            owns_feature: None,
+        },
         // ---- Scored (wired into Tier 5: path efficiency over the flow graph) ----
-        SignalSpec { name: "min_vs_actual_path", status: Scored, rationale: "Tier5.per_excess_keystroke (default path vs graph-shortest to ready)", owns_feature: None },
-        SignalSpec { name: "first_input_latency", status: Scored, rationale: "Tier5.per_latency_keystroke (keystrokes before the first real action)", owns_feature: None },
-        SignalSpec { name: "irreducible_decisions", status: Scored, rationale: "Tier5.per_irreducible_decision (forced choices with no auto default)", owns_feature: None },
-        SignalSpec { name: "dead_end_screens", status: Scored, rationale: "Tier5.per_dead_end (non-terminal node with no forward edge)", owns_feature: None },
-        SignalSpec { name: "cycle_freedom", status: Scored, rationale: "Tier5.has_cycle (flow graph must be a DAG)", owns_feature: None },
+        SignalSpec {
+            name: "min_vs_actual_path",
+            status: Scored,
+            rationale: "Tier5.per_excess_keystroke (default path vs graph-shortest to ready)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "first_input_latency",
+            status: Scored,
+            rationale: "Tier5.per_latency_keystroke (keystrokes before the first real action)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "irreducible_decisions",
+            status: Scored,
+            rationale: "Tier5.per_irreducible_decision (forced choices with no auto default)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "dead_end_screens",
+            status: Scored,
+            rationale: "Tier5.per_dead_end (non-terminal node with no forward edge)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "cycle_freedom",
+            status: Scored,
+            rationale: "Tier5.has_cycle (flow graph must be a DAG)",
+            owns_feature: None,
+        },
         // ---- Scored (wired into Tier 6: cognitive load per screen) ----
-        SignalSpec { name: "reading_grade_level", status: Scored, rationale: "Tier6.per_excess_grade (Flesch-Kincaid over real body prose)", owns_feature: None },
-        SignalSpec { name: "options_per_screen", status: Scored, rationale: "Tier6.per_excess_option (Hick's law on simultaneous choices)", owns_feature: InteractiveOptions },
-        SignalSpec { name: "jargon_density", status: Scored, rationale: "Tier6.per_jargon_per_100w (unexplained technical terms)", owns_feature: None },
-        SignalSpec { name: "new_concepts_per_screen", status: Scored, rationale: "Tier6.per_excess_concept (distinct domain concepts introduced)", owns_feature: None },
-        SignalSpec { name: "number_of_questions", status: Scored, rationale: "Tier6.per_question_over_one (interrogatives to resolve)", owns_feature: None },
-        SignalSpec { name: "negation_count", status: Scored, rationale: "Tier6.per_negation (confusing don't/not/never phrasing)", owns_feature: None },
+        SignalSpec {
+            name: "reading_grade_level",
+            status: Scored,
+            rationale: "Tier6.per_excess_grade (Flesch-Kincaid over real body prose)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "options_per_screen",
+            status: Scored,
+            rationale: "Tier6.per_excess_option (Hick's law on simultaneous choices)",
+            owns_feature: InteractiveOptions,
+        },
+        SignalSpec {
+            name: "jargon_density",
+            status: Scored,
+            rationale: "Tier6.per_jargon_per_100w (unexplained technical terms)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "new_concepts_per_screen",
+            status: Scored,
+            rationale: "Tier6.per_excess_concept (distinct domain concepts introduced)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "number_of_questions",
+            status: Scored,
+            rationale: "Tier6.per_question_over_one (interrogatives to resolve)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "negation_count",
+            status: Scored,
+            rationale: "Tier6.per_negation (confusing don't/not/never phrasing)",
+            owns_feature: None,
+        },
         // ---- Scored (wired into Tier 7: clarity & guidance) ----
-        SignalSpec { name: "single_primary_action", status: Scored, rationale: "Tier7.per_extra_action (one CTA/question per screen)", owns_feature: None },
-        SignalSpec { name: "action_verb_clarity", status: Scored, rationale: "Tier7.verb_unclear (instructions lead with an imperative verb)", owns_feature: None },
-        SignalSpec { name: "next_step_visibility", status: Scored, rationale: "Tier7.no_next_step (screen says what happens next)", owns_feature: None },
-        SignalSpec { name: "expectation_setting", status: Scored, rationale: "Tier7.no_expectation (multi-step context states scope up front)", owns_feature: None },
+        SignalSpec {
+            name: "single_primary_action",
+            status: Scored,
+            rationale: "Tier7.per_extra_action (one CTA/question per screen)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "action_verb_clarity",
+            status: Scored,
+            rationale: "Tier7.verb_unclear (instructions lead with an imperative verb)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "next_step_visibility",
+            status: Scored,
+            rationale: "Tier7.no_next_step (screen says what happens next)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "expectation_setting",
+            status: Scored,
+            rationale: "Tier7.no_expectation (multi-step context states scope up front)",
+            owns_feature: None,
+        },
         // ---- Scored (wired into Tier 8: reversibility & error handling) ----
-        SignalSpec { name: "back_navigation", status: Scored, rationale: "Tier8.no_back_nav (a declined choice still offers a real recovery route, driven on the app)", owns_feature: None },
-        SignalSpec { name: "error_recovery_depth", status: Scored, rationale: "Tier8.per_recovery_keystroke (keystrokes from a declined branch back to an actionable login state)", owns_feature: None },
-        SignalSpec { name: "repeated_prompt", status: Scored, rationale: "Tier8.repeated_prompt (an answered decision is not re-asked in the real transitions)", owns_feature: None },
-        SignalSpec { name: "confirmation_for_destructive", status: Scored, rationale: "Tier8.unconfirmed_destructive (wildcard-free phase classifier: no phase mutates user data without a choice)", owns_feature: None },
-        SignalSpec { name: "timeout_safety", status: Scored, rationale: "Tier8.unsafe_timeout (do-nothing DECISION_TIMEOUT lands on a recoverable phase)", owns_feature: None },
+        SignalSpec {
+            name: "back_navigation",
+            status: Scored,
+            rationale: "Tier8.no_back_nav (a declined choice still offers a real recovery route, driven on the app)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "error_recovery_depth",
+            status: Scored,
+            rationale: "Tier8.per_recovery_keystroke (keystrokes from a declined branch back to an actionable login state)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "repeated_prompt",
+            status: Scored,
+            rationale: "Tier8.repeated_prompt (an answered decision is not re-asked in the real transitions)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "confirmation_for_destructive",
+            status: Scored,
+            rationale: "Tier8.unconfirmed_destructive (wildcard-free phase classifier: no phase mutates user data without a choice)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "timeout_safety",
+            status: Scored,
+            rationale: "Tier8.unsafe_timeout (do-nothing DECISION_TIMEOUT lands on a recoverable phase)",
+            owns_feature: None,
+        },
         // ---- Scored (wired into Tier 9: timing & pacing) ----
-        SignalSpec { name: "countdown_adequacy", status: Scored, rationale: "Tier9.per_second_short (DECISION_TIMEOUT covers each timed screen's read budget at READING_WPS)", owns_feature: None },
-        SignalSpec { name: "forced_wait", status: Scored, rationale: "Tier9.forced_wait (every timed phase honors an immediate-commit key, verified on the app)", owns_feature: None },
-        SignalSpec { name: "time_on_blocker", status: Scored, rationale: "Tier9.per_second_over_ceiling (worst-case unattended dwell is bounded by DECISION_TIMEOUT)", owns_feature: None },
+        SignalSpec {
+            name: "countdown_adequacy",
+            status: Scored,
+            rationale: "Tier9.per_second_short (DECISION_TIMEOUT covers each timed screen's read budget at READING_WPS)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "forced_wait",
+            status: Scored,
+            rationale: "Tier9.forced_wait (every timed phase honors an immediate-commit key, verified on the app)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "time_on_blocker",
+            status: Scored,
+            rationale: "Tier9.per_second_over_ceiling (worst-case unattended dwell is bounded by DECISION_TIMEOUT)",
+            owns_feature: None,
+        },
         // ---- Scored (Layer C: structural / on-screen feature ownership) ----
         // These bind a registry signal to a specific on-screen feature class so
         // the completeness tripwire (Layer C) can prove every visible structural
         // dimension is owned. They drive the REAL full-app render of the provider
         // picker, a surface the welcome card alone never shows.
-        SignalSpec { name: "interactive_options", status: Scored, rationale: "owns the Yes/No selector class (also counted by Tier1.decisions)", owns_feature: InteractiveOptions },
-        SignalSpec { name: "command_affordance", status: Scored, rationale: "owns typed-command screens (/login, /model); also Tier3.escape_hatch", owns_feature: Command },
-        SignalSpec { name: "input_field_present", status: Scored, rationale: "owns the provider picker's type-to-filter input surface (full-app render)", owns_feature: InputField },
+        SignalSpec {
+            name: "interactive_options",
+            status: Scored,
+            rationale: "owns the Yes/No selector class (also counted by Tier1.decisions)",
+            owns_feature: InteractiveOptions,
+        },
+        SignalSpec {
+            name: "command_affordance",
+            status: Scored,
+            rationale: "owns typed-command screens (/login, /model); also Tier3.escape_hatch",
+            owns_feature: Command,
+        },
+        SignalSpec {
+            name: "input_field_present",
+            status: Scored,
+            rationale: "owns the provider picker's type-to-filter input surface (full-app render)",
+            owns_feature: InputField,
+        },
         // ---- Scored (wired into Tier 10: accessibility & robustness) ----
-        SignalSpec { name: "no_unicode_dependence", status: Scored, rationale: "Tier10.per_nonascii_prose_char (load-bearing prose is ASCII-legible; logo is decorative)", owns_feature: None },
-        SignalSpec { name: "color_independence", status: Scored, rationale: "Tier10.color_dependent (selection marked by a non-color video attribute, verified on the buffer)", owns_feature: None },
-        SignalSpec { name: "screen_reader_order", status: Scored, rationale: "Tier10.illogical_order (prose precedes the action row for linear reading)", owns_feature: None },
+        SignalSpec {
+            name: "no_unicode_dependence",
+            status: Scored,
+            rationale: "Tier10.per_nonascii_prose_char (load-bearing prose is ASCII-legible; logo is decorative)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "color_independence",
+            status: Scored,
+            rationale: "Tier10.color_dependent (selection marked by a non-color video attribute, verified on the buffer)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "screen_reader_order",
+            status: Scored,
+            rationale: "Tier10.illogical_order (prose precedes the action row for linear reading)",
+            owns_feature: None,
+        },
         // ---- Deferred (matters, not yet scored, with reason) ----
         // ---- Rejected (out of scope by construction) ----
-        SignalSpec { name: "color_contrast", status: Rejected, rationale: "not derivable from the text buffer the evaluator reads", owns_feature: None },
-        SignalSpec { name: "visual_hierarchy", status: Rejected, rationale: "layout/eye-tracking concern; not measurable offline without users", owns_feature: None },
+        SignalSpec {
+            name: "color_contrast",
+            status: Rejected,
+            rationale: "not derivable from the text buffer the evaluator reads",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "visual_hierarchy",
+            status: Rejected,
+            rationale: "layout/eye-tracking concern; not measurable offline without users",
+            owns_feature: None,
+        },
         // These are genuinely valuable but FUNDAMENTALLY need real users or live
         // telemetry, which this evaluator refuses to collect by design. Listing
         // them keeps the rejection conscious (not a silent omission) and documents
         // exactly why each is out of scope for an offline, data-free evaluator.
-        SignalSpec { name: "actual_completion_rate", status: Rejected, rationale: "needs a real-user funnel; the evaluator scores the artifact, never collects user data", owns_feature: None },
-        SignalSpec { name: "time_to_value_real", status: Rejected, rationale: "wall-clock time-to-first-value needs live telemetry; we only bound the flow's own timing (Tier 9)", owns_feature: None },
-        SignalSpec { name: "subjective_confusion", status: Rejected, rationale: "needs surveys / think-aloud; proxied (not replaced) by Tier 6 cognitive-load signals", owns_feature: None },
-        SignalSpec { name: "drop_off_point", status: Rejected, rationale: "needs analytics on real sessions; proxied structurally by Tier 5 dead_end_screens", owns_feature: None },
+        SignalSpec {
+            name: "actual_completion_rate",
+            status: Rejected,
+            rationale: "needs a real-user funnel; the evaluator scores the artifact, never collects user data",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "time_to_value_real",
+            status: Rejected,
+            rationale: "wall-clock time-to-first-value needs live telemetry; we only bound the flow's own timing (Tier 9)",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "subjective_confusion",
+            status: Rejected,
+            rationale: "needs surveys / think-aloud; proxied (not replaced) by Tier 6 cognitive-load signals",
+            owns_feature: None,
+        },
+        SignalSpec {
+            name: "drop_off_point",
+            status: Rejected,
+            rationale: "needs analytics on real sessions; proxied structurally by Tier 5 dead_end_screens",
+            owns_feature: None,
+        },
     ]
 }
 
@@ -2923,7 +3763,9 @@ fn detect_feature_classes(text: &str) -> Vec<FeatureClass> {
         found.push(FeatureClass::List);
     }
     // A typed command.
-    if text.contains('/') && (lower.contains("/login") || lower.contains("/model") || lower.contains("type /")) {
+    if text.contains('/')
+        && (lower.contains("/login") || lower.contains("/model") || lower.contains("type /"))
+    {
         found.push(FeatureClass::Command);
     }
     // A free-text input / filter field: the provider picker shows a status line
@@ -2944,16 +3786,32 @@ fn all_welcome_screen_texts() -> Vec<(&'static str, String)> {
     use crate::external_auth::ExternalAuthReviewCandidate;
     use crate::tui::app::onboarding_flow::ImportReview;
     let now = std::time::Instant::now();
-    let review =
-        ImportReview::new(vec![ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "Codex auth.json")])
-            .unwrap();
+    let review = ImportReview::new(vec![ExternalAuthReviewCandidate::fixture(
+        "OpenAI/Codex",
+        "Codex auth.json",
+    )])
+    .unwrap();
     let phases: Vec<(&'static str, OnboardingPhase)> = vec![
-        ("LoginOpenAi", OnboardingPhase::LoginOpenAi { yes_highlighted: true }),
-        ("Login{import}", OnboardingPhase::Login { import: Some(review) }),
+        (
+            "LoginOpenAi",
+            OnboardingPhase::LoginOpenAi {
+                yes_highlighted: true,
+            },
+        ),
+        (
+            "Login{import}",
+            OnboardingPhase::Login {
+                import: Some(review),
+            },
+        ),
         ("Login{recovery}", OnboardingPhase::Login { import: None }),
         (
             "ContinuePrompt",
-            OnboardingPhase::ContinuePrompt { cli: ExternalCli::Codex, yes_highlighted: true, shown_at: now },
+            OnboardingPhase::ContinuePrompt {
+                cli: ExternalCli::Codex,
+                yes_highlighted: true,
+                shown_at: now,
+            },
         ),
         ("Suggestions", OnboardingPhase::Suggestions),
     ];
@@ -2985,6 +3843,12 @@ fn render_login_picker_overlay_text() -> String {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    // Full `ui::draw` renders mutate process-global render state (scroll
+    // metrics, layout snapshots, flicker history) that sibling tests assert on.
+    // Serialize on the shared render-state lock, matching the env-then-render
+    // lock order every other drawing test uses.
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+
     let mut app = create_test_app();
     app.onboarding_flow = None;
     app.begin_onboarding_flow_at_login();
@@ -3015,9 +3879,18 @@ fn render_login_picker_overlay_text() -> String {
 fn signal_coverage_scorecard() {
     with_temp_jcode_home(|| {
         let registry = signal_registry();
-        let scored: Vec<&SignalSpec> = registry.iter().filter(|s| s.status == SignalStatus::Scored).collect();
-        let deferred: Vec<&SignalSpec> = registry.iter().filter(|s| s.status == SignalStatus::Deferred).collect();
-        let rejected: Vec<&SignalSpec> = registry.iter().filter(|s| s.status == SignalStatus::Rejected).collect();
+        let scored: Vec<&SignalSpec> = registry
+            .iter()
+            .filter(|s| s.status == SignalStatus::Scored)
+            .collect();
+        let deferred: Vec<&SignalSpec> = registry
+            .iter()
+            .filter(|s| s.status == SignalStatus::Deferred)
+            .collect();
+        let rejected: Vec<&SignalSpec> = registry
+            .iter()
+            .filter(|s| s.status == SignalStatus::Rejected)
+            .collect();
 
         // ---- Layer B metric: scored coverage over the acknowledged-relevant
         // universe (Scored + Deferred; Rejected is out of scope by design). ----
@@ -3068,7 +3941,11 @@ fn signal_coverage_scorecard() {
         println!("scored signals     : {}", scored.len());
         println!("deferred (known)   : {}", deferred.len());
         println!("rejected (scope)   : {}", rejected.len());
-        println!("scored coverage    : {scored_coverage:.0}% of acknowledged-relevant ({}/{})", scored.len(), relevant);
+        println!(
+            "scored coverage    : {scored_coverage:.0}% of acknowledged-relevant ({}/{})",
+            scored.len(),
+            relevant
+        );
         println!("\n-- Layer C: on-screen feature ownership --");
         println!("feature classes present : {:?}", present);
         println!("feature classes owned   : {:?}", owned);
@@ -3201,10 +4078,38 @@ fn signal_coverage_scored_signals_are_all_live() {
         narrow_options_survive: true,
     };
     let g = tier4_score(&good);
-    assert_ne!(tier4_score(&Tier4Metrics { terminology_consistent: false, ..good }), g, "terminology_consistency");
-    assert_ne!(tier4_score(&Tier4Metrics { progress_visible: false, ..good }), g, "progress_visibility");
-    assert_ne!(tier4_score(&Tier4Metrics { default_safe: false, ..good }), g, "default_safety");
-    assert_ne!(tier4_score(&Tier4Metrics { narrow_options_survive: false, ..good }), g, "narrow_terminal_safety");
+    assert_ne!(
+        tier4_score(&Tier4Metrics {
+            terminology_consistent: false,
+            ..good
+        }),
+        g,
+        "terminology_consistency"
+    );
+    assert_ne!(
+        tier4_score(&Tier4Metrics {
+            progress_visible: false,
+            ..good
+        }),
+        g,
+        "progress_visibility"
+    );
+    assert_ne!(
+        tier4_score(&Tier4Metrics {
+            default_safe: false,
+            ..good
+        }),
+        g,
+        "default_safety"
+    );
+    assert_ne!(
+        tier4_score(&Tier4Metrics {
+            narrow_options_survive: false,
+            ..good
+        }),
+        g,
+        "narrow_terminal_safety"
+    );
 
     // Tier 5 liveness: perturbing each path-efficiency signal must move the
     // Tier 5 score. Proves min_vs_actual_path / first_input_latency /
@@ -3217,11 +4122,46 @@ fn signal_coverage_scored_signals_are_all_live() {
         acyclic: true,
     };
     let b5 = tier5_score(&base5);
-    assert_ne!(tier5_score(&Tier5Metrics { excess_keystrokes: 1.0, ..base5 }), b5, "min_vs_actual_path");
-    assert_ne!(tier5_score(&Tier5Metrics { first_input_latency: 1, ..base5 }), b5, "first_input_latency");
-    assert_ne!(tier5_score(&Tier5Metrics { irreducible_decisions: 2, ..base5 }), b5, "irreducible_decisions");
-    assert_ne!(tier5_score(&Tier5Metrics { dead_end_screens: 1, ..base5 }), b5, "dead_end_screens");
-    assert_ne!(tier5_score(&Tier5Metrics { acyclic: false, ..base5 }), b5, "cycle_freedom");
+    assert_ne!(
+        tier5_score(&Tier5Metrics {
+            excess_keystrokes: 1.0,
+            ..base5
+        }),
+        b5,
+        "min_vs_actual_path"
+    );
+    assert_ne!(
+        tier5_score(&Tier5Metrics {
+            first_input_latency: 1,
+            ..base5
+        }),
+        b5,
+        "first_input_latency"
+    );
+    assert_ne!(
+        tier5_score(&Tier5Metrics {
+            irreducible_decisions: 2,
+            ..base5
+        }),
+        b5,
+        "irreducible_decisions"
+    );
+    assert_ne!(
+        tier5_score(&Tier5Metrics {
+            dead_end_screens: 1,
+            ..base5
+        }),
+        b5,
+        "dead_end_screens"
+    );
+    assert_ne!(
+        tier5_score(&Tier5Metrics {
+            acyclic: false,
+            ..base5
+        }),
+        b5,
+        "cycle_freedom"
+    );
 
     // Tier 6 liveness: perturbing each cognitive-load signal must move the
     // Tier 6 score. Proves reading_grade_level / options_per_screen /
@@ -3237,12 +4177,54 @@ fn signal_coverage_scored_signals_are_all_live() {
         negations: 0,
     };
     let b6 = tier6_screen_score(&base6);
-    assert_ne!(tier6_screen_score(&ScreenLoad { grade_level: 14.0, ..base6 }), b6, "reading_grade_level");
-    assert_ne!(tier6_screen_score(&ScreenLoad { options: 4, ..base6 }), b6, "options_per_screen");
-    assert_ne!(tier6_screen_score(&ScreenLoad { jargon_per_100w: 10.0, ..base6 }), b6, "jargon_density");
-    assert_ne!(tier6_screen_score(&ScreenLoad { new_concepts: 6, ..base6 }), b6, "new_concepts_per_screen");
-    assert_ne!(tier6_screen_score(&ScreenLoad { questions: 3, ..base6 }), b6, "number_of_questions");
-    assert_ne!(tier6_screen_score(&ScreenLoad { negations: 2, ..base6 }), b6, "negation_count");
+    assert_ne!(
+        tier6_screen_score(&ScreenLoad {
+            grade_level: 14.0,
+            ..base6
+        }),
+        b6,
+        "reading_grade_level"
+    );
+    assert_ne!(
+        tier6_screen_score(&ScreenLoad {
+            options: 4,
+            ..base6
+        }),
+        b6,
+        "options_per_screen"
+    );
+    assert_ne!(
+        tier6_screen_score(&ScreenLoad {
+            jargon_per_100w: 10.0,
+            ..base6
+        }),
+        b6,
+        "jargon_density"
+    );
+    assert_ne!(
+        tier6_screen_score(&ScreenLoad {
+            new_concepts: 6,
+            ..base6
+        }),
+        b6,
+        "new_concepts_per_screen"
+    );
+    assert_ne!(
+        tier6_screen_score(&ScreenLoad {
+            questions: 3,
+            ..base6
+        }),
+        b6,
+        "number_of_questions"
+    );
+    assert_ne!(
+        tier6_screen_score(&ScreenLoad {
+            negations: 2,
+            ..base6
+        }),
+        b6,
+        "negation_count"
+    );
 
     // Tier 7 liveness: perturbing each clarity signal must move the Tier 7
     // score. Proves single_primary_action / action_verb_clarity /
@@ -3256,10 +4238,38 @@ fn signal_coverage_scored_signals_are_all_live() {
         is_multistep: true,
     };
     let b7 = tier7_screen_score(&base7);
-    assert_ne!(tier7_screen_score(&ScreenClarity { primary_actions: 3, ..base7 }), b7, "single_primary_action");
-    assert_ne!(tier7_screen_score(&ScreenClarity { verbs_lead_instructions: false, ..base7 }), b7, "action_verb_clarity");
-    assert_ne!(tier7_screen_score(&ScreenClarity { next_step_visible: false, ..base7 }), b7, "next_step_visibility");
-    assert_ne!(tier7_screen_score(&ScreenClarity { expectation_set: false, ..base7 }), b7, "expectation_setting");
+    assert_ne!(
+        tier7_screen_score(&ScreenClarity {
+            primary_actions: 3,
+            ..base7
+        }),
+        b7,
+        "single_primary_action"
+    );
+    assert_ne!(
+        tier7_screen_score(&ScreenClarity {
+            verbs_lead_instructions: false,
+            ..base7
+        }),
+        b7,
+        "action_verb_clarity"
+    );
+    assert_ne!(
+        tier7_screen_score(&ScreenClarity {
+            next_step_visible: false,
+            ..base7
+        }),
+        b7,
+        "next_step_visibility"
+    );
+    assert_ne!(
+        tier7_screen_score(&ScreenClarity {
+            expectation_set: false,
+            ..base7
+        }),
+        b7,
+        "expectation_setting"
+    );
 
     // Tier 8 liveness: perturbing each reversibility signal must move the Tier 8
     // score. Proves back_navigation / error_recovery_depth / repeated_prompt /
@@ -3272,11 +4282,46 @@ fn signal_coverage_scored_signals_are_all_live() {
         timeout_safe: true,
     };
     let b8 = tier8_score(&base8);
-    assert_ne!(tier8_score(&Tier8Metrics { back_navigation_ok: false, ..base8 }), b8, "back_navigation");
-    assert_ne!(tier8_score(&Tier8Metrics { error_recovery_depth: 3, ..base8 }), b8, "error_recovery_depth");
-    assert_ne!(tier8_score(&Tier8Metrics { no_repeated_prompt: false, ..base8 }), b8, "repeated_prompt");
-    assert_ne!(tier8_score(&Tier8Metrics { no_unconfirmed_destructive: false, ..base8 }), b8, "confirmation_for_destructive");
-    assert_ne!(tier8_score(&Tier8Metrics { timeout_safe: false, ..base8 }), b8, "timeout_safety");
+    assert_ne!(
+        tier8_score(&Tier8Metrics {
+            back_navigation_ok: false,
+            ..base8
+        }),
+        b8,
+        "back_navigation"
+    );
+    assert_ne!(
+        tier8_score(&Tier8Metrics {
+            error_recovery_depth: 3,
+            ..base8
+        }),
+        b8,
+        "error_recovery_depth"
+    );
+    assert_ne!(
+        tier8_score(&Tier8Metrics {
+            no_repeated_prompt: false,
+            ..base8
+        }),
+        b8,
+        "repeated_prompt"
+    );
+    assert_ne!(
+        tier8_score(&Tier8Metrics {
+            no_unconfirmed_destructive: false,
+            ..base8
+        }),
+        b8,
+        "confirmation_for_destructive"
+    );
+    assert_ne!(
+        tier8_score(&Tier8Metrics {
+            timeout_safe: false,
+            ..base8
+        }),
+        b8,
+        "timeout_safety"
+    );
 
     // Tier 9 liveness: perturbing each timing signal must move the Tier 9 score.
     // Proves countdown_adequacy / forced_wait / time_on_blocker are all wired.
@@ -3286,9 +4331,30 @@ fn signal_coverage_scored_signals_are_all_live() {
         max_blocker_secs: 60,
     };
     let b9 = tier9_score(&base9);
-    assert_ne!(tier9_score(&Tier9Metrics { countdown_slack_secs: -5.0, ..base9 }), b9, "countdown_adequacy");
-    assert_ne!(tier9_score(&Tier9Metrics { no_forced_wait: false, ..base9 }), b9, "forced_wait");
-    assert_ne!(tier9_score(&Tier9Metrics { max_blocker_secs: 300, ..base9 }), b9, "time_on_blocker");
+    assert_ne!(
+        tier9_score(&Tier9Metrics {
+            countdown_slack_secs: -5.0,
+            ..base9
+        }),
+        b9,
+        "countdown_adequacy"
+    );
+    assert_ne!(
+        tier9_score(&Tier9Metrics {
+            no_forced_wait: false,
+            ..base9
+        }),
+        b9,
+        "forced_wait"
+    );
+    assert_ne!(
+        tier9_score(&Tier9Metrics {
+            max_blocker_secs: 300,
+            ..base9
+        }),
+        b9,
+        "time_on_blocker"
+    );
 
     // Tier 10 liveness: perturbing each accessibility signal must move the Tier
     // 10 score. Proves no_unicode_dependence / color_independence /
@@ -3299,7 +4365,28 @@ fn signal_coverage_scored_signals_are_all_live() {
         logical_reading_order: true,
     };
     let b10 = tier10_score(&base10);
-    assert_ne!(tier10_score(&Tier10Metrics { max_nonascii_prose_chars: 3, ..base10 }), b10, "no_unicode_dependence");
-    assert_ne!(tier10_score(&Tier10Metrics { color_independent_selection: false, ..base10 }), b10, "color_independence");
-    assert_ne!(tier10_score(&Tier10Metrics { logical_reading_order: false, ..base10 }), b10, "screen_reader_order");
+    assert_ne!(
+        tier10_score(&Tier10Metrics {
+            max_nonascii_prose_chars: 3,
+            ..base10
+        }),
+        b10,
+        "no_unicode_dependence"
+    );
+    assert_ne!(
+        tier10_score(&Tier10Metrics {
+            color_independent_selection: false,
+            ..base10
+        }),
+        b10,
+        "color_independence"
+    );
+    assert_ne!(
+        tier10_score(&Tier10Metrics {
+            logical_reading_order: false,
+            ..base10
+        }),
+        b10,
+        "screen_reader_order"
+    );
 }
