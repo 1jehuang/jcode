@@ -1595,16 +1595,15 @@ impl Provider for AnthropicProvider {
         }
     }
 
-    fn available_efforts(&self) -> Vec<&'static str> {
-        let model = self.model();
-        if !Self::model_supports_reasoning_effort(&model) {
+    fn reasoning_efforts_for_model(&self, model: &str) -> Vec<&'static str> {
+        if !Self::model_supports_reasoning_effort(model) {
             return vec![];
         }
         let mut efforts = vec!["none", "low", "medium", "high"];
-        if Self::model_supports_xhigh_effort(&model) {
+        if Self::model_supports_xhigh_effort(model) {
             efforts.push("xhigh");
         }
-        if Self::model_supports_max_effort(&model) {
+        if Self::model_supports_max_effort(model) {
             efforts.push("max");
         }
         efforts.push("swarm");

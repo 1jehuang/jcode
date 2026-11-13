@@ -2389,7 +2389,8 @@ fn runtime_info_reports_the_active_provider_and_complete_route_catalog() {
                 "provider": "anthropic",
                 "api_method": "messages",
                 "available": true,
-                "detail": "ready"
+                "detail": "ready",
+                "reasoning_efforts": ["low", "high"]
             },
             {
                 "model": "gemini-pro",
@@ -2426,8 +2427,14 @@ fn runtime_info_reports_the_active_provider_and_complete_route_catalog() {
     // client never has to guess it from a model that has both routes.
     assert_eq!(auth_method.as_deref(), Some("oauth"));
     assert_eq!(routes.len(), 2);
+    assert_eq!(
+        routes[0].reasoning_efforts.as_deref(),
+        Some(["low".to_string(), "high".to_string()].as_slice())
+    );
     assert_eq!(routes[1].provider, "gemini");
     assert!(!routes[1].available);
+    // A daemon that predates the field reports no ladder, not an empty one.
+    assert_eq!(routes[1].reasoning_efforts, None);
 }
 
 #[test]

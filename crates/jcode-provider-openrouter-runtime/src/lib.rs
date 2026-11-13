@@ -928,7 +928,11 @@ impl OpenRouterProvider {
     /// deepseek profile, then the active model family for direct compat
     /// endpoints (never for real OpenRouter, which uses unified reasoning).
     pub(crate) fn supports_deepseek_reasoning_effort(&self) -> bool {
-        if self.model_reasoning_support() == Some(false) {
+        self.supports_deepseek_reasoning_effort_for(&self.model_snapshot())
+    }
+
+    pub(crate) fn supports_deepseek_reasoning_effort_for(&self, model: &str) -> bool {
+        if self.model_reasoning_support_for(model) == Some(false) {
             return false;
         }
         if let Some(explicit) = self.reasoning_effort_support {
@@ -942,7 +946,7 @@ impl OpenRouterProvider {
                 self.profile_id.as_deref(),
                 self.send_openrouter_headers,
             )
-            && Self::model_is_deepseek_family(&self.model_snapshot())
+            && Self::model_is_deepseek_family(model)
     }
 
     /// GPT-family reasoning models (gpt-5.x, codex variants, o-series) accept
@@ -965,7 +969,11 @@ impl OpenRouterProvider {
     /// reasoning models, and only when no explicit config override or
     /// DeepSeek-style support already applies.
     pub(crate) fn supports_openai_reasoning_effort(&self) -> bool {
-        if let Some(explicit) = self.model_reasoning_support() {
+        self.supports_openai_reasoning_effort_for(&self.model_snapshot())
+    }
+
+    pub(crate) fn supports_openai_reasoning_effort_for(&self, model: &str) -> bool {
+        if let Some(explicit) = self.model_reasoning_support_for(model) {
             return explicit;
         }
         if self.reasoning_effort_support == Some(false) {
@@ -981,7 +989,7 @@ impl OpenRouterProvider {
                 self.profile_id.as_deref(),
                 self.send_openrouter_headers,
             )
-            && Self::model_is_openai_reasoning_family(&self.model_snapshot())
+            && Self::model_is_openai_reasoning_family(model)
     }
 
     fn model_snapshot(&self) -> String {
@@ -992,12 +1000,17 @@ impl OpenRouterProvider {
     }
 
     fn model_reasoning_config(&self) -> Option<&(Option<bool>, Option<String>)> {
-        let model = self.model_snapshot().trim().to_ascii_lowercase();
-        self.static_reasoning_config.get(&model)
+        self.model_reasoning_config_for(&self.model_snapshot())
     }
 
-    fn model_reasoning_support(&self) -> Option<bool> {
-        self.model_reasoning_config().and_then(|config| config.0)
+    fn model_reasoning_config_for(&self, model: &str) -> Option<&(Option<bool>, Option<String>)> {
+        self.static_reasoning_config
+            .get(&model.trim().to_ascii_lowercase())
+    }
+
+    fn model_reasoning_support_for(&self, model: &str) -> Option<bool> {
+        self.model_reasoning_config_for(model)
+            .and_then(|config| config.0)
     }
 
     fn configured_effort_for_model(&self) -> Option<String> {

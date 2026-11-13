@@ -117,9 +117,25 @@ fn opus_low_effort_default_and_explicit_overrides() {
     assert_eq!(p.reasoning_effort().as_deref(), Some("max"));
     p.set_reasoning_effort("default").unwrap();
     assert_eq!(p.reasoning_effort().as_deref(), Some("low"));
+    let opus_ladder: Vec<String> = ["low", "medium", "high", "xhigh", "max"]
+        .map(String::from)
+        .to_vec();
+    let route_efforts = |model: &str| {
+        p.model_routes()
+            .into_iter()
+            .find(|route| route.model == model)
+            .and_then(|route| route.reasoning_efforts)
+    };
+    // Bedrock's own routes report what it applies, without MultiProvider.
+    assert_eq!(route_efforts(DEFAULT_MODEL), Some(opus_ladder));
+    assert_eq!(
+        route_efforts("anthropic.claude-3-5-sonnet-20241022-v2:0"),
+        Some(Vec::new())
+    );
     p.set_model("anthropic.claude-3-5-sonnet-20241022-v2:0")
         .unwrap();
     assert_eq!(p.reasoning_effort(), None);
+    assert!(p.available_efforts().is_empty());
     #[cfg(feature = "aws-sdk")]
     assert_eq!(p.additional_request_fields().unwrap(), None);
     let _effort = EnvVarGuard::set("JCODE_BEDROCK_EFFORT", "high");

@@ -565,6 +565,7 @@ fn test_guardrail_reroute_prefers_native_anthropic_route() {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         },
         claude_oauth_route("claude-opus-4-8"),
     ];

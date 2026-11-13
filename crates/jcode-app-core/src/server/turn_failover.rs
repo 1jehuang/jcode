@@ -397,6 +397,7 @@ mod tests {
                 detail: String::new(),
                 cheapness: None,
                 usage: None,
+                reasoning_efforts: None,
             }]
         }
         fn fork(&self) -> Arc<dyn Provider> {

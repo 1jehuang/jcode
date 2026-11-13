@@ -524,9 +524,13 @@ impl Provider for OpenRouterProvider {
     }
 
     fn available_efforts(&self) -> Vec<&'static str> {
-        if self.supports_deepseek_reasoning_effort() {
+        self.reasoning_efforts_for_model(&self.model_snapshot())
+    }
+
+    fn reasoning_efforts_for_model(&self, model: &str) -> Vec<&'static str> {
+        if self.supports_deepseek_reasoning_effort_for(model) {
             jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS.to_vec()
-        } else if self.supports_openai_reasoning_effort() {
+        } else if self.supports_openai_reasoning_effort_for(model) {
             jcode_provider_core::OPENAI_SELECTABLE_EFFORTS.to_vec()
         } else if Self::profile_supports_unified_reasoning(
             self.profile_id.as_deref(),
@@ -648,7 +652,8 @@ impl Provider for OpenRouterProvider {
         let static_model_ids: HashSet<String> = self.static_models.iter().cloned().collect();
         let is_direct_profile = self.profile_id.is_some();
 
-        self.available_models_display()
+        let mut routes: Vec<_> = self
+            .available_models_display()
             .into_iter()
             .filter(|model| jcode_base::provider::is_listable_model_name(model))
             .map(|model| {
@@ -674,9 +679,12 @@ impl Provider for OpenRouterProvider {
                     detail: route_detail,
                     usage: None,
                     cheapness: None,
+                    reasoning_efforts: None,
                 }
             })
-            .collect()
+            .collect();
+        jcode_provider_core::fill_served_reasoning_efforts(self, &mut routes);
+        routes
     }
 
     async fn prefetch_models(&self) -> Result<()> {

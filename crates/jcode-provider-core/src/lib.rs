@@ -357,9 +357,15 @@ pub trait Provider: Send + Sync {
         ))
     }
 
+    /// Ordered reasoning efforts [`Provider::set_reasoning_effort`] accepts
+    /// while `model` is selected.
+    fn reasoning_efforts_for_model(&self, _model: &str) -> Vec<&'static str> {
+        vec![]
+    }
+
     /// Get ordered list of available reasoning effort levels.
     fn available_efforts(&self) -> Vec<&'static str> {
-        vec![]
+        self.reasoning_efforts_for_model(&self.model())
     }
 
     /// Get the active service tier override (if applicable).
@@ -944,6 +950,28 @@ pub struct ModelRoute {
     pub cheapness: Option<RouteCheapnessEstimate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<jcode_usage_types::ModelUsage>,
+    /// Reasoning efforts [`Provider::set_reasoning_effort`] accepts after
+    /// switching to this route, from the runtime that serves it. `None` when
+    /// that runtime is not loaded, so its ladder is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_efforts: Option<Vec<String>>,
+}
+
+/// Efforts `runtime` accepts for `model`, as reported on
+/// [`ModelRoute::reasoning_efforts`].
+pub fn served_reasoning_efforts<P: Provider + ?Sized>(runtime: &P, model: &str) -> Vec<String> {
+    runtime
+        .reasoning_efforts_for_model(model)
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Fill [`ModelRoute::reasoning_efforts`] on routes `runtime` serves itself.
+pub fn fill_served_reasoning_efforts<P: Provider + ?Sized>(runtime: &P, routes: &mut [ModelRoute]) {
+    for route in routes {
+        route.reasoning_efforts = Some(served_reasoning_efforts(runtime, &route.model));
+    }
 }
 
 /// Exact runtime identity for a selected model route.

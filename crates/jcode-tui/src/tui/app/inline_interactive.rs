@@ -813,6 +813,7 @@ impl App {
                 detail: crate::subscription_catalog::routing_policy_detail(model),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             });
         }
     }
@@ -1727,6 +1728,7 @@ impl App {
                 detail: "catalog still loading".to_string(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             }]
         } else {
             routes

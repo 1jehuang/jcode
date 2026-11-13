@@ -344,6 +344,7 @@ mod tests {
             detail: "x".repeat(MAX_LIVE_BYTES),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         }];
         let catalog = Catalog::new(full);
         assert!(catalog.encoded_len > MAX_LIVE_BYTES);

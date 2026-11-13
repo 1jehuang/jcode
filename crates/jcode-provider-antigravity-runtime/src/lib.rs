@@ -817,8 +817,8 @@ impl Provider for AntigravityProvider {
 
     fn model_routes(&self) -> Vec<jcode_provider_core::ModelRoute> {
         let catalog = self.fetched_catalog();
-        if !catalog.is_empty() {
-            return catalog
+        let mut routes: Vec<_> = if !catalog.is_empty() {
+            catalog
                 .into_iter()
                 .map(|model| jcode_provider_core::ModelRoute {
                     model: model.id.clone(),
@@ -828,22 +828,26 @@ impl Provider for AntigravityProvider {
                     detail: catalog_model_detail(&model),
                     usage: None,
                     cheapness: None,
+                    reasoning_efforts: None,
                 })
-                .collect();
-        }
-
-        self.available_models_display()
-            .into_iter()
-            .map(|model| jcode_provider_core::ModelRoute {
-                model,
-                provider: "Antigravity".to_string(),
-                api_method: "https".to_string(),
-                available: true,
-                detail: "fallback catalog".to_string(),
-                usage: None,
-                cheapness: None,
-            })
-            .collect()
+                .collect()
+        } else {
+            self.available_models_display()
+                .into_iter()
+                .map(|model| jcode_provider_core::ModelRoute {
+                    model,
+                    provider: "Antigravity".to_string(),
+                    api_method: "https".to_string(),
+                    available: true,
+                    detail: "fallback catalog".to_string(),
+                    usage: None,
+                    cheapness: None,
+                    reasoning_efforts: None,
+                })
+                .collect()
+        };
+        jcode_provider_core::fill_served_reasoning_efforts(self, &mut routes);
+        routes
     }
 
     fn on_auth_changed(&self) {

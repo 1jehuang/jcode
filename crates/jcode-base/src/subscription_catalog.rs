@@ -452,6 +452,7 @@ mod tests {
             detail: routing_policy_detail(model),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         };
         let selection = jcode_provider_core::RouteSelection::from_model_route(&route);
         assert_eq!(selection.routed_model_spec(), "claude-sonnet-4-6");

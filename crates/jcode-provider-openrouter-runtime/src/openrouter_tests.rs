@@ -175,6 +175,47 @@ fn named_openai_compatible_provider_exposes_static_models_as_routes() {
 }
 
 #[test]
+fn direct_openai_compatible_routes_report_their_runtime_efforts() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let _key = EnvVarGuard::set("TEST_NAMED_COMPAT_KEY", "test-key");
+
+    let profile = jcode_base::config::NamedProviderConfig {
+        base_url: "https://llm.example.com/v1".to_string(),
+        api_key_env: Some("TEST_NAMED_COMPAT_KEY".to_string()),
+        default_model: Some("glm-51-nvfp4".to_string()),
+        models: ["glm-51-nvfp4", "deepseek-v4-pro"]
+            .map(|id| jcode_base::config::NamedProviderModelConfig {
+                id: id.to_string(),
+                ..Default::default()
+            })
+            .to_vec(),
+        ..Default::default()
+    };
+    let provider = OpenRouterProvider::new_named_openai_compatible("effort-test", &profile)
+        .expect("named profile should initialize");
+
+    // Used directly (no MultiProvider), the runtime fills its own routes.
+    let efforts = |model: &str| {
+        provider
+            .model_routes()
+            .into_iter()
+            .find(|route| route.model == model)
+            .and_then(|route| route.reasoning_efforts)
+    };
+    assert_eq!(efforts("glm-51-nvfp4"), Some(Vec::new()));
+    assert_eq!(
+        efforts("deepseek-v4-pro"),
+        Some(
+            jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS
+                .iter()
+                .map(|effort| effort.to_string())
+                .collect()
+        )
+    );
+}
+
+#[test]
 fn direct_openai_compatible_provider_advertises_image_input_support() {
     let _lock = ENV_LOCK.lock();
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");

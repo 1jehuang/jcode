@@ -278,6 +278,7 @@ fn direct_openai_compatible_profile_routes(
             detail: detail.clone(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         });
     }
 
@@ -2554,6 +2555,19 @@ impl Provider for MultiProvider {
         }
     }
 
+    fn reasoning_efforts_for_model(&self, model: &str) -> Vec<&'static str> {
+        let runtime = match self.active_provider() {
+            ActiveProvider::Claude => self.anthropic_provider(),
+            ActiveProvider::OpenAI => self.openai_provider(),
+            ActiveProvider::OpenRouter => self.active_openrouter_execution_provider(),
+            ActiveProvider::Copilot => self.copilot_provider(),
+            _ => None,
+        };
+        runtime
+            .map(|runtime| runtime.reasoning_efforts_for_model(model))
+            .unwrap_or_default()
+    }
+
     fn available_efforts(&self) -> Vec<&'static str> {
         match self.active_provider() {
             ActiveProvider::Claude => self
@@ -3140,6 +3154,7 @@ mod bedrock_placeholder_default_tests {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         }
     }
 

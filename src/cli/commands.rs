@@ -2126,6 +2126,10 @@ struct ModelListRouteReport {
     model: String,
     method: String,
     available: bool,
+    /// Efforts `set_reasoning_effort` accepts on this route; absent when its
+    /// runtime is not loaded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_efforts: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]

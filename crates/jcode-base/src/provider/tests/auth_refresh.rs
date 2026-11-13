@@ -631,6 +631,7 @@ fn test_summarize_model_catalog_refresh_ignores_display_only_age_suffix_changes(
             detail: "fast, 5m ago".to_string(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         }],
         vec![ModelRoute {
             model: "anthropic/claude-sonnet-4".to_string(),
@@ -640,6 +641,7 @@ fn test_summarize_model_catalog_refresh_ignores_display_only_age_suffix_changes(
             detail: "fast, 6m ago".to_string(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         }],
     );
 
@@ -662,6 +664,7 @@ fn test_summarize_model_catalog_refresh_still_counts_meaningful_detail_changes()
             detail: "fast, 5m ago".to_string(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         }],
         vec![ModelRoute {
             model: "anthropic/claude-sonnet-4".to_string(),
@@ -671,6 +674,7 @@ fn test_summarize_model_catalog_refresh_still_counts_meaningful_detail_changes()
             detail: "cached, 6m ago".to_string(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         }],
     );
 

@@ -2817,6 +2817,10 @@ impl BridgeState {
                         available: route["available"].as_bool().unwrap_or(false),
                         detail: route["detail"].as_str().unwrap_or("").to_string(),
                         usage: serde_json::from_value(route["usage"].clone()).unwrap_or(None),
+                        reasoning_efforts: serde_json::from_value(
+                            route["reasoning_efforts"].clone(),
+                        )
+                        .unwrap_or(None),
                     })
                 })
                 .collect();

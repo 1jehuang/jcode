@@ -38,6 +38,7 @@ fn test_detailed_catalog_replaces_placeholder_routes_after_names_only_update() {
                     detail: String::new(),
                     usage: None,
                     cheapness: None,
+                    reasoning_efforts: None,
                 }],
             },
             &mut remote,
