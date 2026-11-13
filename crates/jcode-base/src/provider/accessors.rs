@@ -43,6 +43,13 @@ impl MultiProvider {
             .clone()
     }
 
+    pub(super) fn cursor_acp_provider(&self) -> Option<Arc<dyn Provider>> {
+        self.cursor_acp
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     pub(super) fn bedrock_provider(&self) -> Option<Arc<bedrock::BedrockProvider>> {
         self.bedrock
             .read()

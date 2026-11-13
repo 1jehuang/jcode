@@ -188,4 +188,3 @@ fn test_context_limit_dynamic_cache() {
 
 // --- Migrated from the OpenRouter runtime tests: these exercise MultiProvider
 // --- routing/identity with a real OpenRouter runtime via the registry.
-
