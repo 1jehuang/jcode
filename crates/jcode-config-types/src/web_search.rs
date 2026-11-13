@@ -13,6 +13,9 @@ pub enum WebSearchEngine {
     Bing,
     /// Kagi Search API v1. Requires the configured API key environment variable.
     Kagi,
+    /// Keenable search API. Works without an API key on the public tier
+    /// (rate limited per IP); `keenable_api_key_env` raises the limits.
+    Keenable,
     /// SearXNG metasearch instance (JSON API). Requires `searxng_url` (or the
     /// `JCODE_SEARXNG_URL` env var) to point at a SearXNG instance. Useful on
     /// hosts where DuckDuckGo/Bing block the request via TLS fingerprinting.
@@ -33,6 +36,7 @@ impl WebSearchEngine {
             Self::Duckduckgo => "duckduckgo",
             Self::Bing => "bing",
             Self::Kagi => "kagi",
+            Self::Keenable => "keenable",
             Self::Searxng => "searxng",
             Self::Custom => "custom",
             Self::Native => "native",
@@ -44,6 +48,7 @@ impl WebSearchEngine {
             "duckduckgo" | "ddg" => Some(Self::Duckduckgo),
             "bing" => Some(Self::Bing),
             "kagi" => Some(Self::Kagi),
+            "keenable" => Some(Self::Keenable),
             "searxng" | "searx" => Some(Self::Searxng),
             "custom" => Some(Self::Custom),
             "native" | "provider" => Some(Self::Native),
@@ -125,6 +130,9 @@ pub struct WebSearchConfig {
     pub bing_market: String,
     /// Environment variable containing the Kagi API key. No inline key is stored.
     pub kagi_api_key_env: String,
+    /// Environment variable with an optional Keenable API key. When it is unset
+    /// or empty, the `keenable` engine uses the keyless public endpoint.
+    pub keenable_api_key_env: String,
     /// Base URL of a SearXNG instance (e.g. "https://searx.example.org"), used
     /// by the `searxng` engine. When empty, the `searxng_url_env` variable is
     /// consulted instead.
@@ -163,6 +171,7 @@ impl Default for WebSearchConfig {
             bing_api_key_env: "JCODE_BING_API_KEY".to_string(),
             bing_market: "en-US".to_string(),
             kagi_api_key_env: "KAGI_API_KEY".to_string(),
+            keenable_api_key_env: "KEENABLE_API_KEY".to_string(),
             searxng_url: None,
             searxng_url_env: "JCODE_SEARXNG_URL".to_string(),
             prefer_native: true,
@@ -213,5 +222,26 @@ mod tests {
         );
         assert_eq!(WebSearchEngine::Kagi.as_str(), "kagi");
         assert!(WebSearchEngine::Kagi.is_local());
+    }
+
+    #[test]
+    fn keenable_config_is_opt_in_and_round_trips() {
+        let defaults: WebSearchConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.engine, WebSearchEngine::Duckduckgo);
+        assert_eq!(defaults.keenable_api_key_env, "KEENABLE_API_KEY");
+        let config: WebSearchConfig = serde_json::from_value(serde_json::json!({
+            "engine": "keenable", "fallback_engines": ["bing"],
+            "keenable_api_key_env": "MY_KEENABLE_KEY"
+        }))
+        .unwrap();
+        assert_eq!(config.engine, WebSearchEngine::Keenable);
+        assert_eq!(config.keenable_api_key_env, "MY_KEENABLE_KEY");
+        assert_eq!(serde_json::to_value(config).unwrap()["engine"], "keenable");
+        assert_eq!(
+            WebSearchEngine::parse(" Keenable "),
+            Some(WebSearchEngine::Keenable)
+        );
+        assert_eq!(WebSearchEngine::Keenable.as_str(), "keenable");
+        assert!(WebSearchEngine::Keenable.is_local());
     }
 }
