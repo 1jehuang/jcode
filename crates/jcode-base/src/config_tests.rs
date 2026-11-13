@@ -28,6 +28,37 @@ fn hibernation_environment_override_accepts_seconds_and_zero_but_not_invalid_val
     restore_env_var(key, previous);
 }
 
+#[test]
+fn memory_jev_timeout_environment_override_accepts_seconds_but_not_invalid_values() {
+    let _lock = crate::storage::lock_test_env();
+    let key = "JCODE_MEMORY_JEV_TIMEOUT_SECS";
+    let previous = std::env::var_os(key);
+    for (value, expected) in [("120", 120), (" 30 ", 30), ("-1", 25), ("invalid", 25)] {
+        crate::env::set_var(key, value);
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        assert_eq!(config.agents.memory_jev_timeout_secs, expected, "{value}");
+    }
+    restore_env_var(key, previous);
+}
+
+#[test]
+fn memory_jev_selection_timeout_environment_override_accepts_seconds_but_not_invalid_values() {
+    let _lock = crate::storage::lock_test_env();
+    let key = "JCODE_MEMORY_JEV_SELECTION_TIMEOUT_SECS";
+    let previous = std::env::var_os(key);
+    for (value, expected) in [("240", 240), (" 90 ", 90), ("-1", 60), ("invalid", 60)] {
+        crate::env::set_var(key, value);
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        assert_eq!(
+            config.agents.memory_jev_selection_timeout_secs, expected,
+            "{value}"
+        );
+    }
+    restore_env_var(key, previous);
+}
+
 struct GeminiConfigEnv {
     _home: tempfile::TempDir,
     previous: Vec<(&'static str, Option<OsString>)>,

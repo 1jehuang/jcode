@@ -677,6 +677,15 @@ swarm_stall_after_secs = 600
 # voice_jev_model = "typesafe/jev-1.14"
 # Minimum relevance probability (0.8..=1.0). Invalid values fail closed.
 # memory_jev_threshold = 0.8
+# Per-request timeout (seconds) for Jev decision calls. Self-hosted
+# backends behind model swap (e.g. llama-swap) may need more than 25s.
+# Env override: JCODE_MEMORY_JEV_TIMEOUT_SECS
+# memory_jev_timeout_secs = 25
+# Total deadline (seconds) for one Jev memory relevance selection. Selection
+# issues sequential batched calls, so a value below memory_jev_timeout_secs
+# is raised to three times that timeout.
+# Env override: JCODE_MEMORY_JEV_SELECTION_TIMEOUT_SECS
+# memory_jev_selection_timeout_secs = 60
 # BYOK: OPENROUTER_API_KEY, TYPESAFE_API_KEY, or AIMLAPI_API_KEY.
 # Jcode requires an eligible subscription and gateway memory_jev capability.
 # With a Jcode login and an older gateway, explicitly select a BYOK provider.

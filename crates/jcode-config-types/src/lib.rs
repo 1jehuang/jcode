@@ -550,6 +550,16 @@ pub struct AgentsConfig {
     /// Minimum Jev relevance probability. Invalid values fail closed.
     #[serde(default = "default_memory_jev_threshold")]
     pub memory_jev_threshold: f32,
+    /// Per-request timeout (seconds) for Jev decision calls. Self-hosted
+    /// backends behind model swap (e.g. llama-swap) can exceed the default
+    /// 25s while loading weights.
+    #[serde(default = "default_memory_jev_timeout_secs")]
+    pub memory_jev_timeout_secs: u64,
+    /// Total deadline (seconds) for one Jev memory relevance selection, which
+    /// issues sequential batched calls. Kept strictly above
+    /// `memory_jev_timeout_secs` so a single request can always complete.
+    #[serde(default = "default_memory_jev_selection_timeout_secs")]
+    pub memory_jev_selection_timeout_secs: u64,
     /// Optional model override for memory extraction only, never recall.
     pub memory_model: Option<String>,
     /// Whether optional automatic memory extraction may use a text-generating
@@ -622,6 +632,14 @@ fn default_memory_jev_threshold() -> f32 {
     0.8
 }
 
+fn default_memory_jev_timeout_secs() -> u64 {
+    25
+}
+
+fn default_memory_jev_selection_timeout_secs() -> u64 {
+    60
+}
+
 fn default_memory_sidecar_enabled() -> bool {
     true
 }
@@ -654,6 +672,8 @@ impl Default for AgentsConfig {
             browser_jev_model: None,
             voice_jev_model: None,
             memory_jev_threshold: default_memory_jev_threshold(),
+            memory_jev_timeout_secs: default_memory_jev_timeout_secs(),
+            memory_jev_selection_timeout_secs: default_memory_jev_selection_timeout_secs(),
             memory_model: None,
             memory_sidecar_enabled: default_memory_sidecar_enabled(),
             memory_rerank_cadence: default_memory_rerank_cadence(),
