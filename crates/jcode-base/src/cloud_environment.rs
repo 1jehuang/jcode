@@ -382,6 +382,7 @@ fn lock_private(base: &Path, relative: &Path) -> Result<std::fs::File> {
         // openat(2) with O_CREAT can still fail with ENOENT while another
         // thread is mid-creation of the same new name, so retry that errno
         // briefly instead of surfacing a spurious "cannot lock private state".
+        // One deadline bounds the openat retry and the flock wait together.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let fd = loop {
             let fd = unsafe {
@@ -412,7 +413,6 @@ fn lock_private(base: &Path, relative: &Path) -> Result<std::fs::File> {
         };
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
         ensure!(file.metadata()?.is_file(), "invalid private lock");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
                 break;

@@ -297,6 +297,7 @@ jobs:
           python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target ${{ matrix.target }} -p jcode-provider-bedrock --features aws-sdk --lib
           python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target ${{ matrix.target }} -p jcode-base --lib catalog_refresh_reaches_every_runtime_slot_and_compatible_profile
           python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target ${{ matrix.target }} -p jcode-base --lib forced_catalog_refresh_bypasses_freshness_and_throttle_but_not_in_flight
+          python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target ${{ matrix.target }} -p jcode-base --lib concurrent_first_time_lock_creation_survives_openat_enoent
           python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target ${{ matrix.target }} -p jcode-app-core --lib model_prefetch
           python3 .github/scripts/run_with_timeout.py 600 "$cargo_bin" test --locked --target ${{ matrix.target }} -p jcode-app-core --lib periodic_model_refresh
 
