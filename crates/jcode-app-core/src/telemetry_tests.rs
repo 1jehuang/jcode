@@ -4,7 +4,7 @@ use crate::storage::lock_test_env;
 /// Shared process-wide lock: telemetry state is reached through env vars, which
 /// are global, so a private mutex here would race every other env-mutating test
 /// (issue #593).
-fn lock_telemetry_test_state() -> std::sync::MutexGuard<'static, ()> {
+fn lock_telemetry_test_state() -> crate::storage::TestEnvGuard {
     lock_test_env()
 }
 
