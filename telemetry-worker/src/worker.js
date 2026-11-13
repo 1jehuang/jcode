@@ -1020,9 +1020,10 @@ const RETENTION_DAYS = {
   desktop_update: 365,
 };
 
-const PRUNE_BATCH_LIMIT = 10000;
-// Two 10k batches per family each hour allow 480k expired rows/day/family,
-// while leaving subrequest headroom for both databases and emergency passes.
+const PRUNE_BATCH_LIMIT = 2000;
+// Two 2k batches per family each hour allow 96k expired rows/day/family,
+// about 4x the busiest family's 24k/day measured on 2026-11-13. Small batches
+// reduce D1 CPU bursts while leaving room for both stores and emergency passes.
 const PRUNE_MAX_BATCHES_PER_FAMILY = 2;
 
 async function pruneOldEvents(env, options = {}) {

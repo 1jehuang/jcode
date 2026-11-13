@@ -742,7 +742,7 @@ test("attribution redaction uses bounded detail-driven indexed lookups on the re
       const updates = mock.executed.filter(({ sql }) => sql.startsWith(`UPDATE ${table} SET conversion_id`));
       assert.equal(updates.length, 2, "redaction has a bounded per-table batch budget");
       const { sql, values } = updates[0];
-      assert.deepEqual(values, ["-90 days", 10000]);
+      assert.deepEqual(values, ["-90 days", 2000]);
       const plan = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...values).map(({ detail }) => detail);
       assert.ok(plan.some((detail) => detail.includes(`idx_${table}_conversion_id`)), plan.join("\n"));
       assert.ok(plan.some((detail) => /SEARCH events(?: EXISTS)? USING INDEX idx_events_event_id/.test(detail)), plan.join("\n"));
