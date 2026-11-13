@@ -84,6 +84,13 @@ impl OpenRouterProvider {
             provider_pin: Arc::new(Mutex::new(None)),
             endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
             endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
+            // Global [provider] overrides only: this runtime has no named
+            // profile, so there is no per-profile layer to merge.
+            http_header_overrides: resolved_profile_http_header_overrides(
+                &jcode_base::config::config().provider,
+                None,
+                "[provider]",
+            )?,
         })
     }
 }

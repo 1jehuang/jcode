@@ -42,14 +42,18 @@ pub(super) async fn fetch_models_from_api(
     client: Client,
     api_base: String,
     auth: ProviderAuth,
+    http_header_overrides: HeaderMap,
     models_cache: Arc<RwLock<ModelsCache>>,
     cache_namespace: Option<String>,
 ) -> Result<Vec<ModelInfo>> {
     let url = muse_catalog_url(&api_base, cache_namespace.as_deref());
     let request = auth.apply_catalog(client.get(&url), &api_base).await?;
     let response = apply_kimi_coding_agent_headers(request, &api_base, None)
-            .send()
-            .await
+        // Config-driven overrides apply last so they win over any same-named
+        // header jcode set earlier on the request.
+        .headers(http_header_overrides.clone())
+        .send()
+        .await
             .with_context(|| {
                 format!(
                     "Failed to send OpenAI-compatible model catalog request\n  endpoint: {}\n  auth: {}\nHint: check network connectivity, DNS/TLS, and that the base URL includes the API version (usually /v1).",
@@ -89,7 +93,7 @@ pub(super) async fn fetch_models_from_api(
         })?;
 
     let ns = cache_namespace.as_deref();
-    ollama_context::maybe_enrich(&client, &api_base, ns, &mut models).await;
+    ollama_context::maybe_enrich(&client, &api_base, ns, &http_header_overrides, &mut models).await;
     if let Some(namespace) = ns {
         save_disk_cache_with_source_for_namespace(namespace, &models, Some(&api_base));
     } else {
@@ -274,6 +278,7 @@ mod tests {
                 token: "loopback-token".into(),
                 label: "TEST".into(),
             },
+            reqwest::header::HeaderMap::new(),
             cache,
             Some("muse-subscription".into()),
         )

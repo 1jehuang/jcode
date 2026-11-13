@@ -20,7 +20,15 @@ impl AnthropicProvider {
         let catalog = if is_oauth {
             jcode_base::provider::fetch_anthropic_model_catalog_oauth(&token).await?
         } else {
-            jcode_base::provider::fetch_anthropic_model_catalog(&token).await?
+            // Discovery must go out with the same `[provider.headers]`
+            // overrides the chat transport resolves, or a key overridden
+            // there 401s here and every model shows as unavailable.
+            let headers = super::configured_direct_headers();
+            jcode_base::provider::fetch_anthropic_model_catalog_with_headers(
+                &token,
+                headers.ok().as_ref(),
+            )
+            .await?
         };
         // Persist so the rest of the process benefits from the warm catalog,
         // exactly like the runtime's own prefetch.
@@ -103,7 +111,14 @@ impl AnthropicProvider {
                 Err(err) => return Err(err),
             }
         } else {
-            jcode_base::provider::fetch_anthropic_model_catalog(&self.direct_api_key()?).await?
+            // Same header-override parity as the doctor path: chat honors
+            // `[provider.headers]`, so the direct catalog refresh must too.
+            let headers = super::configured_direct_headers();
+            jcode_base::provider::fetch_anthropic_model_catalog_with_headers(
+                &self.direct_api_key()?,
+                headers.ok().as_ref(),
+            )
+            .await?
         };
         jcode_base::provider::persist_anthropic_model_catalog_for_scope(scope, &catalog);
         if !catalog.context_limits.is_empty() {
