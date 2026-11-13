@@ -415,7 +415,7 @@ impl App {
         self.handle_provider_failover_prompt_with_payload(prompt, remote_resend);
     }
 
-    fn handle_provider_failover_prompt_with_payload(
+    pub(super) fn handle_provider_failover_prompt_with_payload(
         &mut self,
         prompt: crate::provider::ProviderFailoverPrompt,
         remote_resend: Option<super::FallbackResendPayload>,
