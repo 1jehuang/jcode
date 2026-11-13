@@ -1,0 +1,22 @@
+[package]
+name = "jcode-provider-cursor-acp-runtime"
+version = "0.1.0"
+edition = "2024"
+description = "Cursor CLI ACP provider runtime for jcode"
+
+[lib]
+name = "jcode_provider_cursor_acp_runtime"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+jcode-message-types = { path = "../jcode-message-types" }
+jcode-provider-core = { path = "../jcode-provider-core" }
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "macros", "process", "sync"] }
+tokio-stream = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+# SIGTERM for the graceful subprocess shutdown path; start_kill is SIGKILL-only.
+libc = "0.2"

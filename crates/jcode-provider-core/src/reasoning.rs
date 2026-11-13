@@ -19,6 +19,11 @@ pub const OPENROUTER_SELECTABLE_EFFORTS: &[&str] =
 /// Direct DeepSeek effort levels, followed by Jcode's swarm mode.
 pub const DEEPSEEK_SELECTABLE_EFFORTS: &[&str] = &["none", "low", "medium", "high", "max", "swarm"];
 
+/// Cursor ACP effort levels, matched to the Cursor ACP runtime's
+/// `ACP_REASONING_EFFORTS`. Unlike OpenAI/OpenRouter, Cursor ACP does not
+/// support `minimal`, `xhigh`, or the Jcode swarm sentinels.
+pub const CURSOR_ACP_SELECTABLE_EFFORTS: &[&str] = &["none", "low", "medium", "high", "max"];
+
 /// Convert a provider-advertised OpenAI/OpenRouter effort into the canonical
 /// static value used by the provider trait.
 pub fn canonical_reasoning_effort(value: &str) -> Option<&'static str> {
@@ -42,6 +47,10 @@ pub fn inferred_reasoning_efforts(
 ) -> Vec<&'static str> {
     let provider = provider_name.unwrap_or_default().to_ascii_lowercase();
     let model = model_name.unwrap_or_default().to_ascii_lowercase();
+
+    if provider.contains("cursor acp") || provider.contains("cursor-acp") {
+        return CURSOR_ACP_SELECTABLE_EFFORTS.to_vec();
+    }
 
     if provider.contains("openrouter") {
         return OPENROUTER_SELECTABLE_EFFORTS.to_vec();
@@ -138,6 +147,26 @@ mod tests {
         assert_eq!(
             inferred_reasoning_efforts(Some("anthropic"), Some("claude-opus-4-7")),
             vec!["none", "low", "medium", "high", "xhigh", "max", "swarm"]
+        );
+    }
+
+    #[test]
+    fn cursor_acp_ladder_matches_runtime_levels() {
+        assert_eq!(
+            inferred_reasoning_efforts(Some("Cursor ACP"), Some("luna")),
+            CURSOR_ACP_SELECTABLE_EFFORTS
+        );
+        assert_eq!(
+            inferred_reasoning_efforts(Some("cursor-acp"), Some("gpt-5.6-luna")),
+            CURSOR_ACP_SELECTABLE_EFFORTS
+        );
+        assert!(CURSOR_ACP_SELECTABLE_EFFORTS.contains(&"max"));
+        assert!(!CURSOR_ACP_SELECTABLE_EFFORTS.contains(&"minimal"));
+        assert!(
+            !CURSOR_ACP_SELECTABLE_EFFORTS
+                .iter()
+                .any(|e| e.starts_with("swarm")),
+            "swarm sentinels are TUI-only and must not leak into the cursor ACP ladder"
         );
     }
 }
