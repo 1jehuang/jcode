@@ -489,7 +489,12 @@ impl App {
             // Do not enumerate local account labels, projects, or goals while
             // completing a command intended for a different host.
             if input.starts_with("/model ") || input.starts_with("/models ") {
-                return self.rank_suggestions(input, self.model_suggestion_candidates());
+                let mut candidates = self.model_suggestion_candidates();
+                candidates.extend([
+                    ("/model update".to_string(), "Force-refresh model catalog"),
+                    ("/model status".to_string(), "Show current model and context window"),
+                ]);
+                return self.rank_suggestions(input, candidates);
             }
             return if input.starts_with('/') {
                 self.rank_suggestions(input, self.command_candidates())
@@ -587,6 +592,10 @@ impl App {
         }
 
         if prefix.starts_with("/model ") || prefix.starts_with("/models ") {
+            let mut candidates: Vec<(String, &'static str)> = vec![
+                ("/model update".to_string(), "Force-refresh model catalog"),
+                ("/model status".to_string(), "Show current model and context window"),
+            ];
             if let Some(model_spec) = input
                 .strip_prefix("/model ")
                 .or_else(|| input.strip_prefix("/models "))
@@ -598,11 +607,11 @@ impl App {
                 }
             }
 
-            let suggestions = self.model_suggestion_candidates();
-            if suggestions.is_empty() {
+            candidates.extend(self.model_suggestion_candidates());
+            if candidates.is_empty() {
                 return vec![("/model".into(), "Open model picker")];
             }
-            return self.rank_suggestions(input, suggestions);
+            return self.rank_suggestions(input, candidates);
         }
 
         if prefix.starts_with("/agents ") {

@@ -2,6 +2,10 @@
 
 pub(in crate::tui::app) fn is_refresh_model_list_command(trimmed: &str) -> bool {
     trimmed == "/refresh-model-list"
+        || trimmed == "/model refresh"
+        || trimmed == "/models refresh"
+        || trimmed == "/model update"
+        || trimmed == "/models update"
 }
 
 pub(in crate::tui::app) fn format_model_refresh_summary(
@@ -67,6 +71,11 @@ pub(in crate::tui::app) fn no_models_available_message(is_remote: bool) -> Strin
                 .to_string(),
         );
     }
+
+    lines.push(
+        "If a new model is missing, run /model update to force a catalog refresh."
+            .to_string(),
+    );
 
     lines.join("\n")
 }

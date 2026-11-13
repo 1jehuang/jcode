@@ -676,6 +676,7 @@ mod ssh_slash_tests {
                 ("/rename remote title", "rename_session"),
                 ("/memory on", "set_feature"),
                 ("/model refresh", "refresh_models"),
+                ("/model update", "refresh_models"),
                 ("/git status", "input_shell"),
                 ("/auth", "runtime_command"),
                 ("/refresh-model-list", "runtime_command"),
