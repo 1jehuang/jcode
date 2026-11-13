@@ -26,7 +26,7 @@ fn issue_1206_complete_non_image_drop_resolves_to_openable_path() {
         assert!(std::path::Path::new(&app.input).is_file(), "{}", app.input);
         assert_eq!(std::fs::read(&app.input).unwrap(), b"readable notes");
         assert_eq!(app.cursor_pos, app.input.len());
-        assert_eq!(app.input_undo_stack.last().unwrap().0, dropped);
+        assert_eq!(app.input_undo_stack.last().unwrap().input, dropped);
         assert!(app.pending_images.is_empty());
     }
 }
