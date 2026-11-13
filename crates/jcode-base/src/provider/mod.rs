@@ -1819,6 +1819,14 @@ impl Provider for MultiProvider {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(session_id.to_owned());
     }
 
+    fn bind_session_account(&self, account: Option<&str>) -> Result<Option<String>> {
+        self.bind_session_account_inner(account)
+    }
+
+    fn session_account_label(&self) -> Option<String> {
+        self.session_account_label_inner()
+    }
+
     fn catalog_sharing_identity(&self) -> Option<String> {
         Some(format!(
             "{:?}",
@@ -2995,6 +3003,7 @@ impl Provider for MultiProvider {
         let set_model_start = std::time::Instant::now();
         let switch_request = self.fork_model_switch_request(active, &current_model);
         let _ = provider.set_model(&switch_request);
+        provider.inherit_session_account_from(self);
         crate::logging::info(&format!(
             "[TIMING] provider fork: runtimes={}ms ({}), catalog_spawn={}ms, set_model={}ms, total={}ms",
             runtimes_ms,
@@ -3010,32 +3019,7 @@ impl Provider for MultiProvider {
     }
 
     fn fork_for_new_session(&self) -> Arc<dyn Provider> {
-        // A shared server can outlive config changes made by a model picker in a
-        // client process. Ordinary `fork()` intentionally preserves this
-        // template's current selection, which is correct for resumed sessions and
-        // in-flight helper work but stale for a brand-new session. Reconstruct the
-        // orchestrator so the reloadable config cache and current auth state choose
-        // the provider/model again.
-        let mut provider = Self::new_fast();
-        // Reconstruction uses the same composition root. Selection, home,
-        // reloadable config and auth/catalog revisions remain part of the key.
-        provider.catalog_scope = self.catalog_scope;
-
-        // An explicit CLI initial provider/model remains the starting selection
-        // for new sessions, while each session can switch freely afterward.
-        if self.initial_provider.is_some() {
-            let active = self.active_provider();
-            let current_model = self.model();
-            let switch_request = self.fork_model_switch_request(active, &current_model);
-            if let Err(error) = provider.set_model(&switch_request) {
-                crate::logging::warn(&format!(
-                    "Failed to preserve initial provider model '{}' for new session: {}",
-                    switch_request, error
-                ));
-            }
-        }
-
-        Arc::new(provider)
+        self.fork_for_new_session_inner()
     }
 
     fn native_result_sender(&self) -> Option<NativeToolResultSender> {

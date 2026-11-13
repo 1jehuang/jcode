@@ -62,6 +62,8 @@ pub struct OpenRouterStream {
     reasoning_buffer: String,
     finish_reason: Option<String>,
     message_end_emitted: bool,
+    strict_terminal: bool,
+    saw_done: bool,
 }
 
 #[derive(Default)]
@@ -94,7 +96,22 @@ impl OpenRouterStream {
             reasoning_buffer: String::new(),
             finish_reason: None,
             message_end_emitted: false,
+            strict_terminal: false,
+            saw_done: false,
         }
+    }
+
+    /// Require a real terminal signal (`[DONE]` or a non-empty finish reason)
+    /// before a clean end. Command Code uses this so a truncated HTTP body is
+    /// an error, not a successful completion.
+    pub fn new_strict(
+        stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+        model: String,
+        provider_pin: Arc<Mutex<Option<ProviderPin>>>,
+    ) -> Self {
+        let mut stream = Self::new(stream, model, provider_pin);
+        stream.strict_terminal = true;
+        stream
     }
 
     fn queue_message_end(&mut self) {
@@ -293,6 +310,7 @@ impl OpenRouterStream {
 
             if data_lines.is_empty() {
                 if saw_done {
+                    self.saw_done = true;
                     self.queue_message_end();
                     return self.pending.pop_front();
                 }
@@ -571,6 +589,12 @@ impl Stream for OpenRouterStream {
                         return Poll::Ready(Some(Ok(event)));
                     }
                     if !self.message_end_emitted {
+                        if self.strict_terminal && !self.saw_done && self.finish_reason.is_none() {
+                            self.message_end_emitted = true;
+                            return Poll::Ready(Some(Err(anyhow::anyhow!(
+                                "provider chat stream ended without [DONE] or a finish reason"
+                            ))));
+                        }
                         self.message_end_emitted = true;
                         return Poll::Ready(Some(Ok(StreamEvent::MessageEnd {
                             stop_reason: self.finish_reason.take(),

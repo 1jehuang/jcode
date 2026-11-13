@@ -51,6 +51,21 @@ pub fn inferred_reasoning_efforts(
         return DEEPSEEK_SELECTABLE_EFFORTS.to_vec();
     }
 
+    // Responses-routed Muse models (Command Code `meta/muse-*`, native Muse)
+    // accept `reasoning.effort` on the wire. Remote inference has no live
+    // runtime, so recognize them from provider/model identity instead of
+    // returning an empty ladder that would hide `/effort` and picker rows.
+    let is_responses_muse = (model.starts_with("meta/muse")
+        && (provider.contains("command-code")
+            || provider.contains("commandcode")
+            || provider.contains("muse")
+            || provider.contains("meta")
+            || provider.contains("openai-compatible")))
+        || (model.starts_with("muse-") && provider.contains("muse"));
+    if is_responses_muse {
+        return OPENROUTER_SELECTABLE_EFFORTS.to_vec();
+    }
+
     if provider.contains("z.ai") || provider == "zai" || model.starts_with("glm-") {
         return OPENAI_SELECTABLE_EFFORTS.to_vec();
     }
@@ -126,6 +141,21 @@ mod tests {
         assert_eq!(
             inferred_reasoning_efforts(Some("openai-compatible:zai"), Some("glm-5.3-flash")),
             OPENAI_SELECTABLE_EFFORTS
+        );
+    }
+
+    #[test]
+    fn responses_muse_identities_expose_unified_efforts() {
+        assert_eq!(
+            inferred_reasoning_efforts(
+                Some("openai-compatible:command-code"),
+                Some("meta/muse-ember")
+            ),
+            OPENROUTER_SELECTABLE_EFFORTS
+        );
+        assert_eq!(
+            inferred_reasoning_efforts(Some("muse-subscription"), Some("muse-wonder-1.0")),
+            OPENROUTER_SELECTABLE_EFFORTS
         );
     }
 

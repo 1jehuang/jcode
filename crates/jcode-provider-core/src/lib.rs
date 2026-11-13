@@ -13,12 +13,15 @@ pub mod pricing;
 pub mod reasoning;
 pub mod request_compression;
 pub mod retry_after;
+mod route_helpers;
 pub mod selection;
 pub mod service_tier;
 pub mod transport;
 pub mod ws_deflate;
 
 pub use jcode_usage_types::{ModelUsage, compare_model_usage};
+use route_helpers::openrouter_catalog_model_id;
+pub use route_helpers::{grok_build_model_spec, oauth_account_label};
 pub use transport::is_transient_transport_error;
 
 pub use anthropic::{
@@ -83,6 +86,22 @@ pub trait Provider: Send + Sync {
     /// This is distinct from a provider response id used to resume a stream.
     /// Backends without session-affinity support can retain the default no-op.
     fn set_session_id(&self, _session_id: &str) {}
+
+    /// Bind this provider instance to a saved API-key account.
+    ///
+    /// `None` pins the account currently selected by the runtime and returns
+    /// it. `Some(label)` pins that exact account. Returning `None` means the
+    /// provider has no label-addressable account. Implementations must fail
+    /// closed when a pinned account disappears rather than silently selecting
+    /// another account.
+    fn bind_session_account(&self, _account: Option<&str>) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Saved API-key account currently pinned to this provider instance.
+    fn session_account_label(&self) -> Option<String> {
+        None
+    }
 
     /// Prepare provider-specific request state before the foreground completion.
     ///
@@ -1128,27 +1147,6 @@ impl RouteSelection {
     }
 }
 
-/// Grok Build routing spec: `grok-4.6` and `grok-build:grok-4.6` both become
-/// `grok-build:grok-4.6` so `MultiProvider::set_model` dispatches to the Grok
-/// Build runtime instead of treating the bare id as the active provider's model.
-pub fn grok_build_model_spec(model: &str) -> String {
-    let bare = model.strip_prefix("grok-build:").unwrap_or(model).trim();
-    format!("grok-build:{bare}")
-}
-
-/// OpenRouter catalog id for a bare model: claude models gain an `anthropic/`
-/// prefix, OpenAI models an `openai/` prefix, already-qualified ids pass
-/// through. Mirrors `jcode_base::provider::openrouter_catalog_model_id` but
-/// lives here so [`RouteSelection::routed_model_spec`] has no upward dep.
-fn openrouter_catalog_model_id(model: &str) -> String {
-    let trimmed = model.trim();
-    match crate::models::provider_for_model(trimmed) {
-        Some("claude") => format!("anthropic/{trimmed}"),
-        Some("openai") => format!("openai/{trimmed}"),
-        _ => trimmed.to_string(),
-    }
-}
-
 /// Typed view of [`ModelRoute::api_method`].
 ///
 /// The wire format intentionally remains a string so older clients and saved
@@ -1172,19 +1170,6 @@ pub enum ModelRouteApiMethod {
     Current,
     GrokBuild,
     Other(String),
-}
-
-/// Account-qualified OAuth method, preserving the case-sensitive saved label.
-pub fn oauth_account_label(method: &str) -> Option<&str> {
-    let (base, label) = method.trim().split_once('@')?;
-    if !matches!(base, "claude-oauth" | "openai-oauth")
-        || label.is_empty()
-        || label.contains([':', '@'])
-        || label.chars().any(char::is_control)
-    {
-        return None;
-    }
-    Some(label)
 }
 
 impl ModelRouteApiMethod {
@@ -1226,7 +1211,10 @@ impl ModelRouteApiMethod {
             "current" => Self::Current,
             _ => {
                 if let Some(("openai-compatible", profile_id)) = lower.split_once(':') {
-                    let profile_id = profile_id.trim();
+                    let profile_id = profile_id
+                        .split_once('@')
+                        .map_or(profile_id, |(profile_id, _)| profile_id)
+                        .trim();
                     Self::OpenAiCompatible {
                         profile_id: (!profile_id.is_empty()).then(|| profile_id.to_string()),
                     }

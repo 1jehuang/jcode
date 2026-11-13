@@ -13,6 +13,8 @@
 pub mod live_provider_probes;
 pub mod provider_e2e;
 
+mod credential_source;
+
 // The driver's items are exercised only by its internal #[cfg(test)] tests;
 // nothing outside this crate consumes it.
 #[cfg(test)]

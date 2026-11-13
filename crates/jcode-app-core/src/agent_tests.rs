@@ -14,6 +14,9 @@ mod cache_session_affinity;
 #[path = "agent_tests/tool_streaming.rs"]
 mod tool_streaming;
 
+#[path = "agent_tests/tool_cancel_tests.rs"]
+mod tool_cancel_tests;
+
 #[path = "agent_tests/concurrency.rs"]
 mod concurrency;
 
@@ -3191,5 +3194,121 @@ async fn resume_heals_stale_credential_route_after_credential_type_change() {
         ),
         "claude-oauth:claude-sonnet-5",
         "workers inheriting the healed session must target the live credential"
+    );
+}
+
+#[derive(Clone, Default)]
+struct SavedAccountRouteProvider {
+    current: Arc<std::sync::Mutex<Option<String>>>,
+    bound: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl SavedAccountRouteProvider {
+    fn new(current: &str) -> Self {
+        Self {
+            current: Arc::new(std::sync::Mutex::new(Some(current.to_string()))),
+            bound: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for SavedAccountRouteProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        unreachable!("route test must not send a request")
+    }
+
+    fn name(&self) -> &str {
+        "openrouter"
+    }
+
+    fn model(&self) -> String {
+        "deepseek/deepseek-v4-flash".to_string()
+    }
+
+    fn set_model(&self, _: &str) -> Result<()> {
+        Ok(())
+    }
+
+    fn direct_openai_compatible_route_parts(&self) -> Option<(String, String, String)> {
+        Some((
+            "Command Code".to_string(),
+            "openai-compatible:command-code".to_string(),
+            "https://api.commandcode.ai/provider/v1".to_string(),
+        ))
+    }
+
+    fn bind_session_account(&self, account: Option<&str>) -> Result<Option<String>> {
+        let mut bound = self.bound.lock().unwrap();
+        if let Some(account) = account {
+            *bound = Some(account.to_string());
+        } else if bound.is_none() {
+            *bound = self.current.lock().unwrap().clone();
+        }
+        Ok(bound.clone())
+    }
+
+    fn session_account_label(&self) -> Option<String> {
+        self.bound.lock().unwrap().clone()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[tokio::test]
+async fn resumed_session_keeps_its_saved_api_key_account() {
+    let _guard = crate::storage::lock_test_env();
+    struct HomeGuard(Option<std::ffi::OsString>);
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => crate::env::set_var("JCODE_HOME", value),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let _home = HomeGuard(std::env::var_os("JCODE_HOME"));
+    let home = tempfile::tempdir().unwrap();
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+
+    let alpha = Arc::new(SavedAccountRouteProvider::new("alpha"));
+    let mut seed = Agent::new(alpha, Registry::empty());
+    seed.session.model = Some("deepseek/deepseek-v4-flash".to_string());
+    let session_id = seed.session_id().to_string();
+    seed.persist_session_now().expect("persist alpha session");
+    assert_eq!(
+        seed.session_route_api_method().as_deref(),
+        Some("openai-compatible:command-code@alpha")
+    );
+
+    let beta = Arc::new(SavedAccountRouteProvider::new("beta"));
+    let mut resumed = Agent::new(beta.clone(), Registry::empty());
+    assert_eq!(
+        resumed.session_route_api_method().as_deref(),
+        Some("openai-compatible:command-code@beta")
+    );
+    resumed
+        .restore_session(&session_id)
+        .expect("resume session");
+
+    assert_eq!(beta.session_account_label().as_deref(), Some("alpha"));
+    assert_eq!(
+        resumed.session_route_api_method().as_deref(),
+        Some("openai-compatible:command-code@alpha")
+    );
+    let persisted = crate::session::Session::load(&session_id).unwrap();
+    assert_eq!(
+        persisted.route_api_method.as_deref(),
+        Some("openai-compatible:command-code@alpha")
     );
 }

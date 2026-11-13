@@ -143,14 +143,19 @@ pub struct ResolvedOpenAiCompatibleProfile {
 }
 
 mod catalog;
+pub mod command_code;
 mod muse;
+mod registry;
 
 pub use catalog::*;
-use catalog::{LOGIN_PROVIDERS, OPENAI_COMPAT_PROFILES};
+pub use command_code::{
+    COMMAND_CODE_LOGIN_PROVIDER, COMMAND_CODE_PROFILE, COMMAND_CODE_STATIC_MODELS,
+};
 pub use muse::{
     META_MUSE_LOGIN_PROVIDER, META_MUSE_PROFILE, MUSE_SUBSCRIPTION_LOGIN_PROVIDER,
     MUSE_SUBSCRIPTION_PROFILE,
 };
+use registry::{LOGIN_PROVIDERS, OPENAI_COMPAT_PROFILES};
 
 pub fn openai_compatible_profiles() -> &'static [OpenAiCompatibleProfile] {
     &OPENAI_COMPAT_PROFILES

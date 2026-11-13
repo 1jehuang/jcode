@@ -119,6 +119,74 @@ fn session_binding_fork_retains_identity_and_rebinding_is_local_to_router() {
     });
 }
 
+#[derive(Default)]
+struct AccountLabelProvider {
+    label: RwLock<Option<String>>,
+}
+
+impl AccountLabelProvider {
+    fn with_label(label: &str) -> Self {
+        Self {
+            label: RwLock::new(Some(label.to_string())),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for AccountLabelProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> anyhow::Result<EventStream> {
+        Ok(Box::pin(futures::stream::empty()))
+    }
+
+    fn name(&self) -> &str {
+        "account-label-recorder"
+    }
+
+    fn set_model(&self, _model: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn bind_session_account(&self, account: Option<&str>) -> anyhow::Result<Option<String>> {
+        if let Some(account) = account {
+            *self.label.write().unwrap() = Some(account.to_string());
+        }
+        Ok(self.label.read().unwrap().clone())
+    }
+
+    fn session_account_label(&self) -> Option<String> {
+        self.label.read().unwrap().clone()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            label: RwLock::new(self.label.read().unwrap().clone()),
+        })
+    }
+}
+
+#[test]
+fn provider_fork_inherits_the_source_saved_account() {
+    let source = test_multi_provider_with_cursor();
+    *source.openrouter.write().unwrap() = Some(Arc::new(AccountLabelProvider::with_label("alpha")));
+    *source.active.write().unwrap() = ActiveProvider::OpenRouter;
+
+    let target = test_multi_provider_with_cursor();
+    *target.openrouter.write().unwrap() = Some(Arc::new(AccountLabelProvider::default()));
+    *target.active.write().unwrap() = ActiveProvider::OpenRouter;
+    target.inherit_session_account_from(&source);
+
+    assert_eq!(
+        target.session_account_label_inner().as_deref(),
+        Some("alpha")
+    );
+}
+
 #[test]
 fn session_binding_new_session_fork_starts_unbound() {
     static OBSERVED: std::sync::LazyLock<SessionObservations> =

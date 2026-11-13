@@ -1306,6 +1306,7 @@ fn make_provider() -> OpenRouterProvider {
                 label: DEFAULT_API_KEY_NAME.to_string(),
             })
         }),
+        session_account: Arc::new(Mutex::new(None)),
         supports_provider_features: true,
         supports_model_catalog: true,
         profile_id: None,
@@ -1341,6 +1342,7 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
                 label: "OPENAI_COMPAT_API_KEY".to_string(),
             })
         }),
+        session_account: Arc::new(Mutex::new(None)),
         supports_provider_features: false,
         supports_model_catalog: true,
         profile_id: None,
@@ -3210,6 +3212,45 @@ fn compat_profile_serving_deepseek_model_supports_reasoning_effort() {
         .set_reasoning_effort("high")
         .expect("deepseek model on compat endpoint accepts effort");
     assert_eq!(provider.reasoning_effort(), Some("high".to_string()));
+}
+
+/// Responses-routed Muse models on Command Code accept `reasoning.effort`
+/// on the wire, so `/effort` must work for `meta/muse-*` even though Muse
+/// is neither DeepSeek nor GPT family.
+#[test]
+fn command_code_muse_model_supports_reasoning_effort() {
+    let provider = OpenRouterProvider::new_command_code_test(
+        "https://api.commandcode.ai/provider/v1".to_string(),
+        "test-key".to_string(),
+        "meta/muse-ember",
+    );
+    assert!(provider.supports_unified_reasoning_effort());
+    assert!(provider.supports_any_reasoning_effort());
+    assert_eq!(
+        provider.available_efforts(),
+        vec!["none", "minimal", "low", "medium", "high", "xhigh", "swarm"]
+    );
+    provider
+        .set_reasoning_effort("high")
+        .expect("command-code muse accepts effort");
+    assert_eq!(provider.reasoning_effort(), Some("high".to_string()));
+    // `max` is accepted as an alias and normalized to the Responses value.
+    provider
+        .set_reasoning_effort("max")
+        .expect("command-code muse accepts max alias");
+    assert_eq!(provider.reasoning_effort(), Some("xhigh".to_string()));
+
+    // Explicit disable still wins.
+    let disabled = OpenRouterProvider {
+        reasoning_effort_support: Some(false),
+        ..OpenRouterProvider::new_command_code_test(
+            "https://api.commandcode.ai/provider/v1".to_string(),
+            "test-key".to_string(),
+            "meta/muse-ember",
+        )
+    };
+    assert!(disabled.available_efforts().is_empty());
+    assert!(disabled.set_reasoning_effort("high").is_err());
 }
 
 /// GPT-family reasoning models served by a direct OpenAI-compatible gateway

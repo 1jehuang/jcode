@@ -16,9 +16,17 @@ impl OpenRouterProvider {
             jcode_base::auth::muse::ensure_enabled()?;
         }
         let resolver_profile = resolved.clone();
+        let pinned_key = if resolved.id == "command-code" {
+            load_openai_compatible_profile_api_key(&resolver_profile)
+        } else {
+            None
+        };
         let auth: AuthResolver = Arc::new(move || {
             Ok(
-                match load_openai_compatible_profile_api_key(&resolver_profile) {
+                match pinned_key
+                    .clone()
+                    .or_else(|| load_openai_compatible_profile_api_key(&resolver_profile))
+                {
                     Some(token) => ProviderAuth::AuthorizationBearer {
                         token,
                         label: resolver_profile.api_key_env.clone(),
@@ -55,15 +63,13 @@ impl OpenRouterProvider {
             .clone()
             .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
-        Ok(Self {
+        let provider = Self {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
-            reasoning_effort: Arc::new(RwLock::new(Self::initial_reasoning_effort(
-                None,
-                Some(&resolved.id),
-            ))),
+            reasoning_effort: Arc::new(RwLock::new(None)),
             api_base,
             auth,
+            session_account: Self::initial_session_account(Some(&resolved.id)),
             supports_provider_features: false,
             supports_model_catalog: true,
             profile_id: Some(resolved.id.clone()),
@@ -84,6 +90,18 @@ impl OpenRouterProvider {
             provider_pin: Arc::new(Mutex::new(None)),
             endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
             endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
-        })
+        };
+        // Honor `[provider].openai_reasoning_effort` for built-in profiles
+        // (including Responses-routed Muse) instead of only dedicated
+        // deepseek/zai profiles. Mirrors the named-profile construction.
+        let initial_effort = if provider.supports_any_reasoning_effort() {
+            provider.configured_effort_for_model()
+        } else {
+            None
+        };
+        if let Ok(mut effort) = provider.reasoning_effort.try_write() {
+            *effort = initial_effort;
+        }
+        Ok(provider)
     }
 }

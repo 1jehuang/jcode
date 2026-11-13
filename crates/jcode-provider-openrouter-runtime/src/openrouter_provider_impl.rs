@@ -35,12 +35,20 @@ impl Provider for OpenRouterProvider {
         )
     }
 
+    fn bind_session_account(&self, account: Option<&str>) -> Result<Option<String>> {
+        self.bind_session_account_inner(account)
+    }
+
+    fn session_account_label(&self) -> Option<String> {
+        OpenRouterProvider::session_account_label(self)
+    }
+
     async fn complete(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
         system: &str,
-        _resume_session_id: Option<&str>,
+        resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         if self.profile_id.as_deref() == Some("muse-subscription") {
             jcode_base::auth::muse::ensure_enabled()?;
@@ -51,6 +59,25 @@ impl Provider for OpenRouterProvider {
             return self.complete_azure_responses(messages, tools, system).await;
         }
         let model = self.model.read().await.clone();
+        if self
+            .profile_id
+            .as_deref()
+            .is_some_and(|id| id.eq_ignore_ascii_case("command-code"))
+            && model.trim().to_ascii_lowercase().starts_with("claude-")
+        {
+            let auth = self.resolve_auth()?;
+            let crate::ProviderAuth::AuthorizationBearer { token, .. } = auth else {
+                anyhow::bail!("Command Code Messages requires bearer API-key authentication");
+            };
+            let delegate = jcode_provider_anthropic_runtime::AnthropicProvider::new_command_code(
+                &self.api_base,
+                &token,
+                &model,
+            )?;
+            return delegate
+                .complete(messages, tools, system, resume_session_id)
+                .await;
+        }
         let responses_api =
             model_uses_responses_api(&self.api_base, self.profile_id.as_deref(), &model);
         let reasoning_effort = self.reasoning_effort();
@@ -163,6 +190,14 @@ impl Provider for OpenRouterProvider {
             }
         }
 
+        if self
+            .profile_id
+            .as_deref()
+            .is_some_and(|id| id.eq_ignore_ascii_case("command-code"))
+        {
+            request["prompt_cache_key"] = serde_json::json!(self.conversation_id);
+        }
+
         // Optional thinking override for OpenRouter (provider-specific).
         // Skip for strict OpenAI-schema endpoints (e.g. Mistral) which reject
         // the non-standard top-level `thinking` field with a 422 (issue #261).
@@ -233,15 +268,31 @@ impl Provider for OpenRouterProvider {
         // provider-only fields cannot leak into `/responses`; configured extra
         // body fields remain an intentional escape hatch and are merged last.
         if responses_api {
-            request = super::opencode_go_responses::build_request(
-                &effective_messages,
-                tools,
-                system,
-                &model,
-                reasoning_effort.as_deref(),
-                self.max_tokens,
-                jcode_provider_openrouter::request::sanitize_tool_parameters_schema,
-            );
+            if self
+                .profile_id
+                .as_deref()
+                .is_some_and(|id| id.eq_ignore_ascii_case("command-code"))
+            {
+                request = super::opencode_go_responses::build_command_code_responses_request(
+                    &effective_messages,
+                    tools,
+                    system,
+                    &model,
+                    reasoning_effort.as_deref(),
+                    self.max_tokens,
+                    Some(&self.conversation_id),
+                );
+            } else {
+                request = super::opencode_go_responses::build_request(
+                    &effective_messages,
+                    tools,
+                    system,
+                    &model,
+                    reasoning_effort.as_deref(),
+                    self.max_tokens,
+                    jcode_provider_openrouter::request::sanitize_tool_parameters_schema,
+                );
+            }
             if let Some(extra) = self.extra_body.as_ref()
                 && let Some(request_obj) = request.as_object_mut()
             {
@@ -300,7 +351,7 @@ impl Provider for OpenRouterProvider {
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
         let client = self.client.clone();
         let api_base = self.api_base.clone();
-        let auth = (self.auth)()?;
+        let auth = self.resolve_auth()?;
         let send_openrouter_headers = self.send_openrouter_headers;
         let conversation_id = self.conversation_id.clone();
         let request_for_retries = request;
@@ -497,7 +548,7 @@ impl Provider for OpenRouterProvider {
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
         if !self.supports_any_reasoning_effort() {
             anyhow::bail!(
-                "Reasoning effort is not supported by the current model/profile. It works for OpenRouter, DeepSeek-family and GPT-family reasoning models, and profiles with supports_reasoning_effort = true."
+                "Reasoning effort is not supported by the current model/profile. It works for OpenRouter, DeepSeek-family, GPT-family and Responses-based Muse reasoning models, and profiles with supports_reasoning_effort = true."
             );
         }
         let requested = effort.trim().to_ascii_lowercase();
@@ -528,10 +579,7 @@ impl Provider for OpenRouterProvider {
             jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS.to_vec()
         } else if self.supports_openai_reasoning_effort() {
             jcode_provider_core::OPENAI_SELECTABLE_EFFORTS.to_vec()
-        } else if Self::profile_supports_unified_reasoning(
-            self.profile_id.as_deref(),
-            self.send_openrouter_headers,
-        ) {
+        } else if self.supports_unified_reasoning_effort() {
             jcode_provider_core::OPENROUTER_SELECTABLE_EFFORTS.to_vec()
         } else {
             vec![]
@@ -840,6 +888,7 @@ impl Provider for OpenRouterProvider {
             reasoning_effort: Arc::new(RwLock::new(self.reasoning_effort())),
             api_base: self.api_base.clone(),
             auth: self.auth.clone(),
+            session_account: Arc::new(Mutex::new(self.session_account_label())),
             supports_provider_features: self.supports_provider_features,
             supports_model_catalog: self.supports_model_catalog,
             profile_id: self.profile_id.clone(),
@@ -931,7 +980,7 @@ impl OpenRouterProvider {
             Some(api_tools.len()),
             &[],
         );
-        let auth = (self.auth)()?;
+        let auth = self.resolve_auth()?;
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
         let client = self.client.clone();
         let api_base = self.api_base.clone();
@@ -1081,6 +1130,46 @@ impl OpenRouterProvider {
     }
 }
 
+#[cfg(test)]
+impl OpenRouterProvider {
+    pub(crate) fn new_command_code_test(api_base: String, key: String, model: &str) -> Self {
+        let auth: AuthResolver = Arc::new(move || {
+            Ok(ProviderAuth::AuthorizationBearer {
+                token: key.clone(),
+                label: "test-key".to_string(),
+            })
+        });
+        Self {
+            client: jcode_provider_core::shared_http_client(),
+            model: Arc::new(RwLock::new(model.to_string())),
+            reasoning_effort: Arc::new(RwLock::new(None)),
+            api_base,
+            auth,
+            session_account: Self::initial_session_account(None),
+            supports_provider_features: false,
+            supports_model_catalog: false,
+            profile_id: Some("command-code".to_string()),
+            builtin_azure: false,
+            reasoning_effort_support: None,
+            disable_reasoning_heuristics: false,
+            static_reasoning_config: HashMap::new(),
+            max_tokens: None,
+            extra_body: None,
+            static_models: Vec::new(),
+            static_context_limits: HashMap::new(),
+            static_image_input_support: HashMap::new(),
+            send_openrouter_headers: false,
+            conversation_id: new_conversation_id(),
+            models_cache: Arc::new(RwLock::new(ModelsCache::default())),
+            model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
+            provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
+            provider_pin: Arc::new(Mutex::new(None)),
+            endpoints_cache: Arc::new(RwLock::new(EndpointsCache::default())),
+            endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
+        }
+    }
+}
+
 /// Whether one catalog entry declares `image` as an accepted input modality.
 fn declares_image_input(model: &jcode_provider_openrouter::ModelInfo) -> bool {
     model
@@ -1088,3 +1177,7 @@ fn declares_image_input(model: &jcode_provider_openrouter::ModelInfo) -> bool {
         .iter()
         .any(|modality| modality.eq_ignore_ascii_case("image"))
 }
+
+#[cfg(test)]
+#[path = "command_code_mock_tests.rs"]
+mod command_code_mock_tests;

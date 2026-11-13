@@ -12,6 +12,7 @@ use crate::provider_catalog::{
 use super::provider_init::{ProviderChoice, login_provider_for_choice};
 use crate::provider_catalog::save_named_api_key;
 
+mod command_code;
 mod device_login;
 mod existing_key_notice;
 mod google;
@@ -379,7 +380,7 @@ pub async fn run_login_provider(
                     .map(|_| LoginFlowOutcome::Completed)
             }
             LoginProviderTarget::OpenAiCompatible(profile) => {
-                login_openai_compatible_flow(&profile, &options)
+                login_openai_compatible_flow(&profile, account_label, &options)
                     .map(|_| LoginFlowOutcome::Completed)
             }
             LoginProviderTarget::Cursor => login_cursor_flow().map(|_| LoginFlowOutcome::Completed),
@@ -433,6 +434,9 @@ pub async fn run_login_provider(
             &[("method", provider.auth_kind.label())],
         );
         return Ok(());
+    }
+    if provider.id == "command-code" && !options.no_validate {
+        command_code::validate_saved_key().await?;
     }
     auth::AuthStatus::invalidate_cache();
     if options.no_validate {
@@ -842,10 +846,15 @@ fn login_azure_flow() -> Result<()> {
 
 fn login_openai_compatible_flow(
     profile: &OpenAiCompatibleProfile,
+    account_label: Option<&str>,
     options: &LoginOptions,
 ) -> Result<()> {
     let is_custom_profile = profile.id == crate::provider_catalog::OPENAI_COMPAT_PROFILE.id;
     let mut resolved = resolve_openai_compatible_profile(*profile);
+
+    if command_code::select_stored_account_for_login(profile, account_label, options)? {
+        return Ok(());
+    }
 
     eprintln!("Setting up {}...", resolved.display_name);
     let setup_url_depends_on_key = profile.id == crate::provider_catalog::MINIMAX_PROFILE.id;
@@ -955,7 +964,7 @@ fn login_openai_compatible_flow(
             &resolved.env_file,
             None,
         )?;
-        save_named_api_key(&resolved.env_file, &resolved.api_key_env, &key)?;
+        command_code::save_profile_key(&resolved, account_label, &key)?;
         eprintln!("\nSuccessfully saved {} API key!", resolved.display_name);
         "api_key"
     } else {
@@ -1006,12 +1015,7 @@ fn login_openai_compatible_flow(
         eprintln!("{}", next_step::local_endpoint_hint(&resolved.id));
     }
 
-    eprintln!(
-        "Stored at {}",
-        crate::storage::app_config_dir()?
-            .join(&resolved.env_file)
-            .display()
-    );
+    command_code::report_storage_location(&resolved)?;
     if let Some(default_model) = resolved.default_model {
         eprintln!("Default model hint: {}", default_model);
     }
