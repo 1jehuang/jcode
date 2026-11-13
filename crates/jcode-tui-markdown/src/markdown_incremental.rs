@@ -26,12 +26,6 @@ pub struct IncrementalMarkdownRenderer {
     rendered_lines: Vec<Line<'static>>,
     /// Text that was rendered (for comparison)
     rendered_text: String,
-    /// Position of last safe checkpoint (after complete block)
-    last_checkpoint: usize,
-    /// Number of lines at last checkpoint
-    lines_at_checkpoint: usize,
-    /// Whether a blank separator should be preserved at the checkpoint boundary
-    checkpoint_needs_separator: bool,
     /// Whether `rendered_lines` contains a deferred-mermaid pending
     /// placeholder; when true the identical-text fast path must re-render
     /// once the deferred render epoch advances so the completed diagram
@@ -51,9 +45,6 @@ impl IncrementalMarkdownRenderer {
         Self {
             rendered_lines: Vec::new(),
             rendered_text: String::new(),
-            last_checkpoint: 0,
-            lines_at_checkpoint: 0,
-            checkpoint_needs_separator: false,
             rendered_mermaid_pending: false,
             rendered_mermaid_epoch: 0,
             rendered_show_link_urls: config_snapshot().show_link_urls,
@@ -63,10 +54,8 @@ impl IncrementalMarkdownRenderer {
 
     /// Update with new text, returns rendered lines
     ///
-    /// This method efficiently handles streaming by:
-    /// 1. Detecting if text was only appended (common case)
-    /// 2. Finding safe re-render points (after complete blocks)
-    /// 3. Only re-rendering from the last safe point
+    /// Unchanged text returns the cached lines. Any other text is rendered
+    /// in full, once.
     pub fn update(&mut self, full_text: &str) -> Vec<Line<'static>> {
         with_streaming_render_context(|| self.update_internal(full_text))
     }
@@ -78,8 +67,6 @@ impl IncrementalMarkdownRenderer {
             "rendered_lines_count": self.rendered_lines.len(),
             "rendered_lines_estimate_bytes": rendered_lines_estimate_bytes,
             "rendered_text_bytes": rendered_text_bytes,
-            "last_checkpoint": self.last_checkpoint,
-            "lines_at_checkpoint": self.lines_at_checkpoint,
             "total_estimate_bytes": rendered_lines_estimate_bytes + rendered_text_bytes,
         })
     }
@@ -118,9 +105,9 @@ impl IncrementalMarkdownRenderer {
         self.rendered_mermaid_epoch = mermaid_epoch_before;
         self.rendered_show_link_urls = show_link_urls;
 
-        // Find checkpoint for next incremental update
-        self.refresh_checkpoint(full_text, true);
-
+        // No checkpoint is kept: counting the lines of the completed prefix
+        // meant rendering that prefix a second time on every streamed update,
+        // and nothing read the count.
         self.rendered_lines.clone()
     }
 
@@ -229,39 +216,10 @@ impl IncrementalMarkdownRenderer {
         checkpoint
     }
 
-    /// Refresh checkpoint metadata from the latest rendered text.
-    ///
-    /// `force = true` recomputes prefix line counts even when checkpoint byte position is unchanged.
-    fn refresh_checkpoint(&mut self, full_text: &str, force: bool) {
-        let checkpoint = self.find_last_complete_block_checkpoint(full_text);
-        let new_checkpoint = checkpoint.map(|cp| cp.offset).unwrap_or(0);
-        let new_checkpoint_needs_separator =
-            checkpoint.map(|cp| cp.needs_separator).unwrap_or(false);
-        if !force
-            && new_checkpoint == self.last_checkpoint
-            && new_checkpoint_needs_separator == self.checkpoint_needs_separator
-        {
-            return;
-        }
-
-        self.last_checkpoint = new_checkpoint;
-        self.checkpoint_needs_separator = new_checkpoint_needs_separator;
-        if new_checkpoint == 0 {
-            self.lines_at_checkpoint = 0;
-        } else {
-            let prefix_lines =
-                render_markdown_with_width(&full_text[..new_checkpoint], self.max_width);
-            self.lines_at_checkpoint = prefix_lines.len();
-        }
-    }
-
     /// Reset the renderer state
     pub fn reset(&mut self) {
         self.rendered_lines.clear();
         self.rendered_text.clear();
-        self.last_checkpoint = 0;
-        self.lines_at_checkpoint = 0;
-        self.checkpoint_needs_separator = false;
         self.rendered_mermaid_pending = false;
         self.rendered_mermaid_epoch = 0;
     }
