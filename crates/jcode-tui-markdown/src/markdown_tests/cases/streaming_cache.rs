@@ -613,3 +613,39 @@ fn test_incremental_renderer_reuses_the_head_of_a_long_prose_reply() {
                 .update("Something else entirely.\n\nSecond paragraph.")
     );
 }
+
+/// Timing probe, not a correctness test: `cargo test ... stream_cost_probe -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn stream_cost_probe() {
+    let para = "The water clock carried the hours through the night, and the priests who \
+                tended it argued about *seasonal* hours for centuries before anyone agreed.\n\n";
+    let text: String = (0..60)
+        .map(|i| format!("{i}. {para}").replacen(&format!("{i}. "), "", 1))
+        .collect();
+    let steps: Vec<usize> = (1..=text.len() / 40).map(|i| i * 40).collect();
+    for (label, split) in [("whole", false), ("split", true)] {
+        let start = std::time::Instant::now();
+        let mut renderer = IncrementalMarkdownRenderer::new(Some(100));
+        let mut tail_ms = 0.0;
+        for &end in &steps {
+            let t = std::time::Instant::now();
+            if split {
+                renderer.update(&text[..end]);
+            } else {
+                render_markdown_with_width(&text[..end], Some(100));
+            }
+            if end > text.len() * 9 / 10 {
+                tail_ms += t.elapsed().as_secs_f64() * 1000.0;
+            }
+        }
+        let late = steps.iter().filter(|&&e| e > text.len() * 9 / 10).count();
+        eprintln!(
+            "{label}: {} chars, {} updates, total {:.1} ms, last-10% avg {:.3} ms/update",
+            text.len(),
+            steps.len(),
+            start.elapsed().as_secs_f64() * 1000.0,
+            tail_ms / late as f64
+        );
+    }
+}
