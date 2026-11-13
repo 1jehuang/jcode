@@ -96,6 +96,7 @@ impl Config {
 - OpenAI native compaction: {}
 - OpenAI native compaction threshold ratio: {:.2}
 - Cross-provider failover: {}
+- Risk gate: {}
 
 **Agent models:**
 - Swarm / subagent: {}
@@ -280,6 +281,11 @@ impl Config {
             self.provider.openai_native_compaction_mode.as_str(),
             self.provider.openai_native_compaction_threshold_tokens,
             self.provider.cross_provider_failover.as_str(),
+            if self.provider.risk_gate_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            },
             self.agents
                 .swarm_model
                 .as_deref()
