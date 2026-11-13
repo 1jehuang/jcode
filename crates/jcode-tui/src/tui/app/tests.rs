@@ -67,6 +67,7 @@ include!("tests/latex_command.rs");
 include!("tests/key_release_redraw.rs");
 include!("tests/terminal_setup_command.rs");
 include!("tests/issue_497_copy_ctrl_c.rs");
+include!("tests/copy_last_response.rs");
 include!("tests/issue_699_ctrl_d_delete.rs");
 include!("tests/issue_832_remote_ctrl_k.rs");
 include!("tests/voice_input.rs");

@@ -84,6 +84,10 @@ workspace_right = "alt+l"
 # Pane / mode toggles
 side_panel_toggle = "alt+m"
 copy_selection_toggle = "alt+y"
+# Copy the last assistant answer (Markdown text; no reasoning or tool output).
+# Unbound by default so it does not steal Ctrl+X (cut input line). Enable with:
+# copy_last_response = "ctrl+x ctrl+y"
+copy_last_response = "off"
 diagram_pane_toggle = "alt+t"
 diagram_pane_visibility_toggle = "alt+shift+m"
 typing_scroll_lock_toggle = "alt+s"

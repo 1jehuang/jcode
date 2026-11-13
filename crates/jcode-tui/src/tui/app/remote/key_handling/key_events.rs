@@ -295,6 +295,10 @@ pub(super) async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if crate::tui::app::copy_last_response::handle_key(app, code, modifiers) {
+        return Ok(());
+    }
+
     if app.toggle_keys.copy_selection.matches(code, modifiers) {
         app.toggle_copy_selection_mode();
         return Ok(());

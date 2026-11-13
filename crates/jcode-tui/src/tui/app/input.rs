@@ -2356,10 +2356,11 @@ pub(super) fn handle_pre_control_shortcuts(
     if handle_account_shortcut(app, code, modifiers) {
         return true;
     }
-    // Plain Ctrl+K kills to end of line (emacs habit). Ctrl+Shift+K must fall
-    // through to the scroll handler: with the Kitty keyboard protocol enabled,
-    // terminals report Ctrl+Shift+K as Char('k') + CONTROL|SHIFT, so without the
-    // Shift guard this would swallow the scroll-up chord and wipe the draft.
+    if super::copy_last_response::handle_key(app, code, modifiers) {
+        return true;
+    }
+    // Ctrl+K kills to EOL. Shift+K must reach the scroll handler (Kitty reports
+    // Ctrl+Shift+K as Char('k')+CONTROL|SHIFT; without the guard it wipes the draft).
     if modifiers.contains(KeyModifiers::CONTROL)
         && !modifiers.contains(KeyModifiers::SHIFT)
         && matches!(code, KeyCode::Char('k'))
@@ -2432,8 +2433,7 @@ pub(super) fn handle_pre_control_shortcuts(
     }
 
     // Swarm views: Alt+N cycles chat → inline controls → full live page → chat.
-    // Selection/open/prompt controls stay available in both active views, while
-    // plain typing continues to flow to the chat input.
+    // Selection/open/prompt stay available; plain typing still goes to chat.
     if app.toggle_keys.swarm_panel_focus.matches(code, modifiers) {
         match app.cycle_swarm_panel_view() {
             super::tui_state::SwarmPanelView::Chat => {

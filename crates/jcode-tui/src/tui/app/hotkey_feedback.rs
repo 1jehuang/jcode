@@ -1,19 +1,9 @@
-//! Inline hotkey feedback.
+//! Inline hotkey feedback (`display.keybinding_hints`).
 //!
-//! Two complementary behaviors, both gated behind `display.keybinding_hints`:
-//!
-//! 1. **Rare-hotkey feedback.** When the user presses a chord jcode recognizes
-//!    but they use rarely (or have not used in a long time), we surface a short
-//!    inline note: `⌨ Ctrl+G → toggle scroll bookmark`. Per-action usage counts
-//!    persist across sessions, so the notes stop once an action is familiar.
-//! 2. **Near-miss suggestions.** When a modified chord falls through every
-//!    dispatcher unhandled, we tell the user instead of silently swallowing it:
-//!    `⌨ Ctrl+Shift+P isn't bound · nearest: Ctrl+P → toggle auto-poke`.
-//!
-//! The registry mirrors the real dispatch tables (configured bindings first,
-//! then built-in readline/navigation chords). Matching, familiarity, and the
-//! suggestion ranking are pure functions with unit tests; only persistence and
-//! the `App` glue touch the environment.
+//! Rare-hotkey notes (`⌨ Ctrl+G → toggle scroll bookmark`) and near-miss
+//! suggestions (`isn't bound · nearest: …`). Usage counts persist. The registry
+//! mirrors dispatch (configured first, then built-in chords). Matching and
+//! ranking are pure; only persistence and App glue touch the environment.
 
 use std::collections::HashMap;
 
@@ -139,6 +129,11 @@ pub(super) fn build_registry(inputs: &RegistryInputs<'_>) -> Vec<KnownHotkey> {
         inputs.toggles.copy_selection.binding().cloned(),
         "copy_selection_toggle",
         "toggle copy/selection mode",
+    );
+    push(
+        inputs.toggles.copy_last_response.primary_binding().cloned(),
+        "copy_last_response",
+        "copy the last assistant answer",
     );
     push(
         inputs.toggles.side_panel.binding().cloned(),
@@ -1128,6 +1123,8 @@ mod tests {
             ("new_terminal", Some(&["new_terminal"])),
             ("open_resume", Some(&["open_resume"])),
             ("voice_input", Some(&["voice_input"])),
+            // Unbound by default (#1929); listed when the user configures a single chord.
+            ("copy_last_response", None),
         ];
 
         let registry = test_inputs_registry(true);

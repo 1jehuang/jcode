@@ -1066,13 +1066,9 @@ pub struct KeybindingsConfig {
     pub commit_log: String,
     /// Toggle the info widget (default: "alt+i")
     pub info_widget_toggle: String,
-    /// Show/dismiss the session todo list as an inline card in the chat
-    /// transcript (default: "alt+x")
+    /// Toggle the inline todo card (default: "alt+x")
     pub todo_card_toggle: String,
-    /// Focus/unfocus the inline swarm panel for keyboard navigation (default:
-    /// "alt+n"; alt+↑/↓ select, alt+o pops out, alt+shift+p opens the swarm
-    /// prompt, esc exits). Active only when `agents.swarm_spawn_mode = "inline"`
-    /// and the session manages swarm agents.
+    /// Focus the inline swarm panel (default: "alt+n"). Inline swarm only.
     pub swarm_panel_focus: String,
     /// Spawn a fresh jcode session in a new terminal window (default: unbound).
     /// Example: "alt+enter".
@@ -1080,9 +1076,10 @@ pub struct KeybindingsConfig {
     /// Open the `/resume` session picker (default: "cmd+b" on macOS, "alt+r"
     /// elsewhere). Set "" to disable.
     pub open_resume: String,
-    /// Start/stop built-in voice input (default: "ctrl+space"). Speech streams
-    /// to Nari and the transcript is sent as a prompt. Set "" to disable.
+    /// Start/stop built-in voice input (default: "ctrl+space"). Set "" to disable.
     pub voice_input: String,
+    /// Copy last assistant answer (default: off). Example: "ctrl+x ctrl+y".
+    pub copy_last_response: String,
     /// Session picker Enter action: "current-terminal" (default) or "new-terminal".
     /// Ctrl+Enter performs the alternate action.
     pub session_picker_enter: SessionPickerResumeAction,
@@ -1140,6 +1137,7 @@ impl Default for KeybindingsConfig {
                 },
             ),
             voice_input: get("voice_input", "ctrl+space"),
+            copy_last_response: get("copy_last_response", "off"),
             session_picker_enter: SessionPickerResumeAction::CurrentTerminal,
         }
     }
