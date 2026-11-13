@@ -260,6 +260,25 @@ fn request(method: &str, path: &str, body: Option<serde_json::Value>) -> Result<
     request_json(method, path, body)
 }
 
+/// One HTTP client for the life of the process.
+///
+/// Building a client loads the system certificate store, which is a few
+/// hundred file opens. `connect` polls every [`POLL_INTERVAL`] for up to
+/// [`PROVISION_DEADLINE`], so a client per request made every waiting
+/// `jcode cloud proxy` re-read the whole store on each poll. Must be called
+/// off the async runtime, like every use of the blocking client.
+fn api_client() -> Result<&'static reqwest::blocking::Client> {
+    static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client);
+    }
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(40))
+        .user_agent(format!("jcode/{}", env!("CARGO_PKG_VERSION")))
+        .build()?;
+    Ok(CLIENT.get_or_init(|| client))
+}
+
 pub(super) fn request_json<T: serde::de::DeserializeOwned + Send>(
     method: &str,
     path: &str,
@@ -268,10 +287,7 @@ pub(super) fn request_json<T: serde::de::DeserializeOwned + Send>(
     let account = account()?;
     let url = format!("{}/{}", account.base, path);
     off_runtime(move || {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(40))
-            .user_agent(format!("jcode/{}", env!("CARGO_PKG_VERSION")))
-            .build()?;
+        let client = api_client()?;
         let mut req = match method {
             "POST" => client.post(&url),
             "GET" => client.get(&url),
@@ -341,6 +357,12 @@ fn timed_managed_stage<T>(stage: &str, operation: impl FnOnce() -> Result<T>) ->
 /// Create or wake the machine and wait until it accepts this client's key.
 /// `progress` receives each distinct status message.
 pub(crate) fn connect(progress: &mut dyn FnMut(&str)) -> Result<Reply> {
+    connect_unless(progress, &|| false)
+}
+
+/// [`connect`], giving up as soon as `abandoned` reports that nobody is
+/// waiting for the result any more.
+fn connect_unless(progress: &mut dyn FnMut(&str), abandoned: &dyn Fn() -> bool) -> Result<Reply> {
     let key = timed_managed_stage("cloud client key preparation", public_key)?;
     let deadline = Instant::now() + PROVISION_DEADLINE;
     let mut last = String::new();
@@ -365,6 +387,9 @@ pub(crate) fn connect(progress: &mut dyn FnMut(&str)) -> Result<Reply> {
         }
         if Instant::now() >= deadline {
             bail!("Jcode Cloud machine did not become ready in time. Retry to keep waiting.");
+        }
+        if abandoned() {
+            bail!("the SSH client that asked for this connection is gone");
         }
         timed_managed_stage("cloud wake poll wait", || {
             std::thread::sleep(POLL_INTERVAL);
@@ -397,8 +422,37 @@ fn validated_host_keys(reply: &Reply) -> Result<Vec<String>> {
 /// host keys, then relays stdin/stdout to the machine's SSH port. Diagnostics
 /// go to stderr only, since stdout is the SSH wire.
 pub(crate) fn run_proxy() -> Result<()> {
-    let reply = connect(&mut |message| eprintln!("[jcode cloud] {message}"))?;
+    let abandoned = ssh_parent_watch();
+    let reply = connect_unless(
+        &mut |message| eprintln!("[jcode cloud] {message}"),
+        &abandoned,
+    )?;
     relay_proxy(&reply, HOST, &known_hosts_path()?)
+}
+
+/// Reports whether the `ssh` that started this proxy has gone away.
+///
+/// When a caller times out and kills its `ssh`, the proxy is reparented and,
+/// without this, keeps polling the API for the rest of the provision deadline
+/// on behalf of nobody. On Linux the kernel also delivers SIGTERM the moment
+/// the parent dies, which covers the relay phase where nothing polls.
+fn ssh_parent_watch() -> impl Fn() -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: getppid has no preconditions and cannot fail.
+        let parent = unsafe { libc::getppid() };
+        #[cfg(target_os = "linux")]
+        // SAFETY: PR_SET_PDEATHSIG only records a signal number for this process.
+        unsafe {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong);
+        }
+        // SAFETY: as above. Also catches a parent that died before the prctl.
+        move || unsafe { libc::getppid() } != parent
+    }
+    #[cfg(not(unix))]
+    {
+        || false
+    }
 }
 
 pub(super) fn relay_proxy(reply: &Reply, host: &str, known_hosts: &std::path::Path) -> Result<()> {
@@ -878,6 +932,22 @@ mod upgrade_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_client_is_built_once_per_process() {
+        // A client per poll re-read the system certificate store every
+        // POLL_INTERVAL for as long as a proxy waited.
+        let first = api_client().unwrap();
+        let second = api_client().unwrap();
+        assert!(std::ptr::eq(first, second));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ssh_parent_watch_is_quiet_while_the_parent_lives() {
+        let abandoned = ssh_parent_watch();
+        assert!(!abandoned());
+    }
 
     #[test]
     fn prepare_ssh_cli_is_hidden_and_only_prepares_local_files() {
