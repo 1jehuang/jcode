@@ -84,3 +84,33 @@ fn test_partial_drag_inside_tool_output_copies_only_highlighted_text() {
     let copied = drag_copy_needle_in_chat(&mut app, &mut terminal, &clipboard, needle);
     assert_eq!(copied.as_deref(), Some(needle));
 }
+
+/// With `display.latex_rendering = "none"` math is shown as its literal LaTeX
+/// source, so what is highlighted is exactly what can be copied. A partial
+/// drag must not expand to the whole formula the way rendered math does.
+#[test]
+fn test_partial_drag_inside_raw_latex_copies_only_highlighted_text() {
+    // App setup also takes the render lock, so always acquire env first.
+    let _env = LatexCommandEnv::new();
+    let _render_lock = scroll_render_test_lock();
+    crate::env::set_var("JCODE_LATEX_RENDERING", "none");
+    crate::config::Config::invalidate_cache();
+    crate::tui::markdown::install_jcode_markdown_hooks();
+
+    for needle in ["\\rho_{41}", "\\sigma^{17}"] {
+        let clipboard = CapturedClipboard::new();
+        let (mut app, mut terminal) = create_math_copy_test_app();
+        // Unique formulas so no other test's cached render of the same
+        // markdown (in a different LaTeX mode) can be reused here.
+        app.display_messages[1].content =
+            "Raw $a + \\rho_{41} = b$ inline.\n\n$$\nq = \\sigma^{17} + r\n$$".to_string();
+        app.bump_display_messages_version();
+        let screen = render_and_snap(&app, &mut terminal);
+        assert!(
+            screen.contains("math (raw)") && screen.contains("$a + \\rho_{41} = b$"),
+            "math should be shown as raw source: {screen}"
+        );
+        let copied = drag_copy_needle_in_chat(&mut app, &mut terminal, &clipboard, needle);
+        assert_eq!(copied.as_deref(), Some(needle));
+    }
+}
