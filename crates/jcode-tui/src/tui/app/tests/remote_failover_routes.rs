@@ -507,7 +507,7 @@ fn test_remote_failover_stops_when_cross_route_retry_budget_is_spent() {
             is_system: payload.is_system,
             system_reminder: payload.system_reminder,
             auto_retry: true,
-            retry_attempts: App::AUTO_RETRY_MAX_ATTEMPTS,
+            retry_attempts: app.effective_auto_retry_max_attempts(),
             retry_at: None,
         });
         let prompt = jcode_provider_core::ProviderFailoverPrompt {
