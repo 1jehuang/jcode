@@ -288,6 +288,33 @@ fn record_todo_write_mode(input: &Value) {
     let _ = crate::storage::write_json_fast(&path, &counts);
 }
 
+/// Every key an update may carry once names and pauses are normalized: the
+/// stored todo fields plus their public aliases.
+const UPDATE_FIELDS: &[&str] = &[
+    "id",
+    "content",
+    "details",
+    "status",
+    "priority",
+    "group",
+    "lane",
+    "stage",
+    "phase",
+    "wave",
+    "lane_after",
+    "lane_dependencies",
+    "lane_owner",
+    "confidence",
+    "completion_confidence",
+    "confidence_history",
+    "blocked_by",
+    "waiting_on",
+    "waiting_reason",
+    "requires_user_auth",
+    "assigned_to",
+    "intent",
+];
+
 /// Turn incremental edits into a full `todos` list so every downstream rule
 /// (status validation, confidence history, gates, lane and plan sync) runs on
 /// one path. `update` changes only the given fields of todos matched by `id`;
@@ -370,6 +397,16 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
             .as_object_mut()
             .ok_or_else(|| anyhow::anyhow!("stored todo {id:?} is not an object"))?;
         validate_membership(fields)?;
+        // The update schema is open (see `parameters_schema`), so a misspelled
+        // field would otherwise be stored and silently ignored.
+        if let Some(unknown) = fields
+            .keys()
+            .find(|key| !UPDATE_FIELDS.contains(&key.as_str()))
+        {
+            bail!(
+                "unknown update field {unknown:?} on {id:?}; update takes the same fields as add, plus rename_to"
+            );
+        }
         for (key, value) in fields {
             if key != "id" {
                 // `phase`/`lane` are the card's words for `stage`/`group`;
@@ -1336,7 +1373,7 @@ impl Tool for TodoTool {
                 "intent": super::intent_schema_property(),
                 "update": {
                     "type": "array",
-                    "description": "Patch by name; omitted fields stay unchanged.",
+                    "description": "Patch by name with fields as in add; omitted fields stay unchanged.",
                     "items": {
                         "type": "object",
                         "required": ["name"],
@@ -1515,19 +1552,16 @@ impl Tool for TodoTool {
             "type": "string",
             "description": "Insert after this task name."
         });
-        schema["properties"]["update"]["items"]["properties"] =
-            schema["properties"]["todos"]["items"]["properties"].clone();
+        // update repeats no item fields: it takes the same ones as add, and
+        // listing them a third time cost ~230 tokens on every request. The
+        // price is that an open item makes this tool ineligible for OpenAI
+        // strict mode, so field names and types are checked here instead.
         schema["properties"]["update"]["items"]["properties"]["rename_to"] = json!({
-            "type": "string", "minLength": 1,
+            "type": "string",
             "description": "New unique name; preserves identity and dependencies."
         });
-        schema["properties"]["update"]["items"]["additionalProperties"] = json!(false);
         schema["properties"]["add"]["items"]["properties"] = add_properties;
         schema["properties"]["add"]["items"]["additionalProperties"] = json!(false);
-        schema["properties"]["update"]["items"]["properties"]["waiting_on"] =
-            schema["properties"]["todos"]["items"]["properties"]["waiting_on"].clone();
-        schema["properties"]["update"]["items"]["properties"]["requires_user_auth"] =
-            schema["properties"]["todos"]["items"]["properties"]["requires_user_auth"].clone();
         // The item schema is built locally above. Remove flat aliases from the
         // hierarchical representation without assuming the JSON object shape.
         let mut item = schema["properties"]["todos"]["items"].clone();
@@ -1567,7 +1601,6 @@ impl Tool for TodoTool {
             ["properties"]["items"];
         strip_property_descriptions(&mut phase_items["items"], &[]);
         phase_items["description"] = json!("Item fields as in add.");
-        strip_property_descriptions(&mut schema["properties"]["update"]["items"], &["rename_to"]);
         schema
     }
 

@@ -58,7 +58,6 @@ fn incremental_edits_apply_to_whole_lane_and_new_members_inherit() {
 #[test]
 fn public_schema_exposes_lane_dependencies_only_at_correct_levels() {
     let schema = TodoTool.parameters_schema();
-    assert!(schema["properties"]["update"]["items"]["properties"]["lane_dependencies"].is_object());
     assert!(schema["properties"]["add"]["items"]["properties"]["lane_dependencies"].is_object());
     assert!(
         schema["properties"]["update"]["items"]["properties"]

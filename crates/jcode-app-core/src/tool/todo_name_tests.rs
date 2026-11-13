@@ -212,7 +212,7 @@ fn public_schema_uses_names_and_descriptions_not_storage_fields() {
         ["items"]["items"];
     let add_item = &schema["properties"]["add"]["items"];
     let update_item = &schema["properties"]["update"]["items"];
-    for item in [phase_item, add_item, update_item] {
+    for item in [phase_item, add_item] {
         let properties = item["properties"].as_object().unwrap();
         assert!(properties.contains_key("name"));
         assert!(properties.contains_key("description"));
