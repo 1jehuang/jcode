@@ -87,7 +87,10 @@ fn draw_publishes_the_animated_rows_only_when_the_animation_rendered() {
     let area = crate::tui::ui::last_idle_animation_area()
         .expect("an idle screen must publish the animated rectangle");
     let frame_area = *terminal.backend().buffer().area();
-    assert!(area.width >= 4 && area.height >= 2, "degenerate area {area:?}");
+    assert!(
+        area.width >= 4 && area.height >= 2,
+        "degenerate area {area:?}"
+    );
     assert!(
         area.right() <= frame_area.right() && area.bottom() <= frame_area.bottom(),
         "animated rows {area:?} escaped the frame {frame_area:?}"
@@ -131,12 +134,27 @@ fn partial_repaint_matches_a_full_frame_at_the_same_animation_time() {
         patched.area, expected.area,
         "partial repaint changed the frame geometry"
     );
+
+    // The fast path only owns the animated rectangle, so only that rectangle
+    // is comparable. The rest of the buffer comes from two independent full
+    // renders, and those can legitimately differ between the draws: the
+    // header's account inventory loads from machine state in a background
+    // thread, so its row flips from "No auto-routing accounts" to real
+    // logins between frame 1 and frame 2 on machines with saved accounts.
+    // Out-of-area immutability is pinned separately by
+    // `advancing_the_animation_actually_changes_the_animated_rows`.
     let mismatches: Vec<_> = patched
         .content
         .iter()
         .zip(expected.content.iter())
         .enumerate()
-        .filter(|(_, (left, right))| left != right)
+        .filter(|(idx, (left, right))| {
+            let (x, y) = (
+                *idx as u16 % patched.area.width,
+                *idx as u16 / patched.area.width,
+            );
+            area.contains((x, y).into()) && left != right
+        })
         .map(|(idx, (l, r))| {
             (
                 idx as u16 % patched.area.width,
@@ -149,6 +167,86 @@ fn partial_repaint_matches_a_full_frame_at_the_same_animation_time() {
     assert!(
         mismatches.is_empty(),
         "partial repaint diverged from a full frame at {} cells: {:?}",
+        mismatches.len(),
+        &mismatches[..mismatches.len().min(8)]
+    );
+}
+
+#[test]
+fn partial_repaint_keeps_a_custom_light_theme_background_and_foreground() {
+    let _idle_animation = IdleAnimationEnvGuard::enable();
+    let _lock = viewport_snapshot_test_lock();
+    clear_flicker_frame_history_for_tests();
+
+    // A custom theme opts out of terminal adaptation: a full frame fills its
+    // explicit background and leaves its hand-picked colors alone. The partial
+    // path used to skip both rules, so animation ticks repainted those rows
+    // onto the terminal-default background and, in light mode, luminance-
+    // flipped foregrounds the theme never asked to flip.
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("paper.toml"),
+        "[colors]\nbackground = \"#E8E8E2\"\nuser = \"#30343A\"\n",
+    )
+    .expect("write theme");
+    jcode_tui_style::theme::set_theme("paper", Some(temp.path())).expect("load custom theme");
+    jcode_tui_style::set_theme_mode(jcode_tui_style::ThemeMode::Light);
+    assert_ne!(
+        jcode_tui_style::theme::background_color(),
+        ratatui::style::Color::Reset,
+        "the fixture must define an explicit background for the fill rule to matter"
+    );
+    // The active theme and mode are process-global; always restore them, even
+    // on panic, so sibling renders keep their assumptions.
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = jcode_tui_style::theme::set_theme("system", None);
+            jcode_tui_style::set_theme_mode(jcode_tui_style::ThemeMode::Dark);
+        }
+    }
+    let _restore = Restore;
+
+    // The partial repaint at t1 must reproduce the full frame at t1 cell for
+    // cell, including the theme background and unflipped foregrounds.
+    let first = render_full(&idle_animation_state(1.0), 100, 40);
+    let area = crate::tui::ui::last_idle_animation_area().expect("animated rectangle");
+    let mut patched = first.backend().buffer().clone();
+    crate::tui::ui::render_idle_animation_into(&mut patched, area, 1.5);
+
+    let second = render_full(&idle_animation_state(1.5), 100, 40);
+    let expected = second.backend().buffer();
+
+    // Same contract as the plain parity test above: compare the animated
+    // rectangle the partial repaint writes. Outside it, the two full renders
+    // can differ on their own (account inventory warm-up), and the colors
+    // this test pins live inside the rectangle anyway.
+    let mismatches: Vec<_> = patched
+        .content
+        .iter()
+        .zip(expected.content.iter())
+        .enumerate()
+        .filter(|(idx, (left, right))| {
+            let (x, y) = (
+                *idx as u16 % patched.area.width,
+                *idx as u16 / patched.area.width,
+            );
+            area.contains((x, y).into()) && left != right
+        })
+        .map(|(idx, (l, r))| {
+            (
+                idx as u16 % patched.area.width,
+                idx as u16 / patched.area.width,
+                l.fg,
+                l.bg,
+                r.fg,
+                r.bg,
+            )
+        })
+        .collect();
+    assert!(
+        mismatches.is_empty(),
+        "partial repaint lost the custom theme's colors at {} cells: {:?}",
         mismatches.len(),
         &mismatches[..mismatches.len().min(8)]
     );
@@ -490,11 +588,7 @@ fn copying_only_the_animated_rows_matches_cloning_the_whole_frame() {
                 // Call the real production helper, not a local reimplementation.
                 // A hand-rolled copy here would pass even if `copy_cells_in`
                 // were wrong, which defeats the point of the comparison.
-                crate::tui::app::idle_animation_repaint::copy_cells_in(
-                    &base,
-                    &mut optimized,
-                    area,
-                );
+                crate::tui::app::idle_animation_repaint::copy_cells_in(&base, &mut optimized, area);
             } else {
                 optimized = base.clone();
                 seeded = true;
@@ -514,18 +608,13 @@ fn copying_only_the_animated_rows_matches_cloning_the_whole_frame() {
 
         // A degenerate rectangle must not panic or write outside the buffer.
         let mut edge = base.clone();
-        crate::tui::ui::render_idle_animation_into(
-            &mut edge,
-            Rect::new(area.x, area.y, 0, 0),
-            1.0,
-        );
+        crate::tui::ui::render_idle_animation_into(&mut edge, Rect::new(area.x, area.y, 0, 0), 1.0);
         assert_eq!(
             edge, base,
             "an empty animation rectangle must leave the frame untouched"
         );
     }
 }
-
 
 /// `copy_cells_in` is what makes the animation-only repaint cheap: it copies just
 /// the animated rectangle instead of cloning the whole screen. Its correctness
@@ -565,10 +654,16 @@ fn copy_cells_in_copies_exactly_the_rectangle_and_nothing_else() {
 
     for y in 0..full.height {
         for x in 0..full.width {
-            let inside = x >= area.left() && x < area.right() && y >= area.top() && y < area.bottom();
-            let expected = if inside { &src[(x, y)] } else { &before[(x, y)] };
+            let inside =
+                x >= area.left() && x < area.right() && y >= area.top() && y < area.bottom();
+            let expected = if inside {
+                &src[(x, y)]
+            } else {
+                &before[(x, y)]
+            };
             assert_eq!(
-                &dst[(x, y)], expected,
+                &dst[(x, y)],
+                expected,
                 "cell ({x},{y}) {} the copied rectangle {area:?} is wrong: the \
                  animation-only repaint relies on copying exactly this region",
                 if inside { "inside" } else { "outside" }

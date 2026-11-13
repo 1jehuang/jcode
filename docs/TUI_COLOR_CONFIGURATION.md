@@ -40,6 +40,39 @@ apply immediately; no restart.
 | `/colors export` | Print the palette as config TOML |
 | `/colors reset [role]` | Reset one role, or all of them |
 
+## Themes and the `/theme` command
+
+Beyond individual color roles, jcode supports named themes: `system` (default, auto-detect terminal background), `light`, `dark`, and custom palettes you author yourself. Set the active theme with the `/theme` slash command or the `theme` key under `[display]` in `config.toml`.
+
+| Command / Value | Effect |
+| --- | --- |
+| `/theme` or `/theme show` | Display the current theme and available options |
+| `/theme light` | Force the light theme immediately |
+| `/theme dark` | Force the dark theme (explicit dark background fill) |
+| `/theme system` (alias `auto`) | Detect from the terminal background (OSC 11) |
+
+`/theme` writes to `display.theme` in `config.toml`, so the choice survives relaunches. The built-in `dark` theme fills an explicit dark background (`#12121a`) and input background, so the app stays readable even on terminals with a light default background. The `system` and `light` themes keep `Color::Reset` and rely on the buffer adapter instead.
+
+### Custom theme palettes
+
+You can create a named palette by dropping a TOML file in `~/.jcode/themes/<name>.toml` and selecting it with `/theme <name>` (or `theme = "<name>"` in config). The file is a single `[colors]` table mapping role names to `#rrggbb` hex strings:
+
+```toml
+# ~/.jcode/themes/my-theme.toml
+[colors]
+background = "#1a1a2e"
+user = "#8ab4f8"
+ai = "#81c784"
+accent = "#ba8bff"
+input_bg = "#1a1a2e"
+input_text = "#e0e0e0"
+border = "#444466"
+```
+
+Recognized color keys include: `background`, `user`, `ai`, `tool`, `file_link`, `dim`, `accent`, `selection_bg`, `input_bg`, `input_text`, and `border` (hyphens or underscores both accepted).
+
+A custom theme is an **explicit palette**: jcode does not run the terminal light/dark adaptation pass on it, so the colors you set are the colors the terminal receives. This opt-out is intentional — adapting hand-picked colors would invert them and surprise you. Only `system` and `light` go through the buffer adapter.
+
 ## How every color became configurable
 
 The TUI does not have one palette. It has ~22 named semantic roles plus roughly
