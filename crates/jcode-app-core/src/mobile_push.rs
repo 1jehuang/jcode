@@ -8,8 +8,9 @@ use crate::subscription_catalog::{
     DEFAULT_JCODE_API_BASE, JCODE_API_BASE_ENV, JCODE_API_KEY_ENV, JCODE_ENV_FILE,
 };
 use serde::Serialize;
-use std::collections::HashSet;
-use std::sync::Mutex;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Finished turns shorter than this do not push (user is likely watching).
@@ -17,6 +18,42 @@ pub const MIN_TURN_DURATION_FOR_PUSH: Duration = Duration::from_secs(20);
 /// Back-off after the API reports no registered devices.
 pub const NO_DEVICES_SUPPRESS: Duration = Duration::from_secs(10 * 60);
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
+// Allow the TUI's three-second automatic failover countdown to restart work.
+const ERROR_PUSH_GRACE: Duration = Duration::from_secs(10);
+static PENDING_ERRORS: Mutex<Option<HashMap<String, Arc<AtomicBool>>>> = Mutex::new(None);
+
+fn queue_pending_error(session_id: &str) -> Arc<AtomicBool> {
+    let token = Arc::new(AtomicBool::new(false));
+    if let Ok(mut pending) = PENDING_ERRORS.lock() {
+        if let Some(previous) = pending
+            .get_or_insert_with(HashMap::new)
+            .insert(session_id.to_owned(), token.clone())
+        {
+            previous.store(true, Ordering::Release);
+        }
+    }
+    token
+}
+
+fn finish_pending_error(session_id: &str, token: &Arc<AtomicBool>) -> bool {
+    if let Ok(mut pending) = PENDING_ERRORS.lock()
+        && let Some(map) = pending.as_mut()
+        && map
+            .get(session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, token))
+    {
+        map.remove(session_id);
+    }
+    !token.load(Ordering::Acquire)
+}
+
+fn cancel_pending_error(session_id: &str) {
+    if let Ok(mut pending) = PENDING_ERRORS.lock()
+        && let Some(token) = pending.as_mut().and_then(|map| map.remove(session_id))
+    {
+        token.store(true, Ordering::Release);
+    }
+}
 
 /// Timing labels are deliberately static, never payloads, URLs or errors.
 struct PushTiming {
@@ -785,10 +822,12 @@ fn is_ios_session(session_id: &str) -> bool {
 
 /// A user cancel was requested; the ending turn must not push.
 pub fn mark_cancelled(session_id: &str) {
+    cancel_pending_error(session_id);
     set_insert(&CANCELLED, session_id);
 }
 
 pub fn clear_cancelled(session_id: &str) {
+    cancel_pending_error(session_id);
     set_remove(&CANCELLED, session_id);
 }
 
@@ -883,22 +922,42 @@ pub fn notify_turn(
         &PushLabels::for_session(session_id, working_dir, elapsed),
     );
     let source = body.to_string();
-    if let Ok(mut guard) = REPEAT_ERRORS.lock() {
-        if payload.kind != PushKind::TurnError {
-            guard.clear(session_id);
-        } else if guard.is_repeat(session_id, &payload.body, Instant::now()) {
-            record(
-                requested,
-                Some(&payload),
-                &source,
-                "skipped",
-                Some("same error already pushed for this session (10 min quiet window)"),
-                None,
-            );
-            return;
-        }
-    }
+    let pending_error = if payload.kind == PushKind::TurnError {
+        Some(queue_pending_error(session_id))
+    } else {
+        cancel_pending_error(session_id);
+        None
+    };
     handle.spawn(async move {
+        if let Some(token) = pending_error {
+            tokio::time::sleep(ERROR_PUSH_GRACE).await;
+            if !finish_pending_error(&payload.session_id, &token) {
+                record(
+                    requested,
+                    Some(&payload),
+                    &source,
+                    "skipped",
+                    Some("session resumed or cancelled during error grace period"),
+                    None,
+                );
+                return;
+            }
+        }
+        if let Ok(mut guard) = REPEAT_ERRORS.lock() {
+            if payload.kind != PushKind::TurnError {
+                guard.clear(&payload.session_id);
+            } else if guard.is_repeat(&payload.session_id, &payload.body, Instant::now()) {
+                record(
+                    requested,
+                    Some(&payload),
+                    &source,
+                    "skipped",
+                    Some("same error already pushed for this session (10 min quiet window)"),
+                    None,
+                );
+                return;
+            }
+        }
         let Some((key, base)) = credentials() else {
             record(
                 requested,
@@ -1155,6 +1214,44 @@ mod http_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resumed_turn_cancels_pending_failure_push() {
+        let token = super::queue_pending_error("push-recovered-turn");
+        super::clear_cancelled("push-recovered-turn");
+        assert!(!super::finish_pending_error("push-recovered-turn", &token));
+    }
+
+    #[test]
+    fn resuming_one_session_does_not_hide_another_failure() {
+        let recovered = super::queue_pending_error("push-isolated-recovered");
+        let stopped = super::queue_pending_error("push-isolated-stopped");
+        super::clear_cancelled("push-isolated-recovered");
+        assert!(!super::finish_pending_error(
+            "push-isolated-recovered",
+            &recovered
+        ));
+        assert!(super::finish_pending_error(
+            "push-isolated-stopped",
+            &stopped
+        ));
+    }
+
+    #[test]
+    fn stopped_turn_keeps_failure_push() {
+        let token = super::queue_pending_error("push-stopped-turn");
+        assert!(super::finish_pending_error("push-stopped-turn", &token));
+    }
+
+    #[test]
+    fn stale_error_cannot_remove_new_failure_push() {
+        let old = super::queue_pending_error("push-replaced-turn");
+        let new = super::queue_pending_error("push-replaced-turn");
+        assert!(!super::finish_pending_error("push-replaced-turn", &old));
+        super::mark_cancelled("push-replaced-turn");
+        assert!(!super::finish_pending_error("push-replaced-turn", &new));
+        super::take_cancelled("push-replaced-turn");
+    }
+
     use super::*;
 
     #[test]
