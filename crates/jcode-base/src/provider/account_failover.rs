@@ -111,6 +111,8 @@ pub(super) fn same_provider_account_candidates(provider: ActiveProvider) -> Vec<
                 Some(label),
             )
             .is_none()
+                && multi_account_provider_kind(provider)
+                    .is_none_or(|kind| !crate::usage::account_known_exhausted(kind, label))
         })
         .collect()
 }
