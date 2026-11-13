@@ -142,6 +142,41 @@ fn background_turn_polls_todos_slowly_and_catches_up_on_focus() {
 }
 
 #[test]
+fn a_pushing_server_ends_the_periodic_todo_poll() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_session_id = Some("pushed-turn".into());
+    let payload = serde_json::json!({
+        "todos": [{"id":"lane", "content":"Lane", "priority":"high", "status":"pending"}],
+        "plan": {}, "goals": []
+    })
+    .to_string();
+    app.receive_remote_todos("pushed-turn".into(), payload);
+    app.toggle_todo_card();
+    app.is_processing = true;
+    let a_minute_ago = std::time::Instant::now() - std::time::Duration::from_secs(60);
+
+    app.remote_todos_requested_at = Some(a_minute_ago);
+    assert!(
+        app.remote_todos_refresh_due(),
+        "a server that does not push is still polled"
+    );
+
+    app.remote_todos_pushed = true;
+    app.remote_todos_requested_at = Some(a_minute_ago);
+    assert!(
+        !app.remote_todos_refresh_due(),
+        "a focused turn must not poll a server that pushes"
+    );
+
+    app.request_remote_todos_refresh_soon();
+    assert!(
+        app.remote_todos_refresh_due(),
+        "an explicit refresh still asks once"
+    );
+}
+
+#[test]
 fn ssh_todos_command_renders_remote_card() {
     if super::commands_dispatch::ssh_test_runs_in_child("ssh_todos_command_renders_remote_card") {
         return;

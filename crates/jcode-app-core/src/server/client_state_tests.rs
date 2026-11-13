@@ -51,7 +51,7 @@ async fn resume_todos_arrive_before_backpressured_large_history() {
     let elapsed = started.elapsed();
     let event: crate::protocol::ServerEvent = serde_json::from_str(&line).unwrap();
     assert!(
-        matches!(event, crate::protocol::ServerEvent::Todos { session_id: id, payload }
+        matches!(event, crate::protocol::ServerEvent::Todos { session_id: id, payload, .. }
         if id == session_id && payload.contains("Authoritative remote plan"))
     );
     assert!(

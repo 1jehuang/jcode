@@ -11,12 +11,26 @@ fn todos_request_and_snapshot_roundtrip() {
     let event = ServerEvent::Todos {
         session_id: "attached-session".into(),
         payload: payload.clone(),
+        pushes: false,
     };
     let encoded = serde_json::to_value(&event).unwrap();
     assert_eq!(encoded["type"], "todos");
+    // Older clients and daemons never see the field unless it is set.
+    assert!(encoded.get("pushes").is_none());
+    let pushing = serde_json::to_value(ServerEvent::Todos {
+        session_id: "attached-session".into(),
+        payload: payload.clone(),
+        pushes: true,
+    })
+    .unwrap();
+    assert_eq!(pushing["pushes"], true);
+    assert!(matches!(
+        serde_json::from_value::<ServerEvent>(pushing).unwrap(),
+        ServerEvent::Todos { pushes: true, .. }
+    ));
     let decoded: ServerEvent = serde_json::from_value(encoded).unwrap();
     assert!(
-        matches!(decoded, ServerEvent::Todos { session_id, payload: actual }
+        matches!(decoded, ServerEvent::Todos { session_id, payload: actual, pushes: false }
         if session_id == "attached-session" && actual == payload)
     );
 }

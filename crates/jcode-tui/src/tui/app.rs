@@ -1530,6 +1530,10 @@ pub struct App {
     /// session IDs from laptop-local todo storage.
     remote_todos_payload: Option<(String, String)>,
     remote_todos_requested_at: Option<Instant>,
+    /// The connected server sends a todo snapshot on every change, so no
+    /// periodic poll is needed. Learned from the snapshots themselves and
+    /// cleared on reconnect, since the next server may be an older build.
+    remote_todos_pushed: bool,
     /// Hash of the todo payload rendered into the inline chat todo card, used
     /// to keep the card live-updating while it stays in the transcript.
     todo_card_rendered_hash: u64,
