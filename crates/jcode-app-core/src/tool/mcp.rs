@@ -518,7 +518,7 @@ fn connection_config(
         }
         return configured.ok_or_else(|| anyhow::anyhow!("'command' or 'url' is required for connect action (server is not in the MCP config)"));
     }
-    if let Some(url) = params.url.as_deref() {
+    if params.url.is_some() {
         if params.args.is_some() || params.env.is_some() {
             anyhow::bail!("'args' and 'env' are only supported for stdio MCP servers");
         }
@@ -526,7 +526,7 @@ fn connection_config(
         if !matches!(transport, "http" | "streamable-http" | "sse") {
             anyhow::bail!("Remote 'transport' must be 'http', 'streamable-http', or 'sse'");
         }
-        validate_remote_url(url)?;
+        validate_remote_url(params.url.as_deref().expect("remote URL"))?;
     } else {
         if params
             .command
@@ -576,6 +576,10 @@ fn validate_remote_url(value: &str) -> Result<()> {
 pub struct McpManagementTool {
     manager: Arc<RwLock<McpManager>>,
     registry: Option<crate::tool::WeakRegistry>,
+    /// Optional channel to emit ServerEvent::McpStatus after a toggle so the
+    /// remote/client UI refreshes immediately. Set by the server path; the
+    /// local TUI path manages its own mcp_server_names from the manager.
+    event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::protocol::ServerEvent>>,
 }
 
 impl McpManagementTool {
@@ -583,12 +587,52 @@ impl McpManagementTool {
         Self {
             manager,
             registry: None,
+            event_tx: None,
         }
     }
 
     pub fn with_registry(mut self, registry: crate::tool::Registry) -> Self {
         self.registry = Some(registry.downgrade());
         self
+    }
+
+    /// Set the event channel so the tool can emit McpStatus updates after a
+    /// toggle. Used by the server/remote path; the local TUI path passes None
+    /// and refreshes from the manager directly. Accepts an Option so callers
+    /// that already hold one pass it through without an extra match.
+    pub fn with_event_tx(
+        mut self,
+        event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::protocol::ServerEvent>>,
+    ) -> Self {
+        self.event_tx = event_tx;
+        self
+    }
+
+    /// Emit an McpStatus event reflecting the currently connected servers and
+    /// their tool counts, so the UI refreshes after a toggle.
+    async fn emit_mcp_status(&self) {
+        let Some(tx) = &self.event_tx else {
+            return;
+        };
+        let manager = self.manager.read().await;
+        let servers = manager.connected_servers().await;
+        let all_tools = manager.all_tools().await;
+        let status: Vec<String> = servers
+            .iter()
+            .map(|name| {
+                let count = all_tools.iter().filter(|(s, _)| s == name).count();
+                format!("{}:{}", name, count)
+            })
+            .collect();
+        let server_count = status.len();
+        let servers_status = crate::protocol::ServerEvent::McpStatus { servers: status };
+        if tx.send(servers_status).is_err() {
+            // Client channel closed: the status refresh is best-effort.
+            crate::logging::event_info(
+                "mcp_status_send_dropped",
+                vec![("servers", server_count.to_string())],
+            );
+        }
     }
 }
 
@@ -609,8 +653,8 @@ impl Tool for McpManagementTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "enum": ["search", "call", "list", "connect", "disconnect", "reload", "status", "logout"],
-                    "description": "Action."
+                    "enum": ["search", "call", "list", "connect", "disconnect", "reload", "status", "logout", "enable", "disable"],
+                    "description": "Action. 'enable'/'disable' toggles whether a server's tools are injected into the prompt (persists to config)."
                 },
                 "server": {
                     "type": "string",
@@ -704,8 +748,10 @@ impl Tool for McpManagementTool {
             "login" => anyhow::bail!(
                 "Interactive MCP OAuth login is CLI-only. Run `jcode mcp login <configured-server>` in a terminal (add --no-browser to print the authorization URL). No browser was opened."
             ),
+            "enable" => self.toggle_server(params, true, &ctx.session_id).await,
+            "disable" => self.toggle_server(params, false, &ctx.session_id).await,
             _ => Ok(ToolOutput::new(format!(
-                "Unknown action: {}. Use 'search', 'call', 'list', 'connect', 'disconnect', 'reload', 'status', or 'logout'.",
+                "Unknown action: {}. Use 'search', 'call', 'list', 'connect', 'disconnect', 'reload', 'status', 'logout', 'enable', or 'disable'.",
                 params.action
             ))),
         };
@@ -739,13 +785,6 @@ impl Tool for McpManagementTool {
         }
 
         result
-    }
-}
-
-// Helper for tests to update cached server names
-impl McpManagementTool {
-    pub fn manager(&self) -> &Arc<RwLock<McpManager>> {
-        &self.manager
     }
 }
 
@@ -1186,6 +1225,153 @@ impl McpManagementTool {
         }
 
         Ok(ToolOutput::new(output).with_title("MCP: Reloaded"))
+    }
+
+    /// Enable or disable an MCP server in config. When enabling, the server is
+    /// connected and its tools registered. When disabling, the server is
+    /// disconnected and its tools unregistered. The change persists to
+    /// ~/.jcode/mcp.json so it survives restarts (opencode-style toggle).
+    ///
+    /// Persist, flip, reload, and (un)register work live in the shared
+    /// `mcp_toggle` service (jcode-base) so the tool and the TUI command
+    /// behave identically. A failed config save stops the toggle on both
+    /// paths: nothing is (dis)connected or (un)registered, and the tool
+    /// reports the failure instead of a toggle that does not hold.
+    async fn toggle_server(
+        &self,
+        params: McpToolInput,
+        enable: bool,
+        session_id: &str,
+    ) -> Result<ToolOutput> {
+        let server_name = params
+            .server
+            .ok_or_else(|| anyhow::anyhow!("'server' is required for enable/disable action"))?;
+
+        // Load current config, flip the enabled flag, persist to ~/.jcode/mcp.json.
+        let config = self.manager.read().await.load_fresh_config();
+        let (server_config, persistence) =
+            crate::mcp::mcp_toggle::persist_toggle(&config, &server_name, enable)?;
+
+        // A failed save means the toggle did not happen. Nothing below may
+        // mutate manager state: reloading the in-memory config from the
+        // unchanged file would keep the server enabled, `searchable_tools`
+        // would re-advertise its cached tools, and `mcp_call` could reconnect
+        // it, while the tool claimed the toggle applied. Stop here and report
+        // the failure, like the TUI path already does. (Greptile 4307539754)
+        if !persistence.save_ok {
+            let reason = persistence
+                .save_error
+                .clone()
+                .unwrap_or_else(|| "unknown error".to_string());
+            let action = if enable { "enable" } else { "disable" };
+            return Ok(ToolOutput::new(format!(
+                "Failed to {action} MCP server '{server_name}': config not saved ({reason}). \
+                 The server's enabled state is unchanged; fix the write error and retry.",
+            ))
+            .with_title(format!(
+                "MCP: {} {} failed (config not saved)",
+                server_name, action
+            )));
+        }
+
+        // Refresh the manager's in-memory config so subsequent operations
+        // (connect, list, connect_all) see the new enabled/disabled state
+        // instead of the stale cached copy from process start.
+        self.manager.write().await.reload_config();
+
+        let registry = self
+            .registry
+            .as_ref()
+            .and_then(|registry| registry.upgrade());
+
+        if enable {
+            // Connect the server and register its tools
+            let manager = self.manager.read().await;
+            let connected = manager.connected_servers().await;
+            if connected.contains(&server_name) {
+                drop(manager);
+                self.emit_mcp_status().await;
+                return Ok(ToolOutput::new(format!(
+                    "Server '{}' is already connected and enabled. {}",
+                    server_name,
+                    persistence.describe()
+                ))
+                .with_title(format!("MCP: {} already enabled", server_name)));
+            }
+            drop(manager);
+
+            let (tool_count, connect_error) = crate::mcp::mcp_toggle::connect_and_register(
+                &self.manager,
+                &server_name,
+                &server_config,
+                registry.as_ref().map(|r| r as _),
+            )
+            .await;
+
+            if let Some(error) = connect_error {
+                self.emit_mcp_status().await;
+                return Ok(ToolOutput::new(format!(
+                    "Server '{}' enabled in config but failed to connect: {}.\nUse 'reload' to retry. {}",
+                    server_name,
+                    error,
+                    persistence.describe()
+                ))
+                .with_title(format!("MCP: {} enabled (connect failed)", server_name)));
+            }
+
+            crate::logging::event_info(
+                "MCP_LIFECYCLE",
+                vec![
+                    ("phase", "server_enabled".to_string()),
+                    ("server", server_name.clone()),
+                    ("session_id", session_id.to_string()),
+                    ("tool_count", tool_count.to_string()),
+                ],
+            );
+
+            self.emit_mcp_status().await;
+
+            Ok(ToolOutput::new(format!(
+                "Enabled MCP server '{}'. Connected with {} tool(s). {}",
+                server_name,
+                tool_count,
+                persistence.describe()
+            ))
+            .with_title(format!("MCP: Enabled {}", server_name)))
+        } else {
+            // Disconnect the server and unregister its tools
+            crate::mcp::mcp_toggle::disconnect_and_unregister(
+                &self.manager,
+                &server_name,
+                registry.as_ref().map(|r| r as _),
+            )
+            .await;
+
+            crate::logging::event_info(
+                "MCP_LIFECYCLE",
+                vec![
+                    ("phase", "server_disabled".to_string()),
+                    ("server", server_name.clone()),
+                    ("session_id", session_id.to_string()),
+                ],
+            );
+
+            self.emit_mcp_status().await;
+
+            Ok(ToolOutput::new(format!(
+                "Disabled MCP server '{}'. Tools removed from prompt. {}",
+                server_name,
+                persistence.describe()
+            ))
+            .with_title(format!("MCP: Disabled {}", server_name)))
+        }
+    }
+}
+
+// Helper for tests to update cached server names
+impl McpManagementTool {
+    pub fn manager(&self) -> &Arc<RwLock<McpManager>> {
+        &self.manager
     }
 }
 
