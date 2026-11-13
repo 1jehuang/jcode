@@ -82,6 +82,7 @@ async fn main() -> Result<()> {
         tool_call_id: String::new(),
         working_dir: Some(workspace.clone()),
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: ToolExecutionMode::Direct,
     };
