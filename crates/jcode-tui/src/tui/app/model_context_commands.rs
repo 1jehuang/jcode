@@ -53,6 +53,23 @@ pub(in crate::tui::app) fn handle_model_command(app: &mut App, trimmed: &str) ->
         return true;
     }
 
+    if trimmed == "/model status" || trimmed == "/models status" {
+        let model = app.provider.model();
+        let context_window = app.provider.context_window();
+        let effort_raw = app.provider.reasoning_effort();
+        let effort = effort_raw
+            .as_deref()
+            .map(effort_display_label)
+            .unwrap_or("default");
+        let transport_raw = app.provider.transport();
+        let transport = transport_raw.as_deref().unwrap_or("unknown");
+        app.push_display_message(DisplayMessage::system(format!(
+            "Model: {}\nContext window: {:?} tokens\nReasoning effort: {}\nTransport: {}",
+            model, context_window, effort, transport
+        )));
+        return true;
+    }
+
     if let Some(model_name) = trimmed.strip_prefix("/model ") {
         app.record_keybinding_slow(crate::tui::app::shortcut_hints::LearnableAction::ModelSwitch);
         let model_name = model_name.trim();
