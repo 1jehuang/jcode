@@ -277,6 +277,10 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                     println!("Jcode server is running.");
                 }
             }
+            ServerCommand::ExecWorker => {
+                crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
+                crate::tool::remote_exec::run_worker_stdio().await?;
+            }
             ServerCommand::Keepalive => {
                 run_server_keepalive(
                     &args.provider,

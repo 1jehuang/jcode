@@ -718,6 +718,11 @@ pub(crate) enum ServerCommand {
     #[command(hide = true)]
     Stdio,
 
+    /// Internal: serve workspace tool calls over stdin/stdout for a runtime
+    /// that runs elsewhere (`JCODE_EXEC_WORKER`). Holds no model credentials.
+    #[command(hide = true)]
+    ExecWorker,
+
     /// Start the background server if it is not already running.
     Start {
         /// Emit JSON instead of human-readable text
