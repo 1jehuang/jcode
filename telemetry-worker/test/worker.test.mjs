@@ -727,6 +727,28 @@ test("hourly retention escalates bulk pressure without shortening main windows",
   assert.deepEqual(windows(bulk), ["-30 days", "-15 days"]);
 });
 
+test("split main skips bulk-only todo details but keeps parent and legacy retention", async () => {
+  const db = makeDb();
+  const bulk = makeDb();
+  const splitCtx = makeCtx();
+  await worker.scheduled({ cron: "17 0-3,5-23 * * *" }, { DB: db, DB_BULK: bulk }, splitCtx);
+  await Promise.all(splitCtx.waited);
+  const todoDetails = (store) => store.executed.filter(({ sql }) => /DELETE FROM todo_session_details/.test(sql));
+  const todoParents = (store) => store.executed.filter(({ sql, values }) => /DELETE FROM events/.test(sql)
+    && values[0] === "todo_session");
+  assert.equal(todoDetails(db).length, 0, "split main has no optional todo detail table");
+  assert.equal(todoDetails(bulk).length, 1, "bulk still cleans detail children");
+  assert.equal(todoParents(db).length, 1, "split main still cleans raw parent rows");
+  assert.equal(todoParents(bulk).length, 1);
+
+  const legacy = makeDb();
+  const legacyCtx = makeCtx();
+  await worker.scheduled({ cron: "17 0-3,5-23 * * *" }, { DB: legacy }, legacyCtx);
+  await Promise.all(legacyCtx.waited);
+  assert.equal(todoDetails(legacy).length, 1, "unsplit legacy still cleans detail children");
+  assert.equal(todoParents(legacy).length, 1);
+});
+
 test("missing waitUntil does not consume the database emergency cooldown", async () => {
   const env = { DB: makeDb({ sizeAfter: 8_100_000_000 }) };
   await worker.fetch(postRequest(makeBody()), env);

@@ -1090,7 +1090,9 @@ async function pruneOldEvents(env, options = {}) {
           console.warn(`desktop_update_details prune failed`, err?.message || err);
         }
       }
-      if (eventType === "todo_session") {
+      // Split main databases never had this bulk-only detail table. Legacy
+      // unsplit databases and the bulk binding still need child cleanup.
+      if (eventType === "todo_session" && (env.DB_MAIN || !env.DB_BULK)) {
         try {
           await env.DB.prepare(
             `DELETE FROM todo_session_details WHERE event_id IN (
