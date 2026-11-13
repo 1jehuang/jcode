@@ -12,7 +12,8 @@ pub enum ColorCapability {
 
 static CAPABILITY: OnceLock<ColorCapability> = OnceLock::new();
 
-/// Test-only override for [`color_capability`]. 0 = none, 1 = truecolor.
+/// Test-only override for [`color_capability`]. 0 = none, 1 = truecolor,
+/// 2 = 256-color.
 ///
 /// A `OnceLock` first-init pin is not enough here: in a full test run some
 /// earlier test has usually already initialized `CAPABILITY` from the host
@@ -21,10 +22,11 @@ static CAPABILITY: OnceLock<ColorCapability> = OnceLock::new();
 static CAPABILITY_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 pub fn color_capability() -> ColorCapability {
-    if CAPABILITY_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed) == 1 {
-        return ColorCapability::TrueColor;
+    match CAPABILITY_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => ColorCapability::TrueColor,
+        2 => ColorCapability::Color256,
+        _ => *CAPABILITY.get_or_init(detect_color_capability),
     }
-    *CAPABILITY.get_or_init(detect_color_capability)
 }
 
 /// Pin the process-global color capability to truecolor.
@@ -38,6 +40,15 @@ pub fn color_capability() -> ColorCapability {
 /// and unreachable in production, where nothing calls this.
 pub fn pin_truecolor_for_tests() {
     CAPABILITY_OVERRIDE.store(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Pin the process-global color capability to 256-color, mirroring
+/// [`pin_truecolor_for_tests`]. Tests that assert on quantized rendering
+/// (theme snapshot colors must match what `rgb()` emits on a 256-color
+/// terminal) use this so the frame under test does not depend on the host's
+/// `COLORTERM`/`TERM`.
+pub fn pin_color256_for_tests() {
+    CAPABILITY_OVERRIDE.store(2, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Terminals whose GPU glyph atlas corrupts under heavy per-cell *truecolor*
