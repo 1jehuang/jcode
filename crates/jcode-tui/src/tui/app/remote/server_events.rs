@@ -2627,6 +2627,10 @@ fn handle_server_event_inner(
                     Some((name.to_string(), count))
                 })
                 .collect();
+            app.mcp_config = crate::mcp::McpConfig::load_for_dir(
+                app.session.working_dir.as_deref().map(std::path::Path::new),
+            );
+            app.command_suggestions_cache.replace(None);
             // Keep MCP readiness non-intrusive. The footer/tool indicator reads
             // `mcp_server_names` directly, so avoid a transient status notice here:
             // status notices render near the prompt and can cover text while the
