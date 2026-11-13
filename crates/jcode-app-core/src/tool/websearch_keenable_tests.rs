@@ -5,8 +5,10 @@ const ENDPOINTS: (&str, &str) = (
     "https://keyed.test/v1/search",
 );
 
+// Tests talk to a local server, so ignore HTTP_PROXY/ALL_PROXY from the environment.
 fn client() -> reqwest::Client {
     reqwest::Client::builder()
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap()
