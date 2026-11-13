@@ -715,6 +715,21 @@ fn known_no_tool_models_do_not_advertise_tools() {
 }
 
 #[test]
+fn zai_glm_models_advertise_native_tools() {
+    for model in [
+        "zai.glm-5",
+        "zai.glm-5.3",
+        "zai.glm-4.7",
+        "zai.glm-4.7-flash",
+    ] {
+        assert!(
+            BedrockProvider::model_info(model).supports_tools,
+            "{model} should send toolConfig"
+        );
+    }
+}
+
+#[test]
 fn error_classification_mentions_model_access() {
     let message = BedrockProvider::classify_error_message(
         "ValidationException: The provided model identifier is invalid",

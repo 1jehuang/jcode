@@ -942,12 +942,23 @@ impl BedrockProvider {
                 supports_reasoning: false,
                 pricing: Some((4_000_000, 12_000_000)),
             }
+        } else if id.starts_with("zai.") {
+            // Z.AI GLM models implement native Converse tool use (toolConfig in,
+            // toolUse blocks out with stopReason=tool_use). Without toolConfig the
+            // model improvises `<tool_call>` text that the agent cannot execute.
+            BedrockModelInfo {
+                context_tokens: DEFAULT_CONTEXT_LIMIT,
+                max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                supports_tools: true,
+                supports_vision: false,
+                supports_reasoning: false,
+                pricing: None,
+            }
         } else if id.starts_with("openai.")
             || id.starts_with("qwen.")
             || id.starts_with("moonshot.")
             || id.starts_with("moonshotai.")
             || id.starts_with("minimax.")
-            || id.starts_with("zai.")
             || id.starts_with("google.")
             || id.starts_with("nvidia.")
             || id.starts_with("writer.")
