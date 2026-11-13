@@ -5,6 +5,8 @@
 // so it can be exercised without wrangler by passing mocks.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
+import { readFileSync } from "node:fs";
 
 import worker from "../src/worker.js";
 
@@ -138,7 +140,8 @@ function makeDb(plan = {}) {
               if (plan.failInserts && /^INSERT/i.test(sql.trim())) {
                 throw new Error(plan.failureMessage || "generic transient error");
               }
-              return { meta: { changes: /^DELETE/i.test(sql.trim()) ? (plan.deleteChanges ?? 0) : 1, size_after: sizeAfter } };
+              return { meta: { changes: /^DELETE/i.test(sql.trim()) ? (plan.deleteChanges ?? 0)
+                : /^UPDATE/i.test(sql.trim()) ? (plan.updateChanges ?? 1) : 1, size_after: sizeAfter } };
             },
             async all() {
               executed.push({ sql, values });
@@ -725,6 +728,51 @@ test("hourly retention escalates bulk pressure without shortening main windows",
     .map(({ values }) => values[1]);
   assert.deepEqual(windows(db), ["-30 days"]);
   assert.deepEqual(windows(bulk), ["-30 days", "-15 days"]);
+});
+
+test("attribution redaction uses bounded detail-driven indexed lookups on the real schema", async () => {
+  const mock = makeDb({ updateChanges: 10000 });
+  const ctx = makeCtx();
+  await worker.scheduled({ cron: "17 0-3,5-23 * * *" }, { DB: mock }, ctx);
+  await Promise.all(ctx.waited);
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec(readFileSync(new URL("../schema.sql", import.meta.url), "utf8"));
+    for (const table of ["web_details", "install_details"]) {
+      const updates = mock.executed.filter(({ sql }) => sql.startsWith(`UPDATE ${table} SET conversion_id`));
+      assert.equal(updates.length, 2, "redaction has a bounded per-table batch budget");
+      const { sql, values } = updates[0];
+      assert.deepEqual(values, ["-90 days", 10000]);
+      const plan = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...values).map(({ detail }) => detail);
+      assert.ok(plan.some((detail) => detail.includes(`idx_${table}_conversion_id`)), plan.join("\n"));
+      assert.ok(plan.some((detail) => /SEARCH events(?: EXISTS)? USING INDEX idx_events_event_id/.test(detail)), plan.join("\n"));
+      assert.ok(!plan.some((detail) => /SCAN events|idx_events_created_at/.test(detail)), plan.join("\n"));
+      console.log(`${table} attribution query plan: ${plan.join(" | ")}`);
+
+      for (let index = 0; index < 4; index++) {
+        const id = `${table}-${index}`;
+        db.prepare(`INSERT INTO events (telemetry_id, event, version, os, arch, event_id, created_at)
+          VALUES ('test', 'install', 'test', 'linux', 'x86_64', ?, datetime('now', ?))`).run(id, index === 3 ? "-1 day" : "-100 days");
+        db.prepare(`INSERT INTO ${table} (event_id, conversion_id) VALUES (?, 'conversion')`).run(id);
+      }
+      const update = db.prepare(sql);
+      assert.equal(update.run("-90 days", 2).changes, 2, "one statement never exceeds its batch limit");
+      assert.equal(update.run("-90 days", 2).changes, 1);
+      assert.equal(update.run("-90 days", 2).changes, 0);
+      assert.equal(db.prepare(`SELECT conversion_id FROM ${table} WHERE event_id = ?`).get(`${table}-3`).conversion_id,
+        "conversion", "fresh attribution remains intact");
+      assert.equal(db.prepare(`SELECT count(*) AS n FROM ${table}`).get().n, 4, "redaction does not delete details");
+    }
+    for (const { sql, values } of mock.executed.filter(({ sql, values }) => /^DELETE FROM (events|turn_details|session_details)/.test(sql)
+      && values[0] === "turn_end")) {
+      const plan = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...values).map(({ detail }) => detail);
+      assert.ok(plan.some((detail) => /SEARCH events USING (COVERING )?INDEX idx_events_event_created_telemetry/.test(detail)), plan.join("\n"));
+      assert.ok(!plan.some((detail) => /^SCAN events/.test(detail)), plan.join("\n"));
+      console.log(`retention delete query plan: ${plan.join(" | ")}`);
+    }
+  } finally {
+    db.close();
+  }
 });
 
 test("split main skips bulk-only todo details but keeps parent and legacy retention", async () => {

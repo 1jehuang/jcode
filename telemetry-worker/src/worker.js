@@ -1034,13 +1034,21 @@ async function pruneOldEvents(env, options = {}) {
   // install anchors, but sever the browser <-> CLI join after 90 days.
   for (const table of ["web_details", "install_details"]) {
     try {
-      await env.DB.prepare(
-        `UPDATE ${table} SET conversion_id = NULL WHERE conversion_id IS NOT NULL
-         AND event_id IN (
-           SELECT event_id FROM events
-           WHERE created_at < datetime('now', ?) AND event_id IS NOT NULL
-         )`
-      ).bind(linkageCutoff).run();
+      for (let batch = 0; batch < maxBatches; batch++) {
+        // Drive this from the small, partially indexed detail table. An IN
+        // subquery over old events materializes millions of unrelated IDs.
+        const result = await env.DB.prepare(
+          `UPDATE ${table} SET conversion_id = NULL WHERE rowid IN (
+             SELECT detail.rowid FROM ${table} AS detail
+             WHERE detail.conversion_id IS NOT NULL AND EXISTS (
+               SELECT 1 FROM events
+               WHERE events.event_id = detail.event_id
+                 AND events.created_at < datetime('now', ?)
+             ) LIMIT ?
+           )`
+        ).bind(linkageCutoff, PRUNE_BATCH_LIMIT).run();
+        if ((result?.meta?.changes ?? result?.changes ?? 0) < PRUNE_BATCH_LIMIT) break;
+      }
     } catch (err) {
       console.warn(`${table} attribution redaction failed`, err?.message || err);
     }
