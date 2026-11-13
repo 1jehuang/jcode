@@ -424,6 +424,31 @@ fn session_rename_subcommand_parses() {
 }
 
 #[test]
+fn session_export_subcommand_parses() {
+    let args = Args::try_parse_from(["jcode", "session", "export", "fox"]).unwrap();
+    match args.command {
+        Some(Command::Session(SessionCommand::Export { session, output })) => {
+            assert_eq!(session, "fox");
+            assert!(output.is_none());
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+
+    let args =
+        Args::try_parse_from(["jcode", "session", "export", "fox", "notes/release.md"]).unwrap();
+    match args.command {
+        Some(Command::Session(SessionCommand::Export { session, output })) => {
+            assert_eq!(session, "fox");
+            assert_eq!(
+                output.as_deref(),
+                Some(std::path::Path::new("notes/release.md"))
+            );
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+}
+
+#[test]
 fn cloud_sessions_subcommands_parse() {
     let args = Args::try_parse_from([
         "jcode",

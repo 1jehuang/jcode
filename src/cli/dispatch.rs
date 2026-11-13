@@ -7,8 +7,7 @@ use std::time::Instant;
 
 use super::args::{
     AmbientCommand, Args, AuthCommand, CloudCommand, CloudSessionsCommand, Command, MemoryCommand,
-    ModelCommand, ProviderCommand, RestartCommand, ServerCommand, SessionCommand,
-    TranscriptModeArg,
+    ModelCommand, ProviderCommand, RestartCommand, ServerCommand, TranscriptModeArg,
 };
 use crate::{
     agent, auth, build, provider, provider_catalog, server, session, setup_hints, startup_profile,
@@ -16,8 +15,8 @@ use crate::{
 };
 
 use super::{
-    account, acp, commands, debug, hot_exec, login, output, provider_init, selfdev, terminal,
-    tui_launch,
+    account, acp, commands, debug, hot_exec, login, output, provider_init, selfdev, session_export,
+    terminal, tui_launch,
 };
 use provider_init::ProviderChoice;
 
@@ -455,14 +454,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Memory(subcmd)) => {
             commands::run_memory_command(map_memory_subcommand(subcmd)).await?;
         }
-        Some(Command::Session(subcmd)) => match subcmd {
-            SessionCommand::Rename {
-                session,
-                name,
-                clear,
-                json,
-            } => commands::run_session_rename_command(&session, name.as_deref(), clear, json)?,
-        },
+        Some(Command::Session(subcmd)) => session_export::run_session_command(subcmd)?,
         Some(Command::Ambient(subcmd)) => {
             commands::run_ambient_command(map_ambient_subcommand(subcmd)).await?;
         }
