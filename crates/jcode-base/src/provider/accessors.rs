@@ -58,6 +58,52 @@ impl MultiProvider {
         ProviderRegistry::new(self).active_openrouter_execution()
     }
 
+    /// The key runtime image-input capability records (rejections *and*
+    /// lookups) use for `provider`'s active runtime.
+    ///
+    /// Providers other than OpenRouter have one runtime per slot, so the
+    /// stable slot key identifies them. The OpenRouter slot multiplexes
+    /// several distinct endpoints (real OpenRouter, named OpenAI-compatible
+    /// profiles, direct endpoints) behind one `name()`, and two of those
+    /// endpoints can serve the same model name with *different* image
+    /// capabilities, so the record/lookup key must be the concrete runtime's
+    /// [`Provider::capability_scope`] (profile id or endpoint base) instead
+    /// of the bare slot key. Falls back to the slot key when no runtime is
+    /// installed or the runtime offers no scope.
+    pub(super) fn capability_key_for(&self, provider: ActiveProvider) -> String {
+        if provider == ActiveProvider::OpenRouter
+            && let Some(scope) = self
+                .active_openrouter_execution_provider()
+                .and_then(|runtime| runtime.capability_scope())
+        {
+            return scope;
+        }
+        Self::provider_key(provider).to_string()
+    }
+
+    /// The model string the runtime for `provider` is currently serving, used
+    /// to scope image-input rejection records to the same (key, model) pair
+    /// the lookup side checks. Empty when no runtime is installed; the
+    /// recording is then skipped harmlessly.
+    pub(super) fn provider_model_for(&self, provider: ActiveProvider) -> String {
+        let runtime: Option<Arc<dyn Provider>> = match provider {
+            ActiveProvider::Claude => self.anthropic_provider(),
+            ActiveProvider::OpenAI => self.openai_provider(),
+            ActiveProvider::Copilot => self.copilot_provider(),
+            ActiveProvider::Antigravity => self.antigravity_provider(),
+            ActiveProvider::Gemini => self.gemini_provider(),
+            ActiveProvider::Cursor => self.cursor_provider(),
+            ActiveProvider::Bedrock => self
+                .bedrock_provider()
+                .map(|runtime| runtime as Arc<dyn Provider>),
+            ActiveProvider::OpenRouter => self.active_openrouter_execution_provider(),
+        };
+        match runtime {
+            Some(runtime) => runtime.model(),
+            None => String::new(),
+        }
+    }
+
     pub(super) fn clear_active_openai_compatible_profile(&self) {
         ProviderRegistry::new(self).clear_active_compatible_profile();
     }

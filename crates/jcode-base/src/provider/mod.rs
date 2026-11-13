@@ -19,6 +19,16 @@ mod failover;
 mod fingerprint;
 pub mod gemini;
 mod image_clamp;
+#[cfg(test)]
+mod image_capability {
+    //! Test-facing re-exports: `provider/tests.rs` drives the modality
+    //! recovery paths through `super::image_capability` so the tests exercise
+    //! the same facade the production failover path goes through.
+    pub use jcode_provider_core::image_capability::{
+        clear_image_input_overrides_for_provider, image_input_rejected,
+        record_image_input_rejection,
+    };
+}
 pub mod jcode;
 pub mod models;
 mod multi_provider;
@@ -130,6 +140,16 @@ pub(crate) fn new_bedrock_provider() -> bedrock::BedrockProvider {
     let provider = bedrock::BedrockProvider::new();
     promote_bedrock_placeholder_default(&provider);
     provider
+}
+
+/// Whether any message in the request carries an image block. Cheap pre-scan
+/// for the modality-rejection retry path so non-image requests never pay for
+/// the capability bookkeeping.
+fn messages_contain_images(messages: &[Message]) -> bool {
+    messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .any(|block| matches!(block, crate::message::ContentBlock::Image { .. }))
 }
 
 /// Register the live agent provider so background helpers (memory sidecar) can
@@ -546,6 +566,96 @@ impl MultiProvider {
 
     /// Retry only before the stream is accepted, never replay partial output.
     async fn complete_with_auto_reset(
+        &self,
+        provider: ActiveProvider,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        mode: CompletionMode<'_>,
+        resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let mut may_reset = true;
+        loop {
+            let attempt = match mode {
+                CompletionMode::Unified { system } => {
+                    self.complete_on_provider(provider, messages, tools, system, resume_session_id)
+                        .await
+                }
+                CompletionMode::Split {
+                    system_static,
+                    system_dynamic,
+                } => {
+                    self.complete_split_on_provider(
+                        provider,
+                        messages,
+                        tools,
+                        system_static,
+                        system_dynamic,
+                        resume_session_id,
+                    )
+                    .await
+                }
+            };
+            let attempt = self.await_account_stream_start(provider, attempt).await;
+            if let Err(err) = &attempt
+                && messages_contain_images(messages)
+                && jcode_provider_core::image_capability::error_indicates_image_rejection(
+                    &err.to_string(),
+                )
+            {
+                // Record under the same capability-scoped key the lookups
+                // use (concrete runtime identity for the multiplexed
+                // OpenRouter slot), so a text-only endpoint's rejection never
+                // suppresses images for a vision-capable endpoint serving the
+                // same model name behind the same provider slot.
+                jcode_provider_core::image_capability::record_image_input_rejection(
+                    Some(self.capability_key_for(provider).as_str()),
+                    &self.provider_model_for(provider),
+                    &err.to_string(),
+                );
+                crate::logging::warn(&format!(
+                    "Provider {} rejected image input for this model; \
+                     retrying once with images replaced by text markers",
+                    Self::provider_label(provider)
+                ));
+                if let Some(filtered) =
+                    image_clamp::filter_unsupported_outbound_images(messages, false)
+                {
+                    return self
+                        .complete_with_auto_reset_filtered(
+                            provider,
+                            &filtered,
+                            tools,
+                            mode,
+                            resume_session_id,
+                        )
+                        .await;
+                }
+                return attempt;
+            }
+            if may_reset
+                && let Err(error) = &attempt
+                && Self::classify_failover_error(error).should_mark_provider_unavailable()
+                && self
+                    .try_auto_banked_reset(
+                        provider,
+                        &Self::summarize_error(error),
+                        messages,
+                        tools,
+                        mode,
+                    )
+                    .await?
+            {
+                may_reset = false;
+                continue;
+            }
+            return attempt;
+        }
+    }
+
+    /// Same auto-reset loop as [`Self::complete_with_auto_reset`], but for the
+    /// image-filtered replay pass: the filtered snapshot already replaces
+    /// image blocks, so a second modality rejection here is terminal.
+    async fn complete_with_auto_reset_filtered(
         &self,
         provider: ActiveProvider,
         messages: &[Message],
@@ -2109,7 +2219,24 @@ impl Provider for MultiProvider {
     }
 
     fn supports_image_input(&self) -> bool {
-        match self.active_provider() {
+        // A recorded runtime rejection is authoritative: the endpoint told us
+        // this exact model cannot accept images, so both the outbound filter
+        // and the turn loops must treat it as text-only even when the static
+        // capability answer (default-true for direct OpenAI-compatible
+        // endpoints) disagrees. The lookup is scoped the same way the
+        // record is (concrete runtime identity for the multiplexed
+        // OpenRouter slot), so a rejection on one endpoint never suppresses
+        // images for another endpoint serving the same model name.
+        let active = self.active_provider();
+        let key = self.capability_key_for(active);
+        if jcode_provider_core::image_capability::image_input_rejected(
+            &key,
+            &self.provider_model_for(active),
+        ) {
+            return false;
+        }
+
+        match active {
             ActiveProvider::Claude => self
                 .anthropic_provider()
                 .map(|provider| provider.supports_image_input())
@@ -2310,9 +2437,16 @@ impl Provider for MultiProvider {
             );
         }
 
+        // A runtime image-input rejection is scoped to the model that earned
+        // it: a successful switch gives the new model a fresh capability
+        // answer. The clear is deferred until the switch succeeds, because a
+        // FAILED switch leaves the previous model active, and wiping its
+        // capability restriction would let the very next request ship pixels
+        // to the endpoint that just rejected them.
+        let previous_capability_key = self.capability_key_for(self.active_provider());
         // Detect which provider an unprefixed model belongs to.
         let target_provider = provider_for_model(model);
-        if let Some(target_provider) = target_provider
+        let result = if let Some(target_provider) = target_provider
             && let Some(target) = provider_from_model_key(target_provider)
         {
             self.set_model_on_provider(target, model)
@@ -2326,7 +2460,13 @@ impl Provider for MultiProvider {
         } else {
             // Unknown model - try current provider.
             self.set_model_on_provider(self.active_provider(), model)
+        };
+        if result.is_ok() {
+            jcode_provider_core::image_capability::clear_image_input_overrides_for_provider(
+                &previous_capability_key,
+            );
         }
+        result
     }
 
     fn set_route_selection(&self, selection: &RouteSelection) -> Result<()> {
