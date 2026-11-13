@@ -209,6 +209,11 @@ pub(super) async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    // A started copy sequence (e.g. Ctrl+X then Ctrl+Y) beats offer accept keys.
+    if crate::tui::app::copy_last_response::handle_key_if_pending(app, code, modifiers) {
+        return Ok(());
+    }
+
     // Accept an armed post-error fallback offer: stage the route switch and
     // resend so the remote dispatcher applies it (SetRoute + payload resend).
     // Checked before the merge offer to match the local key-handling order

@@ -8,6 +8,28 @@ use jcode_tui_messages::DisplayMessage;
 
 const NO_ANSWER_NOTICE: &str = "No answer to copy yet";
 
+/// Drop sentinel-wrapped reasoning lines and keep remaining bytes as-is,
+/// including blank lines and trailing whitespace in the answer itself.
+fn strip_reasoning_for_copy(content: &str) -> String {
+    let sentinel = jcode_tui_markdown::REASONING_SENTINEL;
+    if !content.contains(sentinel) {
+        return content.to_string();
+    }
+    let mut out = String::with_capacity(content.len());
+    let mut wrote = false;
+    for line in content.split('\n') {
+        if line.contains(sentinel) {
+            continue;
+        }
+        if wrote {
+            out.push('\n');
+        }
+        wrote = true;
+        out.push_str(line);
+    }
+    out
+}
+
 /// Markdown text of the latest assistant message, as the model wrote it.
 ///
 /// Skips reasoning (sentinel-wrapped lines and dedicated reasoning messages)
@@ -18,7 +40,7 @@ pub(super) fn last_assistant_answer_text(messages: &[DisplayMessage]) -> Option<
         if msg.effective_role() != "assistant" {
             return None;
         }
-        let text = super::input::strip_reasoning_lines(&msg.content);
+        let text = strip_reasoning_for_copy(&msg.content);
         if text.trim().is_empty() {
             None
         } else {
@@ -59,4 +81,16 @@ pub(crate) fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) 
         SequenceMatch::Prefix => true,
         SequenceMatch::None => false,
     }
+}
+
+/// Feed the copy sequence only when a prefix is already pending.
+///
+/// Fallback/merge offers share Ctrl+Y with the default copy chord. A started
+/// sequence (Ctrl+X already fed) must complete the copy instead of accepting
+/// the offer. Standalone Ctrl+Y still accepts an offer when nothing is pending.
+pub(crate) fn handle_key_if_pending(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    if !app.toggle_keys.copy_last_response.is_pending() {
+        return false;
+    }
+    handle_key(app, code, modifiers)
 }

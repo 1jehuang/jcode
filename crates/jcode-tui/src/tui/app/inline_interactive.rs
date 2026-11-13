@@ -2607,8 +2607,8 @@ impl App {
             return;
         }
         let current_dir = self.session.working_dir.clone();
-        // Even the cached list can contain tens of MB of search text. Never
-        // deserialize it on the input thread before showing the overlay.
+        // Cached lists can be tens of MB; never deserialize on the input thread.
+        self.toggle_keys.copy_last_response.clear();
         let mut picker = SessionPicker::loading();
         picker.set_current_dir(current_dir);
         picker.set_current_session_id(Some(super::commands::active_session_id(self)));

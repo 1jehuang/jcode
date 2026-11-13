@@ -3150,10 +3150,7 @@ impl App {
             return Ok(());
         }
 
-        // Inline hotkey feedback: when a known-but-rarely-used chord is pressed,
-        // show "you just pressed X → does Y". Placed after the modal/overlay
-        // handlers so overlay-local keys stay silent. Unknown chords are
-        // reported at the fall-through points below.
+        // Known-chord feedback after overlays so overlay keys stay silent.
         self.observe_known_hotkey(code, modifiers, false);
 
         if code == KeyCode::BackTab {
@@ -3161,11 +3158,7 @@ impl App {
             return Ok(());
         }
 
-        // While the model picker preview is visible, route its favorite/default
-        // hotkeys (Ctrl+O set default, Ctrl+N toggle favorite) to the focused
-        // picker handler before the global control shortcuts can claim them. This
-        // makes the hotkeys work directly in the preview list the user always
-        // sees, without colliding with the readline/tmux keys (Ctrl+B/Ctrl+F).
+        // Model-picker favorite/default hotkeys beat global control shortcuts.
         if self.model_picker_preview_hotkey(code, modifiers)? {
             return Ok(());
         }
@@ -3174,8 +3167,12 @@ impl App {
             return Ok(());
         }
 
-        // Accept an armed post-error fallback offer: switch to the next best
-        // model/auth-method and resend the failed turn.
+        // A started copy sequence (e.g. Ctrl+X then Ctrl+Y) beats offer accept keys.
+        if super::copy_last_response::handle_key_if_pending(self, code, modifiers) {
+            return Ok(());
+        }
+
+        // Accept an armed fallback offer and resend the failed turn.
         if self.pending_fallback_offer.is_some()
             && !self.is_processing
             && self.fallback_switch_key_matches(code, modifiers)
@@ -3184,8 +3181,7 @@ impl App {
             return Ok(());
         }
 
-        // Accept an armed "merge the diverged update" offer: spawn a jcode agent
-        // to reconcile the branches. Shares the fallback-switch accept key.
+        // Accept an armed merge-update offer (same accept key as fallback).
         if self.merge_offer_key_matches(code, modifiers) {
             self.accept_update_merge_offer();
             return Ok(());

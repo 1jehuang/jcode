@@ -3,11 +3,6 @@
 // come from sibling includes.
 use jcode_tui_markdown::REASONING_SENTINEL;
 
-fn clipboard_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 #[test]
 fn copy_last_response_default_is_unbound_and_ctrl_x_ctrl_y_is_recognized() {
     use crate::tui::keybind::{ChordSequence, SequenceMatch};
@@ -63,7 +58,7 @@ fn copy_last_answer_text_strips_in_message_reasoning_prefix() {
     let msg = DisplayMessage::assistant(content);
     assert_eq!(
         last_assistant_answer_text(&[msg]),
-        Some("The real answer is 42.".to_string())
+        Some("\nThe real answer is 42.".to_string())
     );
 }
 
@@ -96,8 +91,8 @@ fn copy_last_answer_notice_uses_thousands_separators() {
 
 #[test]
 fn copy_last_answer_writes_test_clipboard_and_reports_character_count() {
-    let _clip = clipboard_test_lock();
-    crate::tui::app::helpers::capture_clipboard_for_tests();
+    let _render_lock = scroll_render_test_lock();
+    let clipboard = CapturedClipboard::new();
     let mut app = create_test_app();
     let answer = "# Hello\n\nUse `code` here.";
     app.push_display_message(DisplayMessage::user("please explain"));
@@ -106,7 +101,7 @@ fn copy_last_answer_writes_test_clipboard_and_reports_character_count() {
 
     super::copy_last_response::copy_last_answer(&mut app);
 
-    let copied = crate::tui::app::helpers::captured_clipboard_for_tests();
+    let copied = clipboard.text();
     let notice = app.status_notice();
     eprintln!("copied text: {copied:?}");
     eprintln!("status notice: {notice:?}");
@@ -115,13 +110,12 @@ fn copy_last_answer_writes_test_clipboard_and_reports_character_count() {
         notice.as_deref(),
         Some(super::copy_last_response::copied_last_answer_notice(answer.chars().count()).as_str())
     );
-    crate::tui::app::helpers::stop_capturing_clipboard_for_tests();
 }
 
 #[test]
 fn copy_last_answer_without_assistant_leaves_clipboard_and_reports_empty() {
-    let _clip = clipboard_test_lock();
-    crate::tui::app::helpers::capture_clipboard_for_tests();
+    let _render_lock = scroll_render_test_lock();
+    let clipboard = CapturedClipboard::new();
     crate::tui::app::helpers::copy_to_clipboard("sentinel-not-an-answer");
     let mut app = create_test_app();
     app.push_display_message(DisplayMessage::user("hello"));
@@ -129,19 +123,18 @@ fn copy_last_answer_without_assistant_leaves_clipboard_and_reports_empty() {
 
     super::copy_last_response::copy_last_answer(&mut app);
 
-    let copied = crate::tui::app::helpers::captured_clipboard_for_tests();
+    let copied = clipboard.text();
     let notice = app.status_notice();
     eprintln!("copied text: {copied:?}");
     eprintln!("status notice: {notice:?}");
     assert_eq!(copied.as_deref(), Some("sentinel-not-an-answer"));
     assert_eq!(notice.as_deref(), Some("No answer to copy yet"));
-    crate::tui::app::helpers::stop_capturing_clipboard_for_tests();
 }
 
 #[test]
 fn copy_last_response_ctrl_x_ctrl_y_hotkey_copies_last_answer() {
-    let _clip = clipboard_test_lock();
-    crate::tui::app::helpers::capture_clipboard_for_tests();
+    let _render_lock = scroll_render_test_lock();
+    let clipboard = CapturedClipboard::new();
     let mut app = create_test_app();
     app.toggle_keys.copy_last_response = crate::tui::keybind::ChordSequence::load("ctrl+x ctrl+y");
     app.push_display_message(DisplayMessage::assistant("hotkey answer"));
@@ -149,14 +142,14 @@ fn copy_last_response_ctrl_x_ctrl_y_hotkey_copies_last_answer() {
     app.handle_key(KeyCode::Char('x'), KeyModifiers::CONTROL)
         .unwrap();
     assert_eq!(
-        crate::tui::app::helpers::captured_clipboard_for_tests().as_deref(),
+        clipboard.text().as_deref(),
         Some(""),
         "Ctrl+X alone is only the prefix; nothing is copied yet"
     );
 
     app.handle_key(KeyCode::Char('y'), KeyModifiers::CONTROL)
         .unwrap();
-    let copied = crate::tui::app::helpers::captured_clipboard_for_tests();
+    let copied = clipboard.text();
     let notice = app.status_notice();
     eprintln!("copied text: {copied:?}");
     eprintln!("status notice: {notice:?}");
@@ -167,5 +160,151 @@ fn copy_last_response_ctrl_x_ctrl_y_hotkey_copies_last_answer() {
             .is_some_and(|n| n.contains("Copied the last answer")),
         "got {notice:?}"
     );
-    crate::tui::app::helpers::stop_capturing_clipboard_for_tests();
+}
+
+fn arm_pending_fallback_offer(app: &mut App) {
+    app.pending_fallback_offer = Some(PendingFallbackOffer {
+        selection: crate::provider::RouteSelection {
+            model: "fallback-model".into(),
+            runtime_key: jcode_provider_core::RuntimeKey::AnthropicApiKey,
+            api_method: "claude-api".into(),
+            provider_label: "Claude".into(),
+            detail: String::new(),
+        },
+        target_label: "fallback-model".into(),
+        from_label: "current-model".into(),
+        remote_resend: None,
+    });
+}
+
+#[test]
+fn copy_last_response_pending_sequence_beats_fallback_offer() {
+    let _render_lock = scroll_render_test_lock();
+    let clipboard = CapturedClipboard::new();
+    let mut app = create_test_app();
+    app.toggle_keys.copy_last_response = crate::tui::keybind::ChordSequence::load("ctrl+x ctrl+y");
+    app.push_display_message(DisplayMessage::assistant("copy me, do not fallback"));
+    arm_pending_fallback_offer(&mut app);
+    let model_before = app.session.model.clone();
+
+    app.handle_key(KeyCode::Char('x'), KeyModifiers::CONTROL)
+        .unwrap();
+    app.handle_key(KeyCode::Char('y'), KeyModifiers::CONTROL)
+        .unwrap();
+
+    assert_eq!(
+        clipboard.text().as_deref(),
+        Some("copy me, do not fallback"),
+        "completing the copy sequence must copy the last answer"
+    );
+    assert!(
+        app.pending_fallback_offer.is_some(),
+        "Ctrl+Y completing a started copy sequence must not apply the fallback offer"
+    );
+    assert!(
+        !app.pending_turn,
+        "fallback resend must not be queued when the copy sequence completes"
+    );
+    assert_eq!(app.session.model, model_before);
+}
+
+#[test]
+fn copy_last_response_pending_sequence_is_fed_before_offers() {
+    let local = include_str!("../input.rs");
+    let remote = include_str!("../remote/key_handling/key_events.rs");
+    for (name, src) in [("local", local), ("remote", remote)] {
+        let pending = src
+            .find("handle_key_if_pending")
+            .unwrap_or_else(|| panic!("{name} key path must feed a pending copy sequence first"));
+        let fallback = src
+            .find("pending_fallback_offer")
+            .unwrap_or_else(|| panic!("{name} key path must still check the fallback offer"));
+        let merge = src
+            .find("merge_offer_key_matches")
+            .unwrap_or_else(|| panic!("{name} key path must still check the merge offer"));
+        assert!(
+            pending < fallback,
+            "{name}: pending copy sequence must be fed before the fallback offer"
+        );
+        assert!(
+            pending < merge,
+            "{name}: pending copy sequence must be fed before the merge offer"
+        );
+    }
+}
+
+#[test]
+fn copy_last_answer_text_preserves_code_block_whitespace() {
+    use super::copy_last_response::last_assistant_answer_text;
+
+    let answer = "```python\nprint(\"hello\")  \n\n\nprint(\"world\")\n```\n";
+    let msg = DisplayMessage::assistant(answer);
+    assert_eq!(
+        last_assistant_answer_text(&[msg]),
+        Some(answer.to_string()),
+        "copy must keep blank lines, trailing spaces, and the trailing newline"
+    );
+}
+
+#[test]
+fn copy_last_response_abandoned_prefix_does_not_copy_after_picker() {
+    let _render_lock = scroll_render_test_lock();
+    let clipboard = CapturedClipboard::new();
+    let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+    let _guard = runtime.enter();
+    let mut app = create_test_app();
+    app.toggle_keys.copy_last_response = crate::tui::keybind::ChordSequence::load("ctrl+x ctrl+y");
+    app.push_display_message(DisplayMessage::assistant("should not copy yet"));
+
+    app.handle_key(KeyCode::Char('x'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert!(
+        app.toggle_keys.copy_last_response.is_pending(),
+        "Ctrl+X must arm the copy prefix"
+    );
+
+    app.open_session_picker();
+    assert!(app.session_picker_overlay.is_some());
+    app.handle_key(KeyCode::Esc, KeyModifiers::empty()).unwrap();
+    assert!(app.session_picker_overlay.is_none());
+    assert!(
+        !app.toggle_keys.copy_last_response.is_pending(),
+        "opening or closing the session picker must drop the copy prefix"
+    );
+
+    app.handle_key(KeyCode::Char('y'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(
+        clipboard.text().as_deref(),
+        Some(""),
+        "standalone Ctrl+Y after an abandoned prefix must not copy"
+    );
+
+    app.handle_key(KeyCode::Char('x'), KeyModifiers::CONTROL)
+        .unwrap();
+    app.handle_key(KeyCode::Char('y'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(
+        clipboard.text().as_deref(),
+        Some("should not copy yet"),
+        "a full sequence after the picker must still copy"
+    );
+}
+
+#[test]
+fn copy_last_answer_clipboard_tests_share_the_render_lock() {
+    let src = include_str!("copy_last_response.rs");
+    assert!(
+        src.contains("scroll_render_test_lock"),
+        "clipboard tests must serialize on the shared render lock"
+    );
+    assert!(
+        src.contains("CapturedClipboard"),
+        "clipboard tests must use CapturedClipboard"
+    );
+    let private = format!("{}{}", "clipboard_test", "_lock");
+    assert!(
+        !src.contains(&private),
+        "do not keep a private clipboard mutex alongside TEST_CLIPBOARD"
+    );
 }

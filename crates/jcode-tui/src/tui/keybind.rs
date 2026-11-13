@@ -446,10 +446,14 @@ impl ChordSequence {
         if raw.is_empty() || is_disabled(raw) {
             return Self::default();
         }
-        let steps: Vec<KeyBinding> = raw
-            .split_whitespace()
-            .filter_map(parse_keybinding)
-            .collect();
+        let mut steps = Vec::new();
+        for step in raw.split_whitespace() {
+            let Some(binding) = parse_keybinding(step) else {
+                crate::logging::warn(&format!("KEYBINDINGS: ignoring invalid sequence `{raw}`"));
+                return Self::default();
+            };
+            steps.push(binding);
+        }
         if steps.is_empty() {
             return Self::default();
         }
@@ -467,6 +471,14 @@ impl ChordSequence {
 
     pub fn is_bound(&self) -> bool {
         !self.steps.is_empty()
+    }
+
+    pub fn is_pending(&self) -> bool {
+        self.pending > 0
+    }
+
+    pub fn clear(&mut self) {
+        self.pending = 0;
     }
 
     pub fn label(&self) -> Option<&str> {
@@ -822,6 +834,29 @@ mod tests {
         );
         assert_eq!(
             ChordSequence::load("ctrl+y").feed(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            SequenceMatch::Complete
+        );
+    }
+
+    #[test]
+    fn copy_last_response_invalid_sequence_steps_are_unbound() {
+        let typo = ChordSequence::load("ctrl+x ctrl+yy");
+        assert!(
+            !typo.is_bound(),
+            "a mistyped later step must reject the whole sequence, got {:?}",
+            typo.label()
+        );
+        assert!(!ChordSequence::load("ctrl+yy").is_bound());
+        assert!(!ChordSequence::load("off").is_bound());
+
+        let mut valid = ChordSequence::load("ctrl+x ctrl+y");
+        assert!(valid.is_bound());
+        assert_eq!(
+            valid.feed(KeyCode::Char('x'), KeyModifiers::CONTROL),
+            SequenceMatch::Prefix
+        );
+        assert_eq!(
+            valid.feed(KeyCode::Char('y'), KeyModifiers::CONTROL),
             SequenceMatch::Complete
         );
     }
