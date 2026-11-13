@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Clone, Default)]
-struct SdkCallbackProvider {
+pub(super) struct SdkCallbackProvider {
     calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 #[async_trait]

@@ -202,6 +202,7 @@ fn format_members_includes_status_and_detail() {
         tool_call_id: "call-1".to_string(),
         working_dir: None,
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: ToolExecutionMode::Direct,
     };
@@ -454,9 +455,9 @@ fn format_status_snapshot_includes_activity_and_metadata() {
     assert!(output.output.contains("Activity: busy (bash)"));
     assert!(output.output.contains("Swarm: swarm-test"));
     assert!(
-        output
-            .output
-            .contains("Meta: headless · attachments=0 · active=3s ago · status_age=7s · joined=42s")
+        output.output.contains(
+            "Meta: headless · attachments=0 · active=3s ago · status_age=7s · joined=42s"
+        )
     );
     assert!(output.output.contains("Files: src/server/comm_sync.rs"));
 }

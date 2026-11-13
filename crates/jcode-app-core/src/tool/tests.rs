@@ -80,6 +80,7 @@ fn mcp_test_context(working_dir: &std::path::Path) -> ToolContext {
         tool_call_id: "mcp-call".to_string(),
         working_dir: Some(working_dir.to_path_buf()),
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: ToolExecutionMode::Direct,
     }
@@ -475,6 +476,7 @@ async fn test_batch_resolves_function_namespaced_tools() {
         tool_call_id: "test".to_string(),
         working_dir: Some(std::env::temp_dir()),
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: ToolExecutionMode::Direct,
     };
@@ -510,6 +512,7 @@ async fn test_batch_rejects_function_namespaced_batch_recursion() {
         tool_call_id: "test".to_string(),
         working_dir: Some(std::env::temp_dir()),
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: ToolExecutionMode::Direct,
     };
@@ -540,6 +543,7 @@ async fn test_batch_resolves_oauth_names() {
         tool_call_id: "test".to_string(),
         working_dir: Some(temp_dir),
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: ToolExecutionMode::Direct,
     };
@@ -564,6 +568,7 @@ async fn registry_execute_enforces_session_tool_policy_after_alias_resolution() 
         tool_call_id: "test".to_string(),
         working_dir: Some(temp_dir.clone()),
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: ToolExecutionMode::Direct,
     };
@@ -614,6 +619,7 @@ async fn registry_execute_pre_tool_hook_blocks_and_allows() {
         tool_call_id: "test".to_string(),
         working_dir: Some(std::env::temp_dir()),
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: ToolExecutionMode::Direct,
     };
@@ -1243,6 +1249,7 @@ async fn unknown_tool_error_lists_available_tools_and_suggestions() {
         tool_call_id: "test".to_string(),
         working_dir: None,
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: ToolExecutionMode::Direct,
     };
@@ -1484,6 +1491,7 @@ async fn execute_big_output_in(session_id: &str, input: Value) -> String {
         tool_call_id: "test".to_string(),
         working_dir: Some(std::env::temp_dir()),
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: ToolExecutionMode::Direct,
     };
@@ -1640,6 +1648,7 @@ async fn test_batch_guards_both_its_subcalls_and_its_own_aggregate() {
         tool_call_id: "test".to_string(),
         working_dir: Some(std::env::temp_dir()),
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: ToolExecutionMode::Direct,
     };

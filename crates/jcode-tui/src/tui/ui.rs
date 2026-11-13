@@ -3334,7 +3334,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         input_ui::wrapped_input_line_count(app, chat_area.width, next_prompt).min(10) as u16;
     // Add 1 line for command suggestions, shell mode hints, or the Ctrl+Enter hint.
     let hint_line_height = input_ui::input_hint_line_height(app);
-    let inline_block_height: u16 = inline_ui_height(app);
+    let inline_block_height: u16 = inline_ui_height(app, chat_area.width);
     let blocker_lines = messages::todo_blocker_footer(app.pinned_todos_payload(), chat_area.width);
     let blocker_height = blocker_lines
         .len()

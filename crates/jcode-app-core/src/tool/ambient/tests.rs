@@ -290,6 +290,7 @@ async fn test_request_permission_rejects_non_ambient_session() {
         tool_call_id: "call_1".to_string(),
         working_dir: None,
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::Direct,
     };
@@ -447,6 +448,7 @@ async fn test_schedule_tool_defaults_to_resuming_originating_session() {
         tool_call_id: "call_1".to_string(),
         working_dir: None,
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::Direct,
     };
@@ -504,6 +506,7 @@ async fn test_schedule_tool_requires_time() {
         tool_call_id: "call_1".to_string(),
         working_dir: None,
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::Direct,
     };
