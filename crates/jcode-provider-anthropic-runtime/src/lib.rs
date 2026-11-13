@@ -15,6 +15,7 @@
 //! Uses the Anthropic Messages API directly without the Python SDK.
 //! This provides better control and eliminates the Python dependency.
 
+mod direct_beta;
 mod reasoning_request;
 mod usage_recording;
 
@@ -2345,15 +2346,6 @@ async fn stream_response(
         );
     } else {
         // Direct API keys use x-api-key
-        // Include prompt-caching beta header
-        let beta_header = if is_1m_model(model_name) {
-            "prompt-caching-2024-07-31,context-1m-2025-08-07"
-        } else {
-            "prompt-caching-2024-07-31"
-        };
-        let beta_header =
-            anthropic_beta_header_with_thinking(beta_header, request.thinking.is_some());
-        let beta_header = reasoning_request::with_binding_beta(&beta_header, &request.thinking);
         req = match direct_transport.auth_mode.as_str() {
             "none" => req,
             "bearer" => req.header("Authorization", format!("Bearer {token}")),
@@ -2366,7 +2358,9 @@ async fn stream_response(
                 "invalid JCODE_ANTHROPIC_AUTH value '{value}' (expected bearer, header, or none)"
             ),
         };
-        req = req.header("anthropic-beta", beta_header);
+        if let Some(beta) = direct_beta::header(model_name, &request.thinking) {
+            req = req.header("anthropic-beta", beta);
+        }
     }
 
     let req = jcode_provider_core::request_compression::json_body(
