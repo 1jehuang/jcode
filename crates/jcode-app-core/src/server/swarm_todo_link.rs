@@ -846,6 +846,49 @@ mod tests {
     }
 
     #[test]
+    fn spawn_adopts_a_later_phase_lane_so_worker_completions_reach_the_coordinator() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::TempDir::new().unwrap();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        let coordinator = "phase-coordinator";
+        let todos = vec![
+            laned("env", 1, "env"),
+            laned("p1", 2, "metrics"),
+            laned("p2", 2, "metrics"),
+        ];
+        crate::todo::save_todos(coordinator, &todos).unwrap();
+        // A phase-less spawn naming a lane that lives in a later phase.
+        let (updated, lane) = crate::todo::stages::ensure_spawn_lane(
+            &todos,
+            "metrics",
+            None,
+            "Measure things",
+            None,
+            "lane-4",
+        );
+        assert_eq!(lane, "lane:2:metrics");
+        assert_eq!(updated, todos, "the existing lane must be adopted");
+        crate::todo::save_todos(coordinator, &updated).unwrap();
+        seed_spawn_lane(coordinator, "phase-worker", &lane).unwrap();
+        let mut worker = crate::todo::load_todos("phase-worker").unwrap();
+        assert_eq!(worker.len(), 2, "the worker owns the whole real lane");
+        worker[0].status = "completed".into();
+        crate::todo::save_todos("phase-worker", &worker).unwrap();
+        let coordinator_todos = crate::todo::load_todos(coordinator).unwrap();
+        assert_eq!(coordinator_todos[1].status, "completed");
+        assert_eq!(
+            coordinator_todos[1].assigned_to.as_deref(),
+            Some("phase-worker")
+        );
+        if let Some(previous_home) = previous_home {
+            crate::env::set_var("JCODE_HOME", previous_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
     fn lane_brief_lists_steps_with_details_and_rules() {
         let mut todos = vec![laned("p1", 1, "parser"), laned("p2", 1, "parser")];
         todos[1].details = Some("touch src/lexer.rs".into());

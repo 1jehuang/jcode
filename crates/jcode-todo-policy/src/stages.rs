@@ -528,9 +528,27 @@ pub fn default_phase(todos: &[TodoItem]) -> Option<u32> {
         .and_then(|stage| stage.number)
 }
 
+/// Id of the first open lane (in phase order) whose group is `lane`.
+fn find_open_lane_by_group(todos: &[TodoItem], lane: &str) -> Option<String> {
+    let refs: Vec<&TodoItem> = todos.iter().collect();
+    stage_layout(&refs)
+        .iter()
+        .flat_map(|stage| &stage.lanes)
+        .find(|candidate| {
+            candidate.group.as_deref() == Some(lane)
+                && candidate
+                    .items
+                    .iter()
+                    .any(|&i| !matches!(refs[i].status.as_str(), "completed" | "cancelled"))
+        })
+        .map(|candidate| lane_id(refs[candidate.items[0]]))
+}
+
 /// Ensure the coordinator's todo list has a lane named `lane` in `phase` for a
 /// spawned worker, returning the updated list and the lane id. An existing
-/// lane with that group in that phase is adopted as is; otherwise one item is
+/// lane with that group in that phase is adopted as is. With no `phase`, an
+/// existing *open* lane with that group is adopted wherever it sits; only when
+/// no such lane exists does one join the active phase. Otherwise one item is
 /// appended from `title` / `details`. Every spawned worker therefore owns
 /// exactly one lane, and that lane is all it syncs.
 pub fn ensure_spawn_lane(
@@ -542,6 +560,15 @@ pub fn ensure_spawn_lane(
     id_hint: &str,
 ) -> (Vec<TodoItem>, String) {
     let lane = lane.trim();
+    // The label is the lane's identity. Resolving a missing phase to the
+    // active one first would mint a second lane with the same label, and the
+    // worker (whose saves mirror only its own lane id) could never complete
+    // the real one.
+    if phase.is_none()
+        && let Some(id) = find_open_lane_by_group(todos, lane)
+    {
+        return (todos.to_vec(), id);
+    }
     let phase = phase.or_else(|| default_phase(todos));
     let probe = TodoItem {
         id: id_hint.to_string(),
@@ -626,5 +653,22 @@ mod spawn_lane_tests {
         let (out, id) = ensure_spawn_lane(&todos, "fix", None, "Fix it", None, "s1");
         assert_eq!(id, "lane::fix");
         assert_eq!(out.last().unwrap().stage, None);
+    }
+
+    #[test]
+    fn spawn_without_phase_adopts_an_existing_lane_in_its_own_phase() {
+        let todos = vec![
+            item("env", "in_progress", Some(1), Some("env")),
+            item("p1", "pending", Some(2), Some("metrics")),
+            item("p2", "pending", Some(2), Some("metrics")),
+        ];
+        let (out, id) = ensure_spawn_lane(&todos, "metrics", None, "Measure things", None, "s1");
+        assert_eq!(id, "lane:2:metrics", "the existing lane must be adopted");
+        assert_eq!(out, todos, "no duplicate lane may be appended");
+        assert_eq!(
+            lane_todos_for_worker(&out, &id).len(),
+            2,
+            "the worker must be seeded with the whole existing lane"
+        );
     }
 }
