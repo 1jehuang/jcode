@@ -1026,6 +1026,21 @@ const PRUNE_BATCH_LIMIT = 2000;
 // reduce D1 CPU bursts while leaving room for both stores and emergency passes.
 const PRUNE_MAX_BATCHES_PER_FAMILY = 2;
 
+async function runRetentionStatement(statement) {
+  try {
+    return await statement.run();
+  } catch (err) {
+    const message = [err?.message, err?.cause?.message].filter(Boolean).join(" ");
+    const overloaded = Number(err?.code) === 7429 || Number(err?.cause?.code) === 7429
+      || /\b7429\b|\bD1(?: DB| database)? is overloaded\b/i.test(message);
+    if (!overloaded) throw err;
+    // D1's overload protection uses a ten-second resource window. Retry only
+    // this idempotent retention statement, once, after that window clears.
+    await new Promise((resolve) => setTimeout(resolve, 11000));
+    return statement.run();
+  }
+}
+
 async function pruneOldEvents(env, options = {}) {
   const retentionScale = options.retentionScale ?? 1;
   const maxBatches = options.maxBatches ?? PRUNE_MAX_BATCHES_PER_FAMILY;
@@ -1038,7 +1053,7 @@ async function pruneOldEvents(env, options = {}) {
       for (let batch = 0; batch < maxBatches; batch++) {
         // Drive this from the small, partially indexed detail table. An IN
         // subquery over old events materializes millions of unrelated IDs.
-        const result = await env.DB.prepare(
+        const result = await runRetentionStatement(env.DB.prepare(
           `UPDATE ${table} SET conversion_id = NULL WHERE rowid IN (
              SELECT detail.rowid FROM ${table} AS detail
              WHERE detail.conversion_id IS NOT NULL AND EXISTS (
@@ -1047,7 +1062,7 @@ async function pruneOldEvents(env, options = {}) {
                  AND events.created_at < datetime('now', ?)
              ) LIMIT ?
            )`
-        ).bind(linkageCutoff, PRUNE_BATCH_LIMIT).run();
+        ).bind(linkageCutoff, PRUNE_BATCH_LIMIT));
         if ((result?.meta?.changes ?? result?.changes ?? 0) < PRUNE_BATCH_LIMIT) break;
       }
     } catch (err) {
@@ -1065,36 +1080,36 @@ async function pruneOldEvents(env, options = {}) {
       // abort pruning of the event rows themselves).
       if (WEB_EVENTS.includes(eventType)) {
         try {
-          await env.DB.prepare(
+          await runRetentionStatement(env.DB.prepare(
             `DELETE FROM web_details WHERE event_id IN (
                SELECT event_id FROM events
                WHERE event = ? AND created_at < datetime('now', ?) AND event_id IS NOT NULL
                LIMIT ?)`
-          ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT).run();
+          ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT));
         } catch (err) {
           console.warn(`web_details prune failed for ${eventType}`, err?.message || err);
         }
       }
       if (INSTALL_FUNNEL_EVENTS.includes(eventType)) {
         try {
-          await env.DB.prepare(
+          await runRetentionStatement(env.DB.prepare(
             `DELETE FROM install_details WHERE event_id IN (
                SELECT event_id FROM events
                WHERE event = ? AND created_at < datetime('now', ?) AND event_id IS NOT NULL
                LIMIT ?)`
-          ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT).run();
+          ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT));
         } catch (err) {
           console.warn(`install_details prune failed for ${eventType}`, err?.message || err);
         }
       }
       if (eventType === "desktop_update") {
         try {
-          await env.DB.prepare(
+          await runRetentionStatement(env.DB.prepare(
             `DELETE FROM desktop_update_details WHERE event_id IN (
                SELECT event_id FROM events
                WHERE event = ? AND created_at < datetime('now', ?) AND event_id IS NOT NULL
                LIMIT ?)`
-          ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT).run();
+          ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT));
         } catch (err) {
           console.warn(`desktop_update_details prune failed`, err?.message || err);
         }
@@ -1103,36 +1118,36 @@ async function pruneOldEvents(env, options = {}) {
       // unsplit databases and the bulk binding still need child cleanup.
       if (eventType === "todo_session" && (env.DB_MAIN || !env.DB_BULK)) {
         try {
-          await env.DB.prepare(
+          await runRetentionStatement(env.DB.prepare(
             `DELETE FROM todo_session_details WHERE event_id IN (
                SELECT event_id FROM events
                WHERE event = ? AND created_at < datetime('now', ?) AND event_id IS NOT NULL
                LIMIT ?)`
-          ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT).run();
+          ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT));
         } catch (err) {
           console.warn("todo_session_details prune failed", err?.message || err);
         }
       }
       try {
         // Delete detail children first so the events FK never blocks the prune.
-        await env.DB.prepare(
+        await runRetentionStatement(env.DB.prepare(
           `DELETE FROM turn_details WHERE event_id IN (
              SELECT event_id FROM events
              WHERE event = ? AND created_at < datetime('now', ?) AND event_id IS NOT NULL
              LIMIT ?)`
-        ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT).run();
-        await env.DB.prepare(
+        ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT));
+        await runRetentionStatement(env.DB.prepare(
           `DELETE FROM session_details WHERE event_id IN (
              SELECT event_id FROM events
              WHERE event = ? AND created_at < datetime('now', ?) AND event_id IS NOT NULL
              LIMIT ?)`
-        ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT).run();
-        const result = await env.DB.prepare(
+        ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT));
+        const result = await runRetentionStatement(env.DB.prepare(
           `DELETE FROM events WHERE id IN (
              SELECT id FROM events
              WHERE event = ? AND created_at < datetime('now', ?)
              LIMIT ?)`
-        ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT).run();
+        ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT));
         observeDbSize(result, env);
         const changes = result?.meta?.changes ?? result?.changes ?? 0;
         // Empty event families must not consume the deletion budget, or adding

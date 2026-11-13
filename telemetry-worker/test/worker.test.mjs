@@ -137,6 +137,7 @@ function makeDb(plan = {}) {
           return {
             async run() {
               executed.push({ sql, values });
+              if (plan.beforeRun) plan.beforeRun(sql, values);
               if (plan.failInserts && /^INSERT/i.test(sql.trim())) {
                 throw new Error(plan.failureMessage || "generic transient error");
               }
@@ -772,6 +773,66 @@ test("attribution redaction uses bounded detail-driven indexed lookups on the re
     }
   } finally {
     db.close();
+  }
+});
+
+test("cron retention retries overload once after eleven seconds for every statement kind", async (t) => {
+  for (const prefix of ["UPDATE web_details", "UPDATE install_details", "DELETE FROM web_details",
+    "DELETE FROM install_details", "DELETE FROM desktop_update_details", "DELETE FROM todo_session_details",
+    "DELETE FROM turn_details", "DELETE FROM session_details", "DELETE FROM events"]) {
+    await t.test(prefix, async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      let attempts = 0;
+      let selected;
+      const db = makeDb({ beforeRun(sql, values) {
+        if (!sql.startsWith(prefix)) return;
+        const key = JSON.stringify([sql, values]);
+        selected ??= key;
+        if (key !== selected) return;
+        if (++attempts === 1) throw new Error("D1_ERROR: D1 DB is overloaded. Please try again later.");
+      } });
+      const ctx = makeCtx();
+      await worker.scheduled({ cron: "17 0-3,5-23 * * *" }, { DB: db }, ctx);
+      for (let i = 0; i < 1000 && attempts === 0; i++) await Promise.resolve();
+      assert.equal(attempts, 1);
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      t.mock.timers.tick(10999);
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      assert.equal(attempts, 1, "does not retry inside D1's ten-second window");
+      t.mock.timers.tick(1);
+      await Promise.all(ctx.waited);
+      assert.equal(attempts, 2, "only the failing statement is retried");
+      assert.ok(db.executed.some(({ sql, values }) => sql.startsWith("DELETE FROM events")
+        && values[0] === "desktop_update"), "later retention families still run");
+    });
+  }
+});
+
+test("retention retry is bounded and excludes non-overload failures", async (t) => {
+  for (const [error, expected] of [
+    [Object.assign(new Error("D1 error"), { code: 7429 }), 2],
+    [new Error("D1_ERROR: code 7429"), 2],
+    [new Error("D1 DB is overloaded. Please try again later."), 2],
+    [new Error("D1_ERROR", { cause: Object.assign(new Error("overload"), { code: 7429 }) }), 2],
+    [new Error("SQLITE_FULL: database or disk is full"), 1],
+    [new Error("no such table: web_details"), 1],
+    [new Error("generic transient error"), 1],
+    [new Error("unrelated service is overloaded"), 1],
+    [new Error("invalid value 74290"), 1],
+  ]) {
+    await t.test(error.message, async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      let attempts = 0;
+      const db = makeDb({ beforeRun(sql) {
+        if (sql.startsWith("UPDATE web_details")) { attempts++; throw error; }
+      } });
+      const ctx = makeCtx();
+      await worker.scheduled({ cron: "17 0-3,5-23 * * *" }, { DB: db }, ctx);
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      t.mock.timers.tick(11000);
+      await Promise.all(ctx.waited);
+      assert.equal(attempts, expected);
+    });
   }
 });
 
