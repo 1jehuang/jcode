@@ -968,7 +968,10 @@ mod tests {
 
         // The `build_contents` function should produce no content, because the only
         // block is a tool use with no corresponding tool result.
-        assert!(contents.is_empty(), "Dangling tool call should be omitted, leaving an empty list");
+        assert!(
+            contents.is_empty(),
+            "Dangling tool call should be omitted, leaving an empty list"
+        );
     }
 
     #[test]
@@ -978,13 +981,19 @@ mod tests {
         let messages = vec![
             Message {
                 role: Role::User,
-                content: vec![ContentBlock::Text { text: "Hello".to_string(), cache_control: None }],
+                content: vec![ContentBlock::Text {
+                    text: "Hello".to_string(),
+                    cache_control: None,
+                }],
                 timestamp: None,
                 tool_duration_ms: None,
             },
             Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::Text { text: "Hi there!".to_string(), cache_control: None }],
+                content: vec![ContentBlock::Text {
+                    text: "Hi there!".to_string(),
+                    cache_control: None,
+                }],
                 timestamp: None,
                 tool_duration_ms: None,
             },
@@ -1003,7 +1012,12 @@ mod tests {
         // This tests BUG 2 specifically with an image tool result, which was the original report.
         // The result is that the last turn should be a user turn.
         let messages = vec![
-            Message { role: Role::User, content: vec![], timestamp: None, tool_duration_ms: None },
+            Message {
+                role: Role::User,
+                content: vec![],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
             Message {
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
@@ -1017,7 +1031,10 @@ mod tests {
             },
             Message {
                 role: Role::User,
-                content: vec![ContentBlock::Image { media_type: "image/png".to_string(), data: "garbage".to_string() }],
+                content: vec![ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "garbage".to_string(),
+                }],
                 timestamp: None,
                 tool_duration_ms: None,
             },
@@ -1035,12 +1052,13 @@ mod tests {
         let empty_user_turns = contents
             .iter()
             .filter(|c| {
-                c.role == "user"
-                    && c.parts.len() == 1
-                    && c.parts[0].text == Some("".to_string())
+                c.role == "user" && c.parts.len() == 1 && c.parts[0].text == Some("".to_string())
             })
             .count();
-        assert_eq!(empty_user_turns, 0, "An extra empty user turn should not be added if the last turn is already user.");
+        assert_eq!(
+            empty_user_turns, 0,
+            "An extra empty user turn should not be added if the last turn is already user."
+        );
     }
 
     /// A `read` result that carries an image must not leave the transcript ending in a model turn,
@@ -1052,7 +1070,10 @@ mod tests {
         let messages = vec![
             Message {
                 role: Role::User,
-                content: vec![ContentBlock::Text { text: "look at this".to_string(), cache_control: None }],
+                content: vec![ContentBlock::Text {
+                    text: "look at this".to_string(),
+                    cache_control: None,
+                }],
                 timestamp: None,
                 tool_duration_ms: None,
             },
@@ -1087,10 +1108,19 @@ mod tests {
 
         let contents = build_contents(&messages);
         let last = contents.last().expect("contents must not be empty");
-        assert_eq!(last.role, "user", "the request must not end on a model turn");
+        assert_eq!(
+            last.role, "user",
+            "the request must not end on a model turn"
+        );
         let has_inline = last.parts.iter().any(|p| p.inline_data.is_some());
-        assert!(has_inline, "the image inlineData must stay in the user turn");
+        assert!(
+            has_inline,
+            "the image inlineData must stay in the user turn"
+        );
         let has_response = last.parts.iter().any(|p| p.function_response.is_some());
-        assert!(has_response, "the functionResponse must stay with the image");
+        assert!(
+            has_response,
+            "the functionResponse must stay with the image"
+        );
     }
 }
