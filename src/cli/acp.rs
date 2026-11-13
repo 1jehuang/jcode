@@ -932,6 +932,8 @@ impl AcpRuntime {
                 supports_user_response: false,
                 supports_server_failover: true,
                 supports_turn_identity: false,
+                // ACP editors have no ask_user chooser: never opt in.
+                supports_decisions: false,
                 crash_on_disconnect: false,
                 continue_on_disconnect: false,
                 id: subscribe_id,
@@ -1011,6 +1013,8 @@ impl AcpRuntime {
                 supports_user_response: false,
                 supports_server_failover: true,
                 supports_turn_identity: false,
+                // ACP editors have no ask_user chooser: never opt in.
+                supports_decisions: false,
                 crash_on_disconnect: false,
                 continue_on_disconnect: false,
                 id: resume_id,

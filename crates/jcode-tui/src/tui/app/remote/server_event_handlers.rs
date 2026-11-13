@@ -56,6 +56,27 @@ pub(super) fn handle_tool_done(
     // whole list here made their rows render with no intent or summary.
     app.streaming_tool_calls.retain(|tc| tc.id != id);
     app.status = ProcessingStatus::Streaming;
+    // The ask_user tool call just completed. It only completes without a
+    // client answer on the server-side timeout (auto-picked option 1) or a
+    // forced channel close, so the chooser card it raised is dead: nobody
+    // will ever consume another answer sent to that request_id. Drop it now
+    // instead of leaving a locked input box until the turn ends. The chooser
+    // is normally already gone (the answer cleared it); this is the safety
+    // net for the paths that resolve server-side.
+    if name == "ask_user"
+        && let Some(decision) = app.pending_decision.take()
+    {
+        if decision.request_id != format!("decision-{id}") {
+            // A different decision is pending (ask_user nested in batch or a
+            // second ask); keep it.
+            app.pending_decision = Some(decision);
+        } else {
+            // The matching chooser was resolved server-side (timeout
+            // auto-pick): the turn resumes, so publish `working` over
+            // OSC 9 for herdr/herdr-webui.
+            crate::tui::app::decision_osc9::emit_decision_osc9(false);
+        }
+    }
     true
 }
 
