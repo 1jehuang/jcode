@@ -524,6 +524,49 @@ fn swarm_status_reaches_the_attached_session_with_its_members() {
     );
 }
 
+/// The daemon broadcasts the roster while it handles the subscribe, before
+/// the `state` reply that names the attached session.
+#[test]
+fn swarm_status_during_attach_waits_for_the_attached_session() {
+    fn attach(state: &mut BridgeState, roster_members: &[&str]) -> Vec<ServerFrame> {
+        let out = state
+            .api_request_to_legacy(&json!({"req": "attach_session", "id": 9, "session_id": "s2"}));
+        let Outbound::Legacy(state_req) = &out[1] else {
+            panic!("expected legacy state request");
+        };
+        let state_id = state_req["id"].as_u64().unwrap();
+        let members: Vec<_> = roster_members
+            .iter()
+            .map(|id| json!({"session_id": id, "status": "ready"}))
+            .collect();
+        let roster = json!({"type": "swarm_status", "members": members});
+        assert!(state.legacy_event_to_api(&roster).is_empty());
+        state.legacy_event_to_api(&json!({
+            "type": "state", "id": state_id, "session_id": "s2",
+            "message_count": 0, "is_processing": false,
+        }))
+    }
+    let rosters = |frames: &[ServerFrame]| -> Vec<(String, usize)> {
+        frames
+            .iter()
+            .filter_map(|frame| match &frame.event {
+                ApiEvent::SwarmStatus {
+                    session_id,
+                    members,
+                } => Some((session_id.clone(), members.len())),
+                _ => None,
+            })
+            .collect()
+    };
+
+    let frames = attach(&mut state_with_session(), &["s2", "session_fox_1"]);
+    assert_eq!(rosters(&frames), [("s2".to_string(), 2)]);
+
+    // The previous session's swarm, broadcast before the switch.
+    let frames = attach(&mut state_with_session(), &["s1", "session_fox_1"]);
+    assert!(rosters(&frames).is_empty());
+}
+
 #[test]
 fn api_sessions_enable_server_account_routing_on_create_attach_and_reconnect() {
     let mut state = BridgeState::default();

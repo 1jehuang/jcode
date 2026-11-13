@@ -170,6 +170,9 @@ pub struct BridgeState {
     pending_no_reply_message_id: Option<(u64, u64)>,
     /// Legacy id of an in-flight `create/attach` subscribe.
     pending_attach_id: Option<(u64, u64, Option<String>)>,
+    /// The daemon broadcasts the swarm roster while it handles the
+    /// subscribe, before the `state` reply names the attached session.
+    pending_swarm_status: Option<Vec<jcode_harness_api::SwarmMemberInfo>>,
     /// Subscribe errors can arrive before the correlated state response.
     pending_attach_subscribe_id: Option<u64>,
     /// Subscribe history may arrive before or after the correlated state reply.
@@ -584,6 +587,7 @@ impl BridgeState {
                     .flatten();
                 self.pending_recovery_history = Some((id, requested_session.clone()));
                 self.pending_attach_id = Some((state_id, api_id, requested_session));
+                self.pending_swarm_status = None;
                 self.pending_attach_subscribe_id = Some(id);
                 self.pending_model_probe = Some(catalog_id);
                 self.pending_create_dir = None;
@@ -1922,6 +1926,16 @@ impl BridgeState {
                     if let Some(snapshot) = event.get("applets") {
                         frames.extend(Self::applet_frame(&session_id, snapshot));
                     }
+                    // A roster sent before the subscribe was handled belongs to
+                    // the previous session's swarm, which this one is not in.
+                    if let Some(members) = self.pending_swarm_status.take()
+                        && members.iter().any(|member| member.session_id == session_id)
+                    {
+                        frames.push(ServerFrame::event(ApiEvent::SwarmStatus {
+                            session_id: session_id.clone(),
+                            members,
+                        }));
+                    }
                     if fresh_activity {
                         frames.push(ServerFrame::event(ApiEvent::SessionStatus {
                             session_id,
@@ -2172,14 +2186,21 @@ impl BridgeState {
             }
             // Members are the daemon's own status records; fields the API
             // does not carry are dropped, and a malformed roster is skipped.
-            "swarm_status" if self.session_id.is_some() => {
-                match serde_json::from_value(event["members"].clone()) {
-                    Ok(members) => vec![ServerFrame::event(ApiEvent::SwarmStatus {
-                        session_id: session(self),
-                        members,
-                    })],
-                    Err(_) => vec![],
+            "swarm_status" => {
+                let Ok(members) = serde_json::from_value(event["members"].clone()) else {
+                    return vec![];
+                };
+                if self.pending_attach_id.is_some() {
+                    self.pending_swarm_status = Some(members);
+                    return vec![];
                 }
+                if self.session_id.is_none() {
+                    return vec![];
+                }
+                vec![ServerFrame::event(ApiEvent::SwarmStatus {
+                    session_id: session(self),
+                    members,
+                })]
             }
             "wake_requested" => vec![ServerFrame::event(ApiEvent::WakeRequested {
                 session_id: event["session_id"]
@@ -2642,6 +2663,7 @@ impl BridgeState {
                     };
                     self.pending_attach_id = None;
                     self.pending_attach_subscribe_id = None;
+                    self.pending_swarm_status = None;
                     self.pending_model_probe = None;
                     self.pending_recovery_history = None;
                     return vec![ServerFrame::reply(
