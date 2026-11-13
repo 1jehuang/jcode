@@ -3530,6 +3530,9 @@ impl App {
     /// Handle bracketed paste: store text content (image URLs are still detected inline)
     pub(super) fn handle_paste(&mut self, text: String) {
         self.wake_idle_hibernation();
+        if crate::tui::ask_form::handle_paste(self, &text) {
+            return;
+        }
         handle_paste(self, text);
     }
 

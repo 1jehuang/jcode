@@ -91,6 +91,28 @@ pub(super) async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    // The question form outranks copy-selection and the composer while it owns
+    // input. It records the request id of a sent answer so its `Done`/`Error`
+    // acknowledgement is claimed instead of settling the turn.
+    match crate::tui::ask_form::handle_key(app, code, modifiers, text_input.as_deref()) {
+        crate::tui::ask_form::KeyOutcome::Ignored => {}
+        crate::tui::ask_form::KeyOutcome::Consumed => return Ok(()),
+        crate::tui::ask_form::KeyOutcome::Send {
+            session_id,
+            elicitation_id,
+            response,
+        } => {
+            match remote
+                .send_elicitation_response(&session_id, &elicitation_id, response)
+                .await
+            {
+                Ok(id) => crate::tui::ask_form::record_response_id(app, id),
+                Err(error) => crate::tui::ask_form::send_failed(app, &error.to_string()),
+            }
+            return Ok(());
+        }
+    }
+
     // Copy-selection mode owns the keyboard, mirroring the local path in
     // `input::handle_modal_key`. Without this, Enter/Y fell through to the
     // composer in client mode: Enter submitted the draft and letters were

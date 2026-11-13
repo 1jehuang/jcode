@@ -106,6 +106,14 @@ pub struct TurnIdentity {
     reason = "wire protocol prioritizes straightforward serde payloads over boxing every larger event variant"
 )]
 pub enum ServerEvent {
+    #[serde(rename = "elicitation_request")]
+    ElicitationRequest(crate::elicitation::FormElicitation),
+    #[serde(rename = "elicitation_resolved")]
+    ElicitationResolved {
+        session_id: String,
+        elicitation_id: String,
+        outcome: crate::elicitation::ElicitationResolution,
+    },
     /// Authoritative attachment boundary, sent before the corresponding History.
     #[serde(rename = "turn_state")]
     TurnState {
@@ -1089,4 +1097,11 @@ pub enum ServerEvent {
         /// Tool call ID this is associated with
         tool_call_id: String,
     },
+
+    /// The daemon finished replaying pending elicitation forms to this
+    /// attachment. Daemon-internal: it marks the end of reconnect
+    /// reconciliation, including an empty replay set, so a client can discard
+    /// drafts it was not re-sent.
+    #[serde(rename = "elicitation_replay_complete")]
+    ElicitationReplayComplete { session_id: String },
 }

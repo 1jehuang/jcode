@@ -34,6 +34,13 @@ pub struct SessionToolConfig {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {
+    #[serde(rename = "elicitation_response")]
+    ElicitationResponse {
+        id: u64,
+        session_id: String,
+        elicitation_id: String,
+        response: crate::elicitation::ElicitationResponse,
+    },
     #[serde(rename = "configure_tools")]
     ConfigureTools { id: u64, tools: SessionToolConfig },
     #[serde(rename = "list_tools")]
@@ -155,6 +162,10 @@ pub enum Request {
         /// Desktop can render user_response tool calls as inline answers.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         supports_user_response: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        supports_elicitation_form: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        applet_elicitation: bool,
         /// The client has no account-router countdown of its own (Desktop,
         /// SDK). On a usage/rate-limit failure the server switches to the next
         /// pool-approved account and retries the turn itself.

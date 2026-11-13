@@ -46,6 +46,7 @@ chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
 urlencoding = "2"        # URL encoding for web search
 uuid = { version = "1", features = ["v4", "v5"] }
+unicode-width = "0.2"      # display-cell width for compact UI limits
 jcode-applet-types = { path = "../jcode-applet-types" }
 
 # Embeddings (local inference) live in jcode-base; this crate forwards the

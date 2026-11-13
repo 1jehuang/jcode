@@ -391,6 +391,8 @@ pub(super) async fn handle_client(
     // Keep only the window preference, never a session-specific prefix fingerprint.
     let mut recent_history_messages = None;
     let mut supports_user_response = false;
+    let mut supports_elicitation_form = false;
+    let mut applet_elicitation = false;
     let mut supports_server_failover = false;
     // Client selfdev status is determined by Subscribe request, not server's env
     let mut client_selfdev = false;
@@ -1365,6 +1367,14 @@ pub(super) async fn handle_client(
                     ),
                 )
                 .await;
+                crate::elicitation::global().attach(
+                    &client_connection_id,
+                    &client_session_id,
+                    supports_elicitation_form,
+                    applet_elicitation,
+                    supports_user_response,
+                    client_event_tx.clone(),
+                );
                 session_control = refresh_session_control_handle(
                     &client_session_id,
                     &agent,
@@ -1553,6 +1563,8 @@ pub(super) async fn handle_client(
                 system_prompt,
                 supports_pdf_panels: requested_pdf_panels,
                 supports_user_response: requested_user_response,
+                supports_elicitation_form: requested_elicitation_form,
+                applet_elicitation: requested_applet_elicitation,
                 supports_server_failover: requested_server_failover,
                 supports_turn_identity: _,
                 working_dir: subscribe_working_dir,
@@ -1595,6 +1607,8 @@ pub(super) async fn handle_client(
                 supports_pdf_panels = requested_pdf_panels;
                 recent_history_messages = history_base.and_then(|base| base.recent_messages);
                 supports_user_response = requested_user_response;
+                supports_elicitation_form = requested_elicitation_form;
+                applet_elicitation = requested_applet_elicitation;
                 supports_server_failover = requested_server_failover;
                 active_terminal_env = terminal_env;
                 current_client_instance_id = client_instance_id.clone();
@@ -1774,6 +1788,8 @@ pub(super) async fn handle_client(
                     // front of the client's GetHistory, delaying first paint.
                     last_available_models_snapshot = None;
                 }
+                crate::elicitation::global().attach(&client_connection_id, &client_session_id,
+                    supports_elicitation_form, applet_elicitation, supports_user_response, client_event_tx.clone());
                 super::client_session::apply_or_defer_desktop_response_capability(
                     &agent,
                     supports_user_response,
@@ -1945,6 +1961,8 @@ pub(super) async fn handle_client(
                 if client_session_id != pre_resume_session_id {
                     provisional_session = false;
                 }
+                crate::elicitation::global().attach(&client_connection_id, &client_session_id,
+                    supports_elicitation_form, applet_elicitation, supports_user_response, client_event_tx.clone());
                 super::client_session::apply_or_defer_desktop_response_capability(
                     &agent,
                     supports_user_response,
@@ -2488,6 +2506,13 @@ pub(super) async fn handle_client(
                 .await;
             }
 
+            Request::ElicitationResponse { id, session_id, elicitation_id, response } => {
+                let event = match crate::elicitation::global().respond(&client_connection_id, &session_id, &elicitation_id, response) {
+                    Ok(()) => ServerEvent::Done {id},
+                    Err(message) => ServerEvent::Error {id, message, retry_after_secs:None},
+                };
+                if let Err(error) = client_event_tx.send(event) { crate::logging::debug(&format!("elicitation reply failed: {error}")); }
+            }
             Request::AppletAction {
                 id,
                 session_id,

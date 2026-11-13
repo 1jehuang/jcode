@@ -455,6 +455,8 @@ fn subscribe_request(working_dir: Option<&str>) -> Request {
         system_prompt: None,
         supports_pdf_panels: false,
         supports_user_response: false,
+        supports_elicitation_form: false,
+        applet_elicitation: false,
         supports_server_failover: false,
         supports_turn_identity: false,
         id: 1,

@@ -859,6 +859,17 @@ impl App {
             super::handterm_native_scroll::HandtermNativeScrollClient::connect_from_env();
         let mut remote_state = remote::RemoteRunState::default();
 
+        // Clears thread-local form state on every return path, including the
+        // `?` early returns below that bypass the end of the loop.
+        struct AskFormLoopGuard;
+        impl Drop for AskFormLoopGuard {
+            fn drop(&mut self) {
+                crate::tui::ask_form::on_remote_loop_exit();
+            }
+        }
+        crate::tui::ask_form::on_remote_loop_start(&mut self);
+        let _ask_form_guard = AskFormLoopGuard;
+
         'outer: loop {
             if self.display_messages.is_empty() {
                 if self.server_spawning {
@@ -913,6 +924,11 @@ impl App {
                 remote::ConnectOutcome::Retry => continue,
                 remote::ConnectOutcome::Quit => break 'outer,
             };
+            // Exactly once per new connection, before post-connect processing
+            // can deliver replayed forms. A second bump after
+            // `handle_post_connect` would make replay-complete discard forms
+            // that were already replayed into this generation.
+            crate::tui::ask_form::on_connection_replaced(&mut self);
             status_spinner_renderer.invalidate();
 
             match remote::handle_post_connect(

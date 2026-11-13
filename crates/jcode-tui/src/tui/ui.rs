@@ -3964,6 +3964,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         !app.auto_scroll_paused(),
     );
 
+    crate::tui::ask_form::render(frame, app);
+
     let frame_elapsed = total_start.elapsed();
     if frame_elapsed >= Duration::from_millis(250) {
         crate::logging::warn(&format!(

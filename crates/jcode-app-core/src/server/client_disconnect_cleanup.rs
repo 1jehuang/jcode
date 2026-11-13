@@ -103,6 +103,7 @@ pub(super) async fn detach_client_attachment(
 ) {
     client_debug_state.write().await.unregister(debug_id);
     client_connections.write().await.remove(connection_id);
+    crate::elicitation::global().detach(connection_id);
     unregister_session_event_sender(swarm_members, session_id, connection_id).await;
 }
 

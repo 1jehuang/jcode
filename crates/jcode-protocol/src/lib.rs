@@ -36,6 +36,7 @@ impl std::fmt::Debug for ProviderOAuthEmail {
 }
 
 mod comm_format;
+pub mod elicitation;
 mod notifications;
 
 pub use comm_format::*;
@@ -840,7 +841,7 @@ pub struct AwaitedMemberStatus {
 impl Request {
     pub fn id(&self) -> u64 {
         match self {
-            Request::RuntimeCommand { id, .. } => *id,
+            Request::RuntimeCommand { id, .. } | Request::ElicitationResponse { id, .. } => *id,
             Request::ConfigureTools { id, .. }
             | Request::ListTools { id }
             | Request::ToolResult { id, .. } => *id,
@@ -937,7 +938,7 @@ impl Request {
     pub fn is_lightweight_control_request(&self) -> bool {
         matches!(
             self,
-            Request::Ping { .. }
+            Request::ElicitationResponse { .. } | Request::Ping { .. }
                 | Request::UpgradeRuntime { .. }
                 // Usage invalidation only touches process-wide caches, so a
                 // one-shot client can send it without subscribing to a session.
