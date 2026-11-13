@@ -90,10 +90,23 @@ pub(crate) fn session_batches(session_id: &str) -> bool {
     state().batched_sessions.contains(session_id)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum Kind {
     Text,
     Reasoning,
+    /// Streamed tool arguments, which the client appends per tool id. A large
+    /// file write arrives as hundreds of these.
+    ToolInput(Option<String>),
+}
+
+impl Kind {
+    fn event(self, text: String) -> ServerEvent {
+        match self {
+            Kind::Text => ServerEvent::TextDelta { text },
+            Kind::Reasoning => ServerEvent::ReasoningDelta { text },
+            Kind::ToolInput(id) => ServerEvent::ToolInput { id, delta: text },
+        }
+    }
 }
 
 struct Pending {
@@ -128,10 +141,7 @@ impl BatchingSender {
 
     fn flush_locked(&self, pending: &mut Option<Pending>) {
         if let Some(pending) = pending.take() {
-            let _ = self.tx.send(match pending.kind {
-                Kind::Text => ServerEvent::TextDelta { text: pending.text },
-                Kind::Reasoning => ServerEvent::ReasoningDelta { text: pending.text },
-            });
+            let _ = self.tx.send(pending.kind.event(pending.text));
         }
     }
 
@@ -157,24 +167,21 @@ impl BatchingSender {
         let (kind, text) = match event {
             ServerEvent::TextDelta { text } => (Kind::Text, text),
             ServerEvent::ReasoningDelta { text } => (Kind::Reasoning, text),
+            ServerEvent::ToolInput { id, delta } => (Kind::ToolInput(id), delta),
             other => {
                 let mut pending = self.pending();
                 self.flush_locked(&mut pending);
                 return self.tx.send(other);
             }
         };
-        let rebuild = |text| match kind {
-            Kind::Text => ServerEvent::TextDelta { text },
-            Kind::Reasoning => ServerEvent::ReasoningDelta { text },
-        };
         let mut pending = self.pending();
         if !session_batches(&self.session_id) {
             self.flush_locked(&mut pending);
-            return self.tx.send(rebuild(text));
+            return self.tx.send(kind.event(text));
         }
         if self.tx.is_closed() {
             *pending = None;
-            return Err(mpsc::error::SendError(rebuild(text)));
+            return Err(mpsc::error::SendError(kind.event(text)));
         }
         let now = Instant::now();
         match &mut *pending {
@@ -214,6 +221,9 @@ mod tests {
             ServerEvent::TextDelta { text } => format!("text:{text}"),
             ServerEvent::ReasoningDelta { text } => format!("reasoning:{text}"),
             ServerEvent::TextDone => "done".to_string(),
+            ServerEvent::ToolInput { id, delta } => {
+                format!("input[{}]:{delta}", id.unwrap_or_default())
+            }
             other => panic!("unexpected event {other:?}"),
         }
     }
@@ -298,6 +308,34 @@ mod tests {
         drop(sender);
         assert_eq!(text(rx.try_recv().unwrap()), "text:tail");
         forget_connection("batch-s3-a");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tool_input_coalesces_per_tool_and_never_merges_across_tools() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sender = BatchingSender::new(tx, "batch-s5".into());
+        set_connection_focus("batch-s5-a", "batch-s5", false);
+        note_session_targets("batch-s5", &ids(&["batch-s5-a"]));
+        let input = |id: &str, delta: &str| ServerEvent::ToolInput {
+            id: Some(id.into()),
+            delta: delta.into(),
+        };
+
+        sender.send(input("t1", "{\"path\":")).unwrap();
+        sender.send(input("t1", "\"a.rs\"}")).unwrap();
+        assert!(rx.try_recv().is_err());
+        // Interleaved parallel tool calls keep their own argument streams.
+        sender.send(input("t2", "{}")).unwrap();
+        assert_eq!(
+            text(rx.try_recv().unwrap()),
+            "input[t1]:{\"path\":\"a.rs\"}"
+        );
+        assert!(rx.try_recv().is_err());
+        sender.send(delta("next")).unwrap();
+        assert_eq!(text(rx.try_recv().unwrap()), "input[t2]:{}");
+        sender.flush();
+        assert_eq!(text(rx.try_recv().unwrap()), "text:next");
+        forget_connection("batch-s5-a");
     }
 
     #[tokio::test(start_paused = true)]
