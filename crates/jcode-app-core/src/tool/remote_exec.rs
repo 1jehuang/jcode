@@ -14,7 +14,8 @@
 //! the registry.
 //!
 //! Prototype limits, see `docs/SERVERLESS.md`: no interactive stdin
-//! forwarding, and one worker per runtime process rather than per session.
+//! forwarding, one worker per runtime process rather than per session, and a
+//! command that runs past ten minutes is promoted inside the worker.
 use super::{Registry, Tool, ToolContext, ToolExecutionMode, ToolImage, ToolOutput};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -32,9 +33,16 @@ pub const WORKER_ENV: &str = "JCODE_EXEC_WORKER";
 /// own working directory, which usually does not exist there.
 pub const WORKDIR_ENV: &str = "JCODE_EXEC_WORKDIR";
 
-/// Tools whose effects belong to the workspace. `bg` is included because it
-/// manages background tasks that `bash` started in the same environment.
-const ROUTED: &[&str] = &["bash", "read", "write", "edit", "apply_patch", "agentgrep", "bg"];
+/// Tools whose effects belong to the workspace.
+///
+/// `bg` is deliberately absent. Background tasks are owned by the runtime:
+/// a slow remote call is an ordinary future there, so the runtime's manager
+/// adopts it, and `bg` must look in that manager, not in the worker's.
+const ROUTED: &[&str] = &["bash", "read", "write", "edit", "apply_patch", "agentgrep"];
+
+/// Longest foreground command the worker runs before `bash` promotes it into
+/// the worker's own background manager, where the runtime cannot follow.
+const BACKGROUND_COMMAND_TIMEOUT_MS: u64 = 600_000;
 
 /// Set in the worker process so it executes locally instead of re-routing.
 static WORKER_MODE: AtomicBool = AtomicBool::new(false);
@@ -217,6 +225,63 @@ impl Drop for CancelOnDrop {
 
 /// Run one routed tool call in the execution environment.
 pub(crate) async fn execute(name: &str, input: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+    if name == "bash" && input.get("run_in_background").and_then(Value::as_bool) == Some(true) {
+        return execute_background(input, ctx).await;
+    }
+    call(name, input, ctx).await
+}
+
+/// `bash` with `run_in_background`: the command runs in the foreground of the
+/// worker while the runtime's background manager owns the pending call, so
+/// `bg`, completion notices and wakeups all work without leaving the runtime.
+async fn execute_background(mut input: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+    let flag =
+        |key: &str, default: bool| input.get(key).and_then(Value::as_bool).unwrap_or(default);
+    let wake = flag("wake", false);
+    let notify = flag("notify", true) || wake;
+    let text = |key: &str| {
+        input
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    let display_name =
+        crate::util::truncate_str(text("intent").or(text("command")).unwrap_or("bash"), 28)
+            .to_string();
+    if let Some(fields) = input.as_object_mut() {
+        fields.insert("run_in_background".into(), Value::Bool(false));
+        fields.insert("timeout".into(), BACKGROUND_COMMAND_TIMEOUT_MS.into());
+    }
+    let task_ctx = ctx.clone();
+    let handle = tokio::spawn(async move { call("bash", input, &task_ctx).await });
+    let info = crate::background::global()
+        .adopt_with_options(
+            "bash",
+            Some(display_name.clone()),
+            &ctx.session_id,
+            notify,
+            wake,
+            handle,
+        )
+        .await;
+    let delivery = if wake {
+        "The agent will be woken when the task completes."
+    } else if notify {
+        "You will be notified when the task completes."
+    } else {
+        "Notifications disabled."
+    };
+    Ok(ToolOutput::new(format!(
+        "Command started in background as requested.\n\nTask ID: {}\nName: {}\n\n{}\n\n{}",
+        info.task_id,
+        display_name,
+        delivery,
+        super::BACKGROUND_WAIT_GUIDANCE
+    )))
+}
+
+async fn call(name: &str, input: Value, ctx: &ToolContext) -> Result<ToolOutput> {
     let client = client().await?;
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = oneshot::channel();
@@ -447,7 +512,14 @@ mod tests {
             dir.path(),
         )
         .await;
-        assert!(matches!(wrote, Frame::Result { id: 1, error: None, .. }));
+        assert!(matches!(
+            wrote,
+            Frame::Result {
+                id: 1,
+                error: None,
+                ..
+            }
+        ));
         assert_eq!(
             std::fs::read_to_string(dir.path().join("note.txt")).unwrap(),
             "from the worker\n"

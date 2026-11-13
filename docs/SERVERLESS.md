@@ -50,8 +50,11 @@ commands, so it can be small, start on demand and stop when idle.
 - `jcode server exec-worker` is the other end. It builds a tool registry with
   a provider that refuses every model call, and serves `call` and `cancel`
   frames, answering with `result` frames. Calls run concurrently.
-- Routed tools: `bash`, `read`, `write`, `edit`, `apply_patch`, `agentgrep`,
-  `bg`. Everything else stays in the runtime. `batch` and `codemode` subcalls
+- Routed tools: `bash`, `read`, `write`, `edit`, `apply_patch`, `agentgrep`.
+  Everything else stays in the runtime, including `bg`: a slow remote call is
+  an ordinary pending future in the runtime, so its background manager adopts
+  it and completion notices and wakeups need no protocol support. `bash` with
+  `run_in_background` is adopted the same way. `batch` and `codemode` subcalls
   are routed one by one because they go back through the registry.
 - Dropping the runtime's future (user interrupt) sends `cancel`, which aborts
   the task in the worker. A dead worker fails its pending calls and the next
@@ -72,6 +75,14 @@ without code changes.
    model's `bash` call returned the container's hostname, and its `write` call
    created `marker.txt` in the container's workspace and not in the host
    checkout. Model credentials never entered the container.
+3. Full chain: in the same kind of container, with no cargo or rustc, the
+   model edited `src/lib.rs` and ran `justrust remote test`. The call passed
+   the 3 second foreground budget, was moved to the background by the runtime,
+   and `bg wait` returned the result: 2 tests passed on the hosted fleet.
+
+The first full-chain attempt failed and shaped the design: with `bg` routed
+to the worker, the runtime adopted the slow call under a task id the worker
+had never heard of, so `bg` answered "Task not found".
 
 ### Prototype limits
 
@@ -85,8 +96,10 @@ without code changes.
   selfdev. Each needs routing or an explicit "not available" answer.
 - The system prompt still describes the runtime's machine (OS, cwd, git
   status). It must describe the execution environment.
-- Background task files live in the environment, so `bg` is routed, but
-  completion wakeups to the runtime are not forwarded yet.
+- A command still running after ten minutes is promoted inside the worker,
+  where the runtime's `bg` cannot follow it.
+- Background output is not visible until the command ends, for the same
+  reason as the streaming limit above.
 - The worker binary is the full 346 MB selfdev `jcode`. A real image wants a
   small worker-only binary.
 
@@ -99,12 +112,20 @@ account's `jcode-subscription.env` mounted read-only:
 - Sign-in works: `justrust remote use hosted` reported the account and plan.
 - `justrust remote test` failed: `cargo metadata: No such file or directory`.
   The client shells out to local cargo to learn which directories to mirror.
-- Fix written in `~/justrust` (`src/remote_build.rs`): when cargo is absent,
-  fall back to the manifest walk the build daemon already uses. It has a unit
-  test. **Not yet verified**: the justrust checkout did not compile at the time
-  because of another agent's unfinished edits in other files, so neither the
-  test nor a real hosted build from the container has run.
+- Fixed in justrust commit `d3cdab706` (`src/remote_build.rs`): when cargo is
+  absent, fall back to the manifest walk the build daemon already uses. Its
+  unit test passes. Not in a published release yet: the runs here used a
+  candidate binary built from that commit.
+- With the fix, a workspace at `/work` still failed: `cannot create /work on
+  the remote machine`. The fleet mirrors source at the same absolute path and
+  its `jcode-mkdir` wrapper only allows paths under `/home` or `/Users`.
+  **The sandbox image must keep the checkout under `/home`.**
+- With the checkout under `/home`, `justrust remote test` passed from the
+  container in 8.1 s, of which 6.3 s was connecting to an idle build machine.
 - The client also needs `ssh`, `rsync`, `curl`, `git` and `tar` in the image.
+- Every sandbox path becomes a mirror on the build machine. Sandboxes that
+  all use one fixed path would collide per account, so the path needs a
+  session or repository component.
 - Known gap in the fallback: a path dependency outside the repository that
   only a workspace member names is not mirrored.
 
@@ -153,9 +174,10 @@ session state written to durable storage so it can stop between turns.
 
 ## Next steps
 
-1. Land and verify the justrust no-cargo fallback, then run a real hosted
-   `justrust test` from the toolchain-free container.
-2. Stream tool output and forward background-task wakeups over the protocol.
+1. Release justrust with the no-cargo fallback so a sandbox image can
+   install it normally.
+2. Stream tool output over the protocol, and forward commands that outlive
+   the worker's foreground limit.
 3. Per-session workers and an environment-aware system prompt.
 4. Deploy the worker in one Cloudflare sandbox behind a relay, and measure
    cold start, per-call latency and workspace restore time.
