@@ -70,6 +70,16 @@ pub(crate) fn refresh_preview_redraw_timer(
     }
 }
 
+/// Most server events handled in one wakeup while they are being batched.
+const SERVER_EVENT_DRAIN_MAX: usize = 256;
+
+/// Whether server events may be read in batches instead of one per wakeup:
+/// only for an unfocused client that is mirroring a turn in flight. A focused
+/// client, or one with nothing running, reads every event as it arrives.
+pub(super) fn hold_server_events_while_unfocused(app: &App) -> bool {
+    app.is_processing && !app.client_focused()
+}
+
 /// Spinner cadence. Not a runtime timer: see [`SpinnerTicker`] for why that
 /// cost four thread wakeups per frame.
 pub(super) fn status_spinner_interval() -> SpinnerTicker {
@@ -941,6 +951,11 @@ impl App {
 
             let mut input_redraw = true;
             let mut deferred_redraw_at: Option<tokio::time::Instant> = None;
+            // While set, server events stay in the socket buffer. An unfocused
+            // client mirroring a turn was woken about 19 times a second by
+            // them, one event per wakeup, and nothing on screen needs that
+            // rate: text is revealed in REDRAW_UNFOCUSED_STREAM batches.
+            let mut server_events_held_until: Option<tokio::time::Instant> = None;
             // Main event loop
             loop {
                 self.sync_sleep_guard();
@@ -1072,24 +1087,59 @@ impl App {
                         super::wake_stats::note("deferred_redraw");
                         deferred_redraw_at = None;
                     }
-                    event = remote_conn.next_event() => {
-                        match &event {
-                            crate::tui::backend::RemoteRead::Event(event) => super::wake_stats::note_debug("server", event),
-                            crate::tui::backend::RemoteRead::Disconnected(_) => super::wake_stats::note("server:closed"),
+                    _ = async {
+                        match server_events_held_until {
+                            Some(at) => tokio::time::sleep_until(at).await,
+                            None => futures::future::pending::<()>().await,
                         }
-                        let (outcome, event_redraw) = remote::handle_remote_event(
-                            &mut self,
-                            &mut terminal,
-                            &mut remote_conn,
-                            &mut remote_state,
-                            event,
-                        )
-                        .await?;
-                        needs_redraw |= event_redraw;
-                        match outcome {
-                            remote::RemoteEventOutcome::Continue => {}
-                            remote::RemoteEventOutcome::Reconnect => continue 'outer,
-                            remote::RemoteEventOutcome::Quit => break 'outer,
+                    } => {
+                        super::wake_stats::note("server_events_released");
+                        server_events_held_until = None;
+                    }
+                    event = remote_conn.next_event(), if server_events_held_until.is_none() || self.client_focused() => {
+                        server_events_held_until = None;
+                        let mut event = event;
+                        let mut drained = 0usize;
+                        loop {
+                            match &event {
+                                crate::tui::backend::RemoteRead::Event(event) => super::wake_stats::note_debug("server", event),
+                                crate::tui::backend::RemoteRead::Disconnected(_) => super::wake_stats::note("server:closed"),
+                            }
+                            let (outcome, event_redraw) = remote::handle_remote_event(
+                                &mut self,
+                                &mut terminal,
+                                &mut remote_conn,
+                                &mut remote_state,
+                                event,
+                            )
+                            .await?;
+                            needs_redraw |= event_redraw;
+                            match outcome {
+                                remote::RemoteEventOutcome::Continue => {}
+                                remote::RemoteEventOutcome::Reconnect => continue 'outer,
+                                remote::RemoteEventOutcome::Quit => break 'outer,
+                            }
+                            // Unfocused mid-turn: take everything already
+                            // delivered in this one wakeup, then leave the
+                            // socket alone for one text batch. Bounded so a
+                            // flood cannot starve input or drawing.
+                            if !hold_server_events_while_unfocused(&self) {
+                                break;
+                            }
+                            drained += 1;
+                            if drained >= SERVER_EVENT_DRAIN_MAX {
+                                break;
+                            }
+                            match futures::FutureExt::now_or_never(remote_conn.next_event()) {
+                                Some(next) => event = next,
+                                None => {
+                                    server_events_held_until = Some(
+                                        tokio::time::Instant::now()
+                                            + crate::tui::redraw_schedule::REDRAW_UNFOCUSED_STREAM,
+                                    );
+                                    break;
+                                }
+                            }
                         }
                     }
                     command = async {

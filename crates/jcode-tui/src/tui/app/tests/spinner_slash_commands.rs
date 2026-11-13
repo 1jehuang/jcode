@@ -48,3 +48,18 @@ fn unfocused_streaming_keeps_the_one_cell_spinner_path() {
         "unfocused streaming must keep the spinner moving between text batches"
     );
 }
+
+/// Server events are batched only for an unfocused client with a turn in
+/// flight. Focus, or an idle session, must read each event as it arrives.
+#[test]
+fn server_events_are_held_only_while_unfocused_and_processing() {
+    let mut app = create_test_app();
+    app.set_client_focused(false);
+    assert!(!super::run_shell::hold_server_events_while_unfocused(&app));
+
+    app.is_processing = true;
+    assert!(super::run_shell::hold_server_events_while_unfocused(&app));
+
+    app.set_client_focused(true);
+    assert!(!super::run_shell::hold_server_events_while_unfocused(&app));
+}
