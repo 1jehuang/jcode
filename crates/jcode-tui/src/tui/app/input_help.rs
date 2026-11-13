@@ -29,7 +29,7 @@ impl App {
                 "/cls\nClear the rendered view only. The model keeps its full context; nothing is sent or forgotten. (Ctrl+L clears the screen but keeps history in scrollback.)"
             }
             "model" => {
-                "/model\nOpen model picker.\n\n/model <name>\nSwitch model.\n\n/model <name>@<provider>\nPin OpenRouter routing (@auto clears pin)."
+                "/model\nOpen model picker.\n\n/model <name>\nSwitch model.\n\n/model <name>@<provider>\nPin OpenRouter routing (@auto clears pin).\n\n/model update (alias /model refresh)\nForce-refresh provider model catalogs so newly published models appear in /model.\n\n/model status\nShow current model, provider, and context window."
             }
             "provider-test-coverage"
             | "provider test coverage"

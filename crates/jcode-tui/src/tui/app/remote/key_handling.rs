@@ -541,9 +541,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             return Ok(());
         }
 
-        if app_mod::model_context::is_refresh_model_list_command(trimmed)
-            || matches!(trimmed, "/model refresh" | "/models refresh")
-        {
+        if app_mod::model_context::is_refresh_model_list_command(trimmed) {
             app.pending_remote_model_refresh_snapshot = Some((
                 app.remote_available_entries.clone(),
                 app.remote_model_options.clone(),

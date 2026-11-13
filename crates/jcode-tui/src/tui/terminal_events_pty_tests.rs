@@ -62,12 +62,6 @@ fn pty_child() {
 fn live_queries_and_fragmented_color_replies_work_through_crossterm() {
     let mut master = -1;
     let mut slave = -1;
-    let size = libc::winsize {
-        ws_row: 24,
-        ws_col: 80,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
     // SAFETY: openpty initializes both descriptors, with no name or termios.
     assert_eq!(
         unsafe {
@@ -75,8 +69,8 @@ fn live_queries_and_fragmented_color_replies_work_through_crossterm() {
                 &mut master,
                 &mut slave,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                &size,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
             )
         },
         0

@@ -174,6 +174,13 @@ pub(crate) fn parse_model_info_value(value: &Value) -> Option<ModelInfo> {
                 "maxModelLength",
                 "max_model_len",
                 "trainingContextLength",
+                // OpenAI-compatible gateways (LiteLLM, vLLM, LM Studio) report
+                // the window as `max_input_tokens` / `max_input` rather than
+                // OpenRouter's `context_length`. Read them last so an explicit
+                // context_* field still wins when both are present
+                // (issue #2157).
+                "max_input_tokens",
+                "max_input",
             ],
         )
         // Native Muse shape nests the live window in
@@ -356,6 +363,39 @@ mod tests {
         assert_eq!(models[0].pricing.prompt.as_deref(), Some("0.1"));
         assert_eq!(models[0].pricing.completion.as_deref(), Some("0.2"));
         assert_eq!(models[0].pricing.input_cache_read.as_deref(), Some("0.01"));
+    }
+
+    #[test]
+    fn openai_compatible_max_input_tokens_is_parsed() {
+        // LiteLLM/vLLM report the window as max_input_tokens, not OpenRouter's
+        // context_length. jcode must honor it so a model not in the static
+        // table (e.g. deepseek-reasoner) does not fall to the 200K default
+        // (issue #2157).
+        let models = parse_openai_compatible_models_response(
+            r#"{"data":[{"id":"deepseek-reasoner","object":"model","owned_by":"openai","max_input_tokens":262144,"max_output_tokens":262144}]}"#,
+        )
+        .expect("LiteLLM catalog response should parse");
+        assert_eq!(models[0].id, "deepseek-reasoner");
+        assert_eq!(models[0].context_length, Some(262_144));
+    }
+
+    #[test]
+    fn explicit_context_length_wins_over_max_input_tokens() {
+        // When a gateway emits both, the explicit context_* field is the more
+        // specific signal and must take precedence.
+        let models = parse_openai_compatible_models_response(
+            r#"{"data":[{"id":"m","context_length":111,"max_input_tokens":222}]}"#,
+        )
+        .unwrap();
+        assert_eq!(models[0].context_length, Some(111));
+    }
+
+    #[test]
+    fn max_input_only_is_parsed() {
+        let models =
+            parse_openai_compatible_models_response(r#"{"data":[{"id":"m","max_input":4096}]}"#)
+                .unwrap();
+        assert_eq!(models[0].context_length, Some(4_096));
     }
 
     #[test]
