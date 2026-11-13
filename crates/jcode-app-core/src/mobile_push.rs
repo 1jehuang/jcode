@@ -70,6 +70,144 @@ pub struct PushPayload {
     pub body: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<u64>,
+    /// Where the session runs: `Cloud` or this machine's name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// Repository (or directory) the session works in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    /// How long the turn that triggered this push ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<u64>,
+}
+
+/// Context shown ahead of the session name so a notification says where it
+/// came from before anything else.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PushLabels {
+    pub origin: Option<String>,
+    pub repo: Option<String>,
+    pub elapsed: Option<Duration>,
+}
+
+impl PushLabels {
+    /// Labels for a live session. `working_dir` falls back to the saved
+    /// session's directory when the caller does not have it at hand.
+    pub fn for_session(
+        session_id: &str,
+        working_dir: Option<&str>,
+        elapsed: Option<Duration>,
+    ) -> Self {
+        if cfg!(test) {
+            return Self::default();
+        }
+        let saved;
+        let dir = match working_dir {
+            Some(dir) => Some(dir),
+            None => {
+                saved = lookup_session_working_dir(session_id);
+                saved.as_deref()
+            }
+        };
+        Self {
+            origin: Some(origin_label().to_string()),
+            repo: dir.and_then(|dir| repo_label(std::path::Path::new(dir))),
+            elapsed,
+        }
+    }
+}
+
+const CLOUD_ORIGIN: &str = "Cloud";
+const LABEL_SEPARATOR: &str = " \u{00B7} ";
+const LABEL_MAX_CHARS: usize = 24;
+const TITLE_MAX_CHARS: usize = 120;
+
+/// `Cloud` on a managed Jcode Cloud machine, otherwise this machine's name.
+fn origin_label() -> &'static str {
+    static LABEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    LABEL.get_or_init(|| {
+        if crate::mobile_runner::is_cloud_machine() {
+            return CLOUD_ORIGIN.to_string();
+        }
+        let read = |path: &str| std::fs::read_to_string(path).ok();
+        machine_label(
+            read("/sys/devices/virtual/dmi/id/product_name").as_deref(),
+            std::env::var("HOSTNAME")
+                .ok()
+                .or_else(|| read("/etc/hostname"))
+                .as_deref(),
+        )
+    })
+}
+
+/// Short human name for a machine: the hardware model without its SKU code
+/// (`XPS 14 DA14260` reads as `XPS 14`), else the hostname, else `Local`.
+fn machine_label(product_name: Option<&str>, host_name: Option<&str>) -> String {
+    // SKU codes mix letters and digits in one long token; model words do not.
+    let is_sku = |token: &str| {
+        token.chars().count() >= 5
+            && token.chars().any(|c| c.is_ascii_digit())
+            && token.chars().any(|c| c.is_alphabetic())
+    };
+    let placeholder = |name: &str| {
+        let lower = name.to_ascii_lowercase();
+        [
+            "system product name",
+            "to be filled",
+            "default string",
+            "virtual machine",
+            "standard pc",
+            "not specified",
+        ]
+        .iter()
+        .any(|p| lower.contains(p))
+    };
+    let model = product_name
+        .map(|name| {
+            name.split_whitespace()
+                .filter(|token| !is_sku(token))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|name| !name.is_empty() && !placeholder(name));
+    let host = host_name
+        .map(|host| host.trim().split('.').next().unwrap_or("").to_string())
+        .filter(|host| !host.is_empty() && host != "localhost");
+    truncate_chars(
+        &model.or(host).unwrap_or_else(|| "Local".to_string()),
+        LABEL_MAX_CHARS,
+    )
+}
+
+/// Name of the repository containing `dir`, else the directory's own name.
+/// The home directory and filesystem root identify nothing, so they are
+/// left unlabeled.
+fn repo_label(dir: &std::path::Path) -> Option<String> {
+    let home = dirs::home_dir();
+    let root = dir
+        .ancestors()
+        .take_while(|p| Some(*p) != home.as_deref())
+        .find(|p| p.join(".git").exists())
+        .unwrap_or(dir);
+    if Some(root) == home.as_deref() {
+        return None;
+    }
+    let name = root.file_name()?.to_string_lossy();
+    let name = name.trim();
+    (!name.is_empty()).then(|| truncate_chars(name, LABEL_MAX_CHARS))
+}
+
+fn lookup_session_working_dir(session_id: &str) -> Option<String> {
+    if session_id.is_empty() {
+        return None;
+    }
+    crate::session::Session::load_startup_stub(session_id)
+        .ok()
+        .and_then(|session| session.working_dir)
+}
+
+fn humanize_duration(elapsed: Duration) -> String {
+    humanize_secs(&elapsed.as_secs().to_string())
 }
 
 pub fn build_payload(
@@ -78,6 +216,24 @@ pub fn build_payload(
     session_title: Option<&str>,
     body: &str,
     turn_id: Option<u64>,
+) -> PushPayload {
+    build_payload_with(
+        kind,
+        session_id,
+        session_title,
+        body,
+        turn_id,
+        &PushLabels::for_session(session_id, None, None),
+    )
+}
+
+pub fn build_payload_with(
+    kind: PushKind,
+    session_id: &str,
+    session_title: Option<&str>,
+    body: &str,
+    turn_id: Option<u64>,
+    labels: &PushLabels,
 ) -> PushPayload {
     let title = session_title
         .map(str::trim)
@@ -108,13 +264,37 @@ pub fn build_payload(
     } else {
         truncate_words(&collapsed, BODY_MAX_CHARS)
     };
-    // Lead the title with a per-kind marker so the kinds are told apart at a
-    // glance on the lock screen, not only by the small subtitle.
-    let title = Some(format!(
-        "{} {}",
-        kind_marker(kind),
-        title.as_deref().unwrap_or("jcode")
-    ));
+    let duration_secs = labels.elapsed.map(|elapsed| elapsed.as_secs());
+    // The run time leads the body, which has several lines of room. In the
+    // one-line title it would crowd out the session name.
+    let body = match labels.elapsed {
+        Some(elapsed) => {
+            let lead = format!("{}{LABEL_SEPARATOR}", humanize_duration(elapsed));
+            let room = BODY_MAX_CHARS.saturating_sub(lead.chars().count());
+            format!("{lead}{}", truncate_words(&body, room))
+        }
+        None => body,
+    };
+    // Title order is what survives lock-screen truncation: where the session
+    // runs, which repo, a per-kind marker, then the session name.
+    let clean_label = |label: &Option<String>| {
+        label
+            .as_deref()
+            .map(|l| plain_inline(l.trim()))
+            .filter(|l| !l.is_empty())
+    };
+    let origin = clean_label(&labels.origin);
+    let repo = clean_label(&labels.repo);
+    let name = title.as_deref().unwrap_or("jcode");
+    let mut prefix = String::new();
+    for label in [origin.as_deref(), repo.as_deref()].into_iter().flatten() {
+        prefix.push_str(label);
+        prefix.push_str(LABEL_SEPARATOR);
+    }
+    prefix.push_str(kind_marker(kind));
+    prefix.push(' ');
+    let room = TITLE_MAX_CHARS.saturating_sub(prefix.chars().count());
+    let title = Some(format!("{prefix}{}", truncate_chars(name, room.max(8))));
     PushPayload {
         kind,
         session_id: session_id.to_string(),
@@ -123,6 +303,9 @@ pub fn build_payload(
         // Message ids are random u64s. JSON numbers above 2^53 lose precision
         // in JavaScript and the API rejects them, so fold into the safe range.
         turn_id: turn_id.map(|id| id & JS_SAFE_INT_MASK),
+        origin,
+        repo,
+        duration_secs,
     }
 }
 
@@ -582,6 +765,20 @@ pub fn notify(
     body: &str,
     turn_id: Option<u64>,
 ) {
+    notify_turn(kind, session_id, session_title, body, turn_id, None, None);
+}
+
+/// Queue a push for a turn that just ended, labeled with how long it ran and
+/// the directory it worked in.
+pub fn notify_turn(
+    kind: PushKind,
+    session_id: &str,
+    session_title: Option<&str>,
+    body: &str,
+    turn_id: Option<u64>,
+    working_dir: Option<&str>,
+    elapsed: Option<Duration>,
+) {
     if cfg!(test) {
         return;
     }
@@ -624,7 +821,14 @@ pub fn notify(
         );
         return;
     };
-    let payload = build_payload(kind, session_id, session_title, body, turn_id);
+    let payload = build_payload_with(
+        kind,
+        session_id,
+        session_title,
+        body,
+        turn_id,
+        &PushLabels::for_session(session_id, working_dir, elapsed),
+    );
     let source = body.to_string();
     handle.spawn(async move {
         let Some((key, base)) = credentials() else {
@@ -1017,6 +1221,105 @@ mod tests {
                 "turn_id": 42
             })
         );
+    }
+
+    #[test]
+    fn mobile_push_title_leads_with_origin_repo_and_run_time() {
+        let labels = PushLabels {
+            origin: Some("XPS 14".to_string()),
+            repo: Some("jcode-mobile".to_string()),
+            elapsed: Some(Duration::from_secs(252)),
+        };
+        let p = build_payload_with(
+            PushKind::TurnDone,
+            "session_x",
+            Some("Fix login"),
+            "Done.",
+            Some(7),
+            &labels,
+        );
+        assert_eq!(
+            serde_json::to_value(&p).unwrap(),
+            serde_json::json!({
+                "kind": "turn_done",
+                "session_id": "session_x",
+                "session_title": "XPS 14 \u{00B7} jcode-mobile \u{00B7} \u{2705} Fix login",
+                "body": "4m 12s \u{00B7} Done.",
+                "turn_id": 7,
+                "origin": "XPS 14",
+                "repo": "jcode-mobile",
+                "duration_secs": 252
+            })
+        );
+        // Cloud sessions, wakes without a run time, and sessions outside a repo.
+        let cloud = PushLabels {
+            origin: Some("Cloud".to_string()),
+            ..PushLabels::default()
+        };
+        let p = build_payload_with(PushKind::Wake, "s", Some("Nightly"), "x", None, &cloud);
+        assert_eq!(
+            p.session_title.as_deref(),
+            Some("Cloud \u{00B7} \u{23F0} Nightly")
+        );
+        assert_eq!(p.duration_secs, None);
+        // A question at the end still reports how long the turn ran.
+        let p = build_payload_with(
+            PushKind::TurnDone,
+            "s",
+            Some("T"),
+            "Done.\n\nShould I deploy it now?",
+            None,
+            &labels,
+        );
+        assert_eq!(p.kind, PushKind::NeedsInput);
+        assert_eq!(
+            p.session_title.as_deref(),
+            Some("XPS 14 \u{00B7} jcode-mobile \u{00B7} \u{2753} T")
+        );
+        assert_eq!(p.body, "4m 12s \u{00B7} Should I deploy it now?");
+        // Labels never push the title or body past the API's limits.
+        let long = "word ".repeat(60);
+        let p = build_payload_with(PushKind::TurnError, "s", Some(&long), &long, None, &labels);
+        let title = p.session_title.unwrap();
+        assert_eq!(title.chars().count(), TITLE_MAX_CHARS);
+        assert!(title.starts_with("XPS 14 \u{00B7} jcode-mobile \u{00B7} \u{274C} word"));
+        assert!(p.body.chars().count() <= BODY_MAX_CHARS);
+        assert!(p.body.starts_with("4m 12s \u{00B7} word"));
+    }
+
+    #[test]
+    fn mobile_push_machine_and_repo_labels() {
+        assert_eq!(
+            machine_label(Some("XPS 14 DA14260\n"), Some("xps14")),
+            "XPS 14"
+        );
+        assert_eq!(machine_label(Some("MacBook Pro"), None), "MacBook Pro");
+        // A product name that is only a SKU, or a board placeholder, says
+        // nothing: use the hostname.
+        assert_eq!(
+            machine_label(Some("20XW00FPUS"), Some("carbon.lan\n")),
+            "carbon"
+        );
+        assert_eq!(
+            machine_label(Some("System Product Name"), Some("tower")),
+            "tower"
+        );
+        assert_eq!(machine_label(None, Some("localhost")), "Local");
+        assert_eq!(machine_label(None, None), "Local");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("my-repo");
+        let nested = repo.join("crates").join("core");
+        std::fs::create_dir_all(&nested).unwrap();
+        // No repository above it: the directory names itself.
+        assert_eq!(repo_label(&nested).as_deref(), Some("core"));
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        assert_eq!(repo_label(&nested).as_deref(), Some("my-repo"));
+        assert_eq!(repo_label(&repo).as_deref(), Some("my-repo"));
+        assert_eq!(repo_label(std::path::Path::new("/")), None);
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(repo_label(&home), None);
+        }
     }
 
     #[test]
