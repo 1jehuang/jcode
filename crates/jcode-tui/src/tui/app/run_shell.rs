@@ -116,8 +116,11 @@ pub(super) fn status_spinner_only_symbol(app: &App) -> Option<&'static str> {
     // responsive instead of choppy at the ~1 Hz passive-liveness redraw rate.
     // When decorative animations are off it advances at the smooth liveness
     // rate; otherwise it uses the full-rate spinner clock.
+    // A focused client streams text as full frames fast enough to carry the
+    // spinner. An unfocused one batches text slowly, so the spinner needs this
+    // path to keep its normal 80ms motion between batches.
     if !app.is_processing
-        || !app.streaming.streaming_text.is_empty()
+        || (!app.streaming.streaming_text.is_empty() && app.client_focused())
         || app.centered_mode()
         || app.has_pending_mouse_scroll_animation()
         || app.remote_startup_phase_active()
