@@ -306,6 +306,31 @@ impl App {
         }
     }
 
+    /// Effective worker model for one agent target ("swarm", "memory"),
+    /// resolving session > global exactly like the server's spawn path
+    /// (`session_swarm_model` + `effective_agent_model`). Live daemon-attached
+    /// sessions receive the per-session `/agents` picks through History, so
+    /// this reports the model workers actually run on instead of suppressing
+    /// the row. Prefers the in-memory overrides (kept current by History and
+    /// the pickers) so the per-frame widget data path does not hit the
+    /// sidecar file. SSH-remote sessions suppress the global-config fallback:
+    /// their server owns the config and the client's file may differ. The
+    /// returned string keeps "inherit"/"coordinator" sentinels verbatim,
+    /// which the runtime rows render as an inherit row.
+    fn effective_worker_model(&self, target: &str) -> Option<String> {
+        if let Some(model) = self.session.agent_model_overrides.get(target) {
+            return Some(model.clone());
+        }
+        if crate::tui::is_ssh_remote() {
+            return None;
+        }
+        match target {
+            "swarm" => crate::config::config().agents.swarm_model.clone(),
+            "memory" => crate::config::config().agents.memory_model.clone(),
+            _ => None,
+        }
+    }
+
     fn widget_route_info(&self, model: Option<&str>) -> WidgetRouteInfo {
         let uses_remote_widget_metadata = self.is_remote || self.is_replay_runtime();
         let remote_provider_name = if uses_remote_widget_metadata {
@@ -1561,6 +1586,10 @@ impl crate::tui::TuiState for App {
         self.has_newer_binary()
     }
 
+    fn info_widget_overlays_enabled(&self) -> bool {
+        !self.suppress_info_widget_overlays
+    }
+
     fn server_update_available(&self) -> Option<bool> {
         if self.is_remote {
             self.remote_server_has_update
@@ -1760,6 +1789,24 @@ impl crate::tui::TuiState for App {
         let auth_method = self.widget_auth_method(route);
         let usage_info = self.widget_usage_info(route, auth_method);
 
+        // Overview summary rows. The TODO list and memory counts come from
+        // disk-backed stores with their own refresh cadence (1s throttle, same
+        // as the pinned todo band), so the frame snapshot reads a cache, not the
+        // store. Swarm derives from the already-gathered `swarm_info`.
+        let todos_summary = self.overview_todos_summary();
+        let memory_counts = self.overview_memory_counts();
+        let swarm_summary = swarm_info.as_ref().map(|info| {
+            let active = info
+                .managed_members
+                .iter()
+                .filter(|member| jcode_tui_render::swarm_gallery::is_active_status(&member.status))
+                .count();
+            crate::tui::info_widget::SwarmSummary {
+                agents: info.managed_members.len(),
+                active,
+            }
+        });
+
         let tokens_per_second = if matches!(self.status, ProcessingStatus::Streaming) {
             self.compute_streaming_tps()
         } else {
@@ -1854,6 +1901,8 @@ impl crate::tui::TuiState for App {
                 self.remote_startup_phase.is_some(),
                 crate::usage::remote_account_usage_received(),
             ),
+            overview_disabled: !crate::config::config().display.single_overview,
+            overview_pinned: crate::config::config().display.overview_pinned,
             context_info,
             context_info_stale: !context_snapshot.fresh,
             historical_context: false,
@@ -1861,6 +1910,26 @@ impl crate::tui::TuiState for App {
             context_limit: Some(self.context_limit as usize),
             model,
             reasoning_effort,
+            // Agent model overrides (agents.swarm_model / agents.memory_model
+            // plus per-session /agents picks). Replay stays unset: the
+            // recording's model is the truth and today's overrides would
+            // mislead. Live sessions (local or daemon-attached) resolve
+            // session > global, exactly like the spawn path does, so the
+            // panel shows the model workers actually run on. A concrete
+            // override renders its row; "inherit"/"coordinator" sentinels
+            // render an explicit inherit row so the setting is verifiable.
+            swarm_model_override: (!self.is_replay_runtime())
+                .then(|| self.effective_worker_model("swarm"))
+                .flatten(),
+            swarm_model_effort: (!self.is_replay_runtime())
+                .then(|| crate::config::config().agents.swarm_effort.clone())
+                .flatten(),
+            memory_model_override: (!self.is_replay_runtime())
+                .then(|| self.effective_worker_model("memory"))
+                .flatten(),
+            memory_model_effort: (!self.is_replay_runtime())
+                .then(|| crate::config::config().agents.memory_effort.clone())
+                .flatten(),
             service_tier: if !self.is_remote {
                 service_tier
             } else {
@@ -1905,6 +1974,9 @@ impl crate::tui::TuiState for App {
             // Memory remains available through commands and tools, but no longer
             // occupies a dedicated info widget.
             memory_info: None,
+            memory_counts,
+            todos_summary,
+            swarm_summary,
             swarm_info,
             background_info,
             usage_info,
@@ -2348,6 +2420,53 @@ pub(crate) enum SwarmPanelView {
 }
 
 impl App {
+    /// Compact TODO summary for the Overview row. Reuses the same session
+    /// todo state as the todos view/pinned band, but only the counts cross
+    /// into the widget data: the Overview row carries no item text.
+    pub(super) fn overview_todos_summary(&self) -> Option<crate::tui::info_widget::TodosSummary> {
+        let session_id = self.active_client_session_id();
+        if crate::tui::is_ssh_remote() || self.remote_todos_payload.is_some() {
+            // Remote: count from the received payload, no disk reads.
+            let payload = self
+                .remote_todos_payload
+                .as_ref()
+                .filter(|(id, _)| Some(id.as_str()) == session_id)
+                .and_then(|(_, payload)| serde_json::from_str::<serde_json::Value>(payload).ok())
+                .unwrap_or_default();
+            let todos: Vec<crate::todo::TodoItem> =
+                serde_json::from_value(payload["todos"].clone()).unwrap_or_default();
+            if todos.is_empty() {
+                return None;
+            }
+            let blocked = todos
+                .iter()
+                .filter(|todo| todo.status != "completed" && !todo.blocked_by.is_empty())
+                .count();
+            return Some(crate::tui::info_widget::TodosSummary {
+                total: todos.len(),
+                completed: todos
+                    .iter()
+                    .filter(|todo| todo.status == "completed")
+                    .count(),
+                in_progress: todos
+                    .iter()
+                    .filter(|todo| todo.status == "in_progress")
+                    .count(),
+                pending: todos.iter().filter(|todo| todo.status == "pending").count(),
+                blocked,
+            });
+        }
+        super::helpers::overview_todos_summary(session_id)
+    }
+
+    /// Memory counts for the Overview row, cached off the frame thread.
+    /// Mirrors the old `gather_memory_info` loader (issue #491): project
+    /// counts read the same store the memory tool writes, scoped to the
+    /// session working dir.
+    pub(super) fn overview_memory_counts(&self) -> Option<crate::tui::info_widget::MemoryCounts> {
+        super::helpers::overview_memory_counts_cached(self.session.working_dir.as_deref())
+    }
+
     /// Cycle chat → inline controls → full live swarm page → chat.
     pub(crate) fn cycle_swarm_panel_view(&mut self) -> SwarmPanelView {
         if !self.inline_swarm_gallery_active() {

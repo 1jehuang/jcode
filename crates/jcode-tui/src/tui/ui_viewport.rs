@@ -325,10 +325,19 @@ pub(super) fn draw_messages(
     area: Rect,
     prepared: Arc<PreparedChatFrame>,
     show_native_scrollbar: bool,
+    pinned_band: Option<band::PinnedBand>,
 ) -> (info_widget::Margins, Option<super::NativeScrollbar>) {
     let (render_area, scrollbar_area) =
         super::split_native_scrollbar_area(area, show_native_scrollbar);
     let left_inset = super::left_aligned_content_inset(render_area.width, app.centered_mode());
+    // The pinned Overview HUD overlays the viewport's top-right corner. The
+    // transcript is prepared full width; rows inside the band re-wrap at the
+    // narrower band width at render time, and rows below the band render at
+    // the full width. Video export needs the plain un-band frame, so it turns
+    // the band off entirely.
+    let pinned_band = pinned_band
+        .filter(|_| !crate::tui::mermaid::is_video_export_mode())
+        .filter(|band| band.content_rows(0) > 0);
     let text_render_area = Rect {
         x: render_area.x.saturating_add(left_inset),
         y: render_area.y,
@@ -353,7 +362,7 @@ pub(super) fn draw_messages(
     let (pinned_todo_band, pinned_todo_more_line) =
         pinned_todo_band_lines(app, text_render_area.width, render_area.height);
     let pinned_todo_band_rows = pinned_todo_band.len() as u16;
-    let max_scroll = compute_max_scroll_with_prompt_preview(
+    let naive_max_scroll = compute_max_scroll_with_prompt_preview(
         total_lines,
         wrapped_user_prompt_starts,
         user_prompt_texts,
@@ -361,6 +370,47 @@ pub(super) fn draw_messages(
         pinned_todo_band.len() as u16,
         preview_start + app.compacted_hidden_user_prompts(),
     );
+
+    // The band re-wraps the top content rows narrow, so fewer wide rows fit
+    // and the no-band max would park the tail too low, cutting the last line.
+    // Grow the max against the band's own accounting: the fixpoint only moves
+    // up, an overshoot just pads blank rows below. Preview rows shift the
+    // content area, so re-resolve them against the grown scroll until both
+    // stabilize.
+    let max_scroll = if let Some(band) = pinned_band {
+        let materialize = |start: usize, end: usize| prepared.materialize_line_slice(start, end);
+        let mut resolved = naive_max_scroll;
+        for _ in 0..4 {
+            let preview = if crate::config::config().display.prompt_preview && resolved > 0 {
+                compute_prompt_preview_line_count(
+                    wrapped_user_prompt_starts,
+                    user_prompt_texts,
+                    resolved,
+                    text_render_area.width,
+                    preview_start + app.compacted_hidden_user_prompts(),
+                )
+            } else {
+                0u16
+            };
+            let top_band_lines = pinned_todo_band.len() as u16 + preview;
+            let next = band::bottom_anchor_max_scroll(
+                total_lines,
+                resolved,
+                render_area.height.saturating_sub(top_band_lines) as usize,
+                band,
+                top_band_lines,
+                text_render_area.width,
+                &materialize,
+            );
+            if next == resolved {
+                break;
+            }
+            resolved = next;
+        }
+        resolved
+    } else {
+        naive_max_scroll
+    };
 
     super::set_last_max_scroll(max_scroll);
 
@@ -471,7 +521,34 @@ pub(super) fn draw_messages(
     let active_inline_edit_context =
         active_file_diff_context(prepared.as_ref(), scroll, visible_height);
 
-    let visible_end = (scroll + visible_height).min(total_lines);
+    // The band re-wraps its top rows at the narrower width, so more wide rows
+    // can share the viewport than the naive `scroll + height` window. Resolve
+    // the tail-follow anchor against that accounting so the tail is never cut;
+    // an undershooting scroll would hide the last line while an overshoot only
+    // pads blank rows below.
+    let band_geometry = |band: band::PinnedBand| {
+        let materialize = |start: usize, end: usize| prepared.materialize_line_slice(start, end);
+        (band, materialize)
+    };
+    let visible_end_pre_band = (scroll + visible_height).min(total_lines);
+    // The band's narrow re-wrap decides the window at every scroll: near the
+    // tail the plain window would materialize more wide rows than the band's
+    // display rows can carry, silently dropping the last lines.
+    let visible_end = if let Some(band) = pinned_band {
+        let (band, materialize) = band_geometry(band);
+        let fits = band::wide_rows_that_fit(
+            scroll,
+            total_lines,
+            visible_height,
+            band,
+            top_band_lines,
+            content_area.width,
+            &materialize,
+        );
+        (scroll + fits).min(total_lines)
+    } else {
+        visible_end_pre_band
+    };
     let visible_user_start = lower_bound(wrapped_user_indices, scroll);
     let visible_user_end = lower_bound(wrapped_user_indices, visible_end);
     let visible_user_indices: Vec<usize> = wrapped_user_indices
@@ -583,16 +660,11 @@ pub(super) fn draw_messages(
         }
     }
 
-    record_copy_viewport_frame_snapshot(
-        prepared.clone(),
-        scroll,
-        visible_end,
-        content_area,
-        &content_margins.left_widths,
-    );
-
     let mut visible_copy_targets: Vec<VisibleCopyTarget> = Vec::new();
     let mut badge_assignments: Vec<(usize, char)> = Vec::new();
+    // Copy-badge rects are resolved after the band split: the mutated wide
+    // row a badge lands on maps to the first display row rendering it.
+    let mut copy_badge_rects: Vec<(char, u16, usize, u16)> = Vec::new();
     let first_visible_copy_target = prepared
         .copy_targets
         .partition_point(|target| target.end_line <= scroll);
@@ -663,7 +735,9 @@ pub(super) fn draw_messages(
         None
     };
 
-    if visible_lines.len() < visible_height {
+    // The band split pads the display rows itself; padding the wide rows
+    // here would only feed the split more blank lines to re-bind.
+    if pinned_band.is_none() && visible_lines.len() < visible_height {
         visible_lines.extend(std::iter::repeat_n(
             Line::from(""),
             visible_height - visible_lines.len(),
@@ -761,6 +835,9 @@ pub(super) fn draw_messages(
 
     super::set_visible_expand_edit_badge(false, None);
     super::set_visible_expand_edit_badge_rect(None);
+    // Filled below, resolved after the band split so the rect's row follows
+    // the display row the mutated wide line lands on.
+    let mut expand_badge_rect: Option<(u16, usize, u16)> = None;
 
     let expand_badge_line = if expand_feedback_active {
         active_inline_edit_context
@@ -780,136 +857,6 @@ pub(super) fn draw_messages(
         " expand"
     };
     let reserved = expand_badge_reserved_width(badge_text);
-    // Never wrap shortcut chrome or expose an invisible click target.
-    if let Some(mut badge_line) =
-        expand_badge_line.filter(|_| reserved <= content_area.width as usize)
-    {
-        if expand_feedback_active && visible_end > scroll {
-            badge_line = badge_line.clamp(scroll, visible_end.saturating_sub(1));
-        }
-        if badge_line >= scroll && badge_line < visible_end {
-            let rel_idx = badge_line - scroll;
-            if let Some(line) = visible_lines.get_mut(rel_idx) {
-                let max_content_width = (content_area.width as usize).saturating_sub(reserved);
-                truncate_line_for_copy_badge(line, max_content_width);
-
-                // Reserve the badge's width in the info-widget margin profile so a
-                // floating widget (e.g. the KV cache panel) docks far enough left to
-                // clear the appended `[Alt⇧E] expand` block instead of being
-                // squeezed into a too-narrow slot that wraps/collides with it. The
-                // margin row for `visible_lines[rel_idx]` is offset by the synthetic
-                // top band (pinned todos + prompt preview), matching the
-                // image-region carve above.
-                let margin_row = top_band_lines as usize + rel_idx;
-                if let Some(width) = margins.right_widths.get_mut(margin_row) {
-                    *width = (*width).saturating_sub(reserved as u16);
-                }
-
-                let badge_start = line.width().saturating_add(1);
-                line.spans.extend(expand_badge_spans(
-                    &copy_badge_alt_label(),
-                    copy_badge_ui.alt_is_active(copy_badge_now),
-                    copy_badge_ui.shift_is_active(copy_badge_now),
-                    copy_badge_ui.key_is_active('e', copy_badge_now),
-                    expand_feedback_active,
-                ));
-
-                let final_width = line.width();
-                let aligned_x = match line.alignment.unwrap_or(Alignment::Left) {
-                    Alignment::Center => content_area
-                        .x
-                        .saturating_add(content_area.width.saturating_sub(final_width as u16) / 2),
-                    Alignment::Right => content_area
-                        .x
-                        .saturating_add(content_area.width.saturating_sub(final_width as u16)),
-                    Alignment::Left => content_area.x,
-                };
-                super::set_visible_expand_edit_badge_rect(Some(Rect {
-                    x: aligned_x.saturating_add(badge_start as u16),
-                    y: content_area.y.saturating_add(rel_idx as u16),
-                    width: final_width.saturating_sub(badge_start) as u16,
-                    height: 1,
-                }));
-                super::set_visible_expand_edit_badge(true, Some(badge_line));
-            }
-        }
-    }
-
-    for (badge_line, key) in badge_assignments {
-        if badge_line < scroll || badge_line >= visible_end {
-            continue;
-        }
-        let rel_idx = badge_line - scroll;
-        if let Some(line) = visible_lines.get_mut(rel_idx) {
-            let reserved = copy_badge_reserved_width(key, &copy_badge_ui, copy_badge_now);
-            let max_content_width = (content_area.width as usize).saturating_sub(reserved);
-            // Trims trailing spaces so the badge sits exactly one separator
-            // space after the content; ends with a dim ellipsis when the
-            // content genuinely has to be cut.
-            truncate_line_for_copy_badge(line, max_content_width);
-            line.spans.push(Span::raw(" "));
-
-            let alt_style = if copy_badge_ui.alt_is_active(copy_badge_now) {
-                Style::default().fg(queued_color()).bold()
-            } else {
-                Style::default().fg(dim_color())
-            };
-            let shift_style = if copy_badge_ui.shift_is_active(copy_badge_now) {
-                Style::default().fg(queued_color()).bold()
-            } else {
-                Style::default().fg(dim_color())
-            };
-            let key_style = if copy_badge_ui.key_is_active(key, copy_badge_now) {
-                Style::default().fg(accent_color()).bold()
-            } else {
-                Style::default().fg(dim_color())
-            };
-
-            if let Some(success) = copy_badge_ui.feedback_for_key(key, copy_badge_now) {
-                let feedback_style = if success {
-                    Style::default().fg(ai_color()).bold()
-                } else {
-                    Style::default().fg(Color::Red).bold()
-                };
-                let feedback_text = if success {
-                    "✓ Copied!"
-                } else {
-                    "✗ Copy failed"
-                };
-                line.spans.push(Span::styled(feedback_text, feedback_style));
-                line.spans.push(Span::raw(" "));
-            }
-
-            let shortcut_start = line.width();
-
-            line.spans
-                .extend(shortcut_badge_spans(key, alt_style, shift_style, key_style));
-
-            let final_width = line.width();
-            let aligned_x = match line.alignment.unwrap_or(Alignment::Left) {
-                Alignment::Center => content_area
-                    .x
-                    .saturating_add(content_area.width.saturating_sub(final_width as u16) / 2),
-                Alignment::Right => content_area
-                    .x
-                    .saturating_add(content_area.width.saturating_sub(final_width as u16)),
-                Alignment::Left => content_area.x,
-            };
-            if let Some(target) = visible_copy_targets
-                .iter_mut()
-                .find(|target| target.key.eq_ignore_ascii_case(&key))
-            {
-                target.badge_rect = Some(Rect {
-                    x: aligned_x.saturating_add(shortcut_start as u16),
-                    y: content_area.y.saturating_add(rel_idx as u16),
-                    width: final_width.saturating_sub(shortcut_start) as u16,
-                    height: 1,
-                });
-            }
-        }
-    }
-    set_visible_copy_targets(visible_copy_targets);
-
     if let Some(range) = app.copy_selection_range().filter(|range| {
         range.start.pane == crate::tui::CopySelectionPane::Chat
             && range.end.pane == crate::tui::CopySelectionPane::Chat
@@ -969,7 +916,277 @@ pub(super) fn draw_messages(
         }
     }
 
-    frame.render_widget(Paragraph::new(visible_lines), content_area);
+    // The band consumes the top display rows: wide rows inside it re-wrap at
+    // the band width and the straddling line continues full-width below it.
+    // Every display row carries a binding back into the wide frame, which
+    // keeps copy and selection exact.
+    let mut display_lines = visible_lines;
+    let mut split_bindings: Vec<band::CopyRowBinding> = Vec::new();
+    let mut split_band_rows = 0usize;
+    if let Some(band) = pinned_band {
+        let split = band::split_visible_rows(
+            display_lines,
+            scroll,
+            visible_height,
+            band,
+            top_band_lines,
+            content_area.width,
+            &|line| prepared.wrapped_copy_offset(line).unwrap_or(0),
+        );
+        display_lines = split.lines;
+        split_bindings = split.bindings;
+        split_band_rows = split.band_rows;
+    }
+    let band_narrow = pinned_band
+        .map(|band| band.narrow_width(content_area.width))
+        .unwrap_or(0) as u16;
+    // Badge chrome only lands on full-width rows: inside the band the HUD
+    // owns the right-hand columns, so its click rects would sit under it.
+    let display_row_of_wide = |wide_line: usize| -> Option<usize> {
+        if split_bindings.is_empty() {
+            wide_line.checked_sub(scroll)
+        } else {
+            split_bindings
+                .iter()
+                .rposition(|binding| binding.wide_line == wide_line)
+                .filter(|row| *row < visible_height)
+        }
+    };
+
+    // Never wrap shortcut chrome or expose an invisible click target.
+    if let Some(mut badge_line) =
+        expand_badge_line.filter(|_| reserved <= content_area.width as usize)
+    {
+        if expand_feedback_active && visible_end > scroll {
+            badge_line = badge_line.clamp(scroll, visible_end.saturating_sub(1));
+        }
+        if badge_line >= scroll
+            && badge_line < visible_end
+            && let Some(row) = display_row_of_wide(badge_line).filter(|row| *row >= split_band_rows)
+            && let Some(line) = display_lines.get_mut(row)
+        {
+            let max_content_width = (content_area.width as usize).saturating_sub(reserved);
+            truncate_line_for_copy_badge(line, max_content_width);
+
+            // Reserve the badge's width in the info-widget margin profile so a
+            // floating widget (e.g. the KV cache panel) docks far enough left to
+            // clear the appended `[Alt⇧E] expand` block instead of being
+            // squeezed into a too-narrow slot that wraps/collides with it. The
+            // margin row for the mutated wide line is offset by the synthetic
+            // top band (pinned todos + prompt preview), matching the
+            // image-region carve above.
+            let margin_row = top_band_lines as usize + (badge_line - scroll);
+            if let Some(width) = margins.right_widths.get_mut(margin_row) {
+                *width = (*width).saturating_sub(reserved as u16);
+            }
+
+            let badge_start = line.width().saturating_add(1);
+            line.spans.extend(expand_badge_spans(
+                &copy_badge_alt_label(),
+                copy_badge_ui.alt_is_active(copy_badge_now),
+                copy_badge_ui.shift_is_active(copy_badge_now),
+                copy_badge_ui.key_is_active('e', copy_badge_now),
+                expand_feedback_active,
+            ));
+
+            let final_width = line.width();
+            let aligned_x = match line.alignment.unwrap_or(Alignment::Left) {
+                Alignment::Center => content_area
+                    .x
+                    .saturating_add(content_area.width.saturating_sub(final_width as u16) / 2),
+                Alignment::Right => content_area
+                    .x
+                    .saturating_add(content_area.width.saturating_sub(final_width as u16)),
+                Alignment::Left => content_area.x,
+            };
+            expand_badge_rect = Some((
+                aligned_x.saturating_add(badge_start as u16),
+                row,
+                final_width.saturating_sub(badge_start) as u16,
+            ));
+            super::set_visible_expand_edit_badge(true, Some(badge_line));
+        }
+    }
+
+    for (badge_line, key) in badge_assignments {
+        if badge_line < scroll || badge_line >= visible_end {
+            continue;
+        }
+        let Some(row) = display_row_of_wide(badge_line).filter(|row| *row >= split_band_rows)
+        else {
+            continue;
+        };
+        if let Some(line) = display_lines.get_mut(row) {
+            let reserved = copy_badge_reserved_width(key, &copy_badge_ui, copy_badge_now);
+            let max_content_width = (content_area.width as usize).saturating_sub(reserved);
+            // Trims trailing spaces so the badge sits exactly one separator
+            // space after the content; ends with a dim ellipsis when the
+            // content genuinely has to be cut.
+            truncate_line_for_copy_badge(line, max_content_width);
+            line.spans.push(Span::raw(" "));
+
+            let alt_style = if copy_badge_ui.alt_is_active(copy_badge_now) {
+                Style::default().fg(queued_color()).bold()
+            } else {
+                Style::default().fg(dim_color())
+            };
+            let shift_style = if copy_badge_ui.shift_is_active(copy_badge_now) {
+                Style::default().fg(queued_color()).bold()
+            } else {
+                Style::default().fg(dim_color())
+            };
+            let key_style = if copy_badge_ui.key_is_active(key, copy_badge_now) {
+                Style::default().fg(accent_color()).bold()
+            } else {
+                Style::default().fg(dim_color())
+            };
+
+            if let Some(success) = copy_badge_ui.feedback_for_key(key, copy_badge_now) {
+                let feedback_style = if success {
+                    Style::default().fg(ai_color()).bold()
+                } else {
+                    Style::default().fg(Color::Red).bold()
+                };
+                let feedback_text = if success {
+                    "✓ Copied!"
+                } else {
+                    "✗ Copy failed"
+                };
+                line.spans.push(Span::styled(feedback_text, feedback_style));
+                line.spans.push(Span::raw(" "));
+            }
+
+            let shortcut_start = line.width();
+
+            line.spans
+                .extend(shortcut_badge_spans(key, alt_style, shift_style, key_style));
+
+            let final_width = line.width();
+            let aligned_x = match line.alignment.unwrap_or(Alignment::Left) {
+                Alignment::Center => content_area
+                    .x
+                    .saturating_add(content_area.width.saturating_sub(final_width as u16) / 2),
+                Alignment::Right => content_area
+                    .x
+                    .saturating_add(content_area.width.saturating_sub(final_width as u16)),
+                Alignment::Left => content_area.x,
+            };
+            copy_badge_rects.push((
+                key,
+                aligned_x.saturating_add(shortcut_start as u16),
+                row,
+                final_width.saturating_sub(shortcut_start) as u16,
+            ));
+        }
+    }
+
+    if let Some((x, row, width)) = expand_badge_rect {
+        super::set_visible_expand_edit_badge_rect(Some(Rect {
+            x,
+            y: content_area.y.saturating_add(row as u16),
+            width,
+            height: 1,
+        }));
+    }
+    for (key, x, row, width) in copy_badge_rects {
+        if let Some(target) = visible_copy_targets
+            .iter_mut()
+            .find(|target| target.key.eq_ignore_ascii_case(&key))
+        {
+            target.badge_rect = Some(Rect {
+                x,
+                y: content_area.y.saturating_add(row as u16),
+                width,
+                height: 1,
+            });
+        }
+    }
+    set_visible_copy_targets(visible_copy_targets);
+
+    // Remap the margin profile from wide rows onto display rows: inside the
+    // band the HUD owns the right-hand columns and the left slack follows the
+    // fragment's own alignment; below the band rows keep the wide-row profile
+    // (image carve, badge reserves) the pre-split passes computed.
+    if !split_bindings.is_empty() {
+        let t = top_band_lines as usize;
+        let mut right: Vec<u16> = Vec::with_capacity(visible_height);
+        let mut left: Vec<u16> = Vec::with_capacity(visible_height);
+        for (row, binding) in split_bindings.iter().enumerate().take(visible_height) {
+            if row < split_band_rows {
+                let line_width = display_lines[row].width() as u16;
+                let left_slack = match display_lines[row].alignment {
+                    Some(Alignment::Center) => band_narrow.saturating_sub(line_width) / 2,
+                    Some(Alignment::Right) => band_narrow.saturating_sub(line_width),
+                    _ => 0,
+                };
+                right.push(0);
+                left.push(left_slack);
+            } else {
+                let src = t + binding.wide_line.saturating_sub(scroll);
+                right.push(margins.right_widths.get(src).copied().unwrap_or(0));
+                left.push(margins.left_widths.get(src).copied().unwrap_or(0));
+            }
+        }
+        margins.right_widths.truncate(t);
+        margins.left_widths.truncate(t);
+        margins.right_widths.extend(right);
+        margins.left_widths.extend(left);
+        while margins.right_widths.len() < viewport_height {
+            margins.right_widths.push(0);
+        }
+        while margins.left_widths.len() < viewport_height {
+            margins.left_widths.push(0);
+        }
+        // Display rows point at the wide line they render; synthetic and
+        // past-the-end padding rows point past the frame so settlement and
+        // copy treat them as empty.
+        let mut row_line_map = vec![total_lines; t];
+        row_line_map.extend(
+            split_bindings
+                .iter()
+                .take(visible_height)
+                .map(|binding| binding.wide_line),
+        );
+        margins.row_line_map = Some(Arc::new(row_line_map));
+        record_copy_viewport_frame_snapshot(
+            prepared.clone(),
+            scroll,
+            visible_end,
+            content_area,
+            &margins.left_widths[t..],
+            Some(Arc::new(split_bindings.clone())),
+        );
+    } else {
+        record_copy_viewport_frame_snapshot(
+            prepared.clone(),
+            scroll,
+            visible_end,
+            content_area,
+            &content_margins.left_widths,
+            None,
+        );
+    }
+
+    if split_band_rows > 0 {
+        let band_rect = Rect {
+            x: content_area.x,
+            y: content_area.y,
+            width: band_narrow,
+            height: split_band_rows as u16,
+        };
+        let below_rect = Rect {
+            x: content_area.x,
+            y: content_area.y.saturating_add(split_band_rows as u16),
+            width: content_area.width,
+            height: content_area.height.saturating_sub(split_band_rows as u16),
+        };
+        let mut band_lines = display_lines;
+        let below_lines = band_lines.split_off(split_band_rows);
+        frame.render_widget(Paragraph::new(band_lines), band_rect);
+        frame.render_widget(Paragraph::new(below_lines), below_rect);
+    } else {
+        frame.render_widget(Paragraph::new(display_lines), content_area);
+    }
 
     let centered = app.centered_mode();
     let diagram_mode = app.diagram_mode();
@@ -996,10 +1213,23 @@ pub(super) fn draw_messages(
             // full content width instead let the rounded-up row count upscale
             // the picture a few cells wider than the margin carve assumed, so
             // it drew over info widgets docked beside it.
-            let fit_cols = if region.width == 0 {
-                content_area.width
+            // Band rows sit under the pinned HUD, so an image whose visible
+            // portion starts there rescales to the band width until its start
+            // row clears the band; below it renders full width. The fit cache
+            // keys on the scaled size, so crossing the boundary re-preps once
+            // instead of thrashing per frame.
+            let visible_start_wide = abs_idx.max(scroll);
+            let band_scoped =
+                display_row_of_wide(visible_start_wide).is_some_and(|row| row < split_band_rows);
+            let render_width = if band_scoped {
+                band_narrow.min(content_area.width)
             } else {
-                region.width.min(content_area.width)
+                content_area.width
+            };
+            let fit_cols = if region.width == 0 {
+                render_width
+            } else {
+                region.width.min(render_width)
             };
 
             if let Some(native_latex) = crate::tui::markdown::handterm_native_latex_for_hash(hash) {
@@ -1012,9 +1242,12 @@ pub(super) fn draw_messages(
                     && image_end <= visible_end
                     && region.height == native_latex.rows
                     && region.width == native_latex.cols
-                    && native_latex.cols <= content_area.width
+                    && native_latex.cols <= render_width
                 {
-                    let top = content_area.y + (abs_idx - scroll) as u16;
+                    let Some(top_row) = display_row_of_wide(abs_idx) else {
+                        continue;
+                    };
+                    let top = content_area.y + top_row as u16;
                     let x = content_area.x + native_latex.cols.saturating_sub(1);
                     let y = top + native_latex.rows.saturating_sub(1);
                     if let Some(symbol) = handterm_native_latex_cell_symbol(
@@ -1053,7 +1286,10 @@ pub(super) fn draw_messages(
                 let marker_visible = abs_idx >= scroll && abs_idx < visible_end;
 
                 if marker_visible {
-                    let screen_y = (abs_idx - scroll) as u16;
+                    let Some(start_row) = display_row_of_wide(abs_idx) else {
+                        continue;
+                    };
+                    let screen_y = start_row as u16;
                     let available_height = content_area.height.saturating_sub(screen_y);
                     let render_height = total_height.min(available_height);
 
@@ -1061,7 +1297,7 @@ pub(super) fn draw_messages(
                         let image_area = Rect {
                             x: content_area.x,
                             y: content_area.y + screen_y,
-                            width: content_area.width,
+                            width: render_width,
                             height: render_height,
                         };
                         let rows = if is_fit {
@@ -1112,14 +1348,16 @@ pub(super) fn draw_messages(
                 } else {
                     let visible_start = scroll.max(abs_idx);
                     let visible_end_img = visible_end.min(image_end);
-                    let screen_y = (visible_start - scroll) as u16;
+                    // The visible portion starts at the viewport's first wide
+                    // row, whose display row the split already fixed.
+                    let screen_y = display_row_of_wide(visible_start).unwrap_or(0) as u16;
                     let render_height = (visible_end_img - visible_start) as u16;
 
                     if render_height > 0 {
                         let image_area = Rect {
                             x: content_area.x,
                             y: content_area.y + screen_y,
-                            width: content_area.width,
+                            width: render_width,
                             height: render_height,
                         };
                         if is_fit {
@@ -1207,8 +1445,13 @@ pub(super) fn draw_messages(
 
     let right_x = render_area.x + render_area.width.saturating_sub(1);
     for &line_idx in &wrapped_user_indices[visible_user_start..visible_user_end] {
-        if line_idx >= scroll && line_idx < scroll + visible_height {
-            let screen_y = content_area.y + (line_idx - scroll) as u16;
+        // Bars mark wide lines, so translate through the split like the
+        // badges; band rows are HUD territory and skip the bar.
+        let Some(row) = display_row_of_wide(line_idx).filter(|row| *row >= split_band_rows) else {
+            continue;
+        };
+        if row < visible_height {
+            let screen_y = content_area.y + row as u16;
             let bar_area = Rect {
                 x: right_x,
                 y: screen_y,
@@ -1589,10 +1832,13 @@ pub(crate) fn pinned_todo_more_area() -> Option<Rect> {
     PINNED_TODO_MORE_AREA.lock().ok().and_then(|area| *area)
 }
 
+#[path = "ui_viewport/band.rs"]
+mod band;
 /// The same previous-prompt band for live sessions and resume previews. Work on
 /// bounded head/tail graphemes instead of allocating every character in a prompt.
 #[path = "ui_viewport/prompt_preview.rs"]
 mod prompt_preview;
+pub(crate) use band::{CopyRowBinding, PinnedBand, packed_display_height};
 #[cfg(test)]
 use prompt_preview::EXPANDED_PROMPT_PREVIEW_COUNT;
 use prompt_preview::compute_max_scroll_with_prompt_preview;

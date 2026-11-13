@@ -35,7 +35,7 @@ mod text;
 mod tips;
 #[path = "info_widget_usage.rs"]
 mod usage_render;
-use super::info_widget_overview::{InfoPageKind, compute_page_layout};
+use super::info_widget_overview::{InfoPageKind, compute_page_layout, section_visibility};
 use super::workspace_map::VisibleWorkspaceRow;
 use crate::ambient::AmbientStatus;
 pub use crate::memory_types::{
@@ -44,7 +44,7 @@ pub use crate::memory_types::{
 };
 use crate::prompt::ContextInfo;
 use crate::protocol::SwarmMemberStatus;
-use memory_render::{render_memory_compact, render_memory_expanded, render_memory_widget};
+use memory_render::render_memory_widget;
 use ratatui::{
     prelude::*,
     widgets::{Block, BorderType, Borders, Paragraph},
@@ -56,11 +56,13 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 
-use commits::{commits_has_data, render_commits_widget};
-use frame::Framed;
-use git::{
-    changes_has_data, changes_height, changes_legend, render_changes_framed, render_git_widget,
+use commits::render_commits_widget;
+pub(crate) use commits::{
+    OVERVIEW_COMMITS_MAX_ROWS, commit_row_lines, commits_has_data, commits_has_data_at, now_secs,
+    render_commits_compact_at,
 };
+use frame::Framed;
+use git::{changes_has_data, changes_legend, render_changes_framed, render_git_widget};
 pub(crate) use git::{edited_paths_from_tool_call, resolve_edited_path};
 pub use graph::{GraphEdge, GraphNode, build_graph_topology, graph_node_score};
 pub(crate) use memory_utils::is_traceworthy_memory_event;
@@ -76,16 +78,22 @@ pub(crate) use usage_render::{LimitBar, limit_color as usage_limit_color};
 use usage_render::{render_usage_compact, render_usage_widget};
 
 /// Overview rows used by the Changes section, mirroring [`render_sections`].
-pub(super) fn changes_section_height(data: &InfoWidgetData) -> u16 {
+/// Width-aware: wrapped paths count their continuation lines. The dual-repo
+/// layout keeps its pre-overview file-unit rows and height.
+pub(super) fn changes_section_height(data: &InfoWidgetData, width: u16) -> u16 {
     if let Some(dual) = &data.dual_git_info {
         return git::dual_git_height(dual);
     }
-    data.git_info.as_ref().map(changes_height).unwrap_or(0)
+    data.git_info
+        .as_ref()
+        .map(|info| git::changes_height(data, info, width))
+        .unwrap_or(0)
 }
 
 /// Overview rows used by the Runtime section, mirroring [`render_sections`].
-pub(super) fn model_info_height(data: &InfoWidgetData) -> u16 {
-    overview_runtime_height(data)
+/// Width-aware: wrapped rows count their continuation lines.
+pub(super) fn model_info_height(data: &InfoWidgetData, width: u16) -> u16 {
+    overview_runtime_height(data, width)
 }
 
 /// Types of info widgets that can be displayed
@@ -260,9 +268,30 @@ pub(crate) fn is_overview_mergeable(kind: WidgetKind) -> bool {
             | WidgetKind::Compaction
             | WidgetKind::ModelInfo
             | WidgetKind::UsageLimits
-            | WidgetKind::KvCache
             | WidgetKind::GitStatus
+            | WidgetKind::Commits
     )
+}
+
+/// Whether a placed Overview's rect can actually show the section that the
+/// standalone `kind` widget renders. The Overview folds sections in, but a
+/// small pocket truncates the tail (Changes/Commits) away; a caller
+/// must not treat such an Overview as covering `kind`'s content.
+pub(crate) fn overview_shows_section_of(
+    kind: WidgetKind,
+    data: &InfoWidgetData,
+    rect: Rect,
+) -> bool {
+    let vis = section_visibility(data, rect);
+    match kind {
+        WidgetKind::ModelInfo => vis.model_info,
+        WidgetKind::BackgroundTasks => vis.background,
+        WidgetKind::UsageLimits => vis.usage,
+        WidgetKind::Compaction => vis.compaction,
+        WidgetKind::GitStatus => vis.changes,
+        WidgetKind::Commits => vis.commits,
+        _ => true,
+    }
 }
 
 /// A placed widget with its location and type
@@ -298,6 +327,56 @@ pub struct SwarmInfo {
     pub focused: bool,
     /// Spinner frame for animating active agents' status glyphs.
     pub spinner_frame: usize,
+}
+
+/// Compact TODO list summary for the Overview: one row, no item rows.
+/// Counts mirror the status vocabulary of the todos view (`build_todos_view_markdown`).
+#[derive(Debug, Default, Clone)]
+pub struct TodosSummary {
+    pub total: usize,
+    pub completed: usize,
+    pub in_progress: usize,
+    pub pending: usize,
+    pub blocked: usize,
+}
+
+impl TodosSummary {
+    /// True when the row should render. A list with no items has no row.
+    pub fn should_render(&self) -> bool {
+        self.total > 0
+    }
+
+    pub fn percent(&self) -> u64 {
+        if self.total == 0 {
+            return 0;
+        }
+        ((self.completed as f64 / self.total as f64) * 100.0).round() as u64
+    }
+}
+
+/// Memory counts for the Overview row: total plus per-scope split.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryCounts {
+    pub total_count: usize,
+    pub project_count: usize,
+    pub global_count: usize,
+}
+
+/// Compact swarm summary for the Overview row: counts only, the dock and
+/// inline gallery keep the per-agent detail.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SwarmSummary {
+    /// Managed agents in this session's spawn subtree (the dock's list).
+    pub agents: usize,
+    /// Agents with an active status (running/thinking/streaming).
+    pub active: usize,
+}
+
+impl SwarmSummary {
+    /// True when the row should render: at least one managed agent.
+    pub fn should_render(&self) -> bool {
+        self.agents > 0
+    }
 }
 
 /// Background task status for the info widget
@@ -677,6 +756,20 @@ const PAGE_SWITCH_SECONDS: u64 = 30;
 /// Data to display in the info widget
 #[derive(Debug, Default, Clone)]
 pub struct InfoWidgetData {
+    /// True when `display.single_overview = false`: the Overview never places
+    /// and each mergeable section docks on its own (classic layout). Inverted
+    /// so the derived default (false) keeps the Overview for test fixtures
+    /// built with `..Default::default()`. Snapshotted per frame, not read
+    /// live in `has_data_for`, so placement stays pure in the data.
+    pub overview_disabled: bool,
+    /// True when `display.overview_pinned` (default): the Overview takes a
+    /// fixed top-right HUD rect instead of floating in the transcript
+    /// margins, and the transcript reserves its column so no text renders
+    /// underneath. Snapshotted per frame like `overview_disabled` so
+    /// placement stays pure in the data. The derived default (false) keeps
+    /// legacy floating behavior for test fixtures built with
+    /// `..Default::default()`; live sessions set it from config.
+    pub overview_pinned: bool,
     pub context_info: Option<ContextInfo>,
     /// True when context state is being updated and no authoritative snapshot is available.
     pub context_info_stale: bool,
@@ -686,6 +779,13 @@ pub struct InfoWidgetData {
     pub context_limit: Option<usize>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    /// Agent-specific model overrides from config: `agents.swarm_model` and
+    /// `agents.memory_model` (plus their efforts). `None` means "inherit the
+    /// coordinator/default model", which is not shown.
+    pub swarm_model_override: Option<String>,
+    pub swarm_model_effort: Option<String>,
+    pub memory_model_override: Option<String>,
+    pub memory_model_effort: Option<String>,
     pub service_tier: Option<String>,
     /// Initial remote runtime metadata has not arrived yet. Cleared by the owner
     /// once the initial snapshot is applied, never inferred from missing values.
@@ -704,8 +804,15 @@ pub struct InfoWidgetData {
     pub client_count: Option<usize>,
     /// Memory system statistics
     pub memory_info: Option<MemoryInfo>,
+    /// Memory counts for the Overview row (survives the memory strip that
+    /// keeps `memory_info` for the dedicated widget).
+    pub memory_counts: Option<MemoryCounts>,
+    /// Compact TODO summary for the Overview row.
+    pub todos_summary: Option<TodosSummary>,
     /// Swarm/subagent status
     pub swarm_info: Option<SwarmInfo>,
+    /// Compact swarm counts for the Overview row.
+    pub swarm_summary: Option<SwarmSummary>,
     /// Background tasks status
     pub background_info: Option<BackgroundInfo>,
     /// Subscription usage info
@@ -789,10 +896,44 @@ impl InfoWidgetData {
             WidgetKind::Diagrams => !self.diagrams.is_empty(),
             WidgetKind::WorkspaceMap => !self.workspace_rows.is_empty(),
             WidgetKind::Overview => {
+                // Opt-out (`display.single_overview = false`): the Overview
+                // never places, so every mergeable widget docks on its own.
+                if self.overview_disabled {
+                    return false;
+                }
                 let mut sections = 0usize;
                 // Status-line facts (model, context %, branch) never count:
                 // the overview only joins detail sections.
                 if runtime_has_data(self) {
+                    sections += 1;
+                }
+                // Summary rows (todos, swarm counts, memory counts) each count
+                // as a section: they are real Overview-only content, not
+                // detail behind status-line facts.
+                if self
+                    .todos_summary
+                    .as_ref()
+                    .is_some_and(|s| s.should_render())
+                {
+                    sections += 1;
+                }
+                if self
+                    .swarm_summary
+                    .as_ref()
+                    .is_some_and(|s| s.should_render())
+                {
+                    sections += 1;
+                }
+                // Memory activity does not count either: the overview strips
+                // `memory_info` before drawing (the dedicated MemoryActivity
+                // widget owns that content), so counting it toward
+                // availability can place an overview that crowds out the
+                // only renderer of memory data in a small pocket. The stored
+                // counts row is separate and does count.
+                if self
+                    .memory_counts
+                    .is_some_and(|counts| counts.total_count > 0)
+                {
                     sections += 1;
                 }
                 if self
@@ -815,9 +956,6 @@ impl InfoWidgetData {
                 {
                     sections += 1;
                 }
-                if self.cache_hit_info.is_some() {
-                    sections += 1;
-                }
                 if self.compaction_info.is_some() {
                     sections += 1;
                 }
@@ -831,6 +969,14 @@ impl InfoWidgetData {
                     sections += 1;
                 }
                 if self.cloud_info.is_some() {
+                    sections += 1;
+                }
+                if self
+                    .git_info
+                    .as_ref()
+                    .map(commits_has_data)
+                    .unwrap_or(false)
+                {
                     sections += 1;
                 }
                 // Only useful as a "join" mode when there are multiple sections.
@@ -1172,9 +1318,22 @@ pub(super) fn calculate_placements_with_cloud_reflow(
             && p.rect.height
                 >= calculate_widget_height(WidgetKind::Overview, data, p.rect.width, area.height)
     });
+    let fresh_overview_rect = fresh
+        .visible
+        .iter()
+        .find(|p| p.kind == WidgetKind::Overview)
+        .map(|p| p.rect);
+    // CloudDirectories is a standalone side widget, not an Overview section,
+    // so a resident one must survive the repack even though the fresh layout
+    // does not re-home it; everything else is preserved by kind or by
+    // folding back into a fresh Overview tall enough to show the section.
     let preserves = resident.visible.iter().all(|old| {
         old.kind == WidgetKind::CloudDirectories
             || fresh.visible.iter().any(|new| new.kind == old.kind)
+            || (is_overview_mergeable(old.kind)
+                && fresh_overview_rect
+                    .map(|rect| overview_shows_section_of(old.kind, data, rect))
+                    .unwrap_or(false))
     });
     if fits && preserves { fresh } else { resident }
 }
@@ -1586,10 +1745,7 @@ fn render_overview_framed(data: &InfoWidgetData, inner: Rect) -> Option<Framed> 
     }
     lines.truncate(inner.height as usize);
 
-    let title = match page.kind {
-        InfoPageKind::CompactOnly => "Overview",
-        InfoPageKind::MemoryExpanded => "Overview · memory",
-    };
+    let title = "Overview";
     let mut framed = Framed::body(lines).title(frame::label(title));
     // The Changes section marks agent-edited files; explain the dot here since
     // compact sections have no border of their own. Page dots keep the right.
@@ -1849,8 +2005,6 @@ fn render_compaction_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
 
 #[path = "info_widget_cache.rs"]
 mod cache_render;
-#[cfg(test)]
-use cache_render::render_kv_cache_summary_line;
 use cache_render::render_kv_cache_widget;
 
 /// Render ambient mode status widget
@@ -2034,12 +2188,11 @@ pub fn render(frame: &mut Frame, rect: Rect, data: &InfoWidgetData) {
 }
 
 fn render_page(kind: InfoPageKind, data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
-    match kind {
-        InfoPageKind::CompactOnly => render_sections(data, inner, None),
-        InfoPageKind::MemoryExpanded => {
-            render_sections(data, inner, Some(InfoPageKind::MemoryExpanded))
-        }
-    }
+    // One clock per page render: the commits section derives freshness from
+    // `now`, and a single read keeps ages from straddling a boundary mid-render.
+    let now = now_secs();
+    let _ = kind; // single page kind; kept for the layout's page contract
+    render_sections(data, inner, now)
 }
 
 pub(super) fn compact_usage_rows(
@@ -2062,27 +2215,23 @@ pub(super) fn startup_usage_lines(width: u16) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn render_sections(
-    data: &InfoWidgetData,
-    inner: Rect,
-    focus: Option<InfoPageKind>,
-) -> Vec<Line<'static>> {
+fn render_sections(data: &InfoWidgetData, inner: Rect, now: i64) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Section order matches master's Overview so both stay visually aligned:
+    // Runtime → Todos → Swarm → Background → Usage → Compaction
+    // → Changes → Commits. (Swarm per-agent detail lives in the inline
+    // gallery/dock, not here.)
 
     // Detail layer only: model identity, context %, and branch/counts live on
     // the overscroll status line and are never repeated here.
     lines.extend(render_model_info(data, inner));
 
-    // Memory info
-    if let Some(info) = &data.memory_info
-        && (info.total_count > 0 || info.activity.is_some())
-    {
-        if matches!(focus, Some(InfoPageKind::MemoryExpanded)) {
-            lines.extend(render_memory_expanded(info, inner));
-        } else {
-            lines.extend(render_memory_compact(info, inner.width));
-        }
-    }
+    // TODO list counts (compact: one row).
+    lines.extend(render_todos_summary_row(data, inner.width));
+
+    // Swarm counts, when this session manages agents (compact: one row).
+    lines.extend(render_swarm_summary_row(data, inner.width));
 
     // Background tasks info
     if let Some(info) = &data.background_info
@@ -2091,22 +2240,158 @@ fn render_sections(
         lines.extend(render_background_compact(info, inner.width as usize));
     }
 
+    // Memory counts (compact: one row). Per-agent detail and the memory
+    // graph stay in the dedicated MemoryActivity widget; this row is the
+    // only stored-count surface in the Overview.
+    lines.extend(render_memory_counts_row(data, inner.width));
+
     // Usage info (subscription limits)
     lines.extend(super::info_widget_overview::render_overview_usage(
         data,
         inner.width,
     ));
 
+    // Compaction: one line, same detail the standalone widget carries on its
+    // body (the mode rides the standalone border, so it goes inline here).
+    if let Some(info) = data.compaction_info.as_ref() {
+        let summary_tokens = (info.summary_chars / crate::compaction::CHARS_PER_TOKEN)
+            .max(usize::from(info.summary_chars > 0));
+        let detail = format!(
+            "Compaction {} · {} old · {} active · ~{} summary tok · {}",
+            if info.is_compacting {
+                "compacting"
+            } else {
+                "compacted"
+            },
+            info.compacted_messages,
+            info.active_messages,
+            summary_tokens,
+            info.mode
+        );
+        let color = if info.is_compacting {
+            rgb(255, 220, 140)
+        } else {
+            rgb(110, 210, 140)
+        };
+        let compaction_line = Line::from(vec![
+            Span::styled("🗜  ", Style::default().fg(color)),
+            Span::styled(
+                truncate_smart(&detail, inner.width.saturating_sub(2) as usize),
+                Style::default().fg(rgb(180, 180, 190)),
+            ),
+        ]);
+        lines.push(frame::fit(&compaction_line, inner.width as usize).unwrap_or_default());
+    }
+
     // Changed files (the detail behind the line's git counts).
     if data.dual_git_info.is_some() || data.git_info.as_ref().is_some_and(changes_has_data) {
         lines.extend(render_git_widget(data, inner));
+    }
+
+    // Recent commits on the current branch.
+    if let Some(git) = data.git_info.as_ref() {
+        lines.extend(render_commits_compact_at(git, inner.width as usize, now));
     }
 
     lines.extend(super::info_widget_cloud::render_cloud_summary(
         data,
         inner.width,
     ));
+
     lines
+}
+
+/// One-row TODO summary for the Overview. Counts use the same status
+/// vocabulary as the todos view; blocked mirrors its rule (incomplete +
+/// `blocked_by` nonempty). Format: `☑ 3/7 done (43%) · 2 doing · 1 blocked`.
+fn render_todos_summary_row(data: &InfoWidgetData, width: u16) -> Vec<Line<'static>> {
+    let Some(summary) = data.todos_summary.as_ref().filter(|s| s.should_render()) else {
+        return Vec::new();
+    };
+    let mut text = format!(
+        "{}/{} done ({}%)",
+        summary.completed,
+        summary.total,
+        summary.percent()
+    );
+    if summary.in_progress > 0 {
+        text.push_str(&format!(" · {} doing", summary.in_progress));
+    }
+    if summary.pending > 0 {
+        text.push_str(&format!(" · {} pending", summary.pending));
+    }
+    if summary.blocked > 0 {
+        text.push_str(&format!(" · {} blocked", summary.blocked));
+    }
+    vec![Line::from(vec![
+        Span::styled("☑ ", Style::default().fg(rgb(120, 220, 160))),
+        Span::styled(
+            truncate_smart(&text, width.saturating_sub(2) as usize),
+            Style::default().fg(rgb(180, 180, 190)),
+        ),
+    ])]
+}
+
+/// One-row swarm summary for the Overview. The dock and inline gallery keep
+/// per-agent detail; this row only says how many agents this session manages
+/// and how many are active. Format: `🐝 3 agents · 2 active`.
+fn render_swarm_summary_row(data: &InfoWidgetData, width: u16) -> Vec<Line<'static>> {
+    let Some(summary) = data.swarm_summary.as_ref().filter(|s| s.should_render()) else {
+        return Vec::new();
+    };
+    let text = if summary.active > 0 {
+        format!(
+            "{} agent{} · {} active",
+            summary.agents,
+            if summary.agents == 1 { "" } else { "s" },
+            summary.active
+        )
+    } else {
+        format!(
+            "{} agent{}",
+            summary.agents,
+            if summary.agents == 1 { "" } else { "s" }
+        )
+    };
+    vec![Line::from(vec![
+        Span::styled("🐝 ", Style::default().fg(rgb(255, 200, 100))),
+        Span::styled(
+            truncate_smart(&text, width.saturating_sub(2) as usize),
+            Style::default().fg(rgb(180, 180, 190)),
+        ),
+    ])]
+}
+
+/// One-row memory count for the Overview. Format:
+/// `🧠 5 memories · 2 project · 3 global`; single-scope lists drop the
+/// missing half. Zero stored memories renders nothing (the row is a
+/// stored-count surface, not a feature status).
+fn render_memory_counts_row(data: &InfoWidgetData, width: u16) -> Vec<Line<'static>> {
+    let Some(counts) = data.memory_counts else {
+        return Vec::new();
+    };
+    if counts.total_count == 0 {
+        return Vec::new();
+    }
+    let label = if counts.total_count == 1 {
+        "1 memory".to_string()
+    } else {
+        format!("{} memories", counts.total_count)
+    };
+    let mut text = label;
+    if counts.project_count > 0 {
+        text.push_str(&format!(" · {} project", counts.project_count));
+    }
+    if counts.global_count > 0 {
+        text.push_str(&format!(" · {} global", counts.global_count));
+    }
+    vec![Line::from(vec![
+        Span::styled("🧠 ", Style::default().fg(rgb(200, 150, 255))),
+        Span::styled(
+            truncate_smart(&text, width.saturating_sub(2) as usize),
+            Style::default().fg(rgb(180, 180, 190)),
+        ),
+    ])]
 }
 
 // ---------------------------------------------------------------------------

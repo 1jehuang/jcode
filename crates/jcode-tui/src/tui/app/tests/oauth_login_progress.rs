@@ -185,6 +185,9 @@ fn oauth_login_progress_preflight_is_honest_when_browser_and_listener_fail() {
 fn oauth_login_progress_real_frame_has_clickable_link_and_expand_button() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
+    // The login URL wraps on pure transcript geometry; keep widget overlays
+    // out of the wrap width so the fixture stays pin-independent.
+    app.suppress_info_widget_overlays = true;
     app.handle_debug_command("login-progress-fixture");
     let index = app.display_messages.len() - 1;
     let backend = ratatui::backend::TestBackend::new(90, 36);
