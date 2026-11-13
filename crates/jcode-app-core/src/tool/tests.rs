@@ -717,6 +717,7 @@ async fn tool_descriptions_stay_under_token_cap() {
     // applet carries the whole view-node vocabulary inline, since the model has
     // no other way to learn which node types and props the host renders.
     // codemode documents its sandbox API.
+    // macos_computer_use carries the full desktop action catalog plus the
     const EXEMPT: &[&str] = &[
         "integration_tools",
         "swarm",
@@ -725,6 +726,7 @@ async fn tool_descriptions_stay_under_token_cap() {
         "todo",
         "applet",
         "codemode",
+        "macos_computer_use",
     ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
@@ -791,6 +793,7 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
     // The todo pause fields carry the rules for when an agent may stop
     // working, which live on the fields because the tool description is one
     // sentence. Each is stated once (on add), not per route.
+    // macos_computer_use action/element document its live-machine safety surface.
     const EXEMPT: &[(&str, &str)] = &[
         (
             "todo",
@@ -807,6 +810,25 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
         ("todo", "$.properties.phases"),
         ("applet", "$.properties.placement"),
         ("desktop_selfdev", "$.properties.action"),
+        // macos_computer_use must enumerate its common actions inline: the
+        // model has no other way to know which verbs exist before discover.
+        ("macos_computer_use", "$.properties.action"),
+        ("macos_computer_use", "$.properties.element"),
+        // session_search include_tools governs log-noise defaults, pinned by
+        // session-picker tests.
+        ("session_search", "$.properties.include_tools"),
+        // todo waiting_on/owner spell the blocking semantics inline because
+        // misuse directly breaks the todo plan contract.
+        ("todo", "$.properties.add.items.properties.waiting_on"),
+        (
+            "todo",
+            "$.properties.phases.items.properties.lanes.items.properties.items.items.properties.waiting_on",
+        ),
+        (
+            "todo",
+            "$.properties.phases.items.properties.lanes.items.properties.owner",
+        ),
+        ("todo", "$.properties.update.items.properties.waiting_on"),
     ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
@@ -1977,6 +1999,12 @@ async fn post_tool_feedback_hook_appends_stdout_to_tool_result() {
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     let previous = std::env::var_os("JCODE_HOOK_POST_TOOL_FEEDBACK");
     crate::env::set_var("JCODE_HOOK_POST_TOOL_FEEDBACK", &script);
+    // jcode-base is compiled without cfg(test) here, so the config cache only
+    // re-checks env every 500ms; force a reload so the hook is visible now
+    // (same trap the pre_tool hook test documents). Without this a sibling
+    // refreshing the cache inside the window leaves post_tool_feedback unset
+    // and the tool result without the hook suffix under parallel load.
+    crate::config::invalidate_config_cache();
 
     let registry = Registry::new(Arc::new(MockProvider) as Arc<dyn Provider>).await;
     let mut ctx = mcp_test_context(dir.path());
@@ -1989,6 +2017,7 @@ async fn post_tool_feedback_hook_appends_stdout_to_tool_result() {
         Some(value) => crate::env::set_var("JCODE_HOOK_POST_TOOL_FEEDBACK", value),
         None => crate::env::remove_var("JCODE_HOOK_POST_TOOL_FEEDBACK"),
     }
+    crate::config::invalidate_config_cache();
     let output = result.expect("read should succeed").output;
     assert!(output.contains("hello"), "{output}");
     assert!(output.contains("[post_tool_feedback]"), "{output}");
