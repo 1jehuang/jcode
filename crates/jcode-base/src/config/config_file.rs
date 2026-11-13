@@ -150,7 +150,26 @@ impl Config {
     /// Update just the default model and provider in the config file.
     /// This reloads, patches, and saves so it doesn't clobber other fields.
     pub fn set_default_model(model: Option<&str>, provider: Option<&str>) -> anyhow::Result<()> {
+        Self::set_default_model_if_changed(model, provider).map(|_| ())
+    }
+
+    /// Update just the default model and provider in the config file, returning
+    /// whether the file was actually written.
+    pub fn set_default_model_if_changed(
+        model: Option<&str>,
+        provider: Option<&str>,
+    ) -> anyhow::Result<bool> {
         let mut cfg = Self::load_for_update()?;
+        if cfg.provider.default_model.as_deref() == model
+            && cfg.provider.default_provider.as_deref() == provider
+        {
+            crate::logging::info(&format!(
+                "Default model already saved: {}, provider: {}",
+                model.unwrap_or("(none)"),
+                provider.unwrap_or("(auto)")
+            ));
+            return Ok(false);
+        }
         cfg.provider.default_model = model.map(|s| s.to_string());
         cfg.provider.default_provider = provider.map(|s| s.to_string());
         cfg.save()?;
@@ -166,7 +185,7 @@ impl Config {
         {
             crate::logging::error(&format!("Could not sync account order: {error}"));
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Update just the default provider in the config file.

@@ -101,6 +101,46 @@ use deferred_operations::{
     spawn_deferred_auth_refreshes, spawn_deferred_provider_operation,
 };
 
+/// Persist a server-confirmed model switch as the config default so new
+/// sessions inherit the user's last explicit choice.
+///
+/// Runs on the server because the server owns the `config.toml` that its new
+/// sessions read; over SSH the client's config is a different file and must
+/// not be the write target. Called only after the switch was confirmed for
+/// the request that asked for persistence, so a rejected `/model B` reply can
+/// never overwrite the default: the reply's own request decides, not
+/// whichever reply happens to land first.
+///
+/// Honors `[provider].persist_model_switch = false` and skips the write when
+/// the file already carries this exact default (file-only compare, so a
+/// `JCODE_MODEL` env override cannot mask a real change).
+fn persist_confirmed_model_default(model_spec: &str, provider_key: Option<&str>) {
+    let cfg = crate::config::Config::load();
+    if !cfg.provider.persist_model_switch {
+        crate::logging::info(&format!(
+            "Skipped persisting model switch because provider.persist_model_switch=false: {}",
+            model_spec
+        ));
+        return;
+    }
+    match crate::config::Config::set_default_model_if_changed(Some(model_spec), provider_key) {
+        Ok(true) => {
+            crate::logging::info(&format!(
+                "Persisted confirmed model switch to config.toml: {} via {} (survives relaunch)",
+                model_spec,
+                provider_key.unwrap_or("auto")
+            ));
+        }
+        Ok(false) => {}
+        Err(e) => {
+            crate::logging::warn(&format!(
+                "Failed to persist model switch to config.toml: {}",
+                e
+            ));
+        }
+    }
+}
+
 fn send_model_changed_result(
     id: u64,
     result: anyhow::Result<(
@@ -163,6 +203,7 @@ fn send_model_changed_result(
 fn apply_cycle_model(
     id: u64,
     direction: i8,
+    persist_default: bool,
     agent: &mut Agent,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
@@ -215,17 +256,33 @@ fn apply_cycle_model(
             )
         })
     };
+    let confirmed = persist_default && result.is_ok();
     send_model_changed_result(id, result, current, agent, client_event_tx);
+    if confirmed {
+        let provider_key = crate::provider::MultiProvider::session_provider_key_after_model_switch(
+            &next_model,
+            &agent.provider_name(),
+            None,
+        );
+        persist_confirmed_model_default(&next_model, provider_key.as_deref());
+    }
 }
 
 pub(super) async fn handle_cycle_model(
     id: u64,
     direction: i8,
+    persist_default: bool,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     if let Ok(mut agent_guard) = agent.try_lock() {
-        apply_cycle_model(id, direction, &mut agent_guard, client_event_tx);
+        apply_cycle_model(
+            id,
+            direction,
+            persist_default,
+            &mut agent_guard,
+            client_event_tx,
+        );
     } else {
         spawn_deferred_agent_mutation(
             "cycle_model",
@@ -233,7 +290,7 @@ pub(super) async fn handle_cycle_model(
             Arc::clone(agent),
             client_event_tx.clone(),
             move |agent_guard, client_event_tx| {
-                apply_cycle_model(id, direction, agent_guard, client_event_tx);
+                apply_cycle_model(id, direction, persist_default, agent_guard, client_event_tx);
             },
         );
     }
@@ -299,6 +356,7 @@ pub(super) async fn handle_set_premium_mode(
 fn apply_set_model(
     id: u64,
     model: String,
+    persist_default: bool,
     agent: &mut Agent,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
@@ -327,7 +385,16 @@ fn apply_set_model(
             )
         })
     };
+    let confirmed = persist_default && result.is_ok();
     send_model_changed_result(id, result, current, agent, client_event_tx);
+    if confirmed {
+        let provider_key = crate::provider::MultiProvider::session_provider_key_after_model_switch(
+            &model,
+            &agent.provider_name(),
+            None,
+        );
+        persist_confirmed_model_default(&model, provider_key.as_deref());
+    }
 }
 
 pub(super) fn automatic_failover_source_is_pool_member(agent: &Agent) -> bool {
@@ -408,6 +475,7 @@ fn apply_set_route(
     id: u64,
     selection: crate::provider::RouteSelection,
     automatic_failover: bool,
+    persist_default: bool,
     agent: &mut Agent,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
@@ -459,17 +527,36 @@ fn apply_set_route(
             )
         })
     };
+    let confirmed = persist_default && result.is_ok();
     send_model_changed_result(id, result, current, agent, client_event_tx);
+    if confirmed {
+        // The picker already resolved the route into a spec + provider key
+        // pair (default_model_selection_from_route); persist exactly those,
+        // not a bare model id that would lose the OAuth/API distinction.
+        let selection = crate::provider::MultiProvider::default_model_selection_from_route(
+            &agent.provider_model(),
+            selection.api_method.as_str(),
+            &selection.provider_label,
+        );
+        persist_confirmed_model_default(&selection.model_spec, selection.provider_key.as_deref());
+    }
 }
 
 pub(super) async fn handle_set_model(
     id: u64,
     model: String,
+    persist_default: bool,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     if let Ok(mut agent_guard) = agent.try_lock() {
-        apply_set_model(id, model, &mut agent_guard, client_event_tx);
+        apply_set_model(
+            id,
+            model,
+            persist_default,
+            &mut agent_guard,
+            client_event_tx,
+        );
     } else {
         spawn_deferred_agent_mutation(
             "set_model",
@@ -477,7 +564,7 @@ pub(super) async fn handle_set_model(
             Arc::clone(agent),
             client_event_tx.clone(),
             move |agent_guard, client_event_tx| {
-                apply_set_model(id, model, agent_guard, client_event_tx);
+                apply_set_model(id, model, persist_default, agent_guard, client_event_tx);
             },
         );
     }
@@ -487,6 +574,7 @@ pub(super) async fn handle_set_route(
     id: u64,
     selection: crate::provider::RouteSelection,
     automatic_failover: bool,
+    persist_default: bool,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
@@ -495,6 +583,7 @@ pub(super) async fn handle_set_route(
             id,
             selection,
             automatic_failover,
+            persist_default,
             &mut agent_guard,
             client_event_tx,
         );
@@ -509,6 +598,7 @@ pub(super) async fn handle_set_route(
                     id,
                     selection,
                     automatic_failover,
+                    persist_default,
                     agent_guard,
                     client_event_tx,
                 );
