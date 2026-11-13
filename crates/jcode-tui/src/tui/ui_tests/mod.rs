@@ -1,5 +1,6 @@
 use super::*;
 
+mod band_copy_translation;
 mod cloud_directories;
 mod codemode_preview;
 mod preview_redraw_schedule;

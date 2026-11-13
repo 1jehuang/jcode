@@ -34,18 +34,77 @@ pub(super) const COMMITS_MAX_ROWS: usize = 5;
 /// is not worth margin space.
 const COMMITS_FRESH_SECS: i64 = 24 * 3600;
 
-fn now_secs() -> i64 {
+pub(crate) fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
 
-pub(super) fn commits_has_data(info: &GitInfo) -> bool {
+pub(crate) fn commits_has_data(info: &GitInfo) -> bool {
     commits_has_data_at(info, now_secs())
 }
 
-fn commits_has_data_at(info: &GitInfo, now: i64) -> bool {
+/// Rows the overview Commits section lists before collapsing the rest into an
+/// inline `+N more` row.
+pub(crate) const OVERVIEW_COMMITS_MAX_ROWS: usize = 3;
+
+/// Rows the commit takes in the Overview section after wrapping, shared by
+/// the render and the height mirror so they can never drift.
+pub(crate) fn commit_row_lines(commit: &RecentCommit, width: usize, now: i64) -> usize {
+    commit_lines(commit, width, now).len()
+}
+
+/// Same-frame callers that measure the section's height must pass their `now`
+/// here so freshness cannot flip between measurement and draw. Long subjects
+/// wrap onto continuation lines instead of truncating.
+pub(crate) fn render_commits_compact_at(
+    info: &GitInfo,
+    width: usize,
+    now: i64,
+) -> Vec<Line<'static>> {
+    if !commits_has_data_at(info, now) {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+
+    let unpushed = info
+        .recent_commits
+        .iter()
+        .filter(|c| c.unpushed)
+        .count()
+        .max(info.ahead);
+    let mut header = vec![Span::styled(
+        "Commits",
+        Style::default().fg(rgb(180, 180, 190)).bold(),
+    )];
+    if unpushed > 0 {
+        header.push(Span::raw("  "));
+        header.push(Span::styled(
+            format!("↑{unpushed} unpushed"),
+            Style::default().fg(rgb(140, 180, 255)),
+        ));
+    }
+    lines.push(frame::fit(&Line::from(header), width).unwrap_or_default());
+
+    let rows = OVERVIEW_COMMITS_MAX_ROWS.min(info.recent_commits.len());
+    for commit in &info.recent_commits[..rows] {
+        lines.extend(commit_lines(commit, width, now));
+    }
+
+    let hidden = info.recent_commits.len().saturating_sub(rows);
+    if hidden > 0 {
+        lines.push(Line::from(vec![Span::styled(
+            format!("  +{hidden} more"),
+            Style::default().fg(rgb(110, 110, 125)),
+        )]));
+    }
+
+    lines
+}
+
+pub(crate) fn commits_has_data_at(info: &GitInfo, now: i64) -> bool {
     info.recent_commits.first().is_some_and(|newest| {
         newest.unpushed || now.saturating_sub(newest.timestamp) < COMMITS_FRESH_SECS
     })
@@ -104,11 +163,33 @@ fn render_commits_at(data: &InfoWidgetData, inner: Rect, now: i64) -> Framed {
 }
 
 fn commit_line(commit: &RecentCommit, width: usize, now: i64) -> Line<'static> {
+    commit_line_spans(commit, width, now, false).0
+}
+
+/// Overview variant of [`commit_line`]: the subject keeps its full text and
+/// wraps onto continuation lines (indented under the marker) instead of ending
+/// in `…`, so long commit messages stay readable. Returns every line the row
+/// occupies.
+fn commit_lines(commit: &RecentCommit, width: usize, now: i64) -> Vec<Line<'static>> {
+    let (line, marker_indent) = commit_line_spans(commit, width, now, true);
+    super::frame::wrap_row_lines(line, width, marker_indent)
+}
+
+/// Build one commit row. `keep_full_subject` skips the single-row truncation
+/// so the caller can wrap instead; the row then intentionally exceeds
+/// `width` until wrapped.
+fn commit_line_spans(
+    commit: &RecentCommit,
+    width: usize,
+    now: i64,
+    keep_full_subject: bool,
+) -> (Line<'static>, usize) {
     let marker = if commit.unpushed {
         Span::styled("● ", Style::default().fg(rgb(140, 180, 255)))
     } else {
         Span::styled("  ", Style::default())
     };
+    let marker_indent = marker.width();
     let subject_cells = UnicodeWidthStr::width(commit.subject.as_str());
     let full_hash = UnicodeWidthStr::width(commit.hash.as_str());
     let hash = if width < 2 + full_hash + 1 + subject_cells {
@@ -126,13 +207,20 @@ fn commit_line(commit: &RecentCommit, width: usize, now: i64) -> Line<'static> {
         .map(|(a, r)| UnicodeWidthStr::width(a.as_str()) + UnicodeWidthStr::width(r.as_str()) + 1)
         .unwrap_or(0);
     let age_w = UnicodeWidthStr::width(age.as_str()) + 1;
-    let fixed = 2 + UnicodeWidthStr::width(hash.as_str());
+    let fixed = marker_indent + UnicodeWidthStr::width(hash.as_str());
 
     // The subject is the point of the row: line stats only appear when it
     // keeps a comfortable width, and the age goes next.
     let min_subject = 12;
     let roomy_subject = 26;
-    let (show_stat, show_age) = if width >= fixed + roomy_subject + stat_w + age_w {
+    let (show_stat, show_age) = if keep_full_subject {
+        // The wrapped row spans multiple lines, so stats and age ride the first
+        // one whenever the subject can keep its minimum readable width.
+        (
+            stat.is_some() && width >= fixed + min_subject + stat_w + age_w,
+            width >= fixed + min_subject + age_w,
+        )
+    } else if width >= fixed + roomy_subject + stat_w + age_w {
         (stat.is_some(), true)
     } else if width >= fixed + min_subject + age_w {
         (false, true)
@@ -141,7 +229,11 @@ fn commit_line(commit: &RecentCommit, width: usize, now: i64) -> Line<'static> {
     };
     let right_w = if show_stat { stat_w } else { 0 } + if show_age { age_w } else { 0 };
     let subject_w = width.saturating_sub(fixed + right_w);
-    let subject = clip(&commit.subject, subject_w);
+    let subject = if keep_full_subject {
+        commit.subject.clone()
+    } else {
+        clip(&commit.subject, subject_w)
+    };
     let pad = subject_w.saturating_sub(UnicodeWidthStr::width(subject.as_str()));
 
     let mut spans = vec![
@@ -169,10 +261,13 @@ fn commit_line(commit: &RecentCommit, width: usize, now: i64) -> Line<'static> {
         ));
     }
     let line = Line::from(spans);
+    if keep_full_subject {
+        return (line, marker_indent);
+    }
     if line.width() <= width {
-        line
+        (line, marker_indent)
     } else {
-        frame::fit(&line, width).unwrap_or_default()
+        (frame::fit(&line, width).unwrap_or_default(), marker_indent)
     }
 }
 

@@ -15,6 +15,7 @@ mod copy_pane_drag;
 pub(crate) use copy_pane_drag::*;
 
 use super::info_widget;
+use super::info_widget_layout;
 use super::markdown;
 use super::ui_diff::{
     DiffLineKind, ParsedDiffLine, collect_diff_lines, diff_add_color, diff_change_counts_for_tool,
@@ -1944,6 +1945,10 @@ struct CopyViewportSnapshot {
     visible_end: usize,
     content_area: Rect,
     left_margins: Vec<u16>,
+    /// Per display row, the wide-frame line and column range the row renders
+    /// when the pinned Overview band re-wraps the top rows. `None` means every
+    /// display row shows wide line `scroll + row` (the plain scrolled frame).
+    row_bindings: Option<Arc<Vec<viewport::CopyRowBinding>>>,
 }
 
 impl CopyViewportSnapshot {
@@ -2144,6 +2149,7 @@ fn record_copy_pane_snapshot(
                 visible_end,
                 content_area,
                 left_margins: left_margins.to_vec(),
+                row_bindings: None,
             });
         });
         return;
@@ -2163,6 +2169,7 @@ fn record_copy_pane_snapshot(
             visible_end,
             content_area,
             left_margins: left_margins.to_vec(),
+            row_bindings: None,
         });
     }
 }
@@ -2173,6 +2180,7 @@ fn record_copy_viewport_frame_snapshot(
     visible_end: usize,
     content_area: Rect,
     left_margins: &[u16],
+    row_bindings: Option<Arc<Vec<viewport::CopyRowBinding>>>,
 ) {
     if secondary_render_active() {
         return;
@@ -2188,6 +2196,7 @@ fn record_copy_viewport_frame_snapshot(
                     visible_end,
                     content_area,
                     left_margins: left_margins.to_vec(),
+                    row_bindings,
                 });
         });
         return;
@@ -2202,6 +2211,7 @@ fn record_copy_viewport_frame_snapshot(
                 visible_end,
                 content_area,
                 left_margins: left_margins.to_vec(),
+                row_bindings,
             });
     }
 }
@@ -2303,8 +2313,16 @@ pub(crate) fn record_copy_viewport_frame_snapshot_for_test(
     visible_end: usize,
     content_area: Rect,
     left_margins: &[u16],
+    row_bindings: Option<Arc<Vec<viewport::CopyRowBinding>>>,
 ) {
-    record_copy_viewport_frame_snapshot(prepared, scroll, visible_end, content_area, left_margins);
+    record_copy_viewport_frame_snapshot(
+        prepared,
+        scroll,
+        visible_end,
+        content_area,
+        left_margins,
+        row_bindings,
+    );
 }
 
 pub(crate) fn line_left_margins_for_area(lines: &[Line<'static>], area_width: u16) -> Vec<u16> {
@@ -3347,7 +3365,38 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         capture.render_order.push("prepare_messages".to_string());
     }
     let prep_start = Instant::now();
+    // Known before the prepare pass (it early-returns below for takeover kinds).
+    let onboarding_welcome = app.onboarding_welcome_active();
+    // Info-widget data must exist before the prepare pass: the pinned Overview
+    // HUD reserves a column at both wrap and render width, so the transcript
+    // must know the reserve while it wraps. `info_widget_data` is a pure
+    // snapshot read, safe to hoist above prepare.
+    let widget_data_start = Instant::now();
+    let widget_data = app.info_widget_data();
+    let widget_data_elapsed = widget_data_start.elapsed();
     let chat_left_inset = left_aligned_content_inset(chat_area.width, app.centered_mode());
+    // Pinned Overview HUD: when the render pass pins the Overview top-right,
+    // compute its band geometry (width x height) once here. The transcript is
+    // prepared full width; only the rows under the band re-wrap narrow at
+    // render time. The render gate (overlays enabled, no donut, no swarm
+    // page, no fullscreen side panel, not onboarding) is mirrored here, and
+    // draw_messages additionally drops the band for video export.
+    let pinned_overview_band = if app.info_widget_overlays_enabled()
+        && !widget_data.is_empty()
+        && !super::idle_donut_active(app)
+        && !swarm_page_active
+        && !side_panel_fullscreen
+        && !onboarding_welcome
+    {
+        info_widget_layout::pinned_overview_band(chat_area, &widget_data).map(|(width, height)| {
+            viewport::PinnedBand {
+                height,
+                reserve: width,
+            }
+        })
+    } else {
+        None
+    };
     let wide_prepare_width = chat_area.width.saturating_sub(chat_left_inset);
     let narrow_prepare_width = wide_prepare_width.saturating_sub(1);
     let pinned_mermaid_aspect_ratio =
@@ -3373,8 +3422,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         note_prep_prepare_at(started.elapsed());
         prepared
     };
-
-    let onboarding_welcome = app.onboarding_welcome_active();
 
     // The guided onboarding phases (login import, OpenAI prompt, continue prompt)
     // are entirely key-driven and own the whole chat column: they render their own
@@ -3505,9 +3552,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // A fresh cloud transcript is short even on a tall terminal. Keep enough
     // packed rows for the cloud card stack instead of hiding directory counts
     // above an otherwise unused lower half of the screen.
-    let widget_data_start = Instant::now();
-    let widget_data = app.info_widget_data();
-    let widget_data_elapsed = widget_data_start.elapsed();
     let cloud_card_height = if app.info_widget_overlays_enabled()
         && widget_data.cloud_info.is_some()
         && chat_area.width >= 120
@@ -3529,12 +3573,37 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     } else {
         0
     };
-    let content_height = prepared
-        .total_wrapped_lines()
-        .saturating_sub(clear_start.unwrap_or(0))
-        .saturating_add(pinned_band_height)
-        .max(1)
-        .min(u16::MAX as usize) as u16;
+    // With the pinned Overview band, the top rows re-wrap narrow and can
+    // expand into more display rows than the wide frame's line count, so a
+    // packed chunk sized to the raw count would cut the tail. Size the
+    // chunk to the band's own display accounting; in scroll mode the
+    // bottom-anchor fixpoint owns the same guarantee.
+    let content_height = {
+        let start = clear_start.unwrap_or(0);
+        let total_lines = prepared.total_wrapped_lines();
+        let display_height = match pinned_overview_band {
+            Some(band) => {
+                let content_width = if chat_scrollbar_visible {
+                    narrow_prepare_width
+                } else {
+                    wide_prepare_width
+                };
+                viewport::packed_display_height(
+                    start,
+                    total_lines,
+                    band,
+                    pinned_band_height.min(u16::MAX as usize) as u16,
+                    content_width,
+                    &|from, to| prepared.materialize_line_slice(from, to),
+                )
+            }
+            None => total_lines.saturating_sub(start),
+        };
+        display_height
+            .saturating_add(pinned_band_height)
+            .max(1)
+            .min(u16::MAX as usize) as u16
+    };
     let content_height = content_height.max(cloud_card_height);
 
     // Terminal-style clear (Ctrl+L): the trailing spacer makes every visible
@@ -3743,6 +3812,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             messages_area,
             prepared.clone(),
             chat_scrollbar_visible,
+            pinned_overview_band,
         );
         chat_scrollbar = scrollbar;
         margins
@@ -3862,6 +3932,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         && !show_donut
         && !swarm_page_active
         && !side_panel_fullscreen
+        && !onboarding_welcome
     {
         if let Some(ref mut capture) = debug_capture {
             capture.render_order.push("render_info_widgets".to_string());
@@ -3881,7 +3952,10 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             // always true and useless; instead verify each placement still fits
             // within the free margin the layout reported for the rows it covers.
             for placement in &placements {
-                if widget_overlaps_content(placement, widget_bounds, &margins) {
+                if widget_overlaps_content(placement, widget_bounds, &margins)
+                    && !(placement.kind == info_widget::WidgetKind::Overview
+                        && pinned_overview_band.is_some())
+                {
                     capture.anomaly(format!(
                         "Info widget {:?} intrudes into content (rect {:?})",
                         placement.kind, placement.rect

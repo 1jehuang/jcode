@@ -6,7 +6,6 @@ use crate::tool::Registry;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
-use std::sync::OnceLock;
 
 #[test]
 fn header_rows_clip_unicode_and_controls_without_losing_style() {
