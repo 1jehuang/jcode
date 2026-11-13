@@ -80,6 +80,38 @@ pub(super) fn hold_server_events_while_unfocused(app: &App) -> bool {
     app.is_processing && !app.client_focused()
 }
 
+/// Whether the spinner thread's ticks should service the loop's other
+/// deadlines in place of runtime timers.
+///
+/// The loop runs in `block_on` on the main thread, so arming a runtime timer
+/// there unparks the worker that owns the timer driver, and its expiry wakes
+/// that worker again. A backtrace of every driver unpark on an unfocused client
+/// mirroring a streamed turn showed nothing else: the redraw tick, the server
+/// event hold and the redraw deferral, re-armed about eight times a second
+/// between them. The spinner thread already wakes the loop every 80ms then, so
+/// those deadlines are checked on its ticks and the timers stay unarmed.
+///
+/// Only for an unfocused client, where being up to half a spinner frame early
+/// or late is invisible, and only when the tick period is coarse enough to be
+/// kept by 80ms steps.
+pub(super) fn spinner_drives_deadlines(
+    spinner_available: bool,
+    focused: bool,
+    redraw_period: Duration,
+) -> bool {
+    spinner_available && !focused && redraw_period >= STATUS_SPINNER_ONLY_INTERVAL * 2
+}
+
+/// Whether a deadline checked on a spinner tick counts as reached. Half a
+/// frame of slack rounds to the nearest tick, so a 250ms deadline is met on the
+/// third tick (240ms) and not the fourth (320ms).
+pub(super) fn deadline_due_on_spinner_tick(
+    deadline: tokio::time::Instant,
+    now: tokio::time::Instant,
+) -> bool {
+    now + STATUS_SPINNER_ONLY_INTERVAL / 2 >= deadline
+}
+
 /// Spinner cadence. Not a runtime timer: see [`SpinnerTicker`] for why that
 /// cost four thread wakeups per frame.
 pub(super) fn status_spinner_interval() -> SpinnerTicker {
@@ -954,6 +986,9 @@ impl App {
 
             let mut input_redraw = true;
             let mut deferred_redraw_at: Option<tokio::time::Instant> = None;
+            // See `spinner_drives_deadlines`.
+            let mut deadlines_were_on_spinner = false;
+            let mut last_loop_tick = tokio::time::Instant::now();
             // While set, server events stay in the socket buffer. An unfocused
             // client mirroring a turn was woken about 19 times a second by
             // them, one event per wakeup, and nothing on screen needs that
@@ -1044,6 +1079,22 @@ impl App {
                     continue;
                 }
 
+                let spinner_available = status_spinner_renderer.spinner_only_available(&self);
+                let on_spinner = spinner_drives_deadlines(
+                    spinner_available,
+                    self.client_focused(),
+                    redraw_period,
+                );
+                if on_spinner != deadlines_were_on_spinner {
+                    deadlines_were_on_spinner = on_spinner;
+                    last_loop_tick = tokio::time::Instant::now();
+                    if !on_spinner {
+                        // The runtime timer was not polled meanwhile. Restart
+                        // it so it does not fire at once for the gap.
+                        redraw_interval = redraw_timer(redraw_period);
+                    }
+                }
+
                 tokio::select! {
                     // Poll in declaration order so user input always wins the
                     // race against server/bus chatter. During heavy streaming
@@ -1071,13 +1122,34 @@ impl App {
                             tokio::time::sleep(redraw_period).await;
                         }
                     }
-                    _ = status_spinner_interval.tick(), if status_spinner_renderer.spinner_only_available(&self) => {
+                    _ = status_spinner_interval.tick(), if spinner_available => {
                         super::wake_stats::note("spinner");
                         if !status_spinner_renderer.draw_status_spinner_only(&self, &mut terminal)? {
                             needs_redraw = true;
                         }
+                        if on_spinner {
+                            let now = tokio::time::Instant::now();
+                            if server_events_held_until
+                                .is_some_and(|at| deadline_due_on_spinner_tick(at, now))
+                            {
+                                super::wake_stats::note("server_events_released");
+                                server_events_held_until = None;
+                            }
+                            if deferred_redraw_at
+                                .is_some_and(|at| deadline_due_on_spinner_tick(at, now))
+                            {
+                                super::wake_stats::note("deferred_redraw");
+                                deferred_redraw_at = None;
+                            }
+                            if deadline_due_on_spinner_tick(last_loop_tick + redraw_period, now) {
+                                last_loop_tick = now;
+                                super::wake_stats::note("tick");
+                                needs_redraw |=
+                                    remote::handle_tick(&mut self, &mut remote_conn).await;
+                            }
+                        }
                     }
-                    _ = redraw_interval.tick() => {
+                    _ = redraw_interval.tick(), if !on_spinner => {
                         super::wake_stats::note("tick");
                         needs_redraw |= remote::handle_tick(&mut self, &mut remote_conn).await;
                     }
@@ -1086,7 +1158,7 @@ impl App {
                             Some(at) => tokio::time::sleep_until(at).await,
                             None => futures::future::pending::<()>().await,
                         }
-                    } => {
+                    }, if !on_spinner => {
                         super::wake_stats::note("deferred_redraw");
                         deferred_redraw_at = None;
                     }
@@ -1095,7 +1167,7 @@ impl App {
                             Some(at) => tokio::time::sleep_until(at).await,
                             None => futures::future::pending::<()>().await,
                         }
-                    } => {
+                    }, if !on_spinner => {
                         super::wake_stats::note("server_events_released");
                         server_events_held_until = None;
                     }

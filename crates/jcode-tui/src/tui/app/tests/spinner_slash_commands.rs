@@ -63,3 +63,38 @@ fn server_events_are_held_only_while_unfocused_and_processing() {
     app.set_client_focused(true);
     assert!(!super::run_shell::hold_server_events_while_unfocused(&app));
 }
+
+/// The loop's deadlines ride on spinner ticks only where that is invisible:
+/// an unfocused client with the spinner running and a coarse tick period.
+#[test]
+fn spinner_ticks_drive_deadlines_only_when_unfocused_and_coarse() {
+    use super::run_shell::{STATUS_SPINNER_ONLY_INTERVAL, spinner_drives_deadlines};
+    let coarse = std::time::Duration::from_millis(250);
+    assert!(spinner_drives_deadlines(true, false, coarse));
+    assert!(
+        !spinner_drives_deadlines(true, true, coarse),
+        "a focused client keeps exact timers"
+    );
+    assert!(
+        !spinner_drives_deadlines(false, false, coarse),
+        "without spinner ticks nothing else would keep the deadlines"
+    );
+    assert!(
+        !spinner_drives_deadlines(true, false, STATUS_SPINNER_ONLY_INTERVAL),
+        "a period as fine as the spinner frame cannot be kept by its ticks"
+    );
+}
+
+/// A 250ms deadline checked every 80ms is met on the third tick, not the
+/// fourth, so batches do not stretch to 320ms.
+#[test]
+fn a_spinner_tick_meets_a_deadline_within_half_a_frame() {
+    use super::run_shell::deadline_due_on_spinner_tick;
+    let start = tokio::time::Instant::now();
+    let deadline = start + std::time::Duration::from_millis(250);
+    let at = |ms| start + std::time::Duration::from_millis(ms);
+    assert!(!deadline_due_on_spinner_tick(deadline, at(80)));
+    assert!(!deadline_due_on_spinner_tick(deadline, at(160)));
+    assert!(deadline_due_on_spinner_tick(deadline, at(240)));
+    assert!(deadline_due_on_spinner_tick(deadline, at(320)));
+}
