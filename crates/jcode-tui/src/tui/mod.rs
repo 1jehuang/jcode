@@ -78,6 +78,7 @@ mod ui;
 mod ui_diff;
 pub mod usage_overlay;
 pub mod visual_debug;
+pub(crate) mod window_visibility;
 pub mod workspace_client;
 pub use jcode_tui_workspace::workspace_map;
 pub use jcode_tui_workspace::workspace_map_widget;

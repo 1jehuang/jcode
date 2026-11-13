@@ -166,6 +166,9 @@ pub(super) fn status_spinner_only_symbol(app: &App) -> Option<&'static str> {
         || app.centered_mode()
         || app.has_pending_mouse_scroll_animation()
         || app.remote_startup_phase_active()
+        // Out of sight: park the spinner thread. The slow hidden tick keeps
+        // the status row current for when the window is shown again.
+        || crate::tui::window_visibility::hidden(app.client_focused())
     {
         return None;
     }
@@ -1219,7 +1222,9 @@ impl App {
                                 None => {
                                     server_events_held_until = Some(
                                         tokio::time::Instant::now()
-                                            + crate::tui::redraw_schedule::REDRAW_UNFOCUSED_STREAM,
+                                            + crate::tui::redraw_schedule::unfocused_event_hold(
+                                                self.client_focused(),
+                                            ),
                                     );
                                     break;
                                 }
