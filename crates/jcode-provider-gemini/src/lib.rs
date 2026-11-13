@@ -288,26 +288,33 @@ pub fn build_contents_with_signature_policy(
     messages: &[Message],
     policy: SignaturePolicy,
 ) -> Vec<GeminiContent> {
-    // Gemini-3 attaches an opaque `thoughtSignature` to function-call parts, and
-    // the Cloud Code / Antigravity backend rejects an assistant turn whose
-    // function calls are ALL unsigned with `Function call is missing a
-    // thought_signature in functionCall parts` (HTTP 400, issue #339). This
-    // happens because:
-    //   * a parallel multi-call turn only signs its FIRST call (siblings persist
-    //     unsigned), and
-    //   * locally synthesized tool calls (batch sub-calls, manual tool use,
-    //     auto-poke continuations, recovery) and pre-signature/imported sessions
-    //     carry no signature at all.
+    // Pre-pass: find tool calls that are still in-flight. Gemini rejects a
+    // request where the number of `functionCall` parts is not equal to the number
+    // of `functionResponse` parts. By filtering out `tool_use` blocks that have
+    // no corresponding `tool_result`, we guarantee the counts match. This is
+    // safer than inventing a placeholder response that Gemini might not
+    // understand. See issue #1988.
+    let tool_results_map: HashSet<String> = messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|b| match b {
+            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+            _ => None,
+        })
+        .collect();
+
+    // Gemini-3 attaches an opaque `thoughtSignature` to function-call parts, and the Cloud
+    // Code / Antigravity backend rejects an assistant turn whose function calls are ALL
+    // unsigned with `Function call is missing a thought_signature in functionCall parts`
+    // (HTTP 400, issue #339). This happens because a parallel multi-call turn only signs its
+    // FIRST call, and synthesized/imported calls carry no signature.
     //
-    // Live-verified backend rule: a turn is accepted as long as *at least one*
-    // of its function calls carries a (valid) signature; a fully-unsigned turn
-    // 400s. All calls in a session share the same opaque reasoning channel and
-    // the backend accepts a previously-emitted signature replayed on later
-    // calls, so we carry the most recent real signature forward across the whole
-    // conversation onto any function call that lacks one. This keeps multi-call
-    // turns and synthesized/imported histories replayable instead of hard-failing.
+    // Live-verified backend rule: a turn is accepted as long as *at least one* of its
+    // function calls carries a (valid) signature. We carry the most recent real signature
+    // forward across the whole conversation. This keeps multi-call turns and synthesized
+    // histories replayable.
     let mut last_signature: Option<String> = None;
-    messages
+    let mut contents: Vec<GeminiContent> = messages
         .iter()
         .filter_map(|message| {
             let role = match message.role {
@@ -333,6 +340,13 @@ pub fn build_contents_with_signature_policy(
                         input,
                         thought_signature,
                     } => {
+                        // A tool call still in flight has no result yet. Do not
+                        // emit a `functionCall` for it, as Gemini requires the
+                        // number of calls and responses to be equal.
+                        if !tool_results_map.contains(id) {
+                            continue;
+                        }
+
                         if policy == SignaturePolicy::DowngradeToolCallsToText {
                             // The backend rejected this history's function-call
                             // parts. Preserve the call as readable text so the
@@ -422,7 +436,25 @@ pub fn build_contents_with_signature_policy(
                 })
             }
         })
-        .collect()
+        .collect();
+
+    // BUG 2: Ensure the conversation does not end with a "model" turn, which
+    // Gemini rejects with "Requests ending with a model turn are not supported".
+    // This can happen if the last action was a tool call that produced an image
+    // or other content. Appending a minimal user turn fixes this. See issue #1988.
+    if let Some(last_content) = contents.last() {
+        if last_content.role == "model" {
+            contents.push(GeminiContent {
+                role: "user".to_string(),
+                parts: vec![GeminiPart {
+                    text: Some("".to_string()),
+                    ..Default::default()
+                }],
+            });
+        }
+    }
+
+    contents
 }
 
 fn tool_name_from_tool_result(tool_use_id: &str, messages: &[Message]) -> String {
@@ -722,6 +754,7 @@ pub fn choose_onboard_tier(res: &LoadCodeAssistResponse) -> GeminiUserTier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jcode_message_types::{ContentBlock, Message, Role};
     use serde_json::json;
 
     #[test]
@@ -915,5 +948,149 @@ mod tests {
             .unwrap();
         assert!(content.role.is_empty());
         assert!(content.parts.is_empty());
+    }
+
+    #[test]
+    fn test_in_flight_tool_call_is_omitted() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "tool_call_123".to_string(),
+                name: "read".to_string(),
+                input: json!({"file_path": "foo.txt"}),
+                thought_signature: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        }];
+
+        let contents = build_contents(&messages);
+
+        // The `build_contents` function should produce no content, because the only
+        // block is a tool use with no corresponding tool result.
+        assert!(contents.is_empty(), "Dangling tool call should be omitted, leaving an empty list");
+    }
+
+    #[test]
+    fn test_history_ending_with_model_turn_gets_user_turn_appended() {
+        // This tests BUG 2. A history ending in a `model` role (e.g. a simple text response)
+        // must have a `user` turn appended.
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text { text: "Hello".to_string(), cache_control: None }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text { text: "Hi there!".to_string(), cache_control: None }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+        ];
+
+        let contents = build_contents(&messages);
+        assert_eq!(contents.len(), 3);
+        assert_eq!(contents[0].role, "user");
+        assert_eq!(contents[1].role, "model");
+        assert_eq!(contents[2].role, "user", "A user turn should be appended");
+        assert_eq!(contents[2].parts[0].text, Some("".to_string()));
+    }
+
+    #[test]
+    fn test_history_with_tool_result_image_is_handled_correctly() {
+        // This tests BUG 2 specifically with an image tool result, which was the original report.
+        // The result is that the last turn should be a user turn.
+        let messages = vec![
+            Message { role: Role::User, content: vec![], timestamp: None, tool_duration_ms: None },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "t".to_string(),
+                    name: "n".to_string(),
+                    input: json!({}),
+                    thought_signature: None,
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Image { media_type: "image/png".to_string(), data: "garbage".to_string() }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+        ];
+
+        let contents = build_contents(&messages);
+        // The final list will have the user, model, user (with tool result).
+        // The last turn is already 'user', so no extra turn should be appended.
+        assert_eq!(
+            contents.last().unwrap().role,
+            "user",
+            "The last turn should be a user turn."
+        );
+        // Count the number of empty user turns. There should not be one.
+        let empty_user_turns = contents
+            .iter()
+            .filter(|c| {
+                c.role == "user"
+                    && c.parts.len() == 1
+                    && c.parts[0].text == Some("".to_string())
+            })
+            .count();
+        assert_eq!(empty_user_turns, 0, "An extra empty user turn should not be added if the last turn is already user.");
+    }
+
+    /// A `read` result that carries an image must not leave the transcript ending in a model turn,
+    /// which Gemini rejects with "Requests ending with a model turn are not supported". The
+    /// functionResponse and its inlineData belong in the same user turn, and the final turn is
+    /// never "model".
+    #[test]
+    fn test_image_tool_result_keeps_user_turn_last() {
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text { text: "look at this".to_string(), cache_control: None }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "read".to_string(),
+                    input: serde_json::json!({"file_path": "/tmp/x.png"}),
+                    thought_signature: None,
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "call_1".to_string(),
+                        content: "image attached".to_string(),
+                        is_error: None,
+                    },
+                    ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: "iVBORw0KGgo=".to_string(),
+                    },
+                ],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+        ];
+
+        let contents = build_contents(&messages);
+        let last = contents.last().expect("contents must not be empty");
+        assert_eq!(last.role, "user", "the request must not end on a model turn");
+        let has_inline = last.parts.iter().any(|p| p.inline_data.is_some());
+        assert!(has_inline, "the image inlineData must stay in the user turn");
+        let has_response = last.parts.iter().any(|p| p.function_response.is_some());
+        assert!(has_response, "the functionResponse must stay with the image");
     }
 }
