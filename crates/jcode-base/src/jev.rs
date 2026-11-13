@@ -497,10 +497,19 @@ fn client_builder() -> reqwest::ClientBuilder {
     client_builder_for(false)
 }
 
+/// Per-request timeout for Jev decision calls. Self-hosted backends behind
+/// model swap (e.g. llama-swap) can exceed the default 25s while loading
+/// weights; raise it with `memory_jev_timeout_secs` /
+/// `JCODE_MEMORY_JEV_TIMEOUT_SECS`. A zero value means unset.
+pub(crate) fn jev_request_timeout() -> Duration {
+    let secs = crate::config::config().agents.memory_jev_timeout_secs;
+    Duration::from_secs(if secs == 0 { 25 } else { secs })
+}
+
 fn client_builder_for(bypass_proxy: bool) -> reqwest::ClientBuilder {
     let builder = Client::builder()
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(25))
+        .timeout(jev_request_timeout())
         .redirect(reqwest::redirect::Policy::none());
     if bypass_proxy {
         builder.no_proxy()
