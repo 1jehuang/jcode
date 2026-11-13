@@ -1972,6 +1972,10 @@ impl crate::tui::TuiState for App {
         renderer.update(&self.streaming.streaming_text)
     }
 
+    fn streaming_markdown_stable_prefix(&self) -> (u64, usize) {
+        self.streaming_md_renderer.borrow().stable_prefix()
+    }
+
     fn centered_mode(&self) -> bool {
         self.centered
     }
