@@ -129,7 +129,8 @@ fn client_focus_report_roundtrip() {
         request,
         Request::ClientFocus {
             id: 7,
-            focused: false
+            focused: false,
+            hidden: false
         }
     ));
     assert_eq!(request.id(), 7);
@@ -138,8 +139,26 @@ fn client_focus_report_roundtrip() {
     let encoded = serde_json::to_value(Request::ClientFocus {
         id: 8,
         focused: true,
+        hidden: false,
     })
     .unwrap();
     assert_eq!(encoded["type"], "client_focus");
     assert_eq!(encoded["focused"], true);
+    // Left off the wire unless set, so the report is unchanged for a server
+    // that predates the field.
+    assert!(encoded.get("hidden").is_none());
+    let hidden = Request::ClientFocus {
+        id: 9,
+        focused: false,
+        hidden: true,
+    };
+    let encoded = serde_json::to_string(&hidden).unwrap();
+    assert!(matches!(
+        serde_json::from_str::<Request>(&encoded).unwrap(),
+        Request::ClientFocus {
+            id: 9,
+            focused: false,
+            hidden: true
+        }
+    ));
 }

@@ -851,11 +851,15 @@ pub(super) async fn handle_client(
         };
         // A focus report only updates this connection's flag. It takes no
         // admission reservation and gets no Ack: it exists to remove wakeups.
-        if let Request::ClientFocus { focused, .. } = &request {
+        if let Request::ClientFocus {
+            focused, hidden, ..
+        } = &request
+        {
             crate::stream_batching::set_connection_focus(
                 &client_connection_id,
                 &client_session_id,
                 *focused,
+                *hidden,
             );
             continue;
         }

@@ -1714,7 +1714,7 @@ async fn streamed_text_is_coalesced_only_when_every_client_is_unfocused() {
         let session_id = agent.session_id().to_string();
         let connection = format!("steady-conn-{unfocused}");
         if unfocused {
-            crate::stream_batching::set_connection_focus(&connection, &session_id, false);
+            crate::stream_batching::set_connection_focus(&connection, &session_id, false, false);
         }
         // What the session fanout does with the attached connections.
         crate::stream_batching::note_session_targets(&session_id, [&connection]);

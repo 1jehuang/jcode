@@ -282,8 +282,8 @@ pub struct RemoteConnection {
     /// The connected server accepts `Request::ClientFocus`. Learned from its
     /// Pong, so an older server is never sent a request it would reject.
     server_accepts_focus: bool,
-    /// Last focus state reported to this server, if any.
-    reported_focus: Option<bool>,
+    /// Last (focused, hidden) state reported to this server, if any.
+    reported_focus: Option<(bool, bool)>,
     last_account_usage_poll: Option<Instant>,
     call_output_tokens_seen: u64,
 }
@@ -952,21 +952,27 @@ impl RemoteConnection {
         }
     }
 
-    /// Tell the server whether this window has focus, once per change, so it
-    /// can batch streamed text for sessions nobody is looking at. A no-op
-    /// until the server has advertised support.
-    pub async fn sync_focus(&mut self, focused: bool) {
-        if !self.server_accepts_focus || self.reported_focus == Some(focused) {
+    /// Tell the server whether this window has focus, and whether an
+    /// unfocused window is out of sight, once per change, so it can batch
+    /// streamed text for sessions nobody is looking at. A no-op until the
+    /// server has advertised support.
+    pub async fn sync_focus(&mut self, focused: bool, hidden: bool) {
+        let hidden = hidden && !focused;
+        if !self.server_accepts_focus || self.reported_focus == Some((focused, hidden)) {
             return;
         }
         let id = self.next_request_id;
         self.next_request_id += 1;
         if self
-            .send_request(Request::ClientFocus { id, focused })
+            .send_request(Request::ClientFocus {
+                id,
+                focused,
+                hidden,
+            })
             .await
             .is_ok()
         {
-            self.reported_focus = Some(focused);
+            self.reported_focus = Some((focused, hidden));
         }
     }
 

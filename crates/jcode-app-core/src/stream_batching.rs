@@ -13,7 +13,7 @@
 //! never batched.
 
 use crate::protocol::ServerEvent;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -21,13 +21,29 @@ use tokio::time::Instant;
 
 /// Matches the unfocused client's own streamed-text redraw period.
 pub(crate) const UNFOCUSED_TEXT_BATCH: Duration = Duration::from_millis(250);
+/// Batch period once every attached client says its window cannot be seen
+/// (another workspace, a background multiplexer window, the display off).
+/// Matches the hidden client's tick, so text is as current as the client
+/// would paint it anyway.
+pub(crate) const HIDDEN_TEXT_BATCH: Duration = Duration::from_secs(1);
+
+/// What a connection last said about its window.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Attention {
+    Focused,
+    /// Not focused, and possibly in view next to the focused window.
+    Unfocused,
+    /// Not focused and known to be out of sight.
+    Hidden,
+}
 
 #[derive(Default)]
 struct State {
-    /// Last focus report per connection. Absent means "never reported".
-    focus: HashMap<String, bool>,
-    /// Sessions whose attached clients are all known to be unfocused.
-    batched_sessions: HashSet<String>,
+    /// Last report per connection. Absent means "never reported".
+    focus: HashMap<String, Attention>,
+    /// Sessions whose attached clients are all known to be unfocused, with
+    /// the batch period their least hidden client allows.
+    batched_sessions: HashMap<String, Duration>,
 }
 
 static STATE: LazyLock<Mutex<State>> = LazyLock::new(|| Mutex::new(State::default()));
@@ -38,11 +54,32 @@ fn state() -> std::sync::MutexGuard<'static, State> {
 
 /// Record a client's focus report. Gaining focus stops batching for its session
 /// immediately instead of waiting for the next fanout to notice.
-pub(crate) fn set_connection_focus(connection_id: &str, session_id: &str, focused: bool) {
+///
+/// `hidden` only means something for an unfocused client. A window coming
+/// back into view shortens the batch period at once for the same reason.
+pub(crate) fn set_connection_focus(
+    connection_id: &str,
+    session_id: &str,
+    focused: bool,
+    hidden: bool,
+) {
+    let attention = match (focused, hidden) {
+        (true, _) => Attention::Focused,
+        (false, true) => Attention::Hidden,
+        (false, false) => Attention::Unfocused,
+    };
     let mut state = state();
-    state.focus.insert(connection_id.to_string(), focused);
-    if focused {
-        state.batched_sessions.remove(session_id);
+    state.focus.insert(connection_id.to_string(), attention);
+    match attention {
+        Attention::Focused => {
+            state.batched_sessions.remove(session_id);
+        }
+        Attention::Unfocused => {
+            if let Some(period) = state.batched_sessions.get_mut(session_id) {
+                *period = UNFOCUSED_TEXT_BATCH;
+            }
+        }
+        Attention::Hidden => {}
     }
 }
 
@@ -67,27 +104,43 @@ pub(crate) fn note_session_targets<'a>(
     connection_ids: impl IntoIterator<Item = &'a String>,
 ) {
     let mut state = state();
-    let mut any = false;
-    let mut all_unfocused = true;
+    let mut period = None;
     for connection_id in connection_ids {
-        any = true;
-        if state.focus.get(connection_id) != Some(&false) {
-            all_unfocused = false;
-            break;
+        match state.focus.get(connection_id) {
+            Some(Attention::Hidden) => {
+                period.get_or_insert(HIDDEN_TEXT_BATCH);
+            }
+            Some(Attention::Unfocused) => period = Some(UNFOCUSED_TEXT_BATCH),
+            Some(Attention::Focused) | None => {
+                period = None;
+                break;
+            }
         }
     }
-    if any && all_unfocused {
-        // Checked first so the per-event path does not allocate.
-        if !state.batched_sessions.contains(session_id) {
-            state.batched_sessions.insert(session_id.to_string());
+    match period {
+        // Looked up first so the per-event path does not allocate.
+        Some(period) => match state.batched_sessions.get_mut(session_id) {
+            Some(current) => *current = period,
+            None => {
+                state
+                    .batched_sessions
+                    .insert(session_id.to_string(), period);
+            }
+        },
+        None => {
+            state.batched_sessions.remove(session_id);
         }
-    } else {
-        state.batched_sessions.remove(session_id);
     }
 }
 
+/// How long streamed text may be held for this session, if it is batched.
+pub(crate) fn session_batch_period(session_id: &str) -> Option<Duration> {
+    state().batched_sessions.get(session_id).copied()
+}
+
+#[cfg(test)]
 pub(crate) fn session_batches(session_id: &str) -> bool {
-    state().batched_sessions.contains(session_id)
+    session_batch_period(session_id).is_some()
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -175,10 +228,10 @@ impl BatchingSender {
             }
         };
         let mut pending = self.pending();
-        if !session_batches(&self.session_id) {
+        let Some(period) = session_batch_period(&self.session_id) else {
             self.flush_locked(&mut pending);
             return self.tx.send(kind.event(text));
-        }
+        };
         if self.tx.is_closed() {
             *pending = None;
             return Err(mpsc::error::SendError(kind.event(text)));
@@ -187,6 +240,9 @@ impl BatchingSender {
         match &mut *pending {
             Some(held) if held.kind == kind => {
                 held.text.push_str(&text);
+                // A window that came back into view must not wait out a
+                // batch that was started while it was hidden.
+                held.flush_at = held.flush_at.min(now + period);
                 // The timer normally does this. A busy loop that keeps getting
                 // deltas before it polls the timer must not hold text longer.
                 if now >= held.flush_at {
@@ -198,7 +254,7 @@ impl BatchingSender {
                 *pending = Some(Pending {
                     kind,
                     text,
-                    flush_at: now + UNFOCUSED_TEXT_BATCH,
+                    flush_at: now + period,
                 });
             }
         }
@@ -248,7 +304,7 @@ mod tests {
         assert_eq!(text(rx.try_recv().unwrap()), "text:b");
 
         // One unfocused and one silent client: still not batched.
-        set_connection_focus("batch-s1-new", "batch-s1", false);
+        set_connection_focus("batch-s1-new", "batch-s1", false, false);
         note_session_targets("batch-s1", &ids(&["batch-s1-old", "batch-s1-new"]));
         sender.send(delta("c")).unwrap();
         assert_eq!(text(rx.try_recv().unwrap()), "text:c");
@@ -260,8 +316,8 @@ mod tests {
     async fn unfocused_session_coalesces_text_until_the_deadline() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let sender = BatchingSender::new(tx, "batch-s2".into());
-        set_connection_focus("batch-s2-a", "batch-s2", false);
-        set_connection_focus("batch-s2-b", "batch-s2", false);
+        set_connection_focus("batch-s2-a", "batch-s2", false, false);
+        set_connection_focus("batch-s2-b", "batch-s2", false, false);
         note_session_targets("batch-s2", &ids(&["batch-s2-a", "batch-s2-b"]));
         assert!(session_batches("batch-s2"));
 
@@ -290,7 +346,7 @@ mod tests {
     async fn other_events_and_kind_changes_flush_held_text_in_order() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let sender = BatchingSender::new(tx, "batch-s3".into());
-        set_connection_focus("batch-s3-a", "batch-s3", false);
+        set_connection_focus("batch-s3-a", "batch-s3", false, false);
         note_session_targets("batch-s3", &ids(&["batch-s3-a"]));
 
         sender
@@ -314,7 +370,7 @@ mod tests {
     async fn tool_input_coalesces_per_tool_and_never_merges_across_tools() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let sender = BatchingSender::new(tx, "batch-s5".into());
-        set_connection_focus("batch-s5-a", "batch-s5", false);
+        set_connection_focus("batch-s5-a", "batch-s5", false, false);
         note_session_targets("batch-s5", &ids(&["batch-s5-a"]));
         let input = |id: &str, delta: &str| ServerEvent::ToolInput {
             id: Some(id.into()),
@@ -342,12 +398,12 @@ mod tests {
     async fn gaining_focus_or_detaching_stops_batching() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let sender = BatchingSender::new(tx, "batch-s4".into());
-        set_connection_focus("batch-s4-a", "batch-s4", false);
+        set_connection_focus("batch-s4-a", "batch-s4", false, false);
         note_session_targets("batch-s4", &ids(&["batch-s4-a"]));
         sender.send(delta("held")).unwrap();
         assert!(rx.try_recv().is_err());
 
-        set_connection_focus("batch-s4-a", "batch-s4", true);
+        set_connection_focus("batch-s4-a", "batch-s4", true, false);
         assert!(!session_batches("batch-s4"));
         sender.send(delta("live")).unwrap();
         assert_eq!(text(rx.try_recv().unwrap()), "text:held");
@@ -355,7 +411,7 @@ mod tests {
 
         // Unfocused again, then the client goes away: no attached client means
         // nothing is known about who will read the stream, so do not batch.
-        set_connection_focus("batch-s4-a", "batch-s4", false);
+        set_connection_focus("batch-s4-a", "batch-s4", false, false);
         note_session_targets("batch-s4", &ids(&["batch-s4-a"]));
         assert!(session_batches("batch-s4"));
         note_session_targets("batch-s4", &ids(&[]));
@@ -367,5 +423,44 @@ mod tests {
         forget_connection("batch-s4-a");
         note_session_targets("batch-s4", &ids(&["batch-s4-a"]));
         assert!(!session_batches("batch-s4"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hidden_sessions_batch_longer_until_any_window_is_in_view() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sender = BatchingSender::new(tx, "batch-s6".into());
+        let both = ids(&["batch-s6-a", "batch-s6-b"]);
+        set_connection_focus("batch-s6-a", "batch-s6", false, true);
+        set_connection_focus("batch-s6-b", "batch-s6", false, true);
+        note_session_targets("batch-s6", &both);
+        assert_eq!(session_batch_period("batch-s6"), Some(HIDDEN_TEXT_BATCH));
+
+        let start = Instant::now();
+        sender.send(delta("a")).unwrap();
+        assert_eq!(sender.deadline(), Some(start + HIDDEN_TEXT_BATCH));
+        tokio::time::advance(UNFOCUSED_TEXT_BATCH * 2).await;
+        sender.send(delta("b")).unwrap();
+        assert!(rx.try_recv().is_err(), "hidden text waits the long period");
+
+        // One of the two windows comes into view, still unfocused: the batch
+        // already held is cut to the short period.
+        set_connection_focus("batch-s6-b", "batch-s6", false, false);
+        assert_eq!(session_batch_period("batch-s6"), Some(UNFOCUSED_TEXT_BATCH));
+        let now = Instant::now();
+        sender.send(delta("c")).unwrap();
+        assert_eq!(sender.deadline(), Some(now + UNFOCUSED_TEXT_BATCH));
+        // The fanout reaches the same answer from the two reports.
+        note_session_targets("batch-s6", &both);
+        assert_eq!(session_batch_period("batch-s6"), Some(UNFOCUSED_TEXT_BATCH));
+        note_session_targets("batch-s6", &ids(&["batch-s6-b", "batch-s6-a"]));
+        assert_eq!(session_batch_period("batch-s6"), Some(UNFOCUSED_TEXT_BATCH));
+
+        // A client that never reported is never batched, hidden peers or not.
+        note_session_targets("batch-s6", &ids(&["batch-s6-a", "batch-s6-old"]));
+        assert_eq!(session_batch_period("batch-s6"), None);
+        sender.flush();
+        assert_eq!(text(rx.try_recv().unwrap()), "text:abc");
+        forget_connection("batch-s6-a");
+        forget_connection("batch-s6-b");
     }
 }

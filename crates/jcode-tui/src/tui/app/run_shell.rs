@@ -1003,8 +1003,11 @@ impl App {
             // Main event loop
             loop {
                 self.sync_sleep_guard();
-                // Sends only when focus changed since the last report.
-                remote_conn.sync_focus(self.client_focused()).await;
+                // Sends only when focus or visibility changed since the last report.
+                let focused = self.client_focused();
+                remote_conn
+                    .sync_focus(focused, crate::tui::window_visibility::hidden(focused))
+                    .await;
                 // The reload fast-start transcript is rendered off-thread. Show
                 // it as soon as it is ready instead of on the next tick: during
                 // remote startup ticks are 1s apart, which held a ready

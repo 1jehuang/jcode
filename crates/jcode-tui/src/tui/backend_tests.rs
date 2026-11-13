@@ -861,17 +861,22 @@ async fn focus_is_reported_once_per_change_and_only_to_servers_that_accept_it() 
 
     // An older server never advertises the capability and would answer the
     // request with an error, so nothing may be sent to it.
-    remote.sync_focus(false).await;
+    remote.sync_focus(false, false).await;
     remote.note_server_capabilities(&["session_tools".to_string()]);
-    remote.sync_focus(false).await;
+    remote.sync_focus(false, false).await;
     // Stream keepalive Pongs carry no capabilities and must not unset support.
     remote.note_server_capabilities(&[crate::protocol::CLIENT_FOCUS_CAPABILITY.to_string()]);
     remote.note_server_capabilities(&[]);
 
-    remote.sync_focus(false).await;
-    remote.sync_focus(false).await;
-    remote.sync_focus(true).await;
-    remote.sync_focus(true).await;
+    remote.sync_focus(false, false).await;
+    remote.sync_focus(false, false).await;
+    // Going out of sight is a change worth one report, and so is coming back.
+    remote.sync_focus(false, true).await;
+    remote.sync_focus(false, true).await;
+    remote.sync_focus(false, false).await;
+    remote.sync_focus(true, false).await;
+    // A focused window is never reported hidden, whatever a stale probe says.
+    remote.sync_focus(true, true).await;
     let marker = remote.request_todos().await.unwrap();
 
     let mut seen = Vec::new();
@@ -882,10 +887,15 @@ async fn focus_is_reported_once_per_change_and_only_to_servers_that_accept_it() 
             .expect("request arrives")
             .unwrap();
         match serde_json::from_str::<Request>(&line).unwrap() {
-            Request::ClientFocus { focused, .. } => seen.push(focused),
+            Request::ClientFocus {
+                focused, hidden, ..
+            } => seen.push((focused, hidden)),
             Request::GetTodos { id } if id == marker => break,
             other => panic!("unexpected request {other:?}"),
         }
     }
-    assert_eq!(seen, vec![false, true]);
+    assert_eq!(
+        seen,
+        vec![(false, false), (false, true), (false, false), (true, false)]
+    );
 }
