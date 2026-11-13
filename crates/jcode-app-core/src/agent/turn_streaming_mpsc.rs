@@ -13,8 +13,12 @@ use tool_handoff::{
 impl Agent {
     pub(super) async fn run_turn_streaming_mpsc(
         &mut self,
-        event_tx: mpsc::UnboundedSender<ServerEvent>,
+        raw_event_tx: mpsc::UnboundedSender<ServerEvent>,
     ) -> Result<()> {
+        // Holds streamed text back while no attached client is focused. Every
+        // other event flushes it first, and so does dropping this on return.
+        let event_tx =
+            crate::stream_batching::BatchingSender::new(raw_event_tx, self.session.id.clone());
         let _runtime_activity =
             crate::runtime_activity::global().try_enter_session(&self.session.id)?;
         self.ensure_session_lease()?;
@@ -106,7 +110,7 @@ impl Agent {
             let memory_pending = self.build_memory_prompt_nonblocking_shared(
                 std::sync::Arc::clone(&messages),
                 Some(std::sync::Arc::new({
-                    let event_tx = event_tx.clone();
+                    let event_tx = event_tx.raw().clone();
                     move |event| {
                         let _ = event_tx.send(event);
                     }
@@ -241,7 +245,7 @@ impl Agent {
                 loop {
                     tokio::select! {
                         _ = keepalive.tick() => {
-                            send_stream_keepalive_mpsc(&event_tx);
+                            send_stream_keepalive_mpsc(event_tx.raw());
                         }
                         _ = self.graceful_shutdown.notified() => {
                             logging::info(
@@ -363,7 +367,16 @@ impl Agent {
                 let next_event = std::pin::pin!(stream.next());
                 let event = tokio::select! {
                     _ = keepalive.tick() => {
-                        send_stream_keepalive_mpsc(&event_tx);
+                        send_stream_keepalive_mpsc(event_tx.raw());
+                        continue;
+                    }
+                    _ = async {
+                        match event_tx.deadline() {
+                            Some(at) => tokio::time::sleep_until(at).await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => {
+                        event_tx.flush();
                         continue;
                     }
                     _ = self.graceful_shutdown.notified() => {
@@ -499,7 +512,7 @@ impl Agent {
                             // identical to a dead connection and the client stall
                             // guard would cancel a healthy stream (issue #451).
                             hidden_activity_last = Instant::now();
-                            send_stream_keepalive_mpsc(&event_tx);
+                            send_stream_keepalive_mpsc(event_tx.raw());
                         }
                         // Always capture reasoning text so it can be persisted as a
                         // history-only trace, regardless of provider replay support.
@@ -1076,6 +1089,8 @@ impl Agent {
                 }
             }
 
+            // The stream is over, so no timer will flush what is still held.
+            event_tx.flush();
             usage_recorder.finish();
             if retry_after_compaction {
                 log_agent_provider_stream_lifecycle(

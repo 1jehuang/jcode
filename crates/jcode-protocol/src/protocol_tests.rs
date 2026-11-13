@@ -120,3 +120,26 @@ fn sdk_login_notify_is_accepted_without_subscribe() {
             .unwrap();
     assert!(request.is_lightweight_control_request());
 }
+
+#[test]
+fn client_focus_report_roundtrip() {
+    let request: Request =
+        serde_json::from_str(r#"{"type":"client_focus","id":7,"focused":false}"#).unwrap();
+    assert!(matches!(
+        request,
+        Request::ClientFocus {
+            id: 7,
+            focused: false
+        }
+    ));
+    assert_eq!(request.id(), 7);
+    // It belongs to an attached connection, so it is not a one-shot control.
+    assert!(!request.is_lightweight_control_request());
+    let encoded = serde_json::to_value(Request::ClientFocus {
+        id: 8,
+        focused: true,
+    })
+    .unwrap();
+    assert_eq!(encoded["type"], "client_focus");
+    assert_eq!(encoded["focused"], true);
+}

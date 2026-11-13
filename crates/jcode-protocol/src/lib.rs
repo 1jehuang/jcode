@@ -123,6 +123,9 @@ pub struct HistoryBase {
 /// Synthetic lazy-window marker used by remote transcript bootstraps.
 pub const RECENT_HISTORY_MARKER_PREFIX: &str = "Earlier remote history - ";
 
+/// `Pong.capabilities` entry of servers that accept `Request::ClientFocus`.
+pub const CLIENT_FOCUS_CAPABILITY: &str = "client_focus";
+
 impl HistoryBase {
     /// Request a bounded initial view. Older servers ignore this hint and
     /// return their ordinary full History payload.
@@ -855,6 +858,7 @@ impl Request {
             Request::Ping { id } => *id,
             Request::GetState { id } => *id,
             Request::GetTodos { id } => *id,
+            Request::ClientFocus { id, .. } => *id,
             Request::DebugCommand { id, .. } => *id,
             Request::ClientDebugCommand { id, .. } => *id,
             Request::ClientDebugResponse { id, .. } => *id,

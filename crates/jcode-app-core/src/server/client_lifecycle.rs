@@ -542,6 +542,7 @@ pub(super) async fn handle_client(
 
     // Per-client event channel (not shared with other clients)
     let _sdk_connection_guard = crate::tool::sdk::ConnectionGuard(client_connection_id.clone());
+    let _focus_guard = crate::stream_batching::ConnectionFocusGuard(client_connection_id.clone());
     let (client_event_tx, mut client_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
 
@@ -848,6 +849,16 @@ pub(super) async fn handle_client(
                 }
             }
         };
+        // A focus report only updates this connection's flag. It takes no
+        // admission reservation and gets no Ack: it exists to remove wakeups.
+        if let Request::ClientFocus { focused, .. } = &request {
+            crate::stream_batching::set_connection_focus(
+                &client_connection_id,
+                &client_session_id,
+                *focused,
+            );
+            continue;
+        }
         let request_decoded_at = Instant::now();
         // Direct input wins the biased select above. A client may already have
         // observed Done/Error while this actor still holds the finished turn's
@@ -1554,6 +1565,8 @@ pub(super) async fn handle_client(
                     break;
                 }
             }
+
+            Request::ClientFocus { .. } => unreachable!("focus reports are handled before acknowledgment"),
 
             Request::GetTodos { .. } => {
                 let event = super::client_writer::todos_snapshot_event(&client_session_id);

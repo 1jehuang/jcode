@@ -977,6 +977,9 @@ impl App {
             }
             status_spinner_renderer.invalidate();
             needs_redraw = true;
+            // The Pong lists what this server supports. Until it arrives no
+            // focus is reported, which the server treats as focused.
+            let _ = remote_conn.request_capabilities().await;
 
             let mut bus_receiver_remote = Bus::global().subscribe();
             if let Some(status) = Bus::global().latest_update_status() {
@@ -997,6 +1000,8 @@ impl App {
             // Main event loop
             loop {
                 self.sync_sleep_guard();
+                // Sends only when focus changed since the last report.
+                remote_conn.sync_focus(self.client_focused()).await;
                 // The reload fast-start transcript is rendered off-thread. Show
                 // it as soon as it is ready instead of on the next tick: during
                 // remote startup ticks are 1s apart, which held a ready
@@ -1177,6 +1182,10 @@ impl App {
                         let mut drained = 0usize;
                         loop {
                             match &event {
+                                crate::tui::backend::RemoteRead::Event(crate::protocol::ServerEvent::Pong { capabilities, .. }) => {
+                                    remote_conn.note_server_capabilities(capabilities);
+                                    super::wake_stats::note("server:pong");
+                                }
                                 crate::tui::backend::RemoteRead::Event(event) => super::wake_stats::note_debug("server", event),
                                 crate::tui::backend::RemoteRead::Disconnected(_) => super::wake_stats::note("server:closed"),
                             }

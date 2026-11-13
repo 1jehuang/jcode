@@ -440,6 +440,7 @@ pub(super) async fn fanout_session_event(
         };
 
         member.event_txs.retain(|_, tx| !tx.is_closed());
+        crate::stream_batching::note_session_targets(session_id, member.event_txs.keys());
 
         if member.event_txs.is_empty() {
             vec![member.event_tx.clone()]

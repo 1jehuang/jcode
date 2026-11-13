@@ -125,6 +125,11 @@ pub enum Request {
     #[serde(rename = "get_todos")]
     GetTodos { id: u64 },
 
+    /// Report whether this client's window has focus. Sent only to servers
+    /// that advertise [`crate::CLIENT_FOCUS_CAPABILITY`]; never acknowledged.
+    #[serde(rename = "client_focus")]
+    ClientFocus { id: u64, focused: bool },
+
     /// Execute a debug command (debug socket only)
     #[serde(rename = "debug_command")]
     DebugCommand {

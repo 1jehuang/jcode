@@ -279,6 +279,11 @@ pub struct RemoteConnection {
     #[cfg(test)]
     protocol_bytes_scanned: usize,
     has_loaded_history: bool,
+    /// The connected server accepts `Request::ClientFocus`. Learned from its
+    /// Pong, so an older server is never sent a request it would reject.
+    server_accepts_focus: bool,
+    /// Last focus state reported to this server, if any.
+    reported_focus: Option<bool>,
     last_account_usage_poll: Option<Instant>,
     call_output_tokens_seen: u64,
 }
@@ -468,6 +473,8 @@ impl RemoteConnection {
             #[cfg(test)]
             protocol_bytes_scanned: 0,
             has_loaded_history: false,
+            server_accepts_focus: false,
+            reported_focus: None,
             last_account_usage_poll: None,
             call_output_tokens_seen: 0,
         };
@@ -924,6 +931,43 @@ impl RemoteConnection {
         self.next_request_id += 1;
         self.send_request(Request::GetTodos { id }).await?;
         Ok(id)
+    }
+
+    /// Ask the server what it supports. Its Pong carries the capability list.
+    pub async fn request_capabilities(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::Ping { id }).await?;
+        Ok(id)
+    }
+
+    /// Record the capability list from a Pong. Stream keepalive Pongs carry
+    /// none and must not clear what the server already advertised.
+    pub fn note_server_capabilities(&mut self, capabilities: &[String]) {
+        if capabilities
+            .iter()
+            .any(|capability| capability == crate::protocol::CLIENT_FOCUS_CAPABILITY)
+        {
+            self.server_accepts_focus = true;
+        }
+    }
+
+    /// Tell the server whether this window has focus, once per change, so it
+    /// can batch streamed text for sessions nobody is looking at. A no-op
+    /// until the server has advertised support.
+    pub async fn sync_focus(&mut self, focused: bool) {
+        if !self.server_accepts_focus || self.reported_focus == Some(focused) {
+            return;
+        }
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        if self
+            .send_request(Request::ClientFocus { id, focused })
+            .await
+            .is_ok()
+        {
+            self.reported_focus = Some(focused);
+        }
     }
 
     /// Ask the server for the fully route-expanded model catalog.
@@ -1641,6 +1685,8 @@ impl RemoteConnection {
             #[cfg(test)]
             protocol_bytes_scanned: 0,
             has_loaded_history: false,
+            server_accepts_focus: false,
+            reported_focus: None,
             last_account_usage_poll: None,
             call_output_tokens_seen: 0,
         }
