@@ -312,6 +312,93 @@ fn test_remote_definitive_exhaustion_immediately_stages_exact_route_not_resend()
 }
 
 #[test]
+fn test_remote_failover_first_generic_failure_is_instant_then_countdown_and_bounded() {
+    with_temp_jcode_home(|| {
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, mut connection) = remote_exact_failover_fixture();
+        let pending = app.pending_provider_failover.take().unwrap();
+        let mut prompt = pending.prompt;
+        let payload = pending.remote_resend;
+        app.automatic_failover_targets.clear();
+        prompt.reason = "503 temporarily unavailable".into();
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+
+        app.handle_provider_failover_prompt_with_payload(prompt.clone(), payload.clone());
+        assert!(app.pending_provider_failover.is_none());
+        assert!(app.pending_automatic_failover_route.is_some());
+        let count = app.display_messages().len();
+        app.handle_provider_failover_prompt_with_payload(prompt.clone(), payload.clone());
+        assert_eq!(app.display_messages().len(), count);
+        assert_eq!(app.automatic_failover_targets.len(), 1);
+
+        // Simulate the acknowledged fallback failing. New targets wait rather
+        // than immediately chaining, even if they report definitive exhaustion.
+        app.pending_automatic_failover_route = None;
+        app.pending_fallback_resend = None;
+        prompt.reason = "OAuth usage exhausted".into();
+        for index in 2..=3 {
+            prompt.target_route = Some(format!("openai-oauth@account-{index}:gpt-5.4"));
+            app.handle_provider_failover_prompt_with_payload(prompt.clone(), payload.clone());
+            let pending = app.pending_provider_failover.take().expect("later countdown");
+            assert!(pending.deadline > Instant::now() + Duration::from_secs(2));
+        }
+        prompt.target_route = Some("openai-oauth@account-4:gpt-5.4".into());
+        app.handle_provider_failover_prompt_with_payload(prompt.clone(), payload.clone());
+        assert!(app.automatic_failover_stopped);
+        assert!(app.pending_provider_failover.is_none());
+        assert!(app.pending_automatic_failover_route.is_none());
+        let count = app.display_messages().len();
+        for _ in 0..10 {
+            app.handle_server_event(
+                crate::protocol::ServerEvent::Error {
+                    id: 21,
+                    message: prompt.to_error_message(),
+                    retry_after_secs: None,
+                },
+                &mut connection,
+            );
+        }
+        assert_eq!(app.display_messages().len(), count);
+    });
+}
+
+#[test]
+fn test_remote_failover_does_not_retry_previously_attempted_target() {
+    with_temp_jcode_home(|| {
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, _remote) = remote_exact_failover_fixture();
+        let pending = app.pending_provider_failover.take().unwrap();
+        app.handle_provider_failover_prompt_with_payload(pending.prompt, pending.remote_resend);
+        assert!(app.automatic_failover_stopped);
+        assert_eq!(app.automatic_failover_targets.len(), 1);
+        assert!(app.pending_provider_failover.is_none());
+    });
+}
+
+#[test]
+fn test_new_user_submission_resets_automatic_failover_budget() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    app.automatic_failover_targets.push("spent-route".into());
+    app.automatic_failover_stopped = true;
+    app.input = "a new request".into();
+    app.cursor_pos = app.input.len();
+    app.submit_input();
+    assert!(app.automatic_failover_targets.is_empty());
+    assert!(!app.automatic_failover_stopped);
+    assert!(app.pending_turn);
+}
+
+#[test]
 fn test_remote_immediate_failover_dispatches_once_and_suppresses_exhaustion_spam() {
     with_temp_jcode_home(|| {
         write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
@@ -362,6 +449,8 @@ fn test_remote_generic_auth_error_arms_countdown_for_exact_pool_route() {
         let _guard = rt.enter();
         let (mut app, _remote) = remote_exact_failover_fixture();
         let payload = app.pending_provider_failover.take().unwrap().remote_resend;
+        // Discard the fixture's staged switch before testing a fresh error.
+        app.automatic_failover_targets.clear();
         assert!(app.offer_fallback_after_error_with_payload("401 invalid API key", payload));
         assert!(app.pending_fallback_offer.is_none());
         let pending = app.pending_provider_failover.as_ref().unwrap();
@@ -635,6 +724,8 @@ fn test_generic_auto_fallback_skips_excluded_preferred_and_checks_source_pool() 
         let _guard = rt.enter();
         let (mut app, _remote) = remote_exact_failover_fixture();
         let payload = app.pending_provider_failover.take().unwrap().remote_resend;
+        // Discard the fixture's staged switch before testing a fresh error.
+        app.automatic_failover_targets.clear();
         app.session.route_api_method = Some("claude-api".into());
         app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::ApiKey);
         let mut preferred = claude_oauth_route("claude-sonnet-4");
@@ -689,6 +780,8 @@ fn test_generic_auto_fallback_respects_explicit_pool_account_order() {
         let _guard = rt.enter();
         let (mut app, _remote) = remote_exact_failover_fixture();
         let payload = app.pending_provider_failover.take().unwrap().remote_resend;
+        // Discard the fixture's staged switch before testing a fresh error.
+        app.automatic_failover_targets.clear();
         let mut earlier_catalog_route = openai_oauth_route("gpt-5.4");
         earlier_catalog_route.api_method = "openai-oauth@openai-otter".into();
         app.remote_model_options.insert(0, earlier_catalog_route);
@@ -723,6 +816,8 @@ fn test_generic_quota_fallback_skips_exhausted_account_sibling_model() {
         let _guard = rt.enter();
         let (mut app, _remote) = remote_exact_failover_fixture();
         let payload = app.pending_provider_failover.take().unwrap().remote_resend;
+        // Discard the fixture's staged switch before testing a fresh error.
+        app.automatic_failover_targets.clear();
         app.remote_provider_name = Some("OpenAI".into());
         app.remote_provider_model = Some("gpt-5.4".into());
         app.session.route_api_method = Some("openai-oauth@openai-otter".into());

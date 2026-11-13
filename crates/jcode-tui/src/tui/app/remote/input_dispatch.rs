@@ -159,6 +159,8 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
     // Remember the typed prompt so we can restore it to the input box if this turn
     // fails (e.g. "token refresh needed"), instead of dropping it.
     app.last_submitted_input = Some(prepared.raw_input.clone());
+    app.automatic_failover_targets.clear();
+    app.automatic_failover_stopped = false;
     app.push_display_message(DisplayMessage {
         role: "user".to_string(),
         content: prepared.raw_input,
@@ -438,6 +440,8 @@ async fn submit_remote_transcript_input(
     match app.send_action(false) {
         SendAction::Submit => {
             let prepared = input::take_prepared_input(app);
+            app.automatic_failover_targets.clear();
+            app.automatic_failover_stopped = false;
             app.push_display_message(DisplayMessage {
                 role: "user".to_string(),
                 content: prepared.raw_input,

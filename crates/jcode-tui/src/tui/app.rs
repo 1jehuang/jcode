@@ -1107,6 +1107,10 @@ pub struct App {
     overnight_auto_poke: Option<OvernightAutoPokeState>,
     // Pending cross-provider resend after a failover warning/countdown.
     pending_provider_failover: Option<PendingProviderFailover>,
+    /// Automatic targets attempted for the logical user turn, including held
+    /// resends. Never reset this merely because a retry starts a new API call.
+    automatic_failover_targets: Vec<String>,
+    automatic_failover_stopped: bool,
     // Interactive "switch to next best model/method and resend" offer surfaced
     // after a provider turn error; accepted with a keypress.
     pending_fallback_offer: Option<PendingFallbackOffer>,

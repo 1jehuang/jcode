@@ -437,6 +437,10 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
         let combined = messages.join("\n\n");
         let auto_retry = reminder.is_some() && messages.is_empty();
+        if !messages.is_empty() && !super::commands::queued_messages_are_only_pokes(&messages) {
+            app.automatic_failover_targets.clear();
+            app.automatic_failover_stopped = false;
+        }
         crate::logging::info(&format!(
             "Sending queued continuation message ({} chars)",
             combined.len()
@@ -1146,6 +1150,7 @@ pub(super) fn debug_command_needs_current_frame(command: &str) -> bool {
 }
 
 fn fail_pending_automatic_failover(app: &mut App, reason: &str) {
+    app.automatic_failover_stopped = true;
     app.pending_automatic_failover_request_id = None;
     app.pending_automatic_failover_started = None;
     app.pending_automatic_failover_route = None;
@@ -1731,6 +1736,8 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         // send while still compiling, so the comment marks why the take matters.
         let interleave_images = std::mem::take(&mut app.interleave_images);
         if !interleave_msg.trim().is_empty() {
+            app.automatic_failover_targets.clear();
+            app.automatic_failover_stopped = false;
             app.push_display_message(DisplayMessage {
                 role: "user".to_string(),
                 content: interleave_msg.clone(),
@@ -1768,6 +1775,10 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         }
         let combined = messages.join("\n\n");
         let preserve_visible_turn = super::commands::queued_messages_are_only_pokes(&messages);
+        if !messages.is_empty() && !preserve_visible_turn {
+            app.automatic_failover_targets.clear();
+            app.automatic_failover_stopped = false;
+        }
         let auto_retry = reminder.is_some() && messages.is_empty();
         for msg in display_system_messages {
             app.push_display_message(DisplayMessage::system(msg));

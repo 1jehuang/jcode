@@ -4092,6 +4092,8 @@ impl App {
         // Remember the typed prompt so we can restore it to the input box if this
         // turn fails (e.g. "token refresh needed"), instead of dropping it.
         self.last_submitted_input = Some(raw_input.clone());
+        self.automatic_failover_targets.clear();
+        self.automatic_failover_stopped = false;
 
         // See `stage_turn_for_remote_tick_loop`: a remote client must never
         // park on the local-only `pending_turn` flag.
@@ -4213,6 +4215,10 @@ impl App {
             let combined = messages.join("\n\n");
             let has_combined = !combined.is_empty();
             let preserve_visible_turn = super::commands::queued_messages_are_only_pokes(&messages);
+            if !messages.is_empty() && !preserve_visible_turn {
+                self.automatic_failover_targets.clear();
+                self.automatic_failover_stopped = false;
+            }
 
             self.commit_pending_streaming_assistant_message();
 

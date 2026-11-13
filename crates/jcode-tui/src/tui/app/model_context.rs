@@ -345,6 +345,7 @@ impl App {
                     .find(|selection| selection.routed_model_spec() == target)
             });
             let Some(selection) = selection else {
+                self.automatic_failover_stopped = true;
                 if let Some(payload) = pending.remote_resend {
                     self.restore_failover_payload(payload);
                 }
@@ -378,6 +379,7 @@ impl App {
                 true
             }
             Err(error) => {
+                self.automatic_failover_stopped = true;
                 self.pending_turn = false;
                 self.push_display_message(DisplayMessage::error(format!(
                     "Failed to switch provider to {}: {}",
@@ -418,6 +420,15 @@ impl App {
         prompt: crate::provider::ProviderFailoverPrompt,
         remote_resend: Option<super::FallbackResendPayload>,
     ) {
+        // Duplicate provider prompts must not replace the held payload, restart
+        // a countdown, or dispatch another switch before acknowledgement.
+        if self.pending_provider_failover.is_some()
+            || self.pending_automatic_failover_route.is_some()
+            || self.pending_automatic_failover_request_id.is_some()
+            || self.automatic_failover_stopped
+        {
+            return;
+        }
         super::commands::disable_auto_poke(self);
         self.overnight_auto_poke = None;
         self.clear_pending_remote_retry();
@@ -446,6 +457,7 @@ impl App {
             .is_some_and(|payload| payload.retry_attempts >= Self::AUTO_RETRY_MAX_ATTEMPTS)
             && config.cross_provider_failover == crate::config::CrossProviderFailoverMode::Countdown
         {
+            self.automatic_failover_stopped = true;
             if let Some(payload) = remote_resend {
                 self.restore_failover_payload(payload);
             }
@@ -473,8 +485,27 @@ impl App {
                         || crate::provider::MultiProvider::is_failover_route_pool_approved(route)
                 }) && (!self.is_remote || remote_resend.is_some()) =>
             {
+                let target = prompt.target_route.as_ref().expect("approved target");
+                if self.automatic_failover_targets.contains(target)
+                    || self.automatic_failover_targets.len()
+                        >= usize::from(Self::AUTO_RETRY_MAX_ATTEMPTS)
+                {
+                    self.automatic_failover_stopped = true;
+                    if let Some(payload) = remote_resend {
+                        self.restore_failover_payload(payload);
+                    }
+                    self.pending_turn = false;
+                    self.push_display_message(DisplayMessage::system(
+                        "Stopped automatic failover: no working route found. Use /model to choose an account and resend manually.".to_string(),
+                    ));
+                    self.set_status_notice("Paused: automatic failover stopped");
+                    return;
+                }
+                // Only the first switch gets the fast path. An exhausted
+                // fallback must not create an instantaneous account loop.
                 let immediate = config.exhausted_usage_immediate_failover
-                    && jcode_provider_core::is_definitive_usage_exhaustion(&prompt.reason);
+                    && self.automatic_failover_targets.is_empty();
+                self.automatic_failover_targets.push(target.clone());
                 self.pending_provider_failover = Some(super::PendingProviderFailover {
                     prompt: prompt.clone(),
                     deadline: Instant::now() + Duration::from_secs(if immediate { 0 } else { 3 }),
@@ -691,6 +722,7 @@ impl App {
         // Never compete with the automatic countdown switcher. A migration
         // lease block is not a provider failure: switching model cannot help.
         if self.pending_provider_failover.is_some()
+            || self.automatic_failover_stopped
             || self.pending_automatic_failover_route.is_some()
             || self.pending_automatic_failover_request_id.is_some()
             || error.contains("Session is not runnable here")

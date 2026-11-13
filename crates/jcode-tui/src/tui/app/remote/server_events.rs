@@ -1272,12 +1272,13 @@ fn handle_server_event_inner(
             // or awaiting acknowledgement. It belongs to the failed route, not
             // a new turn: do not print it again or replace the held payload.
             if (app.pending_provider_failover.is_some()
+                || app.automatic_failover_stopped
                 || app.pending_automatic_failover_route.is_some()
                 || app.pending_automatic_failover_request_id.is_some()
                 || (app.pending_route_selection.is_some() && app.pending_fallback_resend.is_some()))
                 && (crate::provider::parse_failover_prompt_message(&message).is_some()
                     || jcode_provider_core::classify_failover_error_message(&message)
-                        .should_mark_provider_unavailable())
+                        .should_failover())
             {
                 return false;
             }
