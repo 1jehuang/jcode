@@ -976,7 +976,7 @@ async function emergencyPrune(env) {
   console.error(
     `EMERGENCY PRUNE: db size ${pressureFor(env).size} bytes; soft limit ${D1_SOFT_LIMIT_BYTES}; pruning with halved retention windows`,
   );
-  await pruneOldEvents(env, { retentionScale: 0.5, maxBatches: 24 });
+  await pruneOldEvents(env, { retentionScale: 0.5 });
 }
 
 // Retention windows, in days, per event type. Children (turn_details /
@@ -1021,7 +1021,9 @@ const RETENTION_DAYS = {
 };
 
 const PRUNE_BATCH_LIMIT = 10000;
-const PRUNE_MAX_BATCHES_PER_FAMILY = 12;
+// Two 10k batches per family each hour allow 480k expired rows/day/family,
+// while leaving subrequest headroom for both databases and emergency passes.
+const PRUNE_MAX_BATCHES_PER_FAMILY = 2;
 
 async function pruneOldEvents(env, options = {}) {
   const retentionScale = options.retentionScale ?? 1;

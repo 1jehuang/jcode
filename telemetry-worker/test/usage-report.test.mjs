@@ -121,7 +121,7 @@ test("expiry cleanup preserves rollup and old timestamp cannot be counted after 
   await ingest(db, v2);
   db.exec("UPDATE usage_report_ledger SET created_at=unixepoch('now','-9 days')");
   const jobs = [];
-  await worker.scheduled({}, { DB: d1(db) }, { waitUntil(promise) { jobs.push(promise); } });
+  await worker.scheduled({ cron: "17 4 * * *" }, { DB: d1(db) }, { waitUntil(promise) { jobs.push(promise); } });
   await Promise.all(jobs);
   assert.equal(db.prepare("SELECT count(*) n FROM usage_report_ledger").get().n, 0);
   assert.equal(db.prepare("SELECT responses FROM daily_model_usage_v2").get().responses, 1);

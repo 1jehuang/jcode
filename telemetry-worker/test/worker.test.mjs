@@ -708,7 +708,7 @@ test("hourly retention gives every event family its own bounded budget", async (
   const counts = new Map();
   for (const { values } of deletes) counts.set(values[0], (counts.get(values[0]) || 0) + 1);
   for (const family of ["turn_end", "session_start", "onboarding_step", "prompt_submitted"]) {
-    assert.equal(counts.get(family), 12, `${family} gets an independent bounded budget`);
+    assert.equal(counts.get(family), 2, `${family} gets an independent bounded budget`);
   }
   assert.ok(bulk.executed.some(({ sql }) => /DELETE FROM events/.test(sql)));
   assert.ok(!db.executed.some(({ sql }) => /oauth_accounts|usage_report_ledger|model_prices|INSERT OR IGNORE INTO daily_active_users/.test(sql)));
@@ -734,6 +734,21 @@ test("missing waitUntil does not consume the database emergency cooldown", async
   await worker.fetch(postRequest(makeBody()), env, ctx);
   await Promise.all(ctx.waited);
   assert.ok(env.DB.executed.some(({ sql }) => /DELETE FROM events/.test(sql)));
+});
+
+test("backlogged main and bulk plus emergency passes stay below 1000 D1 calls", async () => {
+  const db = makeDb({ deleteChanges: 10000, sizeAfter: 8_100_000_000 });
+  const bulk = makeDb({ deleteChanges: 10000, sizeAfter: 8_200_000_000 });
+  const ctx = makeCtx();
+  await worker.scheduled({ cron: "17 0-3,5-23 * * *" }, { DB: db, DB_BULK: bulk }, ctx);
+  await Promise.all(ctx.waited);
+  const calls = db.executed.length + bulk.executed.length;
+  assert.ok(calls < 1000, `hourly maintenance used ${calls} D1 calls`);
+  for (const store of [db, bulk]) {
+    const deletes = store.executed.filter(({ sql, values }) => /DELETE FROM events/.test(sql)
+      && values[0] === "desktop_update");
+    assert.equal(deletes.length, 4, "last family receives normal and emergency budgets");
+  }
 });
 
 test("missing firehose binding degrades gracefully", async () => {
