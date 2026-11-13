@@ -20,6 +20,7 @@
 use anyhow::{Context, Result};
 use jcode_provider_openrouter::ModelInfo;
 use reqwest::Client;
+use reqwest::header::HeaderMap;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -124,10 +125,17 @@ fn parse_trained_context_from_show(body: &str) -> Result<Option<u64>> {
         .max())
 }
 
-async fn fetch_server_default(client: &Client, root: &str) -> Result<Option<u64>> {
+async fn fetch_server_default(
+    client: &Client,
+    root: &str,
+    http_header_overrides: &HeaderMap,
+) -> Result<Option<u64>> {
     let body = client
         .get(format!("{root}/api/ps"))
         .timeout(PROBE_TIMEOUT)
+        // Config-driven overrides apply last so they win over any same-named
+        // header jcode set earlier on the request.
+        .headers(http_header_overrides.clone())
         .send()
         .await
         .context("GET /api/ps failed")?
@@ -137,11 +145,19 @@ async fn fetch_server_default(client: &Client, root: &str) -> Result<Option<u64>
     parse_server_default_from_ps(&body)
 }
 
-async fn fetch_trained_context(client: &Client, root: &str, model: &str) -> Result<Option<u64>> {
+async fn fetch_trained_context(
+    client: &Client,
+    root: &str,
+    model: &str,
+    http_header_overrides: &HeaderMap,
+) -> Result<Option<u64>> {
     let body = client
         .post(format!("{root}/api/show"))
         .timeout(PROBE_TIMEOUT)
         .json(&serde_json::json!({ "model": model }))
+        // Config-driven overrides apply last so they win over any same-named
+        // header jcode set earlier on the request.
+        .headers(http_header_overrides.clone())
         .send()
         .await
         .context("POST /api/show failed")?
@@ -173,12 +189,13 @@ pub(crate) async fn maybe_enrich(
     client: &Client,
     api_base: &str,
     profile_id: Option<&str>,
+    http_header_overrides: &HeaderMap,
     models: &mut [ModelInfo],
 ) {
     if !is_ollama_api_base(api_base, profile_id) {
         return;
     }
-    enrich_ollama_context_lengths(client, api_base, models).await;
+    enrich_ollama_context_lengths(client, api_base, http_header_overrides, models).await;
 }
 
 /// Fill in `context_length` for Ollama models using the native API.
@@ -188,9 +205,17 @@ pub(crate) async fn maybe_enrich(
 /// model reports a much larger trained window, a one-line hint is logged so the
 /// user knows to raise `OLLAMA_CONTEXT_LENGTH` instead of assuming jcode lost
 /// the conversation.
-async fn enrich_ollama_context_lengths(client: &Client, api_base: &str, models: &mut [ModelInfo]) {
+async fn enrich_ollama_context_lengths(
+    client: &Client,
+    api_base: &str,
+    http_header_overrides: &HeaderMap,
+    models: &mut [ModelInfo],
+) {
     let root = ollama_native_root(api_base);
-    let server_default = probe_or_log("/api/ps", fetch_server_default(client, &root).await);
+    let server_default = probe_or_log(
+        "/api/ps",
+        fetch_server_default(client, &root, http_header_overrides).await,
+    );
 
     let mut trained_by_model: HashMap<String, Option<u64>> = HashMap::new();
     for model in models.iter() {
@@ -199,7 +224,7 @@ async fn enrich_ollama_context_lengths(client: &Client, api_base: &str, models: 
         }
         let trained = probe_or_log(
             "/api/show",
-            fetch_trained_context(client, &root, &model.id).await,
+            fetch_trained_context(client, &root, &model.id, http_header_overrides).await,
         );
         trained_by_model.insert(model.id.clone(), trained);
     }
@@ -322,4 +347,95 @@ mod tests {
         );
         assert!(parse_trained_context_from_show("not json").is_err());
     }
+}
+
+#[test]
+fn config_header_overrides_apply_to_native_ollama_probes() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind probe server");
+    let addr = listener.local_addr().expect("probe server addr");
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        // /api/ps first, then /api/show for the single model.
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().expect("accept probe");
+            let mut buf = vec![0u8; 65536];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            tx.send(String::from_utf8_lossy(&buf[..n]).to_string())
+                .expect("send captured probe");
+            let body = r#"{"models":[{"model":"qwen3:0.6b","context_length":16384}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let client = reqwest::Client::new();
+        let api_base = format!("http://127.0.0.1:{}/v1", addr.port());
+        let mut overrides = reqwest::header::HeaderMap::new();
+        overrides.insert(
+            reqwest::header::USER_AGENT,
+            reqwest::header::HeaderValue::from_static("corp-agent/9.9"),
+        );
+        overrides.insert(
+            reqwest::header::HeaderName::from_static("x-tenant-id"),
+            reqwest::header::HeaderValue::from_static("tenant-42"),
+        );
+        let mut models = vec![ModelInfo {
+            id: "qwen3:0.6b".to_string(),
+            name: String::new(),
+            context_length: None,
+            pricing: Default::default(),
+            created: None,
+            input: Vec::new(),
+        }];
+        maybe_enrich(&client, &api_base, Some("ollama"), &overrides, &mut models).await;
+
+        let ps_request = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("/api/ps captured");
+        assert!(
+            ps_request.contains("GET /api/ps"),
+            "expected /api/ps probe:\n{ps_request}"
+        );
+        assert!(
+            ps_request
+                .lines()
+                .any(|line| line == "x-tenant-id: tenant-42"),
+            "config override missing on /api/ps:\n{ps_request}"
+        );
+        assert!(
+            ps_request
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("user-agent: corp-agent/9.9")),
+            "configured User-Agent missing on /api/ps:\n{ps_request}"
+        );
+
+        let show_request = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("/api/show captured");
+        assert!(
+            show_request.contains("POST /api/show"),
+            "expected /api/show probe:\n{show_request}"
+        );
+        assert!(
+            show_request
+                .lines()
+                .any(|line| line == "x-tenant-id: tenant-42"),
+            "config override missing on /api/show:\n{show_request}"
+        );
+
+        // Enrichment still works: the serving window comes from /api/ps.
+        assert_eq!(models[0].context_length, Some(16_384));
+    });
 }
