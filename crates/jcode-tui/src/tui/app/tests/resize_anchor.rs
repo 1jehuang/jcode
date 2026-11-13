@@ -19,6 +19,10 @@ fn anchored_scroll_test_app() -> crate::tui::app::App {
     app.auto_scroll_paused = false;
     app.status = ProcessingStatus::Idle;
     app.session.short_name = Some("test".to_string());
+    // Anchor math must be deterministic across widths; widget overlays
+    // (including the pinned Overview HUD reserving a column) would shift the
+    // wrap width and make the fixture width-dependent.
+    app.suppress_info_widget_overlays = true;
     app
 }
 
@@ -393,6 +397,7 @@ fn resize_keeps_a_reader_parked_in_live_output_on_the_same_text() {
     let mut app = create_test_app();
     app.diagram_mode = crate::config::DiagramDisplayMode::None;
     app.diagram_pane_enabled = false;
+    app.suppress_info_widget_overlays = true;
     app.status = ProcessingStatus::Streaming;
     app.is_processing = true;
     app.session.short_name = Some("test".to_string());

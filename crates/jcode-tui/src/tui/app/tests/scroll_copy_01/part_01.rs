@@ -1273,7 +1273,8 @@ fn test_ctrl_digit_side_panel_preset_in_app() {
 #[test]
 fn renderer_publishes_the_prepared_frame_as_geometry() {
     let _lock = scroll_render_test_lock();
-    let (app, mut terminal) = create_scroll_test_app(100, 30, 0, 60);
+    let (mut app, mut terminal) = create_scroll_test_app(100, 30, 0, 60);
+    app.suppress_info_widget_overlays = true;
     render_and_snap(&app, &mut terminal);
 
     // The retained frame *is* the published geometry: its total must agree with
@@ -1318,6 +1319,7 @@ fn retained_frame_row_matches_the_rendered_screen() {
     let _lock = scroll_render_test_lock();
     let (mut app, mut terminal) = create_scroll_test_app(100, 30, 0, 60);
     app.auto_scroll_paused = false;
+    app.suppress_info_widget_overlays = true;
     render_and_snap(&app, &mut terminal);
     app.scroll_up(20);
     render_and_snap(&app, &mut terminal);

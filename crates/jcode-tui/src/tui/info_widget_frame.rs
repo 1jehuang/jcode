@@ -36,6 +36,77 @@ pub(crate) fn more(hidden: usize) -> Span<'static> {
     )
 }
 
+/// Hard-wrap an over-long row at display-cell width, keeping span styles.
+/// Unlike a word wrapper, the first line is always full: a long single word
+/// never jumps to its own line, leaving the marker row nearly blank. Used by
+/// overview sections whose rows must wrap instead of truncating: the row is
+/// built to intentionally exceed `width`, then reflowed here. Continuation
+/// lines get `indent` leading spaces, reserved from their own budget.
+pub(crate) fn wrap_row_lines(
+    line: Line<'static>,
+    width: usize,
+    indent: usize,
+) -> Vec<Line<'static>> {
+    if width == 0 {
+        return vec![line];
+    }
+    if line.width() <= width {
+        return vec![line];
+    }
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut cur: Vec<Span<'static>> = Vec::new();
+    let mut cursor = 0usize;
+    let mut first = true;
+    for span in line.spans {
+        let mut text = span.content.to_string();
+        while !text.is_empty() {
+            let budget = if first {
+                width
+            } else {
+                width.saturating_sub(indent)
+            };
+            if cursor >= budget {
+                out.push(Line::from(std::mem::take(&mut cur)));
+                cursor = 0;
+                first = false;
+                continue;
+            }
+            let remaining = budget - cursor;
+            let (head, rest) = split_at_cells(&text, remaining);
+            let head_w = UnicodeWidthStr::width(head.as_str());
+            cur.push(Span::styled(head, span.style));
+            cursor += head_w;
+            text = rest;
+            if head_w == 0 {
+                break;
+            }
+        }
+    }
+    if !cur.is_empty() {
+        out.push(Line::from(cur));
+    }
+    for continuation in out.iter_mut().skip(1) {
+        continuation.spans.insert(0, Span::raw(" ".repeat(indent)));
+    }
+    out
+}
+
+/// Split `text` at no more than `max_cells` display cells.
+fn split_at_cells(text: &str, max_cells: usize) -> (String, String) {
+    if max_cells == 0 {
+        return (String::new(), text.to_string());
+    }
+    let mut w = 0usize;
+    for (idx, ch) in text.char_indices() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > max_cells {
+            return (text[..idx].to_string(), text[idx..].to_string());
+        }
+        w += cw;
+    }
+    (text.to_string(), String::new())
+}
+
 /// A widget's rendered body plus the text it wants on its border.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Framed {
@@ -243,6 +314,39 @@ mod tests {
         let rows = render(&f, 30);
         assert!(rows[0].starts_with("╭ Todos 3/7 "), "{}", rows[0]);
         assert!(rows[0].ends_with(" conf high ╮"), "{}", rows[0]);
+    }
+
+    #[test]
+    fn wrap_row_lines_fills_the_first_line_before_breaking() {
+        let line = Line::from(vec![
+            Span::raw("M "),
+            Span::styled(
+                "crates/jcode-tui/src/tui/info_widget_git.rs",
+                Style::default(),
+            ),
+        ]);
+        let out = wrap_row_lines(line, 20, 3);
+        let text: Vec<String> = out
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        // First line must be full: a word wrapper would push the whole path to
+        // the second line and leave only the marker behind.
+        assert!(text[0].starts_with("M crates/j"), "{:?}", text);
+        assert!(text.len() >= 3, "{:?}", text);
+        for (i, row) in text.iter().enumerate() {
+            let w = unicode_width::UnicodeWidthStr::width(row.as_str());
+            assert!(w <= 20, "row {i} width {w} > 20: {row:?}");
+        }
+        // Continuations indent under the marker prefix.
+        assert!(text[1].starts_with("   "), "{:?}", text);
+    }
+
+    #[test]
+    fn wrap_row_lines_keeps_short_rows_single() {
+        let line = Line::from("M short_path.rs +1 −2");
+        let out = wrap_row_lines(line, 40, 3);
+        assert_eq!(out.len(), 1);
     }
 
     #[test]

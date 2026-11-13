@@ -1077,6 +1077,7 @@ fn pinned_band_shows_stage_grid_and_live_swarm_agents_end_to_end() {
     let _render_lock = crate::tui::ui::render_state_test_lock();
     let _pin = PinTodosEnvGuard::enable();
     let mut app = create_test_app();
+    app.suppress_info_widget_overlays = true;
     let session_id = app.session.id.clone();
     let mut a = pinned_band_todo("a", "stage one alpha", "in_progress");
     a.stage = Some(1);

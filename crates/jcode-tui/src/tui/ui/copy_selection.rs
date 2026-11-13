@@ -21,14 +21,36 @@ pub(super) fn copy_point_from_snapshot(
     }
 
     let rel_row = row.saturating_sub(area.y) as usize;
+    let left_margin = snapshot.left_margins.get(rel_row).copied().unwrap_or(0);
+    let content_x = area.x.saturating_add(left_margin);
+    let rel_col = column.saturating_sub(content_x) as usize;
+
+    // Band rows re-wrap at a narrower width, so a display row can render a
+    // fragment of a wide line. The binding translates row/column into the
+    // wide frame, which stays the single source of copy truth; without it
+    // rows are the plain scrolled window (`scroll + row` at the same column).
+    if let Some(bindings) = snapshot.row_bindings.as_ref()
+        && let Some(binding) = bindings.get(rel_row)
+    {
+        let abs_line = binding.wide_line;
+        if abs_line >= snapshot.visible_end || abs_line >= snapshot.wrapped_plain_line_count() {
+            return None;
+        }
+        let text = snapshot.wrapped_plain_line(abs_line)?;
+        let copy_start = snapshot.wrapped_copy_offset(abs_line).unwrap_or(0);
+        let wide_col = binding.wide_column(rel_col);
+        return Some(crate::tui::CopySelectionPoint {
+            pane: snapshot.pane,
+            abs_line,
+            column: clamp_display_col(text, wide_col).max(copy_start),
+        });
+    }
+
     let abs_line = snapshot.scroll.saturating_add(rel_row);
     if abs_line >= snapshot.visible_end || abs_line >= snapshot.wrapped_plain_line_count() {
         return None;
     }
 
-    let left_margin = snapshot.left_margins.get(rel_row).copied().unwrap_or(0);
-    let content_x = area.x.saturating_add(left_margin);
-    let rel_col = column.saturating_sub(content_x) as usize;
     let text = snapshot.wrapped_plain_line(abs_line)?;
     let copy_start = snapshot.wrapped_copy_offset(abs_line).unwrap_or(0);
     Some(crate::tui::CopySelectionPoint {
@@ -564,6 +586,7 @@ mod tests {
             visible_end: plain.len(),
             content_area: Rect::new(0, 0, 80, plain.len() as u16),
             left_margins: vec![0; plain.len()],
+            row_bindings: None,
         }
     }
 

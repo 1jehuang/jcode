@@ -18,8 +18,13 @@ pub(super) fn runtime_height(data: &InfoWidgetData) -> u16 {
 }
 
 /// Content rows in the unframed overview, which retains every runtime fact.
-pub(super) fn overview_runtime_height(data: &InfoWidgetData) -> u16 {
-    runtime_rows(data).len() as u16
+/// Long rows wrap onto continuation lines, so the height is width-aware.
+pub(super) fn overview_runtime_height(data: &InfoWidgetData, width: u16) -> u16 {
+    let max_len = width.saturating_sub(2) as usize;
+    runtime_rows(data)
+        .into_iter()
+        .map(|row| row.into_wrapped_lines(max_len).len() as u16)
+        .sum()
 }
 
 pub(super) fn runtime_has_data(data: &InfoWidgetData) -> bool {
@@ -36,12 +41,13 @@ pub(super) fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
         .footer_right(footer.into_line(max_len))
 }
 
-/// Overview section: every runtime fact as a row, no border.
+/// Overview section: every runtime fact as a row, no border. Long rows wrap
+/// onto continuation lines instead of truncating, so no field is cut off.
 pub(super) fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
     let max_len = inner.width.saturating_sub(2) as usize;
     runtime_rows(data)
         .into_iter()
-        .map(|row| row.into_line(max_len))
+        .flat_map(|row| row.into_wrapped_lines(max_len))
         .collect()
 }
 
@@ -72,6 +78,7 @@ fn runtime_frame_rows(data: &InfoWidgetData) -> (Vec<RuntimeRow>, RuntimeRow) {
             "tok/s n/a".into()
         },
         text_color: rgb(140, 140, 150),
+        wrap: true,
     };
     (rows, footer)
 }
@@ -81,6 +88,22 @@ struct RuntimeRow {
     icon_color: Color,
     text: String,
     text_color: Color,
+    /// Chrome placeholders (startup "Loading…" slots) truncate instead of
+    /// wrapping: they are transient filler, and repo TUI style keeps UI chrome
+    /// on one row.
+    wrap: bool,
+}
+
+impl Default for RuntimeRow {
+    fn default() -> Self {
+        Self {
+            icon: "",
+            icon_color: Color::Reset,
+            text: String::new(),
+            text_color: Color::Reset,
+            wrap: true,
+        }
+    }
 }
 
 impl RuntimeRow {
@@ -101,12 +124,126 @@ impl RuntimeRow {
         };
         jcode_tui_render::truncate_line_with_ellipsis_to_width(&line, max_len)
     }
+
+    /// Same row, wrapped onto continuation lines instead of truncated. The
+    /// icon rides the first line; continuation lines are indented under it so
+    /// a wrapped row reads as one fact. A single source for render and height
+    /// mirrors keeps them in lockstep.
+    fn into_wrapped_lines(self, max_len: usize) -> Vec<Line<'static>> {
+        let line = if self.icon.is_empty() {
+            Line::from(Span::styled(
+                self.text,
+                Style::default().fg(self.text_color),
+            ))
+        } else {
+            Line::from(vec![
+                Span::styled(
+                    format!("{} ", self.icon),
+                    Style::default().fg(self.icon_color),
+                ),
+                Span::styled(self.text, Style::default().fg(self.text_color)),
+            ])
+        };
+        if max_len == 0 {
+            // Match the single-row path: a zero-width column still renders
+            // one (empty) row, so render and height stay in lockstep.
+            return vec![jcode_tui_render::truncate_line_with_ellipsis_to_width(
+                &line, 0,
+            )];
+        }
+        if !self.wrap {
+            return vec![jcode_tui_render::truncate_line_with_ellipsis_to_width(
+                &line, max_len,
+            )];
+        }
+        crate::tui::markdown::wrap_line(line, max_len)
+    }
 }
 
 fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
     let accent = rgb(140, 180, 255);
     let muted = rgb(140, 140, 150);
     let mut rows = Vec::new();
+
+    // Selected (default) model + effort first: the primary identity of the
+    // session. The home icon marks the default model the session runs on;
+    // the status line shows a shortened form, the panel carries the full name.
+    if let Some(model) = non_empty(data.model.as_deref()) {
+        let mut text = model.to_string();
+        if let Some(effort) = non_empty(data.reasoning_effort.as_deref()) {
+            text.push_str(&format!(" · {effort}"));
+        }
+        rows.push(RuntimeRow {
+            icon: "🏠",
+            icon_color: rgb(255, 135, 200),
+            text,
+            text_color: rgb(220, 220, 230),
+            wrap: true,
+        });
+    }
+
+    // Agent model overrides from config. A concrete override always shows;
+    // the explicit "inherit"/"coordinator" sentinels also render (as an
+    // inherit row) so users can verify the setting in the panel, matching
+    // the pickers' "inherit coordinator" entry. Like the memory row below,
+    // the swarm row also appears for an effort-only setting
+    // (`agents.swarm_effort` without `agents.swarm_model`), so users can
+    // verify the worker effort in the panel.
+    if let Some(model) = non_empty(data.swarm_model_override.as_deref()) {
+        let inherited = is_inherit_sentinel(model);
+        let mut text = if inherited {
+            "inherit coordinator".to_string()
+        } else {
+            model.to_string()
+        };
+        if !inherited && let Some(effort) = non_empty(data.swarm_model_effort.as_deref()) {
+            text.push_str(&format!(" · {effort}"));
+        }
+        rows.push(RuntimeRow {
+            icon: "🐝",
+            icon_color: rgb(255, 200, 100),
+            text,
+            text_color: muted,
+            wrap: true,
+        });
+    } else if let Some(effort) = non_empty(data.swarm_model_effort.as_deref()) {
+        rows.push(RuntimeRow {
+            icon: "🐝",
+            icon_color: rgb(255, 200, 100),
+            text: format!("· {effort}"),
+            text_color: muted,
+            wrap: true,
+        });
+    }
+    // The memory row also appears for an effort-only setting
+    // (`agents.memory_effort` without a model override), so users can
+    // verify the sidecar effort in the panel.
+    if let Some(model) = non_empty(data.memory_model_override.as_deref()) {
+        let inherited = is_inherit_sentinel(model);
+        let mut text = if inherited {
+            "inherit coordinator".to_string()
+        } else {
+            model.to_string()
+        };
+        if !inherited && let Some(effort) = non_empty(data.memory_model_effort.as_deref()) {
+            text.push_str(&format!(" · {effort}"));
+        }
+        rows.push(RuntimeRow {
+            icon: "🧠",
+            icon_color: rgb(200, 150, 255),
+            text,
+            text_color: muted,
+            wrap: true,
+        });
+    } else if let Some(effort) = non_empty(data.memory_model_effort.as_deref()) {
+        rows.push(RuntimeRow {
+            icon: "🧠",
+            icon_color: rgb(200, 150, 255),
+            text: format!("· {effort}"),
+            text_color: muted,
+            wrap: true,
+        });
+    }
 
     let is_openai = data
         .provider_name
@@ -122,6 +259,7 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
                 format!("{tier} tier")
             },
             text_color: rgb(200, 140, 255),
+            wrap: true,
         });
     }
 
@@ -131,6 +269,7 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
             icon_color: accent,
             text: format!("via {upstream}"),
             text_color: rgb(220, 190, 120),
+            wrap: true,
         });
     }
 
@@ -140,6 +279,21 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
             icon_color: accent,
             text: connection.to_lowercase(),
             text_color: muted,
+            wrap: true,
+        });
+    }
+
+    // Queue mode only changes behavior while it is on, so the row appears
+    // for Some(true) and not for the default Some(false): the panel carries
+    // active state, and `has_data_for` already counts the field toward
+    // availability either way.
+    if data.queue_mode == Some(true) {
+        rows.push(RuntimeRow {
+            icon: "⏳",
+            icon_color: rgb(255, 193, 7),
+            text: "queue mode on".to_string(),
+            text_color: muted,
+            wrap: true,
         });
     }
 
@@ -152,6 +306,7 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
             icon_color: accent,
             text: format!("{tps:.0} tok/s"),
             text_color: muted,
+            wrap: true,
         });
     }
 
@@ -168,6 +323,7 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
             icon_color: accent,
             text: session_parts.join(" · "),
             text_color: muted,
+            wrap: true,
         });
     }
 
@@ -185,6 +341,7 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
                     String::new()
                 },
                 text_color: muted,
+                wrap: false,
             });
         }
     }
@@ -194,6 +351,14 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// The "inherit"/"coordinator" sentinels mean the worker takes the
+/// coordinator's model instead of a concrete override. Case-insensitive like
+/// the server's `is_inherit_sentinel` so a hand-edited config still matches.
+fn is_inherit_sentinel(model: &str) -> bool {
+    let trimmed = model.trim();
+    trimmed.eq_ignore_ascii_case("inherit") || trimmed.eq_ignore_ascii_case("coordinator")
 }
 
 fn short_service_tier(service_tier: &str) -> Option<&str> {
@@ -240,17 +405,21 @@ mod tests {
     }
 
     #[test]
-    fn runtime_widget_never_repeats_status_line_identity() {
+    fn runtime_widget_shows_model_and_effort_plus_runtime_detail() {
         let mut d = data();
         d.connection_type = Some("websocket".to_string());
         d.tokens_per_second = Some(61.7);
         let out = text(render_model_widget(&d, Rect::new(0, 0, 30, 8)).all_lines());
-        for owned in ["GPT", "codex", "high", "(hi)", "openai", "OAuth", "jcode"] {
+        // The panel leads with the selected model + effort (user-requested),
+        // then the runtime detail. Identity facts that only the status line
+        // owns (provider name, auth, dir) stay out.
+        for owned in ["openai", "OAuth", "jcode"] {
             assert!(
                 !out.contains(owned),
                 "{owned:?} belongs to the status line: {out}"
             );
         }
+        assert!(out.contains("gpt-5-codex · high"), "{out}");
         assert!(out.contains("fast tier"), "{out}");
         assert!(out.contains("websocket"), "{out}");
         assert!(out.contains("62 tok/s"), "{out}");
@@ -288,16 +457,21 @@ mod tests {
         for tier in [None, Some("off"), Some("default")] {
             let mut d = data();
             d.service_tier = tier.map(str::to_string);
-            assert!(!runtime_has_data(&d), "tier {tier:?}");
+            // The selected model row always renders, so the widget has data;
+            // the tier row must not.
+            assert!(runtime_has_data(&d), "tier {tier:?}");
+            let out = text(render_model_widget(&d, Rect::new(0, 0, 30, 8)).all_lines());
+            assert!(!out.contains("tier"), "tier {tier:?}: {out}");
         }
     }
 
     #[test]
-    fn identity_only_session_has_no_runtime_widget() {
+    fn identity_only_session_renders_just_the_model_row() {
         let mut d = data();
         d.service_tier = None;
-        assert!(!runtime_has_data(&d));
-        assert_eq!(runtime_height(&d), 0);
+        // With no runtime detail, the selected model + effort row still
+        // renders: the panel always shows what model the session runs on.
+        assert_eq!(runtime_height(&d), 1);
     }
 
     #[test]
@@ -327,6 +501,8 @@ mod tests {
     fn single_facts_keep_body_and_use_distinct_unavailable_metric() {
         for icon in ["⚡", "↔", "☁", "◆", TPS_ICON] {
             let mut d = data();
+            d.model = None;
+            d.reasoning_effort = None;
             d.service_tier = (icon == "⚡").then(|| "priority".into());
             d.connection_type = (icon == "↔").then(|| "websocket".into());
             d.upstream_provider = (icon == "☁").then(|| "fireworks".into());
@@ -345,6 +521,8 @@ mod tests {
     fn startup_slots_keep_height_and_report_pending_throughput() {
         for tier in [None, Some("priority")] {
             let mut d = data();
+            d.model = None;
+            d.reasoning_effort = None;
             d.service_tier = tier.map(str::to_string);
             d.startup_runtime_pending = true;
             let (rows, footer) = runtime_frame_rows(&d);
@@ -359,6 +537,8 @@ mod tests {
     fn invalid_throughput_is_unavailable_not_a_live_metric() {
         for tps in [0.0, 0.1, -1.0, f32::NAN, f32::INFINITY] {
             let mut d = data();
+            d.model = None;
+            d.reasoning_effort = None;
             d.tokens_per_second = Some(tps);
             let (rows, footer) = runtime_frame_rows(&d);
             assert_eq!(rows.len(), 1);
@@ -373,8 +553,8 @@ mod tests {
         d.tokens_per_second = Some(61.7);
         d.session_name = Some("sauropod".into());
         let overview = render_model_info(&d, Rect::new(0, 0, 80, 8));
-        assert_eq!(overview.len() as u16, overview_runtime_height(&d));
-        assert_eq!(overview_runtime_height(&d), runtime_height(&d) + 1);
+        assert_eq!(overview.len() as u16, overview_runtime_height(&d, 80));
+        assert_eq!(overview_runtime_height(&d, 80), runtime_height(&d) + 1);
         d.startup_runtime_pending = true;
         d.service_tier = None;
         d.connection_type = None;
@@ -382,9 +562,9 @@ mod tests {
         d.session_name = None;
         assert_eq!(
             render_model_info(&d, Rect::new(0, 0, 80, 8)).len() as u16,
-            overview_runtime_height(&d)
+            overview_runtime_height(&d, 80)
         );
-        assert_eq!(overview_runtime_height(&d), 2);
+        assert_eq!(overview_runtime_height(&d, 80), 2);
     }
 
     #[test]
@@ -395,6 +575,99 @@ mod tests {
         d.session_count = Some(3);
         let framed = render_model_widget(&d, Rect::new(0, 0, 30, 8));
         assert_eq!(framed.lines.len() as u16, runtime_height(&d));
-        assert!(text(framed.all_lines()).contains("sauropod · 3 sessions"));
+        assert!(text(framed.all_lines()).contains("via fireworks"));
+    }
+
+    #[test]
+    fn swarm_and_memory_override_rows_render_when_set() {
+        let mut d = data();
+        d.service_tier = None;
+        d.swarm_model_override = Some("glm-5.2".to_string());
+        d.swarm_model_effort = Some("low".to_string());
+        d.memory_model_override = Some("gemini-3.8-flash".to_string());
+        d.memory_model_effort = Some("none".to_string());
+        let out = text(render_model_widget(&d, Rect::new(0, 0, 40, 8)).all_lines());
+        assert!(out.contains("🐝 glm-5.2 · low"), "{out}");
+        assert!(out.contains("🧠 gemini-3.8-flash · none"), "{out}");
+        // Selected model row plus the two override rows.
+        assert_eq!(runtime_height(&d), 3);
+    }
+
+    #[test]
+    fn memory_effort_only_still_renders_memory_row() {
+        // `agents.memory_effort` without a model override must still show the
+        // memory row, so an effort-only setting is verifiable in the panel.
+        let mut d = data();
+        d.service_tier = None;
+        d.memory_model_effort = Some("low".to_string());
+        let out = text(render_model_widget(&d, Rect::new(0, 0, 40, 8)).all_lines());
+        assert!(out.contains("🧠 · low"), "{out}");
+        assert_eq!(runtime_height(&d), 2);
+    }
+
+    #[test]
+    fn swarm_effort_only_still_renders_swarm_row() {
+        // `agents.swarm_effort` without `agents.swarm_model` must still show
+        // the swarm row, so an effort-only setting is verifiable in the panel
+        // (mirrors the memory row's effort-only branch).
+        let mut d = data();
+        d.service_tier = None;
+        d.swarm_model_effort = Some("low".to_string());
+        let out = text(render_model_widget(&d, Rect::new(0, 0, 40, 8)).all_lines());
+        assert!(out.contains("🐝 · low"), "{out}");
+        // The Overview section renders the same rows via render_model_info.
+        let overview = text(render_model_info(&d, Rect::new(0, 0, 40, 8)));
+        assert!(overview.contains("🐝 · low"), "{overview}");
+        assert_eq!(runtime_height(&d), 2);
+    }
+
+    #[test]
+    fn inherit_sentinels_render_explicit_inherit_rows() {
+        // `agents.swarm_model = "inherit"` (or "coordinator") is an explicit
+        // setting users must be able to verify in the panel, not a silent no-op:
+        // the row renders "inherit coordinator" and drops the effort suffix
+        // (inherited workers use the coordinator's settings wholesale).
+        let mut d = data();
+        d.service_tier = None;
+        d.swarm_model_override = Some(" Inherit ".to_string());
+        d.swarm_model_effort = Some("low".to_string());
+        d.memory_model_override = Some("coordinator".to_string());
+        let out = text(render_model_widget(&d, Rect::new(0, 0, 40, 8)).all_lines());
+        assert!(out.contains("🐝 inherit coordinator"), "{out}");
+        assert!(out.contains("🧠 inherit coordinator"), "{out}");
+        assert!(!out.contains("· low"), "{out}");
+        // The Overview section renders the same rows via render_model_info.
+        let overview = text(render_model_info(&d, Rect::new(0, 0, 40, 8)));
+        assert!(overview.contains("🐝 inherit coordinator"), "{overview}");
+        // Selected model row plus one inherit row per override target.
+        assert_eq!(runtime_height(&d), 3);
+    }
+
+    #[test]
+    fn inherit_overrides_render_no_row() {
+        let mut d = data();
+        d.service_tier = None;
+        assert_eq!(runtime_height(&d), 1);
+    }
+
+    #[test]
+    fn queue_mode_row_renders_when_on_and_hides_when_off() {
+        // Queue mode only changes behavior while it is on, so the row must
+        // appear for Some(true) and stay absent for Some(false)/None (the
+        // panel carries active state, not the default).
+        let mut d = data();
+        d.queue_mode = Some(true);
+        let out = text(render_model_widget(&d, Rect::new(0, 0, 40, 8)).all_lines());
+        assert!(out.contains("⏳ queue mode on"), "{out}");
+        // The Overview section renders the same rows via render_model_info.
+        let overview = text(render_model_info(&d, Rect::new(0, 0, 40, 8)));
+        assert!(overview.contains("⏳ queue mode on"), "{overview}");
+
+        for mode in [Some(false), None] {
+            let mut d = data();
+            d.queue_mode = mode;
+            let out = text(render_model_widget(&d, Rect::new(0, 0, 40, 8)).all_lines());
+            assert!(!out.contains("queue mode"), "mode {mode:?}: {out}");
+        }
     }
 }
