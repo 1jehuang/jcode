@@ -6,10 +6,16 @@ const runner = new URL("../scripts/run-retention.mjs", import.meta.url).href;
 function run(apply, fail = false) {
   const source = `
     process.argv = ['node', 'run-retention.mjs', ...${JSON.stringify(apply ? ["--apply"] : [])}];
+    let overloadSent = false;
+    globalThis.setTimeout = (callback) => { callback(); return 0; };
     globalThis.fetch = async (url, options) => {
       if (String(url).endsWith('/v1/health')) return Response.json({ok:true});
       if (!${apply}) throw new Error('Read-only mode attempted authenticated query');
       const {sql} = JSON.parse(options.body);
+      if (${JSON.stringify(fail)} === "always-overload" || (${JSON.stringify(fail)} === "overload-once" && !overloadSent)) {
+        overloadSent = true;
+        return Response.json({success:false,errors:[{code:7429,message:'D1 DB is overloaded'}]});
+      }
       if (${JSON.stringify(fail)} === "network" && /^DELETE FROM events/.test(sql.trim())) {
         throw new Error('simulated network failure');
       }
@@ -56,4 +62,18 @@ test("retention operator exits nonzero on caught network failures", () => {
   const result = run(true, "network");
   assert.equal(result.status, 1, result.stderr);
   assert.match(result.stdout, /"failures":[1-9]/);
+});
+
+test("retention operator backs off and recovers from transient overload", () => {
+  const result = run(true, "overload-once");
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /"failures":0,"retries":1/);
+  assert.match(result.stderr, /backing off/);
+});
+
+test("retention operator circuit-breaks each persistently overloaded database", () => {
+  const result = run(true, "always-overload");
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stdout, /"statements":0/);
+  assert.match(result.stdout, /"retries":6/);
 });

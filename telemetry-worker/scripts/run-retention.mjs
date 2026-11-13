@@ -35,19 +35,36 @@ if (!apply) {
   let statements = 0;
   let changed = 0;
   let failures = 0;
+  let retries = 0;
+  const blocked = new Map();
   const env = Object.fromEntries(bindings.map(([, name, id]) => [name, {
     prepare(sql) {
       const execute = async (params = []) => {
         try {
-          const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/d1/database/${id}/query`, {
-            method: "POST",
-            headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" },
-            body: JSON.stringify({ sql, params }),
-            signal: AbortSignal.timeout(120_000),
-          });
-          const body = await response.json();
-          if (!response.ok || !body.success || !body.result?.every((result) => result.success)) {
-            throw new Error(`D1 ${name}: ${JSON.stringify(body.errors || response.status)}`);
+          if (blocked.has(id)) throw blocked.get(id);
+          let body;
+          for (let attempt = 0; ; attempt++) {
+            const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/d1/database/${id}/query`, {
+              method: "POST",
+              headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" },
+              body: JSON.stringify({ sql, params }),
+              signal: AbortSignal.timeout(120_000),
+            });
+            body = await response.json();
+            const overloaded = response.status === 429 || response.status === 503
+              || body.errors?.some((error) => error.code === 7429);
+            if (overloaded && attempt < 3) {
+              retries++;
+              console.warn(`${name}: D1 overloaded, backing off before retry ${attempt + 1}/3`);
+              await new Promise((resolve) => setTimeout(resolve, 11_000 * (attempt + 1)));
+              continue;
+            }
+            if (!response.ok || !body.success || !body.result?.every((result) => result.success)) {
+              const error = new Error(`D1 ${name}: ${JSON.stringify(body.errors || response.status)}`);
+              if (overloaded) blocked.set(id, error);
+              throw error;
+            }
+            break;
           }
           const result = body.result.at(-1);
           statements++;
@@ -68,7 +85,7 @@ if (!apply) {
     waitUntil(promise) { pending.push(promise); },
   });
   await Promise.all(pending);
-  console.log(JSON.stringify({ statements, changed, failures }));
+  console.log(JSON.stringify({ statements, changed, failures, retries }));
   await health();
   if (failures) process.exitCode = 1;
 }
