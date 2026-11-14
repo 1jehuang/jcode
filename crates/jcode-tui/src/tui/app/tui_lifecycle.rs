@@ -166,6 +166,14 @@ impl App {
             return false;
         }
         let max_attempts = self.effective_auto_retry_max_attempts();
+        // A forced wait follows a real failed provider attempt, so it honors
+        // the configured base delay like any other retry. Offline probe
+        // re-waits (force == false) keep their short fixed cadence.
+        let base_delay_secs = if force {
+            self.effective_auto_retry_base_delay_secs()
+        } else {
+            5
+        };
         let Some(pending) = self.rate_limit_pending_message.as_mut() else {
             return false;
         };
@@ -184,8 +192,12 @@ impl App {
         }
 
         let plan = crate::network_retry::wait_plan();
-        let retry_at =
-            Instant::now() + Duration::from_secs(5 * u64::from(pending.retry_attempts.max(1)));
+        let retry_at = Instant::now()
+            + Duration::from_secs(
+                base_delay_secs
+                    .saturating_mul(u64::from(pending.retry_attempts.max(1)))
+                    .min(jcode_config_types::MAX_AUTO_RETRY_BACKOFF_SECS),
+            );
         pending.retry_at = Some(retry_at);
         self.rate_limit_reset = Some(retry_at);
         self.status = ProcessingStatus::WaitingForNetwork {
