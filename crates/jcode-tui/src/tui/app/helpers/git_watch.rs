@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// True while a watcher is running and has not lost events.
 static HEALTHY: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "linux")]
 static STARTED: AtomicBool = AtomicBool::new(false);
 
 pub(super) fn is_healthy() -> bool {
@@ -29,11 +30,11 @@ pub(super) fn is_healthy() -> bool {
     )
 )]
 pub(super) fn ensure_started(repo_root: &Path, on_change: fn()) {
-    if STARTED.swap(true, Ordering::AcqRel) {
-        return;
-    }
     #[cfg(target_os = "linux")]
     {
+        if STARTED.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let root = repo_root.to_path_buf();
         let spawned = std::thread::Builder::new()
             .name("jcode-git-watch".to_string())
@@ -46,11 +47,13 @@ pub(super) fn ensure_started(repo_root: &Path, on_change: fn()) {
 
 /// Whether an event on `name` inside the git dir can change the widget.
 /// Lock files and temp objects churn during every git command.
+#[cfg(target_os = "linux")]
 pub(super) fn git_dir_event_relevant(name: &str) -> bool {
     !(name.ends_with(".lock") || name.starts_with("tmp_") || name == "ORIG_HEAD.lock")
 }
 
 /// Directories never worth watching even if not gitignored.
+#[cfg(target_os = "linux")]
 pub(super) fn skip_dir(name: &str) -> bool {
     name == ".git"
 }

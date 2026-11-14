@@ -240,6 +240,7 @@ pub(super) fn swarm_delivery_display_message(content: &str) -> Option<crate::tui
 }
 
 /// Full underlying body of swarm display content, collapsed or not.
+#[cfg(test)]
 pub(super) fn swarm_display_full_body(content: &str) -> &str {
     match jcode_tui_messages::parse_collapsible_swarm_content(content) {
         Some(parsed) if !parsed.body.trim().is_empty() => parsed.body.trim(),
