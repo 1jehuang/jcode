@@ -67,3 +67,28 @@ Transfer resumes from the latest successfully synced conversation, not any
 unsynced work still on an offline laptop. Enabling sync backfills sessions
 modified in the last 14 days, with at most 200 candidate sessions per pass.
 This feature requires compatible API, mobile-app, and cloud-runner versions.
+
+## Implementation validation, November 14, 2026
+
+- Full backend suite: 625 passed, one skipped, zero failures after the local
+  acknowledgement timeout fix.
+- Hosted `justrust check -p jcode-app-core -p jcode-base --tests` passed.
+- Hosted `justrust test -p jcode-base mobile_runner::local --lib` passed all six
+  loopback-HTTP runner tests.
+- Hosted daemon tests exercised idle turns, queued busy-session messages,
+  brief-lock recovery, refusal rather than stranding messages on idle locks,
+  and headless presence. Five passed. The remaining rejection test expected
+  empty initial history, but the agent starts with a bootstrap message. Its
+  assertion now compares against the initial count. Rerunning the correction
+  was blocked by repeated hosted transport failures, not a passing verdict.
+- `crates/jcode-base/tests/mobile_local_backend_acceptance.rs` and its Node
+  fixture exercise actual backend HTTP/SQLite plus the actual Rust local
+  runner, with a synthetic session host. The Node backend lifecycle was run
+  successfully. The complete Rust acceptance executable was not run: hosted
+  compilation repeatedly lost its connection after target-lock contention.
+- Full CLI check and opt-out persistence execution were also attempted but
+  blocked by that hosted outage. Local compilation was not used on battery.
+
+Do not interpret these results as a production deployment or as on-device iOS
+acceptance. The API migration and compatible binaries still need rollout, and
+the blocked checks must pass before declaring the complete workflow validated.
