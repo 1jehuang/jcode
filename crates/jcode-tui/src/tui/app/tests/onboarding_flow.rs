@@ -118,7 +118,9 @@ fn direct_api_key_login_does_not_advertise_a_static_model_default() {
 #[test]
 fn onboarding_strongest_model_only_runs_without_explicit_defaults() {
     with_temp_jcode_home(|| {
-        let previous_explicit = std::env::var_os("JCODE_INITIAL_PROVIDER_EXPLICIT");
+        // Drop guard: the var must come back even when an assertion fails
+        // mid-test, or later tests see different provider settings.
+        let _explicit_restore = EnvRestoreGuard::capture(["JCODE_INITIAL_PROVIDER_EXPLICIT"]);
         crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
 
         let mut app = onboarding_test_app();
@@ -147,12 +149,6 @@ fn onboarding_strongest_model_only_runs_without_explicit_defaults() {
                 .load(std::sync::atomic::Ordering::Acquire),
             "finishing onboarding must cancel a delayed catalog selection"
         );
-
-        if let Some(value) = previous_explicit {
-            crate::env::set_var("JCODE_INITIAL_PROVIDER_EXPLICIT", value);
-        } else {
-            crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
-        }
     });
 }
 
@@ -1487,9 +1483,9 @@ fn import_continue_reaches_ready_quality_first_openai_model() {
     with_temp_jcode_home(|| {
         // The strongest-model preference check below asserts ambient
         // first-run conditions, but the var can be set by an ambient session
-        // (an agent harness runs jcode with an explicit provider). Same
-        // save/remove/restore guard as the strongest-model unit test.
-        let previous_explicit = std::env::var_os("JCODE_INITIAL_PROVIDER_EXPLICIT");
+        // (an agent harness runs jcode with an explicit provider). Drop
+        // guard restores it even if a wait or assertion fails.
+        let _explicit_restore = EnvRestoreGuard::capture(["JCODE_INITIAL_PROVIDER_EXPLICIT"]);
         crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
         let legacy_auth = crate::auth::codex::legacy_auth_file_path().expect("legacy auth path");
         std::fs::create_dir_all(legacy_auth.parent().expect("legacy auth parent"))
@@ -1569,12 +1565,6 @@ fn import_continue_reaches_ready_quality_first_openai_model() {
 
             assert_eq!(model, jcode_provider_core::DEFAULT_OPENAI_MODEL);
             assert_eq!(provider_key.as_deref(), Some("openai-api"));
-
-            if let Some(value) = previous_explicit {
-                crate::env::set_var("JCODE_INITIAL_PROVIDER_EXPLICIT", value);
-            } else {
-                crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
-            }
         });
     });
 }

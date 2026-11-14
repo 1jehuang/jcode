@@ -221,9 +221,14 @@ async fn browser_session_stalled_startup_keeps_healthy_calls_and_workers_respons
         .unwrap();
 
     // The external watchdog bounds failures even if all Tokio workers block.
+    // It is armed only once the measured window starts, so the 3s release
+    // cannot fire inside that window and hide a genuinely stalled healthy
+    // call behind setup and startup-poll time.
     let release_path = fixture.temp.path().join("release");
+    let (arm_tx, arm_rx) = std::sync::mpsc::channel::<()>();
     let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
     let watchdog = std::thread::spawn(move || {
+        let _ = arm_rx.recv();
         let _ = release_rx.recv_timeout(Duration::from_secs(3));
         std::fs::write(release_path, "ready").unwrap();
     });
@@ -261,6 +266,7 @@ async fn browser_session_stalled_startup_keeps_healthy_calls_and_workers_respons
     // still make progress. Daemon-start observation time above is scheduling
     // noise under parallel load, not a stall, so it stays outside the window.
     let started = Instant::now();
+    arm_tx.send(()).unwrap();
     let healthy = tokio::spawn(async move {
         firefox_run_bridge_command("getActiveTab", json!({}), Some("chrome"), &healthy_ctx).await
     });

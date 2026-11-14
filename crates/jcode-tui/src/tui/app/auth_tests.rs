@@ -7,7 +7,10 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let _env_guard = crate::storage::lock_test_env();
     let _provider_env = super::super::tests::ProviderEnvGuard::clear();
     let temp = tempfile::tempdir().expect("tempdir");
-    let saved_env = [
+    // Drop guard: a failed assertion must not leave the scrubbed vars
+    // missing after the env lock is released, which changes later tests'
+    // provider settings.
+    let _restore = EnvRestoreGuard::capture([
         "JCODE_HOME",
         "JCODE_OPENAI_COMPAT_API_BASE",
         "JCODE_OPENAI_COMPAT_API_KEY_NAME",
@@ -33,24 +36,40 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
         "JCODE_OPENROUTER_NO_FALLBACK",
         "JCODE_API_BASE",
         "JCODE_API_KEY",
-    ]
-    .map(|key| (key, std::env::var_os(key)));
+    ]);
 
     crate::env::set_var("JCODE_HOME", temp.path());
-    for (key, _) in saved_env.iter().skip(1) {
+    for (key, _) in _restore.0.iter() {
         crate::env::remove_var(key);
     }
 
     let result = f();
 
-    for (key, value) in saved_env {
-        if let Some(value) = value {
-            crate::env::set_var(key, value);
-        } else {
-            crate::env::remove_var(key);
+    result
+}
+
+struct EnvRestoreGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+impl EnvRestoreGuard {
+    fn capture(keys: impl IntoIterator<Item = &'static str>) -> Self {
+        Self(
+            keys.into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect(),
+        )
+    }
+}
+
+impl Drop for EnvRestoreGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.0.drain(..) {
+            if let Some(value) = value {
+                crate::env::set_var(key, value);
+            } else {
+                crate::env::remove_var(key);
+            }
         }
     }
-    result
 }
 
 #[test]
