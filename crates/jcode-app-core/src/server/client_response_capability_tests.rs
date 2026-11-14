@@ -134,20 +134,54 @@ async fn ask_user_registration_follows_an_attached_renderer() {
         !advertised().await,
         "headless sessions must not offer ask_user"
     );
+    let routes_to = |tx: &mpsc::UnboundedSender<crate::tool::ClientInputRequest>| {
+        crate::tool::ask_user_route::current(&session_id).is_some_and(|c| c.same_channel(tx))
+    };
+    let disconnect = |id: &'static str| {
+        crate::server::client_session::response_capability::disconnect(
+            &sessions,
+            &connections,
+            id,
+            &session_id,
+        )
+    };
     refresh_session(&sessions, &connections, &session_id).await;
     assert!(advertised().await);
-    assert!(
-        agent.lock().await.client_input_routes_to(&tui_tx),
-        "questions must route to the client that renders them"
-    );
-    crate::server::client_session::response_capability::disconnect(
-        &sessions,
-        &connections,
-        "tui",
-        &session_id,
+    assert!(routes_to(&tui_tx), "questions route to the renderer");
+
+    // A second TUI attaches while a turn holds the Agent: the route must move
+    // now, not when the turn ends.
+    let turn = agent.lock().await;
+    let (second_tx, _second_rx) = mpsc::unbounded_channel();
+    connections
+        .write()
+        .await
+        .insert("second".into(), info("second", Some(second_tx.clone())));
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        refresh_session(&sessions, &connections, &session_id),
     )
-    .await;
-    assert!(!advertised().await);
+    .await
+    .expect("refresh blocked on the busy Agent");
+    assert!(routes_to(&second_tx), "the latest attachment is asked");
+    // Typing in the first terminal makes it the one to ask.
+    crate::tool::ask_user_route::touch("tui");
+    assert!(routes_to(&tui_tx));
+    tokio::time::timeout(Duration::from_secs(1), disconnect("tui"))
+        .await
+        .expect("disconnect blocked on the busy Agent");
+    assert!(routes_to(&second_tx), "a detached TUI is never asked");
+    drop(turn);
+
+    disconnect("second").await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while advertised().await {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("ask_user stayed advertised with no renderer attached");
+    assert!(crate::tool::ask_user_route::current(&session_id).is_none());
 }
 
 async fn send(writer: &mut Writer, value: Value) {

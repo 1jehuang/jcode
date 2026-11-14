@@ -1128,6 +1128,16 @@ pub enum ServerEvent {
         questions: Vec<jcode_message_types::ask_user::AskUserQuestion>,
     },
 
+    /// The `ask_user` request ended without this client's answer (the call was
+    /// interrupted), or an answer arrived for a request that no longer waits.
+    #[serde(rename = "ask_user_closed")]
+    AskUserClosed {
+        request_id: String,
+        /// Shown to the user when set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+
     /// A running command is waiting for stdin input from the user
     #[serde(rename = "stdin_request")]
     StdinRequest {

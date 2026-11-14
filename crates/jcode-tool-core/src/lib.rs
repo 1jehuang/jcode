@@ -91,6 +91,8 @@ pub struct AskUserInputRequest {
 pub enum ClientInputRequest {
     Stdin(StdinInputRequest),
     AskUser(AskUserInputRequest),
+    /// The `ask_user` call with this request id ended without an answer.
+    AskUserClosed(String),
 }
 
 #[derive(Clone)]

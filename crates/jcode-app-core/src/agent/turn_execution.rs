@@ -1192,36 +1192,14 @@ impl Agent {
         }
     }
 
-    /// Route `ask_user` to an attached client that renders it, or withdraw the
-    /// tool when none is attached.
-    pub(crate) async fn set_ask_user_client(
-        &mut self,
-        client: Option<tokio::sync::mpsc::UnboundedSender<crate::tool::ClientInputRequest>>,
-    ) {
-        let enabled = client.is_some();
-        if let Some(tx) = client {
-            self.stdin_request_tx = Some(tx);
-        }
-        let was_enabled = self
-            .registry
-            .tool_names()
-            .await
-            .iter()
-            .any(|n| n == "ask_user");
-        if was_enabled != enabled {
+    /// Offer `ask_user` while a client that renders it is attached. A flag,
+    /// not a registry query, so an unchanged capability costs no await.
+    pub(crate) async fn set_ask_user_enabled(&mut self, enabled: bool) {
+        if self.ask_user_enabled != enabled {
+            self.ask_user_enabled = enabled;
             self.registry.set_ask_user_enabled(enabled).await;
             self.invalidate_sdk_tools();
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn client_input_routes_to(
-        &self,
-        tx: &tokio::sync::mpsc::UnboundedSender<crate::tool::ClientInputRequest>,
-    ) -> bool {
-        self.stdin_request_tx
-            .as_ref()
-            .is_some_and(|current| current.same_channel(tx))
     }
 
     pub async fn tool_names(&self) -> Vec<String> {

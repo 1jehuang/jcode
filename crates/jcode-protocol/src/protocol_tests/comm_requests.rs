@@ -123,6 +123,12 @@ fn test_ask_user_roundtrip() -> Result<()> {
         return Err(anyhow!("expected AskUser"));
     };
     assert_eq!(request_id, "ask-call_1");
+    // Newer daemons may add question fields; older clients must still parse.
+    let extended = json.trim().replace("\"header\"", "\"future\":1,\"header\"");
+    assert!(matches!(
+        parse_event_json(&extended)?,
+        ServerEvent::AskUser { .. }
+    ));
     assert_eq!(questions[0].options[0].label, "Postgres");
     assert!(questions[0].multi_select);
 
