@@ -959,6 +959,8 @@ impl BashTool {
         }
         let mut child = command.spawn()?;
 
+        #[cfg(unix)]
+        let process_group_guard = ProcessGroupKillGuard::new(child.id());
         let stdin_handle = child.stdin.take();
         let stdout_handle = child.stdout.take();
         let stderr_handle = child.stderr.take();
@@ -981,6 +983,9 @@ impl BashTool {
         // the still-running task off to the background manager instead of killing it.
         let mut work_handle: tokio::task::JoinHandle<Result<ToolOutput>> =
             tokio::spawn(async move {
+                // Keep the whole process group tied to this task if it is cancelled.
+                #[cfg(unix)]
+                let mut process_group_guard = process_group_guard;
                 let stdout_task = tokio::spawn(collect_output_reporting_progress(
                     stdout_handle,
                     stdout_progress,
@@ -996,6 +1001,8 @@ impl BashTool {
                 drop(stdin_handle);
 
                 let status = child.wait().await?;
+                #[cfg(unix)]
+                process_group_guard.disarm();
 
                 let stdout = stdout_task.await.unwrap_or_default();
                 let stderr = stderr_task.await.unwrap_or_default();
