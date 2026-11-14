@@ -281,10 +281,20 @@ fn decide_mode_defaults_to_fast_path() {
         decide_picker_init_mode(None, Some(ProtocolType::Kitty), Multiplexer::None, None),
         PickerInitMode::Fast
     );
-    // An env miss must not turn an optional capability query into a
-    // two-second startup stall. Multiplexer users can opt in explicitly.
+    // An env miss inside Herdr must probe: it masks the outer terminal's identity
+    // and can pass Kitty graphics through. Same for Zellij.
     assert_eq!(
         decide_picker_init_mode(None, None, Multiplexer::Herdr, None),
+        PickerInitMode::Probe
+    );
+    assert_eq!(
+        decide_picker_init_mode(None, None, Multiplexer::Zellij, None),
+        PickerInitMode::Probe
+    );
+    // Tmux still uses the fast path: its env vars are stable and the outer
+    // terminal's protocol is detectable from the multiplexer env.
+    assert_eq!(
+        decide_picker_init_mode(None, None, Multiplexer::Tmux, None),
         PickerInitMode::Fast
     );
     assert_eq!(
@@ -314,12 +324,9 @@ fn decide_mode_defaults_to_fast_path() {
 
 #[test]
 fn decide_mode_keeps_orca_multiplexers_fast_unless_forced() {
-    for multiplexer in [
-        Multiplexer::Tmux,
-        Multiplexer::Screen,
-        Multiplexer::Herdr,
-        Multiplexer::Zellij,
-    ] {
+    // Herdr and Zellij now probe automatically, so they are excluded from this
+    // loop. Tmux and Screen keep the fast path when the Orca env var is set.
+    for multiplexer in [Multiplexer::Tmux, Multiplexer::Screen] {
         assert_eq!(
             decide_picker_init_mode(None, None, multiplexer, Some("Orca")),
             PickerInitMode::Fast
