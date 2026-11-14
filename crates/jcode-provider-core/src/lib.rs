@@ -53,7 +53,7 @@ pub use models::{
 };
 pub use reasoning::{
     DEEPSEEK_SELECTABLE_EFFORTS, OPENAI_SELECTABLE_EFFORTS, OPENROUTER_SELECTABLE_EFFORTS,
-    canonical_reasoning_effort, inferred_reasoning_efforts,
+    canonical_reasoning_effort, default_reasoning_effort, inferred_reasoning_efforts,
 };
 pub use selection::{
     ActiveProvider, ProviderAvailability, auto_default_provider, cli_provider_arg_for_session_key,
@@ -347,6 +347,16 @@ pub trait Provider: Send + Sync {
 
     /// Get the reasoning effort level (if applicable).
     fn reasoning_effort(&self) -> Option<String> {
+        None
+    }
+
+    /// Effective effort the provider applies when the session has no explicit
+    /// selection, including daemon-owned configuration (for example an
+    /// environment override that disables thinking). Unlike
+    /// [`Self::reasoning_effort`], this is not persisted as a user choice.
+    ///
+    /// Providers that do not know their default return `None`.
+    fn default_reasoning_effort(&self) -> Option<String> {
         None
     }
 

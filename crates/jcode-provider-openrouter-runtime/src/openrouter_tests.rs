@@ -2,6 +2,7 @@ use super::*;
 use bytes::Bytes;
 use futures::StreamExt;
 use jcode_provider_openrouter::stream::OpenRouterStream;
+use serde_json::json;
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -3538,6 +3539,80 @@ fn venice_disables_venice_system_prompt_by_default_but_user_can_override() {
         serde_json::json!(true)
     );
     assert!(OpenRouterProvider::with_profile_default_extra_body(Some("cerebras"), None).is_none());
+}
+
+#[test]
+fn default_reasoning_effort_matches_disabled_thinking_aliases() {
+    let _lock = ENV_LOCK.lock();
+    let make_provider = || OpenRouterProvider {
+        model: Arc::new(RwLock::new("deepseek/deepseek-v4-pro".to_string())),
+        ..make_custom_compatible_provider()
+    };
+
+    for value in ["disabled", "disable", "off", "false", "0"] {
+        let _guard = EnvVarGuard::set("JCODE_OPENROUTER_THINKING", value);
+        assert_eq!(
+            make_provider().default_reasoning_effort().as_deref(),
+            Some("none"),
+            "JCODE_OPENROUTER_THINKING={value} should disable the provider's default effort"
+        );
+    }
+
+    let _guard = EnvVarGuard::set("JCODE_OPENROUTER_THINKING", "enabled");
+    assert_eq!(make_provider().default_reasoning_effort(), None);
+
+    let _guard = EnvVarGuard::set("JCODE_OPENROUTER_THINKING", "disable");
+    let unsupported = OpenRouterProvider {
+        model: Arc::new(RwLock::new("anthropic/claude-opus-5.5".to_string())),
+        ..make_custom_compatible_provider()
+    };
+    assert_eq!(
+        unsupported.default_reasoning_effort(),
+        None,
+        "models with no effort ladder must not report `none`"
+    );
+    let azure = OpenRouterProvider {
+        builtin_azure: true,
+        model: Arc::new(RwLock::new("deepseek/deepseek-v4-pro".to_string())),
+        ..make_custom_compatible_provider()
+    };
+    assert_eq!(
+        azure.default_reasoning_effort(),
+        None,
+        "Azure requests return before the thinking override is read"
+    );
+    let strict_schema = OpenRouterProvider {
+        profile_id: Some("mistral".to_string()),
+        model: Arc::new(RwLock::new("deepseek/deepseek-v4-pro".to_string())),
+        ..make_custom_compatible_provider()
+    };
+    assert_eq!(
+        strict_schema.default_reasoning_effort(),
+        None,
+        "strict OpenAI-schema endpoints suppress the thinking field"
+    );
+    let responses = OpenRouterProvider {
+        profile_id: Some("opencode-go".to_string()),
+        model: Arc::new(RwLock::new("gpt-5.6-luna".to_string())),
+        ..make_custom_compatible_provider()
+    };
+    assert_eq!(
+        responses.default_reasoning_effort(),
+        None,
+        "Responses builders ignore the chat thinking override"
+    );
+    let extra_body_override = OpenRouterProvider {
+        extra_body: json!({"thinking": {"type": "enabled"}})
+            .as_object()
+            .cloned(),
+        model: Arc::new(RwLock::new("deepseek/deepseek-v4-pro".to_string())),
+        ..make_custom_compatible_provider()
+    };
+    assert_eq!(
+        extra_body_override.default_reasoning_effort(),
+        None,
+        "extra_body is merged last and can re-enable thinking"
+    );
 }
 
 #[path = "catalog_auth_tests.rs"]

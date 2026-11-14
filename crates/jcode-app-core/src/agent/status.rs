@@ -216,8 +216,14 @@ impl Agent {
     }
 
     /// Reasoning effort the active provider is running with, if any.
+    ///
+    /// Falls back to the provider's effective default (computed in the daemon
+    /// process so client environment cannot diverge from the provider that
+    /// actually sends the request) when no explicit effort is stored.
     pub fn provider_reasoning_effort(&self) -> Option<String> {
-        self.provider.reasoning_effort()
+        self.provider
+            .reasoning_effort()
+            .or_else(|| self.provider.default_reasoning_effort())
     }
 
     pub fn provider_model(&self) -> String {

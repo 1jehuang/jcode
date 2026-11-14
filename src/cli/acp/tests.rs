@@ -516,6 +516,76 @@ fn config_options_current_model_prepended_when_not_listed() {
 }
 
 #[test]
+fn reported_effort_preserves_daemon_values() {
+    let mut state = SessionUiState {
+        provider_name: Some("deepseek".to_string()),
+        model: Some("deepseek-v4-flash".to_string()),
+        available_models: Vec::new(),
+        reasoning_effort: None,
+    };
+    assert_eq!(displayed_effort(&state), "high");
+
+    state.reasoning_effort = Some("none".to_string());
+    assert_eq!(displayed_effort(&state), "none");
+
+    state.reasoning_effort = Some("xhigh".to_string());
+    assert_eq!(
+        displayed_effort(&state),
+        "xhigh",
+        "a daemon-accepted value the inferred ladder misses must be preserved"
+    );
+
+    // `swarm` is a TUI sentinel, not a selectable ACP effort.
+    state.reasoning_effort = Some("swarm".to_string());
+    assert_eq!(displayed_effort(&state), "high");
+    let options = session_config_options(&state);
+    let effort = options
+        .iter()
+        .find(|option| option["id"] == CONFIG_ID_EFFORT)
+        .expect("deepseek exposes a thought-level option");
+    assert!(
+        !effort["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| option["value"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("swarm"))),
+        "swarm must not leak into the ACP effort selector"
+    );
+
+    state.provider_name = Some("unknown".to_string());
+    state.model = Some("mystery".to_string());
+    state.reasoning_effort = Some("none".to_string());
+    assert_eq!(displayed_effort(&state), "none");
+    assert!(
+        session_config_options(&state)
+            .iter()
+            .all(|option| option["id"] != CONFIG_ID_EFFORT),
+        "a model with no effort ladder must not expose an effort selector"
+    );
+
+    // A non-empty ladder exposes a confirmed value it did not guess.
+    state.provider_name = Some("OpenAI".to_string());
+    state.model = Some("gpt-5.4".to_string());
+    state.reasoning_effort = Some("ultra".to_string());
+    let options = session_config_options(&state);
+    let effort = options
+        .iter()
+        .find(|option| option["id"] == CONFIG_ID_EFFORT)
+        .expect("gpt-5.4 exposes a thought-level option");
+    assert_eq!(effort["currentValue"], "ultra");
+    assert!(
+        effort["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| option["value"] == "ultra"),
+        "the selector must include the confirmed value"
+    );
+}
+
+#[test]
 fn legacy_models_catalog_is_emitted_alongside_config_options() {
     let state = SessionUiState {
         provider_name: Some("deepseek".to_string()),
@@ -609,4 +679,141 @@ fn acp_turn_outcome_ignores_stale_interrupt_before_ack() {
     assert_eq!(o.stop_reason(false), "end_turn");
     o.observe(&ServerEvent::Interrupted, 9);
     assert_eq!(o.stop_reason(false), "cancelled");
+}
+
+#[test]
+fn config_options_report_openai_pro_default_within_its_ladder() {
+    // gpt-5-pro accepts only `high`; the generic OpenAI default (medium)
+    // must not leak into the snapshot.
+    let state = SessionUiState {
+        provider_name: Some("OpenAI".to_string()),
+        model: Some("gpt-5-pro".to_string()),
+        available_models: Vec::new(),
+        reasoning_effort: None,
+    };
+    let options = session_config_options(&state);
+    let effort = options
+        .iter()
+        .find(|option| option["id"] == CONFIG_ID_EFFORT)
+        .expect("gpt-5-pro exposes a thought-level option");
+    assert_eq!(effort["currentValue"], "high");
+}
+
+#[test]
+fn model_change_clears_explicit_null_but_preserves_omitted() {
+    let mut state = SessionUiState {
+        provider_name: Some("OpenAI".to_string()),
+        model: Some("gpt-5.4".to_string()),
+        available_models: Vec::new(),
+        reasoning_effort: Some("high".to_string()),
+    };
+
+    // Older daemons omit the field entirely; keep the confirmed value.
+    apply_model_changed(
+        &mut state,
+        "deepseek-v4-flash".to_string(),
+        Some("DeepSeek".to_string()),
+        None,
+        false,
+    );
+    assert_eq!(state.model.as_deref(), Some("deepseek-v4-flash"));
+    assert_eq!(state.provider_name.as_deref(), Some("DeepSeek"));
+    assert_eq!(state.reasoning_effort.as_deref(), Some("high"));
+
+    // A current daemon serializes `null` to clear the previous effort.
+    apply_model_changed(
+        &mut state,
+        "deepseek-v4-flash".to_string(),
+        Some("DeepSeek".to_string()),
+        None,
+        true,
+    );
+    assert_eq!(state.reasoning_effort, None);
+
+    // A switch that reports an effort installs the server's value.
+    apply_model_changed(
+        &mut state,
+        "gpt-5.4".to_string(),
+        Some("OpenAI".to_string()),
+        Some("low".to_string()),
+        true,
+    );
+    assert_eq!(state.reasoning_effort.as_deref(), Some("low"));
+}
+
+#[test]
+fn model_changed_effort_presence_is_read_from_the_wire() {
+    assert_eq!(
+        model_changed_has_effort_field(&json!({
+            "type": "model_changed",
+            "reasoning_effort": null,
+        })),
+        Some(true)
+    );
+    assert_eq!(
+        model_changed_has_effort_field(&json!({"type": "model_changed"})),
+        Some(false)
+    );
+    assert_eq!(
+        model_changed_has_effort_field(&json!({
+            "type": "turn_event",
+            "event": {"type": "model_changed", "reasoning_effort": "high"},
+        })),
+        Some(true)
+    );
+    assert_eq!(
+        model_changed_has_effort_field(&json!({"type": "text_delta", "text": "x"})),
+        None
+    );
+}
+
+#[test]
+fn config_options_report_deepseek_default_effort_when_unset() {
+    // DeepSeek thinking mode defaults to `high` when no effort is sent.
+    // Reporting `medium` here made ACP hosts show a value the runtime was
+    // not using (Paseo `effectiveThinkingOptionId: medium`).
+    let state = SessionUiState {
+        provider_name: Some("OpenCode Go".to_string()),
+        model: Some("opencode-go:deepseek-v4.1-flash".to_string()),
+        available_models: Vec::new(),
+        reasoning_effort: None,
+    };
+    let options = session_config_options(&state);
+    let effort = options
+        .iter()
+        .find(|option| option["id"] == CONFIG_ID_EFFORT)
+        .expect("deepseek exposes a thought-level option");
+    assert_eq!(effort["currentValue"], "high");
+}
+
+#[test]
+fn config_options_keep_an_explicit_effort_over_the_provider_default() {
+    let state = SessionUiState {
+        provider_name: Some("OpenCode Go".to_string()),
+        model: Some("opencode-go:deepseek-v4.1-flash".to_string()),
+        available_models: Vec::new(),
+        reasoning_effort: Some("max".to_string()),
+    };
+    let options = session_config_options(&state);
+    let effort = options
+        .iter()
+        .find(|option| option["id"] == CONFIG_ID_EFFORT)
+        .expect("deepseek exposes a thought-level option");
+    assert_eq!(effort["currentValue"], "max");
+}
+
+#[test]
+fn config_options_use_openai_default_effort_when_unset() {
+    let state = SessionUiState {
+        provider_name: Some("OpenAI".to_string()),
+        model: Some("gpt-5.2".to_string()),
+        available_models: Vec::new(),
+        reasoning_effort: None,
+    };
+    let options = session_config_options(&state);
+    let effort = options
+        .iter()
+        .find(|option| option["id"] == CONFIG_ID_EFFORT)
+        .expect("openai exposes a thought-level option");
+    assert_eq!(effort["currentValue"], "medium");
 }

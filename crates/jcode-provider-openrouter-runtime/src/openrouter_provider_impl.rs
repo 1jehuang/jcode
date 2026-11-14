@@ -494,6 +494,35 @@ impl Provider for OpenRouterProvider {
             .and_then(|effort| effort.clone())
     }
 
+    fn default_reasoning_effort(&self) -> Option<String> {
+        // `JCODE_OPENROUTER_THINKING` is read in this process, where requests
+        // are built, rather than in the connecting client. Reuse the request
+        // parser so every accepted spelling (`disable` and `disabled`) agrees.
+        if !self.supports_any_reasoning_effort() {
+            return None;
+        }
+        // These paths build their request without consulting the override:
+        // Azure responses and strict OpenAI-schema endpoints suppress the
+        // top-level thinking field. Reporting `none` there would be a lie.
+        if self.builtin_azure
+            || Self::strict_openai_schema_endpoint(self.profile_id.as_deref(), &self.api_base)
+            || crate::opencode_go_responses::model_uses_responses_api(
+                &self.api_base,
+                self.profile_id.as_deref(),
+                &self.model(),
+            )
+            // `extra_body` is merged after the generated thinking field, so it
+            // can re-enable thinking even when the override says disabled.
+            || self
+                .extra_body
+                .as_ref()
+                .is_some_and(|body| body.get("thinking").is_some())
+        {
+            return None;
+        }
+        (Self::thinking_override() == Some(false)).then(|| "none".to_string())
+    }
+
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
         if !self.supports_any_reasoning_effort() {
             anyhow::bail!(
