@@ -508,3 +508,91 @@ fn idle_animation_repaint_preserves_cells_outside_animation_after_swap() {
         renderer.swap_after_animation_frame(&mut terminal);
     }
 }
+
+#[test]
+#[ignore = "manual retained-frame copy timing probe"]
+fn retained_frame_copy_probe() {
+    use std::hint::black_box;
+    let area = Rect::new(0, 0, 140, 45);
+    let mut source = Buffer::empty(area);
+    for (i, cell) in source.content.iter_mut().enumerate() {
+        if i % 3 != 0 {
+            cell.set_symbol(if i % 7 == 0 { "日" } else { "x" });
+            cell.set_fg(Color::Cyan);
+        }
+    }
+    let frames = 500;
+    let mut target = source.clone();
+    let started = Instant::now();
+    for frame in 0..frames {
+        source.content[frame % area.area() as usize].set_fg(if frame % 2 == 0 {
+            Color::Red
+        } else {
+            Color::Blue
+        });
+        target.content.clone_from(black_box(&source.content));
+        black_box(&target);
+    }
+    let full_time = started.elapsed();
+    target.content.clone_from(&source.content);
+    let started = Instant::now();
+    let mut copied = 0usize;
+    for frame in 0..frames {
+        source.content[frame % area.area() as usize].set_fg(if frame % 2 == 0 {
+            Color::Yellow
+        } else {
+            Color::Green
+        });
+        for (to, from) in target.content.iter_mut().zip(black_box(&source.content)) {
+            if to != from {
+                to.clone_from(from);
+                copied += 1;
+            }
+        }
+        black_box(&target);
+    }
+    let selective_time = started.elapsed();
+    assert_eq!(target, source);
+    eprintln!(
+        "retained frame copy: {frames} frames, full {full_time:?} ({} copied cells), selective {selective_time:?} ({copied} copied cells)",
+        frames * area.area() as usize
+    );
+}
+
+#[tokio::test]
+async fn coalesced_frame_timer_keeps_the_exact_frame_deadline() {
+    for period in [Duration::from_millis(10), Duration::from_millis(16)] {
+        let mut timer = redraw_timer(period);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(23);
+        assert_eq!(
+            coalesced_frame_timer(&mut timer, period, Some(deadline)),
+            None
+        );
+        // Repeated incoming events must not postpone the pending frame.
+        assert_eq!(
+            coalesced_frame_timer(&mut timer, period, Some(deadline)),
+            None
+        );
+        assert_eq!(timer.tick().await, deadline);
+        assert_eq!(timer.period(), period);
+        assert_eq!(
+            timer.missed_tick_behavior(),
+            tokio::time::MissedTickBehavior::Skip
+        );
+    }
+}
+
+#[tokio::test]
+async fn coalesced_frame_timer_preserves_slow_ticks_and_independent_deadlines() {
+    let period = Duration::from_millis(250);
+    let mut timer = redraw_timer(period);
+    let first_tick = timer.tick().await;
+    let deadline = first_tick + Duration::from_millis(16);
+    assert_eq!(
+        coalesced_frame_timer(&mut timer, period, Some(deadline)),
+        Some(deadline)
+    );
+    // There is no phase reset or extra tick on coarse liveness schedules.
+    assert_eq!(timer.tick().await, first_tick + period);
+    assert_eq!(coalesced_frame_timer(&mut timer, period, None), None);
+}
