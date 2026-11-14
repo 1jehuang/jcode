@@ -1,5 +1,6 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
+mod osc_color_scrub;
 mod terminal_reports;
 mod word_boundaries;
 
@@ -651,114 +652,9 @@ impl App {
     }
 }
 
+pub(super) use osc_color_scrub::OscScrubState;
+use osc_color_scrub::{scrub_osc_color_replies, should_swallow_osc_st_backslash};
 pub(super) use terminal_reports::strip_terminal_control_sequences;
-
-/// Remove late OSC 10/11 color replies that the terminal delivered as keys.
-///
-/// Some terminals (Orca's Electron terminal, #970) answer the startup
-/// background query after the query has timed out. crossterm then decodes the
-/// reply one character at a time: the `ESC ]` introducer and `ESC \`
-/// terminator become Alt chords that never reach the composer, but the body
-/// `11;rgb:3030/3434/4646` lands in the draft character by character. No single
-/// insertion contains the whole sequence, so it has to be recognized in the
-/// accumulated buffer instead.
-fn scrub_osc_color_replies(app: &mut App) {
-    if !app.input.contains("rgb") {
-        return;
-    }
-    let Some((cleaned, cursor)) = strip_osc_color_replies(&app.input, app.cursor_pos) else {
-        return;
-    };
-    app.input = cleaned;
-    app.cursor_pos = cursor;
-}
-
-/// Strip complete OSC color reply bodies from `input`, returning the cleaned
-/// text and the cursor remapped onto it, or `None` when nothing matched.
-///
-/// A body only matches once it is complete: `1N;rgb:` (or `rgba:`) followed by
-/// three (or four for `rgba`) `/`-separated hex components that all share the
-/// first component's width. Requiring equal widths keeps a half-arrived reply
-/// from matching early and leaving its tail behind. An adjacent `]` or `\` (surviving pieces of the OSC
-/// introducer and string terminator) is removed with it.
-pub(super) fn strip_osc_color_replies(input: &str, cursor: usize) -> Option<(String, usize)> {
-    let bytes = input.as_bytes();
-    let mut ranges: Vec<(usize, usize)> = Vec::new();
-    let mut search = 0usize;
-    while let Some(found) = input[search..].find(";rgb") {
-        let semi = search + found;
-        search = semi + 1;
-        // `1` then one digit before the `;`: OSC 10..=19 color reports.
-        if semi < 2 || bytes[semi - 2] != b'1' || !bytes[semi - 1].is_ascii_digit() {
-            continue;
-        }
-        let mut start = semi - 2;
-        // A third leading digit means this is some other number, not `1N`,
-        // unless it is the tail of a reply we just matched.
-        let follows_reply = ranges.last().is_some_and(|&(_, end)| end == start);
-        if start > 0 && bytes[start - 1].is_ascii_digit() && !follows_reply {
-            continue;
-        }
-        let mut pos = semi + 4;
-        let mut wanted = 3;
-        if bytes.get(pos) == Some(&b'a') {
-            pos += 1;
-            wanted = 4;
-        }
-        if bytes.get(pos) != Some(&b':') {
-            continue;
-        }
-        pos += 1;
-        let hex_run = |from: usize| {
-            bytes[from..]
-                .iter()
-                .take_while(|byte| byte.is_ascii_hexdigit())
-                .count()
-        };
-        let width = hex_run(pos);
-        if !(1..=4).contains(&width) {
-            continue;
-        }
-        pos += width;
-        // Later components take exactly `width` digits, so a second reply
-        // glued onto the last one (`f4f411;rgb:...`) still splits cleanly,
-        // while a component that is still arriving is too short to match.
-        let mut components = 1;
-        while components < wanted && bytes.get(pos) == Some(&b'/') && hex_run(pos + 1) >= width {
-            pos += 1 + width;
-            components += 1;
-        }
-        if components < wanted {
-            continue;
-        }
-        if start > 0 && bytes[start - 1] == b']' {
-            start -= 1;
-        }
-        if bytes.get(pos) == Some(&b'\\') {
-            pos += 1;
-        }
-        ranges.push((start, pos));
-        search = pos;
-    }
-    if ranges.is_empty() {
-        return None;
-    }
-
-    let mut cleaned = String::with_capacity(input.len());
-    let mut new_cursor = cursor;
-    let mut last = 0usize;
-    for (start, end) in ranges {
-        cleaned.push_str(&input[last..start]);
-        if cursor >= end {
-            new_cursor -= end - start;
-        } else if cursor > start {
-            new_cursor -= cursor - start;
-        }
-        last = end;
-    }
-    cleaned.push_str(&input[last..]);
-    Some((cleaned, new_cursor))
-}
 
 pub(super) fn insert_input_text(app: &mut App, text: &str) {
     insert_input_text_with_undo(app, text, false);
@@ -769,10 +665,14 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
         return;
     }
 
+    let raw_terminates_osc = text.ends_with("\x1b\\") || text.ends_with('\x07');
     // Drop terminal escape remnants before they can land in the draft (#540).
     let sanitized = strip_terminal_control_sequences(text);
     let text: &str = &sanitized;
-    if text.is_empty() {
+    if raw_terminates_osc {
+        app.osc_scrub.awaiting_st_backslash = false;
+    }
+    if text.is_empty() || should_swallow_osc_st_backslash(app, text) {
         return;
     }
 
@@ -817,7 +717,7 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
 
     app.input.insert_str(app.cursor_pos, text);
     app.cursor_pos += text.len();
-    scrub_osc_color_replies(app);
+    scrub_osc_color_replies(app, raw_terminates_osc);
 
     // Typing the final command character immediately arms picker filtering.
     // Without this, users can keep typing the command token or press Enter

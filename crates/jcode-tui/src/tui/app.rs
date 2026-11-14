@@ -1697,8 +1697,8 @@ pub struct App {
     // Undo history for in-progress input editing (Ctrl+Z)
     input_undo_stack: Vec<(String, usize)>,
     input_typing_undo: Option<(Instant, usize)>,
-    // Draft replaced by an explicit jump into prompt history (Ctrl+Up),
-    // restored when Down walks back past the newest entry
+    osc_scrub: input::OscScrubState,
+    // Draft replaced by Ctrl+Up into prompt history, restored when Down passes newest entry
     history_draft: Option<(String, usize)>,
     // Short-lived notice for status feedback (model switch, cycle diff mode, etc.)
     status_notice: Option<(String, Instant)>,
