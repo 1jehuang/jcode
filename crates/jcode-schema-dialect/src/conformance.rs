@@ -170,6 +170,15 @@ fn walk(schema: &Value, spec: &DialectSpec, path: &str, errors: &mut Vec<Conform
                         ),
                     });
                 }
+                if spec.transforms.scalar_types && key == "type" && value.is_array() {
+                    errors.push(ConformanceError {
+                        path: path.to_string(),
+                        message: format!(
+                            "array `type` survived dialect `{}` whose wire requires a scalar `type`",
+                            spec.id
+                        ),
+                    });
+                }
                 if spec.transforms.prune_dangling_required && key == "required" {
                     check_required(map, value, path, errors);
                 }
@@ -258,6 +267,18 @@ fn compare(original: &Value, normalized: &Value, path: &str, errors: &mut Vec<Co
             // `required` is the one load-bearing keyword a dialect may legally
             // shrink, because Gemini rejects names it cannot resolve (#655).
             if *key == "required" {
+                continue;
+            }
+            // `scalar_types` rewrites multi-type unions (`["string", "integer"]`)
+            // into `anyOf` branches carrying the enclosing metadata on each
+            // branch, which preserves both the types and prompt-visible text.
+            if normalized_map
+                .get("anyOf")
+                .and_then(Value::as_array)
+                .is_some_and(|branches| {
+                    !branches.is_empty() && branches.iter().all(|branch| branch.get(*key).is_some())
+                })
+            {
                 continue;
             }
             errors.push(ConformanceError {
