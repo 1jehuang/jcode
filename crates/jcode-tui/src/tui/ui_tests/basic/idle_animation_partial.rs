@@ -37,7 +37,7 @@ fn pin_full_tier() {
 /// guard *before* any render-state lock, matching the env-then-render order
 /// the app tests use.
 struct IdleAnimationEnvGuard {
-    _env: std::sync::MutexGuard<'static, ()>,
+    _env: crate::storage::TestEnvGuard,
 }
 
 impl IdleAnimationEnvGuard {
