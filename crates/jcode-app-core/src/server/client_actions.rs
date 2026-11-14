@@ -1150,18 +1150,6 @@ pub(super) async fn handle_resume_all_sessions(
             .map(str::to_string)
             .unwrap_or_else(|| session_id[..8.min(session_id.len())].to_string());
 
-        // Best-effort: record that the durable recovery intent was delivered.
-        if let Err(error) = super::reload_recovery::mark_delivered_if_matching_continuation(
-            &session_id,
-            &reminder,
-            "resume_all_sessions",
-        ) {
-            crate::logging::warn(&format!(
-                "resume_all_sessions: failed to mark recovery intent delivered for {}: {}",
-                session_id, error
-            ));
-        }
-
         let mut swarm = super::live_turn::LiveTurnSwarmContext::new(
             swarm_members,
             swarms_by_id,
@@ -1183,17 +1171,34 @@ pub(super) async fn handle_resume_all_sessions(
             skipped += 1;
             continue;
         }
-        super::live_turn::spawn_tracked_live_turn_with_publication(
+        // Keep the recovery intent pending until the turn actually starts, so a
+        // rejected launch leaves it for the next recovery attempt.
+        if !super::live_turn::spawn_tracked_live_turn_with_publication(
             &session_id,
             agent_guard,
             String::new(),
-            Some(reminder),
+            Some(reminder.clone()),
             None,
             Some("resuming interrupted session".to_string()),
             swarm,
             publication,
         )
-        .await;
+        .await
+        {
+            skipped += 1;
+            continue;
+        }
+        // Best-effort: record that the durable recovery intent was delivered.
+        if let Err(error) = super::reload_recovery::mark_delivered_if_matching_continuation(
+            &session_id,
+            &reminder,
+            "resume_all_sessions",
+        ) {
+            crate::logging::warn(&format!(
+                "resume_all_sessions: failed to mark recovery intent delivered for {}: {}",
+                session_id, error
+            ));
+        }
 
         resumed_sessions.push(display_name);
     }

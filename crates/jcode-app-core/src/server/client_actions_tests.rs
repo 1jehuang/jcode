@@ -1029,6 +1029,94 @@ async fn resume_all_continues_interrupted_idle_live_session() {
     }
 }
 
+/// A launch the runtime refuses (here, a held transfer fence) is not reported as
+/// resumed, and the durable recovery intent stays pending for a later attempt.
+#[tokio::test]
+async fn resume_all_keeps_recovery_pending_when_launch_is_refused() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let provider: Arc<dyn Provider> = Arc::new(StreamingMockProvider::default());
+    let registry = Registry::new(provider.clone()).await;
+    let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+    let session_id = {
+        let mut guard = agent.lock().await;
+        guard.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "please keep going".to_string(),
+                cache_control: None,
+            }],
+        );
+        guard.session_id().to_string()
+    };
+    super::super::reload_recovery::persist_intent(
+        "reload-refused-launch",
+        &session_id,
+        super::super::reload_recovery::ReloadRecoveryRole::InterruptedPeer,
+        crate::tool::selfdev::ReloadRecoveryDirective {
+            reconnect_notice: None,
+            continuation_message: "continue after reload".to_string(),
+        },
+        "refused launch test",
+    )
+    .unwrap();
+
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::<String, Arc<Mutex<Agent>>>::from([(session_id.clone(), agent.clone())]),
+    ));
+    let (member, _attach_rx) = live_member(&session_id);
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([(session_id.clone(), member)])));
+    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+    let (swarms_by_id, event_history, event_counter, swarm_event_tx) = empty_swarm_status_state();
+    let fence = crate::runtime_activity::global()
+        .try_idle_sessions(&std::collections::BTreeSet::from([session_id.clone()]))
+        .expect("fence the session");
+    handle_resume_all_sessions(
+        93,
+        &sessions,
+        &swarm_members,
+        &swarms_by_id,
+        &event_history,
+        &event_counter,
+        &swarm_event_tx,
+        &client_event_tx,
+        None,
+    )
+    .await;
+    drop(fence);
+
+    let result = timeout(Duration::from_secs(2), async {
+        loop {
+            match client_event_rx.recv().await.map(unwrap_test_turn_event) {
+                Some(event @ ServerEvent::ResumeAllResult { .. }) => return event,
+                Some(_) => continue,
+                None => panic!("client channel closed before resume-all result"),
+            }
+        }
+    })
+    .await
+    .expect("resume-all result should be emitted");
+    let ServerEvent::ResumeAllResult {
+        resumed, skipped, ..
+    } = result
+    else {
+        unreachable!()
+    };
+    assert_eq!((resumed, skipped), (0, 1));
+    assert!(super::super::reload_recovery::has_pending_for_session(
+        &session_id
+    ));
+
+    if let Some(home) = prev_home {
+        crate::env::set_var("JCODE_HOME", home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
 #[tokio::test]
 async fn resume_all_skips_session_with_completed_turn() {
     let _guard = crate::storage::lock_test_env();
