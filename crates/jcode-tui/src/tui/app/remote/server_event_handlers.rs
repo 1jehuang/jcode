@@ -106,6 +106,7 @@ pub(in super::super) fn handle_disconnect(
     reason: Option<RemoteDisconnectReason>,
 ) {
     app.invalidate_rewind_ui();
+    app.close_ask_user_dialogs_on_disconnect();
     // The daemon may have applied the switch, but the acknowledgement was
     // lost. Never wait on an old connection's request ID or blindly resend.
     if app.pending_automatic_failover_request_id.is_some() {

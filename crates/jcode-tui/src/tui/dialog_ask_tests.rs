@@ -61,7 +61,7 @@ fn screen(dialog: &Dialog, width: u16) -> Vec<String> {
 
 #[test]
 fn renders_one_question_with_progress_options_and_other() {
-    let dialog = Dialog::ask_user("ask-1".into(), "call_1".into(), questions());
+    let dialog = Dialog::ask_user("ask-1".into(), questions());
     let rows = screen(&dialog, 80);
     assert_eq!(
         rows[1..].to_vec(),
@@ -81,7 +81,7 @@ fn renders_one_question_with_progress_options_and_other() {
 
 #[test]
 fn narrow_rows_truncate_by_display_cells_and_prose_wraps() {
-    let dialog = Dialog::ask_user("ask-1".into(), "call_1".into(), questions());
+    let dialog = Dialog::ask_user("ask-1".into(), questions());
     let rows = screen(&dialog, 24);
     for row in &rows {
         assert!(row.width() <= 24, "{row:?} wider than 24 cells");
@@ -106,7 +106,7 @@ fn narrow_rows_truncate_by_display_cells_and_prose_wraps() {
 
 #[test]
 fn single_then_multi_select_with_other_text() {
-    let mut dialog = Dialog::ask_user("ask-1".into(), "call_1".into(), questions());
+    let mut dialog = Dialog::ask_user("ask-1".into(), questions());
     assert_eq!(press(&mut dialog, KeyCode::Char('2')), DialogKey::Handled);
     let rows = screen(&dialog, 80);
     assert_eq!(rows[1], "   Question 2/2 · Extras");
@@ -151,7 +151,7 @@ fn single_then_multi_select_with_other_text() {
 
 #[test]
 fn other_needs_text_in_single_select_and_esc_dismisses() {
-    let mut dialog = Dialog::ask_user("ask-1".into(), "call_1".into(), questions());
+    let mut dialog = Dialog::ask_user("ask-1".into(), questions());
     press(&mut dialog, KeyCode::Up); // wraps to Other
     assert_eq!(press(&mut dialog, KeyCode::Enter), DialogKey::Handled);
     assert!(screen(&dialog, 80)[1].contains("Question 1/2"));
@@ -170,17 +170,36 @@ fn other_needs_text_in_single_select_and_esc_dismisses() {
 }
 
 #[test]
-fn parallel_requests_queue_and_finished_calls_drop_out() {
+fn parallel_requests_queue_and_closed_requests_drop_out() {
     let one = vec![question("A?", "A", &[("x", "1"), ("y", "2")], false)];
-    let mut dialog = Dialog::ask_user("ask-1".into(), "call_1".into(), one.clone());
-    dialog.queue_ask_user("ask-2".into(), "call_2".into(), one.clone());
-    dialog.queue_ask_user("ask-3".into(), "call_3".into(), one);
-    assert!(!dialog.ask_user_finished("call_2"));
+    let mut dialog = Dialog::ask_user("ask-1".into(), one.clone());
+    dialog.queue_ask_user("ask-2".into(), one.clone());
+    dialog.queue_ask_user("ask-3".into(), one);
+    assert!(!dialog.ask_user_closed("ask-2"));
     assert!(matches!(
         press(&mut dialog, KeyCode::Enter),
         DialogKey::AskUser { request_id, .. } if request_id == "ask-1"
     ));
     assert!(dialog.is_ask_user(), "the queued call is shown next");
-    assert!(dialog.ask_user_finished("call_3"));
+    assert!(dialog.ask_user_closed("ask-3"));
     assert!(!dialog.is_ask_user());
+}
+
+#[test]
+fn long_other_text_keeps_its_end_visible_and_paste_needs_focus() {
+    let mut dialog = Dialog::ask_user("ask-1".into(), questions());
+    dialog.paste_ask_user("ignored while an option has focus");
+    press(&mut dialog, KeyCode::Char('3')); // focus Other
+    dialog.paste_ask_user("a very long custom answer\nthat ends here");
+    let rows = screen(&dialog, 30);
+    let other = rows.iter().find(|row| row.contains("3. ")).unwrap();
+    assert!(other.width() <= 30, "{other:?}");
+    assert!(other.ends_with("ends here"), "{other:?}");
+    assert!(other.contains("3. …"), "{other:?}");
+    assert_eq!(
+        press(&mut dialog, KeyCode::Enter),
+        DialogKey::Handled,
+        "advances to the second question"
+    );
+    assert!(!format!("{:?}", screen(&dialog, 80)).contains("ignored"));
 }

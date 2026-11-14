@@ -6,7 +6,6 @@ use std::collections::VecDeque;
 
 pub(super) struct AskRequest {
     request_id: String,
-    tool_call_id: String,
     questions: Vec<AskUserQuestion>,
 }
 
@@ -33,11 +32,7 @@ impl AskState {
 }
 
 impl Dialog {
-    pub fn ask_user(
-        request_id: String,
-        tool_call_id: String,
-        questions: Vec<AskUserQuestion>,
-    ) -> Self {
+    pub fn ask_user(request_id: String, questions: Vec<AskUserQuestion>) -> Self {
         let mut dialog = Self {
             stack: Vec::new(),
             mcp: None,
@@ -49,7 +44,7 @@ impl Dialog {
             status: None,
             pending_mcp: None,
         };
-        dialog.queue_ask_user(request_id, tool_call_id, questions);
+        dialog.queue_ask_user(request_id, questions);
         dialog
     }
 
@@ -58,19 +53,13 @@ impl Dialog {
     }
 
     /// Show these questions now, or after the open ones when already asking.
-    pub fn queue_ask_user(
-        &mut self,
-        request_id: String,
-        tool_call_id: String,
-        questions: Vec<AskUserQuestion>,
-    ) {
+    pub fn queue_ask_user(&mut self, request_id: String, questions: Vec<AskUserQuestion>) {
         // The daemon validates these; never index into an empty list.
         if questions.is_empty() || questions.iter().any(|q| q.options.is_empty()) {
             return;
         }
         let request = AskRequest {
             request_id,
-            tool_call_id,
             questions,
         };
         match self.ask.as_mut() {
@@ -88,17 +77,29 @@ impl Dialog {
         }
     }
 
-    /// The tool call finished without this dialog (interrupt, timeout):
-    /// drop its questions. Returns whether nothing is left to ask.
-    pub fn ask_user_finished(&mut self, tool_call_id: &str) -> bool {
+    /// The daemon closed this request (interrupted call): drop its questions.
+    /// Returns whether nothing is left to ask.
+    pub fn ask_user_closed(&mut self, request_id: &str) -> bool {
         let Some(ask) = self.ask.as_mut() else {
             return true;
         };
-        ask.queued.retain(|r| r.tool_call_id != tool_call_id);
-        if ask.request.tool_call_id == tool_call_id {
+        ask.queued.retain(|r| r.request_id != request_id);
+        if ask.request.request_id == request_id {
             return self.next_ask_user();
         }
         false
+    }
+
+    /// Bracketed paste goes into a focused Other field and nowhere else.
+    pub fn paste_ask_user(&mut self, text: &str) {
+        let (Some(ask), Some(view)) = (self.ask.as_mut(), self.stack.last()) else {
+            return;
+        };
+        if view.selected == ask.question().options.len() {
+            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            ask.other.push_str(&text);
+            self.rebuild();
+        }
     }
 
     /// Advance to the next queued request. Returns whether none is left.
@@ -157,6 +158,8 @@ impl Dialog {
         if question.multi_select {
             other.insert_str(0, checkbox(!ask.other.is_empty()));
         }
+        // The Other row shows the end of long text, where the user types.
+        view.tail_item = Some(question.options.len());
         let mut rows = vec![other];
         if question.multi_select {
             let last = ask.answers.len() + 1 == ask.request.questions.len();

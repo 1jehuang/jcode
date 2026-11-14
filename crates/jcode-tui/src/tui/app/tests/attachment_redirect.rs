@@ -454,3 +454,27 @@ fn test_reload_legacy_queue_without_images_restores_text() {
         );
     });
 }
+
+#[test]
+fn test_disconnect_closes_ask_user_dialog_and_paste_targets_it() {
+    use crate::protocol::{AskUserOption, AskUserQuestion};
+    let mut app = create_test_app();
+    let question = AskUserQuestion {
+        question: "Which?".into(),
+        header: "Pick".into(),
+        options: ["a", "b"]
+            .map(|label| AskUserOption {
+                label: label.into(),
+                description: String::new(),
+            })
+            .to_vec(),
+        multi_select: false,
+    };
+    app.open_ask_user_dialog("ask-1".into(), vec![question]);
+    let composer = app.input.clone();
+    app.handle_paste("pasted".into());
+    assert_eq!(app.input, composer, "paste must not reach the composer");
+    let mut state = remote::RemoteRunState::default();
+    remote::handle_disconnect(&mut app, &mut state, None);
+    assert!(app.dialog.is_none(), "a dead connection's questions close");
+}

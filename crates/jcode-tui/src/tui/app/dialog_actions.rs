@@ -63,21 +63,35 @@ impl App {
     pub(super) fn open_ask_user_dialog(
         &mut self,
         request_id: String,
-        tool_call_id: String,
         questions: Vec<crate::protocol::AskUserQuestion>,
     ) {
         match self.dialog.as_mut().filter(|dialog| dialog.is_ask_user()) {
-            Some(dialog) => dialog.queue_ask_user(request_id, tool_call_id, questions),
-            None => self.dialog = Some(Dialog::ask_user(request_id, tool_call_id, questions)),
+            Some(dialog) => dialog.queue_ask_user(request_id, questions),
+            None => self.dialog = Some(Dialog::ask_user(request_id, questions)),
         }
     }
 
-    /// The ask_user call ended without an answer from this client.
-    pub(super) fn finish_ask_user_dialog(&mut self, tool_call_id: &str) {
+    /// The daemon closed this request; show why when it says.
+    pub(super) fn close_ask_user_request(&mut self, request_id: &str, error: Option<String>) {
         if let Some(dialog) = self.dialog.as_mut().filter(|dialog| dialog.is_ask_user())
-            && dialog.ask_user_finished(tool_call_id)
+            && dialog.ask_user_closed(request_id)
         {
             self.dialog = None;
+        }
+        if let Some(error) = error {
+            self.push_display_message(DisplayMessage::error(error));
+        }
+    }
+
+    /// Open questions belonged to the dead connection; answers cannot reach
+    /// the agent, which is told that no user is available.
+    pub(in crate::tui::app) fn close_ask_user_dialogs_on_disconnect(&mut self) {
+        if self.dialog.as_ref().is_some_and(Dialog::is_ask_user) {
+            self.dialog = None;
+            self.push_display_message(DisplayMessage::system(
+                "Closed the agent's questions: the connection dropped before you answered."
+                    .to_string(),
+            ));
         }
     }
 
@@ -95,6 +109,11 @@ impl App {
                 } else {
                     self.rewind_ui.local_restore = Some((checkpoint_id, mode));
                 }
+            }
+            Some(DialogKey::AskUser { .. }) => {
+                self.push_display_message(DisplayMessage::error(
+                    "Not connected to the jcode server, so your answers were not sent.".to_string(),
+                ));
             }
             Some(DialogKey::Mcp(_)) => {
                 if let Some(dialog) = self.dialog.as_mut() {
