@@ -908,6 +908,8 @@ impl Request {
             Request::ResumeSession { id, .. } => *id,
             Request::ResumeAllSessions { id } => *id,
             Request::NotifySession { id, .. } => *id,
+            Request::NotifySessionReceipt { id, .. } => *id,
+            Request::GetWakeReceipt { id, .. } => *id,
             Request::AppletAction { id, .. } => *id,
             Request::CloseApplet { id, .. } => *id,
             Request::Transcript { id, .. } => *id,
@@ -990,6 +992,8 @@ impl Request {
                 // session-local path that also switches their model.
                 | Request::NotifyAuthChanged { .. }
                 | Request::NotifySession { .. }
+                | Request::NotifySessionReceipt { .. }
+                | Request::GetWakeReceipt { .. }
                 | Request::AppletAction { .. }
                 | Request::CloseApplet { .. }
                 | Request::CommShare { .. }

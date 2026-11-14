@@ -119,7 +119,7 @@ pub fn checkpoint(session_id: &str, summary: &str) -> Result<Option<Mission>> {
 pub fn clear(session_id: &str) -> Result<bool> {
     let path = mission_path(session_id)?;
     if path.exists() {
-        std::fs::remove_file(path)?;
+        crate::storage::remove_state_file(&path)?;
         Ok(true)
     } else {
         Ok(false)

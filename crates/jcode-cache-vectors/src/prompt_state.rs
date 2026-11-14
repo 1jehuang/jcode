@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::cache_hash::{compute_hash, VectorHash};
+use crate::cache_hash::{VectorHash, compute_hash};
 
 /// Snapshot of every cache-relevant vector at the moment a request is built.
 ///
@@ -205,9 +205,20 @@ mod tests {
     fn snapshot_deterministic_for_same_inputs() {
         let make = || {
             snapshot_current_state(
-                &"sys", &"tools", &"cc", vec![], "m".into(),
-                false, "".into(), vec![], false, false, false, None,
-                &"extra", &"diff",
+                &"sys",
+                &"tools",
+                &"cc",
+                vec![],
+                "m".into(),
+                false,
+                "".into(),
+                vec![],
+                false,
+                false,
+                false,
+                None,
+                &"extra",
+                &"diff",
             )
         };
         let s1 = make();

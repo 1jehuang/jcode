@@ -259,20 +259,35 @@ pub(super) async fn process_reserved_locked_context_with_server_failover(
     content: &str,
     system_reminder: Option<String>,
     display_role: crate::session::StoredDisplayRole,
+    receipt_id: Option<&str>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> anyhow::Result<()> {
     agent.validate_server_turn(lease)?;
     let reminder = system_reminder.clone();
-    let result = agent
-        .run_reserved_streaming_mpsc(
-            lease,
-            content,
-            Vec::new(),
-            system_reminder,
-            event_tx.clone(),
-            Some(display_role),
-        )
-        .await;
+    let result = match receipt_id {
+        Some(receipt_id) => {
+            agent
+                .run_reserved_streaming_mpsc_with_receipt(
+                    lease,
+                    content,
+                    receipt_id,
+                    event_tx.clone(),
+                )
+                .await
+        }
+        None => {
+            agent
+                .run_reserved_streaming_mpsc(
+                    lease,
+                    content,
+                    Vec::new(),
+                    system_reminder,
+                    event_tx.clone(),
+                    Some(display_role),
+                )
+                .await
+        }
+    };
     if result.is_ok() {
         crate::runtime_memory_log::emit_event(
             crate::runtime_memory_log::RuntimeMemoryLogEvent::new(

@@ -54,6 +54,38 @@ impl Drop for ResetConfigCache {
     }
 }
 
+#[tokio::test]
+async fn ambient_loop_cancellation_clears_running_and_allows_restart() {
+    let _guard = crate::storage::lock_test_env();
+    let _cache = ResetConfigCache;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("KCODE_HOME", temp.path());
+    let _enabled = EnvVarGuard::unset("KCODE_AMBIENT_ENABLED");
+    let path = Config::path().expect("config path");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "[ambient]\nenabled = false\n").unwrap();
+    Config::invalidate_cache();
+
+    let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
+    assert!(!runner.is_running().await);
+    let task = tokio::spawn(runner.clone().run_loop(Arc::new(TestProvider)));
+    tokio::task::yield_now().await;
+    assert!(runner.is_running().await, "real loop must be alive");
+    assert!(!runner.start(Arc::new(TestProvider)).await);
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(
+        !runner.is_running().await,
+        "cancelled loop must clear running"
+    );
+    assert!(
+        runner.start(Arc::new(TestProvider)).await,
+        "second start must succeed"
+    );
+    tokio::task::yield_now().await;
+    assert!(runner.is_running().await, "restarted loop must be alive");
+}
+
 #[test]
 fn ambient_gate_tracks_config_toggles_and_preserves_disabled_override() {
     let _guard = crate::storage::lock_test_env();
@@ -328,4 +360,81 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
                 .content_preview()
                 .contains("Spawned session handled task.")
     }));
+}
+
+#[tokio::test]
+async fn attached_session_defers_spawn_until_detached() {
+    let _guard = crate::storage::lock_test_env();
+    let _cache = ResetConfigCache;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("KCODE_HOME", temp.path());
+    let _enabled = EnvVarGuard::unset("KCODE_AMBIENT_ENABLED");
+    let path = Config::path().unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        "[ambient]\nenabled = false\npause_on_active_session = true\n",
+    )
+    .unwrap();
+    Config::invalidate_cache();
+    let mut parent = Session::create_with_id("pause_parent".into(), None, None);
+    parent.save().unwrap();
+    let item = ScheduledItem {
+        id: "paused_spawn".into(),
+        scheduled_for: chrono::Utc::now(),
+        context: "Deferred task".into(),
+        priority: Priority::Normal,
+        target: ScheduleTarget::Spawn {
+            parent_session_id: parent.id.clone(),
+        },
+        created_by_session: parent.id.clone(),
+        created_at: chrono::Utc::now(),
+        working_dir: Some(temp.path().display().to_string()),
+        task_description: Some("Deferred task".into()),
+        relevant_files: vec![],
+        git_branch: None,
+        additional_context: None,
+    };
+    let queue_path = crate::ambient::paths::queue_path().unwrap();
+    crate::ambient::ScheduledQueue::load(queue_path.clone()).push(item);
+    let provider = StreamingTestProvider::default();
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("Detached dispatch completed".into()),
+        StreamEvent::MessageEnd { stop_reason: None },
+    ]);
+    let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
+    *runner.inner.active_user_sessions.write().await = 1;
+    let task = tokio::spawn(runner.clone().run_loop(Arc::new(provider.clone())));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let retained = crate::ambient::ScheduledQueue::load(queue_path.clone())
+        .items()
+        .iter()
+        .any(|item| item.id == "paused_spawn");
+    let undispatched = provider.responses.lock().unwrap().len() == 1;
+    println!("ATTACHED: deferred={undispatched} persisted_record={retained}");
+    if !retained || !undispatched {
+        task.abort();
+        let _ = task.await;
+        panic!("attached session must defer spawn and retain its persisted queue record");
+    }
+    *runner.inner.active_user_sessions.write().await = 0;
+    runner.nudge();
+    let dispatched = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if provider.responses.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok();
+    let removed = crate::ambient::ScheduledQueue::load(queue_path).is_empty();
+    task.abort();
+    let _ = task.await;
+    println!("DETACHED: dispatched={dispatched} queue_empty={removed}");
+    assert!(
+        dispatched && removed,
+        "detached session must dispatch the queued spawn"
+    );
 }

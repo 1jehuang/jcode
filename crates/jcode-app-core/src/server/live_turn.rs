@@ -115,6 +115,7 @@ pub(super) async fn spawn_tracked_live_turn(
     system_reminder: Option<String>,
     display_role: Option<crate::session::StoredDisplayRole>,
     status_detail: Option<String>,
+    receipt_id: Option<String>,
     swarm: LiveTurnSwarmContext,
 ) -> bool {
     let Ok(_admission) = crate::runtime_activity::global().try_enter_session(session_id) else {
@@ -163,6 +164,7 @@ pub(super) async fn spawn_tracked_live_turn(
                 &message,
                 system_reminder,
                 display_role.unwrap_or(crate::session::StoredDisplayRole::System),
+                receipt_id.as_deref(),
                 event_tx.clone(),
             )
             .await
@@ -258,6 +260,7 @@ pub(super) async fn run_live_turn_if_idle(
         system_reminder,
         None,
         detail,
+        None,
         swarm,
     )
     .await
@@ -280,6 +283,43 @@ pub(super) async fn run_live_system_turn_if_idle(
         None,
         Some(crate::session::StoredDisplayRole::System),
         detail,
+        None,
+        swarm,
+    )
+    .await
+}
+
+/// Retryable native receipt wake. Busy or unattached targets stay queued.
+pub(super) async fn run_receipt_turn_if_idle(
+    session_id: &str,
+    message: &str,
+    receipt_id: &str,
+    sessions: &SessionAgents,
+    swarm: LiveTurnSwarmContext,
+) -> bool {
+    let Some(agent) = idle_live_agent(session_id, sessions, &swarm.members).await else {
+        return false;
+    };
+    // The caller's queued snapshot may predate a completed turn. The agent
+    // reservation serializes live turns; re-read the durable receipt only now.
+    if !matches!(
+        super::wake_receipts::get(receipt_id),
+        Ok(Some(receipt))
+            if receipt.session_id == session_id
+                && receipt.message == message
+                && receipt.state == super::wake_receipts::WakeState::Queued
+    ) {
+        return false;
+    }
+    let detail = Some(truncate_detail(message, 120));
+    spawn_tracked_live_turn(
+        session_id,
+        agent,
+        message.to_string(),
+        None,
+        Some(crate::session::StoredDisplayRole::System),
+        detail,
+        Some(receipt_id.to_string()),
         swarm,
     )
     .await
@@ -441,6 +481,7 @@ mod durable_error_tests {
                 None,
                 Some(crate::session::StoredDisplayRole::System),
                 None,
+                None,
                 swarm.clone(),
             )
             .await,
@@ -453,6 +494,7 @@ mod durable_error_tests {
                 &session_id,
                 agent.clone().lock_owned().await,
                 "wake worker".into(),
+                None,
                 None,
                 None,
                 None,

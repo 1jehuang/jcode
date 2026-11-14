@@ -174,12 +174,8 @@ fn create_coordinator_session(parent: &Session, mission: &Option<String>) -> Res
     let mut fork_guard = create_root_fork_guard();
     let fork_id = format!("overnight-{}", parent.id);
     let directive = mission.as_deref().unwrap_or("Run overnight tasks");
-    let fork_result = create_forked_child_messages(
-        &parent.messages,
-        &directive,
-        &fork_id,
-        &mut fork_guard,
-    );
+    let fork_result =
+        create_forked_child_messages(&parent.messages, &directive, &fork_id, &mut fork_guard);
     if fork_result.denied {
         anyhow::bail!(
             "Fork depth exceeded: cannot create coordinator child for parent {}",

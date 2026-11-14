@@ -45,13 +45,13 @@ fn scheduled_queue_stale_managers_preserve_add_remove_and_claim() {
     first.cancel_schedule(&a).unwrap();
     assert_eq!(AmbientManager::new().unwrap().queue().items()[0].id, b);
     assert!(second.cancel_schedule(&a).unwrap().is_none());
-    let claimed = first.take_ready_direct_items();
+    let claimed = first.take_ready_direct_items(false);
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].id, b);
     assert!(second.take_ready_items().is_empty());
     second.schedule(request("later", false)).unwrap();
     assert_eq!(AmbientManager::new().unwrap().queue().len(), 1);
-    assert!(first.take_ready_direct_items().is_empty());
+    assert!(first.take_ready_direct_items(false).is_empty());
 }
 
 #[test]
@@ -138,7 +138,7 @@ fn scheduled_queue_failed_transaction_preserves_disk_and_memory() {
     );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json");
     assert_eq!(queue.len(), 1);
-    assert!(queue.take_ready_direct_items().is_empty());
+    assert!(queue.take_ready_direct_items(false).is_empty());
 }
 
 #[test]

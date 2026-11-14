@@ -6,8 +6,7 @@
 //! the raw crate directly.
 
 use jcode_tool_search::{
-    DescriptionCache, ToolEntry, parse_tool_name,
-    search_tools as keyword_search, SearchResult,
+    DescriptionCache, SearchResult, ToolEntry, parse_tool_name, search_tools as keyword_search,
 };
 use std::sync::{Arc, RwLock};
 
@@ -108,7 +107,10 @@ impl ToolSearchIndex {
 
     /// Check if a specific tool name is registered.
     pub fn contains(&self, tool_name: &str) -> bool {
-        self.inner.read().map(|c| c.contains(tool_name)).unwrap_or(false)
+        self.inner
+            .read()
+            .map(|c| c.contains(tool_name))
+            .unwrap_or(false)
     }
 
     /// Remove all pending (unloaded) entries, keeping only loaded ones.

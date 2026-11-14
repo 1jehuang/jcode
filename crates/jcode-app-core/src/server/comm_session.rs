@@ -195,7 +195,7 @@ fn persist_headed_startup_message(session_id: &str, message: &str) {
 fn clear_headed_startup_message(session_id: &str) {
     if let Ok(jcode_dir) = crate::storage::jcode_dir() {
         let path = jcode_dir.join(format!("client-input-{}", session_id));
-        if let Err(error) = std::fs::remove_file(&path)
+        if let Err(error) = crate::storage::remove_state_file(&path)
             && error.kind() != std::io::ErrorKind::NotFound
         {
             crate::logging::warn(&format!(
@@ -210,7 +210,7 @@ fn cleanup_prepared_visible_spawn_session(session_id: &str) {
     crate::session_env::remove_session_env(session_id);
     clear_headed_startup_message(session_id);
     if let Ok(path) = crate::session::session_path(session_id)
-        && let Err(error) = std::fs::remove_file(&path)
+        && let Err(error) = crate::storage::remove_state_file(&path)
         && error.kind() != std::io::ErrorKind::NotFound
     {
         crate::logging::warn(&format!(
@@ -219,7 +219,7 @@ fn cleanup_prepared_visible_spawn_session(session_id: &str) {
         ));
     }
     if let Ok(path) = crate::session::session_journal_path(session_id)
-        && let Err(error) = std::fs::remove_file(&path)
+        && let Err(error) = crate::storage::remove_state_file(&path)
         && error.kind() != std::io::ErrorKind::NotFound
     {
         crate::logging::warn(&format!(

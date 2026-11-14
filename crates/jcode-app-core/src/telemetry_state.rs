@@ -183,7 +183,7 @@ pub(super) fn prune_active_session_files(dir: &PathBuf) -> u32 {
         if fresh {
             count = count.saturating_add(1);
         } else {
-            let _ = std::fs::remove_file(path);
+            let _ = storage::remove_state_file(&path);
         }
     }
     count
@@ -208,7 +208,7 @@ pub(super) fn observe_active_sessions() -> u32 {
 
 pub(super) fn unregister_active_session(session_id: &str) {
     if let Some(path) = active_session_file(session_id) {
-        let _ = std::fs::remove_file(path);
+        let _ = storage::remove_state_file(&path);
     }
 }
 

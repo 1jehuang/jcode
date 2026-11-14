@@ -286,10 +286,18 @@ impl Agent {
                 self.reconcile_explicit_provider_pin_route();
             }
             Err(e) => {
-                logging::error(&format!(
-                    "Failed to restore session model '{}': {}",
-                    model, e
+                // The saved model is no longer available from this provider.
+                // Degrade gracefully instead of re-persisting a dead model and
+                // re-triggering the same failure on every resume: fall back to
+                // the provider's current model and persist the correction.
+                let fallback = self.provider_model();
+                logging::warn(&format!(
+                    "Saved session model '{}' not available, falling back to provider default \
+                     '{}': {e}",
+                    model, fallback
                 ));
+                self.session.model = Some(fallback);
+                self.persist_session_best_effort("model fallback");
             }
         }
     }

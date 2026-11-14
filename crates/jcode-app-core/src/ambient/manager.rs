@@ -65,8 +65,8 @@ impl AmbientManager {
 
     /// Remove and return only ready items targeted at direct delivery into a
     /// specific resumed or spawned session.
-    pub fn take_ready_direct_items(&mut self) -> Vec<ScheduledItem> {
-        self.queue.take_ready_direct_items()
+    pub fn take_ready_direct_items(&mut self, pause_spawns: bool) -> Vec<ScheduledItem> {
+        self.queue.take_ready_direct_items(pause_spawns)
     }
 
     /// Add a schedule request to the queue. Returns the item ID.

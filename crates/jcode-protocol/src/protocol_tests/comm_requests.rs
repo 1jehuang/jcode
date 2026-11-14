@@ -604,6 +604,26 @@ fn targeted_notification_does_not_require_subscription() -> Result<()> {
 }
 
 #[test]
+fn native_wake_receipt_has_explicit_correlation_and_status_lookup() -> Result<()> {
+    let request = Request::NotifySessionReceipt {
+        id: 93,
+        session_id: "ses_target".to_string(),
+        message: "wake now".to_string(),
+        receipt_id: "discord:event:1".to_string(),
+    };
+    let decoded = parse_request_json(&serde_json::to_string(&request)?)?;
+    assert_eq!(decoded.id(), 93);
+    assert!(decoded.is_lightweight_control_request());
+    assert!(matches!(decoded, Request::NotifySessionReceipt { receipt_id, .. } if receipt_id == "discord:event:1"));
+    let lookup = Request::GetWakeReceipt {
+        id: 94,
+        receipt_id: "discord:event:1".to_string(),
+    };
+    assert_eq!(parse_request_json(&serde_json::to_string(&lookup)?)?.id(), 94);
+    Ok(())
+}
+
+#[test]
 fn test_reload_force_defaults_true_for_legacy_clients() -> Result<()> {
     // Old clients (and the desktop Swift enum, which has no reload case) send a
     // reload request with no `force` field. It must default to true so their

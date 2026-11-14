@@ -75,6 +75,7 @@ pub(crate) mod swarm_todo_link;
 mod swarm_watchdog;
 mod turn_failover;
 mod util;
+pub(crate) mod wake_receipts;
 mod worker_revive;
 
 pub(super) use self::await_members_state::AwaitMembersRuntime;

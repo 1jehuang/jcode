@@ -23,6 +23,54 @@ fn test_writer() -> Result<(Arc<Mutex<WriteHalf>>, crate::transport::Stream)> {
     Ok((Arc::new(Mutex::new(writer_half)), stream_b))
 }
 
+/// Bind a peer stream to a background task that keeps reading it.
+///
+/// The History payload a live-attach resume writes can exceed the operating
+/// system's socket buffer (measured at 14,642 bytes on master). `write_all`
+/// then parks forever once that buffer fills, which deadlocks every resume test
+/// that discards its peer. Draining the peer keeps the writer progressing, and
+/// the channel carries the frames it read so a caller can still assert on the
+/// exact payload the resume sent.
+fn drain_peer(peer: crate::transport::Stream) -> tokio::sync::mpsc::UnboundedReceiver<String> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut reader = tokio::io::BufReader::new(peer);
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) if tx.send(line).is_err() => break,
+                Ok(_) => {}
+            }
+        }
+    });
+    rx
+}
+
+/// Assert that the peer received a History frame for `session_id`.
+///
+/// Draining a peer without checking what arrived would let a resume silently
+/// stop writing history and still pass, so every drained test pins the frame it
+/// was previously too busy blocking to inspect. Bounded so a resume that fails
+/// to write at all fails the test instead of parking it.
+async fn assert_peer_history_for(
+    peer: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    session_id: &str,
+) -> Result<()> {
+    let line = tokio::time::timeout(std::time::Duration::from_secs(5), peer.recv())
+        .await
+        .map_err(|_| anyhow!("peer never received the resume History frame"))?
+        .ok_or_else(|| anyhow!("peer stream closed before the resume History frame"))?;
+    let event: ServerEvent = serde_json::from_str(line.trim())?;
+    match event {
+        ServerEvent::History {
+            session_id: got, ..
+        } if got == session_id => Ok(()),
+        other => Err(anyhow!("expected History for {session_id}, got {other:?}")),
+    }
+}
+
 include!("resume/multiple_live_attach.rs");
 include!("resume/busy_existing_attach.rs");
 include!("resume/reconnect_takeover_with_history.rs");

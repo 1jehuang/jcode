@@ -172,6 +172,16 @@ pub enum ServerEvent {
     #[serde(rename = "ack")]
     Ack { id: u64 },
 
+    /// Durable acceptance state of an explicit native wake receipt.
+    #[serde(rename = "wake_receipt")]
+    WakeReceipt {
+        id: u64,
+        receipt_id: String,
+        session_id: String,
+        /// `queued` is durable acceptance; `awakened` requires turn-entry proof.
+        status: String,
+    },
+
     /// Authoritative worker routing after a successful session preference update.
     #[serde(rename = "agent_models_changed")]
     AgentModelsChanged {

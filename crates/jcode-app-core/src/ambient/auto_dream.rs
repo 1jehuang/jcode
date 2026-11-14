@@ -30,11 +30,7 @@ struct ConsolidationOp {
 /// `session_count` is the total number of ambient cycles completed
 /// (fed to the session gate).
 /// `provider` is the LLM provider used for the consolidation call.
-pub async fn maybe_dream(
-    data_dir: PathBuf,
-    session_count: u64,
-    provider: Arc<dyn Provider>,
-) {
+pub async fn maybe_dream(data_dir: PathBuf, session_count: u64, provider: Arc<dyn Provider>) {
     let mut coordinator = DreamCoordinator::new(data_dir);
 
     // Feed the session gate with the ambient cycle count.
@@ -54,24 +50,15 @@ pub async fn maybe_dream(
                 Ok(()) => {
                     logging::info("Auto-dream: lock acquired, running consolidation");
                     if let Err(e) = run_consolidation(&provider).await {
-                        logging::error(&format!(
-                            "Auto-dream: consolidation failed: {}",
-                            e
-                        ));
+                        logging::error(&format!("Auto-dream: consolidation failed: {}", e));
                     }
                     if let Err(e) = lock.release().await {
-                        logging::error(&format!(
-                            "Auto-dream: failed to release lock: {}",
-                            e
-                        ));
+                        logging::error(&format!("Auto-dream: failed to release lock: {}", e));
                     }
                     logging::info("Auto-dream: consolidation complete");
                 }
                 Err(e) => {
-                    logging::error(&format!(
-                        "Auto-dream: failed to acquire lock: {}",
-                        e
-                    ));
+                    logging::error(&format!("Auto-dream: failed to acquire lock: {}", e));
                 }
             }
         }

@@ -2512,6 +2512,43 @@ pub(super) async fn handle_client(
                 )
                 .await;
             }
+            r @ (Request::NotifySessionReceipt { .. } | Request::GetWakeReceipt { .. }) => {
+                // is_lightweight_control_request routes these before attach, but a
+                // client that has already subscribed can still send one later.
+                // Handle it on the control path rather than aborting the task.
+                if let Err(error) = handle_lightweight_control_request(
+                    r,
+                    Arc::clone(&writer),
+                    LightweightControlContext {
+                        sessions: &sessions,
+                        global_session_id: &global_session_id,
+                        provider_template: &provider_template,
+                        swarm_members: &swarm_members,
+                        swarms_by_id: &swarms_by_id,
+                        shared_context: &shared_context,
+                        swarm_plans: &swarm_plans,
+                        swarm_coordinators: &swarm_coordinators,
+                        file_touch: &file_touch,
+                        channel_subscriptions: &channel_subscriptions,
+                        channel_subscriptions_by_session: &channel_subscriptions_by_session,
+                        client_connections: &client_connections,
+                        event_history: &event_history,
+                        event_counter: &event_counter,
+                        swarm_event_tx: &swarm_event_tx,
+                        mcp_pool: &mcp_pool,
+                        soft_interrupt_queues: &soft_interrupt_queues,
+                        await_members_runtime: &await_members_runtime,
+                        swarm_mutation_runtime: &swarm_mutation_runtime,
+                    },
+                )
+                .await
+                {
+                    super::wake_receipts::send_event(
+                        &client_event_tx,
+                        super::wake_receipts::error_event(request_id, &error.to_string()),
+                    );
+                }
+            }
 
             Request::AppletAction {
                 id,

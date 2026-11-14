@@ -601,6 +601,36 @@ impl Session {
         self.save_inner(false)
     }
 
+    /// Make a saved native wake turn entry durable before its receipt advances.
+    /// Normal session saves favor throughput and may leave a journal append in
+    /// the page cache; receipt state uses a durable write and must not outrun it.
+    pub fn sync_wake_turn_entry(&self) -> Result<()> {
+        if let Some(block) = self.migration_lease_block() {
+            anyhow::bail!("Session {} was not persisted: {}", self.id, block);
+        }
+        // Windows `File::open` yields a read-only handle and `FlushFileBuffers`
+        // requires write access, so open write-capable first and fall back to
+        // read-only when the file itself is not writable.
+        let sync_durably = |path: &Path| -> Result<()> {
+            match std::fs::OpenOptions::new().write(true).open(path) {
+                Ok(file) => file.sync_all()?,
+                Err(_) => std::fs::File::open(path)?.sync_all()?,
+            }
+            Ok(())
+        };
+        let snapshot = session_path(&self.id)?;
+        sync_durably(&snapshot)?;
+        let journal = session_journal_path_from_snapshot(&snapshot);
+        if journal.exists() {
+            sync_durably(&journal)?;
+        }
+        #[cfg(unix)]
+        if let Some(parent) = snapshot.parent() {
+            sync_durably(parent)?;
+        }
+        Ok(())
+    }
+
     /// Persist the session even when it has no visible conversation message
     /// yet. Use this for sessions prepared by one process and attached to by
     /// another (for example visible swarm spawns), where caller-configured

@@ -976,11 +976,10 @@ fn test_bash_tool_schema_advertises_background_progress_guidance() {
     );
 }
 
-// Destructive-command gate integration (#604).
-//
-// The unit-level policy is covered in jcode-command-risk. These tests pin the
-// wiring: that the gate actually sits in the bash tool's execute path, that it
-// refuses before spawning a process, and that it does not disturb normal work.
+// Destructive-command gate integration (#604). The unit-level policy lives in
+// jcode-command-risk. These tests pin the wiring: the gate sits in the bash
+// tool's execute path, refuses before spawning a process, and does not disturb
+// normal work.
 
 fn gate_ctx(working_dir: &str) -> ToolContext {
     ToolContext {
