@@ -59,6 +59,25 @@ pub(super) fn coalesced_frame_timer(
     }
 }
 
+/// Keep the spinner/animation snapshot exact without cloning unchanged cells
+/// on sparse frames. Ratatui already counted flushed updates, so dense redraws
+/// retain the straight vector copy rather than paying another diff scan.
+pub(super) fn update_retained_frame(previous: &mut Buffer, rendered: &Buffer, updates: usize) {
+    let sparse = previous.area == rendered.area
+        && previous.content.len() == rendered.content.len()
+        && updates < rendered.content.len() / 4;
+    previous.area = rendered.area;
+    if sparse {
+        for (to, from) in previous.content.iter_mut().zip(&rendered.content) {
+            if to != from {
+                to.clone_from(from);
+            }
+        }
+    } else {
+        previous.content.clone_from(&rendered.content);
+    }
+}
+
 pub(super) fn redraw_timer(period: Duration) -> tokio::time::Interval {
     let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
     // Redraw ticks represent visual liveness, not elapsed simulation steps. An
@@ -615,10 +634,8 @@ impl StatusSpinnerRenderer {
         let total_cells = Some(completed.buffer.content.len());
         let completed_buffer = match stored_frame {
             Some(mut buffer) => {
-                // Derived `Buffer::clone_from` reallocates; `Vec::clone_from`
-                // reuses the existing cell storage.
-                buffer.area = completed.buffer.area;
-                buffer.content.clone_from(&completed.buffer.content);
+                // Reuse the Vec and skip unchanged cells on sparse frames.
+                update_retained_frame(&mut buffer, completed.buffer, completed.flushed_updates);
                 buffer
             }
             None => completed.buffer.clone(),

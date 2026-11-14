@@ -510,6 +510,46 @@ fn idle_animation_repaint_preserves_cells_outside_animation_after_swap() {
 }
 
 #[test]
+fn retained_frame_update_matches_a_full_copy_for_sparse_dense_and_resized_frames() {
+    for old_area in [Rect::new(0, 0, 8, 4), Rect::new(3, 2, 7, 3)] {
+        for new_area in [old_area, Rect::new(0, 0, 10, 2), Rect::new(0, 0, 0, 0)] {
+            for reported_updates in [0, 1, 8, 100] {
+                let mut previous = Buffer::empty(old_area);
+                let mut rendered = Buffer::empty(new_area);
+                for (i, cell) in rendered.content.iter_mut().enumerate() {
+                    cell.set_symbol(["a", "日", "e\u{301}", "👩‍💻"][i % 4]);
+                    cell.set_fg(if i % 2 == 0 { Color::Red } else { Color::Cyan });
+                    cell.set_bg(Color::Blue);
+                    cell.skip = i % 3 == 0;
+                }
+                let capacity = previous.content.capacity();
+                let storage = previous.content.as_ptr();
+                update_retained_frame(&mut previous, &rendered, reported_updates);
+                assert_eq!(previous, rendered);
+                if old_area == new_area {
+                    assert_eq!(previous.content.as_ptr(), storage);
+                    assert_eq!(previous.content.capacity(), capacity);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn sparse_retained_frame_keeps_unchanged_heap_backed_symbols() {
+    let mut cell = ratatui::buffer::Cell::EMPTY;
+    cell.set_symbol(&format!("a{}", "\u{301}".repeat(32)));
+    let source = Buffer::filled(Rect::new(0, 0, 8, 4), cell);
+    let mut previous = source.clone();
+    let symbol = previous.content[0].symbol().as_ptr();
+    let mut rendered = source;
+    rendered.content[1].set_fg(Color::Red);
+    update_retained_frame(&mut previous, &rendered, 1);
+    assert_eq!(previous, rendered);
+    assert_eq!(previous.content[0].symbol().as_ptr(), symbol);
+}
+
+#[test]
 #[ignore = "manual retained-frame copy timing probe"]
 fn retained_frame_copy_probe() {
     use std::hint::black_box;
@@ -536,25 +576,19 @@ fn retained_frame_copy_probe() {
     let full_time = started.elapsed();
     target.content.clone_from(&source.content);
     let started = Instant::now();
-    let mut copied = 0usize;
     for frame in 0..frames {
         source.content[frame % area.area() as usize].set_fg(if frame % 2 == 0 {
             Color::Yellow
         } else {
             Color::Green
         });
-        for (to, from) in target.content.iter_mut().zip(black_box(&source.content)) {
-            if to != from {
-                to.clone_from(from);
-                copied += 1;
-            }
-        }
+        update_retained_frame(&mut target, black_box(&source), 1);
         black_box(&target);
     }
     let selective_time = started.elapsed();
     assert_eq!(target, source);
     eprintln!(
-        "retained frame copy: {frames} frames, full {full_time:?} ({} copied cells), selective {selective_time:?} ({copied} copied cells)",
+        "retained frame copy: {frames} frames, full {full_time:?} ({} copied cells), selective {selective_time:?} ({frames} copied cells)",
         frames * area.area() as usize
     );
 }
