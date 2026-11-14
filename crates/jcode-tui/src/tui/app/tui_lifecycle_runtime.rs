@@ -144,7 +144,7 @@ impl App {
         }
         let state: &'static str = if self.lifecycle_osc_blocked() {
             "blocked"
-        } else if self.is_processing() {
+        } else if self.is_processing() || self.background_work_pending() {
             "working"
         } else {
             "idle"
@@ -159,15 +159,33 @@ impl App {
     /// Whether the main TUI is currently waiting for a user decision rather than
     /// doing autonomous work. This wires the blocked OSC state to concrete
     /// lifecycle state instead of leaving the manual `osc_blocked` hook dormant.
+    ///
+    /// Queued transfer/split work and an in-flight login exchange are background
+    /// activity, not human decision points, so they count as working via
+    /// [`App::background_work_pending`] instead of blocked here.
     fn lifecycle_osc_blocked(&self) -> bool {
-        self.pending_login.is_some()
+        let pending_login_needs_user = match self.pending_login.as_ref() {
+            Some(PendingLogin::Exchanging { .. }) => false,
+            Some(_) => true,
+            None => false,
+        };
+        pending_login_needs_user
             || self.pending_account_input.is_some()
             || self.pending_ssh_remote_name.is_some()
             || self.pending_fallback_offer.is_some()
             || self.pending_merge_offer.is_some()
-            || self.pending_local_transfer.is_some()
-            || self.pending_split_request
+    }
+
+    /// Autonomous background work that should read as `working`: a login token
+    /// exchange running in a spawned task, a queued `/transfer` or split, or an
+    /// in-progress transfer session preparation.
+    fn background_work_pending(&self) -> bool {
+        matches!(
+            self.pending_login.as_ref(),
+            Some(PendingLogin::Exchanging { .. })
+        ) || self.pending_local_transfer.is_some()
             || self.pending_transfer_request
+            || self.pending_split_request
     }
 
     /// Emit an OSC 9 progress sequence carrying a stable agent-status tag.
@@ -1011,5 +1029,58 @@ mod tests {
         app.is_processing = false;
         app.status = ProcessingStatus::Idle;
         assert_eq!(app.agent_osc_state(), Some("idle"));
+    }
+
+    #[test]
+    fn osc_state_queued_transfer_is_working_not_blocked() {
+        let mut app = create_test_app();
+        app.is_processing = true;
+        assert_eq!(app.agent_osc_state(), Some("working"));
+        app.is_processing = false;
+        app.status = ProcessingStatus::Idle;
+        app.pending_transfer_request = true;
+        assert_eq!(
+            app.agent_osc_state(),
+            None,
+            "already working before the transfer queued; dedup keeps the same state"
+        );
+        app.pending_local_transfer = Some(super::PendingLocalTransfer {
+            receiver: std::sync::mpsc::channel().1,
+        });
+        assert_eq!(app.agent_osc_state(), None, "still working, deduped");
+        app.last_osc_state = Some("idle");
+        assert_eq!(
+            app.agent_osc_state(),
+            Some("working"),
+            "a queued transfer prepare is background work, not a human decision"
+        );
+        app.pending_transfer_request = false;
+        app.pending_local_transfer = None;
+        app.last_osc_state = Some("idle");
+        app.pending_split_request = true;
+        assert_eq!(
+            app.agent_osc_state(),
+            Some("working"),
+            "a queued split is background work, not a human decision"
+        );
+    }
+
+    #[test]
+    fn osc_state_pending_login_exchanging_is_working_not_blocked() {
+        let mut app = create_test_app();
+        app.pending_login = Some(PendingLogin::Exchanging {
+            provider: "anthropic".to_string(),
+        });
+        assert_eq!(
+            app.agent_osc_state(),
+            Some("working"),
+            "a background token exchange needs no human action"
+        );
+        app.pending_login = Some(PendingLogin::Remote);
+        assert_eq!(
+            app.agent_osc_state(),
+            Some("blocked"),
+            "login states that wait for user input still report blocked"
+        );
     }
 }
