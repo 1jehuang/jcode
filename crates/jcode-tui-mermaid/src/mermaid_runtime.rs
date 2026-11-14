@@ -212,11 +212,13 @@ fn parse_env_bool(raw: &str) -> Option<bool> {
 /// * `probe_override` is the parsed value of `JCODE_MERMAID_PICKER_PROBE`
 ///   (`Some(true)`/`Some(false)` when set explicitly, `None` otherwise) and
 ///   always wins so users can force either behavior.
-/// * Without an override, Orca is probed automatically outside multiplexers:
-///   it answers capability queries, including when inline images are disabled,
-///   so the probe respects that setting. Other terminals keep the fast path because
-///   the upstream stdio probe can block for two seconds if they do not answer.
-///   Multiplexer users can opt into the probe with `JCODE_MERMAID_PICKER_PROBE=1`.
+/// * Without an override, Herdr probes automatically because it masks the outer terminal's
+///   identity and can pass Kitty graphics through to a capable outer terminal. Orca also
+///   probes outside multiplexers: it answers capability queries, including when inline images
+///   are disabled, so the probe respects that setting. Other terminals keep the fast path
+///   because the upstream stdio probe can block for two seconds if they do not answer.
+///   Multiplexer users can opt out of Herdr/Orca probing or force the probe with
+///   `JCODE_MERMAID_PICKER_PROBE`.
 pub(super) fn decide_picker_init_mode(
     probe_override: Option<bool>,
     _env_protocol: Option<ProtocolType>,
@@ -224,8 +226,9 @@ pub(super) fn decide_picker_init_mode(
     term_program: Option<&str>,
 ) -> PickerInitMode {
     if probe_override.unwrap_or(
-        multiplexer == Multiplexer::None
-            && term_program.is_some_and(|program| program.eq_ignore_ascii_case("Orca")),
+        multiplexer == Multiplexer::Herdr
+            || (multiplexer == Multiplexer::None
+                && term_program.is_some_and(|program| program.eq_ignore_ascii_case("Orca"))),
     ) {
         PickerInitMode::Probe
     } else {
