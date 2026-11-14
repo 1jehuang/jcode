@@ -226,7 +226,9 @@ impl Dialog {
             _ => {}
         }
         if let Some(row) = activate {
-            let ask = self.ask.as_mut().expect("checked above");
+            let Some(ask) = self.ask.as_mut() else {
+                return DialogKey::Close;
+            };
             if row < options && multi {
                 ask.checked[row] = !ask.checked[row];
             } else {

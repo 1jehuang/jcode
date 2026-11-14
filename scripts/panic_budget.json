@@ -1,5 +1,5 @@
 {
-  "total": 178,
+  "total": 176,
   "tracked_files": {
     "crates/jcode-app-core/src/agent/conversation_reset.rs": 1,
     "crates/jcode-app-core/src/agent/provider.rs": 1,
