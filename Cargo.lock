@@ -3876,6 +3876,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-cache-vectors"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "jcode-codemode"
 version = "0.1.0"
 dependencies = [
@@ -4087,6 +4095,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "pdf-extract",
+]
+
+[[package]]
+name = "jcode-permission-bubble"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
