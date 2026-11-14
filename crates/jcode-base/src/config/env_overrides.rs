@@ -84,6 +84,9 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_COPY_SELECTION_TOGGLE_KEY") {
             self.keybindings.copy_selection_toggle = v;
         }
+        if let Ok(v) = std::env::var("JCODE_COPY_LAST_RESPONSE_KEY") {
+            self.keybindings.copy_last_response = v;
+        }
         if let Ok(v) = std::env::var("JCODE_DIAGRAM_PANE_TOGGLE_KEY") {
             self.keybindings.diagram_pane_toggle = v;
         }

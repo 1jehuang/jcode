@@ -74,6 +74,7 @@ mod commands_plan;
 mod commands_remote;
 mod commands_review;
 mod conversation_state;
+pub(crate) mod copy_last_response;
 mod copy_selection;
 mod debug;
 mod dictation;
@@ -1646,9 +1647,8 @@ pub struct App {
     pending_account_picker_action: Option<crate::tui::AccountPickerAction>,
     /// Last sent account switch, used only as the cycle cursor until acknowledged.
     pending_account_switch_target: Option<crate::tui::AccountPickerAction>,
-    // Keybindings for model switching
+    // Model / effort switch keybindings
     model_switch_keys: ModelSwitchKeys,
-    // Keybindings for effort switching
     effort_switch_keys: super::keybind::EffortSwitchKeys,
     speed_switch_keys: super::keybind::SpeedSwitchKeys,
     // Keybindings for scrolling

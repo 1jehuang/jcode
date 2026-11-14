@@ -220,6 +220,18 @@ pub fn jcode_bindings(cfg: &KeybindingsConfig) -> Vec<JcodeBinding> {
         }
     }
 
+    // Space-separated sequences such as "ctrl+x ctrl+y" expand per step.
+    for piece in cfg.copy_last_response.split_whitespace() {
+        if let Some(chord) = KeyChord::parse(piece) {
+            out.push(JcodeBinding {
+                field: "keybindings.copy_last_response".to_string(),
+                action: "Copy last assistant answer".to_string(),
+                raw: piece.to_string(),
+                chord,
+            });
+        }
+    }
+
     // Multi-binding (comma-separated list) fields.
     let multi: [(&str, &str, &str); 4] = [
         (

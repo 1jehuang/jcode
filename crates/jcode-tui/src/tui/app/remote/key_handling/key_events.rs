@@ -26,6 +26,9 @@ pub(super) async fn handle_remote_key_internal(
     let mut code = code;
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
+    app.toggle_keys
+        .copy_last_response
+        .abandon_unless_continues(code, modifiers);
 
     if app.handle_key_during_provider_failover(code) {
         return Ok(());
@@ -209,6 +212,11 @@ pub(super) async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    // A started copy sequence (e.g. Ctrl+X then Ctrl+Y) beats offer accept keys.
+    if crate::tui::app::copy_last_response::handle_key_if_pending(app, code, modifiers) {
+        return Ok(());
+    }
+
     // Accept an armed post-error fallback offer: stage the route switch and
     // resend so the remote dispatcher applies it (SetRoute + payload resend).
     // Checked before the merge offer to match the local key-handling order
@@ -292,6 +300,10 @@ pub(super) async fn handle_remote_key_internal(
                 }
             }
         }
+        return Ok(());
+    }
+
+    if crate::tui::app::copy_last_response::handle_key(app, code, modifiers) {
         return Ok(());
     }
 

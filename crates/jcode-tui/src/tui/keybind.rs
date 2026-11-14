@@ -420,6 +420,123 @@ impl ToggleBinding {
     }
 }
 
+/// Result of feeding one keypress into a [`ChordSequence`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SequenceMatch {
+    /// This key is not part of the sequence.
+    None,
+    /// This key advanced a multi-key sequence; wait for the next step.
+    Prefix,
+    /// This key completed the sequence (including a single-chord binding).
+    Complete,
+}
+
+/// One or more space-separated chords, e.g. `"ctrl+y"` or `"ctrl+x ctrl+y"`.
+#[derive(Clone, Debug, Default)]
+pub struct ChordSequence {
+    steps: Vec<KeyBinding>,
+    label: Option<String>,
+    pending: usize,
+}
+
+impl ChordSequence {
+    /// Parse `raw`, treating `""` / `"off"` / `"none"` / `"disabled"` as unbound.
+    pub fn load(raw: &str) -> Self {
+        let raw = raw.trim();
+        if raw.is_empty() || is_disabled(raw) {
+            return Self::default();
+        }
+        let mut steps = Vec::new();
+        for step in raw.split_whitespace() {
+            let Some(binding) = parse_keybinding(step) else {
+                crate::logging::warn(&format!("KEYBINDINGS: ignoring invalid sequence `{raw}`"));
+                return Self::default();
+            };
+            steps.push(binding);
+        }
+        if steps.is_empty() {
+            return Self::default();
+        }
+        let label = steps
+            .iter()
+            .map(format_binding)
+            .collect::<Vec<_>>()
+            .join(" ");
+        Self {
+            steps,
+            label: Some(label),
+            pending: 0,
+        }
+    }
+
+    pub fn is_bound(&self) -> bool {
+        !self.steps.is_empty()
+    }
+
+    pub fn is_pending(&self) -> bool {
+        self.pending > 0
+    }
+
+    pub fn clear(&mut self) {
+        self.pending = 0;
+    }
+
+    /// Drop a pending prefix when `code` cannot continue or restart the
+    /// sequence, so a key another handler takes before `feed` (a picker,
+    /// overlay or other hotkey) does not leave the sequence armed.
+    /// Bare modifier presses keep the prefix.
+    pub fn abandon_unless_continues(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        if self.pending == 0 || matches!(code, KeyCode::Modifier(_)) {
+            return;
+        }
+        if !self.steps[self.pending].matches(code, modifiers)
+            && !self.steps[0].matches(code, modifiers)
+        {
+            self.pending = 0;
+        }
+    }
+
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
+    /// Single-chord bindings only; multi-key sequences are ambiguous in the
+    /// hotkey-feedback table (Ctrl+X is already cut-line).
+    pub fn primary_binding(&self) -> Option<&KeyBinding> {
+        if self.steps.len() == 1 {
+            self.steps.first()
+        } else {
+            None
+        }
+    }
+
+    pub fn feed(&mut self, code: KeyCode, modifiers: KeyModifiers) -> SequenceMatch {
+        if self.steps.is_empty() {
+            return SequenceMatch::None;
+        }
+        if self.steps[self.pending].matches(code, modifiers) {
+            self.pending += 1;
+            if self.pending >= self.steps.len() {
+                self.pending = 0;
+                return SequenceMatch::Complete;
+            }
+            return SequenceMatch::Prefix;
+        }
+        if self.pending > 0 {
+            self.pending = 0;
+            if self.steps[0].matches(code, modifiers) {
+                self.pending = 1;
+                if self.pending >= self.steps.len() {
+                    self.pending = 0;
+                    return SequenceMatch::Complete;
+                }
+                return SequenceMatch::Prefix;
+            }
+        }
+        SequenceMatch::None
+    }
+}
+
 /// All configurable pane / mode toggle keybindings.
 #[derive(Clone, Debug)]
 pub struct ToggleKeys {
@@ -434,6 +551,7 @@ pub struct ToggleKeys {
     pub info_widget: ToggleBinding,
     pub todo_card: ToggleBinding,
     pub swarm_panel_focus: ToggleBinding,
+    pub copy_last_response: ChordSequence,
 }
 
 pub fn load_toggle_keys() -> ToggleKeys {
@@ -465,6 +583,7 @@ pub fn load_toggle_keys() -> ToggleKeys {
             &cfg.keybindings.swarm_panel_focus,
             swarm_panel_focus_default(),
         ),
+        copy_last_response: ChordSequence::load(&cfg.keybindings.copy_last_response),
     }
 }
 
@@ -713,6 +832,49 @@ pub fn load_open_resume_key() -> OptionalBinding {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_last_response_ctrl_x_ctrl_y_sequence_parses_and_feeds() {
+        assert!(!ChordSequence::load("").is_bound());
+        assert!(!ChordSequence::load("off").is_bound());
+        let mut seq = ChordSequence::load("ctrl+x ctrl+y");
+        assert!(seq.is_bound());
+        assert_eq!(
+            seq.feed(KeyCode::Char('x'), KeyModifiers::CONTROL),
+            SequenceMatch::Prefix
+        );
+        assert_eq!(
+            seq.feed(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            SequenceMatch::Complete
+        );
+        assert_eq!(
+            ChordSequence::load("ctrl+y").feed(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            SequenceMatch::Complete
+        );
+    }
+
+    #[test]
+    fn copy_last_response_invalid_sequence_steps_are_unbound() {
+        let typo = ChordSequence::load("ctrl+x ctrl+yy");
+        assert!(
+            !typo.is_bound(),
+            "a mistyped later step must reject the whole sequence, got {:?}",
+            typo.label()
+        );
+        assert!(!ChordSequence::load("ctrl+yy").is_bound());
+        assert!(!ChordSequence::load("off").is_bound());
+
+        let mut valid = ChordSequence::load("ctrl+x ctrl+y");
+        assert!(valid.is_bound());
+        assert_eq!(
+            valid.feed(KeyCode::Char('x'), KeyModifiers::CONTROL),
+            SequenceMatch::Prefix
+        );
+        assert_eq!(
+            valid.feed(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            SequenceMatch::Complete
+        );
+    }
 
     #[test]
     fn auto_poke_toggle_can_be_remapped_or_disabled() {
