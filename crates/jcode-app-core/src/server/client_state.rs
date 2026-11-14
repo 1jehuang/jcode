@@ -283,7 +283,7 @@ async fn build_model_catalog(
                     .map(str::to_string)
                     .collect(),
             ),
-            provider.reasoning_effort(),
+            provider.effective_reasoning_effort(),
             provider_oauth_email(provider.as_ref()),
             provider.serving_oauth_account_label(),
         )
@@ -353,7 +353,7 @@ async fn build_model_catalog(
                                 .map(str::to_string)
                                 .collect(),
                         ),
-                        provider.reasoning_effort(),
+                        provider.effective_reasoning_effort(),
                         "fallback",
                         provider_oauth_email(provider.as_ref()),
                         provider.serving_oauth_account_label(),
@@ -846,7 +846,7 @@ async fn send_history_from_persisted_session(
     let reasoning_effort = session
         .reasoning_effort
         .clone()
-        .or_else(|| provider.reasoning_effort());
+        .or_else(|| provider.effective_reasoning_effort());
     let agent_model_overrides = session.agent_model_overrides.clone();
     let inferred_interrupted = was_interrupted
         .is_none()
@@ -1056,7 +1056,7 @@ async fn send_history_with_guard(
         let skills_ms = skills_start.elapsed().as_millis();
 
         let provider_meta_start = Instant::now();
-        let reasoning_effort = provider.reasoning_effort();
+        let reasoning_effort = provider.effective_reasoning_effort();
         let service_tier = provider.service_tier();
         let provider_meta_ms = provider_meta_start.elapsed().as_millis();
 

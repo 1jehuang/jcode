@@ -1153,7 +1153,15 @@ impl App {
     fn onboarding_default_model_label(&self) -> String {
         let model = self.onboarding_default_model_id();
         let pretty = super::model_names::pretty_model_display_name(&model);
-        match self.provider.reasoning_effort() {
+        // Local sessions surface the display-only effective effort so a fixed
+        // effort injected via OpenAI-compatible `extra_body` shows up here too;
+        // remote mode keeps the pre-existing server-reported flow.
+        let effort = if self.is_remote {
+            self.provider.reasoning_effort()
+        } else {
+            self.provider.effective_reasoning_effort()
+        };
+        match effort {
             Some(effort) if !effort.trim().is_empty() && effort != "none" => {
                 let effort_label = super::helpers::effort_display_label(&effort);
                 format!("{} ({})", pretty, effort_label.to_ascii_lowercase())
@@ -1817,5 +1825,117 @@ impl App {
         // The action picker waits for an explicit choice. Return `changed` so the
         // import-progress watchdog keeps the screen repainting while it waits.
         changed
+    }
+}
+
+#[cfg(test)]
+mod effort_label_tests {
+    use super::App;
+    use crate::provider::Provider;
+    use std::sync::Arc;
+
+    /// Switching is off but `extra_body` injects a fixed effort: the label
+    /// must show it (mirrors the OpenRouter fallback via the trait hook).
+    #[derive(Clone)]
+    struct ExtraBodyEffortProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for ExtraBodyEffortProvider {
+        async fn complete(
+            &self,
+            _messages: &[crate::message::Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> anyhow::Result<crate::provider::EventStream> {
+            unimplemented!("Mock provider")
+        }
+
+        fn name(&self) -> &str {
+            "mock-extra-body"
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(self.clone())
+        }
+
+        fn model(&self) -> String {
+            "glm-5-2-nvfp4".to_string()
+        }
+
+        fn available_efforts(&self) -> Vec<&'static str> {
+            Vec::new()
+        }
+
+        fn reasoning_effort(&self) -> Option<String> {
+            None
+        }
+
+        fn effective_reasoning_effort(&self) -> Option<String> {
+            Some("high".to_string())
+        }
+    }
+
+    fn app_with(provider: Arc<dyn Provider>) -> App {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+        let mut app = App::new_for_test_harness(provider, registry);
+        app.is_remote = false;
+        app
+    }
+
+    #[test]
+    fn onboarding_default_model_label_includes_extra_body_effort() {
+        let app = app_with(Arc::new(ExtraBodyEffortProvider));
+        let label = app.onboarding_default_model_label();
+        assert!(
+            label.contains("high"),
+            "label must include the fixed extra_body effort, got: {label}"
+        );
+    }
+
+    #[test]
+    fn onboarding_default_model_label_omits_effort_when_none() {
+        // Trait default: no effort anywhere -> bare pretty model name.
+        let app = app_with(Arc::new(ExtraBodyEffortProviderWithNone));
+        let label = app.onboarding_default_model_label();
+        let expected = crate::tui::app::model_names::pretty_model_display_name("glm-5-2-nvfp4");
+        assert_eq!(
+            label, expected,
+            "label must be the bare pretty name when no effort exists"
+        );
+    }
+
+    /// No switchable and no injected effort at all.
+    #[derive(Clone)]
+    struct ExtraBodyEffortProviderWithNone;
+
+    #[async_trait::async_trait]
+    impl Provider for ExtraBodyEffortProviderWithNone {
+        async fn complete(
+            &self,
+            _messages: &[crate::message::Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> anyhow::Result<crate::provider::EventStream> {
+            unimplemented!("Mock provider")
+        }
+
+        fn name(&self) -> &str {
+            "mock-no-effort"
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(self.clone())
+        }
+
+        fn model(&self) -> String {
+            "glm-5-2-nvfp4".to_string()
+        }
+
+        fn available_efforts(&self) -> Vec<&'static str> {
+            Vec::new()
+        }
     }
 }
