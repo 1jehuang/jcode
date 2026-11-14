@@ -209,6 +209,37 @@ fn enforces_limits_and_references() {
 }
 
 #[test]
+fn displayed_labels_count_toward_max_text() {
+    let tiny = Limits {
+        max_text: 16,
+        ..Limits::default()
+    };
+    let cases = [
+        json!({"type": "tabs", "bind": "t", "tabs": [
+            {"id": "a", "label": "0123456789ABCDEF-over"}
+        ]}),
+        json!({"type": "select", "bind": "s", "options": [
+            {"value": "v", "label": "0123456789ABCDEF-over"}
+        ]}),
+        json!({"type": "key_value", "rows": [
+            {"key": "0123456789ABCDEF", "value": "-over"}
+        ]}),
+        json!({"type": "card", "title": "0123456789ABCDEF-over", "children": []}),
+        json!({"type": "button", "label": "0123456789ABCDEF-over", "on_press": {"action": "host.close"}}),
+    ];
+    for case in cases {
+        let doc = document(case);
+        assert!(
+            matches!(
+                validate_document(&doc, &manifest(&[]), &tiny),
+                Err(ValidationError::TooMuchText(_))
+            ),
+            "label text must count toward max_text"
+        );
+    }
+}
+
+#[test]
 fn patches_are_revisioned_atomic_and_path_restricted() {
     let doc = document(json!({"type": "stack", "children": [
         {"type": "text", "text": "a"}
