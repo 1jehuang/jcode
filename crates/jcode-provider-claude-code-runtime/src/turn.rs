@@ -239,7 +239,8 @@ async fn handle_control(
                 .and_then(Value::as_str)
                 .unwrap_or("");
             let input = request.get("input").cloned().unwrap_or_else(|| json!({}));
-            let decision = control::decide_permission(permission_mode, tool_name, &input);
+            let decision =
+                control::decide_permission_with_tools(permission_mode, tool_name, &input, tools);
             jcode_base::logging::info(&format!(
                 "Claude Code permission: {tool_name} -> {} ({})",
                 if decision.allow { "allow" } else { "deny" },
