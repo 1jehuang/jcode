@@ -1091,10 +1091,15 @@ fn run_macos_hotkey_listener() -> Result<()> {
             let cwd = launch.resolved_cwd();
             let mut args = vec!["--spawn-hotkey".to_string(), launch.chord.clone()];
             args.extend(launch.args.clone());
-            let command = TerminalCommand::new(&exe_path, args)
+            let mut command = TerminalCommand::new(&exe_path, args)
                 .fresh_spawn()
                 .kind("hotkey")
                 .spawn_env("JCODE_SPAWN_LABEL", launch.label.clone());
+            // Honor the selected terminal (config > saved preference, the same
+            // value the plist's JCODE_PREFERRED_TERMINAL records) on every press.
+            if let Some(term) = effective_macos_terminal().spawn_candidate() {
+                command = command.preferred_terminal(term);
+            }
             match spawn_command_in_new_terminal_with(&command, &cwd, |cmd| cmd.spawn().map(|_| ()))
             {
                 Ok(true) => {}

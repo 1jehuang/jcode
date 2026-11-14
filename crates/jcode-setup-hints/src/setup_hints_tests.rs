@@ -291,6 +291,7 @@ fn macos_terminal_notice_silent_for_modern_terminals() {
         MacTerminalKind::WezTerm,
         MacTerminalKind::Warp,
         MacTerminalKind::Alacritty,
+        MacTerminalKind::Kitty,
         MacTerminalKind::Vscode,
         MacTerminalKind::Unknown,
     ] {
