@@ -995,6 +995,21 @@ impl OpenRouterProvider {
     ) -> Option<jcode_provider_openrouter::DiskCache> {
         self.load_disk_cache_entry_for_this_profile()
             .filter(|entry| self.model_disk_cache_source_matches(entry))
+            // A catalog saved under a different effective header set (changed
+            // Authorization or routing header) must not be reused; the same
+            // endpoint can serve different models per header. Caches written
+            // before the fingerprint existed carry `None` and stay usable.
+            .filter(|entry| {
+                entry
+                    .source_headers_fingerprint
+                    .as_deref()
+                    .map_or(true, |stored| {
+                        stored
+                            == catalog_fetch::http_header_overrides_fingerprint(
+                                &self.http_header_overrides,
+                            )
+                    })
+            })
     }
 
     /// Load this provider's own model disk cache, ignoring the process-global

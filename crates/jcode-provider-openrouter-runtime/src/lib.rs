@@ -39,7 +39,7 @@ pub use jcode_provider_openrouter::{
 use jcode_provider_openrouter::{
     KIMI_FALLBACK_PROVIDERS, ModelCatalogRefreshState, ModelsCache, ParsedProvider, PinSource,
     ProviderPin, current_unix_secs, known_providers, load_endpoints_disk_cache, parse_model_spec,
-    save_disk_cache_with_source, save_disk_cache_with_source_for_namespace,
+    save_disk_cache_with_source, save_disk_cache_with_source_for_namespace_with_headers,
     save_endpoints_disk_cache,
 };
 use models_catalog_parse::parse_openai_compatible_models_response;
@@ -664,6 +664,16 @@ pub fn maybe_schedule_openai_compatible_profile_catalog_refresh(
         return false;
     }
 
+    // True when this refresh will target the built-in profile endpoint: a
+    // same-named [providers.<id>] block exists but did not redirect it. In that
+    // case the headers must also come from the built-in source (global
+    // [provider] only), never from the user block, so a custom gateway's
+    // private credentials cannot reach the built-in service.
+    let builtin_endpoint =
+        jcode_base::provider_catalog::openai_compatible_profile_by_id(&resolved.id)
+            .and_then(|builtin| normalize_api_base(builtin.api_base))
+            .is_some_and(|builtin_base| builtin_base == resolved.api_base);
+
     let Some(api_base) = normalize_api_base(&resolved.api_base) else {
         finish_profile_catalog_refresh(&resolved.id);
         return false;
@@ -687,6 +697,30 @@ pub fn maybe_schedule_openai_compatible_profile_catalog_refresh(
         return false;
     };
 
+    // Endpoint and headers must come from the same source. When this
+    // refresh targets the built-in profile endpoint (a same-named
+    // [providers.<id>] block did not redirect it), borrowing that block's
+    // headers would send a custom gateway's private credentials to the
+    // built-in service, so only global [provider] overrides apply there.
+    let headers = if builtin_endpoint {
+        resolved_global_http_header_overrides_or_log(
+            &jcode_base::config::config().provider,
+            "[provider]",
+        )
+    } else {
+        resolved_profile_http_header_overrides(
+            &jcode_base::config::config().provider,
+            jcode_base::config::config().providers.get(&resolved.id),
+            &resolved.id,
+        )
+        .unwrap_or_else(|err| {
+            jcode_base::logging::warn(&format!(
+                "Ignoring invalid provider header overrides, using none: {err}"
+            ));
+            HeaderMap::new()
+        })
+    };
+
     let profile_id = resolved.id.clone();
     let display_name = resolved.display_name.clone();
     let previous_fingerprint =
@@ -699,19 +733,7 @@ pub fn maybe_schedule_openai_compatible_profile_catalog_refresh(
             jcode_provider_core::shared_http_client(),
             api_base,
             auth,
-            // Catalog refreshes for named profiles honor the same merged
-            // header overrides as the foreground runtime (profile wins).
-            resolved_profile_http_header_overrides(
-                &jcode_base::config::config().provider,
-                jcode_base::config::config().providers.get(&profile_id),
-                &profile_id,
-            )
-            .unwrap_or_else(|err| {
-                jcode_base::logging::warn(&format!(
-                    "Ignoring invalid provider header overrides, using none: {err}"
-                ));
-                HeaderMap::new()
-            }),
+            headers,
             models_cache,
             Some(profile_id.clone()),
         )
