@@ -136,7 +136,7 @@ async fn reports_live_sessions_and_delivers_the_claimed_message_once() {
     assert!(requests[0].auth.ends_with("Bearer fixture-key"));
     assert_eq!(
         requests[0].body,
-        serde_json::json!({"machine": "laptop", "sessions": [
+        serde_json::json!({"machine": "laptop", "supports_images": true, "sessions": [
             {"session_id": "session_b", "busy": true},
             {"session_id": "session_a", "busy": false}]})
     );
@@ -197,6 +197,38 @@ async fn failed_delivery_is_reported_instead_of_dropped() {
         requests[1].body,
         serde_json::json!({"status": "failed", "error": "that session cannot take a message right now"})
     );
+}
+
+#[tokio::test]
+async fn photo_validation_and_unsupported_host_fail_explicitly_without_text_delivery() {
+    for (data, expected) in [
+        ("aGk=", "does not support photo messages"),
+        ("bad base64", "invalid image base64"),
+    ] {
+        let mut command = message("session_a", "look at this");
+        command["command"]["images"] =
+            serde_json::json!([{ "media_type":"image/png", "data":data }]);
+        let (base, server) = api(vec![(200, command), (200, serde_json::json!({}))]).await;
+        let host = FakeHost {
+            live: vec![live("session_a", false)],
+            ..Default::default()
+        };
+        assert!(
+            run_local_once(&reqwest::Client::new(), &base, "k", "laptop", &host)
+                .await
+                .unwrap()
+        );
+        assert!(host.delivered.lock().unwrap().is_empty());
+        let requests = server.await.unwrap();
+        assert_eq!(requests[1].body["status"], "failed");
+        assert!(
+            requests[1].body["error"]
+                .as_str()
+                .unwrap()
+                .contains(expected)
+        );
+        assert!(!requests[1].body["error"].as_str().unwrap().contains(data));
+    }
 }
 
 #[tokio::test]

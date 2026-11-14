@@ -110,8 +110,31 @@ pub(super) async fn idle_live_agent(
 /// finish rendering the externally started turn.
 pub(super) async fn spawn_tracked_live_turn(
     session_id: &str,
+    agent: OwnedMutexGuard<Agent>,
+    message: String,
+    system_reminder: Option<String>,
+    display_role: Option<crate::session::StoredDisplayRole>,
+    status_detail: Option<String>,
+    swarm: LiveTurnSwarmContext,
+) -> bool {
+    spawn_tracked_live_turn_with_images(
+        session_id,
+        agent,
+        message,
+        Vec::new(),
+        system_reminder,
+        display_role,
+        status_detail,
+        swarm,
+    )
+    .await
+}
+
+pub(super) async fn spawn_tracked_live_turn_with_images(
+    session_id: &str,
     mut agent: OwnedMutexGuard<Agent>,
     message: String,
+    images: Vec<(String, String)>,
     system_reminder: Option<String>,
     display_role: Option<crate::session::StoredDisplayRole>,
     status_detail: Option<String>,
@@ -157,6 +180,17 @@ pub(super) async fn spawn_tracked_live_turn(
         let start_message_index = agent.message_count();
         let pending_queue = agent.soft_interrupt_queue();
         let (result, stop_reason) = catch_live_turn_panic(async {
+            if !images.is_empty() {
+                return super::turn_failover::process_reserved_locked_message_with_server_failover(
+                    &mut agent,
+                    &turn_lease,
+                    &message,
+                    images,
+                    system_reminder,
+                    event_tx.clone(),
+                )
+                .await;
+            }
             process_reserved_locked_context_with_server_failover(
                 &mut agent,
                 &turn_lease,

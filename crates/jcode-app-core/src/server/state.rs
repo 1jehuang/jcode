@@ -1006,8 +1006,29 @@ pub(super) async fn queue_soft_interrupt_for_session(
     queues: &SessionInterruptQueues,
     sessions: &super::SessionAgents,
 ) -> bool {
+    queue_soft_interrupt_with_images_for_session(
+        session_id,
+        content,
+        Vec::new(),
+        urgent,
+        source,
+        queues,
+        sessions,
+    )
+    .await
+}
+
+pub(super) async fn queue_soft_interrupt_with_images_for_session(
+    session_id: &str,
+    content: String,
+    images: Vec<(String, String)>,
+    urgent: bool,
+    source: SoftInterruptSource,
+    queues: &SessionInterruptQueues,
+    sessions: &super::SessionAgents,
+) -> bool {
     if let Some(queue) = queues.read().await.get(session_id).cloned() {
-        return enqueue_soft_interrupt(&queue, content, Vec::new(), urgent, source);
+        return enqueue_soft_interrupt(&queue, content, images, urgent, source);
     }
 
     let queue = {
@@ -1022,7 +1043,7 @@ pub(super) async fn queue_soft_interrupt_for_session(
 
     if let Some(queue) = queue {
         register_session_interrupt_queue(queues, session_id, queue.clone()).await;
-        enqueue_soft_interrupt(&queue, content, Vec::new(), urgent, source)
+        enqueue_soft_interrupt(&queue, content, images, urgent, source)
     } else {
         let session_exists = {
             let guard = sessions.read().await;
@@ -1037,7 +1058,7 @@ pub(super) async fn queue_soft_interrupt_for_session(
             session_id,
             SoftInterruptMessage {
                 content,
-                images: Vec::new(),
+                images,
                 urgent,
                 source,
                 client_id: None,
