@@ -380,6 +380,7 @@ async fn attached_session_defers_spawn_until_detached() {
     let mut parent = Session::create_with_id("pause_parent".into(), None, None);
     parent.save().unwrap();
     let item = ScheduledItem {
+        recurrence: Default::default(),
         id: "paused_spawn".into(),
         scheduled_for: chrono::Utc::now(),
         context: "Deferred task".into(),

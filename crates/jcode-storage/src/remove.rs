@@ -107,7 +107,7 @@ mod tests {
     /// Serialize tests that mutate `KCODE_HOME`. Uses the shared lock
     /// from the crate root so other test modules cannot race on the env.
     fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-        crate::lock_env()
+        crate::test_jcode_home_lock()
     }
 
     #[test]
