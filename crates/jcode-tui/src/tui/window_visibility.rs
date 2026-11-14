@@ -59,6 +59,16 @@ impl Visibility {
 
     /// Layers nest (a tmux pane inside a compositor window), so one layer
     /// hiding the pane is enough, and one layer vouching for it is not.
+    /// A hidden outer layer already decides the result. Avoid compositor IPC
+    /// and process-ancestry reads for a detached/non-current tmux pane.
+    fn combine_with(self, other: impl FnOnce() -> Self) -> Self {
+        if self == Visibility::Hidden {
+            self
+        } else {
+            self.combine(other())
+        }
+    }
+
     fn combine(self, other: Self) -> Self {
         match (self, other) {
             (Visibility::Hidden, _) | (_, Visibility::Hidden) => Visibility::Hidden,
@@ -171,7 +181,7 @@ fn probe() -> Visibility {
             _ => Visibility::Unknown,
         };
     }
-    probe_tmux().combine(probe_niri())
+    probe_tmux().combine_with(probe_niri)
 }
 
 // --- tmux -----------------------------------------------------------------
@@ -346,6 +356,22 @@ fn parse_niri(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn lazy_visibility_combination_matches_all_layers_without_redundant_probes() {
+        use std::cell::Cell;
+        for first in [Visibility::Unknown, Visibility::Visible, Visibility::Hidden] {
+            for second in [Visibility::Unknown, Visibility::Visible, Visibility::Hidden] {
+                let calls = Cell::new(0);
+                let actual = first.combine_with(|| {
+                    calls.set(calls.get() + 1);
+                    second
+                });
+                assert_eq!(actual, first.combine(second));
+                assert_eq!(calls.get(), usize::from(first != Visibility::Hidden));
+            }
+        }
+    }
 
     #[test]
     fn layers_combine_towards_hidden_and_unknown_stays_unknown() {
