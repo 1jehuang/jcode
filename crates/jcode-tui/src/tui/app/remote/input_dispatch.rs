@@ -25,6 +25,14 @@ pub(in crate::tui::app) async fn begin_remote_send(
     // this as an execution retry. Do this at the shared send boundary so both
     // fallback resends and same-route retries behave identically.
     const EXECUTION_RETRY_PREFIX: &str = "<system-reminder>Retry the interrupted execution of the previous turn. Continue from the current conversation and completed tool results without repeating completed work.</system-reminder>\n\n";
+    let recovery = app.cloud_recovery_reminder();
+    let system_reminder = match (system_reminder, recovery.as_ref()) {
+        (Some(reminder), Some(recovery)) => Some(format!("{reminder}\n\n{recovery}")),
+        (None, Some(recovery)) => Some(recovery.clone()),
+        (reminder, None) => reminder,
+    };
+    // Classify the final wire reminder, including cloud recovery context. A
+    // cloud-only continuation otherwise bypasses the execution-retry marker.
     let system_reminder = system_reminder.map(|reminder| {
         if retry_attempts > 0
             && is_system
@@ -37,12 +45,6 @@ pub(in crate::tui::app) async fn begin_remote_send(
             reminder
         }
     });
-    let recovery = app.cloud_recovery_reminder();
-    let system_reminder = match (system_reminder, recovery.as_ref()) {
-        (Some(reminder), Some(recovery)) => Some(format!("{reminder}\n\n{recovery}")),
-        (None, Some(recovery)) => Some(recovery.clone()),
-        (reminder, None) => reminder,
-    };
     let msg_id = remote
         .send_message_with_images_reminder_and_skill(
             content.clone(),
@@ -189,9 +191,8 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
         title: None,
         tool_data: None,
     });
-    let _ = app
-        .begin_remote_send(remote, prepared.expanded, prepared.images, false)
-        .await;
+    app.begin_remote_send(remote, prepared.expanded, prepared.images, false)
+        .await?;
     Ok(())
 }
 
@@ -890,13 +891,12 @@ mod ssh_slash_tests {
                 .unwrap();
                 assert!(app.pending_prompt_before_history.is_none(), "{command}");
                 assert_eq!(remote.next_request_id_for_test(), next_id);
-                assert!(
-                    app.display_messages()
-                        .last()
-                        .unwrap()
-                        .content
-                        .contains("SSH")
-                );
+                assert!(app
+                    .display_messages()
+                    .last()
+                    .unwrap()
+                    .content
+                    .contains("SSH"));
             }
             for command in [
                 "/future remote skill /context",
