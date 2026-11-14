@@ -54,39 +54,44 @@ impl super::MultiProvider {
     }
 
     pub(super) fn set_unprefixed_model(&self, model: &str) -> anyhow::Result<()> {
+        let trimmed = model.trim();
         if self.active_provider() == super::ActiveProvider::Antigravity
-            && self.antigravity_serves_model(model)
+            && self.antigravity_serves_model(trimmed)
         {
-            return self.set_model_on_provider(super::ActiveProvider::Antigravity, model);
+            return self.set_model_on_provider(super::ActiveProvider::Antigravity, trimmed);
         }
-        if crate::provider::antigravity::is_antigravity_exclusive_model(model)
-            && self.reconcile_auth_if_provider_missing(super::ActiveProvider::Antigravity)
-        {
-            return self.set_model_on_provider(super::ActiveProvider::Antigravity, model);
+        if crate::provider::antigravity::is_antigravity_exclusive_model(trimmed) {
+            if !self.reconcile_auth_if_provider_missing(super::ActiveProvider::Antigravity) {
+                anyhow::bail!(
+                    "Antigravity credentials not available for model '{}'. Run `jcode login --provider antigravity` first.",
+                    trimmed
+                );
+            }
+            return self.set_model_on_provider(super::ActiveProvider::Antigravity, trimmed);
         }
 
         // Detect which provider an unprefixed model belongs to.
-        let target_provider = super::provider_for_model(model);
+        let target_provider = super::provider_for_model(trimmed);
         if let Some(target_provider) = target_provider
             && let Some(target) = super::provider_from_model_key(target_provider)
         {
             if !self.reconcile_auth_if_provider_missing(target)
                 && self.antigravity_provider().is_some()
-                && self.antigravity_serves_model(model)
+                && self.antigravity_serves_model(trimmed)
             {
-                return self.set_model_on_provider(super::ActiveProvider::Antigravity, model);
+                return self.set_model_on_provider(super::ActiveProvider::Antigravity, trimmed);
             }
-            self.set_model_on_provider(target, model)
-        } else if let Some(profile) = self.openai_compatible_profile_owning_model(model) {
+            self.set_model_on_provider(target, trimmed)
+        } else if let Some(profile) = self.openai_compatible_profile_owning_model(trimmed) {
             // Bare ids from an OpenAI-compatible catalog (`celeris-1`,
             // `mimo-v2.5`, ...) match none of the built-in model-name
             // heuristics. Without this, `/model <bare-id>` fell through to
             // whichever provider happened to be active and failed with a
             // misleading "not supported by <active provider>" error.
-            self.set_model_on_openai_compatible_profile(profile, model)
+            self.set_model_on_openai_compatible_profile(profile, trimmed)
         } else {
             // Unknown model - try current provider.
-            self.set_model_on_provider(self.active_provider(), model)
+            self.set_model_on_provider(self.active_provider(), trimmed)
         }
     }
 }

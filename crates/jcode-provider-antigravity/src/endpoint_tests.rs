@@ -379,3 +379,37 @@ fn catalog_cli_version_and_legacy_non_cli_checks_invalidate_stale_caches() {
     catalog.models.push(carbon_model);
     assert!(catalog_has_cli_models(&catalog));
 }
+
+#[test]
+fn model_aliases_and_exclusivity_match_ascii_case_insensitively() {
+    for (input, expected) in [
+        ("CARBON-LOW", "gemini-4-carbon-low"),
+        ("Carbon", "gemini-4-carbon-medium"),
+        ("Gemini-4-Argon", "gemini-4-argon-medium"),
+        ("ARGON-HIGH", "gemini-4-argon-high"),
+        ("GEMINI-3.8-FLASH", "gemini-3.8-flash-medium"),
+        ("GEMINI-3.1-PRO-HIGH", "gemini-pro-agent"),
+        ("GEMINI-4-CARBON-HIGH", "gemini-4-carbon-high"),
+        ("GPT-OSS-120B-MEDIUM", "gpt-oss-120b-medium"),
+    ] {
+        assert_eq!(remap_unsupported_model(input), expected, "input={input}");
+        assert!(is_known_model(input), "input={input}");
+        assert!(is_antigravity_exclusive_model(input), "input={input}");
+    }
+
+    for (shared, canonical) in [
+        ("CLAUDE-SONNET-4-6", "claude-sonnet-4-6"),
+        ("Gemini-3-Flash", "gemini-3-flash"),
+    ] {
+        assert_eq!(remap_unsupported_model(shared), canonical);
+        assert!(is_known_model(shared));
+        assert!(!is_antigravity_exclusive_model(shared));
+    }
+
+    assert_eq!(
+        remap_unsupported_model("Gemini-5-Xenon-Ultra"),
+        "Gemini-5-Xenon-Ultra"
+    );
+    assert!(!is_known_model("Gemini-5-Xenon-Ultra"));
+    assert!(!is_antigravity_exclusive_model("Gemini-5-Xenon-Ultra"));
+}

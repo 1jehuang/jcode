@@ -48,7 +48,9 @@ const VERSION_ENV: &str = "JCODE_ANTIGRAVITY_VERSION";
 pub const ANTIGRAVITY_VERSION: &str = "1.5.5";
 const AGY_BINARY_NAME: &str = "agy";
 const AGY_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
-const AGY_PROBE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const AGY_PROBE_INITIAL_POLL_INTERVAL: Duration = Duration::from_millis(1);
+const AGY_PROBE_MAX_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const AGY_PROBE_RECV_FLOOR: Duration = Duration::from_millis(25);
 pub const X_GOOG_API_CLIENT: &str = "google-cloud-sdk vscode_cloudshelleditor/0.1";
 const CATALOG_REFRESH_TTL_HOURS: i64 = 6;
 
@@ -354,11 +356,13 @@ pub fn probe_agy_version_command(
     });
 
     let deadline = start + timeout;
+    let mut poll_interval = AGY_PROBE_INITIAL_POLL_INTERVAL;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
-                if Instant::now() >= deadline {
+                let now = Instant::now();
+                if now >= deadline {
                     if child.kill().is_ok() {
                         match child.wait() {
                             Ok(_) | Err(_) => {}
@@ -366,7 +370,8 @@ pub fn probe_agy_version_command(
                     }
                     return None;
                 }
-                std::thread::sleep(AGY_PROBE_POLL_INTERVAL);
+                std::thread::sleep(poll_interval.min(deadline.saturating_duration_since(now)));
+                poll_interval = (poll_interval * 2).min(AGY_PROBE_MAX_POLL_INTERVAL);
             }
             Err(_) => return None,
         }
@@ -377,7 +382,7 @@ pub fn probe_agy_version_command(
     }
 
     let remaining = deadline.saturating_duration_since(Instant::now());
-    match rx.recv_timeout(remaining.max(Duration::from_millis(5))) {
+    match rx.recv_timeout(remaining.max(AGY_PROBE_RECV_FLOOR)) {
         Ok(line) => parse_agy_version_output(&line),
         Err(_) => None,
     }
@@ -487,9 +492,14 @@ pub fn merge_antigravity_model_ids(models: impl IntoIterator<Item = String>) -> 
 
 pub fn is_known_model(model: &str) -> bool {
     let normalized = model.trim();
-    !normalized.is_empty()
-        && (AVAILABLE_MODELS.contains(&normalized)
-            || AVAILABLE_MODELS.contains(&remap_unsupported_model(normalized)))
+    if normalized.is_empty() {
+        return false;
+    }
+    let remapped = remap_unsupported_model(normalized);
+    remapped == "gemini-pro-agent"
+        || AVAILABLE_MODELS.iter().any(|known| {
+            known.eq_ignore_ascii_case(normalized) || known.eq_ignore_ascii_case(remapped)
+        })
 }
 
 /// Whether `model` is an Antigravity-only model id (or alias) that is not
@@ -783,18 +793,38 @@ pub fn is_pseudo_tool_call_turn(response: &CodeAssistGenerateResponse) -> bool {
 /// the same requests, so it is the working route to the High Pro model. Map the
 /// broken id onto it so users who pick "Gemini 3.1 Pro (High)" get a working
 /// model instead of a hard 400.
+const MODEL_REMAPS: &[(&str, &str)] = &[
+    ("gemini-3.1-pro-high", "gemini-pro-agent"),
+    ("gemini-pro-agent", "gemini-pro-agent"),
+    ("gemini-4-carbon", "gemini-4-carbon-medium"),
+    ("carbon", "gemini-4-carbon-medium"),
+    ("carbon-medium", "gemini-4-carbon-medium"),
+    ("carbon-high", "gemini-4-carbon-high"),
+    ("carbon-low", "gemini-4-carbon-low"),
+    ("gemini-4-argon", "gemini-4-argon-medium"),
+    ("argon", "gemini-4-argon-medium"),
+    ("argon-medium", "gemini-4-argon-medium"),
+    ("argon-high", "gemini-4-argon-high"),
+    ("argon-low", "gemini-4-argon-low"),
+    ("gemini-3.8-flash", "gemini-3.8-flash-medium"),
+];
+
 pub fn remap_unsupported_model(model: &str) -> &str {
-    match model.trim() {
-        "gemini-3.1-pro-high" => "gemini-pro-agent",
-        "gemini-4-carbon" | "carbon" | "carbon-medium" => "gemini-4-carbon-medium",
-        "carbon-high" => "gemini-4-carbon-high",
-        "carbon-low" => "gemini-4-carbon-low",
-        "gemini-4-argon" | "argon" | "argon-medium" => "gemini-4-argon-medium",
-        "argon-high" => "gemini-4-argon-high",
-        "argon-low" => "gemini-4-argon-low",
-        "gemini-3.8-flash" => "gemini-3.8-flash-medium",
-        other => other,
+    let trimmed = model.trim();
+    if let Some((_, canonical)) = MODEL_REMAPS
+        .iter()
+        .find(|(alias, _)| alias.eq_ignore_ascii_case(trimmed))
+    {
+        return canonical;
     }
+    if let Some(known) = AVAILABLE_MODELS
+        .iter()
+        .copied()
+        .find(|known| known.eq_ignore_ascii_case(trimmed))
+    {
+        return known;
+    }
+    trimmed
 }
 
 /// Whether a resolved Antigravity model id targets a Gemini model.

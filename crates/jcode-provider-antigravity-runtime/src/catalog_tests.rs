@@ -1,9 +1,13 @@
+use super::antigravity_tests::TestEnvGuard;
 use super::*;
 use chrono::Utc;
 use jcode_provider_antigravity::{
-    FetchAvailableModelsResponse, antigravity_version, parse_fetch_available_models_response,
+    FetchAvailableModelsResponse, parse_fetch_available_models_response,
 };
 use jcode_provider_core::Provider;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn test_catalog_entry(id: &str, available: bool) -> CatalogModel {
     CatalogModel {
@@ -22,13 +26,10 @@ fn test_catalog_entry(id: &str, available: bool) -> CatalogModel {
 
 #[test]
 fn load_persisted_catalog_invalidates_unstamped_mismatched_and_legacy_non_cli_caches() {
-    let _guard = jcode_base::storage::lock_test_env();
-    let temp = tempfile::TempDir::new().expect("temp dir");
-    let previous = std::env::var_os("JCODE_HOME");
-    jcode_base::env::set_var("JCODE_HOME", temp.path());
+    let _env = TestEnvGuard::acquire();
+    jcode_base::env::set_var("JCODE_ANTIGRAVITY_VERSION", "1.5.5");
 
     let path = jcode_base::provider::antigravity::persisted_catalog_path().expect("catalog path");
-    let active_version = antigravity_version();
 
     // 1. Unstamped legacy cache (`cli_version: None`) must be invalidated.
     jcode_base::storage::write_json(
@@ -68,7 +69,7 @@ fn load_persisted_catalog_invalidates_unstamped_mismatched_and_legacy_non_cli_ca
             fetched_at_rfc3339: Utc::now().to_rfc3339(),
             default_model_id: None,
             endpoint: None,
-            cli_version: Some(active_version.clone()),
+            cli_version: Some("1.5.5".to_string()),
         },
     )
     .expect("write legacy tiered catalog");
@@ -84,16 +85,11 @@ fn load_persisted_catalog_invalidates_unstamped_mismatched_and_legacy_non_cli_ca
     });
     let loaded = jcode_base::provider::antigravity::load_persisted_catalog()
         .expect("current CLI catalog must load");
-    assert_eq!(loaded.cli_version.as_deref(), Some(active_version.as_str()));
+    assert_eq!(loaded.cli_version.as_deref(), Some("1.5.5"));
     assert_eq!(
         loaded.default_model_id.as_deref(),
         Some("gemini-4-carbon-low")
     );
-
-    match previous {
-        Some(prev) => jcode_base::env::set_var("JCODE_HOME", prev),
-        None => jcode_base::env::remove_var("JCODE_HOME"),
-    }
 }
 
 #[test]
@@ -119,12 +115,12 @@ fn future_catalog_model_absent_from_static_fallbacks_is_discovered_in_switching_
     .expect("parse future catalog response");
 
     let snapshot = parse_fetch_available_models_response(&response);
-    let provider = AntigravityProvider {
-        client: reqwest::Client::new(),
-        model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
-        fetched_catalog: Arc::new(RwLock::new(snapshot.models)),
-        backend_default_model: Arc::new(RwLock::new(snapshot.default_model_id)),
-    };
+    let provider = AntigravityProvider::empty_for_tests();
+    *provider.fetched_catalog.write().expect("catalog lock") = snapshot.models;
+    *provider
+        .backend_default_model
+        .write()
+        .expect("default lock") = snapshot.default_model_id;
 
     assert!(
         provider
@@ -153,7 +149,7 @@ fn future_catalog_model_absent_from_static_fallbacks_is_discovered_in_switching_
 
 #[test]
 fn model_routes_marks_omitted_static_fallbacks_unverified_in_sparse_catalog_and_preserves_false() {
-    let provider = AntigravityProvider::new();
+    let provider = AntigravityProvider::empty_for_tests();
     *provider.fetched_catalog.write().expect("catalog lock") = vec![
         CatalogModel {
             id: "gemini-3-flash".to_string(),
@@ -245,7 +241,7 @@ fn model_routes_marks_omitted_static_fallbacks_unverified_in_sparse_catalog_and_
 
 #[test]
 fn model_routes_reconciles_alias_availability_by_canonical_request_id() {
-    let provider = AntigravityProvider::new();
+    let provider = AntigravityProvider::empty_for_tests();
     *provider.fetched_catalog.write().expect("catalog lock") = vec![
         CatalogModel {
             id: "gemini-4-carbon".to_string(),
@@ -316,23 +312,23 @@ fn model_routes_reconciles_alias_availability_by_canonical_request_id() {
 
 #[test]
 fn antigravity_context_window_resolves_carbon_and_argon_defaults_and_catalog_fallback() {
-    let provider = AntigravityProvider {
-        client: reqwest::Client::new(),
-        model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
-        fetched_catalog: Arc::new(RwLock::new(vec![CatalogModel {
-            id: "chat_20706".to_string(),
-            display_name: None,
-            reset_time: None,
-            tag_title: None,
-            model_provider: None,
-            max_tokens: Some(16_384),
-            max_output_tokens: None,
-            recommended: false,
-            available: true,
-            remaining_fraction_milli: Some(1000),
-        }])),
-        backend_default_model: Arc::new(RwLock::new(Some("gemini-4-carbon".to_string()))),
-    };
+    let provider = AntigravityProvider::empty_for_tests();
+    *provider.fetched_catalog.write().expect("catalog lock") = vec![CatalogModel {
+        id: "chat_20706".to_string(),
+        display_name: None,
+        reset_time: None,
+        tag_title: None,
+        model_provider: None,
+        max_tokens: Some(16_384),
+        max_output_tokens: None,
+        recommended: false,
+        available: true,
+        remaining_fraction_milli: Some(1000),
+    }];
+    *provider
+        .backend_default_model
+        .write()
+        .expect("default lock") = Some("gemini-4-carbon".to_string());
 
     assert_eq!(
         provider.resolve_model_for_request("default"),
@@ -359,16 +355,16 @@ fn resolve_model_for_request_skips_alias_when_canonical_target_is_unavailable() 
     // Gemini-preferred fallback branch: available `gemini-4-carbon` alias whose
     // canonical `gemini-4-carbon-medium` target is unavailable must be skipped
     // in favor of available `gemini-3-flash`.
-    let provider = AntigravityProvider {
-        client: reqwest::Client::new(),
-        model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
-        fetched_catalog: Arc::new(RwLock::new(vec![
-            test_catalog_entry("gemini-4-carbon", true),
-            test_catalog_entry("gemini-4-carbon-medium", false),
-            test_catalog_entry("gemini-3-flash", true),
-        ])),
-        backend_default_model: Arc::new(RwLock::new(Some("gemini-4-carbon".to_string()))),
-    };
+    let provider = AntigravityProvider::empty_for_tests();
+    *provider.fetched_catalog.write().expect("catalog lock") = vec![
+        test_catalog_entry("gemini-4-carbon", true),
+        test_catalog_entry("gemini-4-carbon-medium", false),
+        test_catalog_entry("gemini-3-flash", true),
+    ];
+    *provider
+        .backend_default_model
+        .write()
+        .expect("default lock") = Some("gemini-4-carbon".to_string());
     assert_eq!(
         provider.resolve_model_for_request("default"),
         "gemini-3-flash"
@@ -395,4 +391,345 @@ fn resolve_model_for_request_skips_alias_when_canonical_target_is_unavailable() 
         provider.resolve_model_for_request(""),
         "gpt-oss-120b-medium"
     );
+}
+
+struct MockCatalogServer {
+    base_url: String,
+    fetch_models_hits: Arc<AtomicUsize>,
+    last_user_agent: Arc<Mutex<Option<String>>>,
+    next_response: Arc<Mutex<(u16, String)>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl MockCatalogServer {
+    async fn start(initial_status: u16, initial_body: String) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock catalog server");
+        let addr = listener.local_addr().expect("local addr");
+        let fetch_models_hits = Arc::new(AtomicUsize::new(0));
+        let last_user_agent = Arc::new(Mutex::new(None));
+        let next_response = Arc::new(Mutex::new((initial_status, initial_body)));
+
+        let hits_clone = Arc::clone(&fetch_models_hits);
+        let ua_clone = Arc::clone(&last_user_agent);
+        let resp_clone = Arc::clone(&next_response);
+        let task = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let hits = Arc::clone(&hits_clone);
+                let ua = Arc::clone(&ua_clone);
+                let resp = Arc::clone(&resp_clone);
+                tokio::spawn(async move {
+                    let mut buf = Vec::with_capacity(2048);
+                    let mut chunk = [0_u8; 1024];
+                    let header_end = loop {
+                        match stream.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => {
+                                buf.extend_from_slice(&chunk[..n]);
+                                if let Some(pos) =
+                                    buf.windows(4).position(|window| window == b"\r\n\r\n")
+                                {
+                                    break pos + 4;
+                                }
+                            }
+                        }
+                    };
+
+                    let header_text = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+                    let content_length = header_text
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    while buf.len() < header_end + content_length {
+                        match stream.read(&mut chunk).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+
+                    let request_line = header_text.lines().next().unwrap_or("");
+                    let (status, body) = if request_line.contains("loadCodeAssist") {
+                        (
+                            200,
+                            r#"{"cloudaicompanionProject":"mock-project"}"#.to_string(),
+                        )
+                    } else {
+                        for line in header_text.lines() {
+                            if let Some((name, value)) = line.split_once(':')
+                                && name.eq_ignore_ascii_case("user-agent")
+                            {
+                                *ua.lock().expect("ua lock") = Some(value.trim().to_string());
+                            }
+                        }
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        resp.lock().expect("response lock").clone()
+                    };
+
+                    let reason = if status == 200 {
+                        "OK"
+                    } else {
+                        "Internal Server Error"
+                    };
+                    let raw = format!(
+                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(raw.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+
+        Self {
+            base_url: format!("http://{addr}"),
+            fetch_models_hits,
+            last_user_agent,
+            next_response,
+            task,
+        }
+    }
+
+    fn set_response(&self, status: u16, body: impl Into<String>) {
+        *self.next_response.lock().expect("response lock") = (status, body.into());
+    }
+
+    fn hits(&self) -> usize {
+        self.fetch_models_hits.load(Ordering::SeqCst)
+    }
+
+    fn reset_hits(&self) {
+        self.fetch_models_hits.store(0, Ordering::SeqCst);
+    }
+}
+
+impl Drop for MockCatalogServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+#[test]
+fn live_catalog_discovery_handles_future_models_fresh_cache_forced_refresh_and_failures() {
+    let _env = TestEnvGuard::acquire();
+    jcode_base::env::set_var("JCODE_ANTIGRAVITY_VERSION", "1.5.5");
+    jcode_base::auth::antigravity::save_tokens(&jcode_base::auth::antigravity::AntigravityTokens {
+        access_token: "test-antigravity-access-token".to_string(),
+        refresh_token: "test-antigravity-refresh-token".to_string(),
+        expires_at: Utc::now().timestamp_millis() + 3_600_000,
+        email: Some("tester@example.com".to_string()),
+        project_id: Some("test-project".to_string()),
+    })
+    .expect("save test antigravity tokens");
+
+    assert!(
+        !AVAILABLE_MODELS.contains(&"gemini-5-xenon-ultra")
+            && !AVAILABLE_MODELS.contains(&"gemini-5-radon-pro")
+    );
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+
+    runtime.block_on(async {
+        let initial_payload = serde_json::json!({
+            "defaultAgentModelId": "gemini-5-xenon-ultra",
+            "commandModelIds": ["gemini-4-carbon-low"],
+            "models": {
+                "gemini-5-xenon-ultra": {
+                    "displayName": "Gemini 5 Xenon Ultra",
+                    "quotaInfo": { "remainingFraction": 0.95, "resetTime": "2026-12-01T00:00:00Z" },
+                    "recommended": true,
+                    "maxTokens": 2_000_000,
+                    "maxOutputTokens": 65_536,
+                    "modelProvider": "MODEL_PROVIDER_GOOGLE"
+                },
+                "gemini-4-carbon-low": {
+                    "displayName": "Gemini 4 Carbon Low",
+                    "quotaInfo": { "remainingFraction": 1.0 },
+                    "recommended": false,
+                    "maxTokens": 1_000_000,
+                    "modelProvider": "MODEL_PROVIDER_GOOGLE"
+                }
+            }
+        })
+        .to_string();
+
+        let server = MockCatalogServer::start(200, initial_payload).await;
+        jcode_base::env::set_var("JCODE_ANTIGRAVITY_ENDPOINT", &server.base_url);
+
+        // (a) Cold provider discovers future model over HTTP and exposes it in
+        // switching lists and picker routes.
+        let provider = AntigravityProvider::new();
+        assert!(provider.model_capabilities_need_refresh());
+        assert_eq!(server.hits(), 0);
+
+        provider
+            .prefetch_models()
+            .await
+            .expect("cold prefetch should succeed");
+        assert_eq!(server.hits(), 1);
+        assert!(!provider.model_capabilities_need_refresh());
+        let observed_ua = server
+            .last_user_agent
+            .lock()
+            .expect("ua lock")
+            .clone()
+            .expect("captured user-agent");
+        assert!(
+            observed_ua.starts_with("antigravity/cli/1.5.5 "),
+            "unexpected User-Agent: {observed_ua}"
+        );
+        assert!(
+            provider
+                .available_models_for_switching()
+                .contains(&"gemini-5-xenon-ultra".to_string())
+        );
+        assert_eq!(
+            provider.resolve_model_for_request("default"),
+            "gemini-5-xenon-ultra"
+        );
+        let xenon_route = provider
+            .model_routes()
+            .into_iter()
+            .find(|route| route.model == "gemini-5-xenon-ultra")
+            .expect("gemini-5-xenon-ultra route");
+        assert!(xenon_route.available);
+        assert!(xenon_route.detail.contains("Gemini 5 Xenon Ultra"));
+
+        // (b) `prefetch_models` makes 0 HTTP requests while cache is fresh (both
+        // warm in-memory, newly constructed from disk, and empty-memory seeded
+        // from fresh disk cache), whereas `refresh_model_catalog` bypasses fresh
+        // caches and clears a removed `defaultAgentModelId`.
+        let updated_payload = serde_json::json!({
+            "models": {
+                "gemini-5-xenon-ultra": {
+                    "displayName": "Gemini 5 Xenon Ultra",
+                    "quotaInfo": { "remainingFraction": 0.80 },
+                    "recommended": true,
+                    "maxTokens": 2_000_000,
+                    "modelProvider": "MODEL_PROVIDER_GOOGLE"
+                },
+                "gemini-5-radon-pro": {
+                    "displayName": "Gemini 5 Radon Pro",
+                    "quotaInfo": { "remainingFraction": 1.0 },
+                    "recommended": true,
+                    "maxTokens": 1_500_000,
+                    "modelProvider": "MODEL_PROVIDER_GOOGLE"
+                },
+                "gemini-4-carbon-low": {
+                    "displayName": "Gemini 4 Carbon Low",
+                    "quotaInfo": { "remainingFraction": 1.0 },
+                    "recommended": false,
+                    "maxTokens": 1_000_000,
+                    "modelProvider": "MODEL_PROVIDER_GOOGLE"
+                }
+            }
+        })
+        .to_string();
+        server.set_response(200, updated_payload);
+        server.reset_hits();
+
+        provider
+            .prefetch_models()
+            .await
+            .expect("warm prefetch should skip network");
+        assert_eq!(
+            server.hits(),
+            0,
+            "warm in-memory prefetch must do 0 HTTP requests"
+        );
+        assert!(
+            !provider
+                .available_models_for_switching()
+                .contains(&"gemini-5-radon-pro".to_string())
+        );
+
+        let disk_seeded = AntigravityProvider::new();
+        assert!(!disk_seeded.model_capabilities_need_refresh());
+        disk_seeded
+            .prefetch_models()
+            .await
+            .expect("disk-seeded prefetch should skip network");
+        assert_eq!(
+            server.hits(),
+            0,
+            "disk-seeded prefetch must do 0 HTTP requests"
+        );
+
+        let empty_mem = AntigravityProvider::empty_for_tests();
+        empty_mem
+            .prefetch_models()
+            .await
+            .expect("empty-memory prefetch should seed from fresh disk cache");
+        assert_eq!(
+            server.hits(),
+            0,
+            "fresh disk cache must satisfy empty-memory prefetch"
+        );
+        assert!(
+            empty_mem
+                .available_models_for_switching()
+                .contains(&"gemini-5-xenon-ultra".to_string())
+        );
+
+        let summary = provider
+            .refresh_model_catalog()
+            .await
+            .expect("explicit refresh must bypass fresh cache");
+        assert!(server.hits() >= 1, "explicit refresh must hit mock server");
+        assert!(summary.models_added >= 1);
+        assert!(
+            provider
+                .available_models_for_switching()
+                .contains(&"gemini-5-radon-pro".to_string())
+        );
+        assert_eq!(
+            provider.backend_default_model(),
+            None,
+            "omitted defaultAgentModelId must clear stale backend_default_model"
+        );
+
+        // (c) HTTP 500, HTTP 200 `{}` (empty catalog), and malformed JSON on
+        // explicit refresh all return `Err` and preserve the last-good in-memory
+        // and persisted catalogs + picker routes.
+        let expected_switching = provider.available_models_for_switching();
+        let expected_routes = provider.model_routes();
+        let expected_disk = jcode_base::provider::antigravity::load_persisted_catalog()
+            .expect("persisted catalog after refresh");
+
+        for (label, status, body) in [
+            ("HTTP 500", 500_u16, r#"{"error":"backend outage"}"#),
+            ("empty JSON object", 200_u16, "{}"),
+            ("malformed JSON", 200_u16, "{not-valid-json"),
+        ] {
+            server.set_response(status, body);
+            assert!(
+                provider.refresh_model_catalog().await.is_err(),
+                "{label} must fail explicit refresh"
+            );
+            assert_eq!(
+                provider.available_models_for_switching(),
+                expected_switching,
+                "{label} must preserve switching models"
+            );
+            assert_eq!(
+                provider.model_routes(),
+                expected_routes,
+                "{label} must preserve picker routes"
+            );
+            let disk_after = jcode_base::provider::antigravity::load_persisted_catalog()
+                .expect("persisted catalog must survive failure");
+            assert_eq!(
+                disk_after.models, expected_disk.models,
+                "{label} must preserve persisted disk catalog"
+            );
+        }
+    });
 }

@@ -342,3 +342,112 @@ fn active_antigravity_keeps_precedence_for_unprefixed_known_models_and_explicit_
         assert_eq!(provider.model(), "gemini-5-xenon-ultra");
     });
 }
+
+#[test]
+fn antigravity_exclusive_models_classify_to_antigravity_and_refuse_misrouting_without_credentials()
+{
+    with_clean_provider_test_env(|| {
+        let rt = enter_test_runtime();
+        let _runtime_guard = rt.enter();
+
+        for exclusive in [
+            "gemini-4-carbon-low",
+            "gemini-4-carbon-medium",
+            "gemini-4-carbon-high",
+            "gemini-4-argon-low",
+            "gemini-4-argon-medium",
+            "gemini-4-argon-high",
+            "gemini-3.8-flash-high",
+            "gpt-oss-120b-medium",
+            "claude-opus-4-6-thinking",
+            "carbon-low",
+            "argon-high",
+            "CARBON-LOW",
+            "Gemini-4-Argon",
+        ] {
+            assert_eq!(
+                provider_for_model(exclusive),
+                Some("antigravity"),
+                "{exclusive} must classify to antigravity before generic prefixes"
+            );
+            assert!(
+                !crate::provider::remote_model_is_server_copilot_only(exclusive),
+                "{exclusive} must not be classified as server-copilot-only"
+            );
+        }
+
+        // Shared IDs keep their standalone primary providers.
+        assert_eq!(provider_for_model("claude-sonnet-4-6"), Some("claude"));
+        assert_eq!(provider_for_model("gemini-3-flash"), Some("gemini"));
+
+        // Simplified picker routes classify Antigravity-exclusive models under
+        // Antigravity (https), reflecting Antigravity credential availability.
+        let simplified = crate::provider::simplified_model_routes_for_picker(
+            "OpenAI",
+            "gpt-5.4",
+            vec![
+                "gemini-4-carbon-low".to_string(),
+                "gpt-oss-120b-medium".to_string(),
+                "carbon-low".to_string(),
+            ],
+        );
+        assert_eq!(simplified.len(), 3);
+        for route in &simplified {
+            assert_eq!(route.provider, "Antigravity");
+            assert_eq!(route.api_method, "https");
+            assert!(
+                !route.available,
+                "route for {} should be unavailable without Antigravity auth",
+                route.model
+            );
+        }
+
+        // Configure Gemini, Claude, and OpenAI runtimes while leaving Antigravity
+        // unconfigured: an unprefixed Antigravity-exclusive model must fail with
+        // an explicit Antigravity credential error instead of misrouting to
+        // standalone Gemini/Claude/OpenAI.
+        let provider = test_multi_provider_with_cursor();
+        *provider
+            .anthropic
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(test_anthropic_runtime());
+        *provider
+            .openai
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(test_openai_runtime());
+        *provider
+            .gemini
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(test_gemini_runtime());
+        *provider
+            .antigravity
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        provider.set_active_provider(ActiveProvider::OpenAI);
+
+        for exclusive in [
+            "gemini-4-carbon-low",
+            "gemini-4-argon-high",
+            "gpt-oss-120b-medium",
+            "claude-opus-4-6-thinking",
+            "carbon-low",
+            "GEMINI-4-CARBON-HIGH",
+        ] {
+            let err = provider
+                .set_model(exclusive)
+                .expect_err("exclusive Antigravity model must not fall through to other providers");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(&format!(
+                    "Antigravity credentials not available for model '{exclusive}'"
+                )),
+                "unexpected error for {exclusive}: {msg}"
+            );
+            assert_eq!(
+                provider.active_provider(),
+                ActiveProvider::OpenAI,
+                "failed switch for {exclusive} must not change active provider"
+            );
+        }
+    });
+}
