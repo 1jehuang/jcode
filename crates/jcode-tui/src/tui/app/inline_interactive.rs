@@ -703,6 +703,7 @@ impl App {
             && self.remote_provider_name.as_deref() != Some(name.as_str())
         {
             self.remote_available_service_tiers = None;
+            self.remote_server_context = None;
             self.remote_provider_name = Some(name);
             provider_meta_changed = true;
             provider_name_changed = true;

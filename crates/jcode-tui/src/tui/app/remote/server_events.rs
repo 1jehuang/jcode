@@ -1885,6 +1885,7 @@ fn handle_server_event_inner(
             app.note_client_focus(true);
             let session_changed = prev_session_id.as_deref() != Some(session_id.as_str());
             if session_changed {
+                app.remote_server_context = None;
                 // Drop the previous session's snapshot and polling deadlines.
                 // Otherwise attach can inherit a 1s local / 2s SSH todo delay.
                 // A resume sends its authoritative todo snapshot before the
@@ -2742,6 +2743,10 @@ fn handle_server_event_inner(
                     std::mem::take(&mut app.remote_session_facts_provisional);
                 let model_actually_changed = !had_provisional_facts
                     && app.remote_provider_model.as_deref() != Some(model.as_str());
+                // An older server may omit the window on a route switch.
+                if context_window.is_none() {
+                    app.remote_server_context = None;
+                }
                 app.update_context_limit_for_model(&model, context_window);
                 app.remote_provider_model = Some(model.clone());
                 app.clear_remote_startup_phase();
