@@ -683,32 +683,56 @@ fn fold_all_of(map: &Map<String, Value>) -> Map<String, Value> {
     }
 
     // Do not promote constraint-only or conflicting `anyOf`/`oneOf` branches
-    // onto object/typed schemas: promoting `{oneOf:[{required:["id"]},...]}`
+    // onto object schemas: promoting `{oneOf:[{required:["id"]},...]}`
     // alongside `type`/`properties` leaves invalid `anyOf:[{},{}]` after
     // `prune_dangling_required` on Gemini or OR-merges separate combiners.
-    let enclosing_is_typed_or_object = !properties.is_empty()
+    // On non-object schemas with a single concrete `anyOf`/`oneOf`, distribute
+    // enclosing defaults (`type`, `description`, etc.) into each branch and
+    // replace the parent with `{ comb_key: branches }` so Gemini never sees
+    // sibling fields alongside `anyOf` and `must_preserve_meaning` still finds
+    // load-bearing keywords on every branch.
+    let enclosing_is_object = !properties.is_empty()
         || !required.is_empty()
-        || [
-            "properties",
-            "type",
-            "items",
-            "enum",
-            "const",
-            "anyOf",
-            "oneOf",
-            "not",
-        ]
+        || out.contains_key("properties")
+        || out.contains_key("required")
+        || is_object_typed(&out);
+    let enclosing_has_conflicting_constraint = ["enum", "const", "anyOf", "oneOf", "not"]
         .iter()
         .any(|key| out.contains_key(*key));
 
-    if !enclosing_is_typed_or_object
+    if !enclosing_is_object
+        && !enclosing_has_conflicting_constraint
         && let [(comb_key, comb_value)] = branch_combiners.as_slice()
-        && comb_value.as_array().is_some_and(|arr| {
-            !arr.is_empty() && arr.iter().all(combiner_branch_has_concrete_shape)
-        })
+        && let Some(arr) = comb_value.as_array()
+        && !arr.is_empty()
+        && arr.iter().all(combiner_branch_has_concrete_shape)
     {
-        out.insert(comb_key.clone(), comb_value.clone());
-    } else if !properties.is_empty() || is_object_typed(&out) {
+        let defaults = std::mem::take(&mut out);
+        let distributed: Vec<Value> = arr
+            .iter()
+            .map(|sub| {
+                let Some(sub_map) = sub.as_object() else {
+                    return sub.clone();
+                };
+                let mut merged_sub = sub_map.clone();
+                for (k, v) in &defaults {
+                    if k == "items"
+                        && let Some(existing_items) = merged_sub.get("items")
+                        && existing_items.is_object()
+                        && v.is_object()
+                    {
+                        let combined = merge_property(v, existing_items);
+                        merged_sub.insert(k.clone(), combined);
+                    } else {
+                        merged_sub.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                }
+                Value::Object(merged_sub)
+            })
+            .collect();
+        out.insert(comb_key.clone(), Value::Array(distributed));
+        return out;
+    } else if enclosing_is_object {
         // Harvest optional variant properties declared inside dropped object
         // combiners without promoting their branch-local `required` arrays.
         for (_, comb_value) in &branch_combiners {
