@@ -3471,6 +3471,10 @@ server_resumes: false,
         &client_session_id,
     )
     .await;
+    // Fail questions this transport can no longer answer before cleanup,
+    // which may wait on the Agent that the asking turn still holds.
+    supports_ask_user.store(false, std::sync::atomic::Ordering::Relaxed);
+    ask_user_responses.lock().await.clear();
 
     super::client_disconnect_cleanup::record_transport_closed(
         &client_session_id,
@@ -3547,7 +3551,6 @@ server_resumes: false,
             crate::logging::warn(&format!("Client stdin forwarder failed: {error}"));
         }
         stdin_responses.lock().await.clear();
-        ask_user_responses.lock().await.clear();
         if let Some(handle) = processing_task.take() {
             crate::logging::info(&format!(
                 "Retaining disconnected turn for session {}",
