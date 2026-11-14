@@ -2,7 +2,7 @@
 use super::*;
 use crate::auth::account_pool::{AccountPool, OAuthLogin, account_key};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 static GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -12,7 +12,7 @@ pub(super) fn generation() -> u64 {
     GENERATION.load(Ordering::Acquire)
 }
 
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Default, PartialEq, Eq)]
 struct Inventory {
     logins: Vec<OAuthLogin>,
     pool: AccountPool,
@@ -21,18 +21,33 @@ struct Inventory {
 
 #[derive(Default)]
 struct InventoryCache {
-    inventory: Inventory,
+    inventory: Arc<Inventory>,
     updated: Option<Instant>,
     refreshing: bool,
 }
 
-fn cached_inventory() -> Inventory {
+impl InventoryCache {
+    fn snapshot(&self) -> Arc<Inventory> {
+        Arc::clone(&self.inventory)
+    }
+
+    fn replace_inventory(&mut self, inventory: Inventory) -> bool {
+        if *self.inventory == inventory {
+            return false;
+        }
+        self.inventory = Arc::new(inventory);
+        true
+    }
+}
+
+fn cached_inventory() -> Arc<Inventory> {
     static CACHE: OnceLock<Mutex<InventoryCache>> = OnceLock::new();
+    static EMPTY: OnceLock<Arc<Inventory>> = OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
     let Ok(mut state) = cache.try_lock() else {
-        return Inventory::default();
+        return Arc::clone(EMPTY.get_or_init(Default::default));
     };
-    let inventory = state.inventory.clone();
+    let inventory = state.snapshot();
     if !state.refreshing
         && state
             .updated
@@ -45,8 +60,7 @@ fn cached_inventory() -> Inventory {
             .spawn(move || {
                 let inventory = load_inventory();
                 if let Ok(mut state) = cache.lock() {
-                    if state.inventory != inventory {
-                        state.inventory = inventory;
+                    if state.replace_inventory(inventory) {
                         GENERATION.fetch_add(1, Ordering::Release);
                     }
                     state.updated = Some(Instant::now());
@@ -950,6 +964,92 @@ mod tests {
             label: label.into(),
             email: Some(email.into()),
             active: true,
+        }
+    }
+
+    fn snapshot_fixture() -> Inventory {
+        Inventory {
+            logins: vec![login("openai", "work", "alice@example.com")],
+            pool: AccountPool {
+                members: vec!["openai:work".into()],
+                priorities: [("openai:work".into(), 1)].into_iter().collect(),
+                ..Default::default()
+            },
+            expired: vec![("openai", "old".into())],
+        }
+    }
+
+    #[test]
+    fn inventory_snapshots_share_storage_instead_of_deep_copying() {
+        let mut cache = InventoryCache::default();
+        assert!(cache.replace_inventory(snapshot_fixture()));
+        let original = cache.snapshot();
+        let mut legacy_copies = 0;
+        for _ in 0..1_000 {
+            let legacy = Inventory {
+                logins: original.logins.clone(),
+                pool: original.pool.clone(),
+                expired: original.expired.clone(),
+            };
+            legacy_copies += usize::from(legacy.logins.as_ptr() != original.logins.as_ptr());
+            let shared = cache.snapshot();
+            assert!(Arc::ptr_eq(&shared, &original));
+            assert_eq!(shared.logins.as_ptr(), original.logins.as_ptr());
+            assert_eq!(shared.pool.members.as_ptr(), original.pool.members.as_ptr());
+            assert_eq!(shared.expired.as_ptr(), original.expired.as_ptr());
+        }
+        assert_eq!(legacy_copies, 1_000);
+        eprintln!(
+            "inventory login-vector copies across 1000 reads: legacy={legacy_copies}, shared=0"
+        );
+    }
+
+    #[test]
+    fn inventory_snapshot_publication_preserves_exact_invalidation() {
+        let mut cache = InventoryCache::default();
+        assert!(!cache.replace_inventory(Inventory::default()));
+        assert!(cache.replace_inventory(snapshot_fixture()));
+        let original = cache.snapshot();
+        assert!(!cache.replace_inventory(snapshot_fixture()));
+        assert!(Arc::ptr_eq(&original, &cache.snapshot()));
+
+        for change in 0..3 {
+            let mut changed = snapshot_fixture();
+            match change {
+                0 => changed.logins[0].active = false,
+                1 => changed.pool.members.clear(),
+                _ => changed.expired.clear(),
+            }
+            assert!(cache.replace_inventory(changed));
+            assert!(!Arc::ptr_eq(&original, &cache.snapshot()));
+            assert!(cache.replace_inventory(snapshot_fixture()));
+        }
+        // A published update cannot mutate a snapshot already held by a frame.
+        assert!(*original == snapshot_fixture());
+    }
+
+    #[test]
+    fn inventory_shared_snapshot_preserves_header_output() {
+        let direct = snapshot_fixture();
+        let mut cache = InventoryCache::default();
+        assert!(cache.replace_inventory(snapshot_fixture()));
+        let snapshot = cache.snapshot();
+        let active = ActiveCredentialOverrides {
+            openai: Some(ActiveCredential::OAuth),
+            anthropic: Some(ActiveCredential::OAuth),
+        };
+        for provider in ["openai", "anthropic"] {
+            for selected in [None, Some("work"), Some("other")] {
+                let expected = inventory_lines(&auth(), active, &direct, provider, selected);
+                let actual = inventory_lines(&auth(), active, &snapshot, provider, selected);
+                assert_eq!(actual, expected);
+                for width in [0, 1, 20, 40, 80, 120] {
+                    assert_eq!(
+                        fit_header_lines(actual.clone(), width),
+                        fit_header_lines(expected.clone(), width)
+                    );
+                }
+            }
         }
     }
 
