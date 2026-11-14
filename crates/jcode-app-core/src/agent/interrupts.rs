@@ -428,8 +428,10 @@ impl Agent {
         };
 
         for message in messages {
+            // User follow-ups may share a model message. Notifications must
+            // retain their own delivery events and transcript entries.
             match current_source {
-                Some(source) if source != message.source => {
+                Some(source) if source != message.source || source != SoftInterruptSource::User => {
                     flush_group(
                         self,
                         &mut injected,

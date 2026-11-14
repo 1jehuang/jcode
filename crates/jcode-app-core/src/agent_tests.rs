@@ -820,6 +820,35 @@ async fn injected_soft_interrupts_report_client_ids_per_group_in_queue_order() {
 }
 
 #[tokio::test]
+async fn adjacent_notifications_each_emit_a_delivery_event() {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = Agent::new(provider, registry);
+    for source in [
+        SoftInterruptSource::System,
+        SoftInterruptSource::BackgroundTask,
+    ] {
+        for content in ["first notice", "second notice"] {
+            agent.queue_soft_interrupt(content.into(), vec![], false, source);
+        }
+    }
+    let injected = agent.inject_soft_interrupts();
+    let events = Agent::build_soft_interrupt_events(injected, "D", None);
+    assert_eq!(events.len(), 4);
+    for (event, expected) in events.iter().zip([
+        "first notice",
+        "second notice",
+        "first notice",
+        "second notice",
+    ]) {
+        assert!(
+            matches!(event, ServerEvent::SoftInterruptInjected { content, .. } if content == expected)
+        );
+    }
+}
+
+#[tokio::test]
 async fn run_turn_streaming_mpsc_emits_keepalive_while_provider_is_quiet() {
     let _guard = crate::storage::lock_test_env();
     let provider: Arc<dyn Provider> = Arc::new(DelayedProvider {
