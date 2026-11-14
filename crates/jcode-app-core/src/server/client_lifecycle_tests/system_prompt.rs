@@ -67,9 +67,16 @@ impl SystemPromptSocketFixture {
 
     pub(super) fn new() -> Self {
         let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let provider_template: Arc<dyn Provider> =
-            Arc::new(SystemPromptCaptureProvider(captured.clone()));
+        Self::with_provider(
+            Arc::new(SystemPromptCaptureProvider(captured.clone())),
+            captured,
+        )
+    }
 
+    pub(super) fn with_provider(
+        provider_template: Arc<dyn Provider>,
+        captured: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> Self {
         let sessions: SessionAgents =
             Arc::new(crate::server::session_manager::SessionManager::new());
         let global_session_id = Arc::new(RwLock::new(String::new()));

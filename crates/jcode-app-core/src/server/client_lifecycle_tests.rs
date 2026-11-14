@@ -1880,6 +1880,8 @@ async fn client_turn_usage_limit_error_carries_retry_after_secs() {
 }
 #[path = "client_lifecycle_tests/agent_profile.rs"]
 mod agent_profile;
+#[path = "client_lifecycle_tests/agent_task.rs"]
+mod agent_task;
 #[path = "client_lifecycle_tests/system_prompt.rs"]
 mod system_prompt;
 
