@@ -1291,10 +1291,13 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
 
         // A stale History continuation arriving after the final answer is a
         // no-op even if it carries an invalid skill. No turn/skill/status edits.
+        // The replay is reminder-only: a delivered reminder that arrives with
+        // real content is stripped and the content runs as a new prompt (see
+        // delivered_replay_is_reminder_only), so it is not a no-op.
         start_processing_message(
             ProcessingMessage {
                 id: 78,
-                content: "continue after reload".to_string(),
+                content: String::new(),
                 images: Vec::new(),
                 system_reminder: Some(continuation.to_string()),
                 active_skill: Some("nonexistent-replay-skill".to_string()),
