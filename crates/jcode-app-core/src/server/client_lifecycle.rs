@@ -2494,7 +2494,20 @@ server_resumes: false,
             Request::AgentTask { id, task, .. } => {
                 // Run it as this connection's turn: the request loop keeps
                 // reading ask_user answers and cancels, and disconnect cleanup
-                // owns the task like any other turn.
+                // owns the task like any other turn. Another connection's turn
+                // may hold the Agent; refuse rather than wait for it here.
+                if !client_is_processing
+                    && reject_if_agent_busy_for_request(
+                        id,
+                        "agent_task",
+                        &client_session_id,
+                        client_is_processing,
+                        &agent,
+                        &client_event_tx,
+                    )
+                {
+                    continue;
+                }
                 if !client_is_processing
                     && let Some(info) = client_connections
                         .write()
