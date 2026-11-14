@@ -506,7 +506,9 @@ fn save_openrouter_catalog_cache(model_ids: &[&str]) {
     std::fs::create_dir_all(&cache_dir).expect("create cache dir");
     let cache = jcode_provider_openrouter::DiskCache {
         cached_at: jcode_provider_openrouter::current_unix_secs().expect("current unix time"),
-        source_api_base: None,
+        // #1824: the picker now validates that a cached catalog came from the
+        // endpoint it is being applied to, so the fixture must name its source.
+        source_api_base: Some(crate::provider::STANDARD_OPENROUTER_API_BASE.to_string()),
         models: model_ids
             .iter()
             .map(|id| jcode_provider_openrouter::ModelInfo {
