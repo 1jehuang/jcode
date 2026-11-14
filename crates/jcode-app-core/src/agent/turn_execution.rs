@@ -161,11 +161,9 @@ impl Agent {
         // Inject any pending notifications before the user message
         let alert_start = self.session.messages.len();
         let alerts = self.take_alerts();
-        if !alerts.is_empty() {
+        for alert in alerts {
             let alert_text = format!(
-                "[NOTIFICATION]\nYou received {} notification(s) from other agents working in this codebase:\n\n{}\n\nUse the communicate tool to coordinate with other agents (prefer dm; broadcast reaches only your spawned subtree).",
-                alerts.len(),
-                alerts.join("\n\n---\n\n")
+                "[NOTIFICATION]\nYou received a notification from another agent working in this codebase:\n\n{alert}\n\nUse the communicate tool to coordinate with other agents (prefer dm; broadcast reaches only your spawned subtree)."
             );
             self.add_message_with_display_role(
                 Role::User,
@@ -207,7 +205,7 @@ impl Agent {
             display_role,
             continues_turn,
         )?;
-        if continues_turn {
+        if continues_turn || display_role.is_some() {
             self.emit_context_messages_since(input_start, &event_tx);
         }
         // The per-turn reminder (swarm DM wake, mission continuation, ...) goes
@@ -274,7 +272,15 @@ impl Agent {
                 .join("\n\n");
             let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
                 content,
-                display_role: Some("system".to_string()),
+                display_role: Some(
+                    match message.display_role {
+                        Some(crate::session::StoredDisplayRole::BackgroundTask) => {
+                            "background_task"
+                        }
+                        _ => "system",
+                    }
+                    .to_string(),
+                ),
                 point: "context".to_string(),
                 tools_skipped: None,
                 client_ids: Vec::new(),

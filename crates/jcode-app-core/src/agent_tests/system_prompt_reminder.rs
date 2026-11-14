@@ -116,6 +116,7 @@ async fn pending_alerts_and_reminder_only_turn_publish_context_entries() {
     let provider: Arc<dyn Provider> = Arc::new(SystemPromptCaptureProvider::default());
     let mut agent = Agent::new(provider, Registry::empty());
     agent.push_alert("peer alert: inspect the shared file".to_string());
+    agent.push_alert("peer alert: inspect the shared file".to_string());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     agent
         .run_once_streaming_mpsc("", vec![], Some("Resume after reload".into()), tx)
@@ -136,9 +137,13 @@ async fn pending_alerts_and_reminder_only_turn_publish_context_entries() {
             _ => None,
         })
         .collect();
-    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.len(), 3);
     assert!(entries[0].contains("peer alert: inspect the shared file"));
-    assert_eq!(entries[1], "[auto] Resume after reload");
+    assert_eq!(
+        entries[0], entries[1],
+        "repeated alerts remain separate entries"
+    );
+    assert_eq!(entries[2], "[auto] Resume after reload");
     let persisted = crate::session::Session::load(&agent.session.id).unwrap();
     for entry in entries {
         assert!(
