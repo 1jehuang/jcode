@@ -7,6 +7,7 @@ import { homedir } from 'node:os'
 import { resolve, join } from 'node:path'
 import assert from 'node:assert/strict'
 
+let checkpoint = 'arguments'
 const [mode, directory] = process.argv.slice(2)
 assert(['prepare', 'warm', 'check', 'run', 'cleanup'].includes(mode) && directory,
   'Usage: node scripts/accept_live_local_message.mjs prepare|warm|check|run|cleanup PRIVATE_DIRECTORY')
@@ -23,6 +24,7 @@ const textOf = message => typeof message.content === 'string' ? message.content 
 const prompt = token => `Reply with exactly ${token} and nothing else. Do not use any tools.`
 
 async function main() {
+  checkpoint = mode === 'prepare' ? 'create-and-warm' : 'load-private-state'
   let state
   if (mode === 'prepare') {
     mkdirSync(dir, { recursive: true, mode: 0o700 })
@@ -38,6 +40,7 @@ async function main() {
     // Real minimal inference checks this dedicated session's inherited provider/model,
     // persists its transcript, and lets the ordinary daemon uploader publish it.
     debug(`message:${prompt(state.warm_token)}`, state.session_id)
+    assert.equal(debug('last_response', state.session_id), state.warm_token)
     state.phase = 'prepared'
     persist(state)
     console.log(JSON.stringify({ phase: state.phase, session_id: state.session_id, directory: dir }))
@@ -47,13 +50,18 @@ async function main() {
   assert.equal(state.version, 1)
   assert.equal(state.working_dir, join(dir, 'workspace'))
   assert.match(state.session_id, /^session_[a-zA-Z0-9_-]+$/)
-  const sessions = JSON.parse(debug('sessions'))
-  const local = sessions.find(s => s.session_id === state.session_id)
-  assert(local, 'Dedicated session is not registered in actual daemon')
-  assert.equal(local.working_dir, state.working_dir)
+  // `sessions` only enumerates connected UI clients. A successful targeted
+  // agent:info round trip proves this headless agent is registered in the daemon.
+  checkpoint = 'registered-headless-agent'
+  const info = JSON.parse(debug('agent:info', state.session_id))
+  assert.equal(info.session.id, state.session_id, 'Dedicated session not registered in actual daemon')
+  assert.equal(info.session.working_dir, state.working_dir)
+  const local = { model: info.model, provider: info.provider }
   if (mode === 'warm') {
     assert.equal(state.phase, 'created', 'Warm recovery is only for an unprepared dedicated session')
-    debug(`message:${prompt(state.warm_token)}`, state.session_id)
+    if (debug('last_response', state.session_id) !== state.warm_token) {
+      debug(`message:${prompt(state.warm_token)}`, state.session_id)
+    }
     assert.equal(debug('last_response', state.session_id), state.warm_token)
     state.phase = 'prepared'
     persist(state)
@@ -80,9 +88,11 @@ async function main() {
       path === '/mobile/commands' && body?.kind === 'message' && body?.session_id === state.session_id ||
       path === `/mobile/commands/${state.command_id}`, 'Endpoint outside scoped acceptance allowlist')
     requests.push({ method: body ? 'POST' : 'GET', path, at: new Date().toISOString() })
+    checkpoint = `api-${body ? 'post' : 'get'}`
     const response = await fetch(auth.api_base + path, { method: body ? 'POST' : 'GET',
       headers: { Authorization: `Bearer ${auth.api_key}`, 'Content-Type': 'application/json' },
       ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(20000), redirect: 'error' })
+    checkpoint = `api-http-${response.status}`
     assert(response.ok, `Production API HTTP ${response.status}`)
     return response.json()
   }
@@ -102,6 +112,7 @@ async function main() {
     throw new Error('Transcript pagination exceeded bound')
   }
   const initial = await snapshot()
+  checkpoint = 'live-and-warm-transcript'
   assert.equal(initial.session.live, true, 'Dedicated session is not live on production API')
   assert.equal(debug('last_response', state.session_id), state.warm_token, 'Warm inference did not complete exactly')
   assert(initial.messages.some(m => m.role === 'assistant' && m.text === state.warm_token), 'Warm reply not uploaded by real daemon')
@@ -110,6 +121,7 @@ async function main() {
       model: local.model, provider: local.provider, synced_messages: initial.messages.length }))
     return
   }
+  checkpoint = 'activation-and-single-enqueue-gate'
   assert.equal(process.env.JCODE_PRODUCTION_LOCAL_ACTIVATED, 'yes', 'Await root activation before setting JCODE_PRODUCTION_LOCAL_ACTIVATED=yes')
   assert.equal(state.phase, 'prepared', 'Never repeat an attempted enqueue, inspect saved evidence instead')
   state.phase = 'enqueue_attempted'
@@ -151,6 +163,7 @@ async function main() {
   assert(history.some(m => m.role === 'assistant' && textOf(m) === state.token), 'Exact reply missing from local history')
   assert(final.messages.some(m => m.role === 'user' && m.text === state.prompt))
   assert(final.messages.some(m => m.role === 'assistant' && m.text === state.token))
+  assert(!history.some(m => m.role === 'tool' || m.tool_calls?.length || m.tool_data), 'Unexpected local tool activity')
   assert(!final.messages.some(m => m.role === 'tool'), 'Unexpected synced tool usage')
   assert(!history.some(m => Array.isArray(m.content) && m.content.some(b => ['tool_use', 'tool_result'].includes(b.type))), 'Unexpected tool usage')
   const evidence = { at: new Date().toISOString(), session_id: state.session_id, command_id: state.command_id,
@@ -164,6 +177,6 @@ async function main() {
 }
 main().catch(() => {
   // Never print raw HTTP bodies, config, child stderr, or credential-bearing exceptions.
-  console.error('Acceptance stopped. No automatic enqueue retry. Inspect private state and dedicated session. See documentation for checkpoints.')
+  console.error(`Acceptance stopped at ${checkpoint}. No automatic enqueue retry. Inspect private state and dedicated session. See documentation for checkpoints.`)
   process.exitCode = 1
 })

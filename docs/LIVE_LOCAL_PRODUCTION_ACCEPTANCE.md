@@ -2,9 +2,13 @@
 
 This uses the already-running local daemon and `https://api.jcode.sh/v1`, not a synthetic host. It does not build, install, restart, deploy, migrate, change mobile settings, or touch billing. Run from this repository with Node 20 or newer. Only the dedicated debug-created session receives messages.
 
+## Headless debug-session prerequisite
+
+Current debug-created sessions are marked `is_debug=true`. Ordinary mobile sync intentionally skips these snapshots, even though the daemon local runner can drive them. Also, `debug sessions` lists connected UI clients, not every headless registration. This script therefore proves headless registration using targeted `agent:info`, and fails closed if the actual uploader has not published the warm reply. A dedicated-session-only promotion/export procedure must be explicitly agreed before claiming end-to-end uploader acceptance. Do not invent a live row, submit a fake presence heartbeat, manually upload a fabricated response, or change global sync filtering to get a passing test. As initially prepared on November 14, 2026, this prerequisite is unresolved and `check` correctly stops at HTTP 404.
+
 ## Activation gate
 
-`prepare` may run before backend activation. It creates an `IsolatedTest` memory-scope session using `~/.local/bin/jcode debug create_session:<private-directory>/workspace` and performs one minimal local inference so the normal daemon uploader persists and publishes the session. Its provider/model is inherited from the daemon. The warm reply must exactly match its unique token. If inheritance selects an unavailable model, inspect `debug --session ID state` and adjust **only this dedicated session** with `set_provider:...` / `set_model:...`. Do not alter the daemon defaults or any existing user session.
+`prepare` may run before backend activation. It creates an `IsolatedTest` memory-scope session using `~/.local/bin/jcode debug create_session:<private-directory>/workspace` and performs one minimal local inference so the normal daemon uploader persists its transcript. Once the headless debug-session prerequisite above is resolved, the normal daemon uploader can publish it. Its provider/model is inherited from the daemon. The warm reply must exactly match its unique token. If inheritance selects an unavailable model, inspect `debug --session ID state` and adjust **only this dedicated session** with `set_provider:...` / `set_model:...`. Do not alter the daemon defaults or any existing user session.
 
 If a warm attempt failed, after adjusting only that dedicated provider/model run `node scripts/accept_live_local_message.mjs warm "$D"` to recover the `created` checkpoint. This does not enqueue a production command.
 
@@ -49,6 +53,7 @@ It checks `target: "local"`, the original command/session identity, terminal com
 
 ## Troubleshooting checkpoints
 
+- Failures print a content-free checkpoint label, including an HTTP status when available, never raw response bodies, credentials, or child stderr.
 - `acceptance.json` has the created ID and lifecycle phase, never a credential.
 - `created` means warm inference did not complete or the CLI failed. Inspect only that ID's `state`, `history`, and `last_response`. Do not repeat preparation in the same directory.
 - `prepared` plus a failed `check` means the real warm response, uploader, or fresh presence is not ready. Allow ordinary sync reconciliation and retry `check`, not `run`.
