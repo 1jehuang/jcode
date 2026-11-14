@@ -1107,7 +1107,17 @@ mod tests {
             );
         }
         for width in [16, 24, 40, 80] {
-            for line in render_swarm_strip_lines(&members, 0, false, "alt+n", 0, width, 8) {
+            for line in render_swarm_strip_lines(
+                &members,
+                0,
+                false,
+                "alt+n",
+                0,
+                width,
+                8,
+                &std::collections::HashSet::new(),
+                false,
+            ) {
                 assert!(line.width() <= width, "row exceeds {width} cells: {line:?}");
             }
         }
