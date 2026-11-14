@@ -541,9 +541,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             return Ok(());
         }
 
-        if app_mod::model_context::is_refresh_model_list_command(trimmed)
-            || matches!(trimmed, "/model refresh" | "/models refresh")
-        {
+        if app_mod::model_context::is_refresh_model_list_command(trimmed) {
             app.pending_remote_model_refresh_snapshot = Some((
                 app.remote_available_entries.clone(),
                 app.remote_model_options.clone(),
@@ -660,6 +658,24 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                             )));
                 }
             }
+            return Ok(());
+        }
+
+        if trimmed == "/model status" || trimmed == "/models status" {
+            let model = app
+                .remote_provider_model
+                .clone()
+                .unwrap_or_else(|| app.provider.model());
+            let context_window = app.provider.context_window();
+            let effort_raw = app.remote_reasoning_effort_hint();
+            let effort = effort_raw
+                .as_deref()
+                .map(app_mod::effort_display_label)
+                .unwrap_or("default");
+            app.push_display_message(DisplayMessage::system(format!(
+                "Model: {}\nContext window: {:?} tokens\nReasoning effort: {}",
+                model, context_window, effort
+            )));
             return Ok(());
         }
 

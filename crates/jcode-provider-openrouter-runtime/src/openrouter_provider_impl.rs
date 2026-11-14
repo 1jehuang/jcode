@@ -71,17 +71,18 @@ impl Provider for OpenRouterProvider {
                 None
             }
         });
-        // DeepSeek-family models served through a direct OpenAI-compatible
-        // profile can run thinking mode server-side. Their follow-up requests
-        // must replay the `reasoning_content` returned with an assistant tool
-        // call even though the route has no OpenRouter provider features
-        // (issue #815). Unlike Kimi, this only unlocks stored reasoning: it does
-        // not synthesize the field when the prior turn did not return one.
-        let direct_deepseek_model =
-            !self.supports_provider_features && Self::model_is_deepseek_family(&model);
-        let allow_reasoning =
-            (self.supports_provider_features || kimi_coding_endpoint || direct_deepseek_model)
-                && thinking_enabled != Some(false);
+        // OpenAI-compatible endpoints may serve any reasoning model (DeepSeek,
+        // Qwen, GLM, ...), so the decision to replay `reasoning_content` in
+        // follow-up requests must not depend on the model id. The stream parser
+        // always captures `reasoning_content` when the model returns it, and
+        // `build_chat_messages` only writes the field back when the stored
+        // assistant turn actually carries reasoning text (`has_reasoning_content`).
+        // Enabling it here therefore never synthesizes the field: it only lets a
+        // model that *did* reason keep its context on the next turn
+        // (issue #2157). Previously this was gated on `model_is_deepseek_family`,
+        // which silently dropped reasoning context for every other reasoning
+        // model (issue #815 covered DeepSeek; #2157 generalizes it).
+        let allow_reasoning = thinking_enabled != Some(false);
         let include_reasoning_content = thinking_enabled == Some(true)
             || (allow_reasoning && Self::is_kimi_model(&model))
             || kimi_coding_endpoint;

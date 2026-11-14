@@ -725,6 +725,20 @@ fn test_refresh_model_list_command_suggestions() {
 }
 
 #[test]
+fn test_model_update_suggestions_offer_catalog_refresh() {
+    let app = create_test_app();
+    let suggestions = app.get_suggestions_for("/model u");
+    assert!(
+        suggestions.iter().any(|(cmd, _)| cmd == "/model update"),
+        "expected /model update in {suggestions:?}"
+    );
+    assert!(suggestions.iter().any(|(cmd, _)| cmd == "/model status"));
+
+    let models = app.get_suggestions_for("/model ");
+    assert!(models.iter().any(|(cmd, _)| cmd == "/model update"));
+}
+
+#[test]
 fn test_command_suggestion_arrow_and_ctrl_navigation_accepts_highlighted_row() {
     let mut app = create_test_app();
     app.input = "/con".to_string();
