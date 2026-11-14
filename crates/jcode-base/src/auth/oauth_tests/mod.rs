@@ -97,4 +97,5 @@ async fn mock_token_server(
 
 mod basic;
 mod flow;
+mod openai_device_code;
 mod openai_refresh_deadline;

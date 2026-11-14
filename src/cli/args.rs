@@ -261,6 +261,11 @@ pub(crate) enum Command {
         #[arg(long)]
         no_validate: bool,
 
+        /// OpenAI only: sign in by entering a short code at auth.openai.com/codex/device
+        /// instead of a localhost callback. Suited to remote and cloud machines.
+        #[arg(long, conflicts_with_all = ["callback_url", "auth_code"])]
+        device_code: bool,
+
         #[command(flatten)]
         google: GoogleLoginArgs,
 
