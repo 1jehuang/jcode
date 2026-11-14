@@ -9,6 +9,7 @@ impl Dialog {
             skills: None,
             plugin: None,
             rewind: Some(Vec::new()),
+            ask: None,
             pending_rewind: false,
             status: Some("Loading checkpoints…".to_string()),
             pending_mcp: None,

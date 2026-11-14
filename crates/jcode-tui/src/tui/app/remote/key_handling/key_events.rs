@@ -87,6 +87,16 @@ pub(super) async fn handle_remote_key_internal(
             }) => {
                 app_mod::rewind::restore_remote(app, remote, checkpoint_id, mode).await;
             }
+            Some(crate::tui::dialog::DialogKey::AskUser {
+                request_id,
+                answers,
+            }) => {
+                if let Err(error) = remote.send_ask_user_response(request_id, answers).await {
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Failed to send your answers: {error}"
+                    )));
+                }
+            }
             _ => {}
         }
         return Ok(());

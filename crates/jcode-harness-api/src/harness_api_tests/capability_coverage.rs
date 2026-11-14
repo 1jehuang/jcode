@@ -45,6 +45,8 @@ const LEDGER: &[(&str, Disposition)] = &[
              InvalidateUsage already lets them invalidate that quota cache",
         ),
     ),
+    // The TUI's answer to its own ask_user question dialog.
+    ("AskUserResponse", ClientInternal),
     ("BackgroundTool", Covered),
     ("Cancel", Covered),
     ("CancelSoftInterrupts", Covered),

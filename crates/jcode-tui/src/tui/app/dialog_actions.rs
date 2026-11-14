@@ -50,6 +50,34 @@ impl App {
                 None
             }
             action @ (DialogKey::Mcp(_) | DialogKey::Rewind { .. }) => Some(action),
+            action @ DialogKey::AskUser { .. } => {
+                if !self.dialog.as_ref().is_some_and(Dialog::is_ask_user) {
+                    self.dialog = None;
+                }
+                Some(action)
+            }
+        }
+    }
+
+    /// Show `ask_user` questions, after any already open.
+    pub(super) fn open_ask_user_dialog(
+        &mut self,
+        request_id: String,
+        tool_call_id: String,
+        questions: Vec<crate::protocol::AskUserQuestion>,
+    ) {
+        match self.dialog.as_mut().filter(|dialog| dialog.is_ask_user()) {
+            Some(dialog) => dialog.queue_ask_user(request_id, tool_call_id, questions),
+            None => self.dialog = Some(Dialog::ask_user(request_id, tool_call_id, questions)),
+        }
+    }
+
+    /// The ask_user call ended without an answer from this client.
+    pub(super) fn finish_ask_user_dialog(&mut self, tool_call_id: &str) {
+        if let Some(dialog) = self.dialog.as_mut().filter(|dialog| dialog.is_ask_user())
+            && dialog.ask_user_finished(tool_call_id)
+        {
+            self.dialog = None;
         }
     }
 
