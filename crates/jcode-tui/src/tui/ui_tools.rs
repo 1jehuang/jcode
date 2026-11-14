@@ -1431,6 +1431,19 @@ pub(super) fn get_tool_summary_with_budget(
                 action.to_string()
             }
         }
+        "ask_user" => {
+            let headers: Vec<&str> = tool
+                .input
+                .get("questions")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|q| q.get("header")?.as_str())
+                .collect();
+            let plural = if headers.len() == 1 { "" } else { "s" };
+            let text = format!("{} question{plural}: {}", headers.len(), headers.join(", "));
+            truncate_end_display(&text, bounded(50))
+        }
         "batch" => {
             let count = tool
                 .input

@@ -39,6 +39,7 @@ mod comm_format;
 mod notifications;
 
 pub use comm_format::*;
+pub use jcode_message_types::ask_user::{AskUserAnswer, AskUserOption, AskUserQuestion};
 pub use jcode_session_types::{
     RewindCheckpoint, RewindMode, RewindResult, RewindTargetKind, TurnStopReason,
 };

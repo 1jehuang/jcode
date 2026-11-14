@@ -12,6 +12,7 @@ fn dialog(state: Snapshot, tab: &str) -> Dialog {
         skills: None,
         plugin: Some(plugin),
         rewind: None,
+        ask: None,
         pending_rewind: false,
         status: None,
         pending_mcp: None,

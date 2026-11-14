@@ -22,6 +22,11 @@ use ratatui::widgets::{Clear, Paragraph};
 use serde_json::Value;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+#[path = "dialog_ask.rs"]
+mod ask;
+#[cfg(test)]
+#[path = "dialog_ask_tests.rs"]
+mod ask_tests;
 #[path = "dialog_mcp.rs"]
 mod mcp;
 #[path = "dialog_plugin.rs"]
@@ -45,6 +50,7 @@ pub enum Route {
     PluginAddMarketplace,
     RewindList,
     RewindModes(String),
+    AskUser,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -196,6 +202,11 @@ pub enum DialogKey {
         checkpoint_id: String,
         mode: RewindMode,
     },
+    /// Reply to an `ask_user` request; `None` means dismissed.
+    AskUser {
+        request_id: String,
+        answers: Option<Vec<crate::protocol::AskUserAnswer>>,
+    },
 }
 
 pub struct Dialog {
@@ -204,6 +215,7 @@ pub struct Dialog {
     skills: Option<SkillsState>,
     plugin: Option<plugin::PluginState>,
     rewind: Option<Vec<RewindCheckpoint>>,
+    ask: Option<ask::AskState>,
     pub pending_rewind: bool,
     /// Shown under the subtitle: progress or the last error.
     status: Option<String>,
@@ -220,6 +232,7 @@ impl Dialog {
             skills: None,
             plugin: None,
             rewind: None,
+            ask: None,
             pending_rewind: false,
             status: Some("Loading MCP servers…".to_string()),
             pending_mcp: None,
@@ -238,6 +251,7 @@ impl Dialog {
             }),
             plugin: None,
             rewind: None,
+            ask: None,
             pending_rewind: false,
             status: None,
             pending_mcp: None,
@@ -264,7 +278,10 @@ impl Dialog {
     }
 
     pub fn is_mcp(&self) -> bool {
-        self.plugin.is_none() && self.skills.is_none() && self.rewind.is_none()
+        self.plugin.is_none()
+            && self.skills.is_none()
+            && self.rewind.is_none()
+            && self.ask.is_none()
     }
 
     pub fn set_status(&mut self, status: Option<String>) {
@@ -331,6 +348,9 @@ impl Dialog {
     }
 
     pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> DialogKey {
+        if self.ask.is_some() {
+            return self.handle_ask_key(code, modifiers);
+        }
         if self.plugin.is_some() {
             self.rebuild();
             if self.handle_plugin_key(code) {
@@ -525,6 +545,7 @@ impl Dialog {
             Route::Skills => self.skills_view(),
             Route::RewindList => self.rewind_list_view(),
             Route::RewindModes(id) => self.rewind_modes_view(id),
+            Route::AskUser => self.ask_view(),
             Route::McpList => self.mcp_list_view(),
             Route::McpServer(name) => self
                 .mcp_server(name)
@@ -710,6 +731,13 @@ impl Dialog {
             Style::default().fg(accent_color()),
         ));
         let width = usize::from(area.width.saturating_sub(4)).max(10);
+        // Rows never wrap: anything wider than the pane ends in an ellipsis.
+        let fit = |line: Line<'static>| {
+            jcode_tui_render::truncate_line_with_ellipsis_to_width(
+                &indent(line, 3),
+                usize::from(area.width),
+            )
+        };
         let hint = self.hint(view);
         // Rows left for the body once the rule and the guide are drawn.
         let chrome = if hint.is_some() { 3 } else { 1 };
@@ -719,19 +747,16 @@ impl Dialog {
             self.body_lines(view, width, budget)
                 .into_iter()
                 .take(budget)
-                .map(|line| indent(line, 3)),
+                .map(fit),
         );
         if let Some(hint) = hint {
             lines.push(Line::from(""));
-            lines.push(indent(
-                Line::from(Span::styled(
-                    hint,
-                    Style::default()
-                        .fg(dim_color())
-                        .add_modifier(Modifier::ITALIC),
-                )),
-                3,
-            ));
+            lines.push(fit(Line::from(Span::styled(
+                hint,
+                Style::default()
+                    .fg(dim_color())
+                    .add_modifier(Modifier::ITALIC),
+            ))));
         }
         frame.render_widget(Clear, area);
         frame.render_widget(Paragraph::new(lines), area);
@@ -750,6 +775,9 @@ impl Dialog {
         }
         if view.route == Route::Skills {
             return None;
+        }
+        if view.route == Route::AskUser {
+            return Some(self.ask_hint(view));
         }
         if view.on_escape.is_some() {
             return Some("Enter to confirm · Esc to cancel".to_string());

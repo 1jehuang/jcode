@@ -641,7 +641,12 @@ fn handle_server_event_inner(
             name,
             output,
             error,
-        } => super::server_event_handlers::handle_tool_done(app, remote, id, name, output, error),
+        } => {
+            if name == "ask_user" {
+                app.finish_ask_user_dialog(&id);
+            }
+            super::server_event_handlers::handle_tool_done(app, remote, id, name, output, error)
+        }
         ServerEvent::GeneratedImage {
             id,
             path,
@@ -3674,6 +3679,14 @@ fn handle_server_event_inner(
                 app.set_status_notice(format!("Resuming {} sessions", resumed));
             }
             false
+        }
+        ServerEvent::AskUser {
+            request_id,
+            tool_call_id,
+            questions,
+        } => {
+            app.open_ask_user_dialog(request_id, tool_call_id, questions);
+            true
         }
         ServerEvent::StdinRequest { .. } => {
             app.set_status_notice("⌨ Interactive terminal detected (command will timeout)");

@@ -539,7 +539,7 @@ impl RemoteConnection {
             system_prompt: None,
             supports_pdf_panels: false,
             supports_user_response: false,
-            supports_ask_user: false,
+            supports_ask_user: true,
             supports_server_failover: false,
             supports_turn_identity: true,
             id: conn.next_request_id,
@@ -1347,6 +1347,21 @@ impl RemoteConnection {
             id: self.next_request_id,
             request_id: request_id.to_string(),
             input: input.to_string(),
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await
+    }
+
+    /// Answer an `ask_user` request; `None` means the user dismissed it.
+    pub async fn send_ask_user_response(
+        &mut self,
+        request_id: String,
+        answers: Option<Vec<crate::protocol::AskUserAnswer>>,
+    ) -> Result<()> {
+        let request = Request::AskUserResponse {
+            id: self.next_request_id,
+            request_id,
+            answers,
         };
         self.next_request_id += 1;
         self.send_request(request).await
