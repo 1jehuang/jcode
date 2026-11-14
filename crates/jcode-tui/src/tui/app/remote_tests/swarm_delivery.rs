@@ -21,6 +21,125 @@ fn soft_interrupt_injected(content: &str, display_role: Option<&str>) -> ServerE
     }
 }
 
+#[test]
+fn every_system_and_background_delivery_adds_an_entry() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    for role in ["system", "background_task"] {
+        for _ in 0..2 {
+            let before = app.display_messages().len();
+            handle_server_event(
+                &mut app,
+                soft_interrupt_injected("notification without a structured payload", Some(role)),
+                &mut remote,
+            );
+            assert_eq!(app.display_messages().len(), before + 1);
+            assert_eq!(app.display_messages().last().unwrap().role, role);
+        }
+    }
+}
+
+#[test]
+fn confirmed_memory_delivery_is_visible_with_local_memory_disabled() {
+    let mut app = create_test_app();
+    app.memory_enabled = false;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    let before = app.display_messages().len();
+    handle_server_event(
+        &mut app,
+        ServerEvent::MemoryInjected {
+            count: 1,
+            prompt: "A remembered preference".to_string(),
+            display_prompt: None,
+            prompt_chars: 22,
+            computed_age_ms: 0,
+        },
+        &mut remote,
+    );
+    assert_eq!(app.display_messages().len(), before + 1);
+    assert_eq!(app.display_messages().last().unwrap().role, "memory");
+}
+
+#[test]
+fn background_delivery_survives_transcript_restore() {
+    let mut app = create_test_app();
+    let content = "**Background task** `abc123` · `bash` · ✓ completed · 1s · exit 0";
+    app.replace_display_messages(vec![
+        crate::tui::DisplayMessage::background_task(content),
+        crate::tui::DisplayMessage::user(content),
+        crate::tui::DisplayMessage::system(content),
+    ]);
+    assert_eq!(app.display_messages().len(), 3);
+    for message in app.display_messages() {
+        assert_eq!(message.content, content);
+        assert_eq!(message.role, "background_task");
+    }
+}
+
+#[test]
+fn agent_completion_wakes_never_become_user_prompts() {
+    use crate::tui::DisplayMessage;
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    let content = "Agent jaguar finished their work and is ready for more.\n\nRecent output (automatically captured):\nAll tests passed.\n\nUse assign_task to give them more work.";
+    app.push_display_message(DisplayMessage::swarm(
+        "Swarm · jaguar",
+        jcode_tui_messages::collapse_long_swarm_content(content),
+    ));
+    let before = app.display_messages().len();
+    for (index, role) in [None, Some("user"), Some("system")].into_iter().enumerate() {
+        handle_server_event(
+            &mut app,
+            soft_interrupt_injected(content, role),
+            &mut remote,
+        );
+        assert_eq!(app.display_messages().last().unwrap().role, "swarm");
+        assert_eq!(app.display_messages().len(), before + index + 1);
+    }
+    app.replace_display_messages(vec![
+        DisplayMessage::user("actual user prompt"),
+        DisplayMessage::user(content),
+        DisplayMessage::system("Agent owl stopped.\n\nNo recent assistant output was captured. Use summary/read_context to inspect results or stop to remove them."),
+        DisplayMessage::user("Agent jaguar finished their work and is ready for more."),
+    ]);
+    let roles: Vec<_> = app
+        .display_messages()
+        .iter()
+        .map(|m| m.role.as_str())
+        .collect();
+    assert_eq!(roles, ["user", "swarm", "swarm", "user"]);
+}
+
+#[test]
+fn lane_aware_completion_handoff_is_a_swarm_row() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    let content = "Agent jaguar finished their work and is ready for more.\n\nLane plan:\nPhase 1 · security: 1/2 completed\n- [pending] Live acceptance\n\nFinal response:\nOffline tests passed. Live acceptance unverified.";
+    handle_server_event(
+        &mut app,
+        soft_interrupt_injected(content, None),
+        &mut remote,
+    );
+    let message = app.display_messages().last().unwrap();
+    assert_eq!(message.role, "swarm");
+    assert!(
+        crate::tui::app::remote_notifications::swarm_display_full_body(&message.content)
+            .contains("[pending] Live acceptance")
+    );
+}
+
 fn assert_no_long_rows(app: &crate::tui::app::App) {
     for message in app.display_messages() {
         if message.role == "swarm" {
@@ -42,7 +161,7 @@ fn assert_no_long_rows(app: &crate::tui::app::App) {
 }
 
 #[test]
-fn injected_swarm_dm_is_deduped_against_its_notification_card() {
+fn injected_swarm_dm_adds_delivery_entry_after_its_notification_card() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -63,8 +182,8 @@ fn injected_swarm_dm_is_deduped_against_its_notification_card() {
     );
     assert_eq!(
         app.display_messages().len(),
-        before,
-        "injected copy of an already-shown DM must not add a row"
+        before + 1,
+        "model delivery must add a row even after a receipt notification"
     );
     assert_no_long_rows(&app);
 }

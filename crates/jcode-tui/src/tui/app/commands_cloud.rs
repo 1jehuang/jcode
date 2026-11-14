@@ -166,7 +166,7 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
     if trimmed == "/mobile" {
         if crate::subscription_catalog::configured_api_key().is_none() {
             app.push_display_message(DisplayMessage::error(
-                "Sign in first with `jcode account login`, then retry /mobile.",
+                "Sign in first with `/login jcode`, then retry /mobile. The same Jcode account must be signed in to the mobile app.",
             ));
             return true;
         }
@@ -199,6 +199,12 @@ pub(super) fn handle_cloud_command(app: &mut App, trimmed: &str, session_id: &st
         app.push_display_message(DisplayMessage::error(
             "Run /cloud replace from your local session. Use /local to return from the cloud first.".to_string(),
         ));
+        return true;
+    }
+    if trimmed != "/mobile" && managed_cloud_account_missing(&command) {
+        // Nothing is queued: a signed-out move can only fail after the host
+        // preparation child starts, with a shell-oriented error.
+        show_cloud_account_guidance(app, CloudAccountIssue::SignedOut);
         return true;
     }
     if command == CloudCommand::Cancel {
@@ -882,6 +888,132 @@ fn cloud_failure_reason(details: &str) -> &str {
         .unwrap_or("No error details were returned by the cloud command.")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CloudAccountIssue {
+    SignedOut,
+    SignInExpired,
+    NotEntitled,
+}
+
+/// Whether a command needs the account's managed machine: no explicit host,
+/// or the reserved managed alias.
+fn targets_managed_cloud(command: &CloudCommand) -> bool {
+    match command {
+        CloudCommand::Move { host }
+        | CloudCommand::MoveSelected { host, .. }
+        | CloudCommand::Replace { host, .. } => {
+            host.as_deref().is_none_or(|host| host == "jcode-cloud")
+        }
+        _ => false,
+    }
+}
+
+/// A signed-out user asking for the managed machine. `env_host` is
+/// `$JCODE_CLOUD_HOST`, which replaces the managed default when no host is typed.
+fn needs_cloud_account(
+    command: &CloudCommand,
+    ssh_remote: bool,
+    env_host: Option<&str>,
+    signed_in: bool,
+) -> bool {
+    if signed_in || ssh_remote || !targets_managed_cloud(command) {
+        return false;
+    }
+    let explicit_managed = matches!(
+        command,
+        CloudCommand::Move { host: Some(_) }
+            | CloudCommand::MoveSelected { host: Some(_), .. }
+            | CloudCommand::Replace { host: Some(_), .. }
+    );
+    explicit_managed || env_host.is_none_or(|host| host.trim().is_empty())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests run without credentials. Opt in to exercise the signed-out path.
+    pub(super) static TEST_CLOUD_ACCOUNT_MISSING: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+fn managed_cloud_account_missing(command: &CloudCommand) -> bool {
+    #[cfg(test)]
+    {
+        TEST_CLOUD_ACCOUNT_MISSING.with(|missing| missing.get())
+            && needs_cloud_account(command, false, None, false)
+    }
+    #[cfg(not(test))]
+    {
+        needs_cloud_account(
+            command,
+            crate::tui::is_ssh_remote(),
+            std::env::var("JCODE_CLOUD_HOST").ok().as_deref(),
+            crate::subscription_catalog::configured_api_key()
+                .is_some_and(|key| !key.trim().is_empty()),
+        )
+    }
+}
+
+/// Account failures the cloud CLI reports. Only the user can resolve them, so
+/// they get onboarding steps rather than agent diagnosis.
+fn cloud_account_issue(details: &str) -> Option<CloudAccountIssue> {
+    use crate::subscription_catalog as catalog;
+    [
+        (
+            catalog::CLOUD_ACCOUNT_REQUIRED,
+            CloudAccountIssue::SignedOut,
+        ),
+        (
+            catalog::CLOUD_SIGN_IN_EXPIRED,
+            CloudAccountIssue::SignInExpired,
+        ),
+        (catalog::CLOUD_NOT_ENTITLED, CloudAccountIssue::NotEntitled),
+    ]
+    .into_iter()
+    .find_map(|(marker, issue)| details.contains(marker).then_some(issue))
+}
+
+fn cloud_account_guidance(issue: CloudAccountIssue) -> (String, &'static str) {
+    let pricing = crate::subscription_catalog::JCODE_PRICING_URL;
+    const OWN_MACHINE: &str =
+        "Using your own machine instead? `/cloud <ssh-alias>` needs no Jcode account.";
+    match issue {
+        CloudAccountIssue::SignedOut => (
+            format!(
+                "`/cloud` moves this session to your Jcode Cloud machine, which comes with a paid Jcode plan. You are not signed in to a Jcode account yet.\n\n\
+                 1. Run `/login jcode` to sign in or create an account. It opens a browser approval page, no key is pasted here.\n\
+                 2. Choose a plan that includes Jcode Cloud: {pricing}\n\
+                 3. Run `/cloud` again.\n\n\
+                 {OWN_MACHINE}\n\nNothing was moved."
+            ),
+            "Cloud: sign in with /login jcode",
+        ),
+        CloudAccountIssue::SignInExpired => (
+            format!(
+                "Your Jcode sign-in expired, so Jcode Cloud could not be reached.\n\n\
+                 1. Run `/login jcode` to sign in again.\n\
+                 2. Run `/cloud` again.\n\n\
+                 {OWN_MACHINE}\n\nNothing was moved."
+            ),
+            "Cloud: sign in again with /login jcode",
+        ),
+        CloudAccountIssue::NotEntitled => (
+            format!(
+                "You are signed in, but your Jcode account has no active paid plan, which Jcode Cloud requires.\n\n\
+                 1. Choose a plan: {pricing} (or run `/account jcode manage` to change yours).\n\
+                 2. Run `/cloud` again. No new sign-in is needed.\n\n\
+                 {OWN_MACHINE}\n\nNothing was moved."
+            ),
+            "Cloud: a paid Jcode plan is required",
+        ),
+    }
+}
+
+fn show_cloud_account_guidance(app: &mut App, issue: CloudAccountIssue) {
+    let (message, notice) = cloud_account_guidance(issue);
+    app.push_display_message(DisplayMessage::system(message).with_title("Jcode Cloud setup"));
+    app.set_status_notice(notice);
+}
+
 fn show_cloud_failure(
     app: &mut App,
     command: &str,
@@ -889,6 +1021,10 @@ fn show_cloud_failure(
     exit: Option<i32>,
     details: &str,
 ) {
+    if let Some(issue) = cloud_account_issue(&cloud_failure_details(details)) {
+        show_cloud_account_guidance(app, issue);
+        return;
+    }
     record_cloud_problem(command, session, exit, details);
     let already_pending = app.cloud_recovery_auto_pending
         && app

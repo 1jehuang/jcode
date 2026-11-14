@@ -723,11 +723,12 @@ fn test_definitive_exhaustion_immediate_switch_and_manual_safety() {
         ("countdown", true, "OAuth usage exhausted", true),
         ("countdown", false, "OAuth usage exhausted", false),
         ("manual", true, "OAuth usage exhausted", false),
+        // The first automatic switch is instant for any failure (1cf6c1402).
         (
             "countdown",
             true,
             "429 rate_limit_error: This request would exceed your account's rate limit. Please try again later.",
-            false,
+            true,
         ),
     ] {
         with_temp_jcode_home(|| {

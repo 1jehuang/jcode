@@ -54,7 +54,7 @@ async fn turn_system_reminder_does_not_change_the_system_prompt() {
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
 
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     agent
         .run_once_streaming_mpsc("first", Vec::new(), None, tx.clone())
         .await
@@ -72,6 +72,22 @@ async fn turn_system_reminder_does_not_change_the_system_prompt() {
         .run_once_streaming_mpsc("third", Vec::new(), None, tx)
         .await
         .expect("follow-up turn");
+
+    let injections: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|event| match event {
+            ServerEvent::SoftInterruptInjected {
+                content,
+                display_role,
+                ..
+            } => {
+                assert_eq!(display_role.as_deref(), Some("system"));
+                Some(content)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(injections.len(), 1, "ordinary prompts must not be echoed");
+    assert!(injections[0].contains("direct swarm message from fox"));
 
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 3);
@@ -92,4 +108,87 @@ async fn turn_system_reminder_does_not_change_the_system_prompt() {
     for (before, after) in reminder_turn.iter().zip(follow_up.iter()) {
         assert_eq!(message_text(before), message_text(after));
     }
+}
+
+#[tokio::test]
+async fn pending_alerts_and_reminder_only_turn_publish_context_entries() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(SystemPromptCaptureProvider::default());
+    let mut agent = Agent::new(provider, Registry::empty());
+    agent.push_alert("peer alert: inspect the shared file".to_string());
+    agent.push_alert("peer alert: inspect the shared file".to_string());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    agent
+        .run_once_streaming_mpsc("", vec![], Some("Resume after reload".into()), tx)
+        .await
+        .unwrap();
+    let entries: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|event| match event {
+            ServerEvent::SoftInterruptInjected {
+                content,
+                display_role,
+                client_ids,
+                ..
+            } => {
+                assert_eq!(display_role.as_deref(), Some("system"));
+                assert!(client_ids.is_empty());
+                Some(content)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(entries.len(), 3);
+    assert!(entries[0].contains("peer alert: inspect the shared file"));
+    assert_eq!(
+        entries[0], entries[1],
+        "repeated alerts remain separate entries"
+    );
+    assert_eq!(entries[2], "[auto] Resume after reload");
+    let persisted = crate::session::Session::load(&agent.session.id).unwrap();
+    for entry in entries {
+        assert!(
+            persisted
+                .messages
+                .iter()
+                .any(|message| content_text(&message.content) == entry
+                    && message.display_role == Some(crate::session::StoredDisplayRole::System))
+        );
+    }
+}
+
+#[tokio::test]
+async fn late_skill_announcement_publishes_one_new_context_entry() {
+    let _guard = crate::storage::lock_test_env();
+    let project = tempfile::tempdir().unwrap();
+    let provider: Arc<dyn Provider> = Arc::new(SystemPromptCaptureProvider::default());
+    let mut agent = Agent::new_with_initial_working_dir(
+        provider,
+        Registry::empty(),
+        Some(project.path().to_str().unwrap()),
+    );
+    // Freeze the session's initial skill snapshot before installing a skill.
+    agent.build_system_prompt_split(None);
+    let skill_dir = project.path().join(".jcode/skills/context-entry-test");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: context-entry-test\ndescription: Late announcement test\n---\n\nTest body.\n",
+    )
+    .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    for prompt in ["first", "second"] {
+        agent
+            .run_once_streaming_mpsc(prompt, vec![], None, tx.clone())
+            .await
+            .unwrap();
+    }
+    let entries: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|event| match event {
+            ServerEvent::SoftInterruptInjected { content, .. } => Some(content),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].contains("New skills were installed."));
+    assert!(entries[0].contains("context-entry-test"));
 }

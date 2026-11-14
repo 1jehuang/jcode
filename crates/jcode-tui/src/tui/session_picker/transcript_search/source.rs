@@ -104,6 +104,24 @@ pub(crate) fn stronger(a: Option<Source>, b: Option<Source>) -> Option<Source> {
 /// character, so a typed query never matches it.
 const MARK: char = '\u{1f}';
 
+/// Count mentions of each query term in explicitly tagged user text,
+/// saturating at four per term. Untagged legacy indexes and generated titles
+/// must not masquerade as repeated user requests.
+pub(crate) fn user_mentions(index: &str, tokens: &[String]) -> usize {
+    let mut counts = vec![0usize; tokens.len()];
+    for section in index.split(MARK).skip(1) {
+        let Some(text) = section.strip_prefix(Source::User.tag()) else {
+            continue;
+        };
+        for (count, token) in counts.iter_mut().zip(tokens) {
+            if !token.is_empty() && *count < 4 {
+                *count += text.match_indices(token.as_str()).take(4 - *count).count();
+            }
+        }
+    }
+    counts.into_iter().sum()
+}
+
 impl Source {
     /// Ordered weakest to strongest, matching the tag digits.
     const ALL: [Source; 8] = [

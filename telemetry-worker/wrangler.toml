@@ -10,11 +10,13 @@ routes = [
   { pattern = "telemetry.jcode.sh", custom_domain = true }
 ]
 
-# Nightly retention prune (see RETENTION_DAYS in src/worker.js). Workers Paid
+# Hourly retention prune (see RETENTION_DAYS in src/worker.js). Workers Paid
 # hard-caps each D1 database at 10 GB; pruning keeps durable raw history inside
 # the worker's lower storage-budget guardrail.
+# Hourly retention catches up with ingestion without waiting a full day.
+# Keep the 04:17 nightly job separate for account expiry, rollup repair and pricing.
 [triggers]
-crons = ["17 4 * * *"]
+crons = ["17 4 * * *", "17 0-3,5-23 * * *"]
 
 [[d1_databases]]
 binding = "DB"

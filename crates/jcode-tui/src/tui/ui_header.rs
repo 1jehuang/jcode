@@ -178,16 +178,23 @@ fn unseen_changelog_entries_override() -> &'static std::sync::Mutex<Option<Vec<S
     OVERRIDE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
-fn unseen_changelog_entries() -> Vec<String> {
+fn with_unseen_changelog_entries<R>(render: impl FnOnce(&[String]) -> R) -> R {
     #[cfg(test)]
     {
         if let Ok(guard) = unseen_changelog_entries_override().lock()
-            && let Some(entries) = guard.clone()
+            && let Some(entries) = guard.as_ref()
         {
-            return entries;
+            return render(entries);
         }
     }
-    get_unseen_changelog_entries().clone()
+    render(get_unseen_changelog_entries())
+}
+
+// Existing override lifecycle tests request an owned snapshot. Production
+// rendering uses the borrowed callback and never takes this test-only copy.
+#[cfg(test)]
+fn unseen_changelog_entries() -> Vec<String> {
+    with_unseen_changelog_entries(<[String]>::to_vec)
 }
 
 #[cfg(test)]
@@ -992,7 +999,16 @@ pub(super) fn build_updates_box_lines(width: u16, max_lines: usize) -> Vec<Line<
     if w <= 20 || max_lines < 3 {
         return Vec::new();
     }
-    let new_entries = unseen_changelog_entries();
+    with_unseen_changelog_entries(|entries| updates_box_lines_from_entries(w, max_lines, entries))
+}
+
+// Borrow the cached entries only while building owned output. Do not introduce a
+// header-side cache: the changelog getter remains responsible for invalidation.
+fn updates_box_lines_from_entries(
+    w: usize,
+    max_lines: usize,
+    new_entries: &[String],
+) -> Vec<Line<'static>> {
     if new_entries.is_empty() {
         return Vec::new();
     }
@@ -1044,6 +1060,11 @@ pub(in crate::tui) fn build_header_sections(
     app: &dyn TuiState,
     width: u16,
 ) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
+    // No historical startup/account-router snapshot was recorded. Do not
+    // manufacture one using today's version, authentication and update state.
+    if app.is_replay() {
+        return (Vec::new(), Vec::new());
+    }
     let start = std::time::Instant::now();
     let auth = app.auth_status();
     let auth_ms = start.elapsed().as_millis();
@@ -1071,3 +1092,72 @@ pub(in crate::tui) fn build_header_sections(
 #[cfg(test)]
 #[path = "ui_header/header_tests.rs"]
 mod header_tests;
+
+#[cfg(test)]
+mod changelog_borrow_tests {
+    use super::*;
+
+    #[test]
+    fn changelog_borrow_matches_owned_snapshot_and_refreshes_override() {
+        let _lock = crate::tui::ui::render_state_test_lock();
+        for count in [0, 1, 2, 7, 8, 9, 100] {
+            let entries: Vec<String> = (0..count)
+                .map(|i| format!("Update {i}: 界 👩‍💻 {}", "long subject ".repeat(12)))
+                .collect();
+            let snapshot = entries.clone();
+            let _override = scoped_unseen_changelog_entries_override_for_tests(entries);
+            for width in [0, 20, 21, 40, 80, 240] {
+                for height in [0, 2, 3, 4, 9, 10, 20] {
+                    let expected = if width <= 20 || height < 3 {
+                        Vec::new()
+                    } else {
+                        updates_box_lines_from_entries(width as usize, height, &snapshot)
+                    };
+                    assert_eq!(build_updates_box_lines(width, height), expected);
+                }
+            }
+        }
+        // A previously rendered result owns its text and survives replacement.
+        let _override = scoped_unseen_changelog_entries_override_for_tests(vec!["first".into()]);
+        let first = build_updates_box_lines(80, 10);
+        set_unseen_changelog_entries_override_for_tests(Some(vec!["second".into()]));
+        let second = build_updates_box_lines(80, 10);
+        assert_ne!(first, second);
+        assert!(first.iter().any(|line| line.to_string().contains("first")));
+        assert!(
+            second
+                .iter()
+                .any(|line| line.to_string().contains("second"))
+        );
+    }
+
+    #[test]
+    fn changelog_borrow_eliminates_snapshot_allocations() {
+        let _lock = crate::tui::ui::render_state_test_lock();
+        let entries: Vec<String> = (0..100).map(|i| format!("entry {i}")).collect();
+        let vector_pointer = entries.as_ptr();
+        let string_pointers: Vec<_> = entries.iter().map(|entry| entry.as_ptr()).collect();
+        let _override = scoped_unseen_changelog_entries_override_for_tests(entries);
+        with_unseen_changelog_entries(|borrowed| {
+            assert_eq!(borrowed.as_ptr(), vector_pointer);
+            for (entry, pointer) in borrowed.iter().zip(&string_pointers) {
+                assert_eq!(entry.as_ptr(), *pointer);
+            }
+            // Count the allocations specifically removed, not the unchanged
+            // output allocations: Vec::clone allocates one buffer plus one for
+            // each nonempty String. Pointer identity proves none is copied now.
+            let old_snapshot = borrowed.to_vec();
+            let old_allocations = usize::from(!old_snapshot.is_empty())
+                + old_snapshot
+                    .iter()
+                    .filter(|entry| !entry.is_empty())
+                    .count();
+            assert_ne!(old_snapshot.as_ptr(), vector_pointer);
+            assert_eq!(old_allocations, 101);
+            assert_eq!(old_snapshot, borrowed);
+            eprintln!(
+                "changelog snapshot allocations: old={old_allocations}, borrowed=0 (100 entries)"
+            );
+        });
+    }
+}

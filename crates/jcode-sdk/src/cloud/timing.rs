@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 pub(super) fn operation(method: &str, path: &str) -> &'static str {
     match (method, path) {
+        ("GET", "/auth/verify") => "account_profile",
         ("POST", "/auth/email/start") => "email_start",
         ("POST", "/auth/email/verify") => "email_verify",
         ("POST", "/auth/device") => "device_start",

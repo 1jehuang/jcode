@@ -11,6 +11,7 @@ fn todo_event() -> ServerEvent {
     ServerEvent::Todos {
         session_id: "fixture".into(),
         payload: "private transcript must not be logged".into(),
+        pushes: false,
     }
 }
 

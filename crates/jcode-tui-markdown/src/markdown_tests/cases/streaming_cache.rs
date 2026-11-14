@@ -500,3 +500,152 @@ fn test_incremental_renderer_matches_full_render_for_prefixes() {
         );
     }
 }
+
+/// Replies that exercise the constructs a head/tail split could get wrong.
+fn stable_split_corpus() -> Vec<String> {
+    let prose = (0..12)
+        .map(|i| {
+            format!(
+                "Paragraph {i} talks about \"clocks\" and *water* at some length, long enough \
+                 to wrap across more than one row of a narrow pane.\n\n"
+            )
+        })
+        .collect::<String>();
+    vec![
+        prose,
+        concat!(
+            "## Plan\n\nFirst paragraph with **bold** text.\n\n---\n\n- item one\n- item two\n\n",
+            "After the list.\n\n```rust\nfn main() {\n\n    println!(\"hi\");\n}\n```\n\n",
+            "Trailing <span>html</span> text.\n\nLast words here.\n",
+        )
+        .to_string(),
+        concat!(
+            "Intro line.\n\n- loose one\n\n- loose two\n\n  continued item text\n\nAfter loose list.\n\n",
+            "1. first\n\n   ```sh\n   echo hi\n\nword\n   ```\n\n2. second\n\nDone with lists.\n\nMore prose.\n",
+        )
+        .to_string(),
+        concat!(
+            "Quote next.\n\n> quoted line\n> more quote\n\nlazy text\n\n> ```\n> code\n\nAfter quote.\n\n",
+            "| a | b |\n| --- | --- |\n| 1 | 2 |\n\nAfter table.\n\nTitle\n=====\n\nBody text.\n",
+        )
+        .to_string(),
+        concat!(
+            "See [the docs][d] and a note[^n].\n\nMiddle paragraph.\n\nAnother one.\n\n",
+            "[d]: https://example.com\n\n[^n]: The note.\n\nClosing paragraph.\n",
+        )
+        .to_string(),
+        concat!(
+            "Before html.\n\n<details>\n\nInside details.\n\n</details>\n\nAfter html.\n\n",
+            "Costs $5 and $6 today.\n\nThen \\(x^2\\) and more.\n\nFinal line.\n",
+        )
+        .to_string(),
+        concat!(
+            "Text first.\n\n    indented code\n\nNot code.\n\n ```\n fenced with indent\n\nstill fenced\n ```\n\n",
+            "~~~\ntilde\n\nfence\n~~~\n\nEnd of it.\n\ntool: one\ntool: two\n\nAfter the log.\n",
+        )
+        .to_string(),
+    ]
+}
+
+#[test]
+fn test_incremental_renderer_split_matches_full_render_for_every_prefix() {
+    for mode in [MarkdownSpacingMode::Compact, MarkdownSpacingMode::Document] {
+        for centered in [false, true] {
+            for width in [24usize, 60] {
+                for sample in stable_split_corpus() {
+                    with_markdown_spacing_mode_override(Some(mode), || {
+                        with_center_code_blocks(centered, || {
+                            let mut renderer = IncrementalMarkdownRenderer::new(Some(width));
+                            for end in 0..=sample.len() {
+                                if !sample.is_char_boundary(end) {
+                                    continue;
+                                }
+                                let prefix = &sample[..end];
+                                let incremental = renderer.update(prefix);
+                                // A fresh renderer has no stable head, so it
+                                // renders the text whole.
+                                let full =
+                                    IncrementalMarkdownRenderer::new(Some(width)).update(prefix);
+                                assert!(
+                                    incremental == full,
+                                    "split render diverged ({mode:?}, centered {centered}, width {width}) at {end}:\n{prefix:?}\n--- incremental ---\n{}\n--- full ---\n{}",
+                                    lines_to_string(&incremental),
+                                    lines_to_string(&full)
+                                );
+                            }
+                        })
+                    });
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn test_incremental_renderer_reuses_the_head_of_a_long_prose_reply() {
+    let sample = stable_split_corpus().remove(0);
+    let mut renderer = IncrementalMarkdownRenderer::new(Some(60));
+    let mut total = 0usize;
+    for end in 0..=sample.len() {
+        total = renderer.update(&sample[..end]).len();
+    }
+    let (_, stable) = renderer.stable_prefix();
+    assert!(
+        stable + 4 >= total && stable > 0,
+        "only the last paragraph should be re-rendered: {stable} stable of {total} lines"
+    );
+
+    // Chunked arrival (several paragraphs per update) must settle the same way.
+    let mut chunked = IncrementalMarkdownRenderer::new(Some(60));
+    let mut end = 0usize;
+    while end < sample.len() {
+        end = (end + 137).min(sample.len());
+        let lines = chunked.update(&sample[..end]);
+        assert!(lines == IncrementalMarkdownRenderer::new(Some(60)).update(&sample[..end]));
+    }
+    assert!(chunked.stable_prefix().1 > 0);
+
+    // Text that is not an extension of the last render starts over.
+    let rewritten = renderer.update("Something else entirely.\n\nSecond paragraph.");
+    assert!(
+        rewritten
+            == IncrementalMarkdownRenderer::new(Some(60))
+                .update("Something else entirely.\n\nSecond paragraph.")
+    );
+}
+
+/// Timing probe, not a correctness test: `cargo test ... stream_cost_probe -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn stream_cost_probe() {
+    let para = "The water clock carried the hours through the night, and the priests who \
+                tended it argued about *seasonal* hours for centuries before anyone agreed.\n\n";
+    let text: String = (0..60)
+        .map(|i| format!("{i}. {para}").replacen(&format!("{i}. "), "", 1))
+        .collect();
+    let steps: Vec<usize> = (1..=text.len() / 40).map(|i| i * 40).collect();
+    for (label, split) in [("whole", false), ("split", true)] {
+        let start = std::time::Instant::now();
+        let mut renderer = IncrementalMarkdownRenderer::new(Some(100));
+        let mut tail_ms = 0.0;
+        for &end in &steps {
+            let t = std::time::Instant::now();
+            if split {
+                renderer.update(&text[..end]);
+            } else {
+                render_markdown_with_width(&text[..end], Some(100));
+            }
+            if end > text.len() * 9 / 10 {
+                tail_ms += t.elapsed().as_secs_f64() * 1000.0;
+            }
+        }
+        let late = steps.iter().filter(|&&e| e > text.len() * 9 / 10).count();
+        eprintln!(
+            "{label}: {} chars, {} updates, total {:.1} ms, last-10% avg {:.3} ms/update",
+            text.len(),
+            steps.len(),
+            start.elapsed().as_secs_f64() * 1000.0,
+            tail_ms / late as f64
+        );
+    }
+}

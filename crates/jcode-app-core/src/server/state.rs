@@ -455,7 +455,11 @@ pub(super) async fn fanout_session_event(
     super::live_status::observe(session_id, &event);
     let targets = {
         let mut members = swarm_members.write().await;
-        collect_event_targets(&mut members, std::iter::once(session_id))
+        let targets = collect_event_targets(&mut members, std::iter::once(session_id));
+        if let Some(member) = members.get(session_id) {
+            crate::stream_batching::note_session_targets(session_id, member.event_txs.keys());
+        }
+        targets
     };
 
     send_event_to_targets(&targets, event)

@@ -45,6 +45,7 @@ pub fn save_todos(session_id: &str, todos: &[TodoItem]) -> Result<()> {
 fn write_todos(session_id: &str, todos: &[TodoItem]) -> Result<()> {
     let path = todo_path(session_id)?;
     storage::write_json_fast(&path, todos)?;
+    publish_stored(session_id);
     if let Err(error) = crate::recent_session_index::refresh_todo_title(session_id) {
         crate::logging::warn(&format!(
             "Failed to refresh indexed todo title for {session_id}: {error}"
@@ -128,7 +129,17 @@ pub fn load_session_title(session_id: &str) -> Option<String> {
 
 pub fn save_goals(session_id: &str, goals: &[TodoGoal]) -> Result<()> {
     let path = goals_path(session_id)?;
-    storage::write_json_fast(&path, goals)
+    storage::write_json_fast(&path, goals)?;
+    publish_stored(session_id);
+    Ok(())
+}
+
+/// Tell client connections that this session's stored todo state changed, so
+/// they push a snapshot instead of each window polling for one.
+fn publish_stored(session_id: &str) {
+    crate::bus::Bus::global().publish(crate::bus::BusEvent::TodoStateStored(
+        session_id.to_string(),
+    ));
 }
 
 fn goals_path(session_id: &str) -> Result<PathBuf> {
@@ -148,6 +159,7 @@ pub fn load_plan(session_id: &str) -> Result<TodoPlan> {
 pub fn save_plan(session_id: &str, plan: &TodoPlan) -> Result<()> {
     let path = plan_path(session_id)?;
     storage::write_json_fast(&path, plan)?;
+    publish_stored(session_id);
     if let Err(error) = crate::recent_session_index::refresh_todo_title(session_id) {
         crate::logging::warn(&format!(
             "Failed to refresh indexed todo title for {session_id}: {error}"

@@ -110,7 +110,8 @@ fn drain_at(
     std::fs::create_dir_all(dir)?;
     // Separate from publishing: slow HTTP never holds up a newly recorded event.
     // OS locks release on process death, so another process can replay safely.
-    let _lease = concurrency::lock_path(&dir.join("delivery.lock"))?;
+    // Delivery holds this across HTTP, so waiters sleep rather than poll.
+    let _lease = concurrency::lock_path_blocking(&dir.join("delivery.lock"))?;
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();

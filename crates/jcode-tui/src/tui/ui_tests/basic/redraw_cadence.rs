@@ -367,7 +367,7 @@ fn unfocused_streaming_client_is_capped_but_focused_is_not() {
     state.unfocused = true;
     assert_eq!(
         crate::tui::redraw_interval_with_policy(&state, &policy),
-        crate::tui::redraw_schedule::REDRAW_UNFOCUSED_MIN
+        crate::tui::redraw_schedule::REDRAW_UNFOCUSED_STREAM
     );
 }
 

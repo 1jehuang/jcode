@@ -41,6 +41,25 @@ const STARTUP_TRANSCRIPT_POLL: std::time::Duration = std::time::Duration::from_m
 const EVENT_REDRAW_MIN_INTERVAL: Duration = Duration::from_millis(16);
 pub(super) const STATUS_SPINNER_ONLY_INTERVAL: Duration = Duration::from_millis(80);
 
+/// Keep the spinner/animation snapshot exact without cloning unchanged cells
+/// on sparse frames. Ratatui already counted flushed updates, so dense redraws
+/// retain the straight vector copy rather than paying another diff scan.
+pub(super) fn update_retained_frame(previous: &mut Buffer, rendered: &Buffer, updates: usize) {
+    let sparse = previous.area == rendered.area
+        && previous.content.len() == rendered.content.len()
+        && updates < rendered.content.len() / 4;
+    previous.area = rendered.area;
+    if sparse {
+        for (to, from) in previous.content.iter_mut().zip(&rendered.content) {
+            if to != from {
+                to.clone_from(from);
+            }
+        }
+    } else {
+        previous.content.clone_from(&rendered.content);
+    }
+}
+
 pub(super) fn redraw_timer(period: Duration) -> tokio::time::Interval {
     let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
     // Redraw ticks represent visual liveness, not elapsed simulation steps. An
@@ -68,6 +87,48 @@ pub(crate) fn refresh_preview_redraw_timer(
             *interval = redraw_timer(desired);
         }
     }
+}
+
+/// Most server events handled in one wakeup while they are being batched.
+const SERVER_EVENT_DRAIN_MAX: usize = 256;
+
+/// Whether server events may be read in batches instead of one per wakeup:
+/// only for an unfocused client that is mirroring a turn in flight. A focused
+/// client, or one with nothing running, reads every event as it arrives.
+pub(super) fn hold_server_events_while_unfocused(app: &App) -> bool {
+    app.is_processing && !app.client_focused()
+}
+
+/// Whether the spinner thread's ticks should service the loop's other
+/// deadlines in place of runtime timers.
+///
+/// The loop runs in `block_on` on the main thread, so arming a runtime timer
+/// there unparks the worker that owns the timer driver, and its expiry wakes
+/// that worker again. A backtrace of every driver unpark on an unfocused client
+/// mirroring a streamed turn showed nothing else: the redraw tick, the server
+/// event hold and the redraw deferral, re-armed about eight times a second
+/// between them. The spinner thread already wakes the loop every 80ms then, so
+/// those deadlines are checked on its ticks and the timers stay unarmed.
+///
+/// Only for an unfocused client, where being up to half a spinner frame early
+/// or late is invisible, and only when the tick period is coarse enough to be
+/// kept by 80ms steps.
+pub(super) fn spinner_drives_deadlines(
+    spinner_available: bool,
+    focused: bool,
+    redraw_period: Duration,
+) -> bool {
+    spinner_available && !focused && redraw_period >= STATUS_SPINNER_ONLY_INTERVAL * 2
+}
+
+/// Whether a deadline checked on a spinner tick counts as reached. Half a
+/// frame of slack rounds to the nearest tick, so a 250ms deadline is met on the
+/// third tick (240ms) and not the fourth (320ms).
+pub(super) fn deadline_due_on_spinner_tick(
+    deadline: tokio::time::Instant,
+    now: tokio::time::Instant,
+) -> bool {
+    now + STATUS_SPINNER_ONLY_INTERVAL / 2 >= deadline
 }
 
 /// Spinner cadence. Not a runtime timer: see [`SpinnerTicker`] for why that
@@ -116,11 +177,17 @@ pub(super) fn status_spinner_only_symbol(app: &App) -> Option<&'static str> {
     // responsive instead of choppy at the ~1 Hz passive-liveness redraw rate.
     // When decorative animations are off it advances at the smooth liveness
     // rate; otherwise it uses the full-rate spinner clock.
+    // A focused client streams text as full frames fast enough to carry the
+    // spinner. An unfocused one batches text slowly, so the spinner needs this
+    // path to keep its normal 80ms motion between batches.
     if !app.is_processing
-        || !app.streaming.streaming_text.is_empty()
+        || (!app.streaming.streaming_text.is_empty() && app.client_focused())
         || app.centered_mode()
         || app.has_pending_mouse_scroll_animation()
         || app.remote_startup_phase_active()
+        // Out of sight: park the spinner thread. The slow hidden tick keeps
+        // the status row current for when the window is shown again.
+        || crate::tui::window_visibility::hidden(app.client_focused())
     {
         return None;
     }
@@ -549,10 +616,8 @@ impl StatusSpinnerRenderer {
         let total_cells = Some(completed.buffer.content.len());
         let completed_buffer = match stored_frame {
             Some(mut buffer) => {
-                // Derived `Buffer::clone_from` reallocates; `Vec::clone_from`
-                // reuses the existing cell storage.
-                buffer.area = completed.buffer.area;
-                buffer.content.clone_from(&completed.buffer.content);
+                // Reuse the Vec and skip unchanged cells on sparse frames.
+                update_retained_frame(&mut buffer, completed.buffer, completed.flushed_updates);
                 buffer
             }
             None => completed.buffer.clone(),
@@ -867,6 +932,9 @@ impl App {
         let mut remote_state = remote::RemoteRunState::default();
 
         'outer: loop {
+            // Each pass connects afresh, possibly to an older server. Poll
+            // todos again until this server shows that it pushes them.
+            self.remote_todos_pushed = false;
             if self.display_messages.is_empty() {
                 if self.server_spawning {
                     self.set_remote_startup_phase(super::RemoteStartupPhase::StartingServer);
@@ -939,6 +1007,9 @@ impl App {
             }
             status_spinner_renderer.invalidate();
             needs_redraw = true;
+            // The Pong lists what this server supports. Until it arrives no
+            // focus is reported, which the server treats as focused.
+            let _ = remote_conn.request_capabilities().await;
 
             let mut bus_receiver_remote = Bus::global().subscribe();
             if let Some(status) = Bus::global().latest_update_status() {
@@ -948,9 +1019,22 @@ impl App {
 
             let mut input_redraw = true;
             let mut deferred_redraw_at: Option<tokio::time::Instant> = None;
+            // See `spinner_drives_deadlines`.
+            let mut deadlines_were_on_spinner = false;
+            let mut last_loop_tick = tokio::time::Instant::now();
+            // While set, server events stay in the socket buffer. An unfocused
+            // client mirroring a turn was woken about 19 times a second by
+            // them, one event per wakeup, and nothing on screen needs that
+            // rate: text is revealed in REDRAW_UNFOCUSED_STREAM batches.
+            let mut server_events_held_until: Option<tokio::time::Instant> = None;
             // Main event loop
             loop {
                 self.sync_sleep_guard();
+                // Sends only when focus or visibility changed since the last report.
+                let focused = self.client_focused();
+                remote_conn
+                    .sync_focus(focused, crate::tui::window_visibility::hidden(focused))
+                    .await;
                 // The reload fast-start transcript is rendered off-thread. Show
                 // it as soon as it is ready instead of on the next tick: during
                 // remote startup ticks are 1s apart, which held a ready
@@ -1033,6 +1117,22 @@ impl App {
                     continue;
                 }
 
+                let spinner_available = status_spinner_renderer.spinner_only_available(&self);
+                let on_spinner = spinner_drives_deadlines(
+                    spinner_available,
+                    self.client_focused(),
+                    redraw_period,
+                );
+                if on_spinner != deadlines_were_on_spinner {
+                    deadlines_were_on_spinner = on_spinner;
+                    last_loop_tick = tokio::time::Instant::now();
+                    if !on_spinner {
+                        // The runtime timer was not polled meanwhile. Restart
+                        // it so it does not fire at once for the gap.
+                        redraw_interval = redraw_timer(redraw_period);
+                    }
+                }
+
                 tokio::select! {
                     // Poll in declaration order so user input always wins the
                     // race against server/bus chatter. During heavy streaming
@@ -1060,13 +1160,34 @@ impl App {
                             tokio::time::sleep(redraw_period).await;
                         }
                     }
-                    _ = status_spinner_interval.tick(), if status_spinner_renderer.spinner_only_available(&self) => {
+                    _ = status_spinner_interval.tick(), if spinner_available => {
                         super::wake_stats::note("spinner");
                         if !status_spinner_renderer.draw_status_spinner_only(&self, &mut terminal)? {
                             needs_redraw = true;
                         }
+                        if on_spinner {
+                            let now = tokio::time::Instant::now();
+                            if server_events_held_until
+                                .is_some_and(|at| deadline_due_on_spinner_tick(at, now))
+                            {
+                                super::wake_stats::note("server_events_released");
+                                server_events_held_until = None;
+                            }
+                            if deferred_redraw_at
+                                .is_some_and(|at| deadline_due_on_spinner_tick(at, now))
+                            {
+                                super::wake_stats::note("deferred_redraw");
+                                deferred_redraw_at = None;
+                            }
+                            if deadline_due_on_spinner_tick(last_loop_tick + redraw_period, now) {
+                                last_loop_tick = now;
+                                super::wake_stats::note("tick");
+                                needs_redraw |=
+                                    remote::handle_tick(&mut self, &mut remote_conn).await;
+                            }
+                        }
                     }
-                    _ = redraw_interval.tick() => {
+                    _ = redraw_interval.tick(), if !on_spinner => {
                         super::wake_stats::note("tick");
                         needs_redraw |= remote::handle_tick(&mut self, &mut remote_conn).await;
                     }
@@ -1075,28 +1196,69 @@ impl App {
                             Some(at) => tokio::time::sleep_until(at).await,
                             None => futures::future::pending::<()>().await,
                         }
-                    } => {
+                    }, if !on_spinner => {
                         super::wake_stats::note("deferred_redraw");
                         deferred_redraw_at = None;
                     }
-                    event = remote_conn.next_event() => {
-                        match &event {
-                            crate::tui::backend::RemoteRead::Event(event) => super::wake_stats::note_debug("server", event),
-                            crate::tui::backend::RemoteRead::Disconnected(_) => super::wake_stats::note("server:closed"),
+                    _ = async {
+                        match server_events_held_until {
+                            Some(at) => tokio::time::sleep_until(at).await,
+                            None => futures::future::pending::<()>().await,
                         }
-                        let (outcome, event_redraw) = remote::handle_remote_event(
-                            &mut self,
-                            &mut terminal,
-                            &mut remote_conn,
-                            &mut remote_state,
-                            event,
-                        )
-                        .await?;
-                        needs_redraw |= event_redraw;
-                        match outcome {
-                            remote::RemoteEventOutcome::Continue => {}
-                            remote::RemoteEventOutcome::Reconnect => continue 'outer,
-                            remote::RemoteEventOutcome::Quit => break 'outer,
+                    }, if !on_spinner => {
+                        super::wake_stats::note("server_events_released");
+                        server_events_held_until = None;
+                    }
+                    event = remote_conn.next_event(), if server_events_held_until.is_none() || self.client_focused() => {
+                        server_events_held_until = None;
+                        let mut event = event;
+                        let mut drained = 0usize;
+                        loop {
+                            match &event {
+                                crate::tui::backend::RemoteRead::Event(crate::protocol::ServerEvent::Pong { capabilities, .. }) => {
+                                    remote_conn.note_server_capabilities(capabilities);
+                                    super::wake_stats::note("server:pong");
+                                }
+                                crate::tui::backend::RemoteRead::Event(event) => super::wake_stats::note_debug("server", event),
+                                crate::tui::backend::RemoteRead::Disconnected(_) => super::wake_stats::note("server:closed"),
+                            }
+                            let (outcome, event_redraw) = remote::handle_remote_event(
+                                &mut self,
+                                &mut terminal,
+                                &mut remote_conn,
+                                &mut remote_state,
+                                event,
+                            )
+                            .await?;
+                            needs_redraw |= event_redraw;
+                            match outcome {
+                                remote::RemoteEventOutcome::Continue => {}
+                                remote::RemoteEventOutcome::Reconnect => continue 'outer,
+                                remote::RemoteEventOutcome::Quit => break 'outer,
+                            }
+                            // Unfocused mid-turn: take everything already
+                            // delivered in this one wakeup, then leave the
+                            // socket alone for one text batch. Bounded so a
+                            // flood cannot starve input or drawing.
+                            if !hold_server_events_while_unfocused(&self) {
+                                break;
+                            }
+                            drained += 1;
+                            if drained >= SERVER_EVENT_DRAIN_MAX {
+                                break;
+                            }
+                            match futures::FutureExt::now_or_never(remote_conn.next_event()) {
+                                Some(next) => event = next,
+                                None => {
+                                    server_events_held_until = Some(
+                                        tokio::time::Instant::now()
+                                            + crate::tui::redraw_schedule::unfocused_event_hold(
+                                                self.client_focused(),
+                                            ),
+                                    );
+                                    break;
+                                }
+                            }
                         }
                     }
                     command = async {

@@ -1,6 +1,53 @@
 use super::*;
 
 #[test]
+fn reusable_event_encoding_matches_legacy_bytes_and_reuses_storage() {
+    let mut buffer = Vec::new();
+    for text in ["", "plain text", "界 👩‍💻", "\"quoted\"\n\t\\\u{0000}"] {
+        let event = ServerEvent::TextDelta { text: text.into() };
+        encode_event_into(&event, &mut buffer);
+        assert_eq!(buffer, encode_event(&event).as_bytes());
+    }
+    let event = ServerEvent::TextDelta {
+        text: "fixed streaming chunk 界".into(),
+    };
+    encode_event_into(&event, &mut buffer);
+    let pointer = buffer.as_ptr();
+    let capacity = buffer.capacity();
+    for _ in 0..1000 {
+        encode_event_into(&event, &mut buffer);
+        assert_eq!(buffer.as_ptr(), pointer);
+        assert_eq!(buffer.capacity(), capacity);
+        assert_eq!(buffer, encode_event(&event).as_bytes());
+    }
+    for payload in [
+        serde_json::json!({"type":"interrupted"}),
+        serde_json::json!({"type":"todos", "session_id":"session", "payload":"[]"}),
+    ] {
+        let event: ServerEvent = serde_json::from_value(payload).unwrap();
+        encode_event_into(&event, &mut buffer);
+        assert_eq!(buffer, encode_event(&event).as_bytes());
+    }
+}
+
+#[test]
+fn reusable_event_encoding_does_not_retain_large_snapshots_on_next_call() {
+    let mut buffer = Vec::new();
+    let large = ServerEvent::TextDelta {
+        text: "界".repeat(100_000),
+    };
+    encode_event_into(&large, &mut buffer);
+    assert_eq!(buffer, encode_event(&large).as_bytes());
+    assert!(buffer.capacity() > 64 * 1024);
+    let small = ServerEvent::TextDelta {
+        text: "small".into(),
+    };
+    encode_event_into(&small, &mut buffer);
+    assert_eq!(buffer, encode_event(&small).as_bytes());
+    assert!(buffer.capacity() <= 64 * 1024);
+}
+
+#[test]
 fn todos_request_and_snapshot_roundtrip() {
     let request: Request = serde_json::from_str(r#"{"type":"get_todos","id":41}"#).unwrap();
     assert!(matches!(request, Request::GetTodos { id: 41 }));
@@ -11,12 +58,26 @@ fn todos_request_and_snapshot_roundtrip() {
     let event = ServerEvent::Todos {
         session_id: "attached-session".into(),
         payload: payload.clone(),
+        pushes: false,
     };
     let encoded = serde_json::to_value(&event).unwrap();
     assert_eq!(encoded["type"], "todos");
+    // Older clients and daemons never see the field unless it is set.
+    assert!(encoded.get("pushes").is_none());
+    let pushing = serde_json::to_value(ServerEvent::Todos {
+        session_id: "attached-session".into(),
+        payload: payload.clone(),
+        pushes: true,
+    })
+    .unwrap();
+    assert_eq!(pushing["pushes"], true);
+    assert!(matches!(
+        serde_json::from_value::<ServerEvent>(pushing).unwrap(),
+        ServerEvent::Todos { pushes: true, .. }
+    ));
     let decoded: ServerEvent = serde_json::from_value(encoded).unwrap();
     assert!(
-        matches!(decoded, ServerEvent::Todos { session_id, payload: actual }
+        matches!(decoded, ServerEvent::Todos { session_id, payload: actual, pushes: false }
         if session_id == "attached-session" && actual == payload)
     );
 }
@@ -132,4 +193,46 @@ fn sdk_login_notify_is_accepted_without_subscribe() {
         serde_json::from_str(r#"{"type":"notify_auth_changed","id":1,"provider":"claude"}"#)
             .unwrap();
     assert!(request.is_lightweight_control_request());
+}
+
+#[test]
+fn client_focus_report_roundtrip() {
+    let request: Request =
+        serde_json::from_str(r#"{"type":"client_focus","id":7,"focused":false}"#).unwrap();
+    assert!(matches!(
+        request,
+        Request::ClientFocus {
+            id: 7,
+            focused: false,
+            hidden: false
+        }
+    ));
+    assert_eq!(request.id(), 7);
+    // It belongs to an attached connection, so it is not a one-shot control.
+    assert!(!request.is_lightweight_control_request());
+    let encoded = serde_json::to_value(Request::ClientFocus {
+        id: 8,
+        focused: true,
+        hidden: false,
+    })
+    .unwrap();
+    assert_eq!(encoded["type"], "client_focus");
+    assert_eq!(encoded["focused"], true);
+    // Left off the wire unless set, so the report is unchanged for a server
+    // that predates the field.
+    assert!(encoded.get("hidden").is_none());
+    let hidden = Request::ClientFocus {
+        id: 9,
+        focused: false,
+        hidden: true,
+    };
+    let encoded = serde_json::to_string(&hidden).unwrap();
+    assert!(matches!(
+        serde_json::from_str::<Request>(&encoded).unwrap(),
+        Request::ClientFocus {
+            id: 9,
+            focused: false,
+            hidden: true
+        }
+    ));
 }

@@ -62,6 +62,8 @@ fn pty_child() {
 fn live_queries_and_fragmented_color_replies_work_through_crossterm() {
     let mut master = -1;
     let mut slave = -1;
+    // libc declares openpty's termios and winsize parameters as `*mut` on
+    // macOS and `*const` on Linux. Mutable pointers satisfy both.
     let mut size = libc::winsize {
         ws_row: 24,
         ws_col: 80,

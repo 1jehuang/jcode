@@ -4,6 +4,8 @@ fn account(base: String) -> Account {
     Account {
         api_key: "secret-account-key".into(),
         email: Some("private@example.com".into()),
+        given_name: None,
+        name: None,
         api_base: base,
     }
 }

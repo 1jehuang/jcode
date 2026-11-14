@@ -41,8 +41,11 @@ pub(super) struct SearchRank {
     /// so a single typo cannot sink a session with strong, distinctive hits.
     source_weight: u32,
     literal: bool,
-    intent_terms: usize,
     exact_field: bool,
+    /// Bounded topical evidence from indexed user text, not titles or
+    /// agent/tool chatter. Repeated mentions beat a one-off incidental hit.
+    user_mentions: usize,
+    intent_terms: usize,
     metadata_terms: usize,
     whole_terms: usize,
     score: i64,
@@ -79,6 +82,7 @@ pub(super) fn literal_metadata_rank(index: &str, tokens: &[String]) -> SearchRan
         opening_prompt: 0,
         source_weight: 0,
         literal: metadata_terms == tokens.len(),
+        user_mentions: source::user_mentions(index, tokens),
         intent_terms: 0,
         exact_field: false,
         metadata_terms,

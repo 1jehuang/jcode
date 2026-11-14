@@ -158,7 +158,8 @@ timeout_secs = 90
 # Copilot-key push-to-talk in `jcode companion` (Linux). List keyboard evdev
 # nodes to watch, e.g. ["/dev/input/by-id/usb-Foo-event-kbd"]. Holding the key
 # while a Jcode terminal is focused sends the transcript to that session, even
-# without Jcode Desktop. Empty disables it.
+# without Jcode Desktop. Empty falls back to the keyboards picked in Jcode
+# Desktop ([desktop.voice] global_devices), and disables it if there are none.
 # global_devices = []
 
 # Show live voice input inside the input box: a waveform row above the prompt

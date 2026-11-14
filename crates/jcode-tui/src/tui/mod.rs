@@ -80,6 +80,7 @@ mod ui;
 mod ui_diff;
 pub mod usage_overlay;
 pub mod visual_debug;
+pub(crate) mod window_visibility;
 pub mod workspace_client;
 pub use jcode_tui_workspace::workspace_map;
 pub use jcode_tui_workspace::workspace_map_widget;
@@ -1087,6 +1088,12 @@ pub trait TuiState {
     /// Render streaming text using incremental markdown renderer
     /// This is more efficient than re-rendering on every frame
     fn render_streaming_markdown(&self, width: usize) -> Vec<Line<'static>>;
+    /// `(generation, count)` of the leading lines of the last
+    /// `render_streaming_markdown` result that are unchanged for as long as
+    /// the generation is. `(0, 0)` when nothing is known to be stable.
+    fn streaming_markdown_stable_prefix(&self) -> (u64, usize) {
+        (0, 0)
+    }
     /// Whether centered mode is enabled
     fn centered_mode(&self) -> bool;
     /// Authentication status for all supported providers

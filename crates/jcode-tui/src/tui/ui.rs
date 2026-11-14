@@ -77,6 +77,7 @@ mod memory_estimates;
 mod memory_ui;
 #[path = "ui_messages.rs"]
 mod messages;
+pub(crate) use messages::strip_todo_tool_output_headers;
 #[path = "ui_onboarding.rs"]
 mod onboarding;
 mod output_style;

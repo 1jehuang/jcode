@@ -159,17 +159,50 @@ telemetry silently stopped (June 2026: ~3 days lost). Defenses, in order:
   one per 10 minutes per isolate) instead of waiting for the nightly cron.
 - If an insert fails with a SQLITE_FULL-class error, the emergency prune runs
   immediately, bounding a June-style outage to minutes instead of days.
-- The nightly cron re-checks size after the normal prune and escalates to the
-  emergency prune if still over the soft limit.
+- Hourly retention gives each event family its own bounded deletion budget,
+  so a busy `turn_end` family cannot starve `session_start` or later families.
+  Each family gets two 2,000-row batches per hour (up to 96,000 expired rows
+  per day), about four times the busiest raw family's measured 24,199 daily
+  events on November 13, 2026. This is measured headroom, not unlimited scaling.
+  Attribution expiry uses bounded detail-driven indexed lookups instead of
+  materializing old IDs from the entire event history.
+  The separate 04:17 UTC nightly job still performs account expiry, activity
+  repair and model-price synchronization once per day.
+- Both the main and bulk databases are independently observed and protected.
+  Scheduled retention re-checks both sizes and escalates a pressured database
+  using its existing emergency policy.
 - If a D1 insert still fails, the request returns `{ok, durable:false,
   firehose:true}` instead of a 500, because the event was captured in the
   firehose.
-- `GET /v1/health` reports `db_size_bytes` vs the soft limit for external
-  monitoring.
+- `GET /v1/health` retains the existing soft-limit fields and additionally
+  reports the hard cap and bulk pressure. The 8 GB soft limit is a cleanup
+  guardrail, not D1's 10 GB hard capacity.
 
-Note: D1 has no `VACUUM`, so the file never shrinks; deletes only free pages
-internally for reuse. If bloat itself becomes the problem, rotate to a fresh
-database (create new D1 DB, copy live rows, repoint `wrangler.toml`).
+Operator checks and catch-up, from `telemetry-worker/`:
+
+```sh
+# Read-only live health, no credentials required.
+node scripts/run-retention.mjs
+# Explicitly run one bounded hourly pass with existing retention windows.
+# Uses CLOUDFLARE_API_TOKEN or the current Wrangler OAuth login.
+node scripts/run-retention.mjs --apply
+```
+
+The catch-up runner reuses the worker's scheduled handler instead of keeping a
+second deletion policy. It backs off on D1 overload (code 7429) and circuit-breaks
+an exhausted database after bounded retries rather than flooding it. Its summary
+reports changed rows, failures and retries, and failures produce a nonzero exit.
+It does not migrate databases, shorten ordinary retention
+windows, or delete permanent lifecycle anchors. Check the reported failures and
+recheck the oldest retained events before deciding whether another pass is needed.
+A stable reported size immediately after cleanup is not by itself evidence of
+failure. Verify expired-row counts, continued ingestion, and subsequent size
+observations together.
+
+Do not rely on manual `VACUUM` to recover capacity. If retention can no longer
+keep up or durable history approaches the budget, plan a verified migration or
+new shard (create the database, copy and verify live rows, then update bindings).
+Do not repoint a binding before its schema and required data are ready.
 
 ## Setup
 
@@ -787,7 +820,7 @@ wrangler d1 execute jcode-telemetry --command "WITH links AS (SELECT DISTINCT te
 - Use `meaningful_release_active` for headline product usage. It excludes local/dev/git-checkout traffic and open/close sessions with no meaningful lifecycle activity.
 - For the cleanest headline numbers, prefer the `*_noci` columns, which additionally exclude `is_ci = 1` traffic. Ephemeral CI runners mint a fresh `telemetry_id` per job, so unfiltered they look like brand-new users and installs, inflating active-user/install counts and depressing retention. The client also skips the `install` event under CI, so historical CI installs (before that ships) are the main residual source; the rollup's `last_is_ci` flag lets dashboards filter the rest. Raw events stay tagged (not dropped) so CI crash/error signal is still queryable.
 - Meaningful activity is derived from `session_end`/`session_crash` **and** `turn_end` events. A `turn_end` only fires after a real user turn completes, so counting it keeps the metric accurate for users whose `session_end` is lost (process killed, machine shutdown, dropped final flush, or a session still open at UTC midnight).
-- **Retention pruning**: D1 hard-caps databases at 500 MB. When the cap is hit, every insert fails with HTTP 500 and telemetry silently stops being recorded (this happened in June 2026; ~3 days of events were lost). The worker now runs a nightly cron (`scheduled` handler, see `RETENTION_DAYS` in `src/worker.js`) that prunes high-volume raw rows: `turn_end`/`session_start`/`onboarding_step` after 30 days, `upgrade` after 60, `auth_success` after 180, `session_end`/`session_crash` after 365, `web_pageview`/`subscription_router_error` after 90, `web_cta_click`/`subscription_budget_exhausted` after 365, `subscription_login` after 180. `install`, `feedback`, `subscription_activated`, and `account_linked` rows are never pruned.  Because of this, **historical user/DAU queries must read `daily_active_users`, not raw `events`** - the rollup is backfilled across full history (migration 0014) and maintained at insert time.
+- **Retention pruning**: D1 hard-caps databases at 10 GB on Workers Paid (500 MB on Free). When the cap is hit, every insert fails with HTTP 500 and telemetry silently stops being recorded (this happened in June 2026; ~3 days of events were lost). The worker now runs hourly bounded retention (`scheduled` handler, see `RETENTION_DAYS` in `src/worker.js`) that prunes high-volume raw rows: `turn_end`/`session_start`/`onboarding_step` after 30 days, `upgrade` after 60, `auth_success` after 180, `session_end`/`session_crash` after 365, `web_pageview`/`subscription_router_error` after 90, `web_cta_click`/`subscription_budget_exhausted` after 365, `subscription_login` after 180. `install`, `feedback`, `subscription_activated`, and `account_linked` rows are never pruned.  Because of this, **historical user/DAU queries must read `daily_active_users`, not raw `events`** - the rollup is backfilled across full history (migration 0014) and maintained at insert time.
 - **D1 100-column cap**: production `events` has 98 columns after migration 0016 and D1 refuses `ALTER TABLE ADD COLUMN` past 100 (`too many columns`). Migration 0005's per-turn/session-cadence columns never applied to production `events`; migration 0013 moved those fields into `turn_details`/`session_details`, and migration 0016 put the web beacon fields in `web_details` for the same reason. Do not add new columns to `events`; add them to the detail tables.
 - Raw events remain the source of truth within their retention windows. The `daily_active_users` table is an ingest-time rollup for cheap dashboard queries and is the durable record beyond those windows.
 - The worker uses `INSERT OR IGNORE` keyed by `event_id`; rollups and detail rows are updated only when the canonical raw event insert succeeds, so client retries do not inflate counts.

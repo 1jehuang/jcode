@@ -225,6 +225,7 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
         ServerEvent::Todos {
             session_id,
             payload,
+            ..
         } => {
             assert_eq!(session_id, target_session_id);
             let payload: serde_json::Value = serde_json::from_str(&payload)?;

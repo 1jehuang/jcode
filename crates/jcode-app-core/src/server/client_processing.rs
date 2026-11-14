@@ -419,7 +419,7 @@ pub(super) async fn start_processing_message(
                 id, error
             )),
         }
-        let (completion_report, push_body, push_title) = {
+        let (completion_report, push_body, push_title, push_dir) = {
             let agent = report_agent.lock().await;
             (
                 agent.recent_assistant_output_tail_after(start_message_index),
@@ -427,6 +427,7 @@ pub(super) async fn start_processing_message(
                     .final_assistant_text_after(start_message_index)
                     .unwrap_or_default(),
                 agent.session_display_title_or_name(),
+                agent.working_dir().map(str::to_string),
             )
         };
         crate::agents_status::turn_finished(
@@ -447,12 +448,14 @@ pub(super) async fn start_processing_message(
                         turn_started.elapsed(),
                     ) =>
                 {
-                    crate::mobile_push::notify(
+                    crate::mobile_push::notify_turn(
                         crate::mobile_push::PushKind::TurnDone,
                         &push_session_id,
                         Some(&push_title),
                         &push_body,
                         Some(id),
+                        push_dir.as_deref(),
+                        Some(turn_started.elapsed()),
                     );
                 }
                 Ok(()) => crate::mobile_push::note_skipped(
@@ -462,12 +465,14 @@ pub(super) async fn start_processing_message(
                         turn_started.elapsed().as_secs()
                     ),
                 ),
-                Err(error) => crate::mobile_push::notify(
+                Err(error) => crate::mobile_push::notify_turn(
                     crate::mobile_push::PushKind::TurnError,
                     &push_session_id,
                     Some(&push_title),
                     &crate::util::format_error_chain(error),
                     Some(id),
+                    push_dir.as_deref(),
+                    Some(turn_started.elapsed()),
                 ),
             }
         }

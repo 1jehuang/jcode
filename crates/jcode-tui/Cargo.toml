@@ -17,7 +17,13 @@ publish = false
 name = "jcode_tui"
 path = "src/lib.rs"
 
+[[bin]]
+name = "replay_frames"
+path = "src/bin/replay_frames.rs"
+required-features = ["dev-bins"]
+
 [dependencies]
+clap = { version = "4", features = ["derive"], optional = true }
 # Application core (server, agent, provider, auth, session, tool, config, ...).
 # Re-exported via `pub use jcode_app_core::*` in lib.rs. default-features=false
 # so this crate (and ultimately the root crate) controls app-core's features.
@@ -95,7 +101,7 @@ jcode-tui-workspace = { path = "../jcode-tui-workspace" }
 default = ["pdf", "bedrock"]
 # Exposes bench-only debug helpers (e.g. debug_copy_selection_text_for_bench)
 # consumed by the dev `tui_bench` binary in the root crate.
-dev-bins = []
+dev-bins = ["dep:clap"]
 # Forwarded to app-core (and onward to jcode-base) so the root crate's feature
 # set fully controls the optional stacks.
 jemalloc = ["jcode-app-core/jemalloc"]

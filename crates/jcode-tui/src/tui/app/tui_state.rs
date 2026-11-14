@@ -1318,6 +1318,13 @@ impl crate::tui::TuiState for App {
     }
 
     fn context_snapshot(&self) -> crate::tui::ContextSnapshot {
+        if self.is_replay {
+            return crate::tui::ContextSnapshot {
+                info: None,
+                revision: self.context_revision,
+                fresh: true,
+            };
+        }
         use crate::message::{ContentBlock, Role};
         use std::time::Instant;
 
@@ -1576,6 +1583,9 @@ impl crate::tui::TuiState for App {
     }
 
     fn client_update_available(&self) -> bool {
+        if self.is_replay {
+            return false;
+        }
         self.has_newer_binary()
     }
 
@@ -1588,6 +1598,19 @@ impl crate::tui::TuiState for App {
     }
 
     fn info_widget_data(&self) -> crate::tui::info_widget::InfoWidgetData {
+        if self.is_replay {
+            // Replay has no historical snapshots for account quotas, repository
+            // status, cloud status, or prompt sizing. Unknown is not today's
+            // value, and cumulative token totals are not the current context.
+            return crate::tui::info_widget::InfoWidgetData {
+                model: self.session.model.clone(),
+                provider_name: self.remote_provider_name.clone(),
+                session_name: self.session.short_name.clone(),
+                working_dir: self.session.working_dir.clone(),
+                historical_context: true,
+                ..Default::default()
+            };
+        }
         let context_snapshot = self.context_snapshot();
         let context_info = if let Some(context_info) = context_snapshot.info.clone() {
             (context_info.total_chars > 0).then_some(context_info)
@@ -1993,11 +2016,18 @@ impl crate::tui::TuiState for App {
         renderer.update(&self.streaming.streaming_text)
     }
 
+    fn streaming_markdown_stable_prefix(&self) -> (u64, usize) {
+        self.streaming_md_renderer.borrow().stable_prefix()
+    }
+
     fn centered_mode(&self) -> bool {
         self.centered
     }
 
     fn auth_status(&self) -> crate::auth::AuthStatus {
+        if self.is_replay {
+            return crate::auth::AuthStatus::default();
+        }
         if crate::tui::is_ssh_remote() {
             // Host-local credentials say nothing about the remote provider.
             return crate::auth::AuthStatus::default();
@@ -2013,6 +2043,9 @@ impl crate::tui::TuiState for App {
         &self,
         provider: jcode_provider_core::ActiveProvider,
     ) -> Option<crate::auth::ActiveCredential> {
+        if self.is_replay {
+            return None;
+        }
         // Reuse the same resolution the info widget uses so the header tag and
         // the widget's auth line can never disagree.
         let route = self.widget_route_info(None);
@@ -2020,6 +2053,9 @@ impl crate::tui::TuiState for App {
     }
 
     fn startup_oauth_account_label(&self) -> Option<String> {
+        if self.is_replay {
+            return None;
+        }
         if !self.is_remote {
             if crate::tui::is_ssh_remote() {
                 return None;
@@ -2271,6 +2307,9 @@ impl crate::tui::TuiState for App {
     }
 
     fn git_branch(&self) -> Option<String> {
+        if self.is_replay {
+            return None;
+        }
         gather_git_info().map(|info| info.branch)
     }
 
@@ -2342,6 +2381,9 @@ impl crate::tui::TuiState for App {
     }
 
     fn suggestion_prompts(&self) -> Vec<(String, String)> {
+        if self.is_replay {
+            return Vec::new();
+        }
         App::suggestion_prompts(self)
     }
 

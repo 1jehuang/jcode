@@ -8,8 +8,9 @@ use crate::subscription_catalog::{
     DEFAULT_JCODE_API_BASE, JCODE_API_BASE_ENV, JCODE_API_KEY_ENV, JCODE_ENV_FILE,
 };
 use serde::Serialize;
-use std::collections::HashSet;
-use std::sync::Mutex;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Finished turns shorter than this do not push (user is likely watching).
@@ -17,6 +18,42 @@ pub const MIN_TURN_DURATION_FOR_PUSH: Duration = Duration::from_secs(20);
 /// Back-off after the API reports no registered devices.
 pub const NO_DEVICES_SUPPRESS: Duration = Duration::from_secs(10 * 60);
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
+// Allow the TUI's three-second automatic failover countdown to restart work.
+const ERROR_PUSH_GRACE: Duration = Duration::from_secs(10);
+static PENDING_ERRORS: Mutex<Option<HashMap<String, Arc<AtomicBool>>>> = Mutex::new(None);
+
+fn queue_pending_error(session_id: &str) -> Arc<AtomicBool> {
+    let token = Arc::new(AtomicBool::new(false));
+    if let Ok(mut pending) = PENDING_ERRORS.lock() {
+        if let Some(previous) = pending
+            .get_or_insert_with(HashMap::new)
+            .insert(session_id.to_owned(), token.clone())
+        {
+            previous.store(true, Ordering::Release);
+        }
+    }
+    token
+}
+
+fn finish_pending_error(session_id: &str, token: &Arc<AtomicBool>) -> bool {
+    if let Ok(mut pending) = PENDING_ERRORS.lock()
+        && let Some(map) = pending.as_mut()
+        && map
+            .get(session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, token))
+    {
+        map.remove(session_id);
+    }
+    !token.load(Ordering::Acquire)
+}
+
+fn cancel_pending_error(session_id: &str) {
+    if let Ok(mut pending) = PENDING_ERRORS.lock()
+        && let Some(token) = pending.as_mut().and_then(|map| map.remove(session_id))
+    {
+        token.store(true, Ordering::Release);
+    }
+}
 
 /// Timing labels are deliberately static, never payloads, URLs or errors.
 struct PushTiming {
@@ -67,9 +104,151 @@ pub struct PushPayload {
     pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_title: Option<String>,
+    /// The session's own name. The API shows it on the notification's second
+    /// line, leaving `session_title` as a short where/what/how-long headline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_name: Option<String>,
     pub body: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<u64>,
+    /// Where the session runs: `Cloud` or this machine's name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// Repository (or directory) the session works in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    /// How long the turn that triggered this push ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<u64>,
+}
+
+/// Context shown ahead of the session name so a notification says where it
+/// came from before anything else.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PushLabels {
+    pub origin: Option<String>,
+    pub repo: Option<String>,
+    pub elapsed: Option<Duration>,
+}
+
+impl PushLabels {
+    /// Labels for a live session. `working_dir` falls back to the saved
+    /// session's directory when the caller does not have it at hand.
+    pub fn for_session(
+        session_id: &str,
+        working_dir: Option<&str>,
+        elapsed: Option<Duration>,
+    ) -> Self {
+        if cfg!(test) {
+            return Self::default();
+        }
+        let saved;
+        let dir = match working_dir {
+            Some(dir) => Some(dir),
+            None => {
+                saved = lookup_session_working_dir(session_id);
+                saved.as_deref()
+            }
+        };
+        Self {
+            origin: Some(origin_label().to_string()),
+            repo: dir.and_then(|dir| repo_label(std::path::Path::new(dir))),
+            elapsed,
+        }
+    }
+}
+
+const CLOUD_ORIGIN: &str = "Cloud";
+const LABEL_SEPARATOR: &str = " \u{00B7} ";
+const LABEL_MAX_CHARS: usize = 24;
+const TITLE_MAX_CHARS: usize = 120;
+
+/// `Cloud` on a managed Jcode Cloud machine, otherwise this machine's name.
+pub(crate) fn origin_label() -> &'static str {
+    static LABEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    LABEL.get_or_init(|| {
+        if crate::mobile_runner::is_cloud_machine() {
+            return CLOUD_ORIGIN.to_string();
+        }
+        let read = |path: &str| std::fs::read_to_string(path).ok();
+        machine_label(
+            read("/sys/devices/virtual/dmi/id/product_name").as_deref(),
+            std::env::var("HOSTNAME")
+                .ok()
+                .or_else(|| read("/etc/hostname"))
+                .as_deref(),
+        )
+    })
+}
+
+/// Short human name for a machine: the hardware model without its SKU code
+/// (`XPS 14 DA14260` reads as `XPS 14`), else the hostname, else `Local`.
+fn machine_label(product_name: Option<&str>, host_name: Option<&str>) -> String {
+    // SKU codes mix letters and digits in one long token; model words do not.
+    let is_sku = |token: &str| {
+        token.chars().count() >= 5
+            && token.chars().any(|c| c.is_ascii_digit())
+            && token.chars().any(|c| c.is_alphabetic())
+    };
+    let placeholder = |name: &str| {
+        let lower = name.to_ascii_lowercase();
+        [
+            "system product name",
+            "to be filled",
+            "default string",
+            "virtual machine",
+            "standard pc",
+            "not specified",
+        ]
+        .iter()
+        .any(|p| lower.contains(p))
+    };
+    let model = product_name
+        .map(|name| {
+            name.split_whitespace()
+                .filter(|token| !is_sku(token))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|name| !name.is_empty() && !placeholder(name));
+    let host = host_name
+        .map(|host| host.trim().split('.').next().unwrap_or("").to_string())
+        .filter(|host| !host.is_empty() && host != "localhost");
+    truncate_chars(
+        &model.or(host).unwrap_or_else(|| "Local".to_string()),
+        LABEL_MAX_CHARS,
+    )
+}
+
+/// Name of the repository containing `dir`, else the directory's own name.
+/// The home directory and filesystem root identify nothing, so they are
+/// left unlabeled.
+fn repo_label(dir: &std::path::Path) -> Option<String> {
+    let home = dirs::home_dir();
+    let root = dir
+        .ancestors()
+        .take_while(|p| Some(*p) != home.as_deref())
+        .find(|p| p.join(".git").exists())
+        .unwrap_or(dir);
+    if Some(root) == home.as_deref() {
+        return None;
+    }
+    let name = root.file_name()?.to_string_lossy();
+    let name = name.trim();
+    (!name.is_empty()).then(|| truncate_chars(name, LABEL_MAX_CHARS))
+}
+
+fn lookup_session_working_dir(session_id: &str) -> Option<String> {
+    if session_id.is_empty() {
+        return None;
+    }
+    crate::session::Session::load_startup_stub(session_id)
+        .ok()
+        .and_then(|session| session.working_dir)
+}
+
+fn humanize_duration(elapsed: Duration) -> String {
+    humanize_secs(&elapsed.as_secs().to_string())
 }
 
 pub fn build_payload(
@@ -78,6 +257,24 @@ pub fn build_payload(
     session_title: Option<&str>,
     body: &str,
     turn_id: Option<u64>,
+) -> PushPayload {
+    build_payload_with(
+        kind,
+        session_id,
+        session_title,
+        body,
+        turn_id,
+        &PushLabels::for_session(session_id, None, None),
+    )
+}
+
+pub fn build_payload_with(
+    kind: PushKind,
+    session_id: &str,
+    session_title: Option<&str>,
+    body: &str,
+    turn_id: Option<u64>,
+    labels: &PushLabels,
 ) -> PushPayload {
     let title = session_title
         .map(str::trim)
@@ -108,21 +305,45 @@ pub fn build_payload(
     } else {
         truncate_words(&collapsed, BODY_MAX_CHARS)
     };
-    // Lead the title with a per-kind marker so the kinds are told apart at a
-    // glance on the lock screen, not only by the small subtitle.
-    let title = Some(format!(
-        "{} {}",
-        kind_marker(kind),
-        title.as_deref().unwrap_or("jcode")
-    ));
+    let duration_secs = labels.elapsed.map(|elapsed| elapsed.as_secs());
+    // Each line has one job. The headline says where the session runs, which
+    // repo, what happened and how long it took, and is short enough to fit a
+    // lock screen. The session name gets the second line to itself and the
+    // body carries only the result.
+    let clean_label = |label: &Option<String>| {
+        label
+            .as_deref()
+            .map(|l| plain_inline(l.trim()))
+            .filter(|l| !l.is_empty())
+    };
+    let origin = clean_label(&labels.origin);
+    let repo = clean_label(&labels.repo);
+    let run_time = labels.elapsed.map(humanize_duration);
+    let status = match (kind_status(kind), run_time) {
+        // A finished turn needs no word beyond its check mark and run time.
+        (_, Some(time)) if kind == PushKind::TurnDone => format!("{} {time}", kind_marker(kind)),
+        (word, Some(time)) => format!("{} {word}{LABEL_SEPARATOR}{time}", kind_marker(kind)),
+        (word, None) => format!("{} {word}", kind_marker(kind)),
+    };
+    let headline = [origin.clone(), repo.clone(), Some(status)]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(LABEL_SEPARATOR);
+    let session_name = title;
+    let title = Some(truncate_chars(&headline, TITLE_MAX_CHARS));
     PushPayload {
         kind,
         session_id: session_id.to_string(),
         session_title: title,
+        session_name,
         body,
         // Message ids are random u64s. JSON numbers above 2^53 lose precision
         // in JavaScript and the API rejects them, so fold into the safe range.
         turn_id: turn_id.map(|id| id & JS_SAFE_INT_MASK),
+        origin,
+        repo,
+        duration_secs,
     }
 }
 
@@ -134,6 +355,16 @@ pub fn kind_marker(kind: PushKind) -> &'static str {
         PushKind::TurnError => "\u{274C}",  // cross mark
         PushKind::NeedsInput => "\u{2753}", // question mark
         PushKind::Wake => "\u{23F0}",       // alarm clock
+    }
+}
+
+/// The word that follows the marker in the headline.
+fn kind_status(kind: PushKind) -> &'static str {
+    match kind {
+        PushKind::TurnDone => "Done",
+        PushKind::TurnError => "Failed",
+        PushKind::NeedsInput => "Needs input",
+        PushKind::Wake => "Update",
     }
 }
 
@@ -295,6 +526,13 @@ fn trailing_question(text: &str) -> Option<String> {
 /// Errors arrive as `context: cause: cause`. Drop JSON blobs and noise, keep
 /// the most specific readable cause.
 fn summarize_error(text: &str) -> String {
+    // A provider failover prompt is machine-readable; say it in plain words.
+    if let Some(prompt) = jcode_provider_core::failover::parse_failover_prompt_message(text) {
+        return format!(
+            "{} is unavailable. Open the session to continue on {}.",
+            prompt.from_label, prompt.to_label
+        );
+    }
     static JSON: std::sync::OnceLock<Option<regex::Regex>> = std::sync::OnceLock::new();
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let Some(json) = cached_regex(&JSON, r"\{.*\}") else {
@@ -463,6 +701,41 @@ impl Suppression {
     }
 }
 
+/// How long an identical error for the same session stays quiet.
+const REPEAT_ERROR_QUIET: Duration = Duration::from_secs(10 * 60);
+
+/// Remembers the last error pushed per session so a retry loop that keeps
+/// failing the same way notifies once, not on every attempt.
+#[derive(Debug, Default)]
+pub struct RepeatGuard {
+    last: std::collections::HashMap<String, (String, Instant)>,
+}
+
+impl RepeatGuard {
+    /// True when this exact error was already pushed for the session inside
+    /// the quiet window. Otherwise records it and returns false.
+    pub fn is_repeat(&mut self, session_id: &str, body: &str, now: Instant) -> bool {
+        self.last
+            .retain(|_, (_, at)| now.saturating_duration_since(*at) < REPEAT_ERROR_QUIET);
+        match self.last.get(session_id) {
+            Some((last, _)) if last == body => true,
+            _ => {
+                self.last
+                    .insert(session_id.to_string(), (body.to_string(), now));
+                false
+            }
+        }
+    }
+
+    /// Any other notification for the session ends the quiet window.
+    pub fn clear(&mut self, session_id: &str) {
+        self.last.remove(session_id);
+    }
+}
+
+static REPEAT_ERRORS: std::sync::LazyLock<Mutex<RepeatGuard>> =
+    std::sync::LazyLock::new(|| Mutex::new(RepeatGuard::default()));
+
 static SUPPRESSION: Mutex<Suppression> = Mutex::new(Suppression { until: None });
 
 /// True while the API recently reported no registered devices.
@@ -549,10 +822,12 @@ fn is_ios_session(session_id: &str) -> bool {
 
 /// A user cancel was requested; the ending turn must not push.
 pub fn mark_cancelled(session_id: &str) {
+    cancel_pending_error(session_id);
     set_insert(&CANCELLED, session_id);
 }
 
 pub fn clear_cancelled(session_id: &str) {
+    cancel_pending_error(session_id);
     set_remove(&CANCELLED, session_id);
 }
 
@@ -581,6 +856,20 @@ pub fn notify(
     session_title: Option<&str>,
     body: &str,
     turn_id: Option<u64>,
+) {
+    notify_turn(kind, session_id, session_title, body, turn_id, None, None);
+}
+
+/// Queue a push for a turn that just ended, labeled with how long it ran and
+/// the directory it worked in.
+pub fn notify_turn(
+    kind: PushKind,
+    session_id: &str,
+    session_title: Option<&str>,
+    body: &str,
+    turn_id: Option<u64>,
+    working_dir: Option<&str>,
+    elapsed: Option<Duration>,
 ) {
     if cfg!(test) {
         return;
@@ -624,9 +913,51 @@ pub fn notify(
         );
         return;
     };
-    let payload = build_payload(kind, session_id, session_title, body, turn_id);
+    let payload = build_payload_with(
+        kind,
+        session_id,
+        session_title,
+        body,
+        turn_id,
+        &PushLabels::for_session(session_id, working_dir, elapsed),
+    );
     let source = body.to_string();
+    let pending_error = if payload.kind == PushKind::TurnError {
+        Some(queue_pending_error(session_id))
+    } else {
+        cancel_pending_error(session_id);
+        None
+    };
     handle.spawn(async move {
+        if let Some(token) = pending_error {
+            tokio::time::sleep(ERROR_PUSH_GRACE).await;
+            if !finish_pending_error(&payload.session_id, &token) {
+                record(
+                    requested,
+                    Some(&payload),
+                    &source,
+                    "skipped",
+                    Some("session resumed or cancelled during error grace period"),
+                    None,
+                );
+                return;
+            }
+        }
+        if let Ok(mut guard) = REPEAT_ERRORS.lock() {
+            if payload.kind != PushKind::TurnError {
+                guard.clear(&payload.session_id);
+            } else if guard.is_repeat(&payload.session_id, &payload.body, Instant::now()) {
+                record(
+                    requested,
+                    Some(&payload),
+                    &source,
+                    "skipped",
+                    Some("same error already pushed for this session (10 min quiet window)"),
+                    None,
+                );
+                return;
+            }
+        }
         let Some((key, base)) = credentials() else {
             record(
                 requested,
@@ -744,7 +1075,9 @@ pub async fn request_mobile_resume(
     title: Option<&str>,
 ) -> anyhow::Result<String> {
     let (key, base) = credentials().ok_or_else(|| {
-        anyhow::anyhow!("Sign in first with `jcode account login`, then retry /mobile.")
+        anyhow::anyhow!(
+            "Sign in first with `jcode account login` (or `/login jcode`), then retry /mobile."
+        )
     })?;
     let payload = build_payload(
         PushKind::Wake,
@@ -883,6 +1216,44 @@ mod http_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resumed_turn_cancels_pending_failure_push() {
+        let token = super::queue_pending_error("push-recovered-turn");
+        super::clear_cancelled("push-recovered-turn");
+        assert!(!super::finish_pending_error("push-recovered-turn", &token));
+    }
+
+    #[test]
+    fn resuming_one_session_does_not_hide_another_failure() {
+        let recovered = super::queue_pending_error("push-isolated-recovered");
+        let stopped = super::queue_pending_error("push-isolated-stopped");
+        super::clear_cancelled("push-isolated-recovered");
+        assert!(!super::finish_pending_error(
+            "push-isolated-recovered",
+            &recovered
+        ));
+        assert!(super::finish_pending_error(
+            "push-isolated-stopped",
+            &stopped
+        ));
+    }
+
+    #[test]
+    fn stopped_turn_keeps_failure_push() {
+        let token = super::queue_pending_error("push-stopped-turn");
+        assert!(super::finish_pending_error("push-stopped-turn", &token));
+    }
+
+    #[test]
+    fn stale_error_cannot_remove_new_failure_push() {
+        let old = super::queue_pending_error("push-replaced-turn");
+        let new = super::queue_pending_error("push-replaced-turn");
+        assert!(!super::finish_pending_error("push-replaced-turn", &old));
+        super::mark_cancelled("push-replaced-turn");
+        assert!(!super::finish_pending_error("push-replaced-turn", &new));
+        super::take_cancelled("push-replaced-turn");
+    }
+
     use super::*;
 
     #[test]
@@ -1012,7 +1383,8 @@ mod tests {
             serde_json::json!({
                 "kind": "turn_done",
                 "session_id": "session_x",
-                "session_title": "\u{2705} Fix login",
+                "session_title": "\u{2705} Done",
+                "session_name": "Fix login",
                 "body": "Done. All tests pass",
                 "turn_id": 42
             })
@@ -1020,11 +1392,161 @@ mod tests {
     }
 
     #[test]
+    fn mobile_push_title_leads_with_origin_repo_and_run_time() {
+        let labels = PushLabels {
+            origin: Some("XPS 14".to_string()),
+            repo: Some("jcode-mobile".to_string()),
+            elapsed: Some(Duration::from_secs(252)),
+        };
+        let p = build_payload_with(
+            PushKind::TurnDone,
+            "session_x",
+            Some("Fix login"),
+            "Done.",
+            Some(7),
+            &labels,
+        );
+        assert_eq!(
+            serde_json::to_value(&p).unwrap(),
+            serde_json::json!({
+                "kind": "turn_done",
+                "session_id": "session_x",
+                "session_title": "XPS 14 \u{00B7} jcode-mobile \u{00B7} \u{2705} 4m 12s",
+                "session_name": "Fix login",
+                "body": "Done.",
+                "turn_id": 7,
+                "origin": "XPS 14",
+                "repo": "jcode-mobile",
+                "duration_secs": 252
+            })
+        );
+        // Cloud sessions, wakes without a run time, and sessions outside a repo.
+        let cloud = PushLabels {
+            origin: Some("Cloud".to_string()),
+            ..PushLabels::default()
+        };
+        let p = build_payload_with(PushKind::Wake, "s", Some("Nightly"), "x", None, &cloud);
+        assert_eq!(
+            p.session_title.as_deref(),
+            Some("Cloud \u{00B7} \u{23F0} Update")
+        );
+        assert_eq!(p.session_name.as_deref(), Some("Nightly"));
+        assert_eq!(p.duration_secs, None);
+        // A question at the end still reports how long the turn ran.
+        let p = build_payload_with(
+            PushKind::TurnDone,
+            "s",
+            Some("T"),
+            "Done.\n\nShould I deploy it now?",
+            None,
+            &labels,
+        );
+        assert_eq!(p.kind, PushKind::NeedsInput);
+        assert_eq!(
+            p.session_title.as_deref(),
+            Some("XPS 14 \u{00B7} jcode-mobile \u{00B7} \u{2753} Needs input \u{00B7} 4m 12s")
+        );
+        assert_eq!(p.body, "Should I deploy it now?");
+        // Labels never push the title or body past the API's limits.
+        let long = "word ".repeat(60);
+        let p = build_payload_with(PushKind::TurnError, "s", Some(&long), &long, None, &labels);
+        assert_eq!(
+            p.session_title.as_deref(),
+            Some("XPS 14 \u{00B7} jcode-mobile \u{00B7} \u{274C} Failed \u{00B7} 4m 12s")
+        );
+        assert!(p.session_name.unwrap().chars().count() <= TITLE_MAX_CHARS);
+        assert!(p.body.chars().count() <= BODY_MAX_CHARS);
+        assert!(p.body.starts_with("word word"));
+    }
+
+    #[test]
+    fn mobile_push_failover_prompt_reads_as_plain_words() {
+        let prompt = jcode_provider_core::failover::ProviderFailoverPrompt {
+            from_provider: "claude".into(),
+            from_label: "Anthropic (claude-fox)".into(),
+            to_provider: "claude".into(),
+            to_label: "Anthropic (claude-otter)".into(),
+            target_route: None,
+            reason: "503".into(),
+            estimated_input_chars: 676703,
+            estimated_input_tokens: 169175,
+        };
+        let p = build_payload(
+            PushKind::TurnError,
+            "s",
+            Some("T"),
+            &prompt.to_error_message(),
+            None,
+        );
+        assert_eq!(
+            p.body,
+            "Anthropic (claude-fox) is unavailable. Open the session to continue on Anthropic (claude-otter)."
+        );
+    }
+
+    #[test]
+    fn mobile_push_repeat_guard_quiets_identical_errors_only() {
+        let mut guard = RepeatGuard::default();
+        let t0 = Instant::now();
+        assert!(!guard.is_repeat("a", "503", t0));
+        assert!(guard.is_repeat("a", "503", t0 + Duration::from_secs(60)));
+        // Another session, a different error, or any other push in between
+        // is news.
+        assert!(!guard.is_repeat("b", "503", t0));
+        assert!(!guard.is_repeat("a", "401", t0 + Duration::from_secs(61)));
+        assert!(guard.is_repeat("a", "401", t0 + Duration::from_secs(62)));
+        guard.clear("a");
+        assert!(!guard.is_repeat("a", "401", t0 + Duration::from_secs(63)));
+        // The quiet window ends on its own.
+        assert!(!guard.is_repeat(
+            "a",
+            "401",
+            t0 + Duration::from_secs(64) + REPEAT_ERROR_QUIET
+        ));
+    }
+
+    #[test]
+    fn mobile_push_machine_and_repo_labels() {
+        assert_eq!(
+            machine_label(Some("XPS 14 DA14260\n"), Some("xps14")),
+            "XPS 14"
+        );
+        assert_eq!(machine_label(Some("MacBook Pro"), None), "MacBook Pro");
+        // A product name that is only a SKU, or a board placeholder, says
+        // nothing: use the hostname.
+        assert_eq!(
+            machine_label(Some("20XW00FPUS"), Some("carbon.lan\n")),
+            "carbon"
+        );
+        assert_eq!(
+            machine_label(Some("System Product Name"), Some("tower")),
+            "tower"
+        );
+        assert_eq!(machine_label(None, Some("localhost")), "Local");
+        assert_eq!(machine_label(None, None), "Local");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("my-repo");
+        let nested = repo.join("crates").join("core");
+        std::fs::create_dir_all(&nested).unwrap();
+        // No repository above it: the directory names itself.
+        assert_eq!(repo_label(&nested).as_deref(), Some("core"));
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        assert_eq!(repo_label(&nested).as_deref(), Some("my-repo"));
+        assert_eq!(repo_label(&repo).as_deref(), Some("my-repo"));
+        assert_eq!(repo_label(std::path::Path::new("/")), None);
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(repo_label(&home), None);
+        }
+    }
+
+    #[test]
     fn mobile_push_payload_defaults_and_truncation() {
         let p = build_payload(PushKind::NeedsInput, "s", Some("  "), "", None);
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(v["kind"], "needs_input");
-        assert_eq!(v["session_title"], "\u{2753} jcode");
+        assert_eq!(v["session_title"], "\u{2753} Needs input");
+        assert!(v.get("session_name").is_none());
         assert!(v.get("turn_id").is_none());
         assert_eq!(v["body"], "Waiting for your input");
         let long = "a".repeat(500);
@@ -1057,17 +1579,18 @@ mod tests {
         let answer = "## Summary\n\nFixed the **login** bug in `auth.rs`; all 12 tests pass.\n\n- detail one\n- detail two\n\n```rust\nfn x() {}\n```";
         let p = build_payload(PushKind::TurnDone, "s", Some("Fix `login`"), answer, None);
         assert_eq!(p.body, "Fixed the login bug in auth.rs; all 12 tests pass.");
-        assert_eq!(p.session_title.as_deref(), Some("\u{2705} Fix login"));
+        assert_eq!(p.session_title.as_deref(), Some("\u{2705} Done"));
+        assert_eq!(p.session_name.as_deref(), Some("Fix login"));
         for (kind, body, marker) in [
-            (PushKind::TurnDone, "done", "\u{2705}"),
-            (PushKind::TurnDone, "Should I push?", "\u{2753}"),
-            (PushKind::TurnError, "boom", "\u{274C}"),
-            (PushKind::Wake, "bash completed", "\u{23F0}"),
+            (PushKind::TurnDone, "done", "\u{2705} Done"),
+            (PushKind::TurnDone, "Should I push?", "\u{2753} Needs input"),
+            (PushKind::TurnError, "boom", "\u{274C} Failed"),
+            (PushKind::Wake, "bash completed", "\u{23F0} Update"),
         ] {
             let t = build_payload(kind, "s", Some("T"), body, None)
                 .session_title
                 .unwrap();
-            assert_eq!(t, format!("{marker} T"));
+            assert_eq!(t, marker);
         }
         let bullets = "- Updated parser\n- Added tests\n- Shipped v2 to production servers today";
         assert_eq!(

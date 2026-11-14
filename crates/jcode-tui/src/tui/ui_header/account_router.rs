@@ -2,7 +2,7 @@
 use super::*;
 use crate::auth::account_pool::{AccountPool, OAuthLogin, account_key};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 static GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -12,7 +12,7 @@ pub(super) fn generation() -> u64 {
     GENERATION.load(Ordering::Acquire)
 }
 
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Default, PartialEq, Eq)]
 struct Inventory {
     logins: Vec<OAuthLogin>,
     pool: AccountPool,
@@ -21,18 +21,33 @@ struct Inventory {
 
 #[derive(Default)]
 struct InventoryCache {
-    inventory: Inventory,
+    inventory: Arc<Inventory>,
     updated: Option<Instant>,
     refreshing: bool,
 }
 
-fn cached_inventory() -> Inventory {
+impl InventoryCache {
+    fn snapshot(&self) -> Arc<Inventory> {
+        Arc::clone(&self.inventory)
+    }
+
+    fn replace_inventory(&mut self, inventory: Inventory) -> bool {
+        if *self.inventory == inventory {
+            return false;
+        }
+        self.inventory = Arc::new(inventory);
+        true
+    }
+}
+
+fn cached_inventory() -> Arc<Inventory> {
     static CACHE: OnceLock<Mutex<InventoryCache>> = OnceLock::new();
+    static EMPTY: OnceLock<Arc<Inventory>> = OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
     let Ok(mut state) = cache.try_lock() else {
-        return Inventory::default();
+        return Arc::clone(EMPTY.get_or_init(Default::default));
     };
-    let inventory = state.inventory.clone();
+    let inventory = state.snapshot();
     if !state.refreshing
         && state
             .updated
@@ -45,8 +60,7 @@ fn cached_inventory() -> Inventory {
             .spawn(move || {
                 let inventory = load_inventory();
                 if let Ok(mut state) = cache.lock() {
-                    if state.inventory != inventory {
-                        state.inventory = inventory;
+                    if state.replace_inventory(inventory) {
                         GENERATION.fetch_add(1, Ordering::Release);
                     }
                     state.updated = Some(Instant::now());

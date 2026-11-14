@@ -1,5 +1,7 @@
 use super::*;
 
+#[path = "commands_cloud_tests/account_onboarding.rs"]
+mod account_onboarding;
 #[path = "commands_cloud_tests/auto_recovery.rs"]
 mod auto_recovery;
 

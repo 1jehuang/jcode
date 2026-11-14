@@ -179,12 +179,11 @@ impl Agent {
         let rewind_checkpoint =
             self.checkpoint_user_input(user_message, !images.is_empty(), display_role.is_some())?;
         // Inject any pending notifications before the user message
+        let alert_start = self.session.messages.len();
         let alerts = self.take_alerts();
-        if !alerts.is_empty() {
+        for alert in alerts {
             let alert_text = format!(
-                "[NOTIFICATION]\nYou received {} notification(s) from other agents working in this codebase:\n\n{}\n\nUse the communicate tool to coordinate with other agents (prefer dm; broadcast reaches only your spawned subtree).",
-                alerts.len(),
-                alerts.join("\n\n---\n\n")
+                "[NOTIFICATION]\nYou received a notification from another agent working in this codebase:\n\n{alert}\n\nUse the communicate tool to coordinate with other agents (prefer dm; broadcast reaches only your spawned subtree)."
             );
             self.add_message_with_display_role(
                 Role::User,
@@ -195,6 +194,7 @@ impl Agent {
                 Some(crate::session::StoredDisplayRole::System),
             );
         }
+        self.emit_context_messages_since(alert_start, &event_tx);
 
         let system_reminder = system_reminder.filter(|value| !value.trim().is_empty());
         // A reminder-only turn (e.g. reload recovery) used to persist an empty
@@ -221,8 +221,11 @@ impl Agent {
         // arrive immediately after Message is accepted; if plugin/MCP refresh
         // runs first, cancellation used to leave only an unbound checkpoint and
         // no transcript message, so the prompt vanished from Esc rewind.
+        let announcement_start = self.session.messages.len();
         self.announce_late_skills();
+        self.emit_context_messages_since(announcement_start, &event_tx);
         self.inject_active_skill(&user_message);
+        let input_start = self.session.messages.len();
         self.append_user_context_message_with_display_role(
             &user_message,
             images,
@@ -230,19 +233,26 @@ impl Agent {
             continues_turn,
         )?;
         self.bind_user_checkpoint(rewind_checkpoint)?;
+        if continues_turn || display_role.is_some() {
+            self.emit_context_messages_since(input_start, &event_tx);
+        }
         // The per-turn reminder (swarm DM wake, mission continuation, ...) goes
         // into the transcript after the prompt, never into the system prompt.
         // The system prompt precedes every message, so changing it for one turn
         // invalidated the whole cached conversation on that turn and again on
         // the next turn when it disappeared.
         if let Some(reminder) = system_reminder {
+            let reminder_start = self.session.messages.len();
             self.append_turn_system_reminder(&reminder)?;
+            self.emit_context_messages_since(reminder_start, &event_tx);
         }
 
         if !continues_turn {
             self.refresh_plugin_mcp_before_prompt().await;
         }
+        let mcp_announcement_start = self.session.messages.len();
         self.announce_late_mcp_tools().await;
+        self.emit_context_messages_since(mcp_announcement_start, &event_tx);
         crate::telemetry::record_turn();
         let turn_started_at = Instant::now();
         let start_message_index = self.message_count();
@@ -277,7 +287,43 @@ impl Agent {
         result
     }
 
-    /// Persist a hidden, model-visible `<system-reminder>` message at the tail
+    /// Turn preparation runs before the streaming loop installs its sender.
+    /// Publish each newly appended context message explicitly so clients see a
+    /// new transcript entry, rather than silently changing only model history.
+    fn emit_context_messages_since(
+        &self,
+        start: usize,
+        event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    ) {
+        for message in &self.session.messages[start..] {
+            let content = message
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
+                content,
+                display_role: Some(
+                    match message.display_role {
+                        Some(crate::session::StoredDisplayRole::BackgroundTask) => {
+                            "background_task"
+                        }
+                        _ => "system",
+                    }
+                    .to_string(),
+                ),
+                point: "context".to_string(),
+                tools_skipped: None,
+                client_ids: Vec::new(),
+            });
+        }
+    }
+
+    /// Persist a model-visible `<system-reminder>` message at the tail
     /// of the transcript so it does not disturb the cached prompt prefix.
     pub(super) fn append_turn_system_reminder(&mut self, reminder: &str) -> Result<()> {
         let reminder = reminder.trim();
@@ -887,12 +933,13 @@ impl Agent {
             "Announcing {} MCP tool name(s) in the transcript (tool list stays cache-stable)",
             fresh.len()
         ));
-        self.add_message(
+        self.add_message_with_display_role(
             Role::User,
             vec![ContentBlock::Text {
                 text,
                 cache_control: None,
             }],
+            Some(crate::session::StoredDisplayRole::System),
         );
     }
 
@@ -1033,12 +1080,13 @@ impl Agent {
             "Announcing {} late skill(s) in the transcript (system prompt stays cache-stable)",
             fresh.len()
         ));
-        self.add_message(
+        self.add_message_with_display_role(
             Role::User,
             vec![ContentBlock::Text {
                 text,
                 cache_control: None,
             }],
+            Some(crate::session::StoredDisplayRole::System),
         );
         self.announced_skills_scan_index = self.session.messages.len();
     }

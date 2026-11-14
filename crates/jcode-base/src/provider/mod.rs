@@ -50,6 +50,7 @@ use jcode_provider_core::FailoverDecision;
 use registry::ProviderRegistry;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use std::time::Instant;
 
 pub use account_failover::{has_alternate_account_in_pool, has_eligible_alternate_account};
 pub use catalog_routes::{
@@ -526,6 +527,13 @@ impl MultiProvider {
             if let Some(reason) =
                 models::provider_unavailability_detail_for_account_label(key, Some(&bound_label))
                     .or_else(|| self.session_account_exhausted(active))
+                    .or_else(|| {
+                        account_failover::multi_account_provider_kind(active)
+                            .filter(|kind| {
+                                crate::usage::account_known_exhausted(*kind, &bound_label)
+                            })
+                            .map(|_| "OAuth usage exhausted".to_string())
+                    })
                 && !self
                     .try_auto_banked_reset(active, &reason, messages, tools, mode)
                     .await?
@@ -546,24 +554,17 @@ impl MultiProvider {
                     reason
                 );
             }
+            let attempt_started = Instant::now();
             let attempt = self
                 .complete_with_auto_reset(active, messages, tools, mode, resume_session_id)
                 .await;
             match attempt {
                 Ok(stream) => {
-                    match active {
-                        ActiveProvider::OpenAI => {
-                            models::clear_openai_provider_unavailability_for_account_label(Some(
-                                &bound_label,
-                            ))
-                        }
-                        ActiveProvider::Claude => {
-                            models::clear_claude_provider_unavailability_for_account_label(Some(
-                                &bound_label,
-                            ))
-                        }
-                        _ => {}
-                    }
+                    models::clear_provider_unavailability_after_request(
+                        key,
+                        Some(&bound_label),
+                        attempt_started,
+                    );
                     return Ok(stream);
                 }
                 Err(err) => {
@@ -675,6 +676,7 @@ impl MultiProvider {
                 continue;
             }
 
+            let attempt_started = Instant::now();
             let attempt = self
                 .complete_candidate_with_credit_failover(
                     candidate,
@@ -693,7 +695,7 @@ impl MultiProvider {
 
             match attempt {
                 Ok(stream) => {
-                    clear_provider_unavailable_for_account(key);
+                    models::clear_provider_unavailability_after_request(key, None, attempt_started);
                     self.record_provider_activity(candidate);
                     if candidate != active {
                         self.set_active_provider(candidate);

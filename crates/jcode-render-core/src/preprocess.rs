@@ -49,6 +49,12 @@ enum MathDelimiter {
 /// environments, and fenced `math`/`latex`/`tex`/`katex` blocks. Generic code
 /// spans and code fences are intentionally left byte-for-byte unchanged.
 pub fn normalize_latex_math(text: &str) -> String {
+    // Every pass below rewrites only around `$`, a backslash command or a
+    // fenced math block. Plain prose (most streamed text) has none, and the
+    // four passes otherwise copy it four times per render.
+    if !text.contains(['$', '\\']) && !text.contains("```") && !text.contains("~~~") {
+        return text.to_string();
+    }
     let fenced = normalize_math_fences(text);
     let normalized = normalize_latex_delimiters_and_environments(&fenced);
     let promoted = promote_standalone_inline_math(&normalized);
@@ -771,6 +777,9 @@ fn delimited_content_looks_like_prose(rest: &str, close_delimiter: &str) -> bool
 /// are left untouched, and already-escaped `\$` is preserved. Display-math
 /// `$$` runs are passed through unchanged.
 pub fn escape_currency_dollars(text: &str) -> String {
+    if !text.contains('$') {
+        return text.to_string();
+    }
     let chars: Vec<char> = text.chars().collect();
     let len = chars.len();
     let mut out = String::with_capacity(text.len());
@@ -927,6 +936,18 @@ mod tests {
     fn escapes_currency() {
         assert_eq!(escape_currency_dollars("$5"), "\\$5");
         assert_eq!(escape_currency_dollars("$5x$"), "\\$5x$");
+    }
+
+    #[test]
+    fn text_without_math_markers_is_returned_unchanged() {
+        for text in [
+            "",
+            "Plain prose.\n\n- a list\n- of `code` items\n\n> quote\r\n\ttabbed\n",
+            "trailing spaces  \nand a ~~strike~~ plus `` two ticks ``\n\n",
+        ] {
+            assert_eq!(normalize_latex_math(text), text);
+            assert_eq!(escape_currency_dollars(text), text);
+        }
     }
 
     #[test]

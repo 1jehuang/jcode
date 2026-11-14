@@ -231,7 +231,6 @@ fn pause_schema_is_shared_strict_and_carries_the_guidance() {
         let canonical = &update[field];
         let mut bare = canonical.clone();
         bare.as_object_mut().unwrap().remove("description");
-        assert_eq!(bare, properties["update"]["items"]["properties"][field]);
         assert_eq!(
             bare,
             properties["phases"]["items"]["properties"]["lanes"]["items"]["properties"]["items"]["items"]

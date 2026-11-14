@@ -44,6 +44,18 @@ pub(super) async fn run_scriptable_login_provider(
     account_label: Option<&str>,
     options: &LoginOptions,
 ) -> Result<LoginFlowOutcome> {
+    // `--device-code` on its own: show the code, then wait for approval here.
+    if options.device_code && !options.print_auth_url && !options.complete {
+        anyhow::ensure!(
+            provider.target == LoginProviderTarget::OpenAi,
+            "--device-code is only supported for OpenAI."
+        );
+        start_scriptable_login(provider, account_label, options).await?;
+        if !options.json {
+            eprintln!("Waiting for you to approve the code...");
+        }
+        return complete_scriptable_openai_device_login(provider.id, options).await;
+    }
     if options.print_auth_url
         || (options.flow_id.is_some() && !options.complete && !options.has_provided_input())
     {
@@ -128,6 +140,23 @@ pub(super) async fn start_scriptable_login(
                     redirect_uri: String::new(),
                 }
                 .default_expires_at_ms(),
+            )
+        }
+        LoginProviderTarget::OpenAi if options.device_code => {
+            let label = auth::codex::login_target_label(account_label)?;
+            let device = auth::oauth::start_openai_device_login().await?;
+            let auth_url = device.verification_url.clone();
+            let user_code = device.user_code.clone();
+            let expires_at_ms = device.expires_at_ms;
+            (
+                PendingScriptableLogin::OpenaiDevice {
+                    account_label: label,
+                    device,
+                },
+                auth_url,
+                "complete",
+                Some(user_code),
+                expires_at_ms,
             )
         }
         LoginProviderTarget::OpenAi => {
@@ -343,6 +372,9 @@ pub(super) async fn complete_scriptable_login(
             complete_scriptable_claude_login(provider.id, options, require_scriptable_input(input)?)
                 .await
         }
+        LoginProviderTarget::OpenAi if options.complete && input.is_none() => {
+            complete_scriptable_openai_device_login(provider.id, options).await
+        }
         LoginProviderTarget::OpenAi => {
             complete_scriptable_openai_login(provider.id, options, require_scriptable_input(input)?)
                 .await
@@ -442,6 +474,41 @@ pub(super) async fn complete_scriptable_claude_login(
         if let Some(email) = profile_email {
             eprintln!("Profile email: {}", email);
         }
+    }
+    Ok(LoginFlowOutcome::Completed)
+}
+
+pub(super) async fn complete_scriptable_openai_device_login(
+    provider_id: &str,
+    options: &LoginOptions,
+) -> Result<LoginFlowOutcome> {
+    let pending_path = pending_login_path("openai", options.flow_id.as_deref())?;
+    let PendingScriptableLogin::OpenaiDevice {
+        account_label,
+        device,
+    } = load_pending_login(&pending_path, "openai")?
+    else {
+        anyhow::bail!(
+            "No pending OpenAI device-code login. Start one with `jcode login --provider openai --device-code --print-auth-url`, or finish a browser login with --callback-url."
+        );
+    };
+    let tokens = auth::oauth::finish_openai_device_login(&device).await?;
+    auth::oauth::save_openai_tokens_for_account(&tokens, &account_label)?;
+    clear_pending_login(&pending_path);
+    crate::telemetry::record_auth_success(provider_id, "oauth_device_code");
+    let credentials_path = crate::storage::jcode_dir()?.join("openai-auth.json");
+    emit_scriptable_auth_success(
+        options.json,
+        ScriptableAuthSuccess {
+            status: "authenticated",
+            provider: provider_id.to_string(),
+            account_label: Some(account_label.clone()),
+            credentials_path: Some(credentials_path.display().to_string()),
+            email: None,
+        },
+    )?;
+    if !options.json {
+        eprintln!("Successfully logged in to OpenAI (account '{account_label}').");
     }
     Ok(LoginFlowOutcome::Completed)
 }
