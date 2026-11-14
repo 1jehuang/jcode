@@ -184,6 +184,7 @@ async fn idle_session_that_stays_locked_refuses_instead_of_stranding_the_message
 #[tokio::test]
 async fn sessions_without_a_window_are_not_live_and_refuse_messages() {
     let f = fixture().await;
+    let initial_count = f.agent.lock().await.message_count();
     {
         let mut members = f.host.swarm.members.write().await;
         let member = members.get_mut(&f.session_id).unwrap();
@@ -201,7 +202,7 @@ async fn sessions_without_a_window_are_not_live_and_refuse_messages() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("no longer running"), "{error}");
-    assert_eq!(f.agent.lock().await.message_count(), 0);
+    assert_eq!(f.agent.lock().await.message_count(), initial_count);
 }
 
 #[tokio::test]
