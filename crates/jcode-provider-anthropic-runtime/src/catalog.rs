@@ -20,13 +20,14 @@ impl AnthropicProvider {
         let catalog = if is_oauth {
             jcode_base::provider::fetch_anthropic_model_catalog_oauth(&token).await?
         } else {
-            // Discovery must go out with the same `[provider.headers]`
-            // overrides the chat transport resolves, or a key overridden
-            // there 401s here and every model shows as unavailable.
-            let headers = super::configured_direct_headers();
+            // Chat sends the transport snapshot captured at construction; a
+            // named profile clears JCODE_ANTHROPIC_HEADERS right after this
+            // provider is built, so re-reading env here would silently fall
+            // back to global headers while chat keeps the profile overrides.
+            let headers = self.direct_transport.headers.clone();
             jcode_base::provider::fetch_anthropic_model_catalog_with_headers(
                 &token,
-                headers.ok().as_ref(),
+                headers.as_ref().ok(),
             )
             .await?
         };
@@ -111,12 +112,14 @@ impl AnthropicProvider {
                 Err(err) => return Err(err),
             }
         } else {
-            // Same header-override parity as the doctor path: chat honors
-            // `[provider.headers]`, so the direct catalog refresh must too.
-            let headers = super::configured_direct_headers();
+            // Same header parity as the doctor path: use the transport
+            // snapshot captured at construction (profile overrides intact
+            // even after the named-profile env is cleared), not a fresh env
+            // read that would fall back to global headers.
+            let headers = self.direct_transport.headers.clone();
             jcode_base::provider::fetch_anthropic_model_catalog_with_headers(
                 &self.direct_api_key()?,
-                headers.ok().as_ref(),
+                headers.as_ref().ok(),
             )
             .await?
         };
