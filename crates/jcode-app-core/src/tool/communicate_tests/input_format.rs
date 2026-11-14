@@ -460,3 +460,37 @@ fn format_status_snapshot_includes_activity_and_metadata() {
     );
     assert!(output.output.contains("Files: src/server/comm_sync.rs"));
 }
+
+/// Regression test (#2153): `model: "inherit"` / `"coordinator"` are
+/// resolution sentinels, not agent-selected model overrides. The tool-level
+/// validation must let them pass through so `resolve_swarm_spawn_selection`
+/// can handle them, regardless of `swarm_model_selection` state.
+#[test]
+fn inherit_sentinels_bypass_tool_model_validation() {
+    use crate::server::is_inherit_sentinel;
+
+    // The filter logic mirrors what execute() applies before validation.
+    for sentinel in ["inherit", "coordinator", "  INHERIT  "] {
+        let model = Some(sentinel.to_string());
+        let validation_model = model
+            .as_deref()
+            .filter(|model| !is_inherit_sentinel(model));
+        assert_eq!(
+            validation_model, None,
+            "sentinel {sentinel:?} should be filtered to None"
+        );
+    }
+
+    // Non-sentinel models must still be passed through for validation.
+    for model in ["claude-sonnet-4-20250514", "gpt-4o"] {
+        let m = Some(model.to_string());
+        let validation_model = m
+            .as_deref()
+            .filter(|model| !is_inherit_sentinel(model));
+        assert_eq!(
+            validation_model,
+            Some(model),
+            "real model {model:?} must pass through unchanged"
+        );
+    }
+}

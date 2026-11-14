@@ -40,6 +40,7 @@ pub(super) struct CoordinatorSpawnIdentity {
     pub provider_key: Option<String>,
     pub route_api_method: Option<String>,
     pub is_canary: bool,
+    pub reasoning_effort: Option<String>,
 }
 
 /// The resolved model + auth route a spawned swarm agent should be created
@@ -72,6 +73,7 @@ pub(super) async fn resolve_coordinator_spawn_identity(
             provider_key: agent_guard.session_provider_key(),
             route_api_method: agent_guard.session_route_api_method(),
             is_canary: agent_guard.is_canary(),
+            reasoning_effort: agent_guard.session_reasoning_effort(),
         };
     }
 
@@ -84,6 +86,7 @@ pub(super) async fn resolve_coordinator_spawn_identity(
                 provider_key: session.provider_key.clone(),
                 route_api_method: session.route_api_method.clone(),
                 is_canary: session.is_canary,
+                reasoning_effort: session.reasoning_effort.clone(),
             };
             crate::logging::info(&format!(
                 "Swarm spawn: coordinator {} agent busy/unavailable, inheriting identity from persisted session (model={:?} provider_key={:?} route={:?} canary={})",
