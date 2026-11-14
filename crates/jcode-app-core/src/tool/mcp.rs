@@ -1290,10 +1290,29 @@ impl McpManagementTool {
             let connected = manager.connected_servers().await;
             if connected.contains(&server_name) {
                 drop(manager);
+                // `mcp_call` can connect a disabled server without ever
+                // registering its tools. Enable must register them so the
+                // toggle's promise (tools in the prompt) holds even then.
+                let (tool_count, connect_error) = crate::mcp::mcp_toggle::register_connected_tools(
+                    &self.manager,
+                    &server_name,
+                    registry.as_ref().map(|r| r as _),
+                )
+                .await;
                 self.emit_mcp_status().await;
+                if let Some(error) = connect_error {
+                    return Ok(ToolOutput::new(format!(
+                        "Server '{}' is connected but registering its tools failed: {}. {}",
+                        server_name,
+                        error,
+                        persistence.describe()
+                    ))
+                    .with_title(format!("MCP: {} enabled (register failed)", server_name)));
+                }
                 return Ok(ToolOutput::new(format!(
-                    "Server '{}' is already connected and enabled. {}",
+                    "Server '{}' is already connected and enabled. Registered {} tool(s). {}",
                     server_name,
+                    tool_count,
                     persistence.describe()
                 ))
                 .with_title(format!("MCP: {} already enabled", server_name)));
