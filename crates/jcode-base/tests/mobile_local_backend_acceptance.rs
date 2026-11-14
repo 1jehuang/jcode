@@ -71,7 +71,8 @@ async fn api(
 #[tokio::test]
 #[ignore = "requires sibling solosystems-backend and Node node:sqlite, run explicitly with --ignored"]
 async fn phone_message_crosses_real_backend_sqlite_and_desktop_runner() {
-    use reqwest::Method::{GET, POST};
+    const GET: reqwest::Method = reqwest::Method::GET;
+    const POST: reqwest::Method = reqwest::Method::POST;
     // Resolve at runtime so a hosted-built test binary can run in this checkout.
     let cwd = std::env::current_dir().unwrap();
     let manifest = if cwd.join("crates/jcode-base").is_dir() {
