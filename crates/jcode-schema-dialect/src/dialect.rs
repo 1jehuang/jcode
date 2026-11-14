@@ -170,6 +170,20 @@ pub fn apply_with_quirks(schema: &Value, spec: &DialectSpec, quirks: &LearnedQui
 fn walk(schema: &Value, spec: &DialectSpec, quirks: &LearnedQuirks) -> Value {
     match schema {
         Value::Object(map) => {
+            // Fold `allOf` into the enclosing object before filtering keywords,
+            // normalizing type unions, or pruning `required`. Walking earlier
+            // would either drop `allOf` on dialects whose wire schema lacks it
+            // (Gemini/Antigravity) or prune a branch's `required` before its
+            // sibling branch's `properties` have been united with it.
+            let merged_all_of = spec.transforms.merge_all_of_branches && map.contains_key("allOf");
+            let folded;
+            let map = if merged_all_of {
+                folded = fold_all_of(map);
+                &folded
+            } else {
+                map
+            };
+
             let mut out = Map::new();
             for (key, value) in map {
                 // Renames happen before the support check, because the dialect
@@ -244,14 +258,11 @@ fn walk(schema: &Value, spec: &DialectSpec, quirks: &LearnedQuirks) -> Value {
                 }
             }
 
-            if spec.transforms.scalar_types {
-                normalize_type_union(&mut out);
-            }
-            if spec.transforms.prune_dangling_required {
+            if spec.transforms.prune_dangling_required || merged_all_of {
                 prune_dangling_required(&mut out);
             }
-            if spec.transforms.merge_all_of_branches {
-                merge_all_of_branches(&mut out);
+            if spec.transforms.scalar_types {
+                normalize_type_union(&mut out);
             }
             if spec.transforms.require_properties_on_objects && is_object_typed(&out) {
                 out.entry("properties".to_string())
@@ -399,15 +410,50 @@ fn flatten_top_level_combiners(schema: &mut Value) {
 }
 
 /// Combine two declarations of the same property name, keeping every key
-/// either side declares. Neither is strictly more authoritative: the branch
-/// narrows the type, the parent carries the description, and a tool needs both.
+/// either side declares. `branch` wins scalar collisions, while nested
+/// `properties`, `required`, and `allOf` are merged recursively so shared
+/// object properties across `allOf` branches preserve every sub-property and
+/// requirement.
 fn merge_property(parent: &Value, branch: &Value) -> Value {
     let (Some(parent_map), Some(branch_map)) = (parent.as_object(), branch.as_object()) else {
         return parent.clone();
     };
     let mut merged = branch_map.clone();
     for (key, value) in parent_map {
-        merged.entry(key.clone()).or_insert_with(|| value.clone());
+        match (key.as_str(), merged.get_mut(key), value) {
+            ("properties", Some(Value::Object(existing)), Value::Object(incoming)) => {
+                for (name, prop) in incoming {
+                    match existing.get(name) {
+                        Some(current) => {
+                            let combined = merge_property(prop, current);
+                            existing.insert(name.clone(), combined);
+                        }
+                        None => {
+                            existing.insert(name.clone(), prop.clone());
+                        }
+                    }
+                }
+            }
+            ("required", Some(Value::Array(existing)), Value::Array(incoming)) => {
+                for item in incoming {
+                    if let Some(name) = item.as_str()
+                        && !existing.iter().any(|e| e.as_str() == Some(name))
+                    {
+                        existing.push(Value::String(name.to_string()));
+                    }
+                }
+            }
+            ("allOf", Some(Value::Array(existing)), Value::Array(incoming)) => {
+                for item in incoming {
+                    if !existing.contains(item) {
+                        existing.push(item.clone());
+                    }
+                }
+            }
+            _ => {
+                merged.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
     }
     Value::Object(merged)
 }
@@ -432,6 +478,51 @@ fn flatten_all_combiners(schema: &Value) -> Value {
                         Value::Object(branch) => branch,
                         other => return other,
                     };
+                    if combiner == "allOf" {
+                        for rest in &branches[1..] {
+                            let Value::Object(rest_branch) = flatten_all_combiners(rest) else {
+                                continue;
+                            };
+                            for (key, value) in rest_branch {
+                                match (flattened.get_mut(&key), value) {
+                                    (Some(Value::Object(existing)), Value::Object(incoming))
+                                        if key == "properties" =>
+                                    {
+                                        for (name, property) in incoming {
+                                            match existing.get(&name) {
+                                                Some(current) => {
+                                                    existing.insert(
+                                                        name,
+                                                        merge_property(&property, current),
+                                                    );
+                                                }
+                                                None => {
+                                                    existing.insert(name, property);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    (Some(Value::Array(existing)), Value::Array(incoming))
+                                        if key == "required" =>
+                                    {
+                                        for item in incoming {
+                                            if let Some(name) = item.as_str()
+                                                && !existing
+                                                    .iter()
+                                                    .any(|e| e.as_str() == Some(name))
+                                            {
+                                                existing.push(Value::String(name.to_string()));
+                                            }
+                                        }
+                                    }
+                                    (Some(_), _) => {}
+                                    (None, incoming) => {
+                                        flattened.insert(key, incoming);
+                                    }
+                                }
+                            }
+                        }
+                    }
                     for (key, value) in map {
                         if key == combiner {
                             continue;
@@ -461,6 +552,17 @@ fn flatten_all_combiners(schema: &Value) -> Value {
                                     }
                                 }
                             }
+                            (Some(Value::Array(existing)), Value::Array(incoming))
+                                if combiner == "allOf" && key == "required" =>
+                            {
+                                for item in incoming {
+                                    if let Some(name) = item.as_str()
+                                        && !existing.iter().any(|e| e.as_str() == Some(name))
+                                    {
+                                        existing.push(Value::String(name.to_string()));
+                                    }
+                                }
+                            }
                             (Some(_), _) => {}
                             (None, _) => {
                                 flattened.insert(key.clone(), sibling);
@@ -484,20 +586,38 @@ fn flatten_all_combiners(schema: &Value) -> Value {
     }
 }
 
-/// Merge each `allOf` branch into the enclosing object and drop the `allOf`.
+fn combiner_branch_has_concrete_shape(branch: &Value) -> bool {
+    let Some(map) = branch.as_object() else {
+        return false;
+    };
+    [
+        "type",
+        "properties",
+        "items",
+        "enum",
+        "const",
+        "$ref",
+        "anyOf",
+        "oneOf",
+        "allOf",
+    ]
+    .iter()
+    .any(|key| map.contains_key(*key))
+}
+
+/// Fold each `allOf` branch into a cloned copy of the enclosing object and drop
+/// `allOf` before walking its fields.
 ///
 /// Lossless in principle: `allOf` branches all apply at once, so their
-/// properties and requirements are simply the object's. Needed by validators
-/// that accept `allOf` syntactically without intersecting it, which otherwise
-/// see a tool with no properties at all.
-///
-/// Only object-shaped branches are merged. A branch expressing something else
-/// (a bare `{"minLength": 1}` on a string, say) has nothing to contribute to a
-/// property map, and dropping it only widens what the model may send while the
-/// tool still validates the real call.
-fn merge_all_of_branches(out: &mut Map<String, Value>) {
+/// properties, requirements, types, and value constraints all belong on the
+/// enclosing schema. Folding before the dialect walk ensures dialects whose wire
+/// format lacks `allOf` (Gemini/Antigravity) keep branch-declared types
+/// (including nullable type unions), enums, properties, and cross-branch
+/// `required` entries instead of dropping `allOf` as an unsupported keyword.
+fn fold_all_of(map: &Map<String, Value>) -> Map<String, Value> {
+    let mut out = map.clone();
     let Some(Value::Array(branches)) = out.remove("allOf") else {
-        return;
+        return out;
     };
 
     // Only object-valued property declarations contribute to the union.
@@ -506,44 +626,132 @@ fn merge_all_of_branches(out: &mut Map<String, Value>) {
         Some(Value::Object(properties)) => properties.clone(),
         _ => Map::new(),
     };
-    let mut required: Vec<String> = out
-        .get("required")
-        .and_then(Value::as_array)
-        .map(|names| {
-            names
-                .iter()
-                .filter_map(Value::as_str)
-                .map(ToString::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut required: Vec<String> = match out.get("required").and_then(Value::as_array) {
+        Some(names) => names
+            .iter()
+            .filter_map(Value::as_str)
+            .map(ToString::to_string)
+            .collect(),
+        None => Vec::new(),
+    };
+    let mut branch_combiners: Vec<(String, Value)> = Vec::new();
 
     for branch in &branches {
-        let Some(branch) = branch.as_object() else {
+        let Some(branch_map) = branch.as_object() else {
             continue;
         };
-        // Adopt the branch's `type` when the enclosing object declares none.
-        // A schema whose only `type` lives in its `allOf` branches becomes
-        // typeless once the `allOf` is gone, and a typeless tool schema is
-        // rejected outright.
-        if !out.contains_key("type")
-            && let Some(branch_type) = branch.get("type")
-        {
-            out.insert("type".to_string(), branch_type.clone());
-        }
-        if let Some(branch_properties) = branch.get("properties").and_then(Value::as_object) {
+        let folded_branch;
+        let branch_map = if branch_map.contains_key("allOf") {
+            folded_branch = fold_all_of(branch_map);
+            &folded_branch
+        } else {
+            branch_map
+        };
+
+        if let Some(branch_properties) = branch_map.get("properties").and_then(Value::as_object) {
             for (name, property) in branch_properties {
-                // The enclosing object's own declaration wins: it is the more
-                // specific one, and a branch usually only narrows.
-                properties
-                    .entry(name.clone())
-                    .or_insert_with(|| property.clone());
+                // The enclosing object's own declaration wins on key collisions,
+                // while missing keys (e.g. a narrowed `enum` or `type`) fill in.
+                match properties.get(name) {
+                    Some(existing) => {
+                        properties.insert(name.clone(), merge_property(property, existing));
+                    }
+                    None => {
+                        properties.insert(name.clone(), property.clone());
+                    }
+                }
             }
         }
-        if let Some(branch_required) = branch.get("required").and_then(Value::as_array) {
+        if let Some(branch_required) = branch_map.get("required").and_then(Value::as_array) {
             for name in branch_required.iter().filter_map(Value::as_str) {
                 if !required.iter().any(|existing| existing == name) {
                     required.push(name.to_string());
+                }
+            }
+        }
+        for (key, value) in branch_map {
+            match key.as_str() {
+                "allOf" | "properties" | "required" | "not" => continue,
+                "anyOf" | "oneOf" => {
+                    branch_combiners.push((key.clone(), value.clone()));
+                }
+                _ => {
+                    out.entry(key.clone()).or_insert_with(|| value.clone());
+                }
+            }
+        }
+    }
+
+    // Do not promote constraint-only or conflicting `anyOf`/`oneOf` branches
+    // onto object schemas: promoting `{oneOf:[{required:["id"]},...]}`
+    // alongside `type`/`properties` leaves invalid `anyOf:[{},{}]` after
+    // `prune_dangling_required` on Gemini or OR-merges separate combiners.
+    // On non-object schemas with a single concrete `anyOf`/`oneOf`, distribute
+    // enclosing defaults (`type`, `description`, etc.) into each branch and
+    // replace the parent with `{ comb_key: branches }` so Gemini never sees
+    // sibling fields alongside `anyOf` and `must_preserve_meaning` still finds
+    // load-bearing keywords on every branch.
+    let enclosing_is_object = !properties.is_empty()
+        || !required.is_empty()
+        || out.contains_key("properties")
+        || out.contains_key("required")
+        || is_object_typed(&out);
+    let enclosing_has_conflicting_constraint = ["enum", "const", "anyOf", "oneOf", "not"]
+        .iter()
+        .any(|key| out.contains_key(*key));
+
+    if !enclosing_is_object
+        && !enclosing_has_conflicting_constraint
+        && let [(comb_key, comb_value)] = branch_combiners.as_slice()
+        && let Some(arr) = comb_value.as_array()
+        && !arr.is_empty()
+        && arr.iter().all(combiner_branch_has_concrete_shape)
+    {
+        let defaults = std::mem::take(&mut out);
+        let distributed: Vec<Value> = arr
+            .iter()
+            .map(|sub| {
+                let Some(sub_map) = sub.as_object() else {
+                    return sub.clone();
+                };
+                let mut merged_sub = sub_map.clone();
+                for (k, v) in &defaults {
+                    if k == "items"
+                        && let Some(existing_items) = merged_sub.get("items")
+                        && existing_items.is_object()
+                        && v.is_object()
+                    {
+                        let combined = merge_property(v, existing_items);
+                        merged_sub.insert(k.clone(), combined);
+                    } else {
+                        merged_sub.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                }
+                Value::Object(merged_sub)
+            })
+            .collect();
+        out.insert(comb_key.clone(), Value::Array(distributed));
+        return out;
+    } else if enclosing_is_object {
+        // Harvest optional variant properties declared inside dropped object
+        // combiners without promoting their branch-local `required` arrays.
+        for (_, comb_value) in &branch_combiners {
+            let Some(arr) = comb_value.as_array() else {
+                continue;
+            };
+            for sub in arr {
+                let Some(sub_props) = sub.get("properties").and_then(Value::as_object) else {
+                    continue;
+                };
+                for (name, property) in sub_props {
+                    match properties.get(name) {
+                        Some(existing) => {
+                            properties.insert(name.clone(), merge_property(property, existing));
+                        }
+                        None => {
+                            properties.insert(name.clone(), property.clone());
+                        }
+                    }
                 }
             }
         }
@@ -560,6 +768,5 @@ fn merge_all_of_branches(out: &mut Map<String, Value>) {
             Value::Array(required.into_iter().map(Value::String).collect()),
         );
     }
-    // A branch may have required a name no branch declared.
-    prune_dangling_required(out);
+    out
 }

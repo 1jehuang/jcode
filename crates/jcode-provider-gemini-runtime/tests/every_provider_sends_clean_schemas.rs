@@ -417,3 +417,87 @@ fn a_keyword_no_deny_list_has_ever_heard_of_reaches_no_provider() {
     );
     assert_eq!(openai[0]["parameters"]["properties"]["x"]["type"], "string");
 }
+
+#[test]
+fn all_of_and_nullable_type_arrays_reach_gemini_and_antigravity_routes_cleanly() {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "item": {
+                "description": "Structured item",
+                "allOf": [
+                    {
+                        "type": ["object", "null"],
+                        "properties": {
+                            "id": { "type": "string" }
+                        }
+                    },
+                    {
+                        "properties": {
+                            "priority": { "type": ["integer", "null"] }
+                        },
+                        "required": ["id", "priority", "undeclared"]
+                    }
+                ]
+            }
+        },
+        "required": ["item"]
+    });
+    let defs = vec![ToolDefinition {
+        name: "mcp__tracker__upsert".to_string(),
+        description: "Upsert tracker item".to_string(),
+        input_schema: schema.clone(),
+        defer_loading: false,
+    }];
+
+    let direct_built = jcode_provider_gemini::build_tools(&defs).expect("gemini tools");
+    let direct_params = &direct_built[0].function_declarations[0].parameters;
+    let direct_errors = jcode_schema_dialect::must_not_contain_unsupported_constructs(
+        direct_params,
+        &jcode_schema_dialect::registry::GEMINI,
+    );
+    assert!(direct_errors.is_empty(), "gemini direct: {direct_errors:?}");
+    assert_eq!(direct_params["properties"]["item"]["type"], "object");
+    assert_eq!(direct_params["properties"]["item"]["nullable"], true);
+    assert_eq!(
+        direct_params["properties"]["item"]["required"],
+        serde_json::json!(["id", "priority"])
+    );
+
+    for (model, spec) in [
+        ("gemini-3-flash", &jcode_schema_dialect::registry::GEMINI),
+        (
+            "gemini-3.8-flash-tiered",
+            &jcode_schema_dialect::registry::GEMINI,
+        ),
+        (
+            "claude-sonnet-4-5",
+            &jcode_schema_dialect::registry::ANTIGRAVITY_CLAUDE,
+        ),
+        (
+            "gpt-oss-120b",
+            &jcode_schema_dialect::registry::ANTIGRAVITY_BRIDGE,
+        ),
+    ] {
+        let params = jcode_provider_antigravity::antigravity_compatible_schema(&schema, model);
+        let errors = jcode_schema_dialect::must_not_contain_unsupported_constructs(&params, spec);
+        assert!(errors.is_empty(), "antigravity/{model}: {errors:?}");
+        assert_eq!(
+            params["properties"]["item"]["type"], "object",
+            "antigravity/{model}: {params}"
+        );
+        assert_eq!(
+            params["properties"]["item"]["nullable"], true,
+            "antigravity/{model}: {params}"
+        );
+        assert_eq!(
+            params["properties"]["item"]["properties"]["priority"]["type"], "integer",
+            "antigravity/{model}: {params}"
+        );
+        assert_eq!(
+            params["properties"]["item"]["required"],
+            serde_json::json!(["id", "priority"]),
+            "antigravity/{model}: {params}"
+        );
+    }
+}
