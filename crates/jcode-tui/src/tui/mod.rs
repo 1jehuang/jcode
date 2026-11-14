@@ -133,7 +133,7 @@ fn keyboard_enhancement_flags() -> crossterm::event::KeyboardEnhancementFlags {
 /// via `suspend_terminal_for_editor` may push its own entry after jcode popped
 /// ours. A later cleanup (signal handler, guard drop, picker exit) must not pop
 /// again, or it would remove the editor's entry instead of ours.
-static KITTY_KEYBOARD_PUSH_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub(super) static KITTY_KEYBOARD_PUSH_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Whether an external editor currently owns the terminal.
 ///
