@@ -427,6 +427,45 @@ pub(super) fn send_event_to_targets<'a>(
     delivered
 }
 
+// Keep sends outside the session lock without allocating for the usual single
+// attachment. Multiple recipients retain their original iteration order.
+enum RecipientSnapshot {
+    Empty,
+    One(mpsc::UnboundedSender<ServerEvent>),
+    Many(Vec<mpsc::UnboundedSender<ServerEvent>>),
+}
+
+impl FromIterator<mpsc::UnboundedSender<ServerEvent>> for RecipientSnapshot {
+    fn from_iter<T: IntoIterator<Item = mpsc::UnboundedSender<ServerEvent>>>(iter: T) -> Self {
+        let mut iter = iter.into_iter();
+        let Some(first) = iter.next() else {
+            return Self::Empty;
+        };
+        let Some(second) = iter.next() else {
+            return Self::One(first);
+        };
+        let mut targets = Vec::with_capacity(iter.size_hint().0.saturating_add(2).max(4));
+        targets.push(first);
+        targets.push(second);
+        targets.extend(iter);
+        Self::Many(targets)
+    }
+}
+
+impl RecipientSnapshot {
+    fn as_slice(&self) -> &[mpsc::UnboundedSender<ServerEvent>] {
+        match self {
+            Self::Empty => &[],
+            Self::One(tx) => std::slice::from_ref(tx),
+            Self::Many(targets) => targets,
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "state_fanout_tests.rs"]
+mod fanout_tests;
+
 pub(super) async fn fanout_session_event(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     session_id: &str,
@@ -443,16 +482,20 @@ pub(super) async fn fanout_session_event(
         crate::stream_batching::note_session_targets(session_id, member.event_txs.keys());
 
         if member.event_txs.is_empty() {
-            vec![member.event_tx.clone()]
+            RecipientSnapshot::One(member.event_tx.clone())
         } else {
             if let Some((_, tx)) = member.event_txs.iter().next() {
                 member.event_tx = tx.clone();
             }
-            member.event_txs.values().cloned().collect::<Vec<_>>()
+            member
+                .event_txs
+                .values()
+                .cloned()
+                .collect::<RecipientSnapshot>()
         }
     };
 
-    send_event_to_targets(&targets, event)
+    send_event_to_targets(targets.as_slice(), event)
 }
 
 pub(super) async fn fanout_live_client_event(
@@ -467,10 +510,14 @@ pub(super) async fn fanout_live_client_event(
         };
 
         member.event_txs.retain(|_, tx| !tx.is_closed());
-        member.event_txs.values().cloned().collect::<Vec<_>>()
+        member
+            .event_txs
+            .values()
+            .cloned()
+            .collect::<RecipientSnapshot>()
     };
 
-    send_event_to_targets(&targets, event)
+    send_event_to_targets(targets.as_slice(), event)
 }
 
 /// Deliver `event` to every live attachment of `session_id` except the
@@ -492,9 +539,9 @@ pub(super) async fn fanout_peer_client_event(
             .iter()
             .filter(|(connection_id, _)| connection_id.as_str() != exclude_connection_id)
             .map(|(_, tx)| tx.clone())
-            .collect::<Vec<_>>()
+            .collect::<RecipientSnapshot>()
     };
-    send_event_to_targets(&targets, event)
+    send_event_to_targets(targets.as_slice(), event)
 }
 
 /// Owns one turn's event queue. Closing or aborting the producer drains all
