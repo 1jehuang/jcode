@@ -541,8 +541,7 @@ pub(super) fn agent_profile_source_lines(
             .min(sources.saturating_sub(1))
             .saturating_sub(visible.saturating_sub(1))
             .min(sources.saturating_sub(visible));
-        for row in start..start + visible {
-            let entry = &picker.entries[row];
+        for (row, entry) in picker.entries.iter().enumerate().skip(start).take(visible) {
             let focused = row == selected;
             let style = if focused { accent } else { dim };
             let detail = if matches!(entry.action, PickerAction::AgentProfileSource(_)) {
@@ -559,16 +558,12 @@ pub(super) fn agent_profile_source_lines(
             )));
         }
     }
-    for row in sources..picker.entries.len() {
+    for (row, entry) in picker.entries.iter().enumerate().skip(sources) {
         if lines.len() >= available_rows {
             break;
         }
         lines.push(Line::from(Span::styled(
-            format!(
-                "{} {}",
-                if row == selected { "▸" } else { " " },
-                picker.entries[row].name
-            ),
+            format!("{} {}", if row == selected { "▸" } else { " " }, entry.name),
             if row == selected { accent } else { dim },
         )));
     }
