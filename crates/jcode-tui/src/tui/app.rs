@@ -68,7 +68,9 @@ mod commands_cloud;
 mod commands_colors;
 mod commands_desktop;
 mod commands_dispatch;
+mod commands_goal;
 mod commands_improve;
+mod commands_loop;
 mod commands_overnight;
 mod commands_plan;
 mod commands_remote;
@@ -138,7 +140,9 @@ mod wake_stats;
 pub(crate) use todos_view::pinned_todos_payload_for_session;
 mod tui_lifecycle;
 mod tui_lifecycle_runtime;
+pub(crate) mod tui_event;
 mod tui_state;
+mod ui_elicit;
 mod turn;
 mod turn_memory;
 mod turn_notify;
@@ -1885,6 +1889,12 @@ pub struct App {
     account_picker_overlay: Option<RefCell<super::account_picker::AccountPicker>>,
     /// Usage overlay (None = not visible)
     usage_overlay: Option<RefCell<super::usage_overlay::UsageOverlay>>,
+    /// Elicitation overlay for structured agent-to-user input (None = not active)
+    elicit_overlay: Option<super::elicitation_types::ElicitOverlayState>,
+    /// Receiver for elicitation requests from the tool-core global channel.
+    /// Polled in the main event loop; when a message arrives, it is converted
+    /// to a TUI `ElicitOverlayState` and displayed as a modal overlay.
+    elicit_rx: tokio::sync::mpsc::UnboundedReceiver<Box<jcode_tool_core::ElicitMessage>>,
     /// Whether a usage refresh request is currently in flight.
     usage_report_refreshing: bool,
     /// Provider query from `/usage <provider>`; None shows every provider.

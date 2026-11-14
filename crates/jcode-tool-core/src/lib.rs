@@ -90,6 +90,65 @@ pub struct StdinInputRequest {
     pub response_tx: tokio::sync::oneshot::Sender<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Elicitation types — shared between the tool (jcode-app-core) and TUI (jcode-tui)
+// ---------------------------------------------------------------------------
+
+/// Full elicitation request from the tool, sent through the global channel.
+#[derive(Debug, Clone)]
+pub struct ElicitRequest {
+    pub title: String,
+    pub intent: String,
+    pub field: serde_json::Value,
+    pub question: Option<String>,
+    pub notes: Option<serde_json::Value>,
+    pub buttons: Option<serde_json::Value>,
+    pub request_id: Option<String>,
+    pub timeout_secs: u32,
+    pub urgency: String,
+}
+
+/// Response sent back from the TUI to the waiting tool call.
+#[derive(Debug, Clone)]
+pub struct ElicitResponse {
+    pub action: String,
+    pub value: Option<String>,
+    pub notes: Option<String>,
+}
+
+/// Message sent through the global elicitation channel.
+pub struct ElicitMessage {
+    pub request: ElicitRequest,
+    pub response_tx: tokio::sync::oneshot::Sender<ElicitResponse>,
+}
+
+/// Global elicitation channel. Initialized once by the TUI; tools use the
+/// sender to request user input.
+pub mod elicit_channel {
+    use super::ElicitMessage;
+    use std::sync::OnceLock;
+    use tokio::sync::mpsc;
+
+    static ELICIT_TX: OnceLock<mpsc::UnboundedSender<Box<ElicitMessage>>> = OnceLock::new();
+
+    /// Initialize the global elicitation channel. Returns the receiver that the
+    /// TUI must poll. Safe to call once per process; subsequent calls return a
+    /// dead receiver (the first call's sender is used for all tool sends).
+    pub fn init() -> mpsc::UnboundedReceiver<Box<ElicitMessage>> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let _ = ELICIT_TX.set(tx);
+        rx
+    }
+
+    /// Try to send without blocking (returns Err if channel closed or not initialized).
+    pub fn try_send(msg: ElicitMessage) -> Result<(), tokio::sync::mpsc::error::SendError<Box<ElicitMessage>>> {
+        let Some(tx) = ELICIT_TX.get() else {
+            return Err(tokio::sync::mpsc::error::SendError(Box::new(msg)));
+        };
+        tx.send(Box::new(msg))
+    }
+}
+
 #[derive(Clone)]
 pub struct ToolContext {
     pub session_id: String,

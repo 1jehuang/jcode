@@ -2065,6 +2065,18 @@ impl crate::tui::TuiState for App {
             && !self.inline_swarm_members().is_empty()
     }
 
+    fn swarm_stats(&self) -> crate::tui::SwarmStats {
+        let m = &self.remote_swarm_members;
+        crate::tui::SwarmStats {
+            active: m.iter().filter(|x| x.status == "running").count() as u32,
+            completed: m
+                .iter()
+                .filter(|x| x.status == "completed")
+                .count() as u32,
+            failed: m.iter().filter(|x| x.status == "failed").count() as u32,
+        }
+    }
+
     fn inline_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
         let mut members = self.inline_swarm_members_unticked();
         // Server snapshots only arrive on state changes, so advance active
@@ -2324,6 +2336,10 @@ impl crate::tui::TuiState for App {
 
     fn usage_overlay(&self) -> Option<&RefCell<crate::tui::usage_overlay::UsageOverlay>> {
         self.usage_overlay.as_ref()
+    }
+
+    fn elicit_overlay(&self) -> Option<&crate::tui::elicitation_types::ElicitOverlayState> {
+        self.elicit_overlay.as_ref()
     }
 
     fn working_dir(&self) -> Option<String> {

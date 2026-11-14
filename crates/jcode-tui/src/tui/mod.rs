@@ -1,6 +1,7 @@
 pub mod account_picker;
 pub(crate) mod app;
 pub mod justrust_status;
+pub(crate) mod elicitation_types;
 
 #[derive(Clone)]
 pub struct ContextSnapshot {
@@ -25,6 +26,14 @@ pub struct BackgroundTaskRow {
     pub status: BackgroundTaskRowStatus,
     /// When a successful task stopped being actionable, retained until session closure.
     pub completed_at: Option<std::time::Instant>,
+}
+
+/// Aggregated swarm dispatch statistics for the status bar.
+#[derive(Debug, Clone, Default)]
+pub struct SwarmStats {
+    pub active: u32,
+    pub completed: u32,
+    pub failed: u32,
 }
 
 pub mod backend;
@@ -70,6 +79,7 @@ mod remote_diff;
 pub mod screenshot;
 pub(crate) mod session_facts;
 pub mod session_picker;
+mod status_bar;
 mod stream_buffer;
 mod terminal_events;
 pub mod terminal_setup;
@@ -122,9 +132,14 @@ pub use jcode_tui_messages::DisplayMessage;
 fn keyboard_enhancement_flags() -> crossterm::event::KeyboardEnhancementFlags {
     use crossterm::event::KeyboardEnhancementFlags;
 
+    if std::env::var_os("JCODE_DISABLE_KITTY_KEYBOARD").is_some() {
+        return KeyboardEnhancementFlags::empty();
+    }
+    // Only disambiguate escape codes. REPORT_EVENT_TYPES makes terminals emit
+    // press AND release events; hosts that half-support the kitty protocol
+    // (herdr/conpty panes) leak the release events into the prompt as raw
+    // "[<code>;1:3u" text. REPORT_ALTERNATE_KEYS is dropped for the same reason.
     KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
 }
 
 /// Whether this process still owns an unbalanced entry on the terminal's
@@ -1024,6 +1039,11 @@ pub trait TuiState {
     fn inline_swarm_gallery_active(&self) -> bool {
         false
     }
+    /// Aggregated swarm dispatch statistics (active/completed/failed) for the
+    /// status bar. Default returns zeroed stats for states that don't track swarm.
+    fn swarm_stats(&self) -> SwarmStats {
+        SwarmStats::default()
+    }
     /// Members to render in the inline swarm gallery band.
     fn inline_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
         Vec::new()
@@ -1209,6 +1229,10 @@ pub trait TuiState {
     fn account_picker_overlay(&self) -> Option<&std::cell::RefCell<account_picker::AccountPicker>>;
     /// Usage overlay for /usage command
     fn usage_overlay(&self) -> Option<&std::cell::RefCell<usage_overlay::UsageOverlay>>;
+    /// Elicitation overlay for structured agent-to-user input
+    fn elicit_overlay(&self) -> Option<&elicitation_types::ElicitOverlayState> {
+        None
+    }
     /// Working directory for this session
     // ---- Misc ----
     fn working_dir(&self) -> Option<String>;

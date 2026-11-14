@@ -2667,6 +2667,12 @@ pub(super) fn handle_modal_key(
         return Ok(true);
     }
 
+    // Elicitation overlay takes highest priority among modal overlays.
+    if app.elicit_overlay.is_some() {
+        app.handle_elicit_key(code, modifiers);
+        return Ok(true);
+    }
+
     if app.session_picker_overlay.is_some() {
         app.handle_session_picker_key(code, modifiers)?;
         return Ok(true);

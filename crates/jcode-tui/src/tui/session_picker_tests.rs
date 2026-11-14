@@ -2784,3 +2784,6 @@ mod project_scope;
 
 #[path = "session_picker_tests/onboarding.rs"]
 mod onboarding;
+#[cfg(test)]
+#[path = "session_picker/compact_render_tests.rs"]
+mod compact_render_tests;

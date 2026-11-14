@@ -1245,10 +1245,6 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             return Ok(());
         }
 
-        if app_mod::commands::handle_disabled_mission_command(app, trimmed) {
-            return Ok(());
-        }
-
         if app_mod::commands::handle_goals_command(app, trimmed) {
             return Ok(());
         }

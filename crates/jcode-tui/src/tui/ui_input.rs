@@ -894,7 +894,39 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
         let spinner = super::activity_indicator(elapsed, 12.5);
 
         match app.status() {
-            ProcessingStatus::Idle => Line::from(""),
+            ProcessingStatus::Idle => {
+                let stats = app.swarm_stats();
+                if stats.active > 0 || stats.failed > 0 {
+                    let mut spans = Vec::new();
+                    if stats.active > 0 {
+                        spans.push(Span::styled(
+                            format!("\u{25b8} {} active", stats.active),
+                            Style::default().fg(rgb(0, 200, 0)),
+                        ));
+                    }
+                    if stats.completed > 0 {
+                        if !spans.is_empty() {
+                            spans.push(Span::styled(" ", Style::default().fg(dim_color())));
+                        }
+                        spans.push(Span::styled(
+                            format!("\u{25cf} {} done", stats.completed),
+                            Style::default().fg(dim_color()),
+                        ));
+                    }
+                    if stats.failed > 0 {
+                        if !spans.is_empty() {
+                            spans.push(Span::styled(" ", Style::default().fg(dim_color())));
+                        }
+                        spans.push(Span::styled(
+                            format!("\u{2717} {} failed", stats.failed),
+                            Style::default().fg(rgb(255, 80, 80)),
+                        ));
+                    }
+                    Line::from(spans)
+                } else {
+                    Line::from("")
+                }
+            }
             ProcessingStatus::Sending => {
                 let mut snapshot = live_status_snapshot(app, elapsed);
                 snapshot.phase = "sending".into();

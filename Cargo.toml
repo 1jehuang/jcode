@@ -648,8 +648,13 @@ debug = 0
 incremental = true
 codegen-units = 256
 
+[[bench]]
+name = "startup"
+harness = false
+
 [dev-dependencies]
 async-stream = "0.3"
+criterion = { version = "0.5", features = ["html_reports"] }
 jcode-harness-api = { path = "crates/jcode-harness-api" }
 # Used by tests/context_window_matrix.rs to assert the shared context-window
 # resolution invariants directly, without going through a live provider.

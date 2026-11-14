@@ -16,6 +16,7 @@ pub(crate) use copy_pane_drag::*;
 
 use super::info_widget;
 use super::markdown;
+use super::status_bar;
 use super::ui_diff::{
     DiffLineKind, ParsedDiffLine, collect_diff_lines, diff_add_color, diff_change_counts_for_tool,
     diff_del_color, generate_diff_lines_from_tool_input, tint_span_with_diff_color,
@@ -81,6 +82,9 @@ mod onboarding;
 mod output_style;
 #[path = "ui_overlays.rs"]
 mod overlays;
+
+#[path = "ui_elicitation.rs"]
+mod elicit_overlay;
 #[path = "ui_panel_image_preview.rs"]
 pub(crate) mod panel_image_preview;
 #[path = "ui_pinned.rs"]
@@ -3102,6 +3106,18 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         return;
     }
 
+    if let Some(ref elicit_state) = app.elicit_overlay() {
+        elicit_overlay::draw_elicit_overlay(frame, area, elicit_state);
+        finalize_frame_metrics(
+            app,
+            total_start,
+            Duration::ZERO,
+            total_start.elapsed(),
+            None,
+        );
+        return;
+    }
+
     // Initialize visual debug capture if enabled
     let mut debug_capture = if visual_debug::is_enabled() {
         Some(FrameCaptureBuilder::new(area.width, area.height))
@@ -3434,6 +3450,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // Session status line (dir, branch, context, provider, model), always
     // pinned directly below the input line.
     let overscroll_height: u16 = 1;
+    // Compact status bar: shows workspace, repo, agent stats. Hidden on narrow terminals.
+    let status_bar_height: u16 = if chat_area.width >= 80 { 1 } else { 0 };
     let fixed_height = 1
         + queued_height
         + swarm_strip_height
@@ -3442,7 +3460,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         + inline_ui_gap_height
         + input_height
         + overscroll_height
-        + donut_height; // status + queued + swarm strip + notification + inline UI + gap + input + overscroll + donut
+        + donut_height
+        + status_bar_height; // status + queued + swarm strip + notification + inline UI + gap + input + overscroll + donut + status bar
     let available_height = chat_area.height;
     let stable_fixed_height = fixed_height;
     let overflows = |prepared: &PreparedChatFrame| {
@@ -3585,7 +3604,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             && !side_panel_fullscreen
             && content_height.saturating_add(fixed_height) <= available_height);
 
-    // Layout: messages (includes header), queued, status, notification, inline UI, gap, input, donut
+    // Layout: messages (includes header), queued, status, notification, inline UI, gap, input, donut, status bar
     // All vertical chunks are within the chat_area (left column).
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -3605,6 +3624,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 Constraint::Length(input_height),  // 7 Input
                 Constraint::Length(overscroll_height), // 8 Overscroll status line
                 Constraint::Length(donut_height),  // 9 Donut animation
+                Constraint::Length(status_bar_height), // 10 Compact status bar
             ]
         } else {
             vec![
@@ -3618,6 +3638,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 Constraint::Length(input_height),         // 7 Input
                 Constraint::Length(overscroll_height),    // 8 Overscroll status line
                 Constraint::Length(donut_height),         // 9 Donut animation
+                Constraint::Length(status_bar_height),    // 10 Compact status bar
             ]
         })
         .split(chat_area);
@@ -3916,6 +3937,10 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     if donut_height > 0 {
         animations::draw_idle_animation(frame, app, chunks[9]);
+    }
+    // Compact status bar: workspace, repo, agent stats
+    if status_bar_height > 0 {
+        status_bar::render_status_bar(frame, app, chunks[10]);
     }
     let chrome_elapsed = chrome_start.elapsed();
 

@@ -103,6 +103,7 @@ impl AmbientManager {
             relevant_files: request.relevant_files,
             git_branch: request.git_branch,
             additional_context: request.additional_context,
+            recurrence: request.recurrence,
         }
     }
 

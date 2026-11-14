@@ -73,7 +73,9 @@ impl App {
             ));
             return false;
         }
-        let task = self.remote_login_onboarding.task.as_mut().unwrap();
+        let Some(task) = self.remote_login_onboarding.task.as_mut() else {
+            return false;
+        };
         let reply = match task.reply.try_recv() {
             Ok(reply) => reply,
             Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return false,
