@@ -1023,6 +1023,13 @@ pub(super) async fn handle_notify_auth_changed(
                         let _ = client_event_tx_clone.send(available_models_snapshot_into_event(latest_snapshot.clone()));
                     }
                 }
+                // ModelsUpdated is a catalog-change hint, not a completion wake:
+                // MultiProvider's PendingGuard clears pending without publishing
+                // on failure, and success publishes before the guard drops. An
+                // event-only wait could therefore stall until the 10 s ceiling,
+                // even after successful work. Keep polling until providers expose
+                // a completion notification ordered after clearing pending on
+                // every exit path (including failures and cancellation).
                 _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
             }
         }
