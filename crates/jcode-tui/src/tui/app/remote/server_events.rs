@@ -1235,7 +1235,7 @@ fn handle_server_event_inner(
                 if !auto_poked {
                     app.clear_visible_turn_started();
                     if app.queued_messages.is_empty() {
-                        app.maybe_notify_turn_complete(turn_duration_secs);
+                        app.on_idle_turn_completed(turn_duration_secs);
                     }
                 }
             } else if app.is_processing {

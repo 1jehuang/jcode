@@ -256,6 +256,11 @@ impl App {
     /// until the user types a query; the current input-line draft is saved so
     /// Esc can restore it after the live preview overwrites the input.
     pub(super) fn open_prompt_history_search(&mut self) {
+        if self.suggested_replies_has_staged_input() {
+            self.input.clear();
+            self.cursor_pos = 0;
+        }
+        self.cancel_suggested_replies_interaction(false);
         self.prompt_history_search = Some(PromptHistorySearchState {
             original_input: self.input.clone(),
             original_cursor: self.cursor_pos,

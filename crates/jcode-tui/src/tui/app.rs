@@ -35,14 +35,14 @@ pub(crate) use helpers::effort_display_label;
 use helpers::*;
 use jcode_tui_messages::DisplayMessage;
 use ratatui::DefaultTerminal;
-use std::cell::RefCell;
-use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::{
+    cell::RefCell,
+    collections::HashSet,
+    hash::{Hash, Hasher},
+    path::PathBuf,
+    sync::{Arc, atomic::AtomicBool, mpsc},
+    time::{Duration, Instant},
+};
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -124,9 +124,10 @@ mod justrust_status;
 mod state_ui_history_marker;
 mod state_ui_maintenance;
 mod state_ui_messages;
-mod state_ui_runtime;
+pub(super) mod state_ui_runtime;
 mod state_ui_storage;
 mod subscribe_nudge;
+pub mod suggested_replies;
 mod support;
 mod swarm_hint;
 mod terminal_liveness;
@@ -1890,6 +1891,7 @@ pub struct App {
     /// Lazily-loaded persisted cross-session prompt history (oldest first,
     /// deduped). None until first use; see `prompt_history.rs`.
     persisted_prompt_history: Option<Vec<String>>,
+    pub(crate) suggested_replies: suggested_replies::SuggestedRepliesRuntime,
 }
 
 /// Inert provider used by runtime modes whose output is supplied by another source.
@@ -2901,18 +2903,6 @@ impl App {
         } else {
             false
         }
-    }
-
-    fn kv_cache_common_prefix_messages(
-        current: &KvCacheRequestSignature,
-        previous: &KvCacheRequestSignature,
-    ) -> usize {
-        current
-            .message_hashes
-            .iter()
-            .zip(previous.message_hashes.iter())
-            .take_while(|(current, previous)| current == previous)
-            .count()
     }
 }
 

@@ -695,9 +695,20 @@ pub(super) async fn handle_remote_key_internal(
         return Ok(());
     }
 
-    if input::is_alternate_enter(code, modifiers) && !app.input.trim().starts_with('/') {
+    if input::is_alternate_enter(code, modifiers)
+        && (!app.input.trim().starts_with('/') || app.suggested_replies_has_staged_input())
+    {
         if app.activate_picker_from_preview() {
             return Ok(());
+        }
+
+        app.try_stage_suggested_reply_for_remote_enter(true);
+
+        if app.input.trim().starts_with('/') {
+            if input::try_queue_command(app) {
+                return Ok(());
+            }
+            return submit_remote_enter_input(app, remote).await;
         }
 
         if !app.input.is_empty() {
@@ -726,6 +737,10 @@ pub(super) async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if app.handle_suggested_replies_arrow_key(code, modifiers) {
+        return Ok(());
+    }
+
     if input::handle_multiline_input_navigation(app, code, modifiers)
         || input::handle_prompt_history_navigation(app, code, modifiers)
     {
@@ -734,6 +749,9 @@ pub(super) async fn handle_remote_key_internal(
 
     if let Some(text) = text_input.or_else(|| input::text_input_for_key(code, modifiers)) {
         input::handle_text_input(app, &text);
+        if app.take_pending_remote_suggested_reply().is_some() {
+            submit_remote_enter_input(app, remote).await?;
+        }
         return Ok(());
     }
 
@@ -762,9 +780,13 @@ pub(super) async fn handle_remote_key_internal(
     // to anything; tell the user instead of silently swallowing it.
     app.note_unrecognized_hotkey(code, modifiers, true);
 
+    app.cancel_suggested_replies_for_cursor_key(code);
     match code {
         KeyCode::Char(c) => {
             handle_remote_char_input(app, c);
+            if app.take_pending_remote_suggested_reply().is_some() {
+                submit_remote_enter_input(app, remote).await?;
+            }
         }
         KeyCode::Backspace => {
             if app.cursor_pos > 0 {
@@ -806,7 +828,9 @@ pub(super) async fn handle_remote_key_internal(
             app.cursor_pos = app.input.len();
         }
         KeyCode::Tab => {
-            app.autocomplete();
+            if app.handle_suggested_replies_tab_remote() {
+                submit_remote_enter_input(app, remote).await?;
+            }
         }
         KeyCode::Enter => {
             submit_remote_enter_input(app, remote).await?;
@@ -820,6 +844,7 @@ pub(super) async fn handle_remote_key_internal(
             app.scroll_down(dec);
         }
         KeyCode::Esc => {
+            app.cancel_suggested_replies_on_escape();
             if app
                 .inline_interactive_state
                 .as_ref()
