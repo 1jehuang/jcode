@@ -10,6 +10,51 @@
 // reload snapshot must therefore fold it back into the queue.
 
 #[test]
+fn test_reload_soft_interrupt_recovery_preserves_order_across_verdict_groups() {
+    use crate::protocol::ServerEvent;
+    use crate::tui::backend::soft_interrupt_client_id;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for duplicate_content in [false, true] {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+        let first = "original request";
+        let second = if duplicate_content {
+            first
+        } else {
+            "correction"
+        };
+        app.track_pending_soft_interrupt(41, first.into());
+        app.track_pending_soft_interrupt(42, second.into());
+        app.track_pending_soft_interrupt(43, "final correction".into());
+        app.queued_messages.push("later queued request".into());
+
+        rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+        let (cancel_id, _) = app.soft_interrupt_recovery.unwrap();
+        app.handle_server_event(
+            ServerEvent::SoftInterruptsCancelled {
+                id: cancel_id,
+                // Deliberately reversed within the group, with the first send
+                // in the other group because its receipt was lost on reload.
+                cancelled: vec![soft_interrupt_client_id(43), soft_interrupt_client_id(42)],
+                not_queued: vec![soft_interrupt_client_id(41)],
+            },
+            &mut remote,
+        );
+        assert_eq!(
+            app.queued_messages,
+            [first, second, "final correction", "later queued request"]
+        );
+        assert!(app.pending_soft_interrupts.is_empty());
+        assert!(app.pending_soft_interrupt_requests.is_empty());
+        assert!(app.sent_soft_interrupts.is_empty());
+    }
+}
+
+#[test]
 fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
     for auto_retry in [false, true] {
         let mut app = create_test_app();

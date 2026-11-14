@@ -121,13 +121,27 @@ impl App {
         self.soft_interrupt_recovery = None;
         let mut recovered = Vec::new();
         let mut accepted = 0usize;
-        for (client_id, was_queued) in cancelled
+        // Server verdicts are grouped by outcome, not submission order. Both
+        // groups can contain recoverable prompts when an unacknowledged send
+        // never reached the server. Preserve send order so corrections cannot
+        // overtake the prompts they correct.
+        let verdicts: Vec<_> = self
+            .sent_soft_interrupts
             .iter()
-            .map(|id| (id, true))
-            .chain(not_queued.iter().map(|id| (id, false)))
-        {
+            .filter_map(|(request, _)| {
+                let client_id = crate::tui::backend::soft_interrupt_client_id(*request);
+                if cancelled.contains(&client_id) {
+                    Some((client_id, true))
+                } else if not_queued.contains(&client_id) {
+                    Some((client_id, false))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for (client_id, was_queued) in verdicts {
             let Some(index) = self.sent_soft_interrupts.iter().position(|(request, _)| {
-                &crate::tui::backend::soft_interrupt_client_id(*request) == client_id
+                crate::tui::backend::soft_interrupt_client_id(*request) == client_id
             }) else {
                 continue;
             };
