@@ -40,6 +40,19 @@ impl App {
         app.is_remote = false;
         app.is_replay = true;
         app.runtime_mode = AppRuntimeMode::Replay;
+        // The saved session supplies metadata only. Transcript state must enter
+        // exclusively through historical events, never through today's startup.
+        app.display_messages.clear();
+        app.session.messages.clear();
+        app.auto_poke_incomplete_todos = false;
+        app.auto_poke_default_on = false;
+        app.overnight_auto_poke = None;
+        app.queued_messages.clear();
+        app.queued_commands.clear();
+        app.hidden_queued_system_messages.clear();
+        app.status_notice = None;
+        // Historical replay must never show today's on-disk todo state.
+        app.pinned_todos_payload = None;
         let model_name = app.session.model.clone().unwrap_or_default();
         let session_name = app.session.short_name.clone().unwrap_or_default();
 

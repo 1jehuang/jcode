@@ -94,6 +94,13 @@ impl App {
     /// sees that in an unfocused window, and gaining focus refreshes at once,
     /// so a background turn polls slowly too.
     fn remote_todos_poll_interval(&self) -> std::time::Duration {
+        // A server that pushes every change needs no poll at all. A request
+        // is still sent when `remote_todos_requested_at` is cleared (focus,
+        // the todo tool, attach), and this long interval only catches a push
+        // that was somehow lost.
+        if self.remote_todos_pushed {
+            return std::time::Duration::from_secs(600);
+        }
         if self.is_processing() && self.client_focused {
             std::time::Duration::from_secs(2)
         } else {
@@ -203,6 +210,11 @@ impl App {
     /// (`display.pin_todos`). Returns true when the payload changed and the
     /// viewport should redraw. Disk reads are throttled to once per second.
     pub(super) fn refresh_pinned_todos_if_needed(&mut self) -> bool {
+        // Replay state comes exclusively from historical events or explicit
+        // snapshots. Today's file must never replace a historical pinned card.
+        if self.is_replay {
+            return false;
+        }
         if !crate::config::config().display.pin_todos {
             if self.pinned_todos_payload.is_some() {
                 self.pinned_todos_payload = None;

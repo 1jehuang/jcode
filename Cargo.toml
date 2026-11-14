@@ -444,6 +444,17 @@ opt-level = 3
 [profile.test.package.compact_str]
 opt-level = 3
 
+# The streaming markdown path re-renders every text delta in the focused TUI.
+# Live clients run selfdev builds, so keep it optimized there. Measured with
+# the ignored stream_cost_probe test (9k-char reply, per update late in the
+# reply): 0.219 ms at opt-level 0, 0.059 ms with these three at opt-level 3.
+[profile.selfdev.package.pulldown-cmark]
+opt-level = 3
+[profile.selfdev.package."jcode-tui-markdown"]
+opt-level = 3
+[profile.selfdev.package."jcode-render-core"]
+opt-level = 3
+
 # Keep the text-shaping stack optimized even in dev/selfdev/test builds.
 #
 # cosmic-text + rustybuzz + ttf-parser + swash + yazi do all of the desktop

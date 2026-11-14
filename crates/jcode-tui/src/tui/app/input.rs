@@ -1413,6 +1413,11 @@ impl App {
         &mut self,
         final_response_delivered: bool,
     ) -> bool {
+        // Playback observes recorded turns. It must never create new work from
+        // the current machine's todos, guardrails, or overnight configuration.
+        if self.is_replay {
+            return false;
+        }
         // SSH workflow state and todo reads belong to the remote daemon.
         // Even the guardrail/report checks below consult laptop session files.
         if crate::tui::is_ssh_remote() {
@@ -1451,6 +1456,9 @@ impl App {
         &mut self,
         final_response_delivered: bool,
     ) -> bool {
+        if self.is_replay {
+            return false;
+        }
         if crate::tui::is_ssh_remote() {
             return false;
         }
@@ -4121,6 +4129,8 @@ impl App {
         // Keep the raw draft for failure recovery. Transport expands pastes
         // and excludes only explicitly owned attachment marker text.
         self.last_submitted_input = Some(raw_input.clone());
+        self.automatic_failover_targets.clear();
+        self.automatic_failover_stopped = false;
 
         // See `stage_turn_for_remote_tick_loop`: a remote client must never
         // park on the local-only `pending_turn` flag.
@@ -4250,6 +4260,10 @@ impl App {
         let has_combined = !combined.is_empty()
             || (!messages.is_empty() && !self.queued_message_images.is_empty());
         let preserve_visible_turn = super::commands::queued_messages_are_only_pokes(&messages);
+        if !messages.is_empty() && !preserve_visible_turn {
+            self.automatic_failover_targets.clear();
+            self.automatic_failover_stopped = false;
+        }
         self.commit_pending_streaming_assistant_message();
         for msg in display_system_messages {
             self.push_display_message(DisplayMessage::system(msg));

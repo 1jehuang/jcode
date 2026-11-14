@@ -548,6 +548,12 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     let streaming_prepared = if has_streaming {
         Arc::new(prepare_streaming_cached(app, width, stream_prefix_blank))
     } else {
+        // The reply was committed or cleared: its wrapped head is dead weight.
+        STREAMING_HEAD_WRAP.with(|cache| {
+            if cache.borrow().is_some() {
+                *cache.borrow_mut() = None;
+            }
+        });
         Arc::new(empty_prepared_messages())
     };
     let streaming_ms = streaming_start.elapsed().as_secs_f64() * 1000.0;
@@ -619,7 +625,11 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
         // the header at the same screen position when the first prompt
         // arrives; the padding then simply scrolls away as the transcript
         // grows instead of vanishing in one jump.
-        let pad_top = initial_header_pad_top(height, header_prepared.wrapped_lines.len());
+        let pad_top = if app.is_replay() {
+            0
+        } else {
+            initial_header_pad_top(height, header_prepared.wrapped_lines.len())
+        };
         let mut centered = build_top_pad_lines(width, pad_top);
         centered.reserve(wrapped_lines.len());
         centered.extend(wrapped_lines);
@@ -657,7 +667,11 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     // Re-apply the initial-screen centering pad above the header so the
     // transition from the empty screen to the first message does not shift
     // anything. The pad scrolls off naturally as the transcript grows.
-    let pad_top = initial_header_pad_top(height, header_prepared.wrapped_lines.len());
+    let pad_top = if app.is_replay() {
+        0
+    } else {
+        initial_header_pad_top(height, header_prepared.wrapped_lines.len())
+    };
     let padded_header = if pad_top > 0 {
         let mut lines = build_top_pad_lines(width, pad_top);
         lines.reserve(header_prepared.wrapped_lines.len());
@@ -832,7 +846,7 @@ fn prepare_header_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages
         Arc::new(wrap_lines(all_header_lines, &[], &[], &[], width))
     };
 
-    if prep_cache_bypassed() {
+    if app.is_replay() || prep_cache_bypassed() {
         return build();
     }
 
@@ -2208,6 +2222,21 @@ fn prepare_streaming_cached(
         ratatui::layout::Alignment::Left
     };
 
+    // The renderer names the leading lines it did not re-render. They are
+    // only reusable here when a blank line follows them: display recentering
+    // above works on runs of non-blank lines, so a run that crossed the
+    // boundary could have shifted them.
+    let (stable_generation, stable_len) = app.streaming_markdown_stable_prefix();
+    let head_md_lines = if stable_len > 0
+        && md_lines
+            .get(stable_len)
+            .is_some_and(|line| line.spans.iter().all(|span| span.content.is_empty()))
+    {
+        stable_len
+    } else {
+        0
+    };
+
     let mut lines: Vec<Line<'static>> = Vec::new();
     if prefix_blank {
         lines.push(Line::from(""));
@@ -2216,9 +2245,98 @@ fn prepare_streaming_cached(
         lines.push(align_if_unset(line, align));
     }
 
-    let mut prepared = wrap_lines(lines, &[], &[], &[], width);
+    let mut prepared = if head_md_lines == 0 {
+        wrap_lines(lines, &[], &[], &[], width)
+    } else {
+        let head_len = head_md_lines + usize::from(prefix_blank);
+        let key = StreamingHeadKey {
+            generation: stable_generation,
+            head_len,
+            width,
+            centered,
+            prefix_blank,
+        };
+        let tail_lines = lines.split_off(head_len);
+        let head = STREAMING_HEAD_WRAP.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            match cache.as_ref() {
+                Some((cached_key, head)) if *cached_key == key => Arc::clone(head),
+                _ => {
+                    let head = Arc::new(wrap_lines(lines, &[], &[], &[], width));
+                    *cache = Some((key, Arc::clone(&head)));
+                    head
+                }
+            }
+        });
+        append_wrapped_tail(&head, wrap_lines(tail_lines, &[], &[], &[], width))
+    };
     stamp_mermaid_pending(&mut prepared, mermaid_epoch_before);
     prepared
+}
+
+/// Identifies the wrapped form of the stable head of a streaming reply.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct StreamingHeadKey {
+    generation: u64,
+    head_len: usize,
+    width: u16,
+    centered: bool,
+    prefix_blank: bool,
+}
+
+thread_local! {
+    // One entry: only the reply being streamed on this thread is ever asked for.
+    static STREAMING_HEAD_WRAP: std::cell::RefCell<Option<(StreamingHeadKey, Arc<PreparedMessages>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Join two separately wrapped runs of lines into what wrapping them together
+/// would have produced. Only valid for plain lines (no user prompts, edit
+/// ranges or copy targets), which is all `wrap_lines` emits for streaming.
+fn append_wrapped_tail(head: &PreparedMessages, tail: PreparedMessages) -> PreparedMessages {
+    let head_rows = head.wrapped_lines.len();
+    let head_raw = head.raw_plain_lines.len();
+
+    let mut wrapped_lines = Vec::with_capacity(head_rows + tail.wrapped_lines.len());
+    wrapped_lines.extend(head.wrapped_lines.iter().cloned());
+    wrapped_lines.extend(tail.wrapped_lines);
+
+    let mut wrapped_plain_lines = Vec::with_capacity(wrapped_lines.len());
+    wrapped_plain_lines.extend(head.wrapped_plain_lines.iter().cloned());
+    wrapped_plain_lines.extend(tail.wrapped_plain_lines.iter().cloned());
+
+    let mut wrapped_copy_offsets = Vec::with_capacity(wrapped_lines.len());
+    wrapped_copy_offsets.extend(head.wrapped_copy_offsets.iter().copied());
+    wrapped_copy_offsets.extend(tail.wrapped_copy_offsets.iter().copied());
+
+    let mut raw_plain_lines = Vec::with_capacity(head_raw + tail.raw_plain_lines.len());
+    raw_plain_lines.extend(head.raw_plain_lines.iter().cloned());
+    raw_plain_lines.extend(tail.raw_plain_lines.iter().cloned());
+
+    let mut wrapped_line_map = Vec::with_capacity(wrapped_lines.len());
+    wrapped_line_map.extend(head.wrapped_line_map.iter().copied());
+    wrapped_line_map.extend(tail.wrapped_line_map.iter().map(|map| WrappedLineMap {
+        raw_line: map.raw_line + head_raw,
+        ..*map
+    }));
+
+    let mut image_regions = head.image_regions.clone();
+    image_regions.extend(tail.image_regions.iter().map(|region| {
+        let mut region = *region;
+        region.abs_line_idx += head_rows;
+        region.end_line += head_rows;
+        region
+    }));
+
+    PreparedMessages {
+        wrapped_lines,
+        wrapped_plain_lines: Arc::new(wrapped_plain_lines),
+        wrapped_copy_offsets: Arc::new(wrapped_copy_offsets),
+        raw_plain_lines: Arc::new(raw_plain_lines),
+        wrapped_line_map: Arc::new(wrapped_line_map),
+        image_regions,
+        ..tail
+    }
 }
 
 pub(super) fn prepare_body(

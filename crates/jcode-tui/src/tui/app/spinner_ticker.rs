@@ -18,9 +18,16 @@
 //!
 //! That gain is for a turn that is waiting. It did not show on a live window
 //! mirroring a busy session: 54.0 wakeups/s with this thread against 58.6 and
-//! 53.7 for two windows on the runtime timer over the same 30s. While text
-//! streams the spinner is drawn by full frames and this thread is parked, so
-//! the redraw timer's own wakeup chain is what remains to fix.
+//! 53.7 for two windows on the runtime timer over the same 30s. At that time
+//! streaming text drew the spinner through full frames and left this thread
+//! parked.
+//!
+//! An unfocused client now batches streamed text into a frame every 250ms and
+//! this thread paints the spinner between them, so it runs at 12.5 ticks/s
+//! there too. Measured on a private unfocused client mid-stream, five 10s
+//! windows: 12.5 wakeups/s on this thread, 19.7 to 20.4 on the main thread and
+//! 33.6 to 35.4 on one runtime worker. What wakes that worker is not yet
+//! identified.
 //!
 //! The thread free-runs while its ticks are being collected, so the loop never
 //! has to wake it to ask for the next one. Once two ticks in a row find the
@@ -38,6 +45,13 @@ struct Shared {
     wake: Condvar,
     /// Mirrors `State::next.is_none()` so `tick` can skip the lock.
     parked: AtomicBool,
+    /// Set by `tick` each time the loop waits for a frame, cleared by the
+    /// thread each time it sends one. A full channel alone cannot show that
+    /// nobody is waiting: `reset_after` empties it after every full frame, so
+    /// a focused client streaming text (which paints the spinner in those
+    /// frames and never waits here) kept this thread waking 12.5 times a
+    /// second for the whole reply.
+    awaited: AtomicBool,
 }
 
 struct State {
@@ -66,6 +80,7 @@ impl SpinnerTicker {
             }),
             wake: Condvar::new(),
             parked: AtomicBool::new(true),
+            awaited: AtomicBool::new(false),
         });
         let (sender, ticks) = tokio::sync::mpsc::channel(1);
         let thread_shared = Arc::clone(&shared);
@@ -93,6 +108,7 @@ impl SpinnerTicker {
     /// the thread running and the next call picks up where this one stopped.
     pub(crate) async fn tick(&mut self) {
         if self.has_thread {
+            self.shared.awaited.store(true, Ordering::Release);
             if self.shared.parked.load(Ordering::Acquire) {
                 // Ticks left over from before the thread parked are stale.
                 while self.ticks.try_recv().is_ok() {}
@@ -204,9 +220,10 @@ fn run(shared: &Shared, sender: &tokio::sync::mpsc::Sender<()>, period: Duration
                 .0;
             continue;
         }
+        let awaited = shared.awaited.swap(false, Ordering::AcqRel);
         match sender.try_send(()) {
-            Ok(()) => missed = 0,
-            Err(TrySendError::Full(())) => missed = missed.saturating_add(1),
+            Ok(()) if awaited => missed = 0,
+            Ok(()) | Err(TrySendError::Full(())) => missed = missed.saturating_add(1),
             Err(TrySendError::Closed(())) => return,
         }
         if missed >= PARK_AFTER_MISSED {
@@ -264,6 +281,30 @@ mod tests {
             "a tick queued before parking must not be replayed: {:?}",
             start.elapsed()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn full_frames_that_empty_the_channel_do_not_keep_the_thread_awake() {
+        let period = Duration::from_millis(10);
+        let mut ticker = SpinnerTicker::new(period, period);
+        ticker.tick().await;
+        assert!(!ticker.shared.parked.load(Ordering::Acquire));
+
+        // A focused client streaming text: full frames reset the cadence and
+        // drain the channel, but nothing waits for a spinner tick. Each tick
+        // lands between two frames, so the channel is never found full.
+        for _ in 0..8 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            ticker.reset_after(Duration::from_millis(3));
+        }
+        assert!(
+            ticker.shared.parked.load(Ordering::Acquire),
+            "the thread must park when ticks are drained but never awaited"
+        );
+
+        // Waiting again restarts it.
+        ticker.tick().await;
+        assert!(!ticker.shared.parked.load(Ordering::Acquire));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

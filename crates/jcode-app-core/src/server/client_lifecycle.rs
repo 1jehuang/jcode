@@ -64,7 +64,7 @@ use super::{
 use crate::agent::Agent;
 use crate::bus::{Bus, BusEvent};
 use crate::id;
-use crate::protocol::{Request, ServerEvent, decode_request, encode_event};
+use crate::protocol::{Request, ServerEvent, decode_request, encode_event, encode_event_into};
 use crate::provider::Provider;
 use crate::tool::Registry;
 use crate::transport::Stream;
@@ -149,6 +149,18 @@ use request_watchdog::{
     RequestHandlerWatchdog, RequestHandlerWatchdogContext, log_request_lifecycle_handled,
     reject_if_agent_busy_for_request, send_agent_busy_error, should_start_idle_soft_interrupt,
 };
+/// Session and payload of a todo snapshot, for skipping identical resends.
+fn todos_event_key(event: &ServerEvent) -> Option<(String, String)> {
+    match event {
+        ServerEvent::Todos {
+            session_id,
+            payload,
+            ..
+        } => Some((session_id.clone(), payload.clone())),
+        _ => None,
+    }
+}
+
 fn server_reload_starting() -> bool {
     matches!(
         crate::server::recent_reload_state(RELOAD_STARTING_GUARD_MAX_AGE),
@@ -556,6 +568,7 @@ pub(super) async fn handle_client(
 
     // Per-client event channel (not shared with other clients)
     let _sdk_connection_guard = crate::tool::sdk::ConnectionGuard(client_connection_id.clone());
+    let _focus_guard = crate::stream_batching::ConnectionFocusGuard(client_connection_id.clone());
     let (client_event_tx, mut client_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
 
@@ -565,47 +578,25 @@ pub(super) async fn handle_client(
     let client_connections_for_events = Arc::clone(&client_connections);
     let supports_session_accounts_for_events = Arc::clone(&supports_session_accounts);
     let event_handle = tokio::spawn(async move {
+        let mut event_buffer = Vec::new();
         while let Some(event) = client_event_rx.recv().await {
             if matches!(event, ServerEvent::SessionAccountChanged { .. })
                 && !supports_session_accounts_for_events.load(std::sync::atomic::Ordering::Relaxed)
             {
                 continue;
             }
-            {
+            if let Some(update) = ConnectionMetadataUpdate::from_event(&event) {
                 let mut connections = client_connections_for_events.write().await;
                 if let Some(info) = connections.get_mut(&client_connection_id_for_events) {
-                    let observed = match &event {
-                        ServerEvent::TurnEvent { event, .. } => event.as_ref(),
-                        event => event,
-                    };
-                    match observed {
-                        ServerEvent::TurnStarted { .. } => {
-                            info.is_processing = true;
-                            info.current_tool_name = None;
-                        }
-                        ServerEvent::ToolStart { name, .. } => {
-                            info.is_processing = true;
-                            info.current_tool_name = Some(name.clone());
-                        }
-                        ServerEvent::ToolDone { .. } => {
-                            info.current_tool_name = None;
-                        }
-                        ServerEvent::Done { .. }
-                        | ServerEvent::Error { .. }
-                        | ServerEvent::Interrupted => {
-                            info.is_processing = false;
-                            info.current_tool_name = None;
-                        }
-                        _ => {}
-                    }
+                    update.apply(&mut info.is_processing, &mut info.current_tool_name);
                 }
             }
             let Some(event) = event_for_transport(event, supports_turn_identity) else {
                 continue;
             };
-            let json = encode_event(&event);
+            encode_event_into(&event, &mut event_buffer);
             let mut w = writer_clone.lock().await;
-            if let Err(error) = w.write_all(json.as_bytes()).await {
+            if let Err(error) = w.write_all(&event_buffer).await {
                 // A broken pipe here is routine (client reload/disconnect mid
                 // broadcast), so keep the line short: a full Debug dump of e.g.
                 // a SwarmStatus event prints every member and floods the log.
@@ -616,6 +607,7 @@ pub(super) async fn handle_client(
                 ));
                 break;
             }
+            release_large_event_buffer(&mut event_buffer);
         }
     });
 
@@ -715,6 +707,8 @@ pub(super) async fn handle_client(
     // subscribe. Under heavy swarm file-activity load, ignored bus frames can
     // otherwise monopolize the select loop before the initial subscribe/read.
     let mut client_subscribed = false;
+    // Session and payload of the last todo snapshot sent on this connection.
+    let mut last_pushed_todos: Option<(String, String)> = None;
     let mut provisional_session = true;
     let mut pending_request = Some(initial_request);
 
@@ -818,6 +812,30 @@ pub(super) async fn handle_client(
                             account_label,
                         });
                     }
+                    // Push the todo card to windows showing this session, so
+                    // they do not each poll for it. One todo-tool call writes
+                    // todos, goals and plan in turn; identical snapshots are
+                    // not resent.
+                    Ok(BusEvent::TodoStateStored(session_id)) => {
+                        if session_id == client_session_id {
+                            let event = super::client_writer::todos_snapshot_event(&client_session_id);
+                            let key = todos_event_key(&event);
+                            if key != last_pushed_todos {
+                                last_pushed_todos = key;
+                                let _ = client_event_tx.send(event);
+                            }
+                        }
+                    }
+                    // Missed bus events may include a todo write. The client no
+                    // longer polls, so resend the snapshot rather than guess.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let event = super::client_writer::todos_snapshot_event(&client_session_id);
+                        let key = todos_event_key(&event);
+                        if key != last_pushed_todos {
+                            last_pushed_todos = key;
+                            let _ = client_event_tx.send(event);
+                        }
+                    }
                     Ok(BusEvent::BatchProgress(progress)) => {
                         if progress.session_id == client_session_id {
                             let _ = client_event_tx.send(ServerEvent::BatchProgress { progress });
@@ -890,6 +908,20 @@ pub(super) async fn handle_client(
                 }
             }
         };
+        // A focus report only updates this connection's flag. It takes no
+        // admission reservation and gets no Ack: it exists to remove wakeups.
+        if let Request::ClientFocus {
+            focused, hidden, ..
+        } = &request
+        {
+            crate::stream_batching::set_connection_focus(
+                &client_connection_id,
+                &client_session_id,
+                *focused,
+                *hidden,
+            );
+            continue;
+        }
         let request_decoded_at = Instant::now();
         // Direct input wins the biased select above. A client may already have
         // observed Done/Error while this actor still holds the finished turn's
@@ -1558,19 +1590,12 @@ server_resumes: false,
                 }
             }
 
+            Request::ClientFocus { .. } => unreachable!("focus reports are handled before acknowledgment"),
+
             Request::GetTodos { .. } => {
-                let payload = serde_json::json!({
-                    "todos": crate::todo::load_todos(&client_session_id).unwrap_or_else(|error| {
-                        crate::logging::warn(&format!("Failed to load todos for {client_session_id}: {error}"));
-                        Vec::new()
-                    }),
-                    "plan": crate::todo::load_plan(&client_session_id).unwrap_or_default(),
-                    "goals": crate::todo::load_goals(&client_session_id).unwrap_or_default(),
-                });
-                let _ = client_event_tx.send(ServerEvent::Todos {
-                    session_id: client_session_id.clone(),
-                    payload: payload.to_string(),
-                });
+                let event = super::client_writer::todos_snapshot_event(&client_session_id);
+                last_pushed_todos = todos_event_key(&event);
+                let _ = client_event_tx.send(event);
             }
 
             Request::GetState { id } => {
@@ -3728,6 +3753,65 @@ pub(super) async fn process_reserved_message_streaming_mpsc(
 #[cfg(test)]
 #[path = "client_lifecycle_tests.rs"]
 mod tests;
+
+/// Only metadata-changing events need the shared connection write lock.
+/// Borrow tool names until the lock is held, avoiding allocations for lookup misses.
+enum ConnectionMetadataUpdate<'a> {
+    TurnStarted,
+    ToolStarted(&'a str),
+    ToolDone,
+    TurnEnded,
+}
+
+fn release_large_event_buffer(buffer: &mut Vec<u8>) {
+    // Keep ordinary streaming allocations, but do not pin a large History or
+    // tool-result payload for the rest of a long-lived connection.
+    if buffer.capacity() > 64 * 1024 {
+        *buffer = Vec::new();
+    }
+}
+
+impl<'a> ConnectionMetadataUpdate<'a> {
+    fn from_event(event: &'a ServerEvent) -> Option<Self> {
+        // Deliberately unwrap exactly one level, matching the forwarder's original
+        // behavior. Nested wrappers are not metadata transitions.
+        let observed = match event {
+            ServerEvent::TurnEvent { event, .. } => event.as_ref(),
+            event => event,
+        };
+        match observed {
+            ServerEvent::TurnStarted { .. } => Some(Self::TurnStarted),
+            ServerEvent::ToolStart { name, .. } => Some(Self::ToolStarted(name)),
+            ServerEvent::ToolDone { .. } => Some(Self::ToolDone),
+            ServerEvent::Done { .. } | ServerEvent::Error { .. } | ServerEvent::Interrupted => {
+                Some(Self::TurnEnded)
+            }
+            _ => None,
+        }
+    }
+
+    fn apply(self, is_processing: &mut bool, current_tool_name: &mut Option<String>) {
+        match self {
+            Self::TurnStarted => {
+                *is_processing = true;
+                *current_tool_name = None;
+            }
+            Self::ToolStarted(name) => {
+                *is_processing = true;
+                *current_tool_name = Some(name.to_owned());
+            }
+            Self::ToolDone => *current_tool_name = None,
+            Self::TurnEnded => {
+                *is_processing = false;
+                *current_tool_name = None;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "client_lifecycle_metadata_tests.rs"]
+mod metadata_tests;
 
 #[cfg(test)]
 #[path = "client_lifecycle_cancel_resume_tests.rs"]

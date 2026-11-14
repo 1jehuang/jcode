@@ -9,7 +9,6 @@ use runtime_identity::{
     parse_release_semver, should_defer_history_for_runtime_identity_with_allow,
 };
 
-use super::super::remote_notifications::recent_swarm_card_matches;
 use super::*;
 
 #[cfg(test)]
@@ -1268,12 +1267,13 @@ fn handle_server_event_inner(
             // or awaiting acknowledgement. It belongs to the failed route, not
             // a new turn: do not print it again or replace the held payload.
             if (app.pending_provider_failover.is_some()
+                || app.automatic_failover_stopped
                 || app.pending_automatic_failover_route.is_some()
                 || app.pending_automatic_failover_request_id.is_some()
                 || (app.pending_route_selection.is_some() && app.pending_fallback_resend.is_some()))
                 && (crate::provider::parse_failover_prompt_message(&message).is_some()
                     || jcode_provider_core::classify_failover_error_message(&message)
-                        .should_mark_provider_unavailable())
+                        .should_failover())
             {
                 return false;
             }
@@ -2623,7 +2623,11 @@ fn handle_server_event_inner(
         ServerEvent::Todos {
             session_id,
             payload,
-        } => app.receive_remote_todos(session_id, payload),
+            pushes,
+        } => {
+            app.remote_todos_pushed = pushes;
+            app.receive_remote_todos(session_id, payload)
+        }
         ServerEvent::SwarmStatus { members } => {
             if app.swarm_enabled {
                 // Surface member lifecycle transitions (done/failed/blocked/
@@ -3216,21 +3220,23 @@ fn handle_server_event_inner(
                     );
                     app.finish_background_task(completed.task_id, label, status);
                 }
+                // Task chrome does not replace a chronological delivery entry.
+                app.push_display_message(DisplayMessage::background_task(content.clone()));
             } else if let Some(swarm) =
                 super::super::remote_notifications::swarm_delivery_display_message(&content)
             {
-                // A delivered swarm message: the notification card already
-                // shows it as one row. Never dump the full model-facing text.
-                if !recent_swarm_card_matches(app, &swarm) {
-                    app.push_display_message(swarm);
-                }
+                // Receipt and model delivery are distinct events.
+                app.push_display_message(swarm);
             } else {
+                // Do not coalesce repeated system injections: each delivery is
+                // its own event in the conversation timeline.
+                let title = (role == "system").then(|| "Context notification".to_string());
                 app.push_display_message(DisplayMessage {
                     role,
                     content: content.clone(),
                     tool_calls: vec![],
                     duration_secs: None,
-                    title: None,
+                    title,
                     tool_data: None,
                 });
             }
@@ -3246,24 +3252,24 @@ fn handle_server_event_inner(
             prompt_chars: _,
             computed_age_ms,
         } => {
-            if app.memory_enabled {
-                let plural = if count == 1 { "memory" } else { "memories" };
-                let display_prompt = if let Some(display_prompt) = display_prompt {
-                    display_prompt.clone()
-                } else if prompt.trim().is_empty() {
-                    "# Memory\n\n## Notes\n1. (content unavailable from server event)".to_string()
-                } else {
-                    prompt.clone()
-                };
-                crate::memory::record_injected_prompt(&prompt, count, computed_age_ms);
-                let summary = if count == 1 {
-                    "🧠 auto-recalled 1 memory".to_string()
-                } else {
-                    format!("🧠 auto-recalled {} memories", count)
-                };
-                app.push_display_message(DisplayMessage::memory(summary, display_prompt));
-                app.set_status_notice(format!("🧠 {} relevant {} injected", count, plural));
-            }
+            // The server confirms actual context injection. A stale local
+            // toggle must not hide what the model received.
+            let plural = if count == 1 { "memory" } else { "memories" };
+            let display_prompt = if let Some(display_prompt) = display_prompt {
+                display_prompt.clone()
+            } else if prompt.trim().is_empty() {
+                "# Memory\n\n## Notes\n1. (content unavailable from server event)".to_string()
+            } else {
+                prompt.clone()
+            };
+            crate::memory::record_injected_prompt(&prompt, count, computed_age_ms);
+            let summary = if count == 1 {
+                "🧠 auto-recalled 1 memory".to_string()
+            } else {
+                format!("🧠 auto-recalled {} memories", count)
+            };
+            app.push_display_message(DisplayMessage::memory(summary, display_prompt));
+            app.set_status_notice(format!("🧠 {} relevant {} injected", count, plural));
             false
         }
         ServerEvent::MemoryActivity { activity } => {

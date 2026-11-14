@@ -11,6 +11,32 @@ pub const JCODE_SUBSCRIPTION_ACTIVE_ENV: &str = "JCODE_SUBSCRIPTION_ACTIVE";
 pub const DEFAULT_JCODE_API_BASE: &str = "https://api.jcode.sh/v1";
 pub const JCODE_PRICING_URL: &str = "https://jcode.sh/pricing";
 pub const JCODE_ACCOUNT_URL: &str = "https://jcode.sh/account";
+
+/// Opening sentences of the Jcode Cloud account failures. The cloud CLI prints
+/// them and the TUI recognizes them to show onboarding steps instead of a
+/// generic failure, so keep each one a stable prefix of its full message.
+pub const CLOUD_ACCOUNT_REQUIRED: &str = "Jcode Cloud needs a Jcode account.";
+pub const CLOUD_SIGN_IN_EXPIRED: &str = "Your Jcode sign-in expired.";
+pub const CLOUD_NOT_ENTITLED: &str = "Jcode Cloud requires an active paid Jcode subscription.";
+
+/// Signed out: how to get an account from a shell.
+pub fn cloud_account_required_message() -> String {
+    format!(
+        "{CLOUD_ACCOUNT_REQUIRED} Run `jcode account login` to sign in or create one. A paid plan includes your Jcode Cloud machine: {JCODE_PRICING_URL}"
+    )
+}
+
+/// The saved account key was rejected.
+pub fn cloud_sign_in_expired_message() -> String {
+    format!("{CLOUD_SIGN_IN_EXPIRED} Run `jcode account login` again.")
+}
+
+/// Signed in, but the plan does not include the managed machine.
+pub fn cloud_not_entitled_message() -> String {
+    format!(
+        "{CLOUD_NOT_ENTITLED} See plans at {JCODE_PRICING_URL} or change yours with `jcode account manage`."
+    )
+}
 /// User-facing runtime identity. Keep "Subscription" in the name so picker,
 /// header, status, and diagnostics never resemble a generic model host.
 pub const JCODE_PROVIDER_DISPLAY_NAME: &str = "Jcode Subscription";

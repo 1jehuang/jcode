@@ -37,6 +37,9 @@ pub struct LoginOptions {
     pub flow_id: Option<String>,
     pub cancel: bool,
     pub no_validate: bool,
+    /// Use the OpenAI device-code flow (enter a short code at
+    /// auth.openai.com/codex/device) instead of a localhost callback.
+    pub device_code: bool,
     pub google_access_tier: Option<auth::google::GmailAccessTier>,
     pub google_services: Option<Vec<auth::google::GoogleService>>,
     /// Run the guided Google Cloud OAuth client setup even when a client is saved.
@@ -88,7 +91,8 @@ impl LoginOptions {
             || self.complete
             || self.has_provided_input()
             || self.flow_id.is_some()
-            || self.cancel)
+            || self.cancel
+            || self.device_code)
     }
 }
 
@@ -131,6 +135,11 @@ enum PendingScriptableLogin {
         verifier: String,
         state: String,
         redirect_uri: String,
+    },
+    /// Device-code login (`--device-code`): no callback URL, resume with `--complete`.
+    OpenaiDevice {
+        account_label: String,
+        device: auth::oauth::OpenAiDeviceCode,
     },
     Gemini {
         verifier: String,
@@ -179,6 +188,7 @@ impl PendingScriptableLogin {
         match self {
             Self::Claude { .. } => "claude",
             Self::Openai { .. } => "openai",
+            Self::OpenaiDevice { .. } => "openai",
             Self::Gemini { .. } => "gemini",
             Self::Antigravity { .. } => "antigravity",
             Self::Google { .. } => "google",

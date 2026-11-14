@@ -626,7 +626,31 @@ async fn update_member_status_prefers_explicit_report_back_owner_over_coordinato
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn update_member_status_includes_completion_report_in_owner_notification() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::TempDir::new().unwrap();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    let tasks = vec![
+        crate::todo::TodoItem {
+            id: "offline".into(),
+            content: "Offline checks".into(),
+            status: "completed".into(),
+            stage: Some(1),
+            group: Some("security".into()),
+            ..Default::default()
+        },
+        crate::todo::TodoItem {
+            id: "live".into(),
+            content: "Live acceptance".into(),
+            status: "pending".into(),
+            stage: Some(1),
+            group: Some("security".into()),
+            ..Default::default()
+        },
+    ];
+    crate::todo::save_todos("worker", &tasks).unwrap();
     let swarm_members = Arc::new(RwLock::new(HashMap::new()));
     let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
         "swarm-1".to_string(),
@@ -657,6 +681,11 @@ async fn update_member_status_includes_completion_report_in_owner_notification()
     .await;
 
     let events: Vec<_> = std::iter::from_fn(|| coord_rx.try_recv().ok()).collect();
+    if let Some(previous) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
     assert!(events.iter().any(|event| {
         matches!(
             event,
@@ -664,14 +693,15 @@ async fn update_member_status_includes_completion_report_in_owner_notification()
                 notification_type: NotificationType::Message { .. },
                 message,
                 ..
-            } if message.contains("Recent output (automatically captured):\nValidated the parser")
-                && !message.contains("No recent assistant output")
+            } if message.contains("Final response:\nValidated the parser")
+                && message.contains("Phase 1 · security: 1/2 completed")
+                && message.contains("- [pending] Live acceptance")
         )
     }));
 }
 
 #[tokio::test]
-async fn automatic_output_tail_survives_forced_stop_and_is_delivered_once() {
+async fn forced_stop_does_not_promote_gallery_activity_to_final_response() {
     for status in ["stopped", "failed", "crashed"] {
         let members = Arc::new(RwLock::new(HashMap::new()));
         let swarms = Arc::new(RwLock::new(HashMap::from([(
@@ -692,10 +722,7 @@ async fn automatic_output_tail_survives_forced_stop_and_is_delivered_once() {
             update_member_status("worker", status, None, &members, &swarms, None, None, None).await;
         }
         let members = members.read().await;
-        assert_eq!(
-            members["worker"].latest_completion_report.as_deref(),
-            Some("Applied fix, running validation")
-        );
+        assert_eq!(members["worker"].latest_completion_report.as_deref(), None);
         assert!(members["worker"].output_tail.is_none());
         let notifications: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
             .filter_map(|event| match event {
@@ -704,7 +731,8 @@ async fn automatic_output_tail_survives_forced_stop_and_is_delivered_once() {
             })
             .collect();
         assert_eq!(notifications.len(), 1, "{status}: {notifications:?}");
-        assert!(notifications[0].contains("Applied fix, running validation"));
+        assert!(notifications[0].contains("No final assistant response was captured."));
+        assert!(!notifications[0].contains("Applied fix, running validation"));
         assert!(!notifications[0].contains("stale previous turn"));
     }
 }

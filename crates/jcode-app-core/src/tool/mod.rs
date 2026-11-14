@@ -45,6 +45,7 @@ mod open;
 mod panel;
 mod patch;
 mod read;
+pub mod remote_exec;
 pub(crate) mod sdk;
 pub mod selfdev;
 pub(crate) mod serde_coerce;
@@ -1234,7 +1235,13 @@ impl Registry {
         );
 
         let started_at = std::time::Instant::now();
-        let result = tool.execute(input.clone(), ctx.clone()).await;
+        // Hooks, policy, telemetry and the context guard stay in the runtime.
+        // Only the workspace side effect moves to the execution environment.
+        let result = if !is_custom && remote_exec::routes(resolved_name) {
+            remote_exec::execute(resolved_name, input.clone(), &ctx).await
+        } else {
+            tool.execute(input.clone(), ctx.clone()).await
+        };
         let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
         crate::telemetry::record_tool_execution(resolved_name, &input, result.is_ok(), latency_ms);

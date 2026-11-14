@@ -89,6 +89,7 @@ pub(super) async fn process_turn_with_input(
 pub(super) fn handle_tick(app: &mut App) -> bool {
     let reset_redraw = app.poll_usage_reset() | app.poll_cloud_job();
     app.expire_presumed_focus();
+    crate::tui::window_visibility::poll(app.client_focused(), app.is_processing);
     app.refresh_terminal_title_metrics();
     app.sync_herdr_agent_state();
     // Liveness breadcrumb: if the UI loop wedges, the watchdog reports this as
@@ -539,6 +540,7 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
     app.set_status_notice(background_task_status_notice(&task));
 
     if !app.is_processing {
+        app.push_display_message(DisplayMessage::background_task(notification.clone()));
         app.add_provider_message(Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
@@ -599,6 +601,7 @@ fn handle_background_task_stalled(app: &mut App, task: crate::bus::BackgroundTas
     ));
 
     if !app.is_processing {
+        app.push_display_message(DisplayMessage::background_task(notification.clone()));
         app.add_provider_message(Message {
             role: Role::User,
             content: vec![ContentBlock::Text {

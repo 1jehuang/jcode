@@ -2,6 +2,51 @@ use super::*;
 use anyhow::{Result, anyhow};
 
 #[test]
+fn restored_active_pending_tool_counts_as_interrupted() {
+    let message = crate::session::StoredMessage {
+        id: "pending_bg".into(),
+        role: crate::message::Role::Assistant,
+        content: vec![ContentBlock::ToolUse {
+            id: "wait_1".into(),
+            name: "bg".into(),
+            input: serde_json::json!({"action": "wait", "max_wait_seconds": 400}),
+            thought_signature: None,
+        }],
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    };
+    let agent = test_agent(vec![message]);
+    assert!(restored_session_was_interrupted(
+        "session_pending_bg",
+        &crate::session::SessionStatus::Active,
+        &agent,
+    ));
+}
+
+#[test]
+fn restored_active_completed_assistant_does_not_count_as_interrupted() {
+    let agent = test_agent(vec![crate::session::StoredMessage {
+        id: "done".into(),
+        role: crate::message::Role::Assistant,
+        content: vec![ContentBlock::Text {
+            text: "Done".into(),
+            cache_control: None,
+        }],
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    }]);
+    assert!(!restored_session_was_interrupted(
+        "session_done",
+        &crate::session::SessionStatus::Active,
+        &agent,
+    ));
+}
+
+#[test]
 fn detects_reload_interrupted_generation_text() {
     let agent = test_agent(vec![crate::session::StoredMessage {
         id: "msg_1".to_string(),

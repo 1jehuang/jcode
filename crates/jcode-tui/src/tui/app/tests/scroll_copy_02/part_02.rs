@@ -2002,3 +2002,5 @@ fn test_side_panel_dismiss_survives_local_page_refresh() {
         }
     });
 }
+
+include!("badge_partial_selection.rs");

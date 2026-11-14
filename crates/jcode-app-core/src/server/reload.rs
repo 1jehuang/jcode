@@ -300,13 +300,94 @@ pub(super) async fn await_reload_signal(
     }
 }
 
+/// Swarm status can lag turn startup (or the member can be absent entirely).
+/// Union actual turn registrations with running members and the reload initiator,
+/// retaining known headless metadata even for members not marked running.
+fn reload_recovery_candidates<'a>(
+    members: impl IntoIterator<Item = (&'a str, &'a str, bool)>,
+    active_session_ids: Vec<String>,
+    triggering_session: Option<&str>,
+) -> Vec<(String, bool)> {
+    let members: HashMap<_, _> = members
+        .into_iter()
+        .map(|(id, status, headless)| (id, (status, headless)))
+        .collect();
+    let mut candidates: HashMap<String, bool> = members
+        .iter()
+        // A rate-limited member is parked in a quota wait inside its turn.
+        .filter(|(_, (status, _))| matches!(*status, "running" | "rate_limited"))
+        .map(|(id, (_, headless))| ((*id).to_string(), *headless))
+        .collect();
+    for id in active_session_ids
+        .into_iter()
+        .chain(triggering_session.map(str::to_string))
+    {
+        let headless = members
+            .get(id.as_str())
+            .is_some_and(|(_, headless)| *headless);
+        candidates.entry(id).or_insert(headless);
+    }
+    let mut candidates: Vec<_> = candidates.into_iter().collect();
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    candidates
+}
+
+#[cfg(test)]
+mod recovery_candidate_tests {
+    use super::reload_recovery_candidates;
+    use crate::turn_cancel_registry::{active_session_ids, register_active_turn};
+    use jcode_agent_runtime::InterruptSignal;
+
+    #[test]
+    fn includes_registered_ready_and_absent_members_preserving_headless_metadata() {
+        let ready = "reload_candidates_ready";
+        let absent = "reload_candidates_absent";
+        let _ready_turn = register_active_turn(ready, InterruptSignal::new());
+        let _absent_turn = register_active_turn(absent, InterruptSignal::new());
+        let candidates = reload_recovery_candidates(
+            [(ready, "ready", true), ("idle", "ready", false)],
+            active_session_ids(),
+            Some(ready),
+        );
+        assert!(candidates.contains(&(ready.to_string(), true)));
+        assert!(candidates.contains(&(absent.to_string(), false)));
+        assert!(!candidates.iter().any(|(id, _)| id == "idle"));
+        assert_eq!(candidates.iter().filter(|(id, _)| id == ready).count(), 1);
+    }
+
+    #[test]
+    fn unions_running_active_and_triggering_sessions_in_sorted_unique_order() {
+        assert_eq!(
+            reload_recovery_candidates(
+                [("running", "running", true), ("trigger", "ready", true)],
+                vec![
+                    "running".to_string(),
+                    "active".to_string(),
+                    "active".to_string()
+                ],
+                Some("trigger"),
+            ),
+            vec![
+                ("active".to_string(), false),
+                ("running".to_string(), true),
+                ("trigger".to_string(), true),
+            ]
+        );
+        assert_eq!(
+            reload_recovery_candidates([], Vec::new(), Some("unknown-trigger")),
+            vec![("unknown-trigger".to_string(), false)]
+        );
+    }
+}
+
 async fn persist_reload_recovery_intents(
     reload_id: &str,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     triggering_session: Option<&str>,
 ) {
-    let mut candidates: Vec<(String, bool)> = {
+    let candidates = {
         let members = swarm_members.read().await;
+        let active_session_ids = crate::turn_cancel_registry::active_session_ids();
         let snapshot = members
             .iter()
             .map(|(session_id, member)| {
@@ -325,25 +406,17 @@ async fn persist_reload_recovery_intents(
             serde_json::json!({
                 "triggering_session": triggering_session,
                 "members": snapshot,
+                "active_session_ids": active_session_ids,
             }),
         );
-        members
-            .iter()
-            .filter(|(_, member)| matches!(member.status.as_str(), "running" | "rate_limited"))
-            .map(|(session_id, member)| (session_id.clone(), member.is_headless))
-            .collect()
+        reload_recovery_candidates(
+            members
+                .iter()
+                .map(|(id, member)| (id.as_str(), member.status.as_str(), member.is_headless)),
+            active_session_ids,
+            triggering_session,
+        )
     };
-
-    if let Some(triggering_session) = triggering_session
-        && !candidates
-            .iter()
-            .any(|(session_id, _)| session_id == triggering_session)
-    {
-        candidates.push((triggering_session.to_string(), false));
-    }
-
-    candidates.sort_by(|a, b| a.0.cmp(&b.0));
-    candidates.dedup_by(|a, b| a.0 == b.0);
 
     for (session_id, is_headless) in candidates {
         let reload_ctx = ReloadContext::peek_for_session(&session_id).ok().flatten();

@@ -293,20 +293,44 @@ fn model_facing_descriptions_stay_compact() {
     }
     let phase_item = &schema["properties"]["phases"]["items"]["properties"]["lanes"]["items"]["properties"]
         ["items"]["items"]["properties"];
-    for (route, properties) in [
-        (
-            "update",
-            &schema["properties"]["update"]["items"]["properties"],
-        ),
-        ("phases", phase_item),
-    ] {
-        for (field, property) in properties.as_object().unwrap() {
-            assert!(
-                field == "rename_to" || property.get("description").is_none(),
-                "{route}.{field} repeats a description already given on add"
-            );
-        }
+    for (field, property) in phase_item.as_object().unwrap() {
+        assert!(
+            property.get("description").is_none(),
+            "phases.{field} repeats a description already given on add"
+        );
     }
+    // update lists only what add does not already describe.
+    let update = &schema["properties"]["update"]["items"];
+    let mut fields: Vec<&String> = update["properties"].as_object().unwrap().keys().collect();
+    fields.sort();
+    assert_eq!(fields, ["name", "rename_to"]);
+    assert_eq!(update["additionalProperties"], true);
+}
+
+#[test]
+fn update_rejects_fields_the_open_schema_cannot_catch() {
+    let stored = || json!([{"id": "a", "content": "a", "status": "pending", "priority": "high"}]);
+    let error = apply_todo_patch(
+        json!({"update": [{"id": "a", "statuss": "completed"}]}),
+        stored,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("unknown update field \"statuss\""),
+        "{error}"
+    );
+
+    let patched = apply_todo_patch(
+        json!({"update": [{
+            "id": "a", "status": "in_progress", "priority": "low", "lane": "x", "phase": 2,
+            "confidence": "plausible", "waiting_on": {"ids": ["t1"], "reason": "build"}
+        }]}),
+        stored,
+    )
+    .unwrap();
+    assert_eq!(patched["todos"][0]["status"], "in_progress");
+    assert_eq!(patched["todos"][0]["group"], "x");
 }
 
 #[test]

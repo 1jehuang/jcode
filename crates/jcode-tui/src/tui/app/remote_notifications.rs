@@ -185,7 +185,28 @@ fn collapses_to_one_row(notification_type: &NotificationType) -> bool {
 /// return a one-row swarm display message for it instead of the raw text.
 pub(super) fn swarm_delivery_display_message(content: &str) -> Option<crate::tui::DisplayMessage> {
     let trimmed = content.trim();
-    let (title, body) = if let Some(rest) = trimmed.strip_prefix("Cross-swarm DM from ") {
+    let (title, body) = if let Some(rest) = trimmed.strip_prefix("Agent ") {
+        // Completion wakes use plain prose rather than the DM wire prefix.
+        // Match the generated envelope, not arbitrary user prose about agents.
+        let (intro, details) = rest.split_once("\n\n")?;
+        let (sender, status) = intro.split_once(' ')?;
+        if sender.is_empty()
+            || !matches!(
+                status,
+                "finished their work and is ready for more."
+                    | "finished with status failed."
+                    | "stopped."
+                    | "crashed while working."
+                    | "completed their work."
+            )
+            || !(details.starts_with("Recent output (automatically captured):\n")
+                || details.starts_with("No recent assistant output was captured. ")
+                || details.starts_with("Lane plan:\n"))
+        {
+            return None;
+        }
+        (format!("Swarm · {sender}"), trimmed)
+    } else if let Some(rest) = trimmed.strip_prefix("Cross-swarm DM from ") {
         let (sender, body) = rest.split_once(": ")?;
         (format!("DM from {}", sender.trim()), body)
     } else if let Some(rest) = trimmed.strip_prefix("DM from ") {
@@ -439,19 +460,6 @@ fn present_swarm_notification_inner(
             }
         }
     }
-}
-
-/// True when a recent transcript row has the same swarm title and full body.
-pub(super) fn recent_swarm_card_matches(
-    app: &super::App,
-    candidate: &super::DisplayMessage,
-) -> bool {
-    let body = swarm_display_full_body(&candidate.content);
-    app.display_messages().iter().rev().take(40).any(|message| {
-        message.role == "swarm"
-            && message.title == candidate.title
-            && swarm_display_full_body(&message.content) == body
-    })
 }
 
 #[cfg(test)]

@@ -440,6 +440,11 @@ pub enum SessionUpdateStatus {
 pub enum BusEvent {
     ToolUpdated(ToolEvent),
     TodoUpdated(TodoEvent),
+    /// A session's stored todo list, plan or goals were rewritten. Carries the
+    /// session id. Unlike `TodoUpdated` this fires for every writer, and only
+    /// client connections consume it, to push a fresh snapshot to windows
+    /// showing that session.
+    TodoStateStored(String),
     /// The coordinator changed a lane a worker owns; the worker's todo list
     /// was rewritten to match and the worker should be told.
     LaneEdited(LaneEdited),

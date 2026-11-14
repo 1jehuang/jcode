@@ -53,6 +53,7 @@ pub mod session_window;
 pub mod setup_hints;
 pub mod ssh_remote;
 pub mod startup_profile;
+pub(crate) mod stream_batching;
 pub mod tool;
 pub mod turn_cancel_registry;
 pub mod update;

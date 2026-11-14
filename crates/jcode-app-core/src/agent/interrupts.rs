@@ -444,8 +444,11 @@ impl Agent {
         };
 
         for message in messages {
+            // Every message gets its own model message: each user follow-up
+            // keeps its own rewind checkpoint, and notifications keep their
+            // own delivery events and transcript entries.
             match current_source {
-                Some(source) if source != message.source || source == SoftInterruptSource::User => {
+                Some(source) => {
                     flush_group(
                         self,
                         &mut injected,
@@ -457,7 +460,6 @@ impl Agent {
                     current_source = Some(message.source);
                 }
                 None => current_source = Some(message.source),
-                _ => {}
             }
             current_parts.push(message.content);
             current_images.extend(message.images);
