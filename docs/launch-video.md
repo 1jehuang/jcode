@@ -4,10 +4,10 @@
 
 ## Render original sessions headlessly
 
-The root `src/bin/replay_frames.rs` development binary exports production TUI frames and optional cell data without a terminal window or provider connection:
+The `crates/jcode-tui/src/bin/replay_frames.rs` development binary exports production TUI frames and optional cell data without a terminal window or provider connection:
 
 ```bash
-justrust build --profile selfdev -p jcode --features dev-bins --bin replay_frames
+justrust build --profile selfdev -p jcode-tui --features dev-bins --bin replay_frames
 ./target/selfdev/replay_frames \
   --session session_fox_1793673474425_cee7c7a5ef45bb8a \
   --timeline ~/.jcode/scratch/launch-video/fox-snippet.json \

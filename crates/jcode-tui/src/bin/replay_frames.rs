@@ -1,7 +1,7 @@
 //! Export production TUI replay frames without a terminal or provider connection.
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
-use jcode::tui::App;
+use jcode_tui::tui::App;
 use ratatui::style::{Color, Modifier};
 use serde_json::{Value, json};
 use std::{fs, path::PathBuf};
@@ -80,11 +80,11 @@ async fn main() -> Result<()> {
         (1..=300).contains(&args.cols) && (1..=100).contains(&args.rows),
         "dimensions must be 1..300 columns and 1..100 rows"
     );
-    let timeline: Vec<jcode::replay::TimelineEvent> =
+    let timeline: Vec<jcode_tui::replay::TimelineEvent> =
         serde_json::from_slice(&fs::read(&args.timeline)?)?;
-    let session = jcode::replay::load_session(&args.session)?;
+    let session = jcode_tui::replay::load_session(&args.session)?;
     let duration = args.duration_ms.unwrap_or_else(|| {
-        jcode::replay::timeline_to_replay_events(&timeline)
+        jcode_tui::replay::timeline_to_replay_events(&timeline)
             .iter()
             .map(|(delay, _)| *delay)
             .sum::<u64>()
