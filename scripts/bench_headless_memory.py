@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import select
 import shutil
 import signal
 import socket
@@ -334,11 +335,29 @@ class JsonLineProc:
         self.proc.stdin.write(json.dumps(obj) + "\n")
         self.proc.stdin.flush()
 
+    def read_line_with_deadline(self, deadline: float) -> str | None:
+        """Read one stdout line, or None if the deadline expires first.
+
+        readline() blocks until a full line arrives, so the caller's deadline
+        would otherwise never fire while a silent child stays alive.
+        """
+        fd = self.proc.stdout.fileno()
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return "__timeout__"
+        ready, _, _ = select.select([fd], [], [], remaining)
+        if not ready:
+            return "__timeout__"
+        line = self.proc.stdout.readline()
+        return line if line else "__eof__"
+
     def read_until(self, done, timeout: float = 600) -> str | None:
         deadline = time.time() + timeout
-        while time.time() < deadline:
-            line = self.proc.stdout.readline()
-            if not line:
+        while True:
+            line = self.read_line_with_deadline(deadline)
+            if line == "__timeout__":
+                return "timeout"
+            if line == "__eof__":
                 return "process exited"
             try:
                 ev = json.loads(line)
@@ -347,7 +366,6 @@ class JsonLineProc:
             verdict = done(ev)
             if verdict is not None:
                 return verdict or None
-        return "timeout"
 
     def close(self) -> None:
         try:
