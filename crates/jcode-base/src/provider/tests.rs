@@ -1,6 +1,7 @@
 mod catalog_discovery;
 use super::*;
 mod catalog_memo;
+mod fork_profile_runtime;
 mod saved_account_selection;
 mod session_binding;
 mod startup_pool;

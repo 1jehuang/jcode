@@ -94,8 +94,8 @@ impl ForgeCodeProvider {
                     | ContentBlock::OpenAIReasoning { .. } => {}
                     ContentBlock::Image { .. } => {}
                     ContentBlock::OpenAICompaction { .. } => {}
-                    // Upstream additions with no prompt text of their own:
-                    // a deferred-tool reference and provider-native blocks.
+                    // References and provider-native blocks carry no
+                    // user-authored prompt text for the CLI transport.
                     ContentBlock::ToolReference { .. } | ContentBlock::ProviderNative { .. } => {}
                 }
             }

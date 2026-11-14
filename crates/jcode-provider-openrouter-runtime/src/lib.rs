@@ -2878,6 +2878,7 @@ impl OpenRouterProvider {
 }
 
 mod api_protocol;
+pub use api_protocol::openai_compatible_route_path;
 mod models_catalog_parse;
 mod ollama_context;
 mod opencode_go_messages;
