@@ -155,6 +155,170 @@ fn all_of_branches_preserve_types_nullable_enums_properties_and_cross_branch_req
 }
 
 #[test]
+fn deep_merge_property_preserves_shared_nested_object_properties_required_and_all_of() {
+    let schema = json!({
+        "type": "object",
+        "allOf": [
+            {
+                "properties": {
+                    "endpoint": {
+                        "type": "object",
+                        "description": "Primary endpoint",
+                        "properties": {
+                            "host": { "type": "string" }
+                        },
+                        "required": ["host"],
+                        "allOf": [
+                            {
+                                "properties": {
+                                    "tls": { "type": "boolean" }
+                                },
+                                "required": ["tls"]
+                            }
+                        ]
+                    }
+                },
+                "required": ["endpoint"]
+            },
+            {
+                "properties": {
+                    "endpoint": {
+                        "type": "object",
+                        "properties": {
+                            "port": { "type": ["integer", "null"] }
+                        },
+                        "required": ["host", "port"],
+                        "allOf": [
+                            {
+                                "properties": {
+                                    "timeout_ms": { "type": "integer" }
+                                },
+                                "required": ["timeout_ms"]
+                            }
+                        ]
+                    }
+                }
+            }
+        ]
+    });
+
+    for dialect in [
+        &registry::OPENAI,
+        &registry::GEMINI,
+        &registry::ANTIGRAVITY_CLAUDE,
+        &registry::ANTIGRAVITY_BRIDGE,
+    ] {
+        let out = apply(&schema, dialect);
+        assert!(
+            must_not_contain_unsupported_constructs(&out, dialect).is_empty(),
+            "{}: {out}",
+            dialect.id
+        );
+        let endpoint = &out["properties"]["endpoint"];
+        assert_eq!(
+            endpoint["description"], "Primary endpoint",
+            "{}",
+            dialect.id
+        );
+        assert_eq!(endpoint["properties"]["host"]["type"], "string");
+        assert!(
+            endpoint["properties"].get("port").is_some(),
+            "{}",
+            dialect.id
+        );
+        assert_eq!(endpoint["properties"]["tls"]["type"], "boolean");
+        assert_eq!(endpoint["properties"]["timeout_ms"]["type"], "integer");
+        assert_eq!(
+            endpoint["required"],
+            json!(["host", "port", "tls", "timeout_ms"]),
+            "{}",
+            dialect.id
+        );
+        assert!(
+            endpoint.get("allOf").is_none(),
+            "{}: {endpoint}",
+            dialect.id
+        );
+    }
+}
+
+#[test]
+fn fold_all_of_does_not_promote_constraint_only_or_conflicting_combiners_onto_objects() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "selector": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "name": { "type": "string" }
+                },
+                "allOf": [
+                    {
+                        "oneOf": [
+                            { "required": ["id"] },
+                            { "required": ["name"] }
+                        ]
+                    },
+                    {
+                        "anyOf": [
+                            { "required": ["id"] },
+                            { "required": ["name"] }
+                        ]
+                    },
+                    {
+                        "not": { "required": ["id", "name"] }
+                    }
+                ]
+            },
+            "conflicting_union": {
+                "description": "Two separate unions in allOf must not OR-merge",
+                "allOf": [
+                    { "anyOf": [{ "type": "string" }, { "type": "integer" }] },
+                    { "oneOf": [{ "type": "string" }, { "type": "boolean" }] }
+                ]
+            }
+        }
+    });
+
+    for dialect in [
+        &registry::OPENAI,
+        &registry::GEMINI,
+        &registry::ANTIGRAVITY_CLAUDE,
+        &registry::ANTIGRAVITY_BRIDGE,
+    ] {
+        let out = apply(&schema, dialect);
+        assert!(
+            must_not_contain_unsupported_constructs(&out, dialect).is_empty(),
+            "{}: {out}",
+            dialect.id
+        );
+        let selector = &out["properties"]["selector"];
+        assert_eq!(selector["type"], "object", "{}", dialect.id);
+        assert_eq!(selector["properties"]["id"]["type"], "string");
+        assert_eq!(selector["properties"]["name"]["type"], "string");
+        assert!(
+            selector.get("anyOf").is_none(),
+            "{}: constraint-only combiner leaked as anyOf: {selector}",
+            dialect.id
+        );
+        assert!(
+            selector.get("oneOf").is_none(),
+            "{}: constraint-only combiner leaked as oneOf: {selector}",
+            dialect.id
+        );
+        assert!(selector.get("not").is_none(), "{}", dialect.id);
+
+        let conflicting = &out["properties"]["conflicting_union"];
+        assert!(
+            conflicting.get("anyOf").is_none() && conflicting.get("oneOf").is_none(),
+            "{}: conflicting allOf combiners must not OR-merge: {conflicting}",
+            dialect.id
+        );
+    }
+}
+
+#[test]
 fn proto_field_not_repeating_400_is_classified_as_unrecoverable_schema_error() {
     let message = r#"Antigravity generateContent failed (HTTP 400 Bad Request): "Invalid JSON payload received. Unknown name \"type\" at 'request.tools[0].function_declarations[21].parameters.properties[7].value': Proto field is not repeating, cannot start list.""#;
     assert!(matches!(
