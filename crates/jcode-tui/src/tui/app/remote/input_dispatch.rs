@@ -198,7 +198,15 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
         .await
     {
         app.remove_display_message(echo_index);
-        restore_prepared_remote_input(app, prepared);
+        app.restore_failover_payload(super::super::FallbackResendPayload {
+            content: prepared.expanded,
+            images: prepared.images,
+            raw_input: Some(prepared.raw_input),
+            is_system: false,
+            system_reminder: None,
+            auto_retry: false,
+            retry_attempts: 0,
+        });
         app.push_display_message(DisplayMessage::error(format!(
             "Failed to send message: {error}"
         )));

@@ -347,7 +347,7 @@ fn reload_recovery_prepared_send_failure_restores_draft_without_exiting() {
     );
     assert!(!app.is_processing);
     assert!(app.current_message_id.is_none());
-    assert_eq!(app.input, "Continue the interrupted work");
+    assert_eq!(app.input, "Continue the interrupted work [image 1]");
     assert_eq!(app.cursor_pos, app.input.len());
     assert_eq!(app.pending_images, images);
     assert!(
@@ -382,7 +382,7 @@ fn reload_recovery_keyboard_send_failure_keeps_client_and_draft_alive() {
     let result =
         rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut connection));
     assert!(result.is_ok());
-    assert_eq!(app.input, "Keep this prompt");
+    assert_eq!(app.input, "Keep this prompt [image 1]");
     assert_eq!(app.pending_images, images);
     assert!(!app.is_processing);
     assert!(
@@ -390,6 +390,52 @@ fn reload_recovery_keyboard_send_failure_keeps_client_and_draft_alive() {
             .iter()
             .any(|message| message.content.contains("Failed to send message:"))
     );
+}
+
+#[test]
+fn reload_recovery_deferred_send_failure_preserves_newer_draft() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for after_model_switch in [false, true] {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.auto_poke_incomplete_todos = false;
+        let mut connection = crate::tui::backend::RemoteConnection::dummy();
+        app.remote_model_switch_in_flight = after_model_switch;
+        let held_image = ("image/png".to_string(), "held-image".to_string());
+        rt.block_on(remote::submit_prepared_remote_input(
+            &mut app,
+            &mut connection,
+            input::PreparedInput {
+                raw_input: "Held prompt [image 1]".to_string(),
+                expanded: "Expanded held prompt".to_string(),
+                images: vec![held_image.clone()],
+            },
+        ))
+        .unwrap();
+        let new_image = ("image/png".to_string(), "new-image".to_string());
+        app.input = "Newer unsent draft [image 1]".to_string();
+        app.cursor_pos = app.input.len();
+        app.pending_images = vec![new_image.clone()];
+        connection.mark_history_loaded();
+        app.remote_model_switch_in_flight = false;
+        drop(connection.take_dummy_peer());
+        rt.block_on(remote::process_remote_followups(&mut app, &mut connection));
+        assert_eq!(app.input, "Newer unsent draft [image 1] [image 2]");
+        assert_eq!(app.pending_images, vec![new_image, held_image]);
+        assert!(!app.is_processing);
+        assert!(app.pending_prompt_after_model_switch.is_none());
+        assert!(app.pending_prompt_before_history.is_none());
+        assert!(app.display_messages().iter().any(|message| {
+            message.content.contains("Held prompt [image 1]")
+                && message.content.contains("draft text is preserved")
+        }));
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|message| message.content.contains("Failed to send message:"))
+        );
+    }
 }
 
 #[test]
