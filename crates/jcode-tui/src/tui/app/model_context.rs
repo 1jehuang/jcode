@@ -485,7 +485,9 @@ impl App {
                         || crate::provider::MultiProvider::is_failover_route_pool_approved(route)
                 }) && (!self.is_remote || remote_resend.is_some()) =>
             {
-                let target = prompt.target_route.as_ref().expect("approved target");
+                let Some(target) = prompt.target_route.as_ref() else {
+                    return;
+                };
                 if self.automatic_failover_targets.contains(target)
                     || self.automatic_failover_targets.len()
                         >= usize::from(Self::AUTO_RETRY_MAX_ATTEMPTS)

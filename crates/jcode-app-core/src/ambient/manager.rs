@@ -77,13 +77,6 @@ impl AmbientManager {
         Ok(id)
     }
 
-    pub(super) fn transact_queue<T>(
-        &mut self,
-        update: impl FnOnce(&mut Vec<ScheduledItem>) -> Result<T>,
-    ) -> Result<T> {
-        self.queue.transact(update)
-    }
-
     pub(super) fn scheduled_item(request: ScheduleRequest) -> ScheduledItem {
         let id = format!("sched_{:032x}", rand::random::<u128>());
         let scheduled_for = request.wake_at.unwrap_or_else(|| {

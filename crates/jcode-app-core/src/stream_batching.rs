@@ -213,6 +213,7 @@ impl BatchingSender {
         self.flush_locked(&mut pending);
     }
 
+    #[allow(clippy::result_large_err)] // matches mpsc::UnboundedSender<ServerEvent>::send
     pub(crate) fn send(
         &self,
         event: ServerEvent,

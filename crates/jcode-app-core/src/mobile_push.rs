@@ -24,13 +24,12 @@ static PENDING_ERRORS: Mutex<Option<HashMap<String, Arc<AtomicBool>>>> = Mutex::
 
 fn queue_pending_error(session_id: &str) -> Arc<AtomicBool> {
     let token = Arc::new(AtomicBool::new(false));
-    if let Ok(mut pending) = PENDING_ERRORS.lock() {
-        if let Some(previous) = pending
+    if let Ok(mut pending) = PENDING_ERRORS.lock()
+        && let Some(previous) = pending
             .get_or_insert_with(HashMap::new)
             .insert(session_id.to_owned(), token.clone())
-        {
-            previous.store(true, Ordering::Release);
-        }
+    {
+        previous.store(true, Ordering::Release);
     }
     token
 }
