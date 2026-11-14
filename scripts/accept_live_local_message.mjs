@@ -8,6 +8,7 @@ import { homedir } from 'node:os'
 import { resolve, join } from 'node:path'
 import assert from 'node:assert/strict'
 
+let attachment
 let checkpoint = 'arguments'
 const [mode, directory] = process.argv.slice(2)
 assert(['prepare', 'wire', 'warm', 'check', 'run', 'cleanup'].includes(mode) && directory,
@@ -50,6 +51,35 @@ async function createNormalSession(workingDir) {
           clearTimeout(timer)
           socket.end()
           resolveSession({ session_id: event.session_id, socket: active[0].socket })
+        }
+      }
+    })
+  })
+}
+
+async function attachOwnSession(state) {
+  return new Promise((resolveAttachment, reject) => {
+    const socket = createConnection(state.daemon_socket)
+    let pending = ''
+    const timer = setTimeout(() => { socket.destroy(); reject(new Error('Attach timeout')) }, 20000)
+    socket.on('error', error => { clearTimeout(timer); reject(error) })
+    socket.on('connect', () => socket.write(JSON.stringify({ type: 'subscribe', id: 1,
+      target_session_id: state.session_id, working_dir: state.working_dir, selfdev: false,
+      continue_on_disconnect: true, client_name: 'live-local-acceptance' }) + '\n'))
+    socket.on('data', chunk => {
+      pending += chunk.toString('utf8')
+      while (pending.includes('\n')) {
+        const end = pending.indexOf('\n')
+        const line = pending.slice(0, end)
+        pending = pending.slice(end + 1)
+        let event
+        try { event = JSON.parse(line) } catch { continue }
+        if (event.type === 'session' && event.session_id) {
+          clearTimeout(timer)
+          if (event.session_id !== state.session_id) {
+            socket.destroy()
+            reject(new Error('Attachment returned a different session'))
+          } else resolveAttachment(socket)
         }
       }
     })
@@ -138,6 +168,9 @@ async function main() {
     console.log(JSON.stringify({ phase: state.phase, session_id: state.session_id }))
     return
   }
+  checkpoint = 'attach-own-normal-session'
+  assert(state.setup_debug_session_id && state.daemon_socket, 'Use normal wire session before production acceptance')
+  attachment = await attachOwnSession(state)
   assert.equal(statSync(join(dir, 'auth.json')).mode & 0o077, 0, 'Auth config must be owner-only')
   const auth = JSON.parse(readFileSync(join(dir, 'auth.json'), 'utf8'))
   assert.equal(auth.api_base, 'https://api.jcode.sh/v1')
@@ -173,7 +206,12 @@ async function main() {
     }
     throw new Error('Transcript pagination exceeded bound')
   }
-  const initial = await snapshot()
+  let initial = await snapshot()
+  const presenceDeadline = Date.now() + 40000
+  while (!initial.session.live && Date.now() < presenceDeadline) {
+    await sleep(2000)
+    initial = await snapshot()
+  }
   writeFileSync(join(dir, 'readiness.json'), JSON.stringify({ at: new Date().toISOString(),
     session_id: state.session_id, source: initial.session.source, cwd: initial.session.cwd,
     live: initial.session.live ?? false, busy: initial.session.busy ?? false,
@@ -197,6 +235,7 @@ async function main() {
   persist(state) // Persist BEFORE POST, including ambiguous network failures. Never auto-retry.
   const result = await api('/mobile/commands', { kind: 'message', session_id: state.session_id, text: state.prompt })
   const command = result.command
+  assert.equal(result.host?.state, 'local', 'Enqueue must not wake a cloud host')
   assert(command?.command_id)
   state.command_id = command.command_id
   persist(state)
@@ -214,7 +253,13 @@ async function main() {
   let completed = false
   while (Date.now() < deadline) {
     const c = validateCommand((await api(`/mobile/commands/${state.command_id}`)).command)
-    if (c.status === 'done') { completed = true; break }
+    if (c.status === 'done') {
+      assert.equal(c.result_session_id, state.session_id, 'Completion must retain same local session')
+      state.receipt = { host: result.host, command: c }
+      persist(state)
+      completed = true
+      break
+    }
     await sleep(2000)
   }
   assert(completed, 'Command completion timed out')
@@ -235,6 +280,7 @@ async function main() {
   assert(!final.messages.some(m => m.role === 'tool'), 'Unexpected synced tool usage')
   assert(!history.some(m => Array.isArray(m.content) && m.content.some(b => ['tool_use', 'tool_result'].includes(b.type))), 'Unexpected tool usage')
   const evidence = { at: new Date().toISOString(), session_id: state.session_id, command_id: state.command_id,
+    receipt: state.receipt, daemon_socket: state.daemon_socket,
     target: 'local', command_status: 'done', same_local_session: true, source: final.session.source,
     model: local.model, provider: local.provider, token: state.token, requests, history, synced: final }
   writeFileSync(join(dir, 'evidence.json'), JSON.stringify(evidence, null, 2) + '\n', { mode: 0o600 })
@@ -247,4 +293,4 @@ main().catch(() => {
   // Never print raw HTTP bodies, config, child stderr, or credential-bearing exceptions.
   console.error(`Acceptance stopped at ${checkpoint}. No automatic enqueue retry. Inspect private state and dedicated session. See documentation for checkpoints.`)
   process.exitCode = 1
-})
+}).finally(() => attachment?.end())

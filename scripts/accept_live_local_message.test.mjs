@@ -26,7 +26,10 @@ test('normal wire setup creates a new session and consumes actual legacy identit
   assert.match(source, /type: 'subscribe', id: 1/)
   assert.match(source, /continue_on_disconnect: true/)
   assert.match(source, /event.type === 'session'/)
-  assert.doesNotMatch(source, /target_session_id:/)
+  const creation = source.slice(source.indexOf('async function createNormalSession'), source.indexOf('async function attachOwnSession'))
+  assert.doesNotMatch(creation, /target_session_id:/)
+  assert.match(source, /target_session_id: state.session_id/)
+  assert.match(source, /event.session_id !== state.session_id/)
   assert.doesNotMatch(source, /is_debug\s*=/)
 })
 
