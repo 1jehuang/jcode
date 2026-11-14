@@ -46,6 +46,10 @@ pub const PLAN_CAPTURED_MESSAGE: &str = "The client captured your proposed plan.
 /// Message returned when Claude asks an interactive multiple-choice question.
 pub const ASK_USER_DENIED_MESSAGE: &str = "jcode cannot show interactive questions in Claude Code mode. Ask the user the question directly in your reply and stop so they can answer.";
 
+/// Message returned for AskUserQuestion while jcode's own `ask_user` tool,
+/// which takes the same input, can show the questions in an attached TUI.
+pub const ASK_USER_REDIRECT_MESSAGE: &str = "Ask with the mcp__jcode__ask_user tool instead. It takes the same questions input and shows them to the user.";
+
 /// Whether a jcode tool should be offered to Claude Code over MCP.
 pub fn is_exposed_tool(name: &str) -> bool {
     let lower = name.trim().to_ascii_lowercase();
@@ -177,6 +181,23 @@ pub fn decide_permission(
             "approval unavailable",
         ),
     }
+}
+
+/// [`decide_permission`], except that AskUserQuestion is redirected to
+/// jcode's `ask_user` tool whenever it is among the offered tools.
+pub fn decide_permission_with_tools(
+    permission_mode: &str,
+    tool_name: &str,
+    input: &Value,
+    tools: &[ToolDefinition],
+) -> PermissionDecision {
+    if tool_name == "AskUserQuestion" && tools.iter().any(|tool| tool.name == "ask_user") {
+        return deny(
+            ASK_USER_REDIRECT_MESSAGE,
+            "interactive question (use ask_user)",
+        );
+    }
+    decide_permission(permission_mode, tool_name, input)
 }
 
 /// What the driver must do with an SDK MCP message.
@@ -429,6 +450,20 @@ mod tests {
         let ask = decide_permission("bypassPermissions", "AskUserQuestion", &json!({}));
         assert!(!ask.allow);
         assert_eq!(ask.response["behavior"], "deny");
+        assert_eq!(ask.response["message"], ASK_USER_DENIED_MESSAGE);
+        let tool = |name: &str| ToolDefinition {
+            name: name.into(),
+            description: String::new(),
+            input_schema: json!({}),
+            defer_loading: false,
+        };
+        let tools = [tool("memory"), tool("ask_user")];
+        let ask = decide_permission_with_tools("default", "AskUserQuestion", &json!({}), &tools);
+        assert!(!ask.allow);
+        assert_eq!(ask.response["message"], ASK_USER_REDIRECT_MESSAGE);
+        let ask =
+            decide_permission_with_tools("default", "AskUserQuestion", &json!({}), &tools[..1]);
+        assert_eq!(ask.response["message"], ASK_USER_DENIED_MESSAGE);
     }
 
     #[test]
