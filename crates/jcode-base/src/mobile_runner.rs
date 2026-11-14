@@ -108,17 +108,14 @@ impl MobileCommand {
                     "unsupported image media type"
                 );
                 anyhow::ensure!(
-                    !image.data.is_empty() && image.data.len() <= 2_796_204,
+                    !image.data.is_empty() && image.data.len() <= 1_398_104,
                     "invalid image size"
                 );
                 let decoded = base64::engine::general_purpose::STANDARD
                     .decode(&image.data)
                     .context("invalid image base64")?;
                 bytes += decoded.len();
-                anyhow::ensure!(
-                    bytes <= 2 * 1024 * 1024,
-                    "images exceed 2 MiB decoded total"
-                );
+                anyhow::ensure!(bytes <= 1024 * 1024, "images exceed 1 MiB decoded total");
                 Ok((image.media_type.clone(), image.data.clone()))
             })
             .collect()
@@ -604,7 +601,7 @@ mod tests {
                 .validated_images()
                 .is_err()
         );
-        let full = base64::engine::general_purpose::STANDARD.encode(vec![0u8; 2 * 1024 * 1024]);
+        let full = base64::engine::general_purpose::STANDARD.encode(vec![0u8; 1024 * 1024]);
         let image = serde_json::json!({"media_type":"image/jpeg", "data":full});
         assert!(
             wire(serde_json::json!([image.clone()]))
