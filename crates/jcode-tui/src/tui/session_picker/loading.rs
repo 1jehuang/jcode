@@ -65,7 +65,7 @@ fn include_old_saved_sessions_on_initial_load() -> bool {
 }
 
 const SESSION_LIST_CACHE_TTL: Duration = Duration::from_secs(5);
-const SESSION_LIST_DISK_CACHE_VERSION: u32 = 3;
+const SESSION_LIST_DISK_CACHE_VERSION: u32 = 4;
 const SESSION_LIST_DISK_CACHE_MAX_AGE_SECONDS: i64 = 7 * 24 * 60 * 60;
 const SAVED_METADATA_TAIL_SCAN_BYTES: u64 = 64 * 1024;
 const INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES: usize = 64 * 1024;
@@ -1323,6 +1323,8 @@ struct SessionMessageSummaryData {
     assistant_message_count: usize,
     estimated_tokens: usize,
     first_user_prompt: Option<String>,
+    /// A fork boundary overrides the opening intent of earlier snapshot/journal data.
+    saw_fork_marker: bool,
     search_text: SourceBuckets,
     /// Newest stored message timestamp, of any role (prompts, replies, tools).
     last_message_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -1332,6 +1334,10 @@ impl SessionMessageSummaryData {
     fn add_message(&mut self, message: &SessionMessageSummary) {
         if let Some(ts) = message.timestamp {
             self.last_message_at = Some(self.last_message_at.map_or(ts, |cur| cur.max(ts)));
+        }
+        if message.is_fork_marker {
+            self.first_user_prompt = None;
+            self.saw_fork_marker = true;
         }
         if !summary_message_is_visible_conversation(message) {
             return;
@@ -1373,9 +1379,10 @@ impl SessionMessageSummaryData {
             .assistant_message_count
             .saturating_add(other.assistant_message_count);
         self.estimated_tokens = self.estimated_tokens.saturating_add(other.estimated_tokens);
-        if self.first_user_prompt.is_none() {
+        if other.saw_fork_marker || self.first_user_prompt.is_none() {
             self.first_user_prompt = other.first_user_prompt;
         }
+        self.saw_fork_marker |= other.saw_fork_marker;
         self.search_text
             .merge(&other.search_text, INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES);
     }
@@ -1443,6 +1450,7 @@ struct SessionMessageSummary {
     // allocating or walking it. After display metadata is known, we inspect only
     // the raw prefix for old snapshots that predate `display_role`.
     content_starts_with_system_reminder: bool,
+    is_fork_marker: bool,
     /// Bounded per-source samples of the content, classified by block type.
     content_search: Option<SourceBuckets>,
     content_text: Option<String>,
@@ -1507,6 +1515,20 @@ impl<'de> Visitor<'de> for SessionMessageSummaryVisitor {
         }
 
         let role = role.ok_or_else(|| serde::de::Error::missing_field("role"))?;
+        // Inspect explicit fork reminders even when display_role hides them.
+        // Decode the text so escaped newlines and block-form content work alike.
+        let is_fork_marker = matches!(role, Role::User)
+            && content.is_some_and(raw_content_starts_with_system_reminder)
+            && content
+                .and_then(raw_value_display_text)
+                .is_some_and(|text| {
+                    text.trim_start()
+                        .strip_prefix("<system-reminder>")
+                        .is_some_and(|body| {
+                            body.trim_start()
+                                .starts_with("This session was forked (split) from session ")
+                        })
+                });
         let content_starts_with_system_reminder = matches!(role, Role::User)
             && display_role.is_none()
             && content.is_some_and(raw_content_starts_with_system_reminder);
@@ -1524,6 +1546,7 @@ impl<'de> Visitor<'de> for SessionMessageSummaryVisitor {
         Ok(SessionMessageSummary {
             role,
             content_starts_with_system_reminder,
+            is_fork_marker,
             content_search,
             content_text,
             display_role,

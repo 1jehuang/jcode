@@ -437,6 +437,47 @@ fn user_prompt_transcript_hit_beats_recent_tool_output_hit() {
 }
 
 #[test]
+fn repeated_rendering_requests_outrank_recent_rendering_bug_title() {
+    use super::source::{Source, push_mark};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("absent.json");
+    let mut bug = session("bug", "Desktop rendering bug", 0, &path);
+    push_mark(&mut bug.search_index, Source::User);
+    bug.search_index.push_str("fix this rendering bug");
+    push_mark(&mut bug.search_index, Source::ToolOutput);
+    bug.search_index.push_str(&" render".repeat(500));
+    let mut video = session("video", "Jcode v1 announcement", 3600, &path);
+    video.parent_id = Some("announcement".into());
+    video.first_user_prompt = Some("make faithful renders for a launch video".into());
+    push_mark(&mut video.search_index, Source::User);
+    video.search_index.push_str(
+        "make faithful renders for a launch video. wire in headless rendering. \
+         you should implement direct rendering code",
+    );
+    let mut picker = SessionPicker::new(vec![bug, video]);
+    picker.search_query = "render".into();
+    picker.rebuild_items();
+    wait(&mut picker);
+    assert_eq!(ids(&picker), ["video", "bug"]);
+}
+
+#[test]
+fn user_mention_frequency_is_bounded_and_ignores_generated_text() {
+    use super::source::{Source, push_mark, user_mentions};
+    let tokens = search_query_tokens("render video");
+    let mut index = "render video ".repeat(100);
+    assert_eq!(user_mentions(&index, &tokens), 0);
+    push_mark(&mut index, Source::User);
+    index.push_str("render render video");
+    push_mark(&mut index, Source::Assistant);
+    index.push_str(&"render video ".repeat(100));
+    assert_eq!(user_mentions(&index, &tokens), 3);
+    push_mark(&mut index, Source::User);
+    index.push_str(&"render video ".repeat(100));
+    assert_eq!(user_mentions(&index, &tokens), 8);
+}
+
+#[test]
 fn retyped_later_user_prompt_beats_scattered_literal_hits() {
     let temp = tempfile::tempdir().unwrap();
     let target_path = temp.path().join("target.jsonl");

@@ -1,5 +1,162 @@
 use super::*;
 
+fn fork_intent_message(text: &str) -> serde_json::Value {
+    serde_json::json!({"role": "user", "content": [{"type": "text", "text": text}]})
+}
+
+const FORK_INTENT_MARKER: &str = "<system-reminder>\nThis session was forked (split) from session flamingo (session_flamingo) by the user.\n</system-reminder>";
+
+#[test]
+#[ignore = "local diagnostic: requires the original penguin and elephant transcripts in ~/.jcode"]
+fn fork_intent_real_penguin_render_search_outranks_desktop_bug() {
+    let _env_lock = crate::storage::lock_test_env();
+    let home = std::env::var_os("HOME").expect("HOME for original saved sessions");
+    let jcode_home = std::path::PathBuf::from(home).join(".jcode");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", &jcode_home);
+    let sessions_dir = jcode_home.join("sessions");
+    let penguin_id = "session_penguin_1794616386487_ec4bb97f1d9ce08c";
+    let elephant_id = "session_elephant_1794614106072_b84529326a638ee9";
+    let catchup = crate::catchup::CatchupSeenSnapshot::load();
+    let penguin = parse_jcode_session_info(&sessions_dir, penguin_id, &catchup)
+        .expect("original saved penguin transcript");
+    let elephant = parse_jcode_session_info(&sessions_dir, elephant_id, &catchup)
+        .expect("original saved Desktop rendering bug transcript");
+    let first_prompt = penguin.first_user_prompt.clone();
+    assert!(
+        first_prompt.as_deref().is_some_and(|prompt| {
+            prompt.starts_with("okay i need a launch video.")
+                && prompt.contains("faithful renders of jcode")
+        }),
+        "penguin must use its fork-local video request, first_prompt={first_prompt:?}"
+    );
+
+    let mut picker = super::super::SessionPicker::new(vec![elephant, penguin]);
+    picker.search_query = "render".into();
+    picker.rebuild_items();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while picker.transcript_search.pending() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "render search timed out: penguin={:?}, elephant={:?}, first_prompt={first_prompt:?}",
+            picker.transcript_search.rank(penguin_id),
+            picker.transcript_search.rank(elephant_id),
+        );
+        picker.poll_transcript_search();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let visible: Vec<_> = picker
+        .visible_sessions
+        .iter()
+        .map(|reference| picker.session_by_ref(*reference).unwrap().id.clone())
+        .collect();
+    let penguin_position = visible.iter().position(|id| id == penguin_id);
+    let elephant_position = visible.iter().position(|id| id == elephant_id);
+    assert!(
+        matches!((penguin_position, elephant_position), (Some(p), Some(e)) if p < e),
+        "render ranking: visible={visible:?}, penguin={:?}, elephant={:?}, first_prompt={first_prompt:?}",
+        picker.transcript_search.rank(penguin_id),
+        picker.transcript_search.rank(elephant_id),
+    );
+}
+
+#[test]
+fn fork_intent_snapshot_uses_first_genuine_request_and_keeps_inherited_search() {
+    let mut messages = vec![fork_intent_message("original announcement needle")];
+    for _ in 0..500 {
+        messages.push(serde_json::json!({"role": "assistant", "content": "inherited reply"}));
+    }
+    messages.extend([
+        fork_intent_message(FORK_INTENT_MARKER),
+        fork_intent_message("<system-reminder>injected context</system-reminder>"),
+        fork_intent_message("fix penguin session search"),
+        fork_intent_message("later request"),
+    ]);
+    let data: SessionMessageSummaryData =
+        serde_json::from_str(&serde_json::Value::Array(messages).to_string()).unwrap();
+    assert_eq!(
+        data.first_user_prompt.as_deref(),
+        Some("fix penguin session search")
+    );
+    assert_eq!(data.visible_message_count, 503);
+    let index = build_classified_search_index("fork", "penguin", "", None, None, &data.search_text);
+    assert!(index.contains("original announcement needle"));
+    assert!(index.contains("inherited reply"));
+}
+
+#[test]
+fn fork_intent_journal_resets_across_entries_and_repeated_forks() {
+    let temp = tempfile::tempdir().unwrap();
+    let snapshot = temp.path().join("fork.json");
+    std::fs::write(
+        &snapshot,
+        serde_json::json!({
+            "created_at": "2026-11-13T00:00:00Z",
+            "updated_at": "2026-11-13T00:00:00Z",
+            "messages": [fork_intent_message("inherited opening")]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let journal = session::session_journal_path_from_snapshot(&snapshot);
+    let entry = |messages: Vec<serde_json::Value>| {
+        serde_json::json!({
+            "meta": {"updated_at": "2026-11-13T01:00:00Z"},
+            "append_messages": messages
+        })
+        .to_string()
+    };
+    let mut lines = vec![entry(vec![fork_intent_message(FORK_INTENT_MARKER)])];
+    std::fs::write(&journal, lines.join("\n")).unwrap();
+    assert!(
+        load_session_summary(&snapshot)
+            .unwrap()
+            .messages
+            .first_user_prompt
+            .is_none()
+    );
+    lines.push(entry(vec![fork_intent_message("first fork request")]));
+    std::fs::write(&journal, lines.join("\n")).unwrap();
+    assert_eq!(
+        load_session_summary(&snapshot)
+            .unwrap()
+            .messages
+            .first_user_prompt
+            .as_deref(),
+        Some("first fork request")
+    );
+    lines.push(entry(vec![
+        fork_intent_message("inherited intervening request"),
+        serde_json::json!({"role": "user", "content": FORK_INTENT_MARKER}),
+        fork_intent_message("nested fork request"),
+    ]));
+    std::fs::write(&journal, lines.join("\n")).unwrap();
+    let data = load_session_summary(&snapshot).unwrap().messages;
+    assert_eq!(
+        data.first_user_prompt.as_deref(),
+        Some("nested fork request")
+    );
+    assert_eq!(data.user_message_count, 4);
+    let index = build_classified_search_index("fork", "penguin", "", None, None, &data.search_text);
+    assert!(index.contains("inherited opening"));
+    assert!(index.contains("first fork request"));
+}
+
+#[test]
+fn fork_intent_ignores_non_fork_reminders_and_assistant_quotes() {
+    let data: SessionMessageSummaryData = serde_json::from_str(
+        &serde_json::json!([
+            fork_intent_message("original request"),
+            fork_intent_message("<system-reminder>ordinary context</system-reminder>"),
+            {"role": "assistant", "content": FORK_INTENT_MARKER},
+            fork_intent_message("a later request")
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(data.first_user_prompt.as_deref(), Some("original request"));
+    assert!(!data.saw_fork_marker);
+}
+
 #[test]
 fn preview_loading_preserves_live_tool_duration_metadata() {
     let mut session = Session::create_with_id("preview_metadata".into(), None, None);
