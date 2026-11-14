@@ -456,6 +456,14 @@ fn apply_terminal_event(
             crate::tui::reapply_configured_terminal_modes_after_focus();
             let redraw = app.set_client_focused(true);
             app.note_client_focus(true);
+            // A ConPTY host can repaint or move the pane while unfocused
+            // (#1812); repaint every row so the composer is not left on a
+            // stale one.
+            #[cfg(windows)]
+            let redraw = {
+                app.force_viewport_repaint_after_shift();
+                true
+            };
             Ok(redraw)
         }
         Some(Ok(Event::FocusLost)) => {

@@ -53,6 +53,7 @@ mod info_widget_overview;
 mod info_widget_settle;
 pub mod info_widget_stability;
 pub mod keybind;
+mod keyboard_protocol;
 mod layout_utils;
 pub mod login_picker;
 pub mod markdown;
@@ -225,11 +226,11 @@ fn enable_keyboard_enhancement_to(
     writer: &mut impl std::io::Write,
     inside_tmux: bool,
 ) -> std::io::Result<()> {
-    use crossterm::event::PushKeyboardEnhancementFlags;
-    request_tmux_extended_keys_to(writer, inside_tmux)?;
-    crossterm::execute!(
+    keyboard_protocol::write_mode(
         writer,
-        PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
+        keyboard_protocol::Action::Push,
+        inside_tmux,
+        keyboard_enhancement_flags().bits(),
     )
 }
 
@@ -365,29 +366,24 @@ fn disable_keyboard_enhancement_to(
     writer: &mut impl std::io::Write,
     inside_tmux: bool,
 ) -> std::io::Result<()> {
-    if inside_tmux {
-        writer.write_all(b"\x1b[>4;0m")?;
-    }
-    crossterm::execute!(writer, crossterm::event::PopKeyboardEnhancementFlags)
-}
-
-fn request_tmux_extended_keys_to(
-    writer: &mut impl std::io::Write,
-    inside_tmux: bool,
-) -> std::io::Result<()> {
-    if inside_tmux {
-        // `extended-keys on` needs modifyOtherKeys opt-in, not a Kitty push.
-        writer.write_all(b"\x1b[>4;2m")?;
-    }
-    Ok(())
+    keyboard_protocol::write_mode(
+        writer,
+        keyboard_protocol::Action::Pop,
+        inside_tmux,
+        keyboard_enhancement_flags().bits(),
+    )
 }
 
 fn reapply_keyboard_enhancement_to(
     writer: &mut impl std::io::Write,
     inside_tmux: bool,
 ) -> std::io::Result<()> {
-    request_tmux_extended_keys_to(writer, inside_tmux)?;
-    write!(writer, "\x1b[={}u", keyboard_enhancement_flags().bits())
+    keyboard_protocol::write_mode(
+        writer,
+        keyboard_protocol::Action::Set,
+        inside_tmux,
+        keyboard_enhancement_flags().bits(),
+    )
 }
 
 /// Reassert terminal modes that terminals may clear while the TUI remains alive.
@@ -423,10 +419,16 @@ pub(crate) fn reapply_terminal_modes_to(
 
 pub(crate) fn reapply_configured_terminal_modes_after_focus() {
     let policy = crate::perf::tui_policy();
+    // Reassert keyboard reporting only when startup negotiation actually
+    // succeeded and this process still owns the stack entry. Passing the
+    // configured policy instead re-requested CSI-u after every focus-in on
+    // hosts that never negotiated it (Windows/ConPTY, #1812).
+    let keyboard_enhanced =
+        policy.enable_keyboard_enhancement && kitty_keyboard_push_active().load(Ordering::Acquire);
     if let Err(error) = reapply_terminal_modes_after_focus_to(
         &mut std::io::stdout(),
         policy.enable_mouse_capture,
-        policy.enable_keyboard_enhancement,
+        keyboard_enhanced,
     ) {
         crate::logging::warn(&format!("failed to reapply terminal modes: {error}"));
     }

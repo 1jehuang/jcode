@@ -202,6 +202,10 @@ impl App {
                                 crate::tui::reapply_configured_terminal_modes_after_focus();
                                 self.note_client_focus(true);
                                 let _ = self.set_client_focused(true);
+                                // Repaint every row: a ConPTY host may have
+                                // moved the pane while unfocused (#1812).
+                                #[cfg(windows)]
+                                self.force_viewport_repaint_after_shift();
                             }
                             Some(Ok(Event::FocusLost)) => {
                                 self.set_client_focused(false);
@@ -521,6 +525,10 @@ impl App {
                                 crate::tui::reapply_configured_terminal_modes_after_focus();
                                 self.note_client_focus(true);
                                 let _ = self.set_client_focused(true);
+                                // Repaint every row: a ConPTY host may have
+                                // moved the pane while unfocused (#1812).
+                                #[cfg(windows)]
+                                self.force_viewport_repaint_after_shift();
                             }
                             Some(Ok(Event::FocusLost)) => {
                                 self.set_client_focused(false);
@@ -1534,6 +1542,10 @@ impl App {
                                     crate::tui::reapply_configured_terminal_modes_after_focus();
                                     self.note_client_focus(true);
                                     let _ = self.set_client_focused(true);
+                                    // Repaint every row: a ConPTY host may have
+                                    // moved the pane while unfocused (#1812).
+                                    #[cfg(windows)]
+                                    self.force_viewport_repaint_after_shift();
                                 }
                                 Some(Ok(Event::FocusLost)) => {
                                     self.set_client_focused(false);

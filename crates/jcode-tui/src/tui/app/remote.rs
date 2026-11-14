@@ -671,6 +671,13 @@ async fn apply_terminal_event<B: Backend>(
             input_attribution.event = Some("focus_gained".to_string());
             needs_redraw |= app.set_client_focused(true);
             app.note_client_focus(true);
+            // Repaint every row: a ConPTY host may have moved the pane while
+            // unfocused (#1812).
+            #[cfg(windows)]
+            {
+                app.force_viewport_repaint_after_shift();
+                needs_redraw = true;
+            }
         }
         Some(Ok(Event::FocusLost)) => {
             input_attribution.event = Some("focus_lost".to_string());
@@ -1065,6 +1072,13 @@ where
             crate::tui::reapply_configured_terminal_modes_after_focus();
             needs_redraw |= app.set_client_focused(true);
             app.note_client_focus(true);
+            // Repaint every row: a ConPTY host may have moved the pane while
+            // unfocused (#1812).
+            #[cfg(windows)]
+            {
+                app.force_viewport_repaint_after_shift();
+                needs_redraw = true;
+            }
         }
         Some(Ok(Event::FocusLost)) => {
             app.set_client_focused(false);

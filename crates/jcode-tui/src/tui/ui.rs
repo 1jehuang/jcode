@@ -3348,6 +3348,24 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         capture.layout.input_lines_raw = app.input().lines().count().max(1);
         capture.layout.input_lines_wrapped = base_input_height as usize;
 
+        // Issue #1812: on Windows the composer row is derived from
+        // crossterm's `terminal::size()` (the console window rect), never from
+        // an observed cursor. When a ConPTY host such as herdr lays the frame
+        // out for rows it does not actually show, the footer lands on the
+        // host's status row. Log the size the frame was laid out against and
+        // the rows the layout chose so a capture can tell a size disagreement
+        // from an undetected screen shift.
+        crate::logging::info(&format!(
+            "composer-row: terminal::size()={:?} frame.area={:?} chat_area={:?} \
+             composer_y={} composer_height={} status_y={}",
+            crossterm::terminal::size(),
+            frame.area(),
+            chat_area,
+            chunks[7].y,
+            chunks[7].height,
+            chunks[3].y,
+        ));
+
         // Capture state snapshot
         capture.state.is_processing = app.is_processing();
         capture.state.input_len = app.input().len();

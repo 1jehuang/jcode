@@ -3147,11 +3147,32 @@ impl App {
         self.force_full_repaint = true;
     }
 
+    /// Repaint every cell after an event that can move the physical viewport
+    /// without a geometry change (issue #1812).
+    ///
+    /// Windows ConPTY hosts such as herdr can repaint, zoom or scroll their own
+    /// pane while the console window rect crossterm reports stays the same.
+    /// ratatui only emits diffs against its virtual buffer, so the frame then
+    /// stays anchored to rows the pane no longer shows: typed keys render on
+    /// the host's status row and Enter anchors against the wrong line. Re-emit
+    /// every cell so the layout is painted at the rows jcode laid it out for.
+    ///
+    /// No-op off Windows: native terminals report geometry faithfully and a
+    /// full clear on every focus change would only add flicker.
+    pub(super) fn force_viewport_repaint_after_shift(&mut self) {
+        if cfg!(windows) {
+            self.force_full_redraw = true;
+        }
+    }
+
     const RESIZE_REDRAW_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
 
     fn commit_resize_redraw(&mut self, now: std::time::Instant) -> bool {
         self.last_resize_redraw = Some(now);
         self.resize_redraw_pending = false;
+        // A ConPTY host can keep the reported console rect while its pane
+        // shifts, so a resize is also the moment a stale row is most likely.
+        self.force_viewport_repaint_after_shift();
         // A paused viewport holds a wrapped line index; capture the reading
         // position in content coordinates before the rewrap, so the same
         // message stays under the reader (issue #1412, persistent half).
