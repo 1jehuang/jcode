@@ -333,7 +333,25 @@ EOF
 fi
 
 if [ "$(uname -s)" = "Darwin" ]; then
-  xattr -d com.apple.quarantine "$dest_version_dir/$bin_name" 2>/dev/null || true
+  # macOS 26/27 taskgated SIGKILLs an ad-hoc signed binary that carries
+  # com.apple.provenance (set by installers, Spotlight ingestion or an OS
+  # upgrade) even when `codesign --verify --strict` passes locally. Strip both
+  # xattrs from the real payload and re-sign it ad hoc so the kernel accepts
+  # the launch. Best-effort: an install must never fail over this (issue #1233).
+  repair_macos_signature() {
+    _sig_target=$1
+    [ -n "$_sig_target" ] || return 0
+    # Resolve symlinks: signing a symlink re-signs nothing.
+    _sig_real="$(cd "$(dirname "$_sig_target")" 2>/dev/null && pwd -P)/$(basename "$_sig_target")"
+    [ -e "$_sig_real" ] || return 0
+    /usr/bin/xattr -d com.apple.provenance "$_sig_real" 2>/dev/null || true
+    /usr/bin/xattr -d com.apple.quarantine "$_sig_real" 2>/dev/null || true
+    if [ -x /usr/bin/codesign ]; then
+      /usr/bin/codesign --force --deep --sign - "$_sig_real" >/dev/null 2>&1 || true
+    fi
+    return 0
+  }
+  repair_macos_signature "$dest_version_dir/$bin_name"
   # Generate the architecture-matched, faceless notification broker from the
   # verified binary and remove legacy CLI launcher bundles from ~/Applications.
   # Jcode Desktop is the only Spotlight/Launchpad entry. Best-effort here: the

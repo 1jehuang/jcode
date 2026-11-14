@@ -107,6 +107,18 @@ install_dir="${JCODE_INSTALL_DIR:-$HOME/.local/bin}"
 mkdir -p "$install_dir"
 ln -sfn "$current_dir/jcode" "$install_dir/jcode"
 
+if [ "$(uname -s)" = "Darwin" ]; then
+  # macOS 26/27 taskgated SIGKILLs an ad-hoc signed binary that carries
+  # com.apple.provenance even when `codesign --verify --strict` passes locally.
+  # Strip both xattrs from the real payload (never the symlink) and re-sign it
+  # ad hoc so the kernel accepts the next launch. Best-effort (issue #1233).
+  /usr/bin/xattr -d com.apple.provenance "$version_dir/jcode" 2>/dev/null || true
+  /usr/bin/xattr -d com.apple.quarantine "$version_dir/jcode" 2>/dev/null || true
+  if [ -x /usr/bin/codesign ]; then
+    /usr/bin/codesign --force --deep --sign - "$version_dir/jcode" >/dev/null 2>&1 || true
+  fi
+fi
+
 echo "Installed: $version_dir/jcode"
 echo "Updated stable symlink: $stable_dir/jcode -> $version_dir/jcode"
 echo "Updated current symlink: $current_dir/jcode -> $version_dir/jcode"
