@@ -452,9 +452,10 @@ impl App {
         };
 
         let config = crate::config::Config::load().provider;
+        let auto_retry_max_attempts = self.effective_auto_retry_max_attempts();
         if remote_resend
             .as_ref()
-            .is_some_and(|payload| payload.retry_attempts >= Self::AUTO_RETRY_MAX_ATTEMPTS)
+            .is_some_and(|payload| payload.retry_attempts >= auto_retry_max_attempts)
             && config.cross_provider_failover == crate::config::CrossProviderFailoverMode::Countdown
         {
             self.automatic_failover_stopped = true;
@@ -463,7 +464,7 @@ impl App {
             }
             self.push_display_message(DisplayMessage::system(format!(
                 "Stopped automatic failover after {} retries. Use /model to choose a working account and resend manually.",
-                Self::AUTO_RETRY_MAX_ATTEMPTS
+                auto_retry_max_attempts
             )));
             self.set_status_notice("Paused: automatic failover retry limit reached");
             return;
