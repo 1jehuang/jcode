@@ -183,16 +183,28 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
     app.last_submitted_input = Some(prepared.raw_input.clone());
     app.automatic_failover_targets.clear();
     app.automatic_failover_stopped = false;
-    app.push_display_message(DisplayMessage {
-        role: "user".to_string(),
-        content: prepared.raw_input,
-        tool_calls: vec![],
-        duration_secs: None,
-        title: None,
-        tool_data: None,
-    });
-    app.begin_remote_send(remote, prepared.expanded, prepared.images, false)
-        .await?;
+    let echo_index = app.display_messages().len();
+    app.push_display_message(DisplayMessage::user(prepared.raw_input.clone()));
+    // Keyboard dispatch propagates Err to the TUI event loop. A failed write
+    // is recoverable: keep the consumed composer (including attachments) and
+    // report it here rather than exiting the client or claiming delivery.
+    if let Err(error) = app
+        .begin_remote_send(
+            remote,
+            prepared.expanded.clone(),
+            prepared.images.clone(),
+            false,
+        )
+        .await
+    {
+        app.remove_display_message(echo_index);
+        restore_prepared_remote_input(app, prepared);
+        app.push_display_message(DisplayMessage::error(format!(
+            "Failed to send message: {error}"
+        )));
+        app.set_status_notice("Message not sent; draft restored");
+        return Ok(());
+    }
     Ok(())
 }
 
@@ -891,12 +903,13 @@ mod ssh_slash_tests {
                 .unwrap();
                 assert!(app.pending_prompt_before_history.is_none(), "{command}");
                 assert_eq!(remote.next_request_id_for_test(), next_id);
-                assert!(app
-                    .display_messages()
-                    .last()
-                    .unwrap()
-                    .content
-                    .contains("SSH"));
+                assert!(
+                    app.display_messages()
+                        .last()
+                        .unwrap()
+                        .content
+                        .contains("SSH")
+                );
             }
             for command in [
                 "/future remote skill /context",

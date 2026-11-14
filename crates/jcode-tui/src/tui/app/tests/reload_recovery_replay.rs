@@ -323,7 +323,7 @@ fn reload_recovery_cloud_only_retry_marks_final_reminder_once() {
 }
 
 #[test]
-fn reload_recovery_prepared_send_failure_is_not_reported_as_success() {
+fn reload_recovery_prepared_send_failure_restores_draft_without_exiting() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut app = create_test_app();
@@ -331,24 +331,64 @@ fn reload_recovery_prepared_send_failure_is_not_reported_as_success() {
     let mut connection = crate::tui::backend::RemoteConnection::dummy();
     connection.mark_history_loaded();
     drop(connection.take_dummy_peer());
+    let images = vec![("image/png".to_string(), "preserved-image".to_string())];
     let result = rt.block_on(remote::submit_prepared_remote_input(
         &mut app,
         &mut connection,
         input::PreparedInput {
             raw_input: "Continue the interrupted work".to_string(),
-            expanded: "Continue the interrupted work".to_string(),
-            images: vec![],
+            expanded: "Expanded instructions for the interrupted work".to_string(),
+            images: images.clone(),
         },
     ));
     assert!(
-        result.is_err(),
-        "callers must be able to report failed delivery"
+        result.is_ok(),
+        "recoverable transport failures must not escape the TUI loop"
     );
     assert!(!app.is_processing);
     assert!(app.current_message_id.is_none());
+    assert_eq!(app.input, "Continue the interrupted work");
+    assert_eq!(app.cursor_pos, app.input.len());
+    assert_eq!(app.pending_images, images);
+    assert!(
+        !app.display_messages()
+            .iter()
+            .any(|message| message.role == "user")
+    );
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|message| message.content.contains("Failed to send message:"))
+    );
     assert_eq!(
         app.last_submitted_input.as_deref(),
         Some("Continue the interrupted work")
+    );
+}
+
+#[test]
+fn reload_recovery_keyboard_send_failure_keeps_client_and_draft_alive() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.input = "Keep this prompt".to_string();
+    app.cursor_pos = app.input.len();
+    let images = vec![("image/png".to_string(), "preserved-image".to_string())];
+    app.pending_images = images.clone();
+    let mut connection = crate::tui::backend::RemoteConnection::dummy();
+    connection.mark_history_loaded();
+    drop(connection.take_dummy_peer());
+    let result =
+        rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut connection));
+    assert!(result.is_ok());
+    assert_eq!(app.input, "Keep this prompt");
+    assert_eq!(app.pending_images, images);
+    assert!(!app.is_processing);
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|message| message.content.contains("Failed to send message:"))
     );
 }
 
