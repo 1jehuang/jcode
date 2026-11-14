@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use jcode_base::safety::{self, PermissionRequest, Urgency};
+use jcode_core::console::emit_osc9_status_ignored;
 use jcode_core::util::truncate_str;
 use jcode_tui_style::rgb;
 use ratatui::{
@@ -510,6 +511,25 @@ impl PermissionsApp {
         if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
             anyhow::bail!("permissions viewer requires an interactive terminal");
         }
+
+        // Emit OSC 9 progress with "jcode:blocked" so terminal multiplexers
+        // (herdr) detect that the user needs to act on a permission request.
+        // The main jcode TUI is paused while this viewer runs, so it cannot
+        // emit its own status. A single emission on entry is sufficient
+        // because herdr reads the OSC 9 side-channel persistently.
+        let terminal_status_osc9 = jcode_base::config::config().terminal_status_osc9;
+        if terminal_status_osc9 {
+            emit_osc9_status_ignored("blocked");
+        }
+        // Reset to idle on every exit path, including errors bubbling out of
+        // the loop via `?`, so the viewer never leaves "blocked" behind.
+        struct IdleOnExit;
+        impl Drop for IdleOnExit {
+            fn drop(&mut self) {
+                emit_osc9_status_ignored("idle");
+            }
+        }
+        let _idle_on_exit = terminal_status_osc9.then_some(IdleOnExit);
 
         let mut terminal = jcode_tui_style::init_terminal()
             .map_err(|error| anyhow::anyhow!("failed to initialize terminal: {error}"))?;
