@@ -352,6 +352,10 @@ if [ "$(uname -s)" = "Darwin" ]; then
     return 0
   }
   repair_macos_signature "$dest_version_dir/$bin_name"
+  # The launcher is the path the user actually execs, and taskgated validates
+  # that path: a stale provenance/quarantine xattr on it SIGKILLs the launch even
+  # when the payload binary is clean. Repair it too (best-effort, as above).
+  repair_macos_signature "$launcher_path"
   # Generate the architecture-matched, faceless notification broker from the
   # verified binary and remove legacy CLI launcher bundles from ~/Applications.
   # Jcode Desktop is the only Spotlight/Launchpad entry. Best-effort here: the

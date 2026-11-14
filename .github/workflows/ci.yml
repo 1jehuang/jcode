@@ -32,6 +32,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          # The shell-lint gate below diffs HEAD~1..HEAD. A runner that checks
+          # out depth 1 has no HEAD~1, so the gate would silently lint nothing.
+          # Depth 2 gives the merge commit's first parent, which on a PR
+          # checkout is the base tip.
+          fetch-depth: 2
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -47,6 +52,57 @@ jobs:
         # failed to resolve mod", which reads like a formatting problem and hides
         # every gate behind it. Naming the real cause first (221159294).
         run: python3 scripts/check_module_files.py
+
+      - name: Lint changed shell scripts (errors only)
+        # scripts/ holds 73 bash files and no CI job has ever linted them, so
+        # shellcheck findings could only ever arrive from review bots.
+        #
+        # Only CHANGED scripts are linted. A full scan costs ~5s per file, which
+        # would also fail today on a pre-existing warning backlog. Gating the
+        # diff keeps it fast and green while still catching regressions in
+        # anything this change touches.
+        #
+        # Error severity only, for the same reason: the tree has 0 error-level
+        # findings and 50 pre-existing warning-level ones. Warnings are reported
+        # but not enforced; raise to `-S warning` once the backlog is cleared.
+        #
+        # shellcheck is not guaranteed on every runner. Install it if missing,
+        # and if that fails downgrade to a warning annotation rather than
+        # blocking every PR on runner provisioning.
+        shell: bash
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            if command -v apt-get >/dev/null 2>&1; then
+              sudo apt-get update -qq && sudo apt-get install -y shellcheck || true
+            fi
+          fi
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            echo "::warning::shellcheck is unavailable on this runner; shell lint skipped."
+            exit 0
+          fi
+
+          # Determine a base to diff against. On a PR checkout HEAD is a merge
+          # commit, so HEAD~1 is the base tip and the diff is exactly this
+          # change set. Fall back to skipping when no base can be established
+          # rather than linting the whole tree.
+          files=()
+          if git rev-parse --verify 'HEAD~1' >/dev/null 2>&1; then
+            while IFS= read -r f; do
+              [ -n "$f" ] && [ -f "$f" ] && files+=("$f")
+            done < <(git diff --name-only --diff-filter=ACMR HEAD~1 HEAD -- '*.sh')
+          fi
+
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no shell scripts changed in this change set; nothing to lint"
+            exit 0
+          fi
+
+          shellcheck --version | head -2
+          printf 'linting %d changed script(s):\n' "${#files[@]}"
+          printf '  %s\n' "${files[@]}"
+          shellcheck -S error -f gcc "${files[@]}"
+          warnings=$(shellcheck -S warning -f gcc "${files[@]}" 2>/dev/null | wc -l || true)
+          echo "warning-level findings in changed files (informational): $warnings"
 
       - name: Check formatting
         # These gates are independent. Report every failure in one run instead
@@ -214,19 +270,58 @@ jobs:
       - name: Install mold linker (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq mold
+          # mold is an optimisation, not a requirement to reach this point. A
+          # runner image without sudo or a package manager aborted the job with
+          # exit 127 ("sudo: command not found") before the build started.
+          # Install it when the runner allows it; otherwise warn and let the
+          # Build step fall back to the default linker.
+          if command -v mold >/dev/null 2>&1; then
+            echo "mold already present: $(mold --version | head -1)"
+            exit 0
+          fi
+          SUDO=""
+          if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi
+          if command -v apt-get >/dev/null 2>&1; then
+            $SUDO apt-get update -qq || true
+            $SUDO apt-get install -y -qq mold || true
+          elif command -v dnf >/dev/null 2>&1; then
+            $SUDO dnf install -y mold || true
+          elif command -v apk >/dev/null 2>&1; then
+            $SUDO apk add --no-cache mold || true
+          fi
+          if command -v mold >/dev/null 2>&1; then
+            echo "mold installed: $(mold --version | head -1)"
+          else
+            echo "::warning::mold is unavailable on this runner; the build will use the default linker"
+          fi
 
       - name: Build
         shell: bash
         run: |
           mkdir -p .cargo
           if [ "$RUNNER_OS" = "Linux" ]; then
-            cat > .cargo/config.toml << 'EOF'
-          [target.x86_64-unknown-linux-gnu]
-          linker = "clang"
-          rustflags = ["-C", "link-arg=-fuse-ld=mold"]
-          EOF
+            # Both mold and clang are optional here. A config that names a linker the
+            # runner does not have fails the very first build script:
+            #   error: linker `clang` not found
+            #   error: could not compile `proc-macro2` (build script)
+            # The desk-linux image carries whatever the image recipe bakes in, so only
+            # advertise the tools actually present on this runner.
+            LINKER_LINE=""
+            if command -v clang >/dev/null 2>&1; then
+              LINKER_LINE='linker = "clang"'
+            fi
+            RUSTFLAGS_LINE=""
+            if command -v mold >/dev/null 2>&1; then
+              RUSTFLAGS_LINE='rustflags = ["-C", "link-arg=-fuse-ld=mold"]'
+            fi
+            if [ -n "$LINKER_LINE" ] || [ -n "$RUSTFLAGS_LINE" ]; then
+              echo "[target.x86_64-unknown-linux-gnu]" > .cargo/config.toml
+              if [ -n "$LINKER_LINE" ]; then echo "$LINKER_LINE" >> .cargo/config.toml; fi
+              if [ -n "$RUSTFLAGS_LINE" ]; then echo "$RUSTFLAGS_LINE" >> .cargo/config.toml; fi
+              cat .cargo/config.toml
+            else
+              echo "::warning::neither clang nor mold is available on this runner; using cargo's default linker"
+            fi
           fi
           # NOTE: intentionally NOT exporting RUSTC_WRAPPER=sccache here. Only this
           # step used sccache while the later `cargo test --no-run` steps did not,
@@ -318,8 +413,8 @@ jobs:
           model_dir="$HOME/.jcode/models/all-MiniLM-L6-v2"
           mkdir -p "$model_dir"
           base="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main"
-          curl -sSfL --retry 3 -o "$model_dir/model.onnx" "$base/onnx/model.onnx"
-          curl -sSfL --retry 3 -o "$model_dir/tokenizer.json" "$base/tokenizer.json"
+          curl -sSfL --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 -o "$model_dir/model.onnx" "$base/onnx/model.onnx"
+          curl -sSfL --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 -o "$model_dir/tokenizer.json" "$base/tokenizer.json"
           # Fail loudly if the fetch produced something unusable, so this cannot
           # degrade back into a silent skip.
           test -s "$model_dir/model.onnx"
@@ -397,6 +492,48 @@ jobs:
             -p jcode-tui --lib -- --test-threads=1 \
             --skip test_prompt_entry_shimmer_color_moves_across_positions \
             --skip right_fact_stack_uses_neutral_gray_except_for_context_usage
+
+      # Audit B-7b: CI's `build` job named only 7 of 92 workspace crates in its
+      # lib-test invocations, so ~80% of lib-tests (75 of 92 crates) were never
+      # run in CI. This block adds 4 of the 5 highest-leverage crates by test
+      # count and user-surface criticality to close the gap incrementally.
+      # jcode-provider-openrouter-runtime is intentionally skipped: it has a
+      # pre-existing test failure (`autodetected_profile_seeds_default_model_
+      # and_cache_namespace` expects `glm-4.5` but the autodetected default is
+      # now `glm-5.3`, a model-name drift) at HEAD 748eeaa1e. Tracked
+      # separately; the 4 added here are the audit-clean subset. Order is
+      # test-count descending so the heaviest fixtures fail fast if they break.
+      # Each step uses the same timeout wrapper as the TUI cohort above
+      # (consistency, host may be Linux or macOS per matrix). All four are
+      # shared by every session at runtime; a regression here reaches every
+      # user and would not have been caught by the prior 7-crate gate.
+      - name: Run jcode-command-risk lib tests (audit B-7b)
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
+            -p jcode-command-risk --lib -- --nocapture
+
+      - name: Run jcode-tui-markdown lib tests (audit B-7b)
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
+            -p jcode-tui-markdown --lib -- --nocapture --test-threads=1
+
+      - name: Run jcode-provider-openai-runtime lib tests (audit B-7b)
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
+            -p jcode-provider-openai-runtime --lib -- --nocapture
+
+      - name: Run jcode-provider-core lib tests (audit B-7b)
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
+            -p jcode-provider-core --lib -- --nocapture
 
       - name: Compile integration test binaries
         shell: bash
