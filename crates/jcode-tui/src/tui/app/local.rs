@@ -411,9 +411,7 @@ pub(super) fn handle_mcp_toggle_completed(app: &mut App, toggle: McpToggleComple
     if let Some(error) = toggle.connect_error {
         app.push_display_message(DisplayMessage::error(format!(
             "MCP server '{}' enabled but failed to connect: {}.\nRun '/mcp enable {}' to retry.",
-            toggle.server,
-            error,
-            toggle.server
+            toggle.server, error, toggle.server
         )));
     }
 }
