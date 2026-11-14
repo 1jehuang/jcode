@@ -399,36 +399,58 @@ fn test_remote_catalog_activity_notification_upserts_compact_row() {
 
 #[test]
 fn test_model_picker_copilot_models_have_copilot_route() {
-    let mut app = create_test_app();
-    configure_test_remote_models_with_copilot(&mut app);
+    // Temp home: route building consults configured OpenAI-compatible
+    // profiles (key env vars and env files under the shared test home), so
+    // without isolation the firmware static model list can claim
+    // grok-code-fast-1 and the copilot route disappears. Scrubbing the
+    // named-profile runtime vars keeps a leaked `--provider-profile`
+    // session env from making every built-in profile look configured. App
+    // construction can re-apply the config's default provider profile, so
+    // scrub again right before opening the picker. Clearing the envs
+    // outside the env lock races concurrent guard drops, and the mutex is
+    // not reentrant, so both scrubs live inside `with_temp_jcode_home`.
+    with_temp_jcode_home(|| {
+        let _construction_scrub = NamedProfileEnvGuard::new();
+        let mut app = create_test_app();
+        let _inner_scrub = NamedProfileEnvGuard::new();
+        configure_test_remote_models_with_copilot(&mut app);
 
-    app.open_model_picker();
+        app.open_model_picker();
 
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("model picker should be open");
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("model picker should be open");
 
-    // grok-code-fast-1 is NOT in ALL_CLAUDE_MODELS or ALL_OPENAI_MODELS,
-    // so it should get a copilot route
-    let grok_entry = picker
-        .entries
-        .iter()
-        .find(|m| m.name == "grok-code-fast-1")
-        .expect("grok-code-fast-1 should be in picker");
+        // grok-code-fast-1 is NOT in ALL_CLAUDE_MODELS or ALL_OPENAI_MODELS,
+        // so it should get a copilot route
+        let grok_entry = picker
+            .entries
+            .iter()
+            .find(|m| m.name == "grok-code-fast-1")
+            .expect("grok-code-fast-1 should be in picker");
 
-    assert!(
-        grok_entry.options.iter().any(|r| r.api_method == "copilot"),
-        "grok-code-fast-1 should have a copilot route, got: {:?}",
-        grok_entry.options
-    );
+        assert!(
+            grok_entry.options.iter().any(|r| r.api_method == "copilot"),
+            "grok-code-fast-1 should have a copilot route, got: {:?}",
+            grok_entry.options
+        );
+    });
 }
 
 #[test]
 fn test_model_picker_remote_comtegra_model_uses_comtegra_route_not_copilot() {
     let _lock = crate::storage::lock_test_env();
     let _provider_env = ProviderEnvGuard::clear();
-    let prev_key = std::env::var("COMTEGRA_API_KEY").ok();
+    let _restore = EnvRestoreGuard::capture([
+        "COMTEGRA_API_KEY",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+    ]);
+    crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
+    crate::env::remove_var("JCODE_PROVIDER_PROFILE_ACTIVE");
+    crate::env::remove_var("JCODE_PROVIDER_PROFILE_NAME");
     crate::env::set_var("COMTEGRA_API_KEY", "test-key");
 
     let mut app = create_test_app();
@@ -436,11 +458,6 @@ fn test_model_picker_remote_comtegra_model_uses_comtegra_route_not_copilot() {
     app.remote_available_entries = vec!["glm-51-nvfp4".to_string()];
 
     app.open_model_picker();
-
-    match prev_key {
-        Some(value) => crate::env::set_var("COMTEGRA_API_KEY", value),
-        None => crate::env::remove_var("COMTEGRA_API_KEY"),
-    }
 
     let picker = app
         .inline_interactive_state

@@ -270,18 +270,20 @@ fn resume_invocation_args_omits_blank_socket() {
 /// whether the developer machine has a published local build channel and of
 /// other tests mutating JCODE_HOME in parallel. Returns the guards that keep
 /// the environment pinned for the duration of the test.
-fn pinned_resume_test_home() -> (
-    std::sync::MutexGuard<'static, ()>,
-    tempfile::TempDir,
-    EnvVarGuard,
-) {
+///
+/// Field order matters: tuple fields drop in field order, so the env guard
+/// must be field 0. If the lock were field 0 it would release before
+/// JCODE_HOME was restored, and whichever test acquired the lock next would
+/// run mid-restore with a foreign or missing home (that clobbered
+/// gather_ambient_info_* in parallel runs).
+fn pinned_resume_test_home() -> (EnvVarGuard, tempfile::TempDir, crate::storage::TestEnvGuard) {
     let env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let current = temp.path().join("builds").join("current");
     std::fs::create_dir_all(&current).expect("create builds/current");
     std::fs::write(current.join("jcode"), b"#!/bin/sh\n").expect("write fake jcode binary");
     let home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
-    (env_lock, temp, home)
+    (home, temp, env_lock)
 }
 
 #[test]
@@ -414,7 +416,14 @@ fn gather_ambient_info_filters_to_session_reminders_when_ambient_disabled() {
     // Read synchronously while the temporary JCODE_HOME and its files are pinned:
     // an unrelated in-flight cache refresh can otherwise overwrite the cleared
     // process-global cache with data loaded under another test's JCODE_HOME.
-    let info = gather_ambient_info_inner(false).expect("ambient info");
+    let info = gather_ambient_info_inner(false).unwrap_or_else(|| {
+        panic!(
+            "ambient info gathered no widget: JCODE_HOME={:?} (expected {:?}), queue.json={:?}",
+            std::env::var_os("JCODE_HOME"),
+            temp.path(),
+            std::fs::read_to_string(temp.path().join("ambient").join("queue.json")).ok()
+        );
+    });
     assert!(info.show_widget);
     assert_eq!(info.queue_count, 3);
     assert_eq!(info.reminder_count, 2);

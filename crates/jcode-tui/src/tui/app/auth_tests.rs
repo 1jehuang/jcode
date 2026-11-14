@@ -7,20 +7,69 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let _env_guard = crate::storage::lock_test_env();
     let _provider_env = super::super::tests::ProviderEnvGuard::clear();
     let temp = tempfile::tempdir().expect("tempdir");
-    let saved_env = ["JCODE_HOME"].map(|key| (key, std::env::var_os(key)));
+    // Drop guard: a failed assertion must not leave the scrubbed vars
+    // missing after the env lock is released, which changes later tests'
+    // provider settings.
+    let _restore = EnvRestoreGuard::capture([
+        "JCODE_HOME",
+        "JCODE_OPENAI_COMPAT_API_BASE",
+        "JCODE_OPENAI_COMPAT_API_KEY_NAME",
+        "JCODE_OPENAI_COMPAT_ENV_FILE",
+        "JCODE_OPENAI_COMPAT_SETUP_URL",
+        "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
+        "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
+        "OPENAI_COMPAT_API_KEY",
+        // Ambient named-profile / OpenRouter runtime env leaks across tests
+        // and flips `openai_compatible_profile_is_configured` into the
+        // named-profile path; clear it so each test starts hermetic.
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_PROVIDER",
+        "JCODE_OPENROUTER_NO_FALLBACK",
+        "JCODE_API_BASE",
+        "JCODE_API_KEY",
+    ]);
 
     crate::env::set_var("JCODE_HOME", temp.path());
+    for (key, _) in _restore.0.iter() {
+        crate::env::remove_var(key);
+    }
 
     let result = f();
 
-    for (key, value) in saved_env {
-        if let Some(value) = value {
-            crate::env::set_var(key, value);
-        } else {
-            crate::env::remove_var(key);
+    result
+}
+
+struct EnvRestoreGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+impl EnvRestoreGuard {
+    fn capture(keys: impl IntoIterator<Item = &'static str>) -> Self {
+        Self(
+            keys.into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect(),
+        )
+    }
+}
+
+impl Drop for EnvRestoreGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.0.drain(..) {
+            if let Some(value) = value {
+                crate::env::set_var(key, value);
+            } else {
+                crate::env::remove_var(key);
+            }
         }
     }
-    result
 }
 
 #[test]

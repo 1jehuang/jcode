@@ -224,7 +224,7 @@ pub(crate) fn drain_pending_for_tests() -> Vec<UsageReport> {
 mod tests {
     use super::*;
 
-    fn enable_sponsors() -> (std::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
+    fn enable_sponsors() -> (crate::storage::TestEnvGuard, tempfile::TempDir) {
         let guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir().unwrap();
         crate::env::set_var("JCODE_HOME", temp.path());
