@@ -1289,8 +1289,22 @@ pub(super) async fn handle_ask_user_response(
     ask_user_responses: &AskUserResponses,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
-    if let Some(tx) = ask_user_responses.lock().await.remove(&request_id) {
-        let _ = tx.send(answers);
+    let pending = ask_user_responses.lock().await.remove(&request_id);
+    match pending {
+        Some(tx) => {
+            let _ = tx.send(answers);
+        }
+        // A late dismissal needs no notice.
+        None if answers.is_some() => {
+            let _ = client_event_tx.send(ServerEvent::AskUserClosed {
+                request_id,
+                error: Some(
+                    "Your answer arrived after the question closed, so the agent did not get it."
+                        .to_string(),
+                ),
+            });
+        }
+        None => {}
     }
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }

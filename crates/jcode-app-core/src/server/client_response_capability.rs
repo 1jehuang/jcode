@@ -12,6 +12,17 @@ pub(in crate::server) async fn refresh_session(
     connections: &Connections,
     session_id: &str,
 ) {
+    // Questions route without the Agent lock, so a TUI that reattaches while
+    // a turn holds the Agent is reachable from that same turn.
+    {
+        let connections = connections.read().await;
+        let capable = connections
+            .iter()
+            .filter(|(_, info)| info.session_id == session_id)
+            .filter_map(|(id, info)| Some((id.clone(), info.ask_user_tx.clone()?)))
+            .collect();
+        crate::tool::ask_user_route::sync(session_id, capable);
+    }
     let Some(agent) = sessions.read().await.get(session_id).cloned() else {
         return;
     };
@@ -45,8 +56,8 @@ async fn try_apply(agent: &Arc<Mutex<Agent>>, connections: &Connections, session
     };
     let enabled = attached().any(|info| info.supports_user_response);
     agent.set_desktop_response_capability(enabled).await;
-    let ask_user_tx = attached().find_map(|info| info.ask_user_tx.clone());
-    agent.set_ask_user_client(ask_user_tx).await;
+    let ask_user = attached().any(|info| info.ask_user_tx.is_some());
+    agent.set_ask_user_enabled(ask_user).await;
     true
 }
 

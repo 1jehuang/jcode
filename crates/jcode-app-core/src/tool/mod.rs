@@ -107,6 +107,7 @@ fn is_mcp_tool_name(name: &str) -> bool {
 use std::sync::{LazyLock, RwLock as StdRwLock};
 use tokio::sync::RwLock;
 
+pub(crate) use ask_user::route as ask_user_route;
 pub(crate) use jcode_tool_core::intent_schema_property;
 pub use jcode_tool_core::{
     AskUserInputRequest, ClientInputRequest, StdinInputRequest, Tool, ToolContext,

@@ -693,6 +693,19 @@ pub(super) async fn handle_client(
                             questions: req.questions,
                         });
                     }
+                    crate::tool::ClientInputRequest::AskUserClosed(request_id) => {
+                        if ask_user_responses
+                            .lock()
+                            .await
+                            .remove(&request_id)
+                            .is_some()
+                        {
+                            let _ = client_event_tx.send(ServerEvent::AskUserClosed {
+                                request_id,
+                                error: None,
+                            });
+                        }
+                    }
                 }
             }
         })
@@ -1181,6 +1194,8 @@ server_resumes: false,
                 active_skill,
                 no_reply,
             } => {
+                // The terminal the user types in is the one to ask.
+                crate::tool::ask_user_route::touch(&client_connection_id);
                 if no_reply {
                     append_context_message(
                         id,
@@ -1841,6 +1856,9 @@ server_resumes: false,
                 apply_subscribe_account_pins(&agent, &requested_account_pins, &client_event_tx).await;
                 send_pending_account_notices(&agent, &client_event_tx);
                 refresh_session(&sessions, &client_connections, &client_session_id).await;
+                if requested_ask_user {
+                    crate::tool::ask_user_route::touch(&client_connection_id);
+                }
                 if requested_continuation {
                     super::runtime_ssh_loops::initialize_remote_session(
                         &client_session_id,
@@ -3551,6 +3569,8 @@ server_resumes: false,
             crate::logging::warn(&format!("Client stdin forwarder failed: {error}"));
         }
         stdin_responses.lock().await.clear();
+        // The forwarder may have registered one more question before it stopped.
+        ask_user_responses.lock().await.clear();
         if let Some(handle) = processing_task.take() {
             crate::logging::info(&format!(
                 "Retaining disconnected turn for session {}",
