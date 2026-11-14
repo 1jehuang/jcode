@@ -230,6 +230,47 @@ async fn stop_target_rejects_ambiguous_friendly_name() {
     assert!(err.contains("Ambiguous swarm session 'bear'"));
 }
 
+/// Regression test (#2150): stopping a worker that is already terminal
+/// (removed from the roster by the first stop) must not fail with
+/// "Unknown swarm session". The terminal-state check in
+/// `resolve_stop_target_session` lets the stop proceed so the caller
+/// can report "already stopped" idempotently.
+///
+/// This test verifies the reject path: a session ID that is not in the
+/// roster AND has no persisted state on disk is still rejected. The
+/// terminal-accept path (session removed from roster but `Session::load`
+/// returns a terminal status) is verified by the integration flow in
+/// `handle_comm_stop` where `removed_live_agent` is false and the
+/// persisted-status fallback at line ~1041 handles it.
+#[tokio::test]
+async fn stop_target_rejects_unknown_session_not_in_roster() {
+    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+
+    // A completely unknown session ID (no file on disk).
+    let err = resolve_stop_target_session("swarm-1", "session_ghost_9999", &swarm_members)
+        .await
+        .expect_err("non-terminal unknown session should be rejected");
+    assert!(err.contains("Unknown swarm session"));
+}
+
+/// A session that IS in the roster resolves normally (first stop path).
+#[tokio::test]
+async fn stop_target_resolves_session_in_roster() {
+    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+    let (worker, _worker_rx) = member("session_worker_1234_abcd", Some("swarm-1"), "agent");
+    swarm_members
+        .write()
+        .await
+        .insert(worker.session_id.clone(), worker);
+
+    assert_eq!(
+        resolve_stop_target_session("swarm-1", "session_worker_1234_abcd", &swarm_members)
+            .await
+            .as_deref(),
+        Ok("session_worker_1234_abcd")
+    );
+}
+
 #[tokio::test]
 async fn register_visible_spawned_member_marks_startup_as_running() {
     let swarm_members = Arc::new(RwLock::new(HashMap::new()));
