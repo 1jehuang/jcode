@@ -36,30 +36,96 @@ impl Provider for SchemaSweepMockProvider {
     }
 }
 
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+        let previous = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, previous }
+    }
+
+    fn set_value(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = &self.previous {
+            crate::env::set_var(self.key, previous);
+        } else {
+            crate::env::remove_var(self.key);
+        }
+    }
+}
+
 fn contains_array_type_keyword(schema: &Value) -> bool {
     match schema {
         Value::Object(map) => {
             matches!(map.get("type"), Some(Value::Array(_)))
-                || map.iter().any(|(k, v)| {
-                    if matches!(
-                        jcode_schema_dialect::keyword_role(k),
-                        jcode_schema_dialect::KeywordRole::Data
-                    ) {
-                        false
-                    } else {
-                        contains_array_type_keyword(v)
-                    }
-                })
+                || map
+                    .iter()
+                    .any(|(k, v)| match jcode_schema_dialect::keyword_role(k) {
+                        jcode_schema_dialect::KeywordRole::SubschemaMap => {
+                            v.as_object().is_some_and(|children| {
+                                children.values().any(contains_array_type_keyword)
+                            })
+                        }
+                        jcode_schema_dialect::KeywordRole::SubschemaArray => match v {
+                            Value::Array(items) => items.iter().any(contains_array_type_keyword),
+                            other => contains_array_type_keyword(other),
+                        },
+                        jcode_schema_dialect::KeywordRole::Subschema => {
+                            contains_array_type_keyword(v)
+                        }
+                        jcode_schema_dialect::KeywordRole::Data => false,
+                    })
         }
         Value::Array(items) => items.iter().any(contains_array_type_keyword),
         _ => false,
     }
 }
 
+#[test]
+fn contains_array_type_keyword_recurses_into_subschema_maps_and_skips_data() {
+    assert!(contains_array_type_keyword(&json!({
+        "type": "object",
+        "properties": {
+            "waiting_on": { "type": ["string", "null"] }
+        }
+    })));
+    assert!(contains_array_type_keyword(&json!({
+        "type": "object",
+        "$defs": {
+            "Entry": { "type": ["object", "null"] }
+        }
+    })));
+    assert!(!contains_array_type_keyword(&json!({
+        "type": "object",
+        "properties": {
+            "literal": {
+                "type": "object",
+                "default": { "type": ["string", "null"] }
+            }
+        }
+    })));
+}
+
 #[tokio::test]
 async fn every_builtin_and_optional_tool_schema_conforms_to_gemini_and_antigravity_dialects() {
     let _env_lock = crate::storage::lock_test_env();
     let temp_dir = tempfile::tempdir().expect("isolated temp dir");
+    let _jcode_home = EnvVarGuard::set_path("JCODE_HOME", temp_dir.path());
+    let _home = EnvVarGuard::set_path("HOME", temp_dir.path());
+    let _userprofile = EnvVarGuard::set_path("USERPROFILE", temp_dir.path());
+    let _disable_claude_mcp = EnvVarGuard::set_value("JCODE_DISABLE_CLAUDE_MCP", "1");
+    crate::config::Config::invalidate_cache();
 
     let provider: Arc<dyn Provider> = Arc::new(SchemaSweepMockProvider);
     let registry = Registry::new(provider).await;
@@ -86,7 +152,7 @@ async fn every_builtin_and_optional_tool_schema_conforms_to_gemini_and_antigravi
 
     // Include fixed MCP surface tools directly even when hidden from default
     // model-visible listings so deferred/legacy MCP surfaces never regress.
-    let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
+    let mcp_manager = Arc::new(RwLock::new(McpManager::with_config(McpConfig::default())));
     for extra in [
         McpManagementTool::new(Arc::clone(&mcp_manager)).to_definition(),
         McpSearchTool::new(Arc::clone(&mcp_manager)).to_definition(),
