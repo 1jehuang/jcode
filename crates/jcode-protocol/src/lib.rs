@@ -1037,13 +1037,17 @@ fn decode_legacy_set_route_model(line: &str) -> Option<Request> {
     }
     let model = obj.get("model")?.as_str()?.to_string();
     let id = obj.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
-    // The legacy shape predates persist_default; a desktop client using it
-    // still expects its confirmed switch to become the default, which is the
-    // behavior set_model had before the flag existed.
+    // The legacy shape predates persist_default, so a missing flag keeps the
+    // pre-flag behavior (persist). An explicit flag is honored so a client
+    // can still ask for a temporary switch.
+    let persist_default = obj
+        .get("persist_default")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
     Some(Request::SetModel {
         id,
         model,
-        persist_default: true,
+        persist_default,
     })
 }
 

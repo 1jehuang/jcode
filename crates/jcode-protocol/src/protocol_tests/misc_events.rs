@@ -211,6 +211,26 @@ fn test_set_route_deserializes_as_set_model_compat_alias() -> Result<()> {
 }
 
 #[test]
+fn test_set_route_compat_alias_honors_explicit_persist_default() -> Result<()> {
+    // A missing flag keeps the pre-flag behavior (persist the default);
+    // an explicit false asks for a temporary switch and must be honored.
+    let decoded = decode_request(r#"{"type":"set_route","id":43,"model":"gpt-5.5"}"#)?;
+    let Request::SetModel { persist_default, .. } = decoded else {
+        return Err(anyhow!("expected SetModel"));
+    };
+    assert!(persist_default);
+
+    let decoded = decode_request(
+        r#"{"type":"set_route","id":44,"model":"gpt-5.5","persist_default":false}"#,
+    )?;
+    let Request::SetModel { persist_default, .. } = decoded else {
+        return Err(anyhow!("expected SetModel"));
+    };
+    assert!(!persist_default);
+    Ok(())
+}
+
+#[test]
 fn test_structured_set_route_decodes_as_set_route_not_set_model() -> Result<()> {
     // Regression for the "Invalid request: missing field `model`" bug seen when
     // switching models via the picker: a structured `set_route` request (with a

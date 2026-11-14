@@ -625,8 +625,10 @@ async fn apply_terminal_event<B: Backend>(
                     app.cancel_pending_provider_failover("Provider auto-switch canceled");
                     app.pending_model_switch = None;
                     // Manual route selections persist the confirmed model as
-                    // the config default (user-initiated switch).
-                    match remote.set_route_selection(selection.clone(), true).await {
+                    // the config default, but a fallback offer is a recovery
+                    // route, not a preference change: keep the saved default.
+                    let persist = app.pending_fallback_resend.is_none();
+                    match remote.set_route_selection(selection.clone(), persist).await {
                         Ok(id) => {
                             // Manual fallback offers use unrestricted SetRoute,
                             // but need the same exact acknowledgement fence as
