@@ -1,0 +1,11 @@
+[package]
+name = "jcode-tool-search"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "jcode_tool_search"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

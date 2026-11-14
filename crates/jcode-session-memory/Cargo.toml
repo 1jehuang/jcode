@@ -1,0 +1,12 @@
+[package]
+name = "jcode-session-memory"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[lib]
+name = "jcode_session_memory"
+path = "src/lib.rs"

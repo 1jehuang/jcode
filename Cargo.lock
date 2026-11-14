@@ -3739,6 +3739,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-auto-dream"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "filetime",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "jcode-azure-auth"
 version = "0.1.0"
 dependencies = [
@@ -4031,6 +4045,15 @@ name = "jcode-message-types"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "jcode-micro-compact"
+version = "0.1.0"
+dependencies = [
+ "jcode-message-types",
  "serde",
  "serde_json",
 ]
@@ -4513,6 +4536,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-session-memory"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "jcode-session-types"
 version = "0.1.0"
 dependencies = [
@@ -4652,6 +4682,13 @@ dependencies = [
  "jcode-tool-types",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "jcode-tool-search"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
