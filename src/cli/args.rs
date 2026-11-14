@@ -1122,6 +1122,9 @@ pub(crate) use cloud_sessions::*;
 #[path = "args/restart.rs"]
 mod restart;
 pub(crate) use restart::RestartCommand;
+#[path = "args/session.rs"]
+mod session;
+pub(crate) use session::SessionCommand;
 #[derive(Subcommand, Debug)]
 pub(crate) enum ModelCommand {
     /// List model names you can pass to -m/--model
@@ -1133,27 +1136,6 @@ pub(crate) enum ModelCommand {
         /// Show provider/selection summary before the list
         #[arg(long)]
         verbose: bool,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-pub(crate) enum SessionCommand {
-    /// Rename a saved session's human-readable name/title
-    Rename {
-        /// Session ID or memorable short name, e.g. fox
-        session: String,
-
-        /// New session name/title
-        #[arg(required_unless_present = "clear")]
-        name: Option<String>,
-
-        /// Clear the custom session name/title
-        #[arg(long, conflicts_with = "name")]
-        clear: bool,
-
-        /// Emit JSON instead of human-readable output
-        #[arg(long)]
-        json: bool,
     },
 }
 
