@@ -114,7 +114,7 @@ fn run_azure(base: String) -> Vec<Result<StreamEvent>> {
                 tx,
                 Arc::new(Mutex::new(None)),
                 "deployment".into(),
-                false,
+                crate::api_protocol::ApiProtocol::Responses,
             ),
         )
         .await

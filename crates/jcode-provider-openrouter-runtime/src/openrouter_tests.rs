@@ -3127,7 +3127,7 @@ fn midstream_transport_fault_emits_retry_rollback_before_replay() {
             tx,
             Arc::new(Mutex::new(None)),
             "test-model".to_string(),
-            false,
+            crate::api_protocol::ApiProtocol::ChatCompletions,
         )
         .await;
 

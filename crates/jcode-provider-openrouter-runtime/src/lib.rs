@@ -477,6 +477,26 @@ impl ProviderAuth {
         }
     }
 
+    /// Apply credentials for an Anthropic Messages request.
+    ///
+    /// The Messages endpoint authenticates with `x-api-key` and rejects an
+    /// `Authorization: Bearer` header, so a profile whose credentials resolved
+    /// to a bearer token must present the same secret in the Anthropic shape
+    /// (issue #1224). Explicit `HeaderValue` credentials are already in the
+    /// user's chosen shape and are passed through unchanged.
+    async fn apply_messages(
+        &self,
+        req: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder> {
+        match self {
+            Self::AuthorizationBearer { token, .. } => Ok(req.header("x-api-key", token)),
+            Self::HeaderValue {
+                header_name, value, ..
+            } => Ok(req.header(header_name, value)),
+            other => other.apply(req).await,
+        }
+    }
+
     fn label(&self) -> &str {
         match self {
             Self::AuthorizationBearer { label, .. } => label,
@@ -2845,8 +2865,10 @@ impl OpenRouterProvider {
     }
 }
 
+mod api_protocol;
 mod models_catalog_parse;
 mod ollama_context;
+mod opencode_go_messages;
 mod opencode_go_responses;
 #[path = "openrouter_provider_impl.rs"]
 mod openrouter_provider_impl;

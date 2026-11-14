@@ -1,3 +1,4 @@
+use super::api_protocol::ApiProtocol;
 use super::*;
 use futures::Stream;
 use jcode_provider_openrouter::stream::OpenRouterStream;
@@ -67,7 +68,7 @@ pub(super) async fn run_stream_with_retries(
     tx: mpsc::Sender<Result<StreamEvent>>,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
     model: String,
-    responses_api: bool,
+    protocol: ApiProtocol,
 ) {
     let mut last_error = None;
     let mut next_retry_delay = None;
@@ -130,7 +131,7 @@ pub(super) async fn run_stream_with_retries(
             attempt_tx,
             Arc::clone(&provider_pin),
             model.clone(),
-            responses_api,
+            protocol,
         )
         .await
         {
@@ -200,7 +201,7 @@ async fn stream_response(
     tx: mpsc::Sender<Result<StreamEvent>>,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
     model: String,
-    responses_api: bool,
+    protocol: ApiProtocol,
 ) -> Result<()> {
     use jcode_message_types::ConnectionPhase;
     let _ = tx
@@ -211,28 +212,38 @@ async fn stream_response(
     let connect_start = std::time::Instant::now();
     let stream_idle_timeout = jcode_base::provider::stream_idle_timeout();
 
-    let route = if azure_responses || responses_api {
+    // Azure always speaks OpenAI Responses. Every other endpoint uses the
+    // protocol chosen per model by `api_protocol::select_protocol`, which is
+    // what routes OpenCode Go's MiniMax/Qwen models to `/messages` (#1224).
+    let route = if azure_responses {
         "responses"
     } else {
-        "chat/completions"
+        protocol.route()
     };
     let request_kind = if azure_responses {
         "Azure OpenAI Responses"
     } else {
-        "OpenAI-compatible chat"
+        protocol.request_kind()
     };
     let url = format!("{}/{}", api_base, route);
-    let mut req = apply_kimi_coding_agent_headers(
-        auth.apply(
-            client
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .header("Accept-Encoding", "identity"),
-        )
-        .await?,
-        &api_base,
-        Some(&model),
-    );
+    let base_request = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .header("Accept-Encoding", "identity");
+    // `/messages` authenticates with `x-api-key` and rejects `Authorization:
+    // Bearer`; the chat and Responses routes keep their configured auth shape.
+    let authed = if protocol == ApiProtocol::Messages && !azure_responses {
+        auth.apply_messages(base_request).await?
+    } else {
+        auth.apply(base_request).await?
+    };
+    let mut req = apply_kimi_coding_agent_headers(authed, &api_base, Some(&model));
+
+    if protocol == ApiProtocol::Messages && !azure_responses {
+        // Anthropic's versioning header is required by Messages endpoints and
+        // is deliberately absent from the OpenAI-shaped routes.
+        req = req.header("anthropic-version", "2023-06-01");
+    }
 
     if send_openrouter_headers {
         req = req
@@ -310,16 +321,20 @@ async fn stream_response(
         Box::pin(jcode_provider_openai::stream::OpenAIResponsesStream::new(
             response.bytes_stream(),
         ))
-    } else if responses_api {
-        Box::pin(super::opencode_go_responses::ResponsesStream::new(
-            response.bytes_stream(),
-        ))
     } else {
-        Box::pin(OpenRouterStream::new(
-            response.bytes_stream(),
-            model.clone(),
-            provider_pin,
-        ))
+        match protocol {
+            ApiProtocol::Responses => Box::pin(super::opencode_go_responses::ResponsesStream::new(
+                response.bytes_stream(),
+            )),
+            ApiProtocol::Messages => Box::pin(super::opencode_go_messages::MessagesStream::new(
+                response.bytes_stream(),
+            )),
+            ApiProtocol::ChatCompletions => Box::pin(OpenRouterStream::new(
+                response.bytes_stream(),
+                model.clone(),
+                provider_pin,
+            )),
+        }
     };
 
     // Idle timeout between streamed chunks. Configurable so slow reasoning

@@ -114,7 +114,7 @@ fn captured_request_for_host(host: &str, conversation_id: &str) -> String {
             tx,
             Arc::new(Mutex::new(None)),
             "m".to_string(),
-            false,
+            crate::api_protocol::ApiProtocol::ChatCompletions,
         )
         .await;
         while events.recv().await.is_some() {}
@@ -736,4 +736,117 @@ fn grok_build_subscription_request_spoofs_grok_cli_and_uses_oidc_bearer() {
     assert_eq!(body["tools"][0]["function"]["name"], "bash");
     assert_eq!(body["messages"][0]["role"], "system");
     assert!(body.get("reasoning_effort").is_none());
+}
+
+/// Accept exactly one request and answer it with a minimal Messages SSE stream.
+fn spawn_messages_stream_server() -> (String, std::sync::mpsc::Receiver<String>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let (request_tx, request_rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let mut buf = vec![0u8; 65536];
+        let n = stream.read(&mut buf).unwrap_or(0);
+        let _ = request_tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+        let body = concat!(
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n",
+            "\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n",
+            "\n",
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+    });
+    (format!("http://{addr}/v1"), request_rx)
+}
+
+/// Issue #1224: a Messages-allowlist model must reach `{base}/messages` with
+/// Anthropic auth. The endpoint rejects `Authorization: Bearer`, so the profile
+/// key has to arrive as `x-api-key`, and the version header must be present.
+#[test]
+fn opencode_go_messages_model_posts_to_the_messages_endpoint() {
+    let (api_base, request_rx) = spawn_messages_stream_server();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let events = rt.block_on(async {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<anyhow::Result<StreamEvent>>(64);
+        super::openrouter_sse_stream::run_stream_with_retries(
+            reqwest::Client::new(),
+            api_base,
+            ProviderAuth::AuthorizationBearer {
+                token: "opencode-key".to_string(),
+                label: "OPENCODE_GO_API_KEY".to_string(),
+            },
+            false,
+            new_conversation_id(),
+            serde_json::json!({
+                "model": "minimax-m2.7",
+                "max_tokens": 64,
+                "stream": true,
+                "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            }),
+            false,
+            tx,
+            Arc::new(Mutex::new(None)),
+            "minimax-m2.7".to_string(),
+            crate::api_protocol::ApiProtocol::Messages,
+        )
+        .await;
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        events
+    });
+
+    let raw = request_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("server captured request");
+    assert!(raw.starts_with("POST /v1/messages "), "{raw}");
+    let lower = raw.to_ascii_lowercase();
+    assert!(lower.contains("x-api-key: opencode-key"), "{raw}");
+    assert!(
+        !lower.contains("authorization:"),
+        "the /messages endpoint rejects bearer auth:\n{raw}"
+    );
+    assert!(lower.contains("anthropic-version: 2023-06-01"), "{raw}");
+    let body: serde_json::Value = serde_json::from_str(
+        raw.split("\r\n\r\n")
+            .nth(1)
+            .expect("request body after headers"),
+    )
+    .expect("json body");
+    assert_eq!(body["model"], "minimax-m2.7");
+    assert_eq!(body["stream"], true);
+    // Chat-only fields must not leak into the Messages body.
+    assert!(body.get("stream_options").is_none(), "{body}");
+    assert!(body.get("tool_choice").is_none(), "{body}");
+
+    let events = events
+        .into_iter()
+        .collect::<anyhow::Result<Vec<_>>>()
+        .expect("messages stream events");
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta(text) if text == "ok")),
+        "{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::MessageEnd { .. })),
+        "{events:?}"
+    );
 }

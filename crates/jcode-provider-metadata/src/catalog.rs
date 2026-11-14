@@ -29,6 +29,40 @@ pub const OPENCODE_GO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile
     requires_api_key: true,
 };
 
+/// OpenCode Go models served through the Anthropic Messages protocol
+/// (`POST {api_base}/messages`) instead of `/chat/completions`.
+///
+/// The gateway is multi-protocol: most of its catalog answers on
+/// `/chat/completions`, a small allowlist answers on `/responses`, and the
+/// MiniMax/Qwen entries below only answer on `/messages`. Sending one of these
+/// to `/chat/completions` fails the turn, which is the routing gap reported in
+/// issue #1224.
+pub const OPENCODE_GO_MESSAGES_MODELS: &[&str] = &[
+    "minimax-m3",
+    "minimax-m2.7",
+    "minimax-m2.5",
+    "minimax-m2.5-highspeed",
+    "qwen3.8-max",
+    "qwen3.8-flash",
+    "qwen3.7-max",
+    "qwen3.7-plus",
+    "qwen3.6-plus",
+];
+
+/// Whether `model` is one of the OpenCode Go models that the gateway serves
+/// over the Anthropic Messages API.
+///
+/// Protocol identity belongs to the model, not the endpoint, so this is a pure
+/// allowlist lookup: callers decide whether the configured profile is really
+/// OpenCode Go before acting on it.
+pub fn model_uses_messages_api(model: &str) -> bool {
+    let model = model.trim();
+    !model.is_empty()
+        && OPENCODE_GO_MESSAGES_MODELS
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(model))
+}
+
 pub const ZAI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "zai",
     display_name: "Z.AI",
@@ -1349,3 +1383,62 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 57] = [
     ANTIGRAVITY_LOGIN_PROVIDER,
     GOOGLE_LOGIN_PROVIDER,
 ];
+
+#[cfg(test)]
+mod messages_protocol_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// Issue #1224: OpenCode Go serves MiniMax/Qwen over the Anthropic
+    /// Messages protocol while the rest of its catalog stays on the
+    /// OpenAI-shaped routes. Selection is per model, and it has to tolerate the
+    /// whitespace/casing a session-restored model string can carry.
+    #[test]
+    fn opencode_go_messages_models_are_classified_per_model() {
+        for model in [
+            "minimax-m3",
+            "minimax-m2.7",
+            "minimax-m2.5",
+            "minimax-m2.5-highspeed",
+            "qwen3.8-max",
+            "qwen3.8-flash",
+            "qwen3.7-max",
+            "qwen3.7-plus",
+            "qwen3.6-plus",
+        ] {
+            assert!(
+                model_uses_messages_api(model),
+                "{model} must route to /messages"
+            );
+        }
+        assert!(model_uses_messages_api("  MiniMax-M2.7  "));
+        for model in [
+            "glm-5",
+            "glm-5.1",
+            "kimi-k2.5",
+            "deepseek-v4-flash",
+            "muse-spark-1.3-contributor",
+            "",
+            "  ",
+        ] {
+            assert!(
+                !model_uses_messages_api(model),
+                "{model:?} must not route to /messages"
+            );
+        }
+    }
+
+    #[test]
+    fn opencode_go_messages_model_list_is_clean() {
+        assert!(!OPENCODE_GO_MESSAGES_MODELS.is_empty());
+        let mut seen = HashSet::new();
+        for model in OPENCODE_GO_MESSAGES_MODELS {
+            assert_eq!(
+                *model,
+                model.trim().to_ascii_lowercase(),
+                "{model} must be a trimmed lowercase model id"
+            );
+            assert!(seen.insert(*model), "duplicate Messages model: {model}");
+        }
+    }
+}
