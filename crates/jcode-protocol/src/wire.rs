@@ -187,6 +187,9 @@ pub enum Request {
         /// Desktop can render user_response tool calls as inline answers.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         supports_user_response: bool,
+        /// The TUI renders `ask_user` question dialogs and answers them.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        supports_ask_user: bool,
         /// The client has no account-router countdown of its own (Desktop,
         /// SDK). On a usage/rate-limit failure the server switches to the next
         /// pool-approved account and retries the turn itself.
@@ -639,6 +642,15 @@ pub enum Request {
     InvalidateAnthropicUsage {
         id: u64,
         account_label: Option<String>,
+    },
+
+    /// Answers to an `ask_user` event. `None` means the user dismissed it.
+    #[serde(rename = "ask_user_response")]
+    AskUserResponse {
+        id: u64,
+        request_id: String,
+        #[serde(default)]
+        answers: Option<Vec<jcode_message_types::ask_user::AskUserAnswer>>,
     },
 
     /// Send stdin input to a running command that requested it

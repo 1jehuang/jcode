@@ -250,6 +250,7 @@ async fn report_roundtrip(subscribed: bool) {
                 system_prompt: None,
                 supports_pdf_panels: false,
                 supports_user_response: false,
+                supports_ask_user: false,
                 working_dir: Some(env.root.path().to_string_lossy().into_owned()),
                 target_session_id: Some(WORKER.into()),
                 selfdev: None,

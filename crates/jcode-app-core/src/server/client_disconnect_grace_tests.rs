@@ -219,6 +219,7 @@ fn connection(name: &str, id: &str) -> ClientConnectionInfo {
         current_tool_name: None,
         terminal_env: vec![],
         supports_user_response: false,
+        ask_user_tx: None,
         disconnect_tx,
     }
 }

@@ -38,6 +38,7 @@ async fn user_response_deferred_refresh_reads_current_connections() {
             current_tool_name: None,
             terminal_env: Vec::new(),
             supports_user_response: true,
+            ask_user_tx: None,
             disconnect_tx: mpsc::unbounded_channel().0,
         },
     )])));
@@ -85,6 +86,68 @@ async fn user_response_deferred_refresh_reads_current_connections() {
         .await
         .expect("deferred refresh replayed stale support");
     }
+}
+
+#[tokio::test]
+async fn ask_user_registration_follows_an_attached_renderer() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = IsolatedReloadRecoveryEnv::new();
+    let provider: Arc<dyn Provider> = Arc::new(SdkCallbackProvider::default());
+    let session = crate::session::Session::create_with_id("ask-user-capability".into(), None, None);
+    let session_id = session.id.clone();
+    let registry = Registry::new(provider.clone()).await;
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider, registry, session, None,
+    )));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.clone(), agent.clone())]),
+    ));
+    let (tui_tx, _tui_rx) = mpsc::unbounded_channel();
+    let info = |id: &str, ask_user_tx| ClientConnectionInfo {
+        client_id: id.into(),
+        session_id: session_id.clone(),
+        client_instance_id: None,
+        debug_client_id: None,
+        connected_at: Instant::now(),
+        last_seen: Instant::now(),
+        is_processing: false,
+        current_tool_name: None,
+        terminal_env: Vec::new(),
+        supports_user_response: false,
+        ask_user_tx,
+        disconnect_tx: mpsc::unbounded_channel().0,
+    };
+    let connections = Arc::new(RwLock::new(HashMap::from([
+        ("tui".to_string(), info("tui", Some(tui_tx.clone()))),
+        ("sdk".to_string(), info("sdk", None)),
+    ])));
+    let advertised = || async {
+        agent
+            .lock()
+            .await
+            .tool_names()
+            .await
+            .iter()
+            .any(|name| name == "ask_user")
+    };
+    assert!(
+        !advertised().await,
+        "headless sessions must not offer ask_user"
+    );
+    refresh_session(&sessions, &connections, &session_id).await;
+    assert!(advertised().await);
+    assert!(
+        agent.lock().await.client_input_routes_to(&tui_tx),
+        "questions must route to the client that renders them"
+    );
+    crate::server::client_session::response_capability::disconnect(
+        &sessions,
+        &connections,
+        "tui",
+        &session_id,
+    )
+    .await;
+    assert!(!advertised().await);
 }
 
 async fn send(writer: &mut Writer, value: Value) {

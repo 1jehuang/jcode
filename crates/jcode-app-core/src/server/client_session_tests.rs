@@ -54,6 +54,7 @@ async fn user_response_capability_does_not_block_busy_attachment() {
             current_tool_name: None,
             terminal_env: Vec::new(),
             supports_user_response: true,
+            ask_user_tx: None,
             disconnect_tx: mpsc::unbounded_channel().0,
         },
     )])));
@@ -393,6 +394,7 @@ async fn live_target_claim_is_atomic_with_detached_source_cleanup() {
                 current_tool_name: None,
                 terminal_env: Vec::new(),
                 supports_user_response: false,
+                ask_user_tx: None,
                 disconnect_tx,
             },
         )])));

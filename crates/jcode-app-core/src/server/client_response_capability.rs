@@ -38,10 +38,15 @@ async fn try_apply(agent: &Arc<Mutex<Agent>>, connections: &Connections, session
     let Ok(mut agent) = agent.try_lock() else {
         return false;
     };
-    let enabled = connections
-        .values()
-        .any(|info| info.session_id == session_id && info.supports_user_response);
+    let attached = || {
+        connections
+            .values()
+            .filter(|info| info.session_id == session_id)
+    };
+    let enabled = attached().any(|info| info.supports_user_response);
     agent.set_desktop_response_capability(enabled).await;
+    let ask_user_tx = attached().find_map(|info| info.ask_user_tx.clone());
+    agent.set_ask_user_client(ask_user_tx).await;
     true
 }
 
@@ -55,6 +60,7 @@ pub(in crate::server) async fn disconnect(
 ) {
     if let Some(info) = connections.write().await.get_mut(connection_id) {
         info.supports_user_response = false;
+        info.ask_user_tx = None;
     }
     refresh_session(sessions, connections, session_id).await;
 }

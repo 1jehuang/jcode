@@ -461,6 +461,7 @@ fn subscribe_request(working_dir: Option<&str>) -> Request {
         system_prompt: None,
         supports_pdf_panels: false,
         supports_user_response: false,
+        supports_ask_user: false,
         supports_server_failover: false,
         supports_turn_identity: false,
         id: 1,
@@ -1134,6 +1135,7 @@ async fn terminal_reconciliation_waits_for_terminal_enqueue_for_done_and_error()
             "connection".into(),
             ClientConnectionInfo {
                 supports_user_response: false,
+                ask_user_tx: None,
                 client_id: "connection".into(),
                 session_id: "session_terminal_enqueue_gap".into(),
                 client_instance_id: None,

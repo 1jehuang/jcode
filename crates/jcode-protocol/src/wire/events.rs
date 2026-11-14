@@ -1120,6 +1120,14 @@ pub enum ServerEvent {
         message: String,
     },
 
+    /// The `ask_user` tool is waiting for the user to answer these questions.
+    #[serde(rename = "ask_user")]
+    AskUser {
+        request_id: String,
+        tool_call_id: String,
+        questions: Vec<jcode_message_types::ask_user::AskUserQuestion>,
+    },
+
     /// A running command is waiting for stdin input from the user
     #[serde(rename = "stdin_request")]
     StdinRequest {

@@ -1,8 +1,9 @@
 use super::client_actions::{
-    AgentTaskContext, NotifySessionContext, handle_agent_task, handle_compact, handle_input_shell,
-    handle_notify_session, handle_rename_session, handle_run_subagent, handle_set_feature,
-    handle_set_session_saved, handle_set_subagent_model, handle_split, handle_stdin_response,
-    handle_transfer, handle_trigger_memory_extraction,
+    AgentTaskContext, AskUserResponses, NotifySessionContext, handle_agent_task,
+    handle_ask_user_response, handle_compact, handle_input_shell, handle_notify_session,
+    handle_rename_session, handle_run_subagent, handle_set_feature, handle_set_session_saved,
+    handle_set_subagent_model, handle_split, handle_stdin_response, handle_transfer,
+    handle_trigger_memory_extraction,
 };
 use super::client_comm::{
     handle_comm_channel_members, handle_comm_list, handle_comm_list_channels, handle_comm_message,
@@ -499,6 +500,7 @@ pub(super) async fn handle_client(
                 current_tool_name: None,
                 terminal_env: active_terminal_env.clone(),
                 supports_user_response: false,
+                ask_user_tx: None,
                 disconnect_tx: disconnect_tx.clone(),
             },
         );
@@ -638,6 +640,10 @@ pub(super) async fn handle_client(
 
     let stdin_responses: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let ask_user_responses: AskUserResponses = Arc::new(Mutex::new(HashMap::new()));
+    // Set by Subscribe. Another client's turn can still route here, so a
+    // client that cannot render questions answers "no interactive user".
+    let supports_ask_user = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // Subscribe to bus events so we can forward ModelsUpdated to this client
     // (e.g. when Copilot finishes async init after the initial History was sent)
@@ -645,7 +651,7 @@ pub(super) async fn handle_client(
 
     // Set up stdin request forwarding: tools send StdinInputRequest, we forward to TUI
     let (stdin_req_tx, mut stdin_req_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::tool::StdinInputRequest>();
+        tokio::sync::mpsc::unbounded_channel::<crate::tool::ClientInputRequest>();
     {
         let mut agent_guard = agent.lock().await;
         agent_guard.set_stdin_request_tx(stdin_req_tx.clone());
@@ -653,20 +659,41 @@ pub(super) async fn handle_client(
     let stdin_forwarder = {
         let client_event_tx = client_event_tx.clone();
         let stdin_responses = stdin_responses.clone();
+        let ask_user_responses = ask_user_responses.clone();
+        let supports_ask_user = supports_ask_user.clone();
         let tool_call_id = String::new();
         tokio::spawn(async move {
             while let Some(req) = stdin_req_rx.recv().await {
-                let request_id = req.request_id.clone();
-                stdin_responses
-                    .lock()
-                    .await
-                    .insert(request_id.clone(), req.response_tx);
-                let _ = client_event_tx.send(ServerEvent::StdinRequest {
-                    request_id,
-                    prompt: req.prompt,
-                    is_password: req.is_password,
-                    tool_call_id: tool_call_id.clone(),
-                });
+                match req {
+                    crate::tool::ClientInputRequest::Stdin(req) => {
+                        let request_id = req.request_id.clone();
+                        stdin_responses
+                            .lock()
+                            .await
+                            .insert(request_id.clone(), req.response_tx);
+                        let _ = client_event_tx.send(ServerEvent::StdinRequest {
+                            request_id,
+                            prompt: req.prompt,
+                            is_password: req.is_password,
+                            tool_call_id: tool_call_id.clone(),
+                        });
+                    }
+                    crate::tool::ClientInputRequest::AskUser(req) => {
+                        // Dropping the sender tells the tool nobody can answer.
+                        if !supports_ask_user.load(std::sync::atomic::Ordering::Relaxed) {
+                            continue;
+                        }
+                        ask_user_responses
+                            .lock()
+                            .await
+                            .insert(req.request_id.clone(), req.response_tx);
+                        let _ = client_event_tx.send(ServerEvent::AskUser {
+                            request_id: req.request_id,
+                            tool_call_id: req.tool_call_id,
+                            questions: req.questions,
+                        });
+                    }
+                }
             }
         })
     };
@@ -1553,6 +1580,7 @@ server_resumes: false,
                 system_prompt,
                 supports_pdf_panels: requested_pdf_panels,
                 supports_user_response: requested_user_response,
+                supports_ask_user: requested_ask_user,
                 supports_server_failover: requested_server_failover,
                 supports_turn_identity: _,
                 working_dir: subscribe_working_dir,
@@ -1625,6 +1653,7 @@ server_resumes: false,
                 );
                 recent_history_messages = history_base.and_then(|base| base.recent_messages);
                 supports_user_response = requested_user_response;
+                supports_ask_user.store(requested_ask_user, std::sync::atomic::Ordering::Relaxed);
                 supports_server_failover = requested_server_failover;
                 active_terminal_env = terminal_env;
                 current_client_instance_id = client_instance_id.clone();
@@ -1633,6 +1662,7 @@ server_resumes: false,
                     if let Some(info) = connections.get_mut(&client_connection_id) {
                         info.client_instance_id = client_instance_id.clone();
                         info.supports_user_response = requested_user_response;
+                        info.ask_user_tx = requested_ask_user.then(|| stdin_req_tx.clone());
                         info.terminal_env = active_terminal_env.clone();
                     }
                 }
@@ -2401,6 +2431,21 @@ server_resumes: false,
             } => {
                 handle_stdin_response(id, request_id, input, &stdin_responses, &client_event_tx)
                     .await;
+            }
+
+            Request::AskUserResponse {
+                id,
+                request_id,
+                answers,
+            } => {
+                handle_ask_user_response(
+                    id,
+                    request_id,
+                    answers,
+                    &ask_user_responses,
+                    &client_event_tx,
+                )
+                .await;
             }
 
             Request::AgentTask { id, task, .. } => {
@@ -3502,6 +3547,7 @@ server_resumes: false,
             crate::logging::warn(&format!("Client stdin forwarder failed: {error}"));
         }
         stdin_responses.lock().await.clear();
+        ask_user_responses.lock().await.clear();
         if let Some(handle) = processing_task.take() {
             crate::logging::info(&format!(
                 "Retaining disconnected turn for session {}",

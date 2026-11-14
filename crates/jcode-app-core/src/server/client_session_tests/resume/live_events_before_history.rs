@@ -50,6 +50,7 @@ async fn restored_resume_with_history_backpressure(recovery_turn: bool) -> Resul
             current_tool_name: None,
             terminal_env: Vec::new(),
             supports_user_response: false,
+            ask_user_tx: None,
             disconnect_tx: mpsc::unbounded_channel().0,
         },
     )])));
