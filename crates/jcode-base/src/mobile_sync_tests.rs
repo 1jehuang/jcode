@@ -1242,3 +1242,28 @@ fn incremental_updates_replay_rewritten_and_shrunk_prefixes() {
     session.truncate_messages(1);
     assert_eq!(incremental_messages(&session, &progress).0.len(), 1);
 }
+
+#[test]
+fn phone_message_opt_out_survives_sync_saves_and_disable() {
+    let _lock = storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _env = TestEnv::set(&[("JCODE_HOME", home.path().as_os_str())]);
+    save_state(&MobileSyncState {
+        enabled: true,
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(!uncached_mobile_state().phone_messages_off);
+    let stale = uncached_mobile_state();
+
+    assert!(set_phone_messages_off(true).unwrap().phone_messages_off);
+    // A writer holding an older read must not turn messages back on.
+    save_state(&stale).unwrap();
+    assert!(uncached_mobile_state().phone_messages_off);
+    assert!(uncached_mobile_state().enabled);
+    save_state(&MobileSyncState::default()).unwrap();
+    assert!(uncached_mobile_state().phone_messages_off);
+
+    assert!(!set_phone_messages_off(false).unwrap().phone_messages_off);
+    assert!(!uncached_mobile_state().phone_messages_off);
+}

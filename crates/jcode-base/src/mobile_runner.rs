@@ -17,9 +17,14 @@ use std::process::Stdio;
 use std::time::Duration;
 #[path = "mobile_runner_events.rs"]
 mod events;
+#[path = "mobile_runner_local.rs"]
+mod local;
 #[cfg(test)]
 #[path = "mobile_runner_poll_tests.rs"]
 mod poll_tests;
+pub use local::{
+    LiveSession, LocalSessionHost, MAX_REPORTED_SESSIONS, run_local_once, spawn_local_runner,
+};
 #[path = "mobile_runner_process.rs"]
 mod process;
 #[cfg(test)]

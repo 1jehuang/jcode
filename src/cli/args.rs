@@ -677,6 +677,12 @@ pub(crate) enum TelemetryCommand {
     Disable,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MobileMessagesState {
+    On,
+    Off,
+}
+
 #[derive(Subcommand, Debug)]
 pub(crate) enum MobileCommand {
     /// Turn on transcript sync to your Jcode account (requires a subscription)
@@ -687,6 +693,12 @@ pub(crate) enum MobileCommand {
     Status,
     /// Run one sync pass now
     Sync,
+    /// Allow or stop messages from the phone to sessions running on this
+    /// computer (on by default while mobile sync is enabled)
+    Messages {
+        #[arg(value_enum)]
+        state: MobileMessagesState,
+    },
     /// Run sessions started or continued from the phone on this machine
     /// (Jcode Cloud machines do this automatically)
     Runner {

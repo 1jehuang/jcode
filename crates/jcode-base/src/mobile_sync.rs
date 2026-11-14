@@ -112,6 +112,10 @@ pub struct MobileSyncState {
     /// Fences uploads started before a disable/re-enable cycle.
     #[serde(default)]
     pub generation: u64,
+    /// The user turned off messages from the phone to sessions running here
+    /// (`jcode mobile messages off`). Transcript sync is unaffected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub phone_messages_off: bool,
     /// session id -> progress
     #[serde(default)]
     pub sessions: BTreeMap<String, SessionProgress>,
@@ -295,6 +299,17 @@ pub fn save_state(state: &MobileSyncState) -> Result<()> {
     storage::write_json_secret(&state_path()?, &next)
 }
 
+/// Allow or refuse messages from the phone to sessions running here.
+/// `save_state` never changes this, so a sync pass working from an older read
+/// cannot undo the user's choice.
+pub fn set_phone_messages_off(off: bool) -> Result<MobileSyncState> {
+    let _lock = state_lock()?;
+    let mut next = load_state();
+    next.phone_messages_off = off;
+    storage::write_json_secret(&state_path()?, &next)?;
+    Ok(next)
+}
+
 fn merge_progress(
     state: &mut MobileSyncState,
     updates: &BTreeMap<String, SessionProgress>,
@@ -353,7 +368,7 @@ pub fn session_source() -> &'static str {
     }
 }
 
-fn host_name() -> Option<String> {
+pub(crate) fn host_name() -> Option<String> {
     std::env::var_os("HOSTNAME")
         .map(|value| value.to_string_lossy().into_owned())
         .or_else(|| match std::fs::read_to_string("/etc/hostname") {
@@ -677,7 +692,7 @@ async fn drain_upload_response(mut response: reqwest::Response) -> &'static str 
     timing.outcome
 }
 
-fn valid_session_id(id: &str) -> bool {
+pub(crate) fn valid_session_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
         && id
