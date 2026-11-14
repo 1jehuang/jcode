@@ -61,8 +61,8 @@ pub(crate) fn initial_title(args: &Args) -> String {
         Some(Command::Browser { .. }) => "jcode browser".to_string(),
         Some(Command::Replay { .. }) => "jcode replay".to_string(),
         Some(Command::Model(_)) => "jcode model".to_string(),
-        Some(Command::HerdrStatus) => "jcode herdr status".to_string(),
-        Some(Command::HerdrInstall) => "jcode herdr install".to_string(),
+        // The fork's `herdr status` / `herdr install` subcommands were never
+        // ported (only the runtime reporter crate was), so they have no arms.
         Some(Command::ProviderTestCoverage { .. }) => "jcode provider-test-coverage".to_string(),
         Some(Command::ProviderDoctor { .. }) => "jcode provider-doctor".to_string(),
         Some(Command::AuthTest { .. }) => "jcode auth-test".to_string(),
