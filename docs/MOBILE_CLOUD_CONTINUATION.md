@@ -87,4 +87,11 @@ This feature requires compatible API, mobile-app, and cloud-runner versions.
   application source, commit `6f91b68`.
 
 These automated results are not physical-device iOS acceptance. Production
-API rollout and desktop activation are tracked separately from test results.
+backend `77039949-c1ed-4d7e-bbcf-ad6b1f80200a` was activated at 02:37 UTC,
+November 14. Real mobile composer-API command
+`88598cde-2df1-4dba-a6e3-b9cde7595e8d` reached the same normal local session,
+completed as local, and its exact reply appeared in daemon history and the
+ordinary synced transcript by 02:39:44 UTC, without cloud transfer. The updated
+desktop was gracefully activated with running sessions preserved. See
+`LIVE_LOCAL_PRODUCTION_ACCEPTANCE.md` and the backend's
+`MOBILE_LIVE_LOCAL_ROLLOUT_2026_11_14.md` for receipts and cleanup details.
