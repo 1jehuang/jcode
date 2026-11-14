@@ -16,13 +16,14 @@ use crate::auth::antigravity as antigravity_auth;
 use anyhow::{Context, Result};
 use chrono::Utc;
 
-pub use jcode_provider_antigravity::is_known_model;
 pub use jcode_provider_antigravity::{
     AVAILABLE_MODELS, CatalogModel, CatalogSnapshot, DEFAULT_FALLBACK_MODEL,
     FetchAvailableModelsResponse, PersistedCatalog, X_GOOG_API_CLIENT,
-    antigravity_compatible_schema, antigravity_user_agent, catalog_is_stale, catalog_model_detail,
-    client_metadata_header, fetch_models_api_url, is_retryable_empty_turn,
-    merge_antigravity_model_ids, parse_fetch_available_models_response, remap_unsupported_model,
+    antigravity_compatible_schema, antigravity_user_agent, catalog_has_cli_models,
+    catalog_is_stale, catalog_matches_current_cli_version, catalog_model_detail,
+    client_metadata_header, fetch_models_api_url, is_antigravity_exclusive_model, is_known_model,
+    is_retryable_empty_turn, merge_antigravity_model_ids, parse_fetch_available_models_response,
+    remap_unsupported_model,
 };
 
 /// Path of the persisted warm-catalog cache shared by the runtime crate and
@@ -32,11 +33,7 @@ pub fn persisted_catalog_path() -> Result<std::path::PathBuf> {
 }
 
 /// Load the persisted warm catalog, if present, non-empty, and fetched from
-/// the currently resolved Cloud Code endpoint. A catalog cached from a
-/// different endpoint (e.g. after an endpoint default change or a new
-/// `JCODE_ANTIGRAVITY_ENDPOINT`) is discarded rather than served stale: the
-/// set of models an endpoint serves is endpoint-specific, so reusing it could
-/// offer a model id the current endpoint cannot actually serve.
+/// the currently resolved Cloud Code endpoint and CLI User-Agent version.
 pub fn load_persisted_catalog() -> Option<PersistedCatalog> {
     let path = persisted_catalog_path().ok()?;
     crate::storage::read_json(&path)
@@ -44,6 +41,8 @@ pub fn load_persisted_catalog() -> Option<PersistedCatalog> {
         .filter(|catalog: &PersistedCatalog| {
             !catalog.models.is_empty()
                 && jcode_provider_antigravity::catalog_matches_current_endpoint(catalog)
+                && jcode_provider_antigravity::catalog_matches_current_cli_version(catalog)
+                && jcode_provider_antigravity::catalog_has_cli_models(catalog)
         })
 }
 
@@ -60,6 +59,7 @@ pub fn persist_catalog(snapshot: &CatalogSnapshot) {
         fetched_at_rfc3339: Utc::now().to_rfc3339(),
         default_model_id: snapshot.default_model_id.clone(),
         endpoint: Some(jcode_provider_antigravity::antigravity_endpoint()),
+        cli_version: Some(jcode_provider_antigravity::antigravity_version()),
     };
     if let Err(error) = crate::storage::write_json(&path, &payload) {
         crate::logging::warn(&format!(
