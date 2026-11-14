@@ -277,11 +277,59 @@ pub enum SignaturePolicy {
     DowngradeToolCallsToText,
 }
 
-/// Whether a provider error body is the Cloud Code / Antigravity backend
-/// rejecting a turn because its function calls lack a usable thought signature.
+/// Whether a provider error body is the Cloud Code / Antigravity / Gemini
+/// backend rejecting a turn because its function calls lack a usable thought
+/// signature or violate Gemini's strict functionCall/functionResponse turn
+/// invariants after compaction or interruption.
 pub fn is_missing_thought_signature_error(message: &str) -> bool {
     let lowered = message.to_ascii_lowercase();
-    lowered.contains("thought_signature") || lowered.contains("thoughtsignature")
+    lowered.contains("thought_signature")
+        || lowered.contains("thoughtsignature")
+        || lowered.contains(
+            "function call turn comes immediately after a user turn or after a function response turn",
+        )
+        || lowered.contains("function response turn comes immediately after a function call turn")
+        || lowered.contains(
+            "number of function response parts is equal to the number of function call parts",
+        )
+}
+
+type BlockPositions = HashSet<(usize, usize)>;
+
+/// Pair `ToolUse` and `ToolResult` blocks 1-to-1 across adjacent `Assistant` ->
+/// `User` turns so orphaned or interrupted calls/results can be downgraded to
+/// readable text before Gemini rejects the whole request (#2168).
+fn matched_tool_positions(messages: &[Message]) -> (BlockPositions, BlockPositions) {
+    let mut matched_uses = HashSet::new();
+    let mut matched_results = HashSet::new();
+
+    for (u_msg_idx, message) in messages.iter().enumerate() {
+        if message.role != Role::Assistant {
+            continue;
+        }
+        for (u_blk_idx, block) in message.content.iter().enumerate() {
+            let ContentBlock::ToolUse { id, .. } = block else {
+                continue;
+            };
+            'search: for (r_msg_idx, next_msg) in messages.iter().enumerate().skip(u_msg_idx + 1) {
+                if next_msg.role == Role::Assistant {
+                    break;
+                }
+                for (r_blk_idx, next_block) in next_msg.content.iter().enumerate() {
+                    if let ContentBlock::ToolResult { tool_use_id, .. } = next_block
+                        && tool_use_id == id
+                        && !matched_results.contains(&(r_msg_idx, r_blk_idx))
+                    {
+                        matched_uses.insert((u_msg_idx, u_blk_idx));
+                        matched_results.insert((r_msg_idx, r_blk_idx));
+                        break 'search;
+                    }
+                }
+            }
+        }
+    }
+
+    (matched_uses, matched_results)
 }
 
 pub fn build_contents_with_signature_policy(
@@ -306,16 +354,25 @@ pub fn build_contents_with_signature_policy(
     // calls, so we carry the most recent real signature forward across the whole
     // conversation onto any function call that lacks one. This keeps multi-call
     // turns and synthesized/imported histories replayable instead of hard-failing.
+    let (matched_uses, matched_results) = if policy == SignaturePolicy::DowngradeToolCallsToText {
+        (HashSet::new(), HashSet::new())
+    } else {
+        matched_tool_positions(messages)
+    };
     let mut last_signature: Option<String> = None;
     messages
         .iter()
-        .filter_map(|message| {
+        .enumerate()
+        .filter_map(|(msg_idx, message)| {
             let role = match message.role {
                 Role::User => "user",
                 Role::Assistant => "model",
             };
+            let has_later_user_turn = messages[msg_idx + 1..]
+                .iter()
+                .any(|later| later.role == Role::User);
             let mut parts = Vec::new();
-            for block in &message.content {
+            for (blk_idx, block) in message.content.iter().enumerate() {
                 match block {
                     ContentBlock::Text { text, .. } => {
                         parts.push(GeminiPart {
@@ -333,10 +390,23 @@ pub fn build_contents_with_signature_policy(
                         input,
                         thought_signature,
                     } => {
-                        if policy == SignaturePolicy::DowngradeToolCallsToText {
-                            // The backend rejected this history's function-call
-                            // parts. Preserve the call as readable text so the
-                            // model keeps its context instead of 400ing forever.
+                        let own_signature = thought_signature
+                            .as_ref()
+                            .filter(|sig| !sig.is_empty())
+                            .cloned();
+                        if own_signature.is_some() {
+                            last_signature = own_signature.clone();
+                        }
+                        let unanswered_in_history =
+                            has_later_user_turn && !matched_uses.contains(&(msg_idx, blk_idx));
+                        if policy == SignaturePolicy::DowngradeToolCallsToText
+                            || unanswered_in_history
+                        {
+                            // Either the backend rejected this history's
+                            // function-call parts, or this call never received
+                            // a matching `ToolResult` before the user spoke
+                            // again (#2168). Preserve the call as readable text
+                            // so context and turn alternation stay intact.
                             parts.push(GeminiPart {
                                 text: Some(format!(
                                     "[previous tool call] {name}({})",
@@ -345,13 +415,6 @@ pub fn build_contents_with_signature_policy(
                                 ..Default::default()
                             });
                             continue;
-                        }
-                        let own_signature = thought_signature
-                            .as_ref()
-                            .filter(|sig| !sig.is_empty())
-                            .cloned();
-                        if own_signature.is_some() {
-                            last_signature = own_signature.clone();
                         }
                         let signature = own_signature.or_else(|| last_signature.clone());
                         parts.push(GeminiPart {
@@ -369,9 +432,13 @@ pub fn build_contents_with_signature_policy(
                         content,
                         is_error,
                     } => {
-                        if policy == SignaturePolicy::DowngradeToolCallsToText {
-                            // A `functionResponse` with no matching signed
-                            // `functionCall` is also rejected, so downgrade it too.
+                        if policy == SignaturePolicy::DowngradeToolCallsToText
+                            || !matched_results.contains(&(msg_idx, blk_idx))
+                        {
+                            // A `functionResponse` with no matching preceding
+                            // `functionCall` (e.g. after compaction or under
+                            // downgrade recovery) is rejected by Gemini, so
+                            // preserve it as readable text instead.
                             let label = if is_error.unwrap_or(false) {
                                 "previous tool error"
                             } else {
@@ -408,9 +475,13 @@ pub fn build_contents_with_signature_policy(
                             ..Default::default()
                         });
                     }
-                    ContentBlock::OpenAICompaction { .. }
-                    | ContentBlock::ToolReference { .. }
-                    | ContentBlock::ProviderNative { .. } => {}
+                    ContentBlock::OpenAICompaction { .. } => {
+                        parts.push(GeminiPart {
+                            text: Some("[Prior conversation context compacted]".to_string()),
+                            ..Default::default()
+                        });
+                    }
+                    ContentBlock::ToolReference { .. } | ContentBlock::ProviderNative { .. } => {}
                 }
             }
             if parts.is_empty() {
@@ -915,5 +986,157 @@ mod tests {
             .unwrap();
         assert!(content.role.is_empty());
         assert!(content.parts.is_empty());
+    }
+
+    #[test]
+    fn openai_compaction_marker_keeps_user_turn_between_model_turns() {
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "Compacted summary.".to_string(),
+                    cache_control: None,
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::OpenAICompaction {
+                    encrypted_content: "enc_blob".to_string(),
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "bash".to_string(),
+                    input: json!({ "command": "ls" }),
+                    thought_signature: Some("SIG_1".to_string()),
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".to_string(),
+                    content: "ok".to_string(),
+                    is_error: Some(false),
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+        ];
+
+        let contents = build_contents(&messages);
+        assert_eq!(contents.len(), 4);
+        assert_eq!(contents[0].role, "model");
+        assert_eq!(contents[1].role, "user");
+        assert_eq!(
+            contents[1].parts[0].text.as_deref(),
+            Some("[Prior conversation context compacted]")
+        );
+        assert_eq!(contents[2].role, "model");
+        assert!(contents[2].parts[0].function_call.is_some());
+        assert_eq!(contents[3].role, "user");
+        assert!(contents[3].parts[0].function_response.is_some());
+    }
+
+    #[test]
+    fn unpaired_in_flight_call_and_orphaned_result_downgrade_without_losing_signatures() {
+        let messages = vec![
+            // Orphaned ToolResult left at the head of history after compaction.
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "evicted_call".to_string(),
+                    content: "old output".to_string(),
+                    is_error: Some(false),
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            // Multi-call turn where `call_cancelled` was interrupted (yet carried
+            // the turn's real signature) while `call_done` completed.
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "call_cancelled".to_string(),
+                        name: "bash".to_string(),
+                        input: json!({ "command": "sleep 60" }),
+                        thought_signature: Some("SIG_REAL".to_string()),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "call_done".to_string(),
+                        name: "read".to_string(),
+                        input: json!({ "path": "Cargo.toml" }),
+                        thought_signature: None,
+                    },
+                ],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_done".to_string(),
+                    content: "[package]".to_string(),
+                    is_error: Some(false),
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+        ];
+
+        let contents = build_contents(&messages);
+        let call_count = contents
+            .iter()
+            .flat_map(|c| &c.parts)
+            .filter(|p| p.function_call.is_some())
+            .count();
+        let resp_count = contents
+            .iter()
+            .flat_map(|c| &c.parts)
+            .filter(|p| p.function_response.is_some())
+            .count();
+        assert_eq!(call_count, 1);
+        assert_eq!(resp_count, 1);
+        assert!(
+            contents[0].parts[0]
+                .text
+                .as_deref()
+                .unwrap_or_default()
+                .contains("old output")
+        );
+        assert!(
+            contents[1].parts[0]
+                .text
+                .as_deref()
+                .unwrap_or_default()
+                .contains("sleep 60")
+        );
+        assert_eq!(
+            contents[1].parts[1].function_call.as_ref().unwrap().name,
+            "read"
+        );
+        assert_eq!(
+            contents[1].parts[1].thought_signature.as_deref(),
+            Some("SIG_REAL"),
+            "signature from a downgraded sibling must still carry forward"
+        );
+    }
+
+    #[test]
+    fn recognizes_function_call_turn_order_and_count_rejections_for_downgrade_retry() {
+        assert!(is_missing_thought_signature_error(
+            "Antigravity generateContent failed (HTTP 400 Bad Request): Please ensure that function call turn comes immediately after a user turn or after a function response turn."
+        ));
+        assert!(is_missing_thought_signature_error(
+            "Gemini generateContent failed (HTTP 400 Bad Request): Please ensure that the number of function response parts is equal to the number of function call parts."
+        ));
     }
 }

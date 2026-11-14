@@ -20,10 +20,11 @@ pub use jcode_provider_gemini::{
     GeminiPromptFeedback, GeminiRuntimeState, GeminiTool, GeminiToolConfig, GeminiUsageMetadata,
     GeminiUserTier, IneligibleTier, InlineData, LoadCodeAssistRequest, LoadCodeAssistResponse,
     LongRunningOperationResponse, OnboardUserRequest, OnboardUserResponse, ProjectRef,
-    USER_TIER_FREE, VertexGenerateContentRequest, VertexGenerateContentResponse, build_contents,
-    build_system_instruction_with_tool_guard, build_tools, choose_onboard_tier, client_metadata,
-    extract_gemini_model_ids, gemini_fallback_models, google_cloud_project_from_env,
-    ineligible_or_project_error, is_gemini_model_id, load_code_assist_request,
+    SignaturePolicy, USER_TIER_FREE, VertexGenerateContentRequest, VertexGenerateContentResponse,
+    build_contents, build_contents_with_signature_policy, build_system_instruction_with_tool_guard,
+    build_tools, choose_onboard_tier, client_metadata, extract_gemini_model_ids,
+    gemini_fallback_models, google_cloud_project_from_env, ineligible_or_project_error,
+    is_gemini_model_id, is_missing_thought_signature_error, load_code_assist_request,
     merge_gemini_model_lists, validate_load_code_assist_response,
 };
 use serde::Serialize;
@@ -485,13 +486,22 @@ impl GeminiProvider {
             jcode_schema_dialect::RecoveryAction::RetryWithoutConstruct { description } => {
                 jcode_base::logging::warn(&format!("Gemini {description}"));
                 Some(
-                    self.generate_content(state, model, messages, tools, system, resume_session_id)
-                        .await,
+                    self.generate_content(
+                        state,
+                        model,
+                        messages,
+                        tools,
+                        system,
+                        resume_session_id,
+                        SignaturePolicy::ReplayCarriedForward,
+                    )
+                    .await,
                 )
             }
         }
     }
 
+    #[expect(clippy::too_many_arguments)]
     async fn generate_content(
         &self,
         state: &GeminiRuntimeState,
@@ -500,13 +510,14 @@ impl GeminiProvider {
         tools: &[ToolDefinition],
         system: &str,
         resume_session_id: Option<&str>,
+        signature_policy: SignaturePolicy,
     ) -> Result<CodeAssistGenerateResponse> {
         let request = CodeAssistGenerateRequest {
             model: model.to_string(),
             project: state.project_id.clone(),
             user_prompt_id: Uuid::new_v4().to_string(),
             request: VertexGenerateContentRequest {
-                contents: build_contents(messages),
+                contents: build_contents_with_signature_policy(messages, signature_policy),
                 system_instruction: build_system_instruction_with_tool_guard(
                     system,
                     !tools.is_empty(),
@@ -672,6 +683,7 @@ impl Provider for GeminiProvider {
                     &tools,
                     &system,
                     resume_session_id.as_deref(),
+                    SignaturePolicy::ReplayCarriedForward,
                 )
                 .await
             {
@@ -692,6 +704,7 @@ impl Provider for GeminiProvider {
                                 &tools,
                                 &system,
                                 resume_session_id.as_deref(),
+                                SignaturePolicy::ReplayCarriedForward,
                             )
                             .await
                         {
@@ -736,6 +749,29 @@ impl Provider for GeminiProvider {
                         Some(Err(retry_err)) => {
                             let _ = tx.send(Err(retry_err)).await;
                             return;
+                        }
+                        None if is_missing_thought_signature_error(&err.to_string()) => {
+                            jcode_base::logging::warn(
+                                "Gemini rejected function-call history; retrying with tool calls downgraded to text",
+                            );
+                            match provider
+                                .generate_content(
+                                    &state,
+                                    &model,
+                                    &messages,
+                                    &tools,
+                                    &system,
+                                    resume_session_id.as_deref(),
+                                    SignaturePolicy::DowngradeToolCallsToText,
+                                )
+                                .await
+                            {
+                                Ok(response) => response,
+                                Err(retry_err) => {
+                                    let _ = tx.send(Err(retry_err)).await;
+                                    return;
+                                }
+                            }
                         }
                         None => {
                             let _ = tx.send(Err(err)).await;
