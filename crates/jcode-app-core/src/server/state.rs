@@ -415,16 +415,28 @@ pub(super) fn send_event_to_targets<'a>(
     targets: impl IntoIterator<Item = &'a mpsc::UnboundedSender<ServerEvent>>,
     event: ServerEvent,
 ) -> usize {
+    send_event_to_targets_recover(targets, event).unwrap_or(0)
+}
+
+/// Return the original payload when every queue is closed or rejects delivery.
+/// A caller can then use its fallback without cloning successful events first.
+fn send_event_to_targets_recover<'a>(
+    targets: impl IntoIterator<Item = &'a mpsc::UnboundedSender<ServerEvent>>,
+    event: ServerEvent,
+) -> Result<usize, ServerEvent> {
     let mut targets = targets.into_iter().filter(|tx| !tx.is_closed()).peekable();
     let mut delivered = 0;
     while let Some(tx) = targets.next() {
         if targets.peek().is_none() {
-            delivered += usize::from(tx.send(event).is_ok());
-            break;
+            return match tx.send(event) {
+                Ok(()) => Ok(delivered + 1),
+                Err(error) if delivered == 0 => Err(error.0),
+                Err(_) => Ok(delivered),
+            };
         }
         delivered += usize::from(tx.send(event.clone()).is_ok());
     }
-    delivered
+    Err(event)
 }
 
 // Keep sends outside the session lock without allocating for the usual single
@@ -466,16 +478,30 @@ impl RecipientSnapshot {
 #[path = "state_fanout_tests.rs"]
 mod fanout_tests;
 
+#[cfg(test)]
+#[path = "state_turn_delivery_tests.rs"]
+mod turn_delivery_tests;
+
 pub(super) async fn fanout_session_event(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     session_id: &str,
     event: ServerEvent,
 ) -> usize {
+    fanout_session_event_recover(swarm_members, session_id, event)
+        .await
+        .unwrap_or(0)
+}
+
+async fn fanout_session_event_recover(
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    session_id: &str,
+    event: ServerEvent,
+) -> Result<usize, ServerEvent> {
     super::live_status::observe(session_id, &event);
     let targets = {
         let mut members = swarm_members.write().await;
         let Some(member) = members.get_mut(session_id) else {
-            return 0;
+            return Err(event);
         };
 
         member.event_txs.retain(|_, tx| !tx.is_closed());
@@ -495,7 +521,7 @@ pub(super) async fn fanout_session_event(
         }
     };
 
-    send_event_to_targets(targets.as_slice(), event)
+    send_event_to_targets_recover(targets.as_slice(), event)
 }
 
 pub(super) async fn fanout_live_client_event(
@@ -568,7 +594,8 @@ impl TurnEventChannel {
             let started = ServerEvent::TurnStarted {
                 identity: identity.clone(),
             };
-            if fanout_session_event(&members, &session_id, started.clone()).await == 0 {
+            if let Err(started) = fanout_session_event_recover(&members, &session_id, started).await
+            {
                 let _ = fallback.send(started);
             }
             loop {
@@ -591,7 +618,8 @@ impl TurnEventChannel {
                     identity: identity.clone(),
                     event: Box::new(event),
                 };
-                if fanout_session_event(&members, &session_id, event.clone()).await == 0 {
+                if let Err(event) = fanout_session_event_recover(&members, &session_id, event).await
+                {
                     let _ = fallback.send(event);
                 }
             }
@@ -600,7 +628,8 @@ impl TurnEventChannel {
                     identity: identity.clone(),
                     event: Box::new(event),
                 };
-                if fanout_session_event(&members, &session_id, event.clone()).await == 0 {
+                if let Err(event) = fanout_session_event_recover(&members, &session_id, event).await
+                {
                     let _ = fallback.send(event);
                 }
             }
