@@ -3414,7 +3414,7 @@ fn handle_alignment_command(app: &mut App, trimmed: &str) -> bool {
 }
 
 fn handle_theme_command(app: &mut App, trimmed: &str) -> bool {
-    if !trimmed.starts_with("/theme") {
+    if trimmed != "/theme" && !trimmed.starts_with("/theme ") {
         return false;
     }
 
@@ -3459,18 +3459,25 @@ fn handle_theme_command(app: &mut App, trimmed: &str) -> bool {
     // Save to config
     match crate::config::Config::set_display_theme(&theme_value) {
         Ok(()) => {
-            // Apply theme immediately at runtime
-            let mode = if theme_value == "light" {
-                jcode_tui_style::ThemeMode::Light
-            } else if theme_value == "dark" {
-                jcode_tui_style::ThemeMode::Dark
-            } else {
-                // system/auto: detect from terminal
-                crate::tui::theme_detect::init_theme_mode()
+            // Apply theme immediately at runtime. Mode and palette must both
+            // follow the newly saved preference: resolving the mode from the
+            // same config value (not the stale global) keeps a forced dark on a
+            // light terminal from reinstalling the light-adapted palette
+            // (or vice versa).
+            let mode = match theme_value.as_str() {
+                "light" => jcode_tui_style::ThemeMode::Light,
+                "dark" => jcode_tui_style::ThemeMode::Dark,
+                _ => {
+                    // system/auto: detect from terminal
+                    crate::tui::theme_detect::init_theme_mode()
+                }
             };
             jcode_tui_style::set_theme_mode(mode);
             // Re-apply palette in case a custom theme file is configured
             crate::tui::theme_detect::apply_configured_palette();
+            // Cached transcript lines carry the previous theme's colors;
+            // drop them so existing messages re-render with the new palette.
+            jcode_tui_messages::clear_message_cache();
 
             app.push_display_message(DisplayMessage::system(format!(
                 "Theme set to {theme_value}. Applied immediately."

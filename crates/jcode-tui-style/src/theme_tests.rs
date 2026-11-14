@@ -758,9 +758,8 @@ fn semantic_role_slots_defaults_match_role_defaults() {
     for &(key, role) in &SEMANTIC_ROLE_SLOTS {
         let expected = role.default_rgb();
         let (r, g, b) = expected;
-        assert_eq!(
+        assert!(
             theme_color_is_default(Color::Rgb(r, g, b), expected),
-            true,
             "{key:?} default must match Role::{}::default_rgb",
             role.key()
         );

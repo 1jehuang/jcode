@@ -80,7 +80,7 @@ A blocked command must not silently execute against the laptop.
 | `/colors`, `/color`, `/alignment`, `/latex`, `/thinking-display`, `/thinking`, `/reasoning`, `/compact-notifications`, `/show-agentgrep-output`, `/tool-call-details` | UI | Client presentation preferences intentionally belong to the displaying terminal. Saved settings affect the laptop UI, never VM session storage. |
 | `/hotkeys`, `/keys`, `/keybindings` | UI | Inspect the displaying terminal's keys and personal hotkey usage, not VM keyboard state. |
 | `/terminal-setup` | UI | Configure the terminal displaying the client. This intentionally changes client terminal settings, not VM settings. |
-| `/theme` | UI | Show or set the laptop color theme (`light`, `dark`, `system`). Rendering only: it restyles this terminal and saves the preference in laptop config; the VM conversation is untouched. |
+| `/theme` | Blocked | Theme changes are unavailable in SSH mode. Neither laptop config nor VM storage is changed. |
 | `/commit`, `/merge`, `/commit-push`, `/commit-and-push` | Prompt | Agent executes git operations on the VM. These are not client-side git invocations. |
 | `/fast-release`, `/fast-macos-release`, `/merge-remote-release`, `/remote-release`, `/cut-release`, `/commit-push-release` | Prompt | Release instructions run through the VM agent. Host tools, credentials and platform builds must exist there. |
 | `/triage` | Prompt | Remote agent triage instruction. Requires the VM's GitHub access. |
