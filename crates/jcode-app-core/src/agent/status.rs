@@ -17,10 +17,7 @@ fn assistant_output_tail_after(messages: &[StoredMessage], start_index: usize) -
                 })
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            jcode_swarm_core::recent_output_tail(
-                std::iter::once(text.as_str()),
-                jcode_swarm_core::SWARM_OUTPUT_TAIL_TOKENS,
-            )
+            jcode_swarm_core::normalize_completion_report(Some(text))
         })
 }
 
@@ -398,7 +395,11 @@ mod output_tail_tests {
             serde_json::json!([{"type":"text", "text":long}]),
         )];
         let tail = assistant_output_tail_after(&messages, 0).unwrap();
-        assert!(tail.len() <= jcode_swarm_core::SWARM_OUTPUT_TAIL_TOKENS * 4);
+        assert_eq!(
+            tail.chars().count(),
+            jcode_swarm_core::MAX_SWARM_COMPLETION_REPORT_CHARS
+        );
+        assert!(tail.starts_with("[Earlier response text truncated by jcode.]"));
         assert!(tail.ends_with("LATEST RESULT"));
     }
 }

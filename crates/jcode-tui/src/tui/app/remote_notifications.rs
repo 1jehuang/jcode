@@ -200,7 +200,8 @@ pub(super) fn swarm_delivery_display_message(content: &str) -> Option<crate::tui
                     | "completed their work."
             )
             || !(details.starts_with("Recent output (automatically captured):\n")
-                || details.starts_with("No recent assistant output was captured. "))
+                || details.starts_with("No recent assistant output was captured. ")
+                || details.starts_with("Lane plan:\n"))
         {
             return None;
         }

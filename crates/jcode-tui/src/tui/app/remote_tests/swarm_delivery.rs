@@ -54,6 +54,21 @@ fn agent_completion_wakes_never_become_user_prompts() {
     assert_eq!(roles, ["user", "swarm", "swarm", "user"]);
 }
 
+#[test]
+fn lane_aware_completion_handoff_is_a_swarm_row() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    let content = "Agent jaguar finished their work and is ready for more.\n\nLane plan:\nPhase 1 · security: 1/2 completed\n- [pending] Live acceptance\n\nFinal response:\nOffline tests passed. Live acceptance unverified.";
+    handle_server_event(&mut app, soft_interrupt_injected(content, None), &mut remote);
+    let message = app.display_messages().last().unwrap();
+    assert_eq!(message.role, "swarm");
+    assert!(crate::tui::app::remote_notifications::swarm_display_full_body(&message.content)
+        .contains("[pending] Live acceptance"));
+}
+
 fn assert_no_long_rows(app: &crate::tui::app::App) {
     for message in app.display_messages() {
         if message.role == "swarm" {
