@@ -241,7 +241,7 @@ struct Account {
 fn account() -> Result<Account> {
     let key = crate::subscription_catalog::configured_api_key()
         .filter(|k| !k.trim().is_empty())
-        .context("Sign in to your Jcode account (`jcode login`) to use Jcode Cloud")?;
+        .with_context(crate::subscription_catalog::cloud_account_required_message)?;
     let base = crate::subscription_catalog::configured_api_base()
         .filter(|b| b.starts_with("https://"))
         .unwrap_or_else(|| DEFAULT_API_BASE.into());
@@ -316,10 +316,8 @@ pub(super) fn request_json<T: serde::de::DeserializeOwned + Send>(
 
 fn describe_error(status: u16, code: &str, message: &str) -> String {
     match (status, code) {
-        (401, _) => "Your Jcode sign-in expired. Run `jcode login` again.".into(),
-        (402, "cloud_not_entitled") => {
-            "Jcode Cloud requires an active paid Jcode subscription.".into()
-        }
+        (401, _) => crate::subscription_catalog::cloud_sign_in_expired_message(),
+        (402, "cloud_not_entitled") => crate::subscription_catalog::cloud_not_entitled_message(),
         _ => message.to_string(),
     }
 }
@@ -932,6 +930,21 @@ mod upgrade_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_errors_name_the_next_step() {
+        use crate::subscription_catalog as catalog;
+        let expired = describe_error(401, "unauthorized", "revoked");
+        assert!(expired.starts_with(catalog::CLOUD_SIGN_IN_EXPIRED));
+        assert!(expired.contains("`jcode account login`"));
+        let unpaid = describe_error(402, "cloud_not_entitled", "");
+        assert!(unpaid.starts_with(catalog::CLOUD_NOT_ENTITLED));
+        assert!(unpaid.contains(catalog::JCODE_PRICING_URL));
+        let signed_out = catalog::cloud_account_required_message();
+        assert!(signed_out.starts_with(catalog::CLOUD_ACCOUNT_REQUIRED));
+        assert!(signed_out.contains("`jcode account login`"));
+        assert_eq!(describe_error(409, "busy", "try later"), "try later");
+    }
 
     #[test]
     fn api_client_is_built_once_per_process() {

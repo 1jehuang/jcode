@@ -10,6 +10,9 @@ impl App {
             "mobile" => {
                 "/mobile\nMove this session and its swarm to your managed Jcode Cloud host, then send a push notification. Tap it in the mobile app to open this session. If already on cloud, only the notification is sent.\n\nSign in to the same Jcode account in the CLI and app, and enable app notifications. Push failures do not undo a successful cloud move.\n\n/mobile cancel\nCancel a queued handoff. An already-running transfer cannot be cancelled here."
             }
+            "cloud" | "local" => {
+                "/cloud\nMove this session and its swarm to your Jcode Cloud machine and keep working there. Requires a Jcode account with a paid plan: run /login jcode first. If you are signed out, /cloud shows the setup steps instead of moving anything.\n\n/cloud <ssh-alias>\nMove to your own SSH host instead. No Jcode account needed.\n\n/cloud --dry-run\nPreview the move.\n\n/cloud status\nShow where this session lives.\n\n/cloud replace --dry-run | --yes\nReplace the cloud checkout with local working files.\n\n/cloud reload\nRestart the cloud daemon onto its new runtime once idle.\n\n/cloud cancel\nCancel a queued handoff.\n\n/local\nBring a cloud session back to this machine."
+            }
             "compact" => {
                 "/compact\nForce context compaction now.\nStarts background summarization and applies it automatically when ready.\n\n/compact mode\nShow current compaction mode for this session.\n\n/compact mode <reactive|proactive|semantic>\nChange compaction mode for this session."
             }

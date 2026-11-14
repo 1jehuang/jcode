@@ -1075,7 +1075,9 @@ pub async fn request_mobile_resume(
     title: Option<&str>,
 ) -> anyhow::Result<String> {
     let (key, base) = credentials().ok_or_else(|| {
-        anyhow::anyhow!("Sign in first with `jcode account login`, then retry /mobile.")
+        anyhow::anyhow!(
+            "Sign in first with `jcode account login` (or `/login jcode`), then retry /mobile."
+        )
     })?;
     let payload = build_payload(
         PushKind::Wake,

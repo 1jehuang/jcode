@@ -113,7 +113,8 @@ impl Target {
             return Ok(super::super::cloud_managed::HOST.to_string());
         }
         bail!(
-            "no cloud machine: sign in with `jcode login` to use the Jcode Cloud machine included with your subscription, or pass --host <ssh-alias> / set JCODE_CLOUD_HOST"
+            "{} To use your own machine instead, pass --host <ssh-alias> or set JCODE_CLOUD_HOST.",
+            crate::subscription_catalog::cloud_account_required_message()
         )
     }
 
