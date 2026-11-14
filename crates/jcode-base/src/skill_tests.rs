@@ -5,6 +5,7 @@ fn test_skill(name: &str, description: &str, content: &str) -> Skill {
         name: name.to_string(),
         description: description.to_string(),
         allowed_tools: None,
+        disable_model_invocation: false,
         content: content.to_string(),
         path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
         search_text: std::sync::OnceLock::from(build_skill_search_text(name, description, content)),
@@ -104,6 +105,107 @@ fn allowed_tools_rejects_non_string_sequence_values() {
     .expect("write skill");
 
     assert!(SkillRegistry::parse_skill_inner(&path).is_err());
+}
+
+#[test]
+fn disable_model_invocation_parses_true_false_and_absence() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let cases = [
+        ("disable-model-invocation: true\n", true),
+        ("disable-model-invocation: false\n", false),
+        ("", false),
+    ];
+
+    for (index, (field, expected)) in cases.into_iter().enumerate() {
+        let path = temp.path().join(format!("skill-{index}.md"));
+        std::fs::write(
+            &path,
+            format!("---\nname: test\ndescription: Test skill\n{field}---\n\nBody\n"),
+        )
+        .expect("write skill");
+        let skill = SkillRegistry::parse_skill_inner(&path).expect("parse skill");
+        assert_eq!(skill.disable_model_invocation, expected, "{field:?}");
+    }
+}
+
+#[test]
+fn disable_model_invocation_skill_is_hidden_from_model_list_but_still_resolvable() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    write_skill_file(
+        temp.path(),
+        "visible",
+        "---\nname: visible\ndescription: Visible skill\n---\n\nBody\n",
+    );
+    write_skill_file(
+        temp.path(),
+        "manual-only",
+        "---\nname: manual-only\ndescription: Manual only\ndisable-model-invocation: true\n---\n\nBody\n",
+    );
+    let mut registry = SkillRegistry::default();
+    registry.load_from_dir(temp.path()).expect("load skills");
+
+    let names = |skills: Vec<&Skill>| -> Vec<String> {
+        skills.into_iter().map(|skill| skill.name.clone()).collect()
+    };
+    assert_eq!(names(registry.list_model_invocable()), ["visible"]);
+    assert_eq!(names(registry.list()), ["manual-only", "visible"]);
+    assert!(registry.get("manual-only").is_some());
+    assert_eq!(
+        registry.resolve_invocation("/manual-only run it"),
+        Some(SkillInvocation {
+            name: "manual-only",
+            prompt: Some("run it"),
+        })
+    );
+    let prompt = registry
+        .get("manual-only")
+        .expect("slash invocation resolves the hidden skill")
+        .get_prompt();
+    assert!(prompt.contains("# Skill: manual-only"), "{prompt}");
+    assert!(prompt.contains("Body"), "{prompt}");
+}
+
+#[test]
+fn disable_model_invocation_non_boolean_values_keep_skill_loaded_and_model_visible() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let cases = [
+        ("quoted-true", "disable-model-invocation: \"true\"\n"),
+        ("empty", "disable-model-invocation:\n"),
+        ("word", "disable-model-invocation: yes\n"),
+        ("number", "disable-model-invocation: 1\n"),
+        ("list", "disable-model-invocation: [true]\n"),
+        ("map", "disable-model-invocation: {hidden: true}\n"),
+        ("false", "disable-model-invocation: false\n"),
+        ("hidden", "disable-model-invocation: true\n"),
+    ];
+    for (name, field) in cases {
+        write_skill_file(
+            temp.path(),
+            name,
+            &format!("---\nname: {name}\ndescription: Test skill\n{field}---\n\nBody\n"),
+        );
+    }
+    let mut registry = SkillRegistry::default();
+    registry.load_from_dir(temp.path()).expect("load skills");
+
+    let visible: Vec<&str> = registry
+        .list_model_invocable()
+        .into_iter()
+        .map(|skill| skill.name.as_str())
+        .collect();
+    assert_eq!(
+        visible,
+        [
+            "empty",
+            "false",
+            "list",
+            "map",
+            "number",
+            "quoted-true",
+            "word"
+        ]
+    );
+    assert!(registry.get("hidden").is_some());
 }
 
 #[test]
