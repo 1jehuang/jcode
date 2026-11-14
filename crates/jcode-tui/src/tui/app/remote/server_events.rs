@@ -1089,6 +1089,7 @@ fn handle_server_event_inner(
             }
             app.push_display_message(DisplayMessage::system("Interrupted"));
             app.is_processing = false;
+            app.note_turn_interrupted();
             app.status = ProcessingStatus::Idle;
             app.stream_message_ended = false;
             app.processing_started = None;
@@ -1207,6 +1208,7 @@ fn handle_server_event_inner(
                 }
                 crate::tui::mermaid::clear_streaming_preview_diagram();
                 app.is_processing = false;
+                app.note_turn_done(app.turn_guardrail_stopped);
                 app.status = ProcessingStatus::Idle;
                 app.stream_message_ended = false;
                 // Turn completed successfully; drop the saved prompt so a later
@@ -1365,6 +1367,7 @@ fn handle_server_event_inner(
                     app.set_status_notice("Rate limited; queued retry");
                 }
                 app.is_processing = false;
+                app.note_turn_retrying(App::compact_provider_failure(&message));
                 app.status = ProcessingStatus::Idle;
                 app.stream_message_ended = false;
                 app.processing_started = None;
@@ -1400,6 +1403,7 @@ fn handle_server_event_inner(
                 });
             }
             app.is_processing = false;
+            app.note_turn_failed(App::compact_provider_failure(&message));
             app.status = ProcessingStatus::Idle;
             app.stream_message_ended = false;
             let recovered_local = recover_local_interleave_to_queue(app, "request error");
@@ -3554,3 +3558,7 @@ use activity_notice::runtime_activity_status_notice;
 #[cfg(test)]
 #[path = "server_events/runtime_command_tests.rs"]
 mod runtime_command_tests;
+
+#[cfg(test)]
+#[path = "server_events/outcome_status_tests.rs"]
+mod outcome_status_tests;
