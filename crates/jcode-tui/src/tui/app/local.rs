@@ -515,6 +515,7 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
     app.set_status_notice(background_task_status_notice(&task));
 
     if !app.is_processing {
+        app.push_display_message(DisplayMessage::background_task(notification.clone()));
         app.add_provider_message(Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
@@ -575,6 +576,7 @@ fn handle_background_task_stalled(app: &mut App, task: crate::bus::BackgroundTas
     ));
 
     if !app.is_processing {
+        app.push_display_message(DisplayMessage::background_task(notification.clone()));
         app.add_provider_message(Message {
             role: Role::User,
             content: vec![ContentBlock::Text {

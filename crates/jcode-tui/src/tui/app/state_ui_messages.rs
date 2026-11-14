@@ -21,8 +21,8 @@ fn display_message_from_stored_message(
     if text.trim().is_empty() {
         return None;
     }
-    if is_background_task_lifecycle_message(&text) {
-        return None;
+    if matches!(message.role, Role::User) && is_background_task_lifecycle_message(&text) {
+        return Some(DisplayMessage::background_task(text));
     }
     if !matches!(message.role, Role::Assistant)
         && let Some(swarm) = super::remote_notifications::swarm_delivery_display_message(&text)
@@ -31,7 +31,9 @@ fn display_message_from_stored_message(
     }
     match message.display_role {
         Some(crate::session::StoredDisplayRole::System) => Some(DisplayMessage::system(text)),
-        Some(crate::session::StoredDisplayRole::BackgroundTask) => None,
+        Some(crate::session::StoredDisplayRole::BackgroundTask) => {
+            Some(DisplayMessage::background_task(text))
+        }
         None => match message.role {
             Role::User => {
                 if crate::session::is_scheduled_task_message(message) {
@@ -126,7 +128,11 @@ impl App {
 
     pub fn push_display_message(&mut self, mut message: DisplayMessage) {
         if is_background_task_lifecycle_message(&message.content) {
-            return;
+            if matches!(message.role.as_str(), "user" | "system") {
+                message.role = "background_task".to_string();
+            } else if message.role != "background_task" && message.role != "assistant" {
+                return;
+            }
         }
         if message.role == "tool" && message.duration_secs.is_none() {
             message.duration_secs = DisplayMessage::tool_duration_from_output(&message.content);
@@ -163,7 +169,15 @@ impl App {
     }
 
     pub(super) fn replace_display_messages(&mut self, mut messages: Vec<DisplayMessage>) {
-        messages.retain(|message| !is_background_task_lifecycle_message(&message.content));
+        messages.retain_mut(|message| {
+            if !is_background_task_lifecycle_message(&message.content) {
+                return true;
+            }
+            if matches!(message.role.as_str(), "user" | "system") {
+                message.role = "background_task".to_string();
+            }
+            matches!(message.role.as_str(), "background_task" | "assistant")
+        });
         for message in &mut messages {
             if message.role == "tool" && message.duration_secs.is_none() {
                 message.duration_secs = DisplayMessage::tool_duration_from_output(&message.content);

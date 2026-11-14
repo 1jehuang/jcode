@@ -85,7 +85,7 @@ fn test_silent_background_lifecycle_updates_local_and_remote_without_transcript(
 }
 
 #[test]
-fn test_handle_background_task_completed_retains_row_without_transcript_card() {
+fn test_handle_background_task_completed_adds_delivery_transcript_card() {
     let mut app = create_test_app();
     let event = BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
         task_id: "bg123".to_string(),
@@ -103,7 +103,8 @@ fn test_handle_background_task_completed_retains_row_without_transcript_card() {
 
     super::local::handle_bus_event(&mut app, Ok(event));
 
-    assert!(app.display_messages().is_empty());
+    assert_eq!(app.display_messages().len(), 1);
+    assert_eq!(app.display_messages()[0].role, "background_task");
     let row = &app.background_task_rows_ref()[0];
     assert_eq!(row.task_id, "bg123");
     assert_eq!(row.label, "bash");
@@ -114,6 +115,32 @@ fn test_handle_background_task_completed_retains_row_without_transcript_card() {
         app.status_notice(),
         Some("Background task completed · bash".to_string())
     );
+}
+
+#[test]
+fn test_local_stalled_background_injection_adds_transcript_entry() {
+    let mut app = create_test_app();
+    let event = BusEvent::BackgroundTaskStalled(crate::bus::BackgroundTaskStalled {
+        task_id: "stalled-delivery".to_string(),
+        tool_name: "bash".to_string(),
+        display_name: None,
+        session_id: app.session.id.clone(),
+        stall_wake_seconds: 30,
+        running_secs: 45.0,
+        output_tail: "waiting for output".to_string(),
+        output_file: std::env::temp_dir().join("stalled-delivery.output"),
+        notify: true,
+        wake: true,
+    });
+    super::local::handle_bus_event(&mut app, Ok(event));
+    assert_eq!(app.display_messages().len(), 1);
+    assert_eq!(app.display_messages()[0].role, "background_task");
+    assert!(
+        app.display_messages()[0]
+            .content
+            .contains("stalled-delivery")
+    );
+    assert!(app.pending_turn);
 }
 
 #[test]
