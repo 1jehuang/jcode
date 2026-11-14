@@ -354,18 +354,20 @@ async fn register_visible_spawned_member(
     broadcast_swarm_status(swarm_id, swarm_members, swarms_by_id).await;
 }
 
-/// Resolve the reasoning effort for a spawned swarm worker (#1165).
+/// Resolve the reasoning effort for a spawned swarm worker (#1165, #2153).
 ///
 /// The swarm tool no longer lets agents choose worker effort, so
 /// `requested_effort` only arrives from direct protocol clients (SDK). It wins
-/// when present, then the user's `agents.swarm_effort` config pin, and
-/// otherwise workers run at [`DEFAULT_SWARM_WORKER_EFFORT`].
+/// when present, then the user's `agents.swarm_effort` config pin, then—if the
+/// coordinator itself is in `swarm` mode—the configured `swarm_root_effort`
+/// (default "low"). This way a coordinator that has explicitly set
+/// `swarm_root_effort = "none"` propagates "no thinking" to its workers.
+/// Otherwise workers run at [`DEFAULT_SWARM_WORKER_EFFORT`].
 #[path = "spawn_policy.rs"]
 mod spawn_policy;
 use spawn_policy::inherit_coordinator_selection;
-pub(super) use spawn_policy::{
-    is_inherit_sentinel, resolve_swarm_spawn_effort, resolve_swarm_spawn_mode,
-};
+pub(crate) use spawn_policy::is_inherit_sentinel;
+pub(super) use spawn_policy::{resolve_swarm_spawn_effort, resolve_swarm_spawn_mode};
 #[expect(
     clippy::too_many_arguments,
     reason = "server-side swarm spawning needs session, swarm state, provider, and event sinks together"
@@ -395,8 +397,14 @@ pub(super) async fn spawn_swarm_agent(
     client_connections: &ClientConnections,
 ) -> anyhow::Result<String> {
     let agents_config = &crate::config::config().agents;
+    // "inherit" / "coordinator" are resolution sentinels handled by
+    // resolve_swarm_spawn_selection, not agent-selected model overrides.
+    // They must pass validation regardless of swarm_model_selection state.
+    let validation_model = requested_model
+        .as_deref()
+        .filter(|model| !is_inherit_sentinel(model));
     agents_config
-        .validate_swarm_model_request(requested_model.as_deref())
+        .validate_swarm_model_request(validation_model)
         .map_err(anyhow::Error::msg)?;
     let resolved_working_dir =
         resolve_spawn_working_dir(working_dir, req_session_id, sessions, swarm_members).await;
@@ -421,6 +429,8 @@ pub(super) async fn spawn_swarm_agent(
     let spawn_effort = resolve_swarm_spawn_effort(
         requested_effort.as_deref(),
         agents_config.swarm_effort.as_deref(),
+        coordinator.reasoning_effort.as_deref(),
+        Some(agents_config.root_effort_for_swarm()),
     );
     crate::logging::info(&format!(
         "Swarm spawn model resolution: requested_model={:?} requested_effort={:?} configured_swarm_effort={:?} configured_swarm_model={:?} coordinator_model={:?} coordinator_provider_key={:?} coordinator_route={:?} -> spawn_model={:?} spawn_provider_key={:?} spawn_route={:?}",

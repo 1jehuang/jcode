@@ -26,6 +26,7 @@ mod comm_await;
 mod comm_control;
 mod comm_plan;
 mod comm_session;
+pub(crate) use comm_session::is_inherit_sentinel;
 mod comm_sync;
 mod configured_name;
 use configured_name::normalize_configured_server_name;

@@ -809,9 +809,16 @@ impl Tool for CommunicateTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let mut params: CommunicateInput = serde_json::from_value(input)?;
+        // "inherit" / "coordinator" are resolution sentinels handled by
+        // resolve_swarm_spawn_selection, not agent-selected model overrides.
+        // They must pass validation regardless of swarm_model_selection state.
+        let validation_model = params
+            .model
+            .as_deref()
+            .filter(|model| !crate::server::is_inherit_sentinel(model));
         crate::config::config()
             .agents
-            .validate_swarm_model_request(params.model.as_deref())
+            .validate_swarm_model_request(validation_model)
             .map_err(anyhow::Error::msg)?;
 
         // `to_session` and `target_session` both name a single session id. Historically
