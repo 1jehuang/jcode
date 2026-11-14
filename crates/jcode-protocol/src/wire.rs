@@ -245,6 +245,15 @@ pub enum Request {
     #[serde(rename = "get_history")]
     GetHistory { id: u64 },
 
+    /// List persisted sessions with the metadata a client needs to group and
+    /// label them (title, working directory, last activity, saved flag).
+    #[serde(rename = "list_sessions")]
+    ListSessions {
+        id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
+
     /// Get only provider/model metadata and available models.
     #[serde(rename = "get_model_catalog")]
     GetModelCatalog {
@@ -942,7 +951,9 @@ pub enum Request {
 }
 
 mod events;
-pub use events::{AccountUsageSnapshot, AccountUsageWindow, ServerEvent, TurnIdentity};
+pub use events::{
+    AccountUsageSnapshot, AccountUsageWindow, ServerEvent, SessionSummary, TurnIdentity,
+};
 
 impl std::fmt::Debug for Request {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

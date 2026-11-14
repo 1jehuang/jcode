@@ -779,3 +779,48 @@ fn subscribe_and_resume_client_name_is_optional_and_compatible() {
     let json = serde_json::to_string(&old).unwrap();
     assert!(!json.contains("client_name"));
 }
+
+#[test]
+fn list_sessions_request_and_event_roundtrip() -> Result<()> {
+    let request = Request::ListSessions {
+        id: 810,
+        limit: Some(25),
+    };
+    let json = serde_json::to_string(&request)?;
+    assert!(json.contains("\"type\":\"list_sessions\""));
+    let decoded = parse_request_json(&json)?;
+    assert_eq!(decoded.id(), 810);
+    assert!(
+        matches!(decoded, Request::ListSessions { limit: Some(25), .. })
+    );
+
+    // `limit` is optional so clients that just want the default page can omit it.
+    let bare: Request = serde_json::from_str(r#"{"type":"list_sessions","id":811}"#)?;
+    assert!(matches!(bare, Request::ListSessions { limit: None, .. }));
+    assert_eq!(bare.id(), 811);
+
+    let event = ServerEvent::Sessions {
+        id: 810,
+        sessions: vec![SessionSummary {
+            session_id: "sess_abc".into(),
+            display_title: "Fix parser".into(),
+            working_dir: Some("/tmp/project".into()),
+            updated_at_ms: 1_700_000_000_000,
+            last_active_at_ms: Some(1_700_000_500_000),
+            saved: true,
+        }],
+    };
+    let wire = encode_event(&event);
+    assert!(wire.contains("\"type\":\"sessions\""));
+    let decoded = parse_event_json(wire.trim())?;
+    let ServerEvent::Sessions { sessions, .. } = decoded else {
+        return Err(anyhow!("expected Sessions event"));
+    };
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].session_id, "sess_abc");
+    assert_eq!(sessions[0].display_title, "Fix parser");
+    assert_eq!(sessions[0].working_dir.as_deref(), Some("/tmp/project"));
+    assert_eq!(sessions[0].last_active_at_ms, Some(1_700_000_500_000));
+    assert!(sessions[0].saved);
+    Ok(())
+}

@@ -98,6 +98,22 @@ pub struct TurnIdentity {
     pub turn_id: u64,
 }
 
+/// One persisted session in a `sessions` reply.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub session_id: String,
+    /// Effective display title (custom rename, todo title, or generated title).
+    pub display_title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    /// Persisted transcript update time, used for newest-first ordering.
+    pub updated_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_active_at_ms: Option<i64>,
+    #[serde(default)]
+    pub saved: bool,
+}
+
 /// Server event sent to client
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -619,6 +635,13 @@ pub enum ServerEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
         display_title: String,
+    },
+
+    /// Persisted sessions on this server, newest activity first.
+    #[serde(rename = "sessions")]
+    Sessions {
+        id: u64,
+        sessions: Vec<SessionSummary>,
     },
 
     /// Full conversation history (response to GetHistory)

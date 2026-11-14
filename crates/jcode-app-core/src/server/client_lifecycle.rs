@@ -1813,6 +1813,50 @@ pub(super) async fn handle_client(
                 }
             }
 
+            Request::ListSessions { id, limit } => {
+                let limit = limit.unwrap_or(500).clamp(1, 2_000);
+                let mut list: Vec<crate::protocol::SessionSummary> =
+                    crate::recent_session_index::recent(limit)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|entry| {
+                            let display_title =
+                                entry.display_title().unwrap_or_default().to_string();
+                            crate::protocol::SessionSummary {
+                                session_id: entry.session_id,
+                                display_title,
+                                working_dir: entry.working_dir,
+                                updated_at_ms: entry.updated_at_ms,
+                                last_active_at_ms: entry.last_active_at_ms,
+                                saved: entry.saved,
+                            }
+                        })
+                        .collect();
+                // A session that has not been persisted yet still belongs in the
+                // live list. Its title is resolved after the first turn.
+                let live_sessions: Vec<String> = sessions.read().await.keys().cloned().collect();
+                for session_id in live_sessions {
+                    if !list.iter().any(|entry| entry.session_id == session_id) {
+                        list.insert(
+                            0,
+                            crate::protocol::SessionSummary {
+                                session_id: session_id.clone(),
+                                display_title: session_id,
+                                working_dir: None,
+                                updated_at_ms: 0,
+                                last_active_at_ms: None,
+                                saved: false,
+                            },
+                        );
+                    }
+                }
+                let json = encode_event(&ServerEvent::Sessions { id, sessions: list });
+                let mut w = writer.lock().await;
+                if w.write_all(json.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+
             Request::GetModelCatalog { id, subscribe_usage_updates } => {
                 model_usage_updates_enabled = subscribe_usage_updates;
                 if handle_get_model_catalog(id, &client_session_id, &agent, &provider, &writer)
