@@ -81,6 +81,20 @@ fn model_uses_messages_api(api_base: &str, profile_id: Option<&str>, model: &str
         && jcode_base::provider_catalog::model_uses_messages_api(model)
 }
 
+/// Path this endpoint serves `model` on, without the configured api_base.
+///
+/// Public so callers outside this crate (notably `jcode-base`'s provider
+/// tests) can assert the route a runtime selects instead of duplicating the
+/// model allowlists. Production code picks the route through
+/// [`select_protocol`] directly.
+pub fn openai_compatible_route_path(
+    api_base: &str,
+    profile_id: Option<&str>,
+    model: &str,
+) -> &'static str {
+    select_protocol(api_base, profile_id, model).route()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

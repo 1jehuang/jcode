@@ -2967,6 +2967,19 @@ impl Provider for MultiProvider {
         } else {
             None
         };
+        // Carry the active direct OpenAI-compatible runtime, not just the real
+        // OpenRouter slot. A fork that rebuilt every profile from `Default`
+        // lost the profile identity behind the current model, so the per-model
+        // protocol hint (e.g. OpenCode Go's `/responses` and `/messages`
+        // routes, issue #1225) silently degraded to chat completions until the
+        // next `set_model` rebound the slot.
+        let registry = ProviderRegistry::new(self);
+        let active_compatible_profile = registry.active_compatible_profile_id();
+        let compatible_profile_runtimes = self
+            .openai_compatible_profiles
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
 
         mark("openrouter", &mut laps);
         let provider = Self {
@@ -2978,8 +2991,8 @@ impl Provider for MultiProvider {
             cursor: RwLock::new(cursor_provider),
             bedrock: RwLock::new(bedrock_provider),
             openrouter: RwLock::new(openrouter),
-            openai_compatible_profiles: RwLock::new(HashMap::new()),
-            active_openai_compatible_profile: RwLock::new(None),
+            openai_compatible_profiles: RwLock::new(compatible_profile_runtimes),
+            active_openai_compatible_profile: RwLock::new(active_compatible_profile),
             session_id: RwLock::new(self.bound_session_id()),
             active: RwLock::new(active),
             startup_notices: RwLock::new(Vec::new()),
