@@ -133,6 +133,11 @@ path = "src/bin/mermaid_side_panel_probe.rs"
 required-features = ["dev-bins"]
 
 [[bin]]
+name = "replay_frames"
+path = "src/bin/replay_frames.rs"
+required-features = ["dev-bins"]
+
+[[bin]]
 name = "tui_bench"
 path = "src/bin/tui_bench.rs"
 required-features = ["dev-bins"]

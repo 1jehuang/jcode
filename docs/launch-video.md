@@ -28,11 +28,11 @@ python3 scripts/render_kitty_frames.py \
 
 The rasterizer loads Kitty's native extension using Kitty's embedded Python. Its configuration defaults to `~/.config/kitty/kitty.conf`. Repeat for each reviewed source timeline. Feed the resulting MP4s to the compositor below. The compositor's image-sequence input remains a general compatibility feature, not the prescribed production workflow.
 
-The exporter uses production TUI state/layout. The compositor applies no terminal scaling, but that is **not a measured claim of pixel equality with a live Kitty window**. Font shaping, glyph rasterization, terminal configuration, colors, and H.264 chroma subsampling can differ. Review rendered video for faithful content and readable typography before publication.
+The exporter uses the exact production TUI state/layout renderer, with historical todo snapshots and no current account/git data or automatic agent follow-ups. Kitty’s own VT parser, font shaping, glyph sprites, fallback fonts and decorations produce the raster headlessly. The compositor applies no terminal scaling. A saved real-terminal calibration at 14×32 cells measured 0.105/255 mean RGB error and a maximum difference of 3/255 after aligning terminal padding, across a 550×28 text crop. That is close visual agreement, not universal pixel identity: the check does not cover every emoji, desktop transparency or cursor. Use `--codec ffv1` with a `.mkv` output for an exact lossless copy of the generated RGB frames. H.264 exports and the shareable final composition are lossy. Review rendered video for faithful content and readable typography before publication.
 
 ## Privacy and output layout
 
-Recommended source: **1680x960 pixels** for a 120-column, 30-row TUI. The compositor centers that rectangle on 1920x1080 without a scale filter. Review every rendered frame, including scrollback, expanded tool outputs, pinned todo names, account labels, paths, URLs, email addresses, tokens, and command arguments. `reviewed: true` is an explicit human attestation, not an automatic secret scanner.
+Recommended source: **1680x960 pixels** for a 120-column, 30-row TUI. The compositor centers that rectangle on 1920x1080 without a scale filter. Review every rendered frame, including scrollback, expanded tool outputs, pinned todo names, account labels, paths, URLs, email addresses, tokens, and command arguments. `reviewed: true` is an explicit visual-review attestation, not an automatic secret scanner.
 
 Keep captions short. Header and footer typography is outside the recommended source rectangle. Oversized sources fail instead of being silently resized. Audio is deliberately stripped. Intro/outro cards and short fades provide pacing without overlays obscuring the pinned plan.
 
