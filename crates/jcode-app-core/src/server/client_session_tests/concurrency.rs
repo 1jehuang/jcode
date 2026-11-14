@@ -47,10 +47,13 @@ impl IsolatedConcurrencyEnv {
 
 impl Drop for IsolatedConcurrencyEnv {
     fn drop(&mut self) {
-        let mut restore_lock = self.test_lock.take();
-        if self.owns_test_lock && restore_lock.is_none() {
-            restore_lock = Some(crate::storage::lock_test_env());
+        // The environment is only safe to restore while the lock that
+        // serializes env mutation is held: reuse the guard this env still
+        // owns, or re-take the lock that `release_test_lock` gave up.
+        if self.owns_test_lock && self.test_lock.is_none() {
+            self.test_lock = Some(crate::storage::lock_test_env());
         }
+        let _restore_lock = self.test_lock.take();
         for (key, value) in self.previous.drain(..) {
             match value {
                 Some(value) => crate::env::set_var(key, value),
