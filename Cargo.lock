@@ -3601,6 +3601,7 @@ dependencies = [
  "hex",
  "jcode-build-meta",
  "jcode-companion",
+ "jcode-config-types",
  "jcode-docs-data",
  "jcode-harness-api",
  "jcode-harness-api-server",
@@ -4438,6 +4439,7 @@ dependencies = [
  "jcode-message-types",
  "jcode-provider-core",
  "jcode-provider-openrouter-runtime",
+ "serde_json",
  "tokio",
 ]
 
