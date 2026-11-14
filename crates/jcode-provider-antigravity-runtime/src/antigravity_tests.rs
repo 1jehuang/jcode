@@ -333,15 +333,60 @@ fn resolve_model_for_request_maps_default_alias_to_real_model() {
         provider.resolve_model_for_request("gemini-3.1-pro-low"),
         "gemini-3.1-pro-low"
     );
+    // Bare `gemini-4-carbon` and `gemini-4-argon` aliases (plus short aliases)
+    // resolve to the default medium tier served by the Cloud Code backend,
+    // while explicit tier variants pass through.
+    for (input, expected) in [
+        ("gemini-4-carbon", "gemini-4-carbon-medium"),
+        ("carbon", "gemini-4-carbon-medium"),
+        ("carbon-high", "gemini-4-carbon-high"),
+        ("carbon-medium", "gemini-4-carbon-medium"),
+        ("carbon-low", "gemini-4-carbon-low"),
+        ("gemini-4-carbon-high", "gemini-4-carbon-high"),
+        ("gemini-4-carbon-medium", "gemini-4-carbon-medium"),
+        ("gemini-4-carbon-low", "gemini-4-carbon-low"),
+        ("gemini-4-argon", "gemini-4-argon-medium"),
+        ("argon", "gemini-4-argon-medium"),
+        ("argon-high", "gemini-4-argon-high"),
+        ("argon-medium", "gemini-4-argon-medium"),
+        ("argon-low", "gemini-4-argon-low"),
+        ("gemini-4-argon-high", "gemini-4-argon-high"),
+        ("gemini-4-argon-medium", "gemini-4-argon-medium"),
+        ("gemini-4-argon-low", "gemini-4-argon-low"),
+        ("gemini-3.8-flash", "gemini-3.8-flash-medium"),
+    ] {
+        assert_eq!(provider.resolve_model_for_request(input), expected);
+    }
 }
 
 #[test]
-fn remap_unsupported_model_only_touches_broken_pro_high() {
-    assert_eq!(
-        remap_unsupported_model("gemini-3.1-pro-high"),
-        "gemini-pro-agent"
-    );
+fn remap_unsupported_model_handles_pro_high_and_gemini4_aliases() {
+    for (alias, canonical) in [
+        ("gemini-3.1-pro-high", "gemini-pro-agent"),
+        ("gemini-4-carbon", "gemini-4-carbon-medium"),
+        ("carbon", "gemini-4-carbon-medium"),
+        ("carbon-medium", "gemini-4-carbon-medium"),
+        ("carbon-high", "gemini-4-carbon-high"),
+        ("carbon-low", "gemini-4-carbon-low"),
+        ("gemini-4-argon", "gemini-4-argon-medium"),
+        ("argon", "gemini-4-argon-medium"),
+        ("argon-medium", "gemini-4-argon-medium"),
+        ("argon-high", "gemini-4-argon-high"),
+        ("argon-low", "gemini-4-argon-low"),
+        ("gemini-3.8-flash", "gemini-3.8-flash-medium"),
+    ] {
+        assert_eq!(remap_unsupported_model(alias), canonical);
+    }
     for model in [
+        "gemini-4-carbon-high",
+        "gemini-4-carbon-medium",
+        "gemini-4-carbon-low",
+        "gemini-4-argon-high",
+        "gemini-4-argon-medium",
+        "gemini-4-argon-low",
+        "gemini-3.8-flash-high",
+        "gemini-3.8-flash-medium",
+        "gemini-3.8-flash-low",
         "gemini-3.1-pro-low",
         "gemini-pro-agent",
         "gemini-3-flash",
@@ -351,6 +396,51 @@ fn remap_unsupported_model_only_touches_broken_pro_high() {
     ] {
         assert_eq!(remap_unsupported_model(model), model);
     }
+    for alias in [
+        "gemini-4-carbon",
+        "carbon",
+        "carbon-medium",
+        "carbon-high",
+        "carbon-low",
+        "gemini-4-carbon-high",
+        "gemini-4-carbon-medium",
+        "gemini-4-carbon-low",
+        "gemini-4-argon",
+        "argon",
+        "argon-medium",
+        "argon-high",
+        "argon-low",
+        "gemini-4-argon-high",
+        "gemini-4-argon-medium",
+        "gemini-4-argon-low",
+    ] {
+        assert!(jcode_provider_antigravity::is_known_model(alias));
+        assert!(jcode_provider_antigravity::is_antigravity_exclusive_model(
+            alias
+        ));
+        assert!(model_is_gemini(alias));
+    }
+    for flash_model in [
+        "gemini-3.8-flash",
+        "gemini-3.8-flash-high",
+        "gemini-3.8-flash-medium",
+        "gemini-3.8-flash-low",
+    ] {
+        assert!(jcode_provider_antigravity::is_known_model(flash_model));
+        assert!(jcode_provider_antigravity::is_antigravity_exclusive_model(
+            flash_model
+        ));
+        assert!(model_is_gemini(flash_model));
+    }
+}
+
+#[test]
+fn antigravity_user_agent_uses_cli_product_prefix_required_for_gemini_4() {
+    let ua = antigravity_user_agent();
+    assert!(
+        ua.starts_with("antigravity/cli/"),
+        "expected antigravity/cli/<version> User-Agent, got: {ua}"
+    );
 }
 
 #[test]
