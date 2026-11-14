@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 11;
+export const API_VERSION_MINOR = 12;
 
 export type RuntimeCommand = "skills" | "context" | "info" | "cache" | "memory" | "swarm" | "agents" | "subagent_model" | "autoreview" | "autojudge" | "transport" | "fast" | "telemetry" | "subscription" | "overnight" | "productivity" | "initiatives" | "premium" | "provider_test_coverage" | "refresh_model_list" | "continue" | "resume_all" | "remote" | "server_reload" | "review" | "judge" | "subagent" | "auth" | "logout";
 
@@ -282,6 +282,24 @@ export interface SidePanelSnapshot {
   pages?: SidePanelPage[];
 }
 
+/** One member of a swarm, as `swarm_status` reports it. */
+export interface SwarmMemberInfo {
+  session_id: string;
+  friendly_name?: string;
+  /** `spawned`, `running`, `ready`, `completed`, `failed`, `stopped`, or `crashed`, among others. */
+  status: string;
+  detail?: string;
+  /** Stable label of the task the member was spawned or assigned for. */
+  task_label?: string;
+  /** `agent` or `coordinator`. */
+  role?: string;
+  /** The session this member reports to, which spawned it. */
+  report_back_to_session_id?: string;
+  /** Last lines of in-progress output; cleared when the member's turn ends. */
+  output_tail?: string;
+  status_age_secs?: number;
+}
+
 export type ApiEvent =
   | { ev: "hello_ok"; version: number; server: string; capabilities?: string[] }
   | { ev: "ok" }
@@ -370,6 +388,8 @@ export type ApiEvent =
       summary: string;
       done?: boolean;
     }
+  /** Live roster of the attached session's swarm, sent whenever a member changes. */
+  | { ev: "swarm_status"; session_id: string; members: SwarmMemberInfo[] }
   | { ev: "message_accepted"; session_id: string }
   | {
       ev: "permission_request";
@@ -498,6 +518,7 @@ export const KNOWN_EVENT_KINDS = [
   "turn_stopped",
   "wake_requested",
   "background_progress",
+  "swarm_status",
   "message_accepted",
   "permission_request",
   "session_status",

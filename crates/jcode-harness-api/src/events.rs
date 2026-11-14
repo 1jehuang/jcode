@@ -291,6 +291,17 @@ pub enum ApiEvent {
         done: bool,
     },
 
+    /// The live roster of the attached session's swarm.
+    ///
+    /// The daemon sends it to every member whenever one changes, and the TUI
+    /// draws its swarm from it. Workers stream on their own sessions, which
+    /// this connection is not attached to, so without it a client sees a
+    /// coordinator spawn workers and then nothing until they report.
+    SwarmStatus {
+        session_id: String,
+        members: Vec<SwarmMemberInfo>,
+    },
+
     /// The agent accepted a user message: it is in the session's queue and
     /// will be processed. Sent once per `SendMessage` that the daemon acks.
     ///
@@ -475,6 +486,37 @@ pub enum ErrorCode {
     UnknownSession,
     InvalidRequest,
     Internal,
+}
+
+/// One member of a swarm, as `SwarmStatus` reports it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SwarmMemberInfo {
+    pub session_id: String,
+    /// Short name, e.g. `fox`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub friendly_name: Option<String>,
+    /// Lifecycle status: `spawned`, `running`, `ready`, `completed`,
+    /// `failed`, `stopped`, or `crashed`, among others.
+    pub status: String,
+    /// What the member is doing, or why it failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Stable label of the task the member was spawned or assigned for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_label: Option<String>,
+    /// `agent` or `coordinator`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// The session this member reports to, which spawned it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_back_to_session_id: Option<String>,
+    /// The last lines of the member's in-progress output. The daemon keeps it
+    /// for members that report back, and clears it when their turn ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tail: Option<String>,
+    /// Seconds since the status last changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_age_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
