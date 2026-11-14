@@ -133,6 +133,19 @@ pub(super) fn normalize_todo_snapshot(value: Value) -> Result<String> {
         .get_mut("todos")
         .and_then(Value::as_array_mut)
         .context("todo snapshot requires a todos array")?;
+    let named_ids: std::collections::HashMap<String, Value> = todos
+        .iter()
+        .enumerate()
+        .filter_map(|(index, todo)| {
+            let name = todo.get("name").or_else(|| todo.get("content"))?.as_str()?;
+            Some((
+                name.to_owned(),
+                todo.get("id")
+                    .cloned()
+                    .unwrap_or_else(|| json!(format!("replay_{index}"))),
+            ))
+        })
+        .collect();
     for (index, todo) in todos.iter_mut().enumerate() {
         let fields = todo
             .as_object_mut()
@@ -147,6 +160,16 @@ pub(super) fn normalize_todo_snapshot(value: Value) -> Result<String> {
         }
         if let Some(phase) = fields.remove("phase") {
             fields.insert("stage".into(), phase);
+        }
+        if let Some(mut dependencies) = fields.remove("lane_dependencies") {
+            if let Some(dependencies) = dependencies.as_array_mut() {
+                for dependency in dependencies {
+                    if let Some(id) = dependency.as_str().and_then(|name| named_ids.get(name)) {
+                        *dependency = id.clone();
+                    }
+                }
+            }
+            fields.insert("lane_after".into(), dependencies);
         }
         fields
             .entry("id")
@@ -174,7 +197,7 @@ pub(super) fn normalize_todo_snapshot(value: Value) -> Result<String> {
 /// Todo tools historically returned a JSON array followed by labeled JSON
 /// sections. Decode those sections without interpreting model-generated prose.
 pub(super) fn todo_snapshot_from_output(output: &str) -> Option<String> {
-    let output = crate::tui::ui_messages::strip_todo_tool_output_headers(output);
+    let output = crate::tui::ui::strip_todo_tool_output_headers(output);
     let mut stream = serde_json::Deserializer::from_str(output.trim_start()).into_iter::<Value>();
     let first = stream.next()?.ok()?;
     let mut payload = if first.is_array() {

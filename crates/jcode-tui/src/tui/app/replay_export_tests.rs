@@ -28,6 +28,16 @@ fn parses_saved_and_public_todos_and_labeled_metadata() {
     assert_eq!(payload["todos"][0]["stage"], 2);
     assert!(todo_snapshot_from_output("not JSON").is_none());
     assert!(normalize_todo_snapshot(json!({"todos":[{}]})).is_err());
+    let public_dependencies = json!([
+        {"name":"First phase", "status":"completed", "priority":"high"},
+        {"name":"Dependent phase", "status":"pending", "priority":"high", "lane_dependencies":["First phase"]}
+    ]);
+    let parsed: Value =
+        serde_json::from_str(&normalize_todo_snapshot(public_dependencies).unwrap()).unwrap();
+    assert_eq!(
+        parsed["todos"][1]["lane_after"][0],
+        parsed["todos"][0]["id"]
+    );
 }
 
 #[test]
