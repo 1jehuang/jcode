@@ -79,23 +79,32 @@ fn direct_api_url() -> String {
 }
 
 fn configured_direct_headers() -> Result<HeaderMap> {
-    let Some(raw) = std::env::var("JCODE_ANTHROPIC_HEADERS")
+    // Named Claude profiles serialize their merged overrides into
+    // JCODE_ANTHROPIC_HEADERS (profile beats global per header name). When the
+    // env is absent (plain-Claude runtime, no named profile), fall back to the
+    // global [provider] config so config-driven overrides work there too.
+    if let Some(raw) = std::env::var("JCODE_ANTHROPIC_HEADERS")
         .ok()
         .filter(|value| !value.trim().is_empty())
-    else {
-        return Ok(HeaderMap::new());
-    };
-    let headers: std::collections::BTreeMap<String, String> = serde_json::from_str(&raw)
-        .context("JCODE_ANTHROPIC_HEADERS must be a JSON object of string values")?;
-    let mut result = HeaderMap::new();
-    for (name, value) in headers {
-        let name = HeaderName::from_bytes(name.as_bytes())
-            .with_context(|| format!("invalid Anthropic-compatible header name '{name}'"))?;
-        let value = HeaderValue::from_str(&value)
-            .with_context(|| format!("invalid value for Anthropic-compatible header '{name}'"))?;
-        result.insert(name, value);
+    {
+        let headers: std::collections::BTreeMap<String, String> = serde_json::from_str(&raw)
+            .context("JCODE_ANTHROPIC_HEADERS must be a JSON object of string values")?;
+        let mut result = HeaderMap::new();
+        for (name, value) in headers {
+            let name = HeaderName::from_bytes(name.as_bytes())
+                .with_context(|| format!("invalid Anthropic-compatible header name '{name}'"))?;
+            let value = HeaderValue::from_str(&value).with_context(|| {
+                format!("invalid value for Anthropic-compatible header '{name}'")
+            })?;
+            result.insert(name, value);
+        }
+        return Ok(result);
     }
-    Ok(result)
+    jcode_base::provider_catalog::resolved_provider_http_header_overrides(
+        &jcode_base::config::config().provider,
+        None,
+        "[provider]",
+    )
 }
 
 fn direct_auth_mode() -> String {
@@ -1002,8 +1011,32 @@ impl AnthropicProvider {
     fn catalog_scope_for_route(&self, oauth: bool) -> String {
         if oauth && let Some(label) = self.oauth_account_label() {
             format!("oauth::{label}")
+        } else if oauth {
+            jcode_base::provider::anthropic_catalog_scope_for_route(true)
         } else {
-            jcode_base::provider::anthropic_catalog_scope_for_route(oauth)
+            // The cache identity must hash the credential that actually signs
+            // direct catalog requests. A `[provider.headers]` x-api-key override
+            // (or a named-profile key) changes the account the catalog belongs
+            // to; hashing only the underlying ANTHROPIC_API_KEY would let a
+            // fresh catalog from the previous account suppress discovery for
+            // the new one. The digest is a hash, never the key itself.
+            use sha2::{Digest, Sha256};
+            let effective = self
+                .direct_transport
+                .headers
+                .as_ref()
+                .ok()
+                .and_then(|headers| headers.get("x-api-key"))
+                .map(|value| value.as_bytes().to_vec())
+                .or_else(|| {
+                    self.direct_api_key()
+                        .ok()
+                        .map(|key| key.as_bytes().to_vec())
+                });
+            format!(
+                "api-key::{:x}",
+                Sha256::digest(effective.as_deref().unwrap_or_default())
+            )
         }
     }
 
@@ -2309,14 +2342,6 @@ async fn stream_response(
     };
 
     let mut req = client.post(url);
-    if !is_oauth {
-        req = req.headers(
-            direct_transport
-                .headers
-                .clone()
-                .map_err(anyhow::Error::msg)?,
-        );
-    }
     req = req.header("anthropic-version", API_VERSION).header(
         "accept",
         if is_oauth {
@@ -2367,6 +2392,19 @@ async fn stream_response(
             ),
         };
         req = req.header("anthropic-beta", beta_header);
+    }
+
+    // Config-driven overrides apply last (after every built-in header) so a
+    // same-named override replaces the built-in value instead of appending a
+    // duplicate header such as a second anthropic-beta or User-Agent.
+    if !is_oauth {
+        let overrides = direct_transport
+            .headers
+            .clone()
+            .map_err(anyhow::Error::msg)?;
+        if !overrides.is_empty() {
+            req = req.headers(overrides);
+        }
     }
 
     let req = jcode_provider_core::request_compression::json_body(
