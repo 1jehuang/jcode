@@ -144,6 +144,9 @@ fn main() {
         context_tokens: None,
         context_limit: None,
         output_tokens: None,
+        input_tokens: None,
+        queue_depth: None,
+        cost_cents: None,
     };
     let panel_members = vec![
         gm(
@@ -172,15 +175,15 @@ fn main() {
     ];
     print_lines(
         "PANEL: 4 agents, selected #1 (implementer), focused @ width 70 h 14",
-        &render_swarm_panel(&panel_members, 1, true, 70, 14),
+        &render_swarm_panel(&panel_members, 1, true, 70, 14, None),
     );
     print_lines(
         "PANEL: 4 agents, selected #0, unfocused @ width 70 h 14",
-        &render_swarm_panel(&panel_members, 0, false, 70, 14),
+        &render_swarm_panel(&panel_members, 0, false, 70, 14, None),
     );
     print_lines(
         "PANEL: narrow @ width 44 h 12",
-        &render_swarm_panel(&panel_members, 2, true, 44, 12),
+        &render_swarm_panel(&panel_members, 2, true, 44, 12, None),
     );
 
     // ---- New compact strip (above status line) ----
@@ -213,15 +216,16 @@ fn main() {
             0,
             90,
             12,
+            None,
         ),
     );
     print_lines(
         "STRIP: focused, selected #1 @ width 90",
-        &render_swarm_strip(&panel_members, 1, true, &hints, None, 3, 90, 12),
+        &render_swarm_strip(&panel_members, 1, true, &hints, None, 3, 90, 12, None),
     );
     print_lines(
         "STRIP: focused narrow @ width 54",
-        &render_swarm_strip(&panel_members, 0, true, &hints, None, 5, 54, 12),
+        &render_swarm_strip(&panel_members, 0, true, &hints, None, 5, 54, 12, None),
     );
 
     // ---- Vertical strip (default layout: one agent per row) ----
@@ -248,11 +252,12 @@ fn main() {
             90,
             4,
             12,
+            None,
         ),
     );
     print_lines(
         "VERTICAL: focused (accordion), selected #1 @ width 90",
-        &render_swarm_strip_vertical(&vert_members, 1, true, &hints, None, 3, 90, 4, 12),
+        &render_swarm_strip_vertical(&vert_members, 1, true, &hints, None, 3, 90, 4, 12, None),
     );
     print_lines(
         "VERTICAL: 7 agents overflow @ width 80",
@@ -274,6 +279,7 @@ fn main() {
             80,
             4,
             12,
+            None,
         ),
     );
 

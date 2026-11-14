@@ -264,7 +264,7 @@ impl App {
         // Warn at 70%, 80%, 90%
         if !self.context_warning_shown && usage_percent >= 70.0 {
             let warning = format!(
-                "\n⚠️  Context usage: {:.0}% ({}/{}k tokens) - compaction approaching\n\n",
+                "\n▲  Context usage: {:.0}% ({}/{}k tokens) - compaction approaching\n\n",
                 usage_percent,
                 input_tokens / 1000,
                 self.context_limit / 1000
@@ -275,7 +275,7 @@ impl App {
             // Reset to show 80% warning
             if usage_percent < 85.0 {
                 let warning = format!(
-                    "\n⚠️  Context usage: {:.0}% - compaction imminent\n\n",
+                    "\n▲  Context usage: {:.0}% - compaction imminent\n\n",
                     usage_percent
                 );
                 self.append_streaming_text(&warning);
@@ -482,16 +482,16 @@ impl App {
             let current_input = std::mem::replace(&mut self.input, stashed);
             let current_cursor = std::mem::replace(&mut self.cursor_pos, stashed_cursor);
             if current_input.is_empty() {
-                self.set_status_notice("📋 Input restored from stash");
+                self.set_status_notice("◫ Input restored from stash");
             } else {
                 self.stashed_input = Some((current_input, current_cursor));
-                self.set_status_notice("📋 Swapped input with stash");
+                self.set_status_notice("◫ Swapped input with stash");
             }
         } else if !self.input.is_empty() {
             let input = std::mem::take(&mut self.input);
             let cursor = std::mem::replace(&mut self.cursor_pos, 0);
             self.stashed_input = Some((input, cursor));
-            self.set_status_notice("📋 Input stashed");
+            self.set_status_notice("◫ Input stashed");
         }
     }
 }

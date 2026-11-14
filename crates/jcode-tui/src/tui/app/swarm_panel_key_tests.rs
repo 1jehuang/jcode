@@ -291,7 +291,7 @@ fn plain_typing_is_not_captured() {
             KeyModifiers::NONE
         };
         assert_eq!(
-            swarm_panel_action_for_key(code, mods),
+            swarm_panel_action_for_key(code, mods, false, false, false),
             None,
             "{code:?} must pass through to the chat input"
         );
@@ -301,39 +301,39 @@ fn plain_typing_is_not_captured() {
 #[test]
 fn alt_chords_drive_the_panel() {
     assert_eq!(
-        swarm_panel_action_for_key(KeyCode::Down, KeyModifiers::ALT),
+        swarm_panel_action_for_key(KeyCode::Down, KeyModifiers::ALT, false, false, false),
         Some(SwarmPanelAction::SelectNext)
     );
     assert_eq!(
-        swarm_panel_action_for_key(KeyCode::Up, KeyModifiers::ALT),
+        swarm_panel_action_for_key(KeyCode::Up, KeyModifiers::ALT, false, false, false),
         Some(SwarmPanelAction::SelectPrev)
     );
     assert_eq!(
-        swarm_panel_action_for_key(KeyCode::Char('j'), KeyModifiers::ALT),
+        swarm_panel_action_for_key(KeyCode::Char('j'), KeyModifiers::ALT, false, false, false),
         Some(SwarmPanelAction::SelectNext)
     );
     assert_eq!(
-        swarm_panel_action_for_key(KeyCode::Char('k'), KeyModifiers::ALT),
+        swarm_panel_action_for_key(KeyCode::Char('k'), KeyModifiers::ALT, false, false, false),
         Some(SwarmPanelAction::SelectPrev)
     );
     assert_eq!(
-        swarm_panel_action_for_key(KeyCode::Char('o'), KeyModifiers::ALT),
+        swarm_panel_action_for_key(KeyCode::Char('o'), KeyModifiers::ALT, false, false, false),
         Some(SwarmPanelAction::PopOut)
     );
     assert_eq!(
-        swarm_panel_action_for_key(KeyCode::Enter, KeyModifiers::ALT),
+        swarm_panel_action_for_key(KeyCode::Enter, KeyModifiers::ALT, false, false, false),
         Some(SwarmPanelAction::PopOut)
     );
     assert_eq!(
-        swarm_panel_action_for_key(KeyCode::Char('P'), KeyModifiers::ALT | KeyModifiers::SHIFT),
+        swarm_panel_action_for_key(KeyCode::Char('P'), KeyModifiers::ALT | KeyModifiers::SHIFT, false, false, false),
         Some(SwarmPanelAction::OpenPrompt)
     );
     assert_eq!(
-        swarm_panel_action_for_key(KeyCode::Char('p'), KeyModifiers::ALT | KeyModifiers::SHIFT),
+        swarm_panel_action_for_key(KeyCode::Char('p'), KeyModifiers::ALT | KeyModifiers::SHIFT, false, false, false),
         Some(SwarmPanelAction::OpenPrompt)
     );
     assert_eq!(
-        swarm_panel_action_for_key(KeyCode::Esc, KeyModifiers::NONE),
+        swarm_panel_action_for_key(KeyCode::Esc, KeyModifiers::NONE, false, false, false),
         Some(SwarmPanelAction::Exit)
     );
 }
@@ -342,9 +342,101 @@ fn alt_chords_drive_the_panel() {
 fn ctrl_chords_pass_through() {
     for code in [KeyCode::Char('j'), KeyCode::Char('o'), KeyCode::Down] {
         assert_eq!(
-            swarm_panel_action_for_key(code, KeyModifiers::CONTROL),
+            swarm_panel_action_for_key(code, KeyModifiers::CONTROL, false, false, false),
             None,
             "{code:?}+ctrl belongs to other handlers"
         );
     }
+}
+
+#[test]
+fn space_toggles_select() {
+    assert_eq!(
+        swarm_panel_action_for_key(KeyCode::Char(' '), KeyModifiers::NONE, false, false, false),
+        Some(SwarmPanelAction::ToggleSelect)
+    );
+}
+
+#[test]
+fn ctrl_a_selects_all() {
+    assert_eq!(
+        swarm_panel_action_for_key(KeyCode::Char('a'), KeyModifiers::CONTROL, false, false, false),
+        Some(SwarmPanelAction::SelectAll)
+    );
+}
+
+#[test]
+fn shift_tab_toggles_batch_mode() {
+    assert_eq!(
+        swarm_panel_action_for_key(KeyCode::BackTab, KeyModifiers::SHIFT, false, false, false),
+        Some(SwarmPanelAction::BatchMode)
+    );
+}
+
+#[test]
+fn batch_mode_keys_only_active_when_batch() {
+    // Outside batch mode, s/r/p are not batch actions (r starts a rename).
+    assert_eq!(
+        swarm_panel_action_for_key(KeyCode::Char('s'), KeyModifiers::NONE, false, false, false),
+        None
+    );
+    assert_eq!(
+        swarm_panel_action_for_key(KeyCode::Char('p'), KeyModifiers::NONE, false, false, false),
+        None
+    );
+    // In batch mode they apply to every selected agent.
+    assert_eq!(
+        swarm_panel_action_for_key(KeyCode::Char('s'), KeyModifiers::NONE, false, true, false),
+        Some(SwarmPanelAction::BatchStop)
+    );
+    assert_eq!(
+        swarm_panel_action_for_key(KeyCode::Char('r'), KeyModifiers::NONE, false, true, false),
+        Some(SwarmPanelAction::BatchRestart)
+    );
+    assert_eq!(
+        swarm_panel_action_for_key(KeyCode::Char('p'), KeyModifiers::NONE, false, true, false),
+        Some(SwarmPanelAction::BatchPrompt)
+    );
+}
+
+#[test]
+fn r_key_starts_rename_when_not_in_batch() {
+    assert_eq!(
+        swarm_panel_action_for_key(KeyCode::Char('r'), KeyModifiers::NONE, false, false, false),
+        Some(SwarmPanelAction::StartRename)
+    );
+    // r in batch mode maps to BatchRestart, not StartRename.
+    assert_eq!(
+        swarm_panel_action_for_key(KeyCode::Char('r'), KeyModifiers::NONE, false, true, false),
+        Some(SwarmPanelAction::BatchRestart)
+    );
+}
+
+#[test]
+fn rename_mode_captures_text_input() {
+    assert_eq!(
+        swarm_panel_action_for_key(KeyCode::Char('a'), KeyModifiers::NONE, false, false, true),
+        Some(SwarmPanelAction::RenameChar('a'))
+    );
+    assert_eq!(
+        swarm_panel_action_for_key(KeyCode::Backspace, KeyModifiers::NONE, false, false, true),
+        Some(SwarmPanelAction::RenameBackspace)
+    );
+    assert_eq!(
+        swarm_panel_action_for_key(KeyCode::Enter, KeyModifiers::NONE, false, false, true),
+        Some(SwarmPanelAction::RenameConfirm)
+    );
+    assert_eq!(
+        swarm_panel_action_for_key(KeyCode::Esc, KeyModifiers::NONE, false, false, true),
+        Some(SwarmPanelAction::RenameEscape)
+    );
+}
+
+#[test]
+fn rename_mode_blocks_other_keys() {
+    // In rename mode, alt-chords pass through so they cannot hijack typing.
+    assert_eq!(
+        swarm_panel_action_for_key(KeyCode::Down, KeyModifiers::ALT, false, false, true),
+        None
+    );
 }

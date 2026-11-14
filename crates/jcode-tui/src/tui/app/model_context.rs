@@ -1494,7 +1494,7 @@ impl App {
 
         match manager.force_compact_with(&provider_messages, self.provider.clone()) {
             Ok(()) => Some(
-                "⚡ Auto-compaction started - summarizing old messages in background. Retry in a moment."
+                "◈ Auto-compaction started - summarizing old messages in background. Retry in a moment."
                     .to_string(),
             ),
             Err(reason) => {
@@ -1506,7 +1506,7 @@ impl App {
                     Ok(dropped) => {
                         self.sync_session_compaction_state_from_manager(&manager);
                         Some(format!(
-                            "⚡ Emergency compaction: dropped {} old messages. You can continue.",
+                            "◈ Emergency compaction: dropped {} old messages. You can continue.",
                             dropped
                         ))
                     }
@@ -1515,7 +1515,7 @@ impl App {
                         if truncated > 0 {
                             self.messages = provider_messages;
                             Some(format!(
-                                "⚡ Emergency truncation: shortened {} large tool result(s) to fit context. You can continue.",
+                                "◈ Emergency truncation: shortened {} large tool result(s) to fit context. You can continue.",
                                 truncated
                             ))
                         } else {
@@ -1558,7 +1558,7 @@ impl App {
         self.reseed_compaction_from_provider_messages();
 
         self.push_display_message(DisplayMessage::system(format!(
-            "⚡ Request was too large; dropped {} oversized image(s) and retrying...",
+            "◈ Request was too large; dropped {} oversized image(s) and retrying...",
             stripped
         )));
 
@@ -1627,7 +1627,7 @@ impl App {
         }
 
         self.push_display_message(DisplayMessage::system(
-            "⚠️ Context limit exceeded - auto-compacting and retrying...".to_string(),
+            "▲ Context limit exceeded - auto-compacting and retrying...".to_string(),
         ));
 
         // Force the compaction manager to think we're at the limit

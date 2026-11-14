@@ -774,6 +774,15 @@ pub struct SwarmMemberRuntime {
     /// Cumulative output tokens produced by the worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
+    /// Total input tokens consumed by this agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    /// Number of tasks queued behind this agent (auto-scaling signal).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_depth: Option<u32>,
+    /// Estimated cost in USD cents for this agent's session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cents: Option<u64>,
 }
 
 impl SwarmMemberRuntime {
@@ -792,6 +801,9 @@ impl SwarmMemberRuntime {
             && self.context_tokens.is_none()
             && self.context_limit.is_none()
             && self.output_tokens.is_none()
+            && self.input_tokens.is_none()
+            && self.queue_depth.is_none()
+            && self.cost_cents.is_none()
     }
 }
 

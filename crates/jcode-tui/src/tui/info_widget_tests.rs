@@ -908,7 +908,7 @@ fn swarm_dock_surfaces_attention_and_collapses_overflow() {
         first.contains("reviewer") && first.contains("cargo test failed"),
         "{first}"
     );
-    assert!(lines_text(framed.title_right.as_slice()).contains("⚠ 1"));
+    assert!(lines_text(framed.title_right.as_slice()).contains("▲ 1"));
     assert_eq!(framed.lines.len(), 6, "rows capped");
     assert!(lines_text(framed.footer.as_slice()).contains("+3 more"));
     // Tiny sizes never panic or overflow.
@@ -1306,7 +1306,7 @@ fn background_widget_renders_session_task_rows_with_progress() {
         ..Default::default()
     };
     let framed = super::render_background_widget(&finished, Rect::new(0, 0, 40, 4));
-    assert_eq!(lines_text(framed.title.as_slice()), "⏳ \nBackground");
+    assert_eq!(lines_text(framed.title.as_slice()), "⧖ \nBackground");
 
     // Compact (overview) form mirrors its computed height.
     let compact = super::render_background_compact(&info, 40);

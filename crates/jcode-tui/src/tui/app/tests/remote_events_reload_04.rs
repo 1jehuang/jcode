@@ -471,7 +471,7 @@ fn test_schedule_pending_remote_retry_respects_retry_limit() {
         retry_at: None,
     });
 
-    assert!(!app.schedule_pending_remote_retry("⚠ failed."));
+    assert!(!app.schedule_pending_remote_retry("▲ failed."));
     assert!(app.rate_limit_pending_message.is_none());
     assert!(app.rate_limit_reset.is_none());
     assert!(

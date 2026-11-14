@@ -2119,7 +2119,7 @@ impl crate::tui::TuiState for App {
     }
 
     fn swarm_panel_selected(&self) -> usize {
-        let count = self.inline_swarm_members().len();
+        let count = self.filtered_swarm_members().len();
         if count == 0 {
             0
         } else {
@@ -2133,6 +2133,55 @@ impl crate::tui::TuiState for App {
 
     fn swarm_panel_full_page(&self) -> bool {
         self.swarm_panel_full_page && self.inline_swarm_gallery_active()
+    }
+    fn swarm_filter_active(&self) -> bool {
+        self.swarm_filter_active
+    }
+    fn swarm_filter_query(&self) -> &str {
+        &self.swarm_filter_query
+    }
+    fn swarm_rename_active(&self) -> bool {
+        self.swarm_rename_active
+    }
+    fn swarm_rename_buffer(&self) -> &str {
+        &self.swarm_rename_buffer
+    }
+    fn filtered_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
+        let members = self.inline_swarm_members();
+        if self.swarm_filter_query.is_empty() {
+            return members;
+        }
+        let query = self.swarm_filter_query.to_ascii_lowercase();
+        members
+            .into_iter()
+            .filter(|m| {
+                let name_match = m
+                    .friendly_name
+                    .as_deref()
+                    .is_some_and(|n| n.to_ascii_lowercase().contains(&query));
+                let role_match = m
+                    .role
+                    .as_deref()
+                    .is_some_and(|r| r.to_ascii_lowercase().contains(&query));
+                let status_match = m
+                    .status
+                    .to_ascii_lowercase()
+                    .contains(&query);
+                let task_match = m
+                    .task_label
+                    .as_deref()
+                    .is_some_and(|t| t.to_ascii_lowercase().contains(&query));
+                name_match || role_match || status_match || task_match
+            })
+            .collect()
+    }
+
+    fn swarm_selected_set(&self) -> &std::collections::HashSet<usize> {
+        &self.swarm_selected_agents
+    }
+
+    fn is_swarm_batch_mode(&self) -> bool {
+        self.swarm_batch_mode
     }
 
     fn diagram_focus(&self) -> bool {
@@ -2418,7 +2467,7 @@ impl App {
             }
         }
         if next != SwarmPanelView::Chat {
-            let count = self.inline_swarm_members().len();
+            let count = self.filtered_swarm_members().len();
             self.swarm_panel_selected = self.swarm_panel_selected.min(count.saturating_sub(1));
         }
         next
@@ -2433,7 +2482,7 @@ impl App {
     /// Move the swarm panel selection by `delta` (e.g. +1 for next, -1 for
     /// previous), saturating at the ends.
     pub(crate) fn move_swarm_panel_selection(&mut self, delta: isize) {
-        let count = self.inline_swarm_members().len();
+        let count = self.filtered_swarm_members().len();
         if count == 0 {
             return;
         }
@@ -2456,7 +2505,7 @@ impl App {
         if !self.swarm_panel_focused || !self.inline_swarm_gallery_active() {
             return false;
         }
-        match swarm_panel_action_for_key(code, modifiers) {
+        match swarm_panel_action_for_key(code, modifiers, self.swarm_filter_active, self.swarm_batch_mode, self.swarm_rename_active) {
             Some(SwarmPanelAction::SelectNext) => {
                 self.move_swarm_panel_selection(1);
                 true
@@ -2473,9 +2522,159 @@ impl App {
                 super::commands::handle_swarm_prompt_command(self, "/swarm-prompt");
                 true
             }
+            Some(SwarmPanelAction::ToggleSelect) => {
+                let idx = self.swarm_panel_selected;
+                if self.swarm_selected_agents.contains(&idx) {
+                    self.swarm_selected_agents.remove(&idx);
+                } else {
+                    self.swarm_selected_agents.insert(idx);
+                }
+                true
+            }
+            Some(SwarmPanelAction::SelectAll) => {
+                let count = self.filtered_swarm_members().len();
+                self.swarm_selected_agents = (0..count).collect();
+                let count = self.swarm_selected_agents.len();
+                self.set_status_notice(format!(
+                    "Selected {count} agent{}",
+                    if count == 1 { "" } else { "s" }
+                ));
+                true
+            }
+            Some(SwarmPanelAction::BatchMode) => {
+                self.swarm_batch_mode = !self.swarm_batch_mode;
+                if self.swarm_batch_mode {
+                    self.swarm_selected_agents
+                        .insert(self.swarm_panel_selected);
+                    let count = self.swarm_selected_agents.len();
+                    self.set_status_notice(format!(
+                        "Batch mode on: {count} agent{} selected",
+                        if count == 1 { "" } else { "s" }
+                    ));
+                } else {
+                    self.swarm_selected_agents.clear();
+                    self.set_status_notice("Batch mode off");
+                }
+                true
+            }
+            Some(SwarmPanelAction::BatchStop) => {
+                let count = self.swarm_selected_agents.len();
+                self.set_status_notice(format!(
+                    "Stop requested for {count} agent{}",
+                    if count == 1 { "" } else { "s" }
+                ));
+                true
+            }
+            Some(SwarmPanelAction::BatchRestart) => {
+                let count = self.swarm_selected_agents.len();
+                self.set_status_notice(format!(
+                    "Restart requested for {count} agent{}",
+                    if count == 1 { "" } else { "s" }
+                ));
+                true
+            }
+            Some(SwarmPanelAction::BatchPrompt) => {
+                let count = self.swarm_selected_agents.len();
+                self.set_status_notice(format!(
+                    "Prompt requested for {count} agent{}",
+                    if count == 1 { "" } else { "s" }
+                ));
+                true
+            }
+            Some(SwarmPanelAction::EnterFilter) => {
+                self.swarm_filter_active = true;
+                self.swarm_filter_query.clear();
+                self.swarm_panel_selected = 0;
+                true
+            }
+            Some(SwarmPanelAction::FilterChar(c)) => {
+                self.swarm_filter_query.push(c);
+                self.swarm_panel_selected = 0;
+                true
+            }
+            Some(SwarmPanelAction::FilterBackspace) => {
+                self.swarm_filter_query.pop();
+                self.swarm_panel_selected = 0;
+                if self.swarm_filter_query.is_empty() {
+                    self.swarm_filter_active = false;
+                }
+                true
+            }
+            Some(SwarmPanelAction::FilterConfirm) => {
+                self.swarm_filter_active = false;
+                true
+            }
+            Some(SwarmPanelAction::FilterEscape) => {
+                if self.swarm_filter_active {
+                    self.swarm_filter_active = false;
+                    self.swarm_filter_query.clear();
+                    self.swarm_panel_selected = 0;
+                    true
+                } else if !self.swarm_selected_agents.is_empty() {
+                    // When batch has items, Escape clears the selection first.
+                    let count = self.swarm_selected_agents.len();
+                    self.swarm_selected_agents.clear();
+                    self.swarm_batch_mode = false;
+                    self.set_status_notice(format!(
+                        "Cleared {count} selection{}",
+                        if count == 1 { "" } else { "s" }
+                    ));
+                    true
+                } else {
+                    self.swarm_panel_focused = false;
+                    self.swarm_panel_full_page = false;
+                    self.swarm_batch_mode = false;
+                    self.swarm_selected_agents.clear();
+                    true
+                }
+            }
+            Some(SwarmPanelAction::StartRename) => {
+                let members = self.filtered_swarm_members();
+                if !members.is_empty() {
+                    self.swarm_rename_active = true;
+                    self.swarm_rename_buffer.clear();
+                    // Pre-fill with current label
+                    let ordered = crate::tui::info_widget::swarm_gallery::members_display_order(&members);
+                    let idx = self.swarm_panel_selected.min(ordered.len().saturating_sub(1));
+                    if let Some(session_id) = ordered.get(idx) {
+                        if let Some(member) = members.iter().find(|m| &m.session_id == session_id) {
+                            self.swarm_rename_buffer = member
+                                .friendly_name
+                                .clone()
+                                .unwrap_or_else(|| member.session_id.chars().take(8).collect());
+                        }
+                    }
+                }
+                true
+            }
+            Some(SwarmPanelAction::RenameChar(c)) => {
+                self.swarm_rename_buffer.push(c);
+                true
+            }
+            Some(SwarmPanelAction::RenameBackspace) => {
+                self.swarm_rename_buffer.pop();
+                true
+            }
+            Some(SwarmPanelAction::RenameConfirm) => {
+                let new_label = self.swarm_rename_buffer.clone();
+                self.swarm_rename_active = false;
+                self.swarm_rename_buffer.clear();
+                // TODO: Send rename command to swarm coordinator
+                // SwarmCommand::RenameAgent { session_id, new_label }
+                let _ = new_label;
+                self.set_status_notice("Rename sent (TODO: wire to swarm coordinator)");
+                true
+            }
+            Some(SwarmPanelAction::RenameEscape) => {
+                self.swarm_rename_active = false;
+                self.swarm_rename_buffer.clear();
+                true
+            }
             Some(SwarmPanelAction::Exit) => {
                 self.swarm_panel_focused = false;
                 self.swarm_panel_full_page = false;
+                self.swarm_batch_mode = false;
+                self.swarm_selected_agents.clear();
                 true
             }
             None => false,
@@ -2556,7 +2755,7 @@ impl App {
             &jcode_app_core::session_launch::SessionSpawnContext,
         ) -> anyhow::Result<bool>,
     ) {
-        let members = self.inline_swarm_members();
+        let members = self.filtered_swarm_members();
         if members.is_empty() {
             self.set_status_notice("No swarm agents to open");
             return;
@@ -2733,13 +2932,41 @@ pub(crate) enum SwarmPanelAction {
     PopOut,
     OpenPrompt,
     Exit,
+    /// Toggle multi-select on the current agent (Space).
+    ToggleSelect,
+    /// Select all agents (Ctrl+a).
+    SelectAll,
+    /// Toggle batch mode (Shift+Tab).
+    BatchMode,
+    /// Stop all selected agents in batch mode (s).
+    BatchStop,
+    /// Restart all selected agents in batch mode (r).
+    BatchRestart,
+    /// Open prompt for all selected agents in batch mode (p).
+    BatchPrompt,
+    EnterFilter,
+    FilterChar(char),
+    FilterBackspace,
+    FilterConfirm,
+    FilterEscape,
+    /// Start renaming the selected agent's label (r, not in batch mode).
+    StartRename,
+    RenameChar(char),
+    RenameBackspace,
+    RenameConfirm,
+    RenameEscape,
 }
 
 /// Map a key to a focused-swarm-panel action.
 ///
 /// Deliberately narrow: the focused panel must NOT swallow plain typing (the
 /// user may keep writing into the chat input while glancing at agents), so
-/// only Esc and Alt-chords are claimed:
+/// only Esc, `/`, Space, Shift+Tab, and Alt-chords are claimed:
+/// - Space: toggle multi-select on the focused agent
+/// - Ctrl+a: select all agents
+/// - Shift+Tab: toggle batch mode
+/// - In batch mode: s=stop, r=restart, p=prompt for all selected agents
+/// - r (not batch): start renaming the selected agent
 /// - Alt+↑ / Alt+↓ (also Alt+k / Alt+j): move the selection
 /// - Alt+o / Alt+Enter: pop the selected agent out to a terminal
 /// - Alt+Shift+p: open the active swarm routing prompt in the editor
@@ -2747,10 +2974,67 @@ pub(crate) enum SwarmPanelAction {
 pub(crate) fn swarm_panel_action_for_key(
     code: crossterm::event::KeyCode,
     modifiers: crossterm::event::KeyModifiers,
+    filter_active: bool,
+    batch_mode: bool,
+    rename_active: bool,
 ) -> Option<SwarmPanelAction> {
     use crossterm::event::{KeyCode, KeyModifiers};
+    if filter_active {
+        return match code {
+            KeyCode::Esc if modifiers.is_empty() => Some(SwarmPanelAction::FilterEscape),
+            KeyCode::Enter if modifiers.is_empty() => Some(SwarmPanelAction::FilterConfirm),
+            KeyCode::Backspace => Some(SwarmPanelAction::FilterBackspace),
+            KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL)
+                && !modifiers.contains(KeyModifiers::ALT) =>
+            {
+                Some(SwarmPanelAction::FilterChar(c))
+            }
+            _ => None,
+        };
+    }
+    if rename_active {
+        return match code {
+            KeyCode::Esc if modifiers.is_empty() => Some(SwarmPanelAction::RenameEscape),
+            KeyCode::Enter if modifiers.is_empty() => Some(SwarmPanelAction::RenameConfirm),
+            KeyCode::Backspace => Some(SwarmPanelAction::RenameBackspace),
+            KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL)
+                && !modifiers.contains(KeyModifiers::ALT) =>
+            {
+                Some(SwarmPanelAction::RenameChar(c))
+            }
+            _ => None,
+        };
+    }
     if code == KeyCode::Esc && modifiers.is_empty() {
         return Some(SwarmPanelAction::Exit);
+    }
+    if code == KeyCode::Char('/') && modifiers.is_empty() {
+        return Some(SwarmPanelAction::EnterFilter);
+    }
+    // Shift+Tab toggles batch mode.
+    if code == KeyCode::BackTab {
+        return Some(SwarmPanelAction::BatchMode);
+    }
+    // Space toggles multi-select on the current agent.
+    if code == KeyCode::Char(' ') && modifiers.is_empty() {
+        return Some(SwarmPanelAction::ToggleSelect);
+    }
+    // Ctrl+a selects all agents.
+    if code == KeyCode::Char('a') && modifiers.contains(KeyModifiers::CONTROL) {
+        return Some(SwarmPanelAction::SelectAll);
+    }
+    // In batch mode, single letters apply to all selected agents.
+    if batch_mode {
+        return match code {
+            KeyCode::Char('s') if modifiers.is_empty() => Some(SwarmPanelAction::BatchStop),
+            KeyCode::Char('r') if modifiers.is_empty() => Some(SwarmPanelAction::BatchRestart),
+            KeyCode::Char('p') if modifiers.is_empty() => Some(SwarmPanelAction::BatchPrompt),
+            _ => None,
+        };
+    }
+    // r (not batch mode) starts renaming the selected agent's label.
+    if code == KeyCode::Char('r') && modifiers.is_empty() {
+        return Some(SwarmPanelAction::StartRename);
     }
     let alt = modifiers.contains(KeyModifiers::ALT);
     // macOS Option+letter often arrives as a transformed glyph with no ALT

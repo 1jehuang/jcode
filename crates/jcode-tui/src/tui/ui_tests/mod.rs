@@ -169,6 +169,10 @@ struct TestState {
     pinned_todos_payload: Option<String>,
     justrust_status: Option<crate::tui::justrust_status::StatusRow>,
     swarm_panel_full_page: bool,
+    swarm_filter_active: bool,
+    swarm_filter_query: String,
+    swarm_rename_active: bool,
+    swarm_rename_buffer: String,
 }
 
 impl crate::tui::TuiState for TestState {
@@ -358,6 +362,43 @@ impl crate::tui::TuiState for TestState {
     }
     fn swarm_panel_full_page(&self) -> bool {
         self.swarm_panel_full_page
+    }
+    fn swarm_filter_active(&self) -> bool {
+        self.swarm_filter_active
+    }
+    fn swarm_filter_query(&self) -> &str {
+        &self.swarm_filter_query
+    }
+    fn swarm_rename_active(&self) -> bool {
+        self.swarm_rename_active
+    }
+    fn swarm_rename_buffer(&self) -> &str {
+        &self.swarm_rename_buffer
+    }
+    fn filtered_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
+        let members = self.swarm_members.clone();
+        if self.swarm_filter_query.is_empty() {
+            return members;
+        }
+        let query = self.swarm_filter_query.to_ascii_lowercase();
+        members
+            .into_iter()
+            .filter(|m| {
+                let name_match = m
+                    .friendly_name
+                    .as_deref()
+                    .is_some_and(|n| n.to_ascii_lowercase().contains(&query));
+                let role_match = m
+                    .role
+                    .as_deref()
+                    .is_some_and(|r| r.to_ascii_lowercase().contains(&query));
+                let status_match = m
+                    .status
+                    .to_ascii_lowercase()
+                    .contains(&query);
+                name_match || role_match || status_match
+            })
+            .collect()
     }
     fn remote_startup_phase_active(&self) -> bool {
         self.remote_startup_phase_active

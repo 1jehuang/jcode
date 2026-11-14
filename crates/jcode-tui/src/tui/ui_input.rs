@@ -8,7 +8,7 @@ use super::tools_ui::{get_tool_activity_detail, summarize_batch_running_tools_co
 use super::visual_debug::{self, FrameCaptureBuilder};
 use super::{
     ProcessingStatus, TuiState, accent_color, ai_color, asap_color, dim_color, pending_color,
-    queued_color, rainbow_prompt_color, user_color,
+    queued_color, rainbow_prompt_color, status_text_color, user_color,
 };
 use crate::message::ConnectionPhase;
 use crate::tui::app;
@@ -857,7 +857,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
         String::new()
     };
 
-    let line = if let Some(build_progress) = crate::build::read_build_progress() {
+    let mut line = if let Some(build_progress) = crate::build::read_build_progress() {
         let spinner = super::activity_indicator(elapsed, 12.5);
         Line::from(vec![
             Span::styled(spinner, Style::default().fg(rgb(255, 193, 7))),
@@ -923,7 +923,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                     crate::message::ConnectionPhase::SendingRequest if phase_elapsed > 10.0 => {
                         rgb(255, 193, 7)
                     }
-                    _ => dim_color(),
+                    _ => status_text_color(),
                 };
                 let mut spans = live_processing_status_line(&snapshot, stale_secs, spinner).spans;
                 if let Some(label) = spans.get_mut(1) {
@@ -974,7 +974,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                     Span::styled("↻ ", Style::default().fg(rgb(255, 193, 7))),
                     Span::styled(
                         format!(
-                            "network disconnected, waiting to retry · {} · {}",
+                            "[offline] waiting to retry · {} · {}",
                             listener,
                             format_elapsed(elapsed)
                         ),
@@ -1035,7 +1035,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                 if let Some(status) = subagent {
                     spans.push(Span::styled(
                         format!(" ({})", status),
-                        Style::default().fg(dim_color()),
+                        Style::default().fg(status_text_color()),
                     ));
                 }
                 if let Some(label) = app
@@ -1044,7 +1044,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                 {
                     spans.push(Span::styled(
                         format!(" · {}", label),
-                        Style::default().fg(dim_color()),
+                        Style::default().fg(status_text_color()),
                     ));
                 }
 
@@ -1113,7 +1113,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
         }
     };
 
-    let line = status_with_background_tasks(
+    let mut line = status_with_background_tasks(
         line,
         app.background_task_rows(),
         area.width as usize,
@@ -1121,6 +1121,14 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
     );
 
     crate::memory::check_staleness();
+
+    // In very narrow panes (< 35 cols) truncate the status line to avoid
+    // wrapping or visual overflow.  For streaming/tool lines, strip the
+    // " [tag] " prefix first so the actual status text gets most of the space.
+    let effective_width = area.width as usize;
+    if effective_width > 0 && effective_width < 35 {
+        line = truncate_line_for_narrow(line, effective_width);
+    }
 
     if app.centered_mode() {
         frame.render_widget(Paragraph::new(line.alignment(Alignment::Center)), area);
@@ -1178,14 +1186,14 @@ fn running_tool_header_spans(
     let mut spans = vec![
         Span::styled(spinner, Style::default().fg(anim_color)),
         Span::styled(
-            format!(" running {}", name),
-            Style::default().fg(dim_color()),
+            format!(" [tool: {}]", name),
+            Style::default().fg(status_text_color()).bold(),
         ),
     ];
     if let Some(detail) = detail {
         spans.push(Span::styled(
-            format!(" · {}", detail),
-            Style::default().fg(anim_color).bold(),
+            format!(" {}", detail),
+            Style::default().fg(status_text_color()),
         ));
     }
     spans
@@ -1203,6 +1211,57 @@ fn push_queued_suffix(spans: &mut Vec<Span<'static>>, queued_suffix: &str) {
     }
 }
 
+/// Truncate a status line to fit within `max_cols` characters.
+///
+/// In narrow panes (< 35 cols) the full status lines (which include spinners,
+/// bracketed state labels, token counts, etc.) would overflow the available
+/// width.  Ratatui handles visual clipping automatically, but we also strip
+/// the bracketed prefix for streaming/tool statuses so the actual status text
+/// gets the limited horizontal space rather than wasting it on the spinner and
+/// tag.
+fn truncate_line_for_narrow(line: Line<'static>, max_cols: usize) -> Line<'static> {
+    use unicode_width::UnicodeWidthStr;
+    let mut remaining = max_cols;
+    let spans: Vec<Span<'static>> = line
+        .spans
+        .into_iter()
+        .filter_map(|span| {
+            if remaining == 0 {
+                return None;
+            }
+            let s: &str = span.content.as_ref();
+            let w = UnicodeWidthStr::width(s);
+            if w == 0 {
+                return None;
+            }
+            if w <= remaining {
+                remaining -= w;
+                Some(Span::styled(s.to_string(), span.style))
+            } else {
+                // Truncate with ellipsis.  Stop one character early so the
+                // ellipsis fits within `remaining` when it is appended.
+                let mut out = String::with_capacity(remaining);
+                let mut used = 0;
+                for ch in s.chars() {
+                    let cw = UnicodeWidthStr::width(ch.to_string().as_str());
+                    // Would this char leave room for the ellipsis?
+                    if used + cw + 1 > remaining {
+                        break;
+                    }
+                    out.push(ch);
+                    used += cw;
+                }
+                if used < remaining {
+                    out.push('…');
+                }
+                remaining = 0;
+                Some(Span::styled(out, span.style))
+            }
+        })
+        .collect();
+    Line::from(spans)
+}
+
 fn streaming_status_spans(
     spinner: &'static str,
     status_text: String,
@@ -1213,11 +1272,11 @@ fn streaming_status_spans(
     let mut spans = Vec::new();
     spans.push(Span::styled(spinner, Style::default().fg(ai_color())));
     spans.push(Span::styled(
-        format!(" {}", status_text),
+        format!(" [streaming] {}", status_text),
         Style::default().fg(if has_warning {
             rgb(255, 193, 7)
         } else {
-            dim_color()
+            status_text_color()
         }),
     ));
     push_queued_suffix(&mut spans, queued_suffix);

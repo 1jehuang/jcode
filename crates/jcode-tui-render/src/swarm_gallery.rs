@@ -37,6 +37,20 @@ pub fn role_glyph(role: Option<&str>) -> Option<&'static str> {
     }
 }
 
+/// Role-based accent color for tile borders and title text.
+///
+/// Provides visual differentiation between agent roles in the gallery grid.
+/// Falls back to `None` for unknown roles so callers can use `status_accent()`.
+pub fn role_color(role: Option<&str>) -> Option<Color> {
+    match role {
+        Some("coordinator") => Some(rgb(255, 200, 100)), // gold/amber
+        Some("worker") | Some("implementer") => Some(rgb(100, 160, 255)), // blue
+        Some("reviewer") => Some(rgb(130, 210, 130)), // green
+        Some("researcher") => Some(rgb(180, 140, 255)), // purple
+        _ => None,
+    }
+}
+
 /// Compact age formatting for member viewports (now/Ns/Nm/Nh).
 pub fn humanize_age(age: u64) -> String {
     if age < 2 {
@@ -195,6 +209,15 @@ fn format_tokens(tokens: u64) -> String {
     }
 }
 
+/// Format a cost in cents: three decimals below a dollar, two above.
+fn format_cost(cents: u64) -> String {
+    if cents >= 100 {
+        format!("${:.2}", cents as f64 / 100.0)
+    } else {
+        format!("${:.3}", cents as f64 / 100.0)
+    }
+}
+
 /// Combine provider display name and credential route into one metadata piece,
 /// e.g. "OpenAI oauth". Returns `None` when both are blank.
 fn format_route(provider: Option<&str>, auth_method: Option<&str>) -> Option<String> {
@@ -251,6 +274,146 @@ pub fn gallery_header(total: usize, active: usize) -> Line<'static> {
     ])
 }
 
+/// Aggregate stats line shown below agent chips when the swarm strip is focused.
+///
+/// Formats as: "X/Y agents · Z active · A/B tasks · Xm Ys elapsed"
+/// Right-aligned to `width` using dim styling.
+pub fn summary_line(
+    total: usize,
+    active: usize,
+    todos_done: u32,
+    todos_total: u32,
+    max_elapsed: u64,
+    width: usize,
+) -> Line<'static> {
+    let elapsed_text = if max_elapsed < 60 {
+        format!("{}s", max_elapsed)
+    } else {
+        format!("{}m {}s", max_elapsed / 60, max_elapsed % 60)
+    };
+    let tasks_text = format!("{}/{} tasks", todos_done, todos_total);
+    let mut body = format!(
+        "{total} agent{} · {active} active · {tasks_text} · {elapsed_text} elapsed",
+        if total == 1 { "" } else { "s" },
+    );
+    let body_w = disp_w(&body);
+    if body_w > width {
+        // Truncate display-width to fit within the budget.
+        let mut w = 0usize;
+        let mut end = body.len();
+        for (i, ch) in body.char_indices() {
+            w += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if w > width {
+                end = i;
+                break;
+            }
+        }
+        body.truncate(end);
+    }
+    let body_w = disp_w(&body);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if body_w < width {
+        spans.push(Span::raw(" ".repeat(width - body_w)));
+    }
+    spans.push(Span::styled(
+        body,
+        Style::default().fg(rgb(105, 105, 120)),
+    ));
+    Line::from(spans)
+}
+
+/// Summary line built directly from a `&[GalleryMember]` slice.
+///
+/// Counts members by status category and formats as:
+/// `Agents: {total} · {running} running · {queued} queued · {idle} idle`
+/// Categories with zero count are omitted. Right-aligned to `width`.
+pub fn summary_line_from_members(members: &[GalleryMember], width: usize) -> Line<'static> {
+    let total = members.len();
+
+    let mut running = 0usize;
+    let mut queued = 0usize;
+    let mut done = 0usize;
+    let mut failed = 0usize;
+    let mut idle = 0usize;
+
+    for m in members {
+        match m.status.as_str() {
+            "running" | "streaming" | "thinking" => running += 1,
+            "queued" | "waiting" => queued += 1,
+            "completed" | "done" => done += 1,
+            "failed" | "error" => failed += 1,
+            _ => idle += 1,
+        }
+    }
+
+    let dim = rgb(105, 105, 120);
+    let accent = rgb(255, 200, 100);
+
+    // Collect non-zero categories as (label, color) pairs.
+    let mut segments: Vec<(String, Color)> = Vec::new();
+    if running > 0 {
+        segments.push((format!("{running} running"), accent));
+    }
+    if queued > 0 {
+        segments.push((format!("{queued} queued"), dim));
+    }
+    if done > 0 {
+        segments.push((format!("{done} done"), dim));
+    }
+    if failed > 0 {
+        segments.push((format!("{failed} failed"), rgb(255, 100, 100)));
+    }
+    if idle > 0 {
+        segments.push((format!("{idle} idle"), dim));
+    }
+
+    let prefix_text = format!("Agents: {total}");
+
+    // Compose the full body text to measure width.
+    let mut body_text = prefix_text.clone();
+    for (label, _) in &segments {
+        body_text.push_str(" · ");
+        body_text.push_str(label);
+    }
+
+    if disp_w(&body_text) > width {
+        let mut w = 0usize;
+        let mut end = body_text.len();
+        for (i, ch) in body_text.char_indices() {
+            w += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if w > width {
+                end = i;
+                break;
+            }
+        }
+        body_text.truncate(end);
+    }
+
+    let body_w = disp_w(&body_text);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if body_w < width {
+        spans.push(Span::raw(" ".repeat(width - body_w)));
+    }
+
+    // If the full body had to drop trailing segments, render it all dim.
+    let mut full_w = disp_w(&prefix_text);
+    for (label, _) in &segments {
+        full_w += disp_w(label) + 3;
+    }
+    if body_w < full_w {
+        spans.push(Span::styled(body_text, Style::default().fg(dim)));
+    } else {
+        // Render prefix dim, then each colored segment.
+        spans.push(Span::styled(prefix_text, Style::default().fg(dim)));
+        for (label, color) in &segments {
+            spans.push(Span::styled(" · ", Style::default().fg(dim)));
+            spans.push(Span::styled(label.clone(), Style::default().fg(*color)));
+        }
+    }
+
+    Line::from(spans)
+}
+
 /// A renderer-agnostic view of one swarm member, ready for layout.
 ///
 /// Callers are responsible for building the `body` lines (e.g. choosing live
@@ -296,6 +459,12 @@ pub struct GalleryMember {
     pub context_limit: Option<u64>,
     /// Cumulative output tokens produced by the member.
     pub output_tokens: Option<u64>,
+    /// Total input tokens consumed by the member.
+    pub input_tokens: Option<u64>,
+    /// Number of tasks queued behind the member (auto-scaling signal).
+    pub queue_depth: Option<u32>,
+    /// Estimated cost in USD cents for the member's session.
+    pub cost_cents: Option<u64>,
 }
 
 /// One compact todo entry shown in the focused swarm detail view.
@@ -320,15 +489,23 @@ pub struct GalleryToolIntent {
 
 /// Convert members into gallery tiles, sorted for stable placement
 /// (coordinator first, worktree manager next, then by `sort_key`).
+///
+/// When a member has a recognized role, the tile accent (border color)
+/// uses the role-based color instead of the status-based accent.
 pub fn members_to_tiles(members: &[GalleryMember]) -> Vec<SwarmTile> {
     sort_members_for_display(members)
         .into_iter()
         .map(|m| {
+            let accent = role_color(m.role.as_deref())
+                .unwrap_or_else(|| status_accent(&m.status));
             let mut tile =
-                SwarmTile::new(m.label.clone(), m.status.clone(), status_accent(&m.status))
+                SwarmTile::new(m.label.clone(), m.status.clone(), accent)
                     .with_body(m.body.clone());
             if let Some(glyph) = role_glyph(m.role.as_deref()) {
                 tile = tile.with_role_glyph(glyph);
+            }
+            if let Some(rc) = role_color(m.role.as_deref()) {
+                tile = tile.with_role_color(rc);
             }
             tile
         })
@@ -344,6 +521,7 @@ pub fn render_gallery(
     members: &[GalleryMember],
     width: usize,
     max_height: usize,
+    selected: Option<usize>,
 ) -> Vec<Line<'static>> {
     if members.is_empty() {
         return Vec::new();
@@ -356,6 +534,7 @@ pub fn render_gallery(
     let header = gallery_header(members.len(), active);
     let cfg = SwarmGalleryConfig {
         max_height: max_height.saturating_sub(1).max(4),
+        selected,
         ..Default::default()
     };
     let mut out = render_swarm_gallery(&tiles, width, &cfg, Some(header));
@@ -382,7 +561,8 @@ pub fn render_swarm_chat_cards(members: &[GalleryMember], width: usize) -> Vec<L
 
     let mut out = Vec::new();
     for member in sort_members_for_display(members) {
-        let accent = status_accent(&member.status);
+        let accent = role_color(member.role.as_deref())
+            .unwrap_or_else(|| status_accent(&member.status));
         let lead = format!(
             "    {} {} ",
             member.icon.as_deref().unwrap_or("🐝"),
@@ -444,7 +624,8 @@ pub fn render_swarm_live_card(
         return Vec::new();
     }
 
-    let accent = status_accent(&member.status);
+    let accent = role_color(member.role.as_deref())
+        .unwrap_or_else(|| status_accent(&member.status));
     let mut metadata = Vec::new();
     if let Some(elapsed) = member.elapsed_secs {
         metadata.push(format_elapsed(elapsed));
@@ -530,6 +711,7 @@ pub fn render_swarm_panel(
     focused: bool,
     width: usize,
     max_height: usize,
+    rename_hint: Option<&str>,
 ) -> Vec<Line<'static>> {
     if members.is_empty() || width < 8 || max_height < 3 {
         return Vec::new();
@@ -548,12 +730,17 @@ pub fn render_swarm_panel(
     out.push(panel_header(members.len(), active, focused));
 
     // Reserve at least 3 lines for the detail viewport when there is room.
+    // The rename input line, when active, takes one row out of the budget.
+    let rename_budget = if rename_hint.is_some() { 1 } else { 0 };
     let detail_budget = if max_height >= 7 {
-        (max_height / 2).max(3)
+        ((max_height.saturating_sub(rename_budget)) / 2).max(3)
     } else {
         0
     };
-    let list_budget = max_height.saturating_sub(1).saturating_sub(detail_budget);
+    let list_budget = max_height
+        .saturating_sub(1)
+        .saturating_sub(detail_budget)
+        .saturating_sub(rename_budget);
 
     // ---- Agent list ----
     let list_rows = list_budget.min(ordered.len());
@@ -576,8 +763,27 @@ pub fn render_swarm_panel(
     if detail_budget >= 3
         && let Some(tile) = tiles.get(display_index_to_tile_index(&ordered, members, selected))
     {
-        let detail = crate::swarm_tiles::render_single_tile(tile, width, detail_budget);
+        let detail = crate::swarm_tiles::render_single_tile(tile, width, detail_budget, focused);
         out.extend(detail);
+    }
+
+    // ---- Rename input line ----
+    if let Some(buffer) = rename_hint {
+        let cursor = "▌";
+        let label = format!("Rename: {buffer}{cursor}");
+        let label_w = unicode_width::UnicodeWidthStr::width(label.as_str());
+        let mut spans = vec![Span::styled(
+            label,
+            Style::default().fg(rgb(200, 200, 210)),
+        )];
+        // Pad to the panel width so the row reads as an input field.
+        if label_w < width {
+            spans.push(Span::styled(
+                " ".repeat(width - label_w),
+                Style::default().fg(rgb(60, 60, 70)),
+            ));
+        }
+        out.push(Line::from(spans));
     }
 
     // Hard bound: the header carries a fixed hint and list rows budget by
@@ -630,6 +836,7 @@ pub fn render_swarm_strip(
     spinner_frame: usize,
     width: usize,
     max_height: usize,
+    batch_selected: Option<&std::collections::HashSet<usize>>,
 ) -> Vec<Line<'static>> {
     if members.is_empty() || width < 8 {
         return Vec::new();
@@ -669,7 +876,9 @@ pub fn render_swarm_strip(
         task: Option<String>,
         todo: Option<String>,
         color: Color,
+        active: bool,
         is_sel: bool,
+        is_batch: bool,
     }
     let chips: Vec<Chip> = ordered
         .iter()
@@ -683,12 +892,17 @@ pub fn render_swarm_strip(
                 .filter(|t| !t.trim().is_empty())
                 .map(|t| truncate_label(t, CHIP_TASK_MAX_W)),
             todo: m.todo.map(|(done, total)| format!("{done}/{total}")),
-            color: status_accent(&m.status),
+            color: role_color(m.role.as_deref()).unwrap_or_else(|| status_accent(&m.status)),
+            active: is_active_status(&m.status),
             is_sel: idx == selected,
+            is_batch: batch_selected.is_some_and(|set| set.contains(&idx)),
         })
         .collect();
     let chip_w = |c: &Chip| -> usize {
-        disp_w(&c.glyph) + 1 + disp_w(&c.name) + c.todo.as_ref().map(|t| disp_w(t) + 1).unwrap_or(0)
+        let prefix = if c.is_sel && focused { 2 } else { 0 }; // '▸ ' width
+        let batch_pfx = if c.is_batch { 2 } else { 0 }; // '✓ ' width
+        prefix + batch_pfx + disp_w(&c.glyph) + 1 + disp_w(&c.name)
+            + c.todo.as_ref().map(|t| disp_w(t) + 1).unwrap_or(0)
     };
 
     // Fit as many chips as possible into `budget`, collapsing overflow into a
@@ -780,26 +994,46 @@ pub fn render_swarm_strip(
 
     let used: usize = if shown == 0 && !chips.is_empty() {
         // Degenerate width: show the first chip truncated.
-        let budget = width.saturating_sub(lead_w + if show_tally { tail_w + gap } else { 0 });
         let c = &chips[0];
-        let avail = budget.saturating_sub(disp_w(&c.glyph) + 1);
+        let prefix_w = if c.is_sel && focused { 2 } else { 0 } // '▸ ' width
+            + if c.is_batch { 2 } else { 0 }; // '✓ ' width
+        let budget = width.saturating_sub(lead_w + if show_tally { tail_w + gap } else { 0 });
+        let avail = budget.saturating_sub(disp_w(&c.glyph) + 1 + prefix_w);
         let name = truncate_label(&c.name, avail.max(1));
-        let style = Style::default().fg(c.color);
-        spans.push(Span::styled(format!("{} ", c.glyph), style));
-        spans.push(Span::styled(name.clone(), style));
-        disp_w(&c.glyph) + 1 + disp_w(&name)
+        let style = if c.active {
+            Style::default().fg(c.color).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(rgb(110, 110, 125))
+        };
+        let prefix = if c.is_sel && focused { "▸ " } else { "" };
+        let batch_prefix = if c.is_batch { "✓ " } else { "" };
+        spans.push(Span::styled(
+            format!("{prefix}{batch_prefix}{} {}", c.glyph, name),
+            style,
+        ));
+        prefix_w + disp_w(&c.glyph) + 1 + disp_w(&name)
     } else {
         for (i, chip) in chips.iter().take(shown).enumerate() {
             if i > 0 {
                 spans.push(Span::raw(CHIP_SEP));
             }
-            let mut style = Style::default().fg(chip.color);
+            let mut style = if chip.active {
+                Style::default().fg(chip.color).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(rgb(110, 110, 125))
+            };
             if chip.is_sel && focused {
-                style = style.add_modifier(Modifier::BOLD | Modifier::REVERSED);
+                style = style
+                    .add_modifier(Modifier::REVERSED | Modifier::UNDERLINED);
             } else if chip.is_sel {
-                style = style.add_modifier(Modifier::BOLD);
+                style = style.add_modifier(Modifier::UNDERLINED);
             }
-            spans.push(Span::styled(format!("{} {}", chip.glyph, chip.name), style));
+            let prefix = if chip.is_sel && focused { "▸ " } else { "" };
+            let batch_prefix = if chip.is_batch { "✓ " } else { "" };
+            spans.push(Span::styled(
+                format!("{prefix}{batch_prefix}{} {}", chip.glyph, chip.name),
+                style,
+            ));
             if per_task_w > 0
                 && let Some(task) = &chip.task
             {
@@ -884,7 +1118,7 @@ pub fn render_swarm_strip(
                 let prefix_w = prefix.chars().count();
                 let body = truncate_label(&detail, width.saturating_sub(prefix_w));
                 out.push(Line::from(vec![
-                    Span::styled(prefix, Style::default().fg(status_accent(&m.status))),
+                    Span::styled(prefix, Style::default().fg(role_color(m.role.as_deref()).unwrap_or_else(|| status_accent(&m.status)))),
                     Span::styled(body, Style::default().fg(rgb(180, 180, 190))),
                 ]));
             }
@@ -964,6 +1198,7 @@ pub fn render_swarm_strip_vertical(
     width: usize,
     max_rows: usize,
     max_height: usize,
+    batch_selected: Option<&std::collections::HashSet<usize>>,
 ) -> Vec<Line<'static>> {
     if members.is_empty() || width < 8 || max_rows == 0 {
         return Vec::new();
@@ -1007,7 +1242,7 @@ pub fn render_swarm_strip_vertical(
     for (row, m) in ordered.iter().enumerate().skip(start).take(shown) {
         let first = out.is_empty();
         let is_sel = row == selected;
-        let color = status_accent(&m.status);
+        let color = role_color(m.role.as_deref()).unwrap_or_else(|| status_accent(&m.status));
         let glyph = status_glyph(&m.status, spinner_frame);
         let todo = m.todo.map(|(done, total)| format!("{done}/{total}"));
 
@@ -1025,6 +1260,19 @@ pub fn render_swarm_strip_vertical(
             Style::default().fg(rgb(255, 200, 100)),
         )];
 
+        // In batch mode every row carries a checkbox for its selection state.
+        let batch_w = if batch_selected.is_some() { 4 } else { 0 };
+        if let Some(selected_set) = batch_selected {
+            let checked = selected_set.contains(&row);
+            let check = if checked { "[✓] " } else { "[ ] " };
+            let check_color = if checked {
+                rgb(100, 200, 100)
+            } else {
+                rgb(100, 100, 110)
+            };
+            spans.push(Span::styled(check, Style::default().fg(check_color)));
+        }
+
         // Right tail only on the first row; degrade by dropping hint first.
         let (row_tail_w, show_hint) = if first {
             if lead_w + gap + tally_w + hint_w + 16 <= width && hint_w > 0 {
@@ -1040,6 +1288,7 @@ pub fn render_swarm_strip_vertical(
 
         let body_budget = width
             .saturating_sub(lead_w)
+            .saturating_sub(batch_w)
             .saturating_sub(if row_tail_w > 0 { row_tail_w + gap } else { 0 });
 
         // Per-worker status tail, mirroring the main status line: route,
@@ -1102,9 +1351,14 @@ pub fn render_swarm_strip_vertical(
         }
 
         // <glyph> [icon ]<name>[ · task][ done/total]
-        let mut style = Style::default().fg(color);
-        if is_sel && focused {
-            style = style.add_modifier(Modifier::BOLD);
+        let row_active = is_active_status(&m.status);
+        let mut style = if row_active {
+            Style::default().fg(color).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(rgb(110, 110, 125))
+        };
+        if is_sel {
+            style = style.add_modifier(Modifier::UNDERLINED);
         }
         // The worker icon occupies the left-edge slot before the spinner.
         // Only workers without an icon need a textual identity in the body.
@@ -1541,7 +1795,9 @@ fn dock_row(
     spinner_frame: usize,
     width: usize,
 ) -> Line<'static> {
-    let accent = status_accent(&member.status);
+    let accent = role_color(member.role.as_deref())
+        .unwrap_or_else(|| status_accent(&member.status));
+    let active = is_active_status(&member.status);
     let marker = if selected { "▸ " } else { "  " };
     let glyph = role_glyph(member.role.as_deref())
         .map(|g| format!("{g} "))
@@ -1556,26 +1812,39 @@ fn dock_row(
         .saturating_sub(2 + disp_w(&glyph) + disp_w(&label) + right_w)
         .max(1);
 
-    let mut label_style = Style::default().fg(if selected {
-        rgb(235, 235, 245)
+    let mut label_style = if active {
+        Style::default().fg(accent).add_modifier(Modifier::BOLD)
     } else {
-        rgb(170, 170, 180)
-    });
+        Style::default().fg(rgb(110, 110, 125))
+    };
+    if selected {
+        label_style = label_style.add_modifier(Modifier::UNDERLINED);
+    }
     if selected && focused {
-        label_style = label_style.add_modifier(Modifier::BOLD);
+        label_style = label_style.add_modifier(Modifier::REVERSED);
     }
     let mut spans = vec![Span::styled(
         marker.to_string(),
         Style::default().fg(if selected { accent } else { rgb(90, 90, 100) }),
     )];
     if !glyph.is_empty() {
-        spans.push(Span::styled(glyph, Style::default().fg(accent)));
+        let glyph_style = if active {
+            Style::default().fg(accent)
+        } else {
+            Style::default().fg(rgb(110, 110, 125))
+        };
+        spans.push(Span::styled(glyph, glyph_style));
     }
     spans.push(Span::styled(label, label_style));
     spans.push(Span::raw(" ".repeat(filler)));
+    let status_style = if active {
+        Style::default().fg(accent)
+    } else {
+        Style::default().fg(rgb(110, 110, 125))
+    };
     spans.push(Span::styled(
         status.to_string(),
-        Style::default().fg(accent),
+        status_style,
     ));
     if let Some(todo) = todo {
         spans.push(Span::styled(todo, Style::default().fg(rgb(130, 130, 140))));
@@ -1661,7 +1930,8 @@ fn render_hovered_detail(
     width: usize,
     budget: usize,
 ) -> Vec<Line<'static>> {
-    let accent = status_accent(&m.status);
+    let accent = role_color(m.role.as_deref())
+        .unwrap_or_else(|| status_accent(&m.status));
     let dim = rgb(120, 120, 130);
     const GUTTER: &str = "   ";
 
@@ -1837,6 +2107,7 @@ fn hovered_detail_body(
                 }
             }
         }
+        push_metric_lines(m, &mut out, budget, show_member_rail);
         return out;
     }
 
@@ -1882,29 +2153,91 @@ fn hovered_detail_body(
         }
     }
 
+    push_metric_lines(m, &mut out, budget, show_member_rail);
     out
 }
+
+/// Append the per-agent performance metrics (token counts, queue depth, cost)
+/// to a detail viewport, one row each, while there is budget left.
+fn push_metric_lines(
+    m: &GalleryMember,
+    out: &mut Vec<Line<'static>>,
+    budget: usize,
+    show_member_rail: bool,
+) {
+    let detail_fg = rgb(190, 190, 200);
+    let gutter_fg = rgb(80, 80, 90);
+    const GUTTER: &str = "   ";
+    const BAR: &str = "│   ";
+
+    let mut push = |icon: &str, text: String, color: Color| {
+        if out.len() >= budget {
+            return;
+        }
+        out.push(Line::from(vec![
+            Span::raw(GUTTER),
+            Span::styled(
+                if show_member_rail { BAR } else { "    " },
+                Style::default().fg(gutter_fg),
+            ),
+            Span::styled(format!("  {icon} "), Style::default().fg(color)),
+            Span::raw(text),
+        ]));
+    };
+
+    if let Some(tokens) = m.input_tokens {
+        push("📥", format_tokens(tokens), detail_fg);
+    }
+    if let Some(tokens) = m.output_tokens {
+        push("📤", format_tokens(tokens), detail_fg);
+    }
+    if let Some(depth) = m.queue_depth
+        && depth > 0
+    {
+        push(
+            "⚠️ ",
+            format!("{depth} tasks queued"),
+            rgb(255, 180, 50),
+        );
+    }
+    if let Some(cents) = m.cost_cents {
+        push("💰", format_cost(cents), detail_fg);
+    }
+}
+
 fn panel_header(total: usize, active: usize, focused: bool) -> Line<'static> {
+    let agent_color = if focused {
+        rgb(220, 220, 230) // bright white when focused
+    } else {
+        rgb(160, 160, 170) // dim gray when unfocused
+    };
+    let active_color = if focused {
+        if active > 0 {
+            rgb(255, 200, 100) // accent gold when focused and active
+        } else {
+            rgb(150, 150, 160)
+        }
+    } else {
+        rgb(140, 140, 150) // dim when unfocused
+    };
+
     let mut spans = vec![
         Span::styled("🐝 ", Style::default().fg(rgb(255, 200, 100))),
         Span::styled(
-            format!(
-                "{} agent{}{}",
-                total,
-                if total == 1 { "" } else { "s" },
-                if active > 0 {
-                    format!(" · {active} active")
-                } else {
-                    String::new()
-                }
-            ),
-            Style::default().fg(rgb(160, 160, 170)),
+            format!("{} agent{}", total, if total == 1 { "" } else { "s" }),
+            Style::default().fg(agent_color),
         ),
     ];
+    if active > 0 {
+        spans.push(Span::styled(
+            format!(" · {active} active"),
+            Style::default().fg(active_color),
+        ));
+    }
     if focused {
         spans.push(Span::styled(
             "  (j/k select · o pop out · esc)",
-            Style::default().fg(rgb(110, 110, 120)),
+            Style::default().fg(rgb(100, 100, 110)),
         ));
     }
     Line::from(spans)
@@ -1955,7 +2288,8 @@ fn display_index_to_tile_index(
 /// One row in the agent list: a selection marker, optional role glyph, the
 /// label, a status badge, and an age hint, all bounded to `width`.
 fn list_row(member: &GalleryMember, selected: bool, focused: bool, width: usize) -> Line<'static> {
-    let accent = status_accent(&member.status);
+    let accent = role_color(member.role.as_deref())
+        .unwrap_or_else(|| status_accent(&member.status));
     let marker = if selected { "▸ " } else { "  " };
     let glyph = role_glyph(member.role.as_deref())
         .map(|g| format!("{g} "))
@@ -1981,7 +2315,11 @@ fn list_row(member: &GalleryMember, selected: bool, focused: bool, width: usize)
     let label = truncate_label(&member.label, label_budget);
     let label_w = disp_w(&label);
 
-    let label_style = if selected {
+    let label_style = if selected && focused {
+        Style::default()
+            .fg(accent)
+            .add_modifier(Modifier::BOLD)
+    } else if selected {
         Style::default().fg(rgb(235, 235, 245))
     } else {
         Style::default().fg(rgb(170, 170, 180))

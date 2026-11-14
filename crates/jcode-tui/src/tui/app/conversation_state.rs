@@ -40,7 +40,7 @@ impl App {
 
     pub(super) fn format_compaction_started_message(trigger: &str) -> String {
         let strategy = Self::format_compaction_strategy_label(trigger);
-        format!("📦 Compacting context ({strategy})")
+        format!("◧ Compacting context ({strategy})")
     }
 
     pub(super) fn format_compaction_progress_notice(elapsed: std::time::Duration) -> String {
@@ -106,20 +106,20 @@ impl App {
         match (event.pre_tokens, event.post_tokens) {
             (Some(pre), Some(post)) => {
                 format!(
-                    "📦 Compacted ({strategy}): {} → {}",
+                    "◧ Compacted ({strategy}): {} → {}",
                     usage(pre),
                     usage(post)
                 )
             }
-            (Some(pre), None) => format!("📦 Compacted ({strategy}): from {}", usage(pre)),
-            (None, Some(post)) => format!("📦 Compacted ({strategy}): now {}", usage(post)),
+            (Some(pre), None) => format!("◧ Compacted ({strategy}): from {}", usage(pre)),
+            (None, Some(post)) => format!("◧ Compacted ({strategy}): now {}", usage(post)),
             (None, None) => match event.messages_compacted.filter(|count| *count > 0) {
                 Some(count) => format!(
-                    "📦 Compacted ({strategy}): {} older message{} summarized",
+                    "◧ Compacted ({strategy}): {} older message{} summarized",
                     Self::format_compaction_number(count as u64),
                     if count == 1 { "" } else { "s" },
                 ),
-                None => format!("📦 Compacted ({strategy})"),
+                None => format!("◧ Compacted ({strategy})"),
             },
         }
     }
@@ -877,46 +877,46 @@ mod tests {
             assert_eq!(
                 App::format_compaction_complete_message(&event, 200_000),
                 format!(
-                    "📦 Compacted ({method}): ~180,000 tokens (90.0%) → ~40,000 tokens (20.0%)"
+                    "◧ Compacted ({method}): ~180,000 tokens (90.0%) → ~40,000 tokens (20.0%)"
                 )
             );
         }
         event.trigger = "hard_compact".to_string();
         assert_eq!(
             App::format_compaction_complete_message(&event, 200_000),
-            "📦 Compacted (emergency): ~180,000 tokens (90.0%) → ~40,000 tokens (20.0%)"
+            "◧ Compacted (emergency): ~180,000 tokens (90.0%) → ~40,000 tokens (20.0%)"
         );
         assert_eq!(
             App::format_compaction_complete_message(&event, 0),
-            "📦 Compacted (emergency): ~180,000 tokens → ~40,000 tokens"
+            "◧ Compacted (emergency): ~180,000 tokens → ~40,000 tokens"
         );
         event.pre_tokens = None;
         event.post_tokens = None;
         assert_eq!(
             App::format_compaction_complete_message(&event, 200_000),
-            "📦 Compacted (emergency): 100 older messages summarized"
+            "◧ Compacted (emergency): 100 older messages summarized"
         );
         event.messages_compacted = None;
         assert_eq!(
             App::format_compaction_complete_message(&event, 200_000),
-            "📦 Compacted (emergency)"
+            "◧ Compacted (emergency)"
         );
         event.post_tokens = Some(40_000);
         assert_eq!(
             App::format_compaction_complete_message(&event, 200_000),
-            "📦 Compacted (emergency): now ~40,000 tokens (20.0%)"
+            "◧ Compacted (emergency): now ~40,000 tokens (20.0%)"
         );
         event.pre_tokens = Some(180_000);
         event.post_tokens = None;
         assert_eq!(
             App::format_compaction_complete_message(&event, 200_000),
-            "📦 Compacted (emergency): from ~180,000 tokens (90.0%)"
+            "◧ Compacted (emergency): from ~180,000 tokens (90.0%)"
         );
         event.pre_tokens = Some(0);
         event.post_tokens = Some(0);
         assert_eq!(
             App::format_compaction_complete_message(&event, 200_000),
-            "📦 Compacted (emergency): ~0 tokens (0.0%) → ~0 tokens (0.0%)"
+            "◧ Compacted (emergency): ~0 tokens (0.0%) → ~0 tokens (0.0%)"
         );
     }
 

@@ -260,7 +260,7 @@ impl App {
     /// when the gate allows (user is blocked on tokens right now).
     pub(super) fn rate_limit_notice_with_nudge(&mut self, reset_secs: u64) -> String {
         let mut line = format!(
-            "⏳ Rate limit hit. Will auto-retry in {} seconds...",
+            "⧖ Rate limit hit. Will auto-retry in {} seconds...",
             reset_secs
         );
         if self.claim_subscribe_nudge(SubscribeNudgeTrigger::RateLimited) {

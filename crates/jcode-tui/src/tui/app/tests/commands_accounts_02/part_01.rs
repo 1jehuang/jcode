@@ -355,7 +355,7 @@ fn test_show_accounts_includes_masked_email_column() {
         let status = if account.expires > now_ms {
             "✓ valid"
         } else {
-            "⚠ expired"
+            "▲ expired"
         };
         let email = account
             .email

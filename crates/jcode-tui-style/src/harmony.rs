@@ -217,6 +217,9 @@ pub(crate) const MUST_DISTINGUISH: &[(Role, Role)] = &[
     // makes the status unreadable. Visual inspection of generated palettes
     // caught them landing on the same hue, which no test had covered.
     (Role::System, Role::Queued),
+    // StatusText must differ from Dim so the bottom status line is distinguishable
+    // from low-emphasis transcript hints.
+    (Role::Dim, Role::StatusText),
 ];
 // `user`/`info` and `ai`/`accent` are deliberately *not* listed: Dracula and
 // other loved palettes make those similar on purpose, and they never appear in

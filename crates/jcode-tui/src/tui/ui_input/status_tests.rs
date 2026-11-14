@@ -898,3 +898,50 @@ fn voice_ghost_text_wraps_after_input_without_moving_cursor() {
     assert_eq!(ghost.content.as_ref(), " the bug");
     assert!(ghost.style.add_modifier.contains(Modifier::ITALIC));
 }
+
+#[test]
+fn truncate_line_for_narrow_short_text_unchanged() {
+    let line = Line::from(vec![Span::styled("hello", Style::default())]);
+    let truncated = truncate_line_for_narrow(line, 35);
+    assert_eq!(truncated.spans.len(), 1);
+    assert_eq!(truncated.spans[0].content.as_ref(), "hello");
+}
+
+#[test]
+fn truncate_line_for_narrow_long_text_truncated_with_ellipsis() {
+    let text = "[sending] 4.2s · ↑120 ↓340";
+    let line = Line::from(vec![Span::styled(text, Style::default())]);
+    let truncated = truncate_line_for_narrow(line, 15);
+    // Should be truncated to fit within 15 display columns.
+    let rendered: String = truncated.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(rendered.len() <= 15, "got {}: {rendered}", rendered.len());
+    assert!(rendered.ends_with('…'), "expected ellipsis: {rendered}");
+}
+
+#[test]
+fn truncate_line_for_narrow_multiple_spans() {
+    let line = Line::from(vec![
+        Span::styled("⏳ ", Style::default()),
+        Span::styled("[sending] 4.2s", Style::default()),
+    ]);
+    let truncated = truncate_line_for_narrow(line, 8);
+    let total_width: usize = truncated
+        .spans
+        .iter()
+        .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    // The second span is clipped to what the first span left minus one column
+    // for the ellipsis, so the total is max_cols - 1 regardless of the split.
+    assert_eq!(total_width, 7, "exact cumulative width: got {total_width}");
+    assert!(
+        truncated.spans.last().unwrap().content.ends_with('…'),
+        "clipped span must end with an ellipsis"
+    );
+}
+
+#[test]
+fn truncate_line_for_narrow_zero_width_line() {
+    let line = Line::from(vec![]);
+    let truncated = truncate_line_for_narrow(line, 10);
+    assert!(truncated.spans.is_empty());
+}

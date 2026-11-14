@@ -278,9 +278,18 @@ thread_local! {
 /// transcript above: this keeps the header/tips text and info widgets
 /// perfectly still when the slash menu opens on a fresh session. The donut
 /// simply renders shorter for as long as the composer is expanded.
-pub(crate) fn idle_donut_reserved_height(show_donut: bool, input_height: u16) -> u16 {
+///
+/// In small panes (< `MIN_PANE_FOR_DONUT` rows) the donut is suppressed
+/// unconditionally: the 14-row reservation would consume the entire pane,
+/// leaving no room for messages.
+pub(crate) fn idle_donut_reserved_height(
+    show_donut: bool,
+    input_height: u16,
+    available_height: u16,
+) -> u16 {
     const IDLE_DONUT_HEIGHT: u16 = 14;
-    if show_donut {
+    const MIN_PANE_FOR_DONUT: u16 = 8;
+    if show_donut && available_height >= MIN_PANE_FOR_DONUT {
         let composer_growth = input_height.saturating_sub(1);
         IDLE_DONUT_HEIGHT.saturating_sub(composer_growth)
     } else {
