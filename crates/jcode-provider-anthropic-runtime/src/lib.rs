@@ -1011,8 +1011,32 @@ impl AnthropicProvider {
     fn catalog_scope_for_route(&self, oauth: bool) -> String {
         if oauth && let Some(label) = self.oauth_account_label() {
             format!("oauth::{label}")
+        } else if oauth {
+            jcode_base::provider::anthropic_catalog_scope_for_route(true)
         } else {
-            jcode_base::provider::anthropic_catalog_scope_for_route(oauth)
+            // The cache identity must hash the credential that actually signs
+            // direct catalog requests. A `[provider.headers]` x-api-key override
+            // (or a named-profile key) changes the account the catalog belongs
+            // to; hashing only the underlying ANTHROPIC_API_KEY would let a
+            // fresh catalog from the previous account suppress discovery for
+            // the new one. The digest is a hash, never the key itself.
+            use sha2::{Digest, Sha256};
+            let effective = self
+                .direct_transport
+                .headers
+                .as_ref()
+                .ok()
+                .and_then(|headers| headers.get("x-api-key"))
+                .map(|value| value.as_bytes().to_vec())
+                .or_else(|| {
+                    self.direct_api_key()
+                        .ok()
+                        .map(|key| key.as_bytes().to_vec())
+                });
+            format!(
+                "api-key::{:x}",
+                Sha256::digest(effective.as_deref().unwrap_or_default())
+            )
         }
     }
 
