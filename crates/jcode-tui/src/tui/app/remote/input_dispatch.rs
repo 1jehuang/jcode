@@ -17,6 +17,26 @@ pub(in crate::tui::app) async fn begin_remote_send(
     retry_attempts: u8,
 ) -> Result<u64> {
     app.prepare_cloud_environment(remote).await?;
+    // Reload delivery is idempotent on the server: an exact repeat of its
+    // hidden reminder is acknowledged with Done without running the agent.
+    // Delivery does not imply successful execution, though. A provider failure
+    // (including a fallback route switch) must resume that accepted turn rather
+    // than replay the original delivery token. Keep the instructions, but mark
+    // this as an execution retry. Do this at the shared send boundary so both
+    // fallback resends and same-route retries behave identically.
+    const EXECUTION_RETRY_PREFIX: &str = "<system-reminder>Retry the interrupted execution of the previous turn. Continue from the current conversation and completed tool results without repeating completed work.</system-reminder>\n\n";
+    let system_reminder = system_reminder.map(|reminder| {
+        if retry_attempts > 0
+            && is_system
+            && content.trim().is_empty()
+            && images.is_empty()
+            && !reminder.starts_with(EXECUTION_RETRY_PREFIX)
+        {
+            format!("{EXECUTION_RETRY_PREFIX}{reminder}")
+        } else {
+            reminder
+        }
+    });
     let recovery = app.cloud_recovery_reminder();
     let system_reminder = match (system_reminder, recovery.as_ref()) {
         (Some(reminder), Some(recovery)) => Some(format!("{reminder}\n\n{recovery}")),

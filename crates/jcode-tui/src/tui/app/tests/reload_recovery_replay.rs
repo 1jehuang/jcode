@@ -63,6 +63,81 @@ fn reload_replay_context(session_id: &str) -> ReloadContext {
 }
 
 #[test]
+fn reload_recovery_execution_retries_are_not_delivery_replays() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    app.is_remote = true;
+    let mut connection = crate::tui::backend::RemoteConnection::dummy();
+    connection.mark_history_loaded();
+    let directive = ReloadContext::recovery_directive(
+        Some(&reload_replay_context("reload_retry")),
+        true,
+        "",
+        None,
+    )
+    .unwrap();
+    let original = directive.continuation_message;
+
+    // Initial delivery must still exactly match the durable recovery record.
+    rt.block_on(remote::begin_remote_send(
+        &mut app,
+        &mut connection,
+        String::new(),
+        vec![],
+        true,
+        Some(original.clone()),
+        true,
+        0,
+    ))
+    .unwrap();
+    assert_eq!(
+        app.rate_limit_pending_message.as_ref().unwrap().system_reminder.as_deref(),
+        Some(original.as_str())
+    );
+
+    // Model a provider failure after acceptance and a confirmed fallback switch.
+    // The server has already marked the original reload intent delivered.
+    app.is_processing = false;
+    app.pending_fallback_resend = Some(FallbackResendPayload {
+        retry_attempts: 0,
+        content: String::new(),
+        images: vec![],
+        is_system: true,
+        auto_retry: true,
+        system_reminder: Some(original.clone()),
+        raw_input: None,
+    });
+    rt.block_on(remote::process_remote_followups(&mut app, &mut connection));
+    assert!(app.is_processing);
+    assert!(app.pending_fallback_resend.is_none());
+    let pending = app.rate_limit_pending_message.as_ref().unwrap();
+    assert!(pending.content.is_empty(), "do not echo another user prompt");
+    assert_eq!(pending.retry_attempts, 1);
+    let retry = pending.system_reminder.clone().unwrap();
+    assert_ne!(retry, original, "an exact replay is suppressed by the server");
+    assert!(retry.contains("Retry the interrupted execution"));
+    assert!(retry.ends_with(&original), "preserve the recovery instructions");
+
+    // Same-route retries share the fix and must not grow the reminder each time.
+    rt.block_on(remote::begin_remote_send(
+        &mut app,
+        &mut connection,
+        String::new(),
+        vec![],
+        true,
+        Some(retry.clone()),
+        true,
+        2,
+    ))
+    .unwrap();
+    assert_eq!(
+        app.rate_limit_pending_message.as_ref().unwrap().system_reminder.as_deref(),
+        Some(retry.as_str())
+    );
+}
+
+#[test]
 fn reload_recovery_preserves_visible_turn_timer_through_dispatch() {
     let _env_guard = crate::storage::lock_test_env();
     let rt = tokio::runtime::Runtime::new().unwrap();
