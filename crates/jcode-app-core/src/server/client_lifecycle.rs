@@ -56,7 +56,7 @@ use super::{
 use crate::agent::Agent;
 use crate::bus::{Bus, BusEvent};
 use crate::id;
-use crate::protocol::{Request, ServerEvent, decode_request, encode_event};
+use crate::protocol::{Request, ServerEvent, decode_request, encode_event, encode_event_into};
 use crate::provider::Provider;
 use crate::tool::Registry;
 use crate::transport::Stream;
@@ -551,6 +551,7 @@ pub(super) async fn handle_client(
     let client_connection_id_for_events = client_connection_id.clone();
     let client_connections_for_events = Arc::clone(&client_connections);
     let event_handle = tokio::spawn(async move {
+        let mut event_buffer = Vec::new();
         while let Some(event) = client_event_rx.recv().await {
             if let Some(update) = ConnectionMetadataUpdate::from_event(&event) {
                 let mut connections = client_connections_for_events.write().await;
@@ -561,9 +562,9 @@ pub(super) async fn handle_client(
             let Some(event) = event_for_transport(event, supports_turn_identity) else {
                 continue;
             };
-            let json = encode_event(&event);
+            encode_event_into(&event, &mut event_buffer);
             let mut w = writer_clone.lock().await;
-            if let Err(error) = w.write_all(json.as_bytes()).await {
+            if let Err(error) = w.write_all(&event_buffer).await {
                 // A broken pipe here is routine (client reload/disconnect mid
                 // broadcast), so keep the line short: a full Debug dump of e.g.
                 // a SwarmStatus event prints every member and floods the log.
@@ -574,6 +575,7 @@ pub(super) async fn handle_client(
                 ));
                 break;
             }
+            release_large_event_buffer(&mut event_buffer);
         }
     });
 
@@ -3543,6 +3545,14 @@ enum ConnectionMetadataUpdate<'a> {
     ToolStarted(&'a str),
     ToolDone,
     TurnEnded,
+}
+
+fn release_large_event_buffer(buffer: &mut Vec<u8>) {
+    // Keep ordinary streaming allocations, but do not pin a large History or
+    // tool-result payload for the rest of a long-lived connection.
+    if buffer.capacity() > 64 * 1024 {
+        *buffer = Vec::new();
+    }
 }
 
 impl<'a> ConnectionMetadataUpdate<'a> {

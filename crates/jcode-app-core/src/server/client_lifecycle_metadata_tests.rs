@@ -1,6 +1,55 @@
 use super::{ConnectionMetadataUpdate, ServerEvent};
 use serde_json::json;
 
+#[test]
+fn writer_buffer_retains_64kib_and_releases_larger_capacity() {
+    for capacity in [0, 1024, 64 * 1024, 64 * 1024 + 1, 128 * 1024] {
+        let mut buffer = Vec::with_capacity(capacity);
+        buffer.extend_from_slice(b"written");
+        let actual_capacity = buffer.capacity();
+        let pointer = buffer.as_ptr();
+        super::release_large_event_buffer(&mut buffer);
+        if actual_capacity > 64 * 1024 {
+            assert_eq!(buffer.capacity(), 0);
+            assert!(buffer.is_empty());
+        } else {
+            assert_eq!(buffer.capacity(), actual_capacity);
+            assert_eq!(buffer.as_ptr(), pointer);
+            assert_eq!(buffer, b"written");
+        }
+    }
+}
+
+#[tokio::test]
+async fn writer_reused_buffer_preserves_sequential_wire_bytes() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut events = fixtures();
+    events.push(ServerEvent::TextDelta {
+        text: "large".repeat(20_000),
+    });
+    events.push(wrapped(ServerEvent::TextDelta {
+        text: "after large\n☃".into(),
+    }));
+    events.push(ServerEvent::Done { id: 99 });
+    let expected: String = events.iter().map(crate::protocol::encode_event).collect();
+    // A small transport forces partial writes, exercising write_all with the
+    // same borrowed buffer until the entire event has been delivered.
+    let (mut writer, mut reader) = tokio::io::duplex(17);
+    let sender = tokio::spawn(async move {
+        let mut buffer = Vec::new();
+        for event in events {
+            crate::protocol::encode_event_into(&event, &mut buffer);
+            writer.write_all(&buffer).await.unwrap();
+            super::release_large_event_buffer(&mut buffer);
+            assert!(buffer.capacity() <= 64 * 1024);
+        }
+    });
+    let mut actual = Vec::new();
+    reader.read_to_end(&mut actual).await.unwrap();
+    sender.await.unwrap();
+    assert_eq!(actual, expected.as_bytes());
+}
+
 fn fixtures() -> Vec<ServerEvent> {
     [
         json!({"type":"turn_started", "identity":{"runtime_generation":"generation", "turn_id":1}}),
