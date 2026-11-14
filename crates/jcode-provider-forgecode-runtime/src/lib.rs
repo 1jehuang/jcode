@@ -94,6 +94,9 @@ impl ForgeCodeProvider {
                     | ContentBlock::OpenAIReasoning { .. } => {}
                     ContentBlock::Image { .. } => {}
                     ContentBlock::OpenAICompaction { .. } => {}
+                    // Upstream additions with no prompt text of their own:
+                    // a deferred-tool reference and provider-native blocks.
+                    ContentBlock::ToolReference { .. } | ContentBlock::ProviderNative { .. } => {}
                 }
             }
             if !parts.is_empty() {

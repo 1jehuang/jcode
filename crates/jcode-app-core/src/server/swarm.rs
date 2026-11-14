@@ -852,6 +852,11 @@ async fn broadcast_swarm_status_now(
                             context_tokens: tokens.map(|(context, _)| context).filter(|t| *t > 0),
                             context_limit,
                             output_tokens: tokens.map(|(_, output)| output).filter(|t| *t > 0),
+                            // The fork's member model does not track these yet; the
+                            // fields are optional and omitted from the wire when None.
+                            input_tokens: None,
+                            queue_depth: None,
+                            cost_cents: None,
                         },
                     },
                 )
