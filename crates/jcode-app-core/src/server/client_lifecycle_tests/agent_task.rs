@@ -101,3 +101,75 @@ async fn agent_task_leaves_the_request_loop_reading() {
     drop(reader);
     server_task.abort();
 }
+
+/// An agent task is this connection's turn. A message sent while it runs is
+/// refused at once; it must not wait in the request loop for the Agent the
+/// task holds, which would stop the loop reading answers and cancels.
+#[tokio::test]
+async fn message_during_agent_task_is_refused_without_stalling_the_loop() {
+    let _lock = crate::storage::lock_test_env();
+    let home = IsolatedReloadRecoveryEnv::new();
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let fixture = SystemPromptSocketFixture::with_provider(
+        Arc::new(GatedProvider {
+            started: started.clone(),
+            release: release.clone(),
+        }),
+        Arc::default(),
+    );
+    let (server_task, stream) = fixture.connect();
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let mut send = async |value: serde_json::Value| {
+        writer
+            .write_all(format!("{value}\n").as_bytes())
+            .await
+            .unwrap();
+    };
+    async fn next_matching(
+        reader: &mut BufReader<crate::transport::ReadHalf>,
+        predicate: impl Fn(&ServerEvent) -> bool,
+    ) -> ServerEvent {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                let event = turn_payload(serde_json::from_str(&line).unwrap());
+                if predicate(&event) {
+                    return event;
+                }
+            }
+        })
+        .await
+        .expect("daemon event timeout: the request loop stopped reading")
+    }
+
+    send(json!({"type":"subscribe","id":1,"working_dir":home._home.path()})).await;
+    next_matching(&mut reader, |e| matches!(e, ServerEvent::Done { id: 1 })).await;
+    send(json!({"type":"agent_task","id":2,"from_agent":"peer","task":"work"})).await;
+    tokio::time::timeout(Duration::from_secs(10), started.notified())
+        .await
+        .expect("agent task turn started");
+
+    send(json!({"type":"message","id":3,"content":"second"})).await;
+    let refused = next_matching(&mut reader, |e| {
+        matches!(e, ServerEvent::Error { id: 3, .. })
+    })
+    .await;
+    let ServerEvent::Error { message, .. } = refused else {
+        unreachable!()
+    };
+    assert_eq!(message, "Already processing a message");
+    send(json!({"type":"ping","id":4})).await;
+    next_matching(&mut reader, |e| {
+        matches!(e, ServerEvent::Pong { id: 4, .. })
+    })
+    .await;
+
+    release.notify_one();
+    next_matching(&mut reader, |e| matches!(e, ServerEvent::Done { id: 2 })).await;
+    drop(send);
+    drop(reader);
+    server_task.abort();
+}
