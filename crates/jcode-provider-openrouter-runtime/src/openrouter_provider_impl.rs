@@ -770,6 +770,24 @@ impl Provider for OpenRouterProvider {
             .split_once('@')
             .map(|(b, _)| b)
             .filter(|b| !b.is_empty());
+        let normalized_model_id = model_id.trim().to_ascii_lowercase();
+        // Precedence: explicit per-model context_window config > live /models
+        // metadata (memory, then disk) > built-in family/name tables > default.
+        // Keep configured values separate from static profile defaults: those
+        // defaults must not override evidence from the serving endpoint.
+        if let Some(limit) = self.configured_context_limits.get(&normalized_model_id) {
+            return *limit;
+        }
+        let qualified_model_id = self
+            .profile_id
+            .as_ref()
+            .map(|profile| format!("{profile}:{normalized_model_id}"));
+        if let Some(limit) = qualified_model_id
+            .as_deref()
+            .and_then(jcode_base::provider::models::configured_context_limit_for_model)
+        {
+            return limit;
+        }
         // Try cached model data from OpenRouter API
         let cache = self.models_cache.try_read();
         if let Ok(cache) = cache
@@ -792,16 +810,17 @@ impl Provider for OpenRouterProvider {
         {
             return ctx as usize;
         }
-        let normalized_model_id = model_id.trim().to_ascii_lowercase();
-        if let Some(limit) = self.static_context_limits.get(&normalized_model_id) {
-            return *limit;
-        }
-        // Config loading seeds explicit per-model context windows here. They
-        // must outrank built-in profile family guesses. See #1087.
-        if let Some(limit) =
-            jcode_base::provider::cached_context_limit_for_model(&normalized_model_id)
+        // Config/catalog data published by another runtime must also beat the
+        // profile's built-in family guesses. See #1087 and #2115.
+        if let Some(limit) = qualified_model_id
+            .as_deref()
+            .and_then(jcode_base::provider::cached_context_limit_for_model)
+            .or_else(|| jcode_base::provider::cached_context_limit_for_model(&normalized_model_id))
         {
             return limit;
+        }
+        if let Some(limit) = self.static_context_limits.get(&normalized_model_id) {
+            return *limit;
         }
         // Ollama caps the served window server-side (OLLAMA_CONTEXT_LENGTH,
         // default 4096) and silently truncates anything longer, so a model's
@@ -850,6 +869,7 @@ impl Provider for OpenRouterProvider {
             max_tokens: self.max_tokens,
             extra_body: self.extra_body.clone(),
             static_models: self.static_models.clone(),
+            configured_context_limits: self.configured_context_limits.clone(),
             static_context_limits: self.static_context_limits.clone(),
             static_image_input_support: self.static_image_input_support.clone(),
             send_openrouter_headers: self.send_openrouter_headers,
