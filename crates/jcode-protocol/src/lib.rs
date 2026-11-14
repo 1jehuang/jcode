@@ -997,6 +997,23 @@ pub fn encode_event(event: &ServerEvent) -> String {
     json
 }
 
+/// Encode the same newline-terminated JSON as [`encode_event`], reusing storage
+/// for ordinary streaming events. Oversized snapshots are not retained on the
+/// next call. Callers should also release buffers over 64 KiB after writing to
+/// avoid retaining a large final snapshot while the connection is idle.
+pub fn encode_event_into(event: &ServerEvent, buffer: &mut Vec<u8>) {
+    if buffer.capacity() > 64 * 1024 {
+        *buffer = Vec::new();
+    } else {
+        buffer.clear();
+    }
+    if serde_json::to_writer(&mut *buffer, event).is_err() {
+        buffer.clear();
+        buffer.extend_from_slice(b"{}");
+    }
+    buffer.push(b'\n');
+}
+
 /// Decode a request from a JSON string.
 ///
 /// Handles a legacy/desktop compatibility shape where a model switch was sent as
