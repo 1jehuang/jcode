@@ -76,6 +76,15 @@ fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
         ))
         .unwrap();
         let rejected_id = app.current_message_id.unwrap();
+        let retry_reminder = app
+            .rate_limit_pending_message
+            .as_ref()
+            .unwrap()
+            .system_reminder
+            .clone()
+            .unwrap();
+        assert!(retry_reminder.contains("Retry the interrupted execution"));
+        assert!(retry_reminder.ends_with("Continue the pending task"));
         app.handle_server_event(
             crate::protocol::ServerEvent::Error {
                 id: rejected_id,
@@ -89,10 +98,7 @@ fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
         assert!(app.current_message_id.is_none());
         assert!(app.rate_limit_pending_message.is_none());
         assert!(app.rate_limit_reset.is_none());
-        assert_eq!(
-            app.hidden_queued_system_messages,
-            ["Continue the pending task"]
-        );
+        assert_eq!(app.hidden_queued_system_messages, [retry_reminder.clone()]);
         assert!(!app.display_messages().iter().any(|m| m.role == "error"));
         assert!(app.pending_fallback_offer.is_none());
 
@@ -109,10 +115,7 @@ fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
         rt.block_on(remote::handle_tick(&mut app, &mut remote));
         assert!(app.is_processing);
         assert!(app.current_message_id.is_none());
-        assert_eq!(
-            app.hidden_queued_system_messages,
-            ["Continue the pending task"]
-        );
+        assert_eq!(app.hidden_queued_system_messages, [retry_reminder.clone()]);
 
         app.handle_server_event(
             crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
@@ -134,7 +137,7 @@ fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
                 .unwrap()
                 .system_reminder
                 .as_deref(),
-            Some("Continue the pending task")
+            Some(retry_reminder.as_str())
         );
     }
 }

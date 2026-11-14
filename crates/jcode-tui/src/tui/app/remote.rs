@@ -347,56 +347,8 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         }
     }
 
-    if let Some(reset_time) = app.rate_limit_reset
-        && Instant::now() >= reset_time
-    {
-        app.rate_limit_reset = None;
-        if !app.is_processing
-            && let Some(pending) = app.rate_limit_pending_message.clone()
-        {
-            if matches!(app.status, ProcessingStatus::WaitingForNetwork { .. })
-                && !crate::network_retry::is_probably_online().await
-            {
-                app.schedule_pending_remote_network_wait("network probe still failing");
-                return true;
-            }
-            if matches!(app.status, ProcessingStatus::WaitingForNetwork { .. }) {
-                app.status = ProcessingStatus::Idle;
-                app.status_detail = None;
-            }
-            let status = if pending.auto_retry {
-                format!(
-                    "✓ Retrying continuation...{}",
-                    if pending.is_system {
-                        " (system message)"
-                    } else {
-                        ""
-                    }
-                )
-            } else {
-                format!(
-                    "✓ Rate limit reset. Retrying...{}",
-                    if pending.is_system {
-                        " (system message)"
-                    } else {
-                        ""
-                    }
-                )
-            };
-            app.push_display_message(DisplayMessage::system(status));
-            let _ = begin_remote_send(
-                app,
-                remote,
-                pending.content,
-                pending.images,
-                pending.is_system,
-                pending.system_reminder,
-                pending.auto_retry,
-                pending.retry_attempts,
-            )
-            .await;
-            return true;
-        }
+    if dispatch_due_remote_retry(app, remote).await {
+        return true;
     }
 
     if app
@@ -529,6 +481,78 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.maybe_finish_background_client_reload();
     needs_redraw |= app.maybe_hot_reload_onto_new_binary();
     needs_redraw
+}
+
+/// Dispatch a held turn only after bootstrap and any competing turn settle.
+/// Keep its deadline armed while blocked, and re-arm on a failed socket write.
+pub(super) async fn dispatch_due_remote_retry(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+) -> bool {
+    if !app
+        .rate_limit_reset
+        .is_some_and(|deadline| Instant::now() >= deadline)
+        || !remote.has_loaded_history()
+        || app.is_processing
+        || app.remote_model_switch_in_flight
+        || app.awaiting_remote_interrupt_ack()
+    {
+        return false;
+    }
+    let Some(pending) = app.rate_limit_pending_message.clone() else {
+        app.rate_limit_reset = None;
+        return false;
+    };
+    app.rate_limit_reset = None;
+    if matches!(app.status, ProcessingStatus::WaitingForNetwork { .. })
+        && !crate::network_retry::is_probably_online().await
+    {
+        app.schedule_pending_remote_network_wait("network probe still failing");
+        return true;
+    }
+    if matches!(app.status, ProcessingStatus::WaitingForNetwork { .. }) {
+        app.status = ProcessingStatus::Idle;
+        app.status_detail = None;
+    }
+    let status = if pending.auto_retry {
+        "✓ Retrying continuation..."
+    } else {
+        "✓ Rate limit reset. Retrying..."
+    };
+    let suffix = if pending.is_system {
+        " (system message)"
+    } else {
+        ""
+    };
+    app.push_display_message(DisplayMessage::system(format!("{status}{suffix}")));
+    if let Err(error) = begin_remote_send(
+        app,
+        remote,
+        pending.content,
+        pending.images,
+        pending.is_system,
+        pending.system_reminder,
+        pending.auto_retry,
+        pending.retry_attempts,
+    )
+    .await
+    {
+        // User turns held by a rate limit were explicitly scheduled for retry
+        // even if their initial send was not auto-retry.
+        if let Some(pending) = app.rate_limit_pending_message.as_mut() {
+            pending.auto_retry = true;
+        }
+        let reason = format!("Failed to resend held turn: {error}");
+        if !app.schedule_pending_remote_retry(&reason) {
+            app.pause_exhausted_auto_resume(
+                format!(
+                    "{reason}. Automatic retry limit reached. Reconnect and resend your message."
+                ),
+                "Retry send failed",
+            );
+        }
+    }
+    true
 }
 
 /// Forward the reasoning-effort variant staged by a model-picker selection
@@ -1149,15 +1173,30 @@ pub(super) fn debug_command_needs_current_frame(command: &str) -> bool {
     )
 }
 
+fn restore_unconfirmed_model_switch_prompts(app: &mut App) {
+    if let Some(payload) = app.pending_fallback_resend.take() {
+        app.restore_failover_payload(payload);
+    }
+    if let Some(prepared) = app.pending_prompt_after_model_switch.take() {
+        app.restore_failover_payload(super::FallbackResendPayload {
+            content: prepared.expanded,
+            images: prepared.images,
+            is_system: false,
+            system_reminder: None,
+            auto_retry: false,
+            retry_attempts: 0,
+            raw_input: Some(prepared.raw_input),
+        });
+    }
+}
+
 fn fail_pending_automatic_failover(app: &mut App, reason: &str) {
     app.automatic_failover_stopped = true;
     app.pending_automatic_failover_request_id = None;
     app.pending_automatic_failover_started = None;
     app.pending_automatic_failover_route = None;
     app.remote_model_switch_in_flight = false;
-    if let Some(payload) = app.pending_fallback_resend.take() {
-        app.restore_failover_payload(payload);
-    }
+    restore_unconfirmed_model_switch_prompts(app);
     app.push_display_message(DisplayMessage::error(format!(
         "Fallback switch stopped: {}",
         App::compact_provider_failure(reason)
@@ -1174,6 +1213,17 @@ pub(super) fn handle_disconnect(
     // lost. Never wait on an old connection's request ID or blindly resend.
     if app.pending_automatic_failover_request_id.is_some() {
         fail_pending_automatic_failover(app, "Connection lost before route confirmation");
+    } else if app.remote_model_switch_in_flight {
+        // Manual switches have no automatic-failover request ID. Their
+        // acknowledgement is just as connection-scoped: keeping this flag
+        // would park every later prompt forever after reconnect. Do not send
+        // a prompt intended for a route whose switch was never confirmed.
+        app.remote_model_switch_in_flight = false;
+        restore_unconfirmed_model_switch_prompts(app);
+        app.push_display_message(DisplayMessage::error(
+            "Connection lost before model switch confirmation. Any waiting prompt was restored instead of sent on an unconfirmed route. Check /model after reconnecting.".to_string(),
+        ));
+        app.set_status_notice("Model switch unconfirmed; check /model");
     }
     app.revoke_cloud_environment();
     let detail = if state.server_reload_in_progress {
