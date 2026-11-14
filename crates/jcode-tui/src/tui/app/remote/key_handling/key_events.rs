@@ -711,7 +711,7 @@ pub(super) async fn handle_remote_key_internal(
             match app.send_action(true) {
                 SendAction::Submit => submit_prepared_remote_input(app, remote, prepared).await?,
                 SendAction::Queue => {
-                    app.queued_messages.push(prepared.expanded);
+                    queue_prepared_remote_input(app, prepared);
                 }
                 SendAction::Interleave => {
                     app.send_interleave_now(prepared.expanded, prepared.images, remote)

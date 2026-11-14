@@ -247,6 +247,31 @@ pub(in crate::tui::app) async fn handle_remote_key(
 mod key_events;
 pub(in crate::tui::app) use key_events::handle_remote_key_event;
 use key_events::handle_remote_key_internal;
+
+/// The text-only follow-up queue cannot carry attachments. Keep the complete
+/// draft editable rather than queueing text that refers to discarded images.
+fn queue_prepared_remote_input(app: &mut App, prepared: input::PreparedInput) {
+    if prepared.images.is_empty() {
+        app.queued_messages.push(prepared.expanded);
+        return;
+    }
+    // Preparation consumed pasted text storage. Restore its expanded contents,
+    // not now-unresolvable [pasted ...] placeholders.
+    app.restore_failover_payload(app_mod::FallbackResendPayload {
+        content: prepared.expanded,
+        images: prepared.images,
+        is_system: false,
+        system_reminder: None,
+        auto_retry: false,
+        retry_attempts: 0,
+        raw_input: None,
+    });
+    app.push_display_message(DisplayMessage::system(
+        "Message not queued: queued messages cannot carry images. Your text and images are still in the input. Send now or wait until the current turn finishes.",
+    ));
+    app.set_status_notice("Images cannot be queued; draft preserved");
+}
+
 /// Everything a plain Enter does with the composer contents in a remote
 /// session: slash commands, shell commands, and prompts. Shared by the key
 /// handler and by the turn-end dispatcher for commands queued with Ctrl+Enter.
@@ -2069,7 +2094,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
         match app.send_action(false) {
             SendAction::Submit => submit_prepared_remote_input(app, remote, prepared).await?,
             SendAction::Queue => {
-                app.queued_messages.push(prepared.expanded);
+                queue_prepared_remote_input(app, prepared);
             }
             SendAction::Interleave => {
                 app.send_interleave_now(prepared.expanded, prepared.images, remote)
