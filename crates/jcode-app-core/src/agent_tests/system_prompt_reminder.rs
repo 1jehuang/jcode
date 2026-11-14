@@ -145,7 +145,8 @@ async fn pending_alerts_and_reminder_only_turn_publish_context_entries() {
             persisted
                 .messages
                 .iter()
-                .any(|message| message_text(message) == entry)
+                .any(|message| content_text(&message.content) == entry
+                    && message.display_role == Some(crate::session::StoredDisplayRole::System))
         );
     }
 }
