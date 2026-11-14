@@ -230,20 +230,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     {
         crate::logging::warn(&format!("Remote todo refresh failed: {error}"));
     }
-    needs_redraw |= app.refresh_todos_view_if_needed();
-    needs_redraw |= app.refresh_todo_card_if_needed();
-    needs_redraw |= app.refresh_completed_todo_report(false);
-    needs_redraw |= app.refresh_pinned_todos_if_needed();
-    needs_redraw |= app.refresh_justrust_status();
-    needs_redraw |= app.prune_irrelevant_background_tasks();
-    needs_redraw |= app.refresh_side_panel_linked_content_if_due();
-    needs_redraw |= app.poll_model_picker_load();
-    needs_redraw |= app.poll_session_picker_load();
-    needs_redraw |= app.poll_session_picker_presence();
-    needs_redraw |= app.poll_session_picker_search_submission();
-    needs_redraw |= app.onboarding_tick();
-    needs_redraw |= app.progress_update_simulator();
-    needs_redraw |= app.refresh_keybindings_if_config_reloaded();
+    needs_redraw |= app.poll_remote_ui_tick();
 
     let _ = check_debug_command(app, remote).await;
 
@@ -421,7 +408,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         return needs_redraw;
     }
 
-    if !app.is_processing && !app.queued_commands.is_empty() {
+    if !app.is_processing && app.has_ready_remote_command_or_suggestion() {
         // Commands queued with Ctrl+Enter run before queued prompts. Hand them
         // to the follow-up dispatcher, which runs them one at a time.
         app.pending_queued_dispatch = true;
@@ -1515,7 +1502,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         return;
     }
 
-    if app.pending_queued_dispatch {
+    if app.pending_queued_dispatch && app.suggested_replies.pending_remote_submit.is_none() {
         note_startup_submit_deferred(app, "pending_queued_dispatch in progress");
         return;
     }
@@ -1618,6 +1605,16 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         app.clear_visible_turn_started();
         app.replay_processing_started_ms = None;
         app.replay_elapsed_override = None;
+    }
+
+    if app.take_pending_remote_suggested_reply().is_some() {
+        if let Err(error) = key_handling::submit_remote_enter_input(app, remote).await {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to submit suggested reply: {error}"
+            )));
+            app.set_status_notice("Suggested reply failed");
+        }
+        return;
     }
 
     if app.submit_input_on_startup && !app.is_processing {

@@ -257,6 +257,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
     if app.activate_picker_from_preview() {
         return Ok(());
     }
+    app.try_stage_suggested_reply_for_remote_enter(false);
     if !app.input.is_empty() {
         let command = input::expand_paste_placeholders(app, &app.input)
             .trim()
@@ -442,12 +443,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             return Ok(());
         }
 
-        if trimmed == "/help" || trimmed == "/?" || trimmed == "/commands" {
-            app.help_scroll = Some(0);
-            return Ok(());
-        }
-
-        if app_mod::commands::handle_dictation_command(app, trimmed) {
+        if app.try_handle_local_remote_slash_command(trimmed) {
             return Ok(());
         }
 

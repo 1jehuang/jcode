@@ -319,6 +319,7 @@ where
         return false;
     }
 
+    app.cancel_suggested_replies_interaction(false);
     app.remember_input_undo_state();
     app.input.clear();
     app.cursor_pos = 0;
@@ -583,6 +584,7 @@ fn expand_matching_paste(app: &mut App, text: &str) -> bool {
         return false;
     };
 
+    app.cancel_suggested_replies_interaction(false);
     app.follow_chat_bottom_for_typing();
     app.remember_input_undo_state();
     app.input.replace_range(
@@ -782,6 +784,7 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
     // Keeping this at the shared insertion boundary also covers paste and
     // Shift+Enter, rather than relying on individual key dispatchers to remember
     // to reconcile the transcript viewport.
+    app.cancel_suggested_replies_interaction(false);
     app.follow_chat_bottom_for_typing();
 
     let at_end = app.cursor_pos == app.input.len();
@@ -843,32 +846,8 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
         return false;
     }
 
-    let onboarding_suggestions = matches!(
-        app.onboarding_phase(),
-        Some(crate::tui::app::onboarding_flow::OnboardingPhase::Suggestions)
-    );
-    if app.input.is_empty()
-        && !app.is_processing
-        && (app.display_messages.is_empty() || onboarding_suggestions)
-    {
-        let mut chars = text.chars();
-        if let (Some(c), None) = (chars.next(), chars.next())
-            && let Some(digit) = c.to_digit(10)
-        {
-            let suggestions = app.suggestion_prompts();
-            let idx = digit as usize;
-            if idx >= 1 && idx <= suggestions.len() {
-                let (_label, prompt) = &suggestions[idx - 1];
-                if !prompt.starts_with('/') {
-                    app.remember_input_undo_state();
-                    app.input = prompt.clone();
-                    app.cursor_pos = app.input.len();
-                    app.follow_chat_bottom_for_typing();
-                    app.submit_input();
-                    return true;
-                }
-            }
-        }
+    if app.try_stage_suggested_reply_text(text) {
+        return true;
     }
 
     insert_input_text_with_undo(app, text, true);
@@ -1032,6 +1011,7 @@ pub(super) fn handle_prompt_history_navigation(
                 return history
                     .last()
                     .map(|prompt| {
+                        app.cancel_suggested_replies_interaction(false);
                         app.remember_input_undo_state();
                         app.history_draft =
                             Some((app.input.clone(), app.cursor_pos.min(app.input.len())));
@@ -1048,6 +1028,7 @@ pub(super) fn handle_prompt_history_navigation(
             KeyCode::Up => Some(current_index.saturating_sub(1)),
             KeyCode::Down if current_index + 1 < history.len() => Some(current_index + 1),
             KeyCode::Down => {
+                app.cancel_suggested_replies_interaction(false);
                 if let Some((draft, cursor_pos)) = app.history_draft.take() {
                     app.input = draft;
                     app.cursor_pos = cursor_pos;
@@ -1069,6 +1050,7 @@ pub(super) fn handle_prompt_history_navigation(
     let Some(prompt) = history.get(target) else {
         return false;
     };
+    app.cancel_suggested_replies_interaction(false);
     app.input = prompt.clone();
     app.cursor_pos = app.input.len();
     app.reset_tab_completion();
@@ -1132,6 +1114,7 @@ fn shifted_printable_fallback(c: char, modifiers: KeyModifiers) -> char {
 }
 
 pub(super) fn clear_input_for_escape(app: &mut App) {
+    app.cancel_suggested_replies_on_escape();
     let had_input = !app.input.is_empty();
     if had_input {
         app.remember_input_undo_state();
@@ -1280,6 +1263,7 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
     }
 
     if !parts.is_empty() {
+        app.cancel_suggested_replies_interaction(false);
         app.input = parts.join("\n\n");
         app.cursor_pos = app.input.len();
         let count = parts.len();
@@ -1291,6 +1275,7 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
     } else if let Some(command) = app.queued_commands.pop() {
         // Commands are recalled one at a time (newest first): joining several
         // would turn them into a single malformed command.
+        app.cancel_suggested_replies_interaction(false);
         app.input = command;
         app.cursor_pos = app.input.len();
         app.sync_model_picker_preview_from_input();
@@ -1957,7 +1942,8 @@ pub(super) fn handle_alternate_enter(app: &mut App) {
         return;
     }
 
-    if app.input.is_empty() {
+    if app.suggested_replies_input_is_empty_or_staged() {
+        app.try_submit_suggested_reply_on_empty_input(true);
         return;
     }
 
@@ -2056,6 +2042,7 @@ pub(super) fn handle_control_key(app: &mut App, code: KeyCode) -> bool {
 }
 
 pub(super) fn delete_input_to_start(app: &mut App) {
+    app.cancel_suggested_replies_interaction(false);
     if app.cursor_pos > 0 {
         app.remember_input_undo_state();
     }
@@ -2065,6 +2052,7 @@ pub(super) fn delete_input_to_start(app: &mut App) {
 }
 
 pub(super) fn delete_input_to_end(app: &mut App) {
+    app.cancel_suggested_replies_interaction(false);
     if app.cursor_pos < app.input.len() {
         app.remember_input_undo_state();
     }
@@ -2134,6 +2122,7 @@ pub(super) fn try_ctrl_d_forward_delete(app: &mut App) -> bool {
         return true;
     }
     let next = crate::tui::core::next_char_boundary(&app.input, app.cursor_pos);
+    app.cancel_suggested_replies_interaction(false);
     app.remember_input_undo_state();
     app.input.drain(app.cursor_pos..next);
     app.reset_tab_completion();
@@ -2142,6 +2131,7 @@ pub(super) fn try_ctrl_d_forward_delete(app: &mut App) -> bool {
 }
 
 pub(super) fn delete_input_word_back(app: &mut App) {
+    app.cancel_suggested_replies_interaction(false);
     let start = app.find_word_boundary_back();
     if start < app.cursor_pos {
         app.remember_input_undo_state();
@@ -2823,7 +2813,7 @@ pub(super) fn handle_enter(app: &mut App) -> bool {
         return true;
     }
     promote_dropped_images(app);
-    if app.activate_picker_from_preview() {
+    if app.activate_picker_from_preview() || app.try_submit_suggested_reply_on_empty_input(false) {
         return true;
     }
     if !app.input.is_empty() {
@@ -2843,6 +2833,9 @@ pub(super) fn handle_enter(app: &mut App) -> bool {
 }
 
 pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
+    if app.pre_handle_basic_key_for_suggested_replies(code) {
+        return true;
+    }
     match code {
         KeyCode::Char(c) => handle_text_input(app, &c.to_string()),
         KeyCode::Backspace => {
@@ -2905,6 +2898,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             true
         }
         KeyCode::Esc => {
+            app.cancel_suggested_replies_on_escape();
             if app
                 .inline_interactive_state
                 .as_ref()
@@ -2981,6 +2975,7 @@ pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
     let images = app.take_pending_image_payloads();
     app.cursor_pos = 0;
     app.clear_input_undo_history();
+    app.clear_suggested_replies_for_new_turn();
     PreparedInput {
         raw_input,
         expanded,
@@ -2999,6 +2994,7 @@ pub(super) fn stage_local_interleave(
 }
 
 fn attach_image(app: &mut App, media_type: String, base64_data: String) {
+    app.cancel_suggested_replies_interaction(false);
     let size_kb = base64_data.len() / 1024;
     app.pending_images.push((media_type.clone(), base64_data));
     let placeholder = format!("[image {}]", app.pending_images.len());
@@ -3272,7 +3268,8 @@ impl App {
             }
         }
 
-        if handle_multiline_input_navigation(self, code, modifiers)
+        if self.handle_suggested_replies_arrow_key(code, modifiers)
+            || handle_multiline_input_navigation(self, code, modifiers)
             || handle_prompt_history_navigation(self, code, modifiers)
         {
             return Ok(());
@@ -3953,6 +3950,7 @@ impl App {
         self.pasted_contents.clear();
         self.cursor_pos = 0;
         self.clear_input_undo_history();
+        self.clear_suggested_replies_for_new_turn();
         self.follow_chat_bottom(); // Reset to bottom and resume auto-scroll on new input
 
         // If the previous assistant turn still has visible streamed text that has not yet been

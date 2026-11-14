@@ -1225,6 +1225,14 @@ pub trait TuiState {
     /// Suggestion prompts for new users (shown in initial empty state).
     /// Returns (label, prompt_text) pairs. Empty if user is experienced or not authenticated.
     fn suggestion_prompts(&self) -> Vec<(String, String)>;
+    fn suggested_replies_view(
+        &self,
+    ) -> Option<crate::tui::app::suggested_replies::SuggestedRepliesView> {
+        None
+    }
+    fn explorer_countdown_active(&self) -> bool {
+        false
+    }
     /// Cache TTL status - shows whether the prompt cache is warm/cold based on idle time
     fn cache_ttl_status(&self) -> Option<CacheTtlInfo>;
     /// Keep a reset offer visible briefly without rearming on usage refresh.
@@ -1233,27 +1241,7 @@ pub trait TuiState {
     }
     /// Read-only reset guidance for the active OpenAI OAuth account.
     fn openai_reset_hint(&self) -> Option<String> {
-        // SSH sessions may use a different login on the remote host. Local
-        // cached credits cannot establish reset availability for that account.
-        if self.is_processing() || is_ssh_remote() {
-            return None;
-        }
-        let auth_method = self.info_widget_data().auth_method;
-        if auth_method != info_widget::AuthMethod::OpenAIOAuth {
-            return None;
-        }
-        let usage = crate::usage::get_openai_usage_sync();
-        let account_label = crate::auth::codex::active_account_label();
-        let hint = crate::tui::ui::input_ui::openai_reset_status_hint(
-            auth_method,
-            &usage,
-            account_label.as_deref(),
-        )?;
-        let credits = usage.openai_reset_credits.as_ref()?;
-        // Stable across polling and countdown changes. A different account or
-        // number of credits is a new offer worth showing again.
-        let key = format!("{:?}:{}", account_label, credits.available_count);
-        self.reset_hint_visible(&key).then_some(hint)
+        app::state_ui_runtime::active_openai_reset_hint(self)
     }
     /// Whether the notification line has content to show
     fn has_notification(&self) -> bool {

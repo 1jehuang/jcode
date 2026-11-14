@@ -234,6 +234,8 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/accounts", "Alias for /account"),
     RegisteredCommand::public("/cache", "Show cache stats; extend/5m saves Anthropic TTL"),
     RegisteredCommand::public("/debug-visual", "Toggle visual debug overlay"),
+    RegisteredCommand::public("/suggestions", "Inspect or test Suggested Replies cascade"),
+    RegisteredCommand::hidden("/suggested-replies", "Alias for /suggestions"),
     RegisteredCommand::public("/screenshot-mode", "Toggle screenshot capture mode"),
     RegisteredCommand::public("/screenshot", "Capture a screenshot debug state"),
     RegisteredCommand::public("/record", "Record a demo capture"),
@@ -1708,22 +1710,6 @@ impl App {
         self.history_draft = None;
     }
 
-    pub(super) fn undo_input_change(&mut self) {
-        self.input_typing_undo = None;
-        if let Some((input, cursor_pos)) = self.input_undo_stack.pop() {
-            // The composer now holds a restored draft, so the copy stashed by a
-            // history jump is stale: a later Down must not resurrect it.
-            self.history_draft = None;
-            self.input = input;
-            self.cursor_pos = cursor_pos.min(self.input.len());
-            self.reset_tab_completion();
-            self.sync_model_picker_preview_from_input();
-            self.set_status_notice("↶ Input restored");
-        } else {
-            self.set_status_notice("Nothing to undo");
-        }
-    }
-
     pub(super) fn command_accepts_args(cmd: &str) -> bool {
         matches!(
             cmd.trim(),
@@ -1783,6 +1769,8 @@ impl App {
                 | "/save"
                 | "/rename"
                 | "/cache"
+                | "/suggestions"
+                | "/suggested-replies"
         )
     }
 }
