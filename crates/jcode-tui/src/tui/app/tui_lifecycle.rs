@@ -266,9 +266,7 @@ impl App {
         mut session: Session,
     ) -> Self {
         let skills = Arc::new(SkillRegistry::default());
-        // Remote and replay clients never connect MCP servers locally (the
-        // server owns them), so skip parsing ~/.claude.json and friends on the
-        // first-frame path.
+        // Remote/replay clients never connect MCP servers locally; skip ~/.claude.json on startup.
         let mcp_manager = Arc::new(RwLock::new(McpManager::with_config(
             crate::mcp::McpConfig::default(),
         )));
@@ -655,6 +653,7 @@ impl App {
             stashed_input: None,
             input_undo_stack: Vec::new(),
             input_typing_undo: None,
+            osc_scrub: Default::default(),
             history_draft: None,
             status_notice: None,
             learn_hint: None,
@@ -1170,6 +1169,7 @@ impl App {
             stashed_input: None,
             input_undo_stack: Vec::new(),
             input_typing_undo: None,
+            osc_scrub: Default::default(),
             history_draft: None,
             status_notice: None,
             learn_hint: None,
