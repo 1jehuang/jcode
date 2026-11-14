@@ -327,9 +327,13 @@ impl Agent {
         if let Some(effort) = self.session.reasoning_effort.clone() {
             if let Err(e) = self.provider.set_reasoning_effort(&effort) {
                 crate::logging::error(&format!(
-                    "Failed to restore session reasoning effort '{}': {}",
+                    "Failed to restore session reasoning effort '{}': {}; falling back to config default",
                     effort, e
                 ));
+                // Clear the stale session effort so the provider's config-derived
+                // default takes effect, and the server does not report the
+                // invalid persisted value to the TUI.
+                self.session.reasoning_effort = None;
             }
         } else {
             self.session.reasoning_effort = self.provider.reasoning_effort();
