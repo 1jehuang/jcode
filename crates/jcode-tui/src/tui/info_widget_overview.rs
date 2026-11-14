@@ -155,9 +155,20 @@ fn compact_overview_height(data: &InfoWidgetData) -> u16 {
     model_info_height(data)
         + compact_memory_height(data)
         + compact_background_height(data)
+        + compact_mcp_height(data)
         + compact_usage_height(data)
         + changes_section_height(data)
         + u16::from(data.cloud_info.is_some())
+}
+
+/// Height of the MCP section in the compact overview. Mirrors
+/// `render_mcp_servers_line`: one row when everything fits, otherwise a
+/// header row plus one row per server.
+fn compact_mcp_height(data: &InfoWidgetData) -> u16 {
+    if data.mcp_servers.is_empty() {
+        return 0;
+    }
+    1 + u16::try_from(data.mcp_servers.len()).unwrap_or(u16::MAX)
 }
 
 fn expanded_memory_height(data: &InfoWidgetData) -> u16 {
