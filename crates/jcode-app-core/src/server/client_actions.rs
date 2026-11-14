@@ -1309,21 +1309,34 @@ pub(super) async fn handle_ask_user_response(
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }
 
-pub(super) struct AgentTaskContext<'a> {
-    pub(super) client_event_tx: &'a mpsc::UnboundedSender<ServerEvent>,
-    pub(super) swarm_members: &'a Arc<RwLock<HashMap<String, SwarmMember>>>,
-    pub(super) swarms_by_id: &'a Arc<RwLock<HashMap<String, HashSet<String>>>>,
-    pub(super) event_history: &'a Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
-    pub(super) event_counter: &'a Arc<std::sync::atomic::AtomicU64>,
-    pub(super) swarm_event_tx: &'a broadcast::Sender<SwarmEvent>,
+pub(super) struct AgentTaskContext {
+    pub(super) client_event_tx: mpsc::UnboundedSender<ServerEvent>,
+    pub(super) swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+    pub(super) swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    pub(super) event_history: Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
+    pub(super) event_counter: Arc<std::sync::atomic::AtomicU64>,
+    pub(super) swarm_event_tx: broadcast::Sender<SwarmEvent>,
 }
 
-pub(super) async fn handle_agent_task(
+/// Run an agent task off the request loop. Its turn can wait for an
+/// `ask_user` answer or a cancel that arrives on this same connection, so
+/// awaiting it in the loop would deadlock.
+pub(super) fn spawn_agent_task(
+    id: u64,
+    task: String,
+    client_session_id: String,
+    agent: Arc<Mutex<Agent>>,
+    ctx: AgentTaskContext,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move { handle_agent_task(id, task, &client_session_id, &agent, &ctx).await })
+}
+
+async fn handle_agent_task(
     id: u64,
     task: String,
     client_session_id: &str,
     agent: &Arc<Mutex<Agent>>,
-    ctx: &AgentTaskContext<'_>,
+    ctx: &AgentTaskContext,
 ) {
     let mut agent = agent.lock().await;
     let lease = match agent.claim_server_turn() {
@@ -1340,7 +1353,7 @@ pub(super) async fn handle_agent_task(
     };
     let events = super::state::TurnEventChannel::new(
         client_session_id.into(),
-        Arc::clone(ctx.swarm_members),
+        Arc::clone(&ctx.swarm_members),
         ctx.client_event_tx.clone(),
         &lease,
     );
@@ -1348,11 +1361,11 @@ pub(super) async fn handle_agent_task(
         client_session_id,
         "running",
         Some(truncate_detail(&task, 120)),
-        ctx.swarm_members,
-        ctx.swarms_by_id,
-        Some(ctx.event_history),
-        Some(ctx.event_counter),
-        Some(ctx.swarm_event_tx),
+        &ctx.swarm_members,
+        &ctx.swarms_by_id,
+        Some(&ctx.event_history),
+        Some(&ctx.event_counter),
+        Some(&ctx.swarm_event_tx),
     )
     .await;
 
@@ -1371,11 +1384,11 @@ pub(super) async fn handle_agent_task(
                 client_session_id,
                 "completed",
                 None,
-                ctx.swarm_members,
-                ctx.swarms_by_id,
-                Some(ctx.event_history),
-                Some(ctx.event_counter),
-                Some(ctx.swarm_event_tx),
+                &ctx.swarm_members,
+                &ctx.swarms_by_id,
+                Some(&ctx.event_history),
+                Some(&ctx.event_counter),
+                Some(&ctx.swarm_event_tx),
             )
             .await;
             let _ = events.sender().send(ServerEvent::Done { id });
@@ -1385,11 +1398,11 @@ pub(super) async fn handle_agent_task(
                 client_session_id,
                 "failed",
                 Some(truncate_detail(&e.to_string(), 120)),
-                ctx.swarm_members,
-                ctx.swarms_by_id,
-                Some(ctx.event_history),
-                Some(ctx.event_counter),
-                Some(ctx.swarm_event_tx),
+                &ctx.swarm_members,
+                &ctx.swarms_by_id,
+                Some(&ctx.event_history),
+                Some(&ctx.event_counter),
+                Some(&ctx.swarm_event_tx),
             )
             .await;
             let retry_after_secs = super::usage_limit_resume::error_retry_after_secs(&e);

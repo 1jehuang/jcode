@@ -1,9 +1,9 @@
 use super::client_actions::{
-    AgentTaskContext, AskUserResponses, NotifySessionContext, handle_agent_task,
-    handle_ask_user_response, handle_compact, handle_input_shell, handle_notify_session,
-    handle_rename_session, handle_run_subagent, handle_set_feature, handle_set_session_saved,
-    handle_set_subagent_model, handle_split, handle_stdin_response, handle_transfer,
-    handle_trigger_memory_extraction,
+    AgentTaskContext, AskUserResponses, NotifySessionContext, handle_ask_user_response,
+    handle_compact, handle_input_shell, handle_notify_session, handle_rename_session,
+    handle_run_subagent, handle_set_feature, handle_set_session_saved, handle_set_subagent_model,
+    handle_split, handle_stdin_response, handle_transfer, handle_trigger_memory_extraction,
+    spawn_agent_task,
 };
 use super::client_comm::{
     handle_comm_channel_members, handle_comm_list, handle_comm_list_channels, handle_comm_message,
@@ -671,14 +671,15 @@ pub(super) async fn handle_client(
                         });
                     }
                     crate::tool::ClientInputRequest::AskUser(req) => {
+                        // Check the flag under the map lock: disconnect clears
+                        // it, then the map, so no sender can slip in between.
                         // Dropping the sender tells the tool nobody can answer.
+                        let mut responses = ask_user_responses.lock().await;
                         if !supports_ask_user.load(std::sync::atomic::Ordering::Relaxed) {
                             continue;
                         }
-                        ask_user_responses
-                            .lock()
-                            .await
-                            .insert(req.request_id.clone(), req.response_tx);
+                        responses.insert(req.request_id.clone(), req.response_tx);
+                        drop(responses);
                         let _ = client_event_tx.send(ServerEvent::AskUser {
                             request_id: req.request_id,
                             tool_call_id: req.tool_call_id,
@@ -2492,21 +2493,20 @@ server_resumes: false,
             }
 
             Request::AgentTask { id, task, .. } => {
-                handle_agent_task(
+                spawn_agent_task(
                     id,
                     task,
-                    &client_session_id,
-                    &agent,
-                    &AgentTaskContext {
-                        client_event_tx: &client_event_tx,
-                        swarm_members: &swarm_members,
-                        swarms_by_id: &swarms_by_id,
-                        event_history: &event_history,
-                        event_counter: &event_counter,
-                        swarm_event_tx: &swarm_event_tx,
+                    client_session_id.clone(),
+                    Arc::clone(&agent),
+                    AgentTaskContext {
+                        client_event_tx: client_event_tx.clone(),
+                        swarm_members: Arc::clone(&swarm_members),
+                        swarms_by_id: Arc::clone(&swarms_by_id),
+                        event_history: Arc::clone(&event_history),
+                        event_counter: Arc::clone(&event_counter),
+                        swarm_event_tx: swarm_event_tx.clone(),
                     },
-                )
-                .await;
+                );
             }
 
             Request::AgentCapabilities { id } => {
