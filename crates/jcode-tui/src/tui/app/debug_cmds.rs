@@ -237,6 +237,10 @@ impl App {
                 "Fixture only. No real browser, listener, or credentials. Full URL is available for copying here.",
             );
             self.pending_login = Some(PendingLogin::OpenAiAccount {
+                expected_existing: false,
+                expected_identity: None,
+                replace: false,
+                attempt: Default::default(),
                 verifier: "fixture".to_string(),
                 label: "fixture".to_string(),
                 expected_state: "fixture".to_string(),

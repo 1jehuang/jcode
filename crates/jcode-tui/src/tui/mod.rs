@@ -33,10 +33,12 @@ mod cloud_latency;
 mod cloud_status;
 pub(crate) mod color_support;
 mod core;
+pub(crate) mod dialog;
 pub(crate) mod fuzzy;
 pub mod herdr;
 mod info_widget_cloud;
 mod info_widget_cloud_directories;
+pub(crate) mod plugin_command;
 // Terminal image display + metadata helpers now live in the dependency-free
 // `jcode-terminal-image` crate (shared with the `read` tool). Re-exported here
 // so existing `crate::tui::image` paths keep working.
@@ -397,7 +399,9 @@ pub(crate) fn reapply_terminal_modes_to(
     focus_change: bool,
 ) -> std::io::Result<()> {
     use crossterm::QueueableCommand;
-    use crossterm::event::{EnableBracketedPaste, EnableFocusChange, EnableMouseCapture};
+    use crossterm::event::{
+        DisableMouseCapture, EnableBracketedPaste, EnableFocusChange, EnableMouseCapture,
+    };
 
     writer.queue(EnableBracketedPaste)?;
     if focus_change {
@@ -409,6 +413,13 @@ pub(crate) fn reapply_terminal_modes_to(
         // hosts such as VS Code also need the VT tracking modes reasserted.
         #[cfg(windows)]
         writer.write_all(b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h")?;
+    } else {
+        // A terminal can inherit capture from an earlier Jcode invocation (or
+        // from a configuration change while this session is running). Omitting
+        // the enable sequences is not enough to return selection to the host.
+        writer.queue(DisableMouseCapture)?;
+        #[cfg(windows)]
+        writer.write_all(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1015l\x1b[?1006l")?;
     }
     if keyboard_enhanced {
         reapply_keyboard_enhancement_to(writer, inside_tmux())?;
@@ -593,7 +604,10 @@ mod terminal_mode_tests {
     fn reapply_omits_keyboard_protocols_when_disabled() {
         let mut output = Vec::new();
         reapply_terminal_modes_to(&mut output, false, false, false).unwrap();
-        assert_eq!(output, b"\x1b[?2004h");
+        assert_eq!(
+            output,
+            b"\x1b[?2004h\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l"
+        );
     }
 
     #[test]
@@ -604,6 +618,11 @@ mod terminal_mode_tests {
         let output = String::from_utf8(output).unwrap();
         assert!(output.starts_with("\x1b[?2004h\x1b[?1004h"));
         assert!(!output.contains("\x1b[?1000h"));
+        assert!(output.contains("\x1b[?1006l"));
+        assert!(output.contains("\x1b[?1015l"));
+        assert!(output.contains("\x1b[?1003l"));
+        assert!(output.contains("\x1b[?1002l"));
+        assert!(output.contains("\x1b[?1000l"));
         assert!(output.contains("\x1b[="));
     }
 
@@ -646,6 +665,7 @@ mod terminal_mode_tests {
                     "must keep focus reporting enabled"
                 );
                 assert_eq!(output.contains("\x1b[?1000h"), mouse_capture);
+                assert_eq!(output.contains("\x1b[?1000l"), !mouse_capture);
                 assert_eq!(output.contains("\x1b[=7u"), keyboard_enhanced);
                 assert!(
                     !output.contains("\x1b[>7u"),
@@ -979,6 +999,11 @@ pub trait TuiState {
     }
     /// Optional configured keybinding label for external dictation.
     fn dictation_key_label(&self) -> Option<String>;
+    /// Label of the `scroll_to_bottom` chord shown in the "Jump to bottom"
+    /// pill, or `None` when the action is unbound.
+    fn jump_to_bottom_key_label(&self) -> Option<String> {
+        None
+    }
     /// Time since app started (for startup animations)
     fn animation_elapsed(&self) -> f32;
     /// Time remaining until rate limit resets (if rate limited)
@@ -1172,8 +1197,12 @@ pub trait TuiState {
     fn session_picker_overlay(&self) -> Option<&std::cell::RefCell<session_picker::SessionPicker>>;
     /// Login picker overlay for /login command
     fn login_picker_overlay(&self) -> Option<&std::cell::RefCell<login_picker::LoginPicker>>;
-    /// Account picker overlay for /account command
+    /// Account picker overlay for /accounts command
     fn account_picker_overlay(&self) -> Option<&std::cell::RefCell<account_picker::AccountPicker>>;
+    /// `/mcp` or `/skills` dialog
+    fn dialog(&self) -> Option<&dialog::Dialog> {
+        None
+    }
     /// Usage overlay for /usage command
     fn usage_overlay(&self) -> Option<&std::cell::RefCell<usage_overlay::UsageOverlay>>;
     /// Working directory for this session
@@ -1199,6 +1228,10 @@ pub trait TuiState {
     fn copy_selection_range(&self) -> Option<CopySelectionRange>;
     /// Persistent status for in-app copy selection mode.
     fn copy_selection_status(&self) -> Option<CopySelectionStatus>;
+    /// Editable composer selection as an ordered byte range into `input()`.
+    fn input_selection_range(&self) -> Option<(usize, usize)> {
+        None
+    }
 
     /// The composer follows the selection endpoint only during a mouse drag.
     fn input_drag_scroll_offset(&self) -> Option<usize> {
@@ -1238,12 +1271,17 @@ pub trait TuiState {
         if self.is_processing() || is_ssh_remote() {
             return None;
         }
-        let auth_method = self.info_widget_data().auth_method;
+        let data = self.info_widget_data();
+        let auth_method = data.auth_method;
         if auth_method != info_widget::AuthMethod::OpenAIOAuth {
             return None;
         }
         let usage = crate::usage::get_openai_usage_sync();
-        let account_label = crate::auth::codex::active_account_label();
+        // This window's account (its pin), else the default account.
+        let account_label = data
+            .window_account
+            .map(|account| account.label)
+            .or_else(crate::auth::codex::active_account_label);
         let hint = crate::tui::ui::input_ui::openai_reset_status_hint(
             auth_method,
             &usage,
@@ -1718,10 +1756,26 @@ impl PickerKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountPickerAction {
-    Switch { provider_id: String, label: String },
-    Add { provider_id: String },
-    Replace { provider_id: String, label: String },
-    OpenCenter { provider_filter: Option<String> },
+    /// Use this saved account in this window (pins the session).
+    Switch {
+        provider_id: String,
+        label: String,
+    },
+    /// Make this saved account the default for new windows.
+    SetDefault {
+        provider_id: String,
+        label: String,
+    },
+    Add {
+        provider_id: String,
+    },
+    Replace {
+        provider_id: String,
+        label: String,
+    },
+    OpenCenter {
+        provider_filter: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1757,6 +1811,11 @@ pub enum PickerAction {
         detail_lines: Vec<String>,
     },
     AgentTarget(AgentModelTarget),
+    AgentProfiles,
+    AgentProfileChoice(Option<String>),
+    AgentProfileSource(String),
+    AgentProfileApply(String),
+    AgentProfileCancel,
     AgentModelChoice {
         target: AgentModelTarget,
         clear_override: bool,
@@ -1783,9 +1842,44 @@ pub struct InlineInteractiveState {
     pub filter: String,
     /// Preview mode: picker is visible but input stays in main text box
     pub preview: bool,
+    /// Routes an `@provider` scope switched, as (entry index, route the user
+    /// had before). Restored when the scope no longer applies, so a temporary
+    /// filter never changes where a later unscoped selection goes.
+    pub scoped_route_restore: Vec<(usize, usize)>,
+    /// Set while the `/model` picker shows the reasoning-level step for one
+    /// model. The entries are then one row per level, and the model list is
+    /// kept here so Esc can return to it unchanged.
+    pub effort_step: Option<Box<ModelEffortStep>>,
+}
+
+/// Second step of the `/model` picker: choose a reasoning level for `model`.
+#[derive(Debug, Clone)]
+pub struct ModelEffortStep {
+    /// The model row that was picked, with its chosen route selected.
+    pub model: PickerEntry,
+    /// The model list as it was, restored on Esc.
+    pub parent: InlineInteractiveState,
+    /// Opened by the save-default key: Enter saves model + level as the
+    /// default instead of switching.
+    pub save_default: bool,
 }
 
 impl InlineInteractiveState {
+    /// The user picked route `option` for entry `index` by hand. Their choice
+    /// replaces any route a scope switched for it, so clearing the scope
+    /// keeps it instead of restoring the older route. A key press that leaves
+    /// the route where it was (nothing else in scope to move to) is not a
+    /// choice, so the saved route is kept.
+    pub fn choose_route(&mut self, index: usize, option: usize) {
+        if let Some(entry) = self.entries.get_mut(index)
+            && option < entry.options.len()
+            && option != entry.selected_option
+        {
+            entry.selected_option = option;
+            self.scoped_route_restore.retain(|(i, _)| *i != index);
+        }
+    }
+
     pub fn debug_memory_profile(&self) -> serde_json::Value {
         let entries_bytes: usize = self.entries.iter().map(estimate_picker_entry_bytes).sum();
         let filtered_bytes = self.filtered.capacity() * std::mem::size_of::<usize>();
@@ -1807,12 +1901,17 @@ fn estimate_picker_action_bytes(action: &PickerAction) -> usize {
         | PickerAction::RemoteLogin { .. }
         | PickerAction::RemoteImportDecision { .. }
         | PickerAction::AgentTarget(_)
+        | PickerAction::AgentProfiles
+        | PickerAction::AgentProfileCancel
         | PickerAction::AgentModelChoice { .. }
         | PickerAction::SubagentModelChoice { .. }
         | PickerAction::LogoutAll => 0,
-        PickerAction::Account(AccountPickerAction::Switch { provider_id, label }) => {
-            provider_id.capacity() + label.capacity()
-        }
+        PickerAction::AgentProfileChoice(name) => name.as_ref().map_or(0, String::capacity),
+        PickerAction::AgentProfileSource(id) | PickerAction::AgentProfileApply(id) => id.capacity(),
+        PickerAction::Account(
+            AccountPickerAction::Switch { provider_id, label }
+            | AccountPickerAction::SetDefault { provider_id, label },
+        ) => provider_id.capacity() + label.capacity(),
         PickerAction::Account(AccountPickerAction::Add { provider_id }) => provider_id.capacity(),
         PickerAction::Account(AccountPickerAction::Replace { provider_id, label }) => {
             provider_id.capacity() + label.capacity()
@@ -1876,8 +1975,31 @@ fn estimate_picker_entry_bytes(entry: &PickerEntry) -> usize {
 }
 
 impl InlineInteractiveState {
+    pub fn is_agent_profile_sources(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| matches!(entry.action, PickerAction::AgentProfileApply(_)))
+    }
+
     pub fn schema(&self) -> InlineInteractiveSchema {
-        if self.is_agent_target_picker() {
+        if self.is_agent_profile_sources()
+            || self
+                .entries
+                .iter()
+                .any(|entry| matches!(entry.action, PickerAction::AgentProfileChoice(_)))
+        {
+            InlineInteractiveSchema {
+                layout: InlineInteractiveLayout::ThreeColumn,
+                primary_label: "INSTRUCTION PROFILE [SESSION]",
+                secondary_label: "SCOPE",
+                secondary_preview_label: "SCOPE",
+                tertiary_label: "DETAIL",
+                preview_submit_hint: "  ↵ choose",
+                active_submit_hint: "  ↑↓ ↵ apply · Esc cancel",
+                shows_default_shortcut_hint: false,
+                preview_activation_column: 0,
+            }
+        } else if self.is_agent_target_picker() {
             InlineInteractiveSchema {
                 layout: InlineInteractiveLayout::ThreeColumn,
                 primary_label: "TARGET",
@@ -1911,10 +2033,12 @@ impl InlineInteractiveState {
     pub fn is_agent_target_picker(&self) -> bool {
         self.kind == PickerKind::Model
             && !self.entries.is_empty()
-            && self
-                .entries
-                .iter()
-                .all(|entry| matches!(entry.action, PickerAction::AgentTarget(_)))
+            && self.entries.iter().all(|entry| {
+                matches!(
+                    entry.action,
+                    PickerAction::AgentTarget(_) | PickerAction::AgentProfiles
+                )
+            })
     }
 
     pub fn uses_compact_navigation(&self) -> bool {
@@ -2068,8 +2192,17 @@ impl PickerEntry {
     pub fn account_state_label(&self) -> Option<&'static str> {
         match &self.action {
             PickerAction::Account(AccountPickerAction::Switch { .. }) => {
-                Some(if self.is_current { "active" } else { "saved" })
+                // Scope badge for a saved account row.
+                Some(match self.options.first().map(|o| o.api_method.as_str()) {
+                    Some("pinned · this window") => "pinned · this window",
+                    Some("this window · default") => "this window · default",
+                    Some("this window") => "this window",
+                    Some("default") => "default",
+                    _ if self.is_current => "this window",
+                    _ => "saved",
+                })
             }
+            PickerAction::Account(AccountPickerAction::SetDefault { .. }) => Some("default"),
             PickerAction::Account(AccountPickerAction::Add { .. }) => Some("add"),
             PickerAction::Account(AccountPickerAction::Replace { .. }) => Some("replace"),
             PickerAction::Account(AccountPickerAction::OpenCenter { .. }) => Some("manage"),

@@ -636,6 +636,11 @@ async fn registry_execute_pre_tool_hook_blocks_and_allows() {
             ctx(),
         )
         .await;
+    // jcode's own bookkeeping calls (the `/mcp` dialog, MCP status checks) are
+    // not tool calls, so user hooks never see them.
+    let internal = registry
+        .execute_internal("bash", serde_json::json!({"command": "echo secret"}), ctx())
+        .await;
 
     match prev {
         Some(value) => crate::env::set_var("JCODE_HOOK_PRE_TOOL", value),
@@ -649,6 +654,7 @@ async fn registry_execute_pre_tool_hook_blocks_and_allows() {
         "hook stderr should surface in the error: {error}"
     );
     assert!(allowed.is_ok(), "non-matching input should pass the gate");
+    assert!(internal.is_ok(), "internal calls bypass the pre_tool gate");
 }
 
 #[tokio::test]
@@ -717,6 +723,8 @@ async fn tool_descriptions_stay_under_token_cap() {
     // applet carries the whole view-node vocabulary inline, since the model has
     // no other way to learn which node types and props the host renders.
     // codemode documents its sandbox API.
+    // macos_computer_use acts on the user's live machine: its inline consent,
+    // background-first routing and discovery policy are safety-critical.
     const EXEMPT: &[&str] = &[
         "integration_tools",
         "swarm",
@@ -725,6 +733,13 @@ async fn tool_descriptions_stay_under_token_cap() {
         "todo",
         "applet",
         "codemode",
+        "macos_computer_use",
+        // ask_user is registered only for an attached TUI; its usage rules
+        // (no Other option, recommended first) shape the dialog the user sees.
+        "ask_user",
+        // Repository-search guidance (agentgrep/rg, hidden files) is tested
+        // load-bearing text (#1804).
+        "bash",
     ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
@@ -788,6 +803,8 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
     // applet placement lists every shorthand so the model can pick a surface
     // without a round trip. desktop_selfdev action carries a safety warning:
     // killing the harness bridge by hand strands the calling session.
+    // macos_computer_use action documents background AX versus visible input
+    // and discovery routing; element defines the AX handle contract inline.
     // The todo pause fields carry the rules for when an agent may stop
     // working, which live on the fields because the tool description is one
     // sentence. Each is stated once (on add), not per route.
@@ -807,6 +824,8 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
         ("todo", "$.properties.phases"),
         ("applet", "$.properties.placement"),
         ("desktop_selfdev", "$.properties.action"),
+        ("macos_computer_use", "$.properties.action"),
+        ("macos_computer_use", "$.properties.element"),
     ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
@@ -959,6 +978,7 @@ async fn test_context_guard_small_output_passes_through() {
     let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(200_000)));
     let registry = Registry {
         mcp_policy: Arc::default(),
+        plugin_mcp_refresh: Arc::default(),
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         compaction,
@@ -974,6 +994,7 @@ async fn test_context_guard_withholds_huge_single_output_by_default() {
     let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(1000)));
     let registry = Registry {
         mcp_policy: Arc::default(),
+        plugin_mcp_refresh: Arc::default(),
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         compaction,
@@ -1012,6 +1033,7 @@ async fn test_context_guard_returns_truncated_output_when_caller_accepts() {
     let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(1000)));
     let registry = Registry {
         mcp_policy: Arc::default(),
+        plugin_mcp_refresh: Arc::default(),
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         compaction,
@@ -1048,6 +1070,7 @@ async fn test_context_guard_reports_the_real_cost_and_affordable_size() {
     }
     let registry = Registry {
         mcp_policy: Arc::default(),
+        plugin_mcp_refresh: Arc::default(),
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         compaction,
@@ -1094,6 +1117,7 @@ async fn test_context_guard_truncates_when_context_nearly_full() {
     }
     let registry = Registry {
         mcp_policy: Arc::default(),
+        plugin_mcp_refresh: Arc::default(),
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         compaction,
@@ -1120,6 +1144,7 @@ async fn test_context_guard_still_refuses_when_context_is_exhausted() {
     }
     let registry = Registry {
         mcp_policy: Arc::default(),
+        plugin_mcp_refresh: Arc::default(),
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         compaction,
@@ -1146,6 +1171,7 @@ async fn test_context_guard_zero_budget_passes_through() {
     let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(0)));
     let registry = Registry {
         mcp_policy: Arc::default(),
+        plugin_mcp_refresh: Arc::default(),
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         compaction,
@@ -1365,6 +1391,7 @@ async fn test_context_guard_never_spends_more_than_it_reports() {
                     }
                     let registry = Registry {
                         mcp_policy: Arc::default(),
+                        plugin_mcp_refresh: Arc::default(),
                         tools: Arc::new(RwLock::new(HashMap::new())),
                         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
                         compaction,
@@ -1414,6 +1441,7 @@ async fn test_context_guard_refusal_reads_clearly_for_todays_regression() {
     }
     let registry = Registry {
         mcp_policy: Arc::default(),
+        plugin_mcp_refresh: Arc::default(),
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         compaction,
@@ -1717,6 +1745,7 @@ async fn test_guard_withholds_large_output_on_a_million_token_window() {
     }
     let registry = Registry {
         mcp_policy: Arc::default(),
+        plugin_mcp_refresh: Arc::default(),
         tools: Arc::new(RwLock::new(HashMap::new())),
         skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
         compaction,
@@ -1749,6 +1778,7 @@ async fn test_single_output_ceiling_is_absolute_not_only_proportional() {
         let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(budget)));
         let registry = Registry {
             mcp_policy: Arc::default(),
+            plugin_mcp_refresh: Arc::default(),
             tools: Arc::new(RwLock::new(HashMap::new())),
             skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
             compaction,
@@ -1977,6 +2007,7 @@ async fn post_tool_feedback_hook_appends_stdout_to_tool_result() {
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     let previous = std::env::var_os("JCODE_HOOK_POST_TOOL_FEEDBACK");
     crate::env::set_var("JCODE_HOOK_POST_TOOL_FEEDBACK", &script);
+    crate::config::invalidate_config_cache();
 
     let registry = Registry::new(Arc::new(MockProvider) as Arc<dyn Provider>).await;
     let mut ctx = mcp_test_context(dir.path());
@@ -1989,6 +2020,7 @@ async fn post_tool_feedback_hook_appends_stdout_to_tool_result() {
         Some(value) => crate::env::set_var("JCODE_HOOK_POST_TOOL_FEEDBACK", value),
         None => crate::env::remove_var("JCODE_HOOK_POST_TOOL_FEEDBACK"),
     }
+    crate::config::invalidate_config_cache();
     let output = result.expect("read should succeed").output;
     assert!(output.contains("hello"), "{output}");
     assert!(output.contains("[post_tool_feedback]"), "{output}");

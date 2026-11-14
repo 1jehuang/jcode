@@ -8,9 +8,40 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 11;
+export const API_VERSION_MINOR = 13;
 
-export type RuntimeCommand = "skills" | "context" | "info" | "cache" | "memory" | "swarm" | "agents" | "subagent_model" | "autoreview" | "autojudge" | "transport" | "fast" | "telemetry" | "subscription" | "overnight" | "productivity" | "initiatives" | "premium" | "provider_test_coverage" | "refresh_model_list" | "continue" | "resume_all" | "remote" | "server_reload" | "review" | "judge" | "subagent" | "auth" | "logout";
+export type RewindMode = "conversation_and_files" | "conversation_only" | "files_only";
+
+/** User targets restore before the prompt; assistant targets restore after the message. */
+export type RewindTargetKind = "user_prompt" | "assistant_message";
+
+export interface RewindCheckpoint {
+  /** Omitted means user_prompt. Assistant targets retain the selected assistant message. */
+  target_kind?: RewindTargetKind;
+  id: string;
+  /** Stored boundary: before the user prompt or immediately after the assistant message. */
+  message_index: number;
+  /** Original user prompt or selected assistant message excerpt. */
+  prompt: string;
+  timestamp?: string;
+  can_restore_files: boolean;
+  changed_file_count: number;
+}
+
+export interface RewindResult {
+  /** Omitted means user_prompt. Assistant restores leave the client's draft untouched. */
+  target_kind?: RewindTargetKind;
+  mode: RewindMode;
+  /** User input to restore to the editor. Empty for assistant targets; keep the draft untouched. */
+  prompt: string;
+  removed_messages: number;
+  restored_files: number;
+  skipped_files?: string[];
+  /** Original user prompt attachments, as [media type, base64 data]. Absent for files-only and assistant restores. */
+  images?: [string, string][];
+}
+
+export type RuntimeCommand = "skills" | "mcp" | "context" | "info" | "cache" | "memory" | "swarm" | "agent" | "agents" | "subagent_model" | "autoreview" | "autojudge" | "transport" | "fast" | "telemetry" | "subscription" | "overnight" | "productivity" | "initiatives" | "premium" | "provider_test_coverage" | "refresh_model_list" | "continue" | "resume_all" | "remote" | "server_reload" | "review" | "judge" | "subagent" | "auth" | "logout";
 
 export type PermissionDecision = "allow" | "allow_always" | "deny";
 
@@ -191,6 +222,8 @@ export type ApiRequest =
   | { req: "peek_session"; session_id: string; limit?: number }
   | { req: "clear"; session_id: string }
   | { req: "rewind"; session_id: string; message_index: number }
+  | { req: "list_rewind_checkpoints"; session_id: string }
+  | { req: "rewind_checkpoint"; session_id: string; checkpoint_id: string; mode: RewindMode }
   | {
       req: "permission_response";
       session_id: string;
@@ -291,6 +324,8 @@ export type ApiEvent =
   | { ev: "attached"; session: SessionInfo }
   | { ev: "session_forked"; session: SessionInfo }
   | { ev: "history"; session_id: string; messages: HistoryMessage[]; images?: RenderedImage[] }
+  | { ev: "rewind_checkpoints"; session_id: string; checkpoints: RewindCheckpoint[] }
+  | { ev: "rewind_complete"; session_id: string; result: RewindResult }
   | { ev: "pong" }
   | { ev: "text_delta"; session_id: string; text: string; message_id?: string }
   | { ev: "text_done"; session_id: string; message_id?: string }
@@ -465,6 +500,8 @@ export type ServerFrame = { v: number; reply_to?: number } & UnknownApiEvent;
 
 /** Every event tag the SDK knows about, for drift checks and routing. */
 export const KNOWN_EVENT_KINDS = [
+  "rewind_checkpoints",
+  "rewind_complete",
   "runtime_command_result",
   "hello_ok",
   "ok",
@@ -518,6 +555,8 @@ export const KNOWN_EVENT_KINDS = [
 
 /** Every request tag the SDK can send. */
 export const KNOWN_REQUEST_KINDS = [
+  "list_rewind_checkpoints",
+  "rewind_checkpoint",
   "runtime_command",
   "hello",
   "list_sessions",

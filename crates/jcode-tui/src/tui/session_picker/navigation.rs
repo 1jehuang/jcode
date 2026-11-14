@@ -15,6 +15,7 @@ impl SessionPicker {
     }
 
     pub fn next(&mut self) {
+        self.user_selection_intent = true;
         self.pending_search_submission = None;
         self.search_selection.stop();
         // Onboarding actions form a short list above the resumable sessions.
@@ -42,6 +43,7 @@ impl SessionPicker {
     }
 
     pub fn previous(&mut self) {
+        self.user_selection_intent = true;
         self.pending_search_submission = None;
         self.search_selection.stop();
         // Onboarding: already on the first action -> nothing above it.

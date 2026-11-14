@@ -2,6 +2,31 @@ use super::*;
 use crate::auth::{AuthState, ProviderAuth};
 
 #[test]
+fn chatgpt_web_unknown_routes_never_use_oauth_api_or_openrouter() {
+    let _guard = EnvGuard::new();
+    crate::auth::AuthStatus::invalidate_cache();
+    let ids = vec![
+        "gpt-6[web]".to_string(),
+        "gpt-5.6-sol[web]".to_string(),
+        "gpt-5.5[web]".to_string(),
+        "o3[web]".to_string(),
+        "o4-mini[web]".to_string(),
+    ];
+    for routes in [
+        simplified_model_routes_for_picker("OpenAI", "gpt-6[web]", ids.clone()),
+        remote_model_routes_fallback(Some("OpenAI"), &ids),
+    ] {
+        for id in &ids {
+            let matching = routes.iter().filter(|r| r.model == *id).collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1, "{id}: {matching:?}");
+            assert_eq!(matching[0].api_method, "chatgpt-web");
+            assert!(!matching[0].available);
+        }
+    }
+    crate::auth::AuthStatus::invalidate_cache();
+}
+
+#[test]
 fn saved_account_catalogs_keep_work_personal_and_named_accounts_separate() {
     let _guard = EnvGuard::new();
     let home = crate::storage::jcode_dir().unwrap();
@@ -37,6 +62,7 @@ fn saved_account_catalogs_keep_work_personal_and_named_accounts_separate() {
     let routes = expand_saved_account_routes(vec![
         build_anthropic_oauth_route("claude-sonnet-4-6", true, ""),
         ModelRoute {
+            catalog_metadata: None,
             model: "claude-sonnet-4-6".into(),
             provider: "Anthropic".into(),
             api_method: "claude-api".into(),
@@ -432,6 +458,109 @@ fn custom_config_profile_model_never_gets_a_copilot_route_from_either_source() {
             "no source may attach a Copilot route: {routes:?}"
         );
     }
+}
+
+#[test]
+fn named_profile_merge_skips_builtin_duplicate_and_keeps_config_only_models() {
+    let built_in = ModelRoute {
+        catalog_metadata: None,
+        model: "A6-Coder-Large".into(),
+        provider: "A6 API".into(),
+        api_method: "openai-compatible:a6api".into(),
+        available: true,
+        detail: String::new(),
+        usage: None,
+        cheapness: None,
+    };
+    let configured_duplicate = ModelRoute {
+        provider: "a6api".into(),
+        model: "a6-coder-large".into(),
+        ..built_in.clone()
+    };
+    let config_only = ModelRoute {
+        provider: "a6api".into(),
+        model: "A6-Coder-Small".into(),
+        ..built_in.clone()
+    };
+
+    let merged = without_existing_model_routes(
+        std::slice::from_ref(&built_in),
+        vec![configured_duplicate, config_only.clone()],
+    );
+
+    assert_eq!(merged, vec![config_only]);
+}
+
+#[test]
+fn named_profile_routes_exclude_generation_only_and_preserve_model_metadata() {
+    let profile = crate::config::NamedProviderConfig {
+        base_url: "https://api.example.test/v1".into(),
+        default_model: Some("chat-vision".into()),
+        models: vec![
+            crate::config::NamedProviderModelConfig {
+                id: "chat-vision".into(),
+                context_window: Some(1_000_000),
+                max_input_tokens: Some(900_000),
+                max_output_tokens: Some(32_000),
+                reasoning: Some(true),
+                supports_thinking: Some(true),
+                reasoning_efforts: vec!["max".into(), "low".into(), "high".into()],
+                input: vec!["text".into(), "image".into()],
+                output: vec!["text".into()],
+                supported_endpoints: vec!["chat/completions".into(), "responses".into()],
+                supports_tool_calls: Some(true),
+                supports_streaming: Some(true),
+                supports_structured_outputs: Some(true),
+                supports_chat: Some(true),
+                ..Default::default()
+            },
+            crate::config::NamedProviderModelConfig {
+                id: "video-only".into(),
+                input: vec!["text".into()],
+                output: vec!["video".into()],
+                supported_endpoints: vec!["videos".into()],
+                supports_chat: Some(false),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+
+    let routes = named_provider_profile_routes("example", &profile);
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].model, "chat-vision");
+    let metadata = routes[0].catalog_metadata.as_ref().unwrap();
+    assert_eq!(metadata.context_window, Some(1_000_000));
+    assert_eq!(metadata.max_input_tokens, Some(900_000));
+    assert_eq!(metadata.max_output_tokens, Some(32_000));
+    assert_eq!(metadata.input_modalities, ["text", "image"]);
+    assert_eq!(metadata.output_modalities, ["text"]);
+    assert_eq!(
+        metadata.supported_endpoints,
+        ["chat/completions", "responses"]
+    );
+    assert_eq!(metadata.supports_image_input, Some(true));
+    assert_eq!(metadata.supports_tool_calls, Some(true));
+    assert_eq!(metadata.supports_streaming, Some(true));
+    assert_eq!(metadata.supports_structured_outputs, Some(true));
+    assert_eq!(metadata.supports_thinking, Some(true));
+    assert_eq!(metadata.reasoning_efforts, ["max", "low", "high"]);
+}
+
+#[test]
+fn named_profile_blocks_generation_only_default_from_picker_fallback() {
+    let profile = crate::config::NamedProviderConfig {
+        base_url: "https://api.example.test/v1".into(),
+        default_model: Some("video-only".into()),
+        models: vec![crate::config::NamedProviderModelConfig {
+            id: "video-only".into(),
+            output: vec!["video".into()],
+            supports_chat: Some(false),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    assert!(named_provider_profile_routes("example", &profile).is_empty());
 }
 
 #[test]

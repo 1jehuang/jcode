@@ -37,6 +37,9 @@ use crate::auth::router_transfer;
 use crate::auth::transfer::{self, CloudCredentialTransfer, TransferProvider};
 use crate::{session, storage};
 
+mod repo_restore;
+use repo_restore::restore_repo_contents;
+
 mod transport;
 pub(crate) use transport::Target;
 use transport::retry_ssh;
@@ -1761,25 +1764,22 @@ fn restore_repo(
         }
         let head_tree = git(&root, &["rev-parse", "HEAD^{tree}"]).ok();
         // An empty checkout holds nothing that could be lost.
-        let empty_tree = git(&root, &["hash-object", "-t", "tree", "/dev/null"]).ok();
+        let empty_tree = git(&root, &["hash-object", "-t", "tree", "--stdin"])
+            .context("identify empty checkout before restoring")?;
         if !known.contains(&current)
             && head_tree.as_deref() != Some(current.as_str())
-            && empty_tree.as_deref() != Some(current.as_str())
+            && empty_tree != current
         {
             // Preserve the unreturned state as a durable commit instead of
             // refusing. Orphaned work from older sessions otherwise blocks
             // every later move into this checkout. The rescue ref keeps the
             // full tree (tracked and untracked) recoverable on this host.
-            let stamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or_default();
+            let stamp = now_secs();
             let rescue_ref = format!("{SNAPSHOT_REF_PREFIX}/rescued/{stamp}-{session_id}");
             let message = format!("jcode cloud: unreturned work rescued before {session_id}");
             let mut args = vec!["commit-tree", current.as_str(), "-m", message.as_str()];
-            let parent = git(&root, &["rev-parse", "--verify", "HEAD^{commit}"]).ok();
-            if let Some(parent) = &parent {
-                args.extend(["-p", parent.as_str()]);
+            if head_tree.is_some() {
+                args.extend(["-p", "HEAD"]);
             }
             let rescued = git_env(&root, &args, &identity_env(&root)).and_then(|commit| {
                 git(&root, &["update-ref", &rescue_ref, &commit])?;
@@ -1837,73 +1837,6 @@ fn refuse_unreturned(root: &Path, repo: &RepoManifest) -> Result<()> {
             );
         }
     }
-}
-
-fn restore_repo_contents(
-    repo: &RepoManifest,
-    root: &Path,
-    bundle_str: &str,
-    snap_ref: &str,
-    ignored_tar: &Path,
-    session_id: &str,
-) -> Result<String> {
-    let root = root.to_path_buf();
-    let bundle_str = bundle_str.to_owned();
-    let snap_ref = snap_ref.to_owned();
-    // An incremental bundle may omit the branch advertisement when that
-    // branch's tip is already a prerequisite on this host. The snapshot has
-    // the complete parent chain we need, so fetch it rather than requiring an
-    // advertised branch. Verify prerequisites before touching checkout refs.
-    git(&root, &["bundle", "verify", &bundle_str])?;
-    let mut fetch_args = vec!["fetch", "--quiet", "--force", bundle_str.as_str()];
-    let snap_spec = format!("{snap_ref}:{snap_ref}");
-    fetch_args.push(&snap_spec);
-    git(&root, &fetch_args)?;
-    git(
-        &root,
-        &["cat-file", "-e", &format!("{}^{{commit}}", repo.head)],
-    )?;
-
-    match &repo.branch {
-        Some(branch) => {
-            git(
-                &root,
-                &["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")],
-            )?;
-        }
-        None => {
-            git(&root, &["update-ref", "--no-deref", "HEAD", &repo.head])?;
-        }
-    }
-    // Branch at original HEAD, working tree + index = snapshot, so uncommitted
-    // work stays uncommitted exactly as it was locally.
-    git(&root, &["reset", "--quiet", "--hard", &repo.head])?;
-    git(&root, &["read-tree", "--reset", "-u", &snap_ref])?;
-    git(&root, &["reset", "--quiet", "--mixed", &repo.head])?;
-    git(
-        &root,
-        &[
-            "update-ref",
-            &format!("{SNAPSHOT_REF_PREFIX}/{session_id}/base"),
-            &repo.snapshot,
-        ],
-    )?;
-    if let Some(name) = &repo.git_user_name
-        && git(&root, &["config", "user.name"]).is_err()
-    {
-        git(&root, &["config", "user.name", name])?;
-    }
-    if let Some(email) = &repo.git_user_email
-        && git(&root, &["config", "user.email"]).is_err()
-    {
-        git(&root, &["config", "user.email", email])?;
-    }
-    if ignored_tar.is_file() {
-        let mut command = Command::new("tar");
-        command.arg("-xf").arg(ignored_tar).arg("-C").arg(&root);
-        run_ok(command, "restore ignored files")?;
-    }
-    git(&root, &["rev-parse", &snap_ref])
 }
 
 /// Local side of return: fetch the cloud snapshot as refs and 3-way merge it

@@ -89,6 +89,7 @@ fn test_remote_background_shortcut_idle_keeps_word_navigation() {
 
 fn openai_oauth_route(model: &str) -> crate::provider::ModelRoute {
     crate::provider::ModelRoute {
+        catalog_metadata: None,
         model: model.to_string(),
         provider: "OpenAI".to_string(),
         api_method: "openai-oauth".to_string(),
@@ -101,6 +102,7 @@ fn openai_oauth_route(model: &str) -> crate::provider::ModelRoute {
 
 fn claude_oauth_route(model: &str) -> crate::provider::ModelRoute {
     crate::provider::ModelRoute {
+        catalog_metadata: None,
         model: model.to_string(),
         provider: "Anthropic".to_string(),
         api_method: "claude-oauth".to_string(),
@@ -138,6 +140,7 @@ fn test_remote_account_failover_prompt_does_not_hold_or_retry_same_account() {
         auto_retry: true,
         retry_attempts: 0,
         retry_at: None,
+        overload_attempts: 0,
     });
     app.last_submitted_input = Some("hi".to_string());
     app.is_processing = true;
@@ -158,6 +161,7 @@ fn test_remote_account_failover_prompt_does_not_hold_or_retry_same_account() {
             id: 21,
             message: prompt.to_error_message(),
             retry_after_secs: Some(60),
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -217,6 +221,7 @@ fn remote_exact_failover_fixture() -> (App, crate::tui::backend::RemoteConnectio
         auto_retry: false,
         retry_attempts: 0,
         retry_at: None,
+        overload_attempts: 0,
     });
     app.last_submitted_input = Some("hi".into());
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
@@ -235,6 +240,7 @@ fn remote_exact_failover_fixture() -> (App, crate::tui::backend::RemoteConnectio
             id: 21,
             message: prompt.to_error_message(),
             retry_after_secs: None,
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -358,6 +364,7 @@ fn test_remote_failover_first_generic_failure_is_instant_then_countdown_and_boun
                     id: 21,
                     message: prompt.to_error_message(),
                     retry_after_secs: None,
+                    server_resumes: false,
                 },
                 &mut connection,
             );
@@ -412,6 +419,7 @@ fn test_remote_immediate_failover_dispatches_once_and_suppresses_exhaustion_spam
                     id: 21,
                     message: "429 usage limit reached; quota exhausted".into(),
                     retry_after_secs: None,
+                    server_resumes: false,
                 },
                 &mut connection,
             );
@@ -508,6 +516,7 @@ fn test_remote_failover_stops_when_cross_route_retry_budget_is_spent() {
             system_reminder: payload.system_reminder,
             auto_retry: true,
             retry_attempts: App::AUTO_RETRY_MAX_ATTEMPTS,
+            overload_attempts: 0,
             retry_at: None,
         });
         let prompt = jcode_provider_core::ProviderFailoverPrompt {
@@ -525,6 +534,7 @@ fn test_remote_failover_stops_when_cross_route_retry_budget_is_spent() {
                 id: 23,
                 message: prompt.to_error_message(),
                 retry_after_secs: None,
+                server_resumes: false,
             },
             &mut connection,
         );
@@ -658,6 +668,7 @@ fn test_remote_failover_control_error_releases_switch_without_retry() {
                 id: 22,
                 message: "Target is no longer available".into(),
                 retry_after_secs: Some(60),
+                server_resumes: false,
             },
             &mut connection,
         );
@@ -914,7 +925,7 @@ fn test_rejected_remote_automatic_route_retains_old_identity_and_drops_payload()
         assert!(app.pending_automatic_failover_route.is_none());
         assert!(app.pending_fallback_resend.is_none());
         assert!(!app.remote_model_switch_in_flight);
-        assert_eq!(app.input, "hi");
+        assert_eq!(app.input, "hi [image 1]");
         assert_eq!(
             app.pending_images,
             vec![("image/png".into(), "image-data".into())]
@@ -999,7 +1010,9 @@ fn test_cancel_image_only_failover_restores_attachments() {
         payload.raw_input = Some(String::new());
         payload.images = vec![("image/png".into(), "image-data".into())];
         app.cancel_pending_provider_failover("Canceled");
-        assert!(app.input.is_empty());
+        assert_eq!(app.input, "[image 1]");
+        input::insert_input_text(&mut app, "restored ");
+        assert!(app.input.contains("[image 1]"));
         assert_eq!(
             app.pending_images,
             vec![("image/png".into(), "image-data".into())]
@@ -1054,6 +1067,7 @@ fn test_remote_auth_error_arms_fallback_offer_with_resend_payload() {
         auto_retry: false,
         retry_attempts: 0,
         retry_at: None,
+        overload_attempts: 0,
     });
     app.last_submitted_input = Some("hi".to_string());
     app.is_processing = true;
@@ -1064,6 +1078,7 @@ fn test_remote_auth_error_arms_fallback_offer_with_resend_payload() {
             id: 21,
             message: "OpenAI token refresh failed; run /login to re-authenticate: {\"error\":{\"message\":\"Your session has ended. Please log in again.\",\"type\":\"invalid_request_error\",\"code\":\"refresh_token_invalidated\"}}".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -1107,6 +1122,7 @@ fn test_remote_usage_limit_shows_error_and_single_switch_line() {
         claude_oauth_route("claude-sonnet-4"),
     ];
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+overload_attempts: 0,
         content: "hi".to_string(),
         images: vec![],
         is_system: false,
@@ -1122,6 +1138,7 @@ fn test_remote_usage_limit_shows_error_and_single_switch_line() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::Error {
+server_resumes: false,
             id: 22,
             message: "usage_limit_reached: The usage limit has been reached".to_string(),
             retry_after_secs: None,
@@ -1216,6 +1233,7 @@ fn test_remote_fallback_offer_accept_stages_switch_and_resends() {
         auto_retry: false,
         retry_attempts: 0,
         retry_at: None,
+        overload_attempts: 0,
     });
     app.last_submitted_input = Some("hi".to_string());
     app.is_processing = true;
@@ -1226,6 +1244,7 @@ fn test_remote_fallback_offer_accept_stages_switch_and_resends() {
             id: 22,
             message: "OpenAI token refresh failed; run /login to re-authenticate: refresh_token_invalidated".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         },
         &mut remote,
     );

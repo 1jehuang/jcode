@@ -246,6 +246,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         provider_oauth_account_label: None,
         reasoning_effort: None,
         service_tier: None,
+        account_labels: Vec::new(),
         subagent_model: None,
         autoreview_enabled: None,
         autojudge_enabled: None,
@@ -375,6 +376,7 @@ fn test_side_panel_state_event_roundtrip() -> Result<()> {
 #[test]
 fn test_error_event_retry_after_roundtrip() -> Result<()> {
     let event = ServerEvent::Error {
+server_resumes: false,
         id: 42,
         message: "rate limited".to_string(),
         retry_after_secs: Some(17),
@@ -382,6 +384,7 @@ fn test_error_event_retry_after_roundtrip() -> Result<()> {
     let json = encode_event(&event);
     let decoded = parse_event_json(json.trim())?;
     let ServerEvent::Error {
+server_resumes: false,
         id,
         message,
         retry_after_secs,
@@ -400,6 +403,7 @@ fn test_error_event_retry_after_back_compat_default() -> Result<()> {
     let json = r#"{"type":"error","id":7,"message":"oops"}"#;
     let decoded = parse_event_json(json)?;
     let ServerEvent::Error {
+server_resumes: false,
         id,
         message,
         retry_after_secs,

@@ -48,9 +48,11 @@ impl Drop for Home {
 
 fn subscribe(target: &str) -> Request {
     Request::Subscribe {
+        agent_profile_name: None,
         system_prompt: None,
         supports_pdf_panels: false,
         supports_user_response: false,
+        supports_ask_user: false,
         supports_server_failover: false,
         supports_turn_identity: false,
         id: 71,
@@ -64,6 +66,8 @@ fn subscribe(target: &str) -> Request {
         crash_on_disconnect: false,
         continue_on_disconnect: false,
         terminal_env: vec![],
+        account_pins: Vec::new(),
+        supports_session_accounts: false,
         client_name: None,
     }
 }

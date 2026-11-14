@@ -107,6 +107,7 @@ pub struct MarginsCapture {
     pub left_widths: Vec<u16>,
     pub right_widths: Vec<u16>,
     pub centered: bool,
+    pub content_start_row: usize,
 }
 
 /// Info widget placement capture

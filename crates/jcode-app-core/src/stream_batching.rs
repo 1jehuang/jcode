@@ -213,6 +213,7 @@ impl BatchingSender {
         self.flush_locked(&mut pending);
     }
 
+    #[allow(clippy::result_large_err)] // mirrors mpsc::UnboundedSender::send for drop-in use
     pub(crate) fn send(
         &self,
         event: ServerEvent,

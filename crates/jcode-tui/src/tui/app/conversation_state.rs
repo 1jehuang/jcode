@@ -119,7 +119,14 @@ impl App {
                     Self::format_compaction_number(count as u64),
                     if count == 1 { "" } else { "s" },
                 ),
-                None => format!("📦 Compacted ({strategy})"),
+                None => match event.messages_dropped.filter(|count| *count > 0) {
+                    Some(count) => format!(
+                        "📦 Compacted ({strategy}): {} message{} dropped",
+                        Self::format_compaction_number(count as u64),
+                        if count == 1 { "" } else { "s" }
+                    ),
+                    None => format!("📦 Compacted ({strategy})"),
+                },
             },
         }
     }
@@ -799,10 +806,12 @@ impl App {
         // re-registering them if we cleared the registry here.
         self.clear_streaming_render_state();
         self.queued_messages.clear();
+        self.queued_message_images.clear();
         self.pasted_contents.clear();
         self.pending_images.clear();
         self.active_skill = None;
         self.provider_session_id = None;
+        self.invalidate_rewind_ui();
         self.session = new_session;
         self.set_side_panel_snapshot(
             crate::side_panel::snapshot_for_session(&self.session.id).unwrap_or_default(),
@@ -853,6 +862,10 @@ impl App {
         self.set_status_notice("Recovered session");
     }
 }
+
+#[cfg(test)]
+#[path = "compaction_notice_tests.rs"]
+mod compaction_notice_tests;
 
 #[cfg(test)]
 mod tests {

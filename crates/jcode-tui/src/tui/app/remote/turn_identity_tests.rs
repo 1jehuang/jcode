@@ -57,6 +57,7 @@ fn completed_turn_busy_continuation_retries_from_idle_without_another_terminal()
         handle_server_event(
             &mut app,
             ServerEvent::Error {
+                server_resumes: false,
                 id: rejected,
                 message: "Already processing a message".into(),
                 retry_after_secs: None,
@@ -144,6 +145,7 @@ fn completed_turn_busy_user_send_restores_prompt_without_overwriting_new_draft()
         handle_server_event(
             &mut app,
             ServerEvent::Error {
+                server_resumes: false,
                 id: rejected,
                 message: "Already processing a message".into(),
                 retry_after_secs: None,
@@ -153,14 +155,8 @@ fn completed_turn_busy_user_send_restores_prompt_without_overwriting_new_draft()
         assert!(!app.is_processing);
         assert!(app.current_message_id.is_none());
         assert!(app.remote_resume_activity.is_none());
-        assert_eq!(
-            app.input,
-            if draft.is_empty() {
-                "rejected user prompt"
-            } else {
-                draft
-            }
-        );
+        assert_eq!(app.input, draft);
+        assert_eq!(app.queued_messages, ["rejected user prompt"]);
         assert!(app.hidden_queued_system_messages.is_empty());
     }
 }
@@ -207,6 +203,7 @@ fn local_send_rejection_preserves_running_observer_and_restores_prompt() {
     handle_server_event(
         &mut app,
         ServerEvent::Error {
+            server_resumes: false,
             id: 99,
             message: "Already processing a message".into(),
             retry_after_secs: None,
@@ -241,6 +238,7 @@ fn local_send_rejection_preserves_running_observer_and_restores_prompt() {
 fn local_preacceptance_error_and_control_done_settle_without_active_turn() {
     for event in [
         ServerEvent::Error {
+            server_resumes: false,
             id: 99,
             message: "Authentication failed".into(),
             retry_after_secs: None,
@@ -355,6 +353,7 @@ fn old_completion_and_error_cannot_idle_newer_external_turn() {
     for event in [
         ServerEvent::Done { id: 10 },
         ServerEvent::Error {
+            server_resumes: false,
             id: 10,
             message: "old".into(),
             retry_after_secs: None,

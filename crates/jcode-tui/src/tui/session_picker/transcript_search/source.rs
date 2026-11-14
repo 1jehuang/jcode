@@ -135,16 +135,17 @@ impl Source {
         Source::User,
     ];
 
+    // Control characters keep source markers out of literal search matches.
     fn tag(self) -> char {
         match self {
-            Source::ToolOutput => '0',
-            Source::Thinking => '1',
-            Source::ToolInput => '2',
-            Source::Other => '3',
-            Source::Project => '4',
-            Source::Assistant => '5',
-            Source::Intent => '6',
-            Source::User => '7',
+            Source::ToolOutput => '\u{10}',
+            Source::Thinking => '\u{11}',
+            Source::ToolInput => '\u{12}',
+            Source::Other => '\u{13}',
+            Source::Project => '\u{14}',
+            Source::Assistant => '\u{15}',
+            Source::Intent => '\u{16}',
+            Source::User => '\u{17}',
         }
     }
 
@@ -154,7 +155,7 @@ impl Source {
 
     /// Index of this source in [`SourceBuckets`].
     fn slot(self) -> usize {
-        self.tag() as usize - '0' as usize
+        self as usize
     }
 }
 

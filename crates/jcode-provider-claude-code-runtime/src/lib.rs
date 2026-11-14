@@ -1,0 +1,861 @@
+//! Claude Code provider runtime for jcode.
+//!
+//! Claude turns run through the user's installed `claude` CLI over the Agent
+//! SDK stream-json protocol, the same way t3code drives Claude:
+//!
+//! - one long-lived `claude` child per jcode session (resumed with `--resume`),
+//! - Claude Code owns the agent loop, built-in tools, compaction, auth and
+//!   retries,
+//! - jcode-only tools are served back to Claude over an in-process SDK MCP
+//!   server (`mcp__jcode__<tool>`) and executed by jcode through the
+//!   `NativeToolCall` / [`Provider::native_result_sender`] bridge,
+//! - accounts are instances, each an isolated `CLAUDE_CONFIG_DIR`. jcode never
+//!   reads or stores Claude Code credentials.
+
+mod background;
+pub mod control;
+mod file_tool_routing;
+mod history;
+pub mod process;
+pub mod prompt;
+mod session_turn;
+pub mod settings;
+pub mod translate;
+pub mod turn;
+pub mod usage;
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, RwLock};
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, anyhow, bail};
+use async_trait::async_trait;
+use jcode_message_types::{Message, ToolDefinition};
+use jcode_provider_core::{
+    AccountPin, AccountPinSlot, AccountProviderKind, EventStream, ModelCatalogRefreshSummary,
+    ModelRoute, NativeToolResult, NativeToolResultSender, Provider,
+    summarize_model_catalog_refresh,
+};
+use serde_json::Value;
+use tokio::sync::{Mutex, mpsc};
+use tokio_stream::wrappers::ReceiverStream;
+
+use crate::history::SeenHistory;
+use crate::process::{ChildHandle, InitInfo, LaunchConfig};
+use crate::settings::{ClaudeCodeInstance, ClaudeCodeSettings, SessionStart, SpawnSpec};
+pub use crate::translate::{ClaudeCodeRateLimits, RateLimitWindow};
+
+/// Provider name (`Provider::name`).
+pub const PROVIDER_NAME: &str = "claude-code";
+/// Identity probe cache lifetime.
+const PROBE_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+/// Identity probe deadline.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(25);
+/// How long the probe waits for `get_usage` after `initialize` answered.
+const PROBE_USAGE_TIMEOUT: Duration = Duration::from_secs(8);
+/// One-shot (`complete_simple`) deadline.
+const ONESHOT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Model ids offered before the CLI reported its own list.
+const FALLBACK_MODELS: &[&str] = &[
+    "claude-opus-5-5",
+    "claude-opus-5",
+    "claude-fable-5-1",
+    "claude-fable-5",
+    "claude-sonnet-5",
+    "claude-haiku-4-5",
+];
+
+/// Identity reported by an init-only probe.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ClaudeCodeIdentity {
+    pub email: Option<String>,
+    pub subscription: Option<String>,
+    pub organization: Option<String>,
+    pub models: Vec<String>,
+    /// Subscription usage windows from `get_usage`. Empty with
+    /// `answered == false` when the CLI does not support the request or did
+    /// not answer in time.
+    pub usage: usage::ClaudeCodeUsage,
+}
+
+/// Run an init-only probe child for `instance`: `initialize`, then
+/// `get_usage`. No prompt is written and no tokens are used. User hooks,
+/// remote MCP servers and IDE auto-connect are disabled for the probe.
+pub async fn probe_instance(
+    settings: &ClaudeCodeSettings,
+    instance: &ClaudeCodeInstance,
+) -> Result<ClaudeCodeIdentity> {
+    let mut command = tokio::process::Command::new(settings.resolved_binary());
+    command
+        .args(settings::build_probe_argv(&settings.setting_sources))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    settings::apply_instance_env(&mut command, instance);
+    command.envs(settings::probe_env_extras());
+    tokio::time::timeout(PROBE_TIMEOUT, async move {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let mut child = command.spawn().context("start Claude Code probe")?;
+        let mut stdin = child.stdin.take().context("probe stdin")?;
+        let stdout = child.stdout.take().context("probe stdout")?;
+        let request =
+            control::control_request("probe-init", control::initialize_request(false, ""));
+        stdin.write_all(format!("{request}\n").as_bytes()).await?;
+        stdin.flush().await?;
+        let mut identity: Option<ClaudeCodeIdentity> = None;
+        let mut lines = BufReader::new(stdout).lines();
+        let finish = |child: &mut tokio::process::Child| {
+            let _ = child.start_kill();
+        };
+        loop {
+            // After `initialize`, give `get_usage` a short window: older CLIs
+            // may not answer it at all.
+            let next = if identity.is_some() {
+                match tokio::time::timeout(PROBE_USAGE_TIMEOUT, lines.next_line()).await {
+                    Ok(line) => line?,
+                    Err(_) => None,
+                }
+            } else {
+                lines.next_line().await?
+            };
+            let Some(line) = next else {
+                finish(&mut child);
+                return identity
+                    .ok_or_else(|| anyhow!("Claude Code probe exited without answering"));
+            };
+            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if value.get("type").and_then(Value::as_str) != Some("control_response") {
+                continue;
+            }
+            let response = value.get("response");
+            let request_id = response
+                .and_then(|r| r.get("request_id"))
+                .and_then(Value::as_str);
+            let body = response
+                .and_then(|r| r.get("response"))
+                .unwrap_or(&Value::Null);
+            match request_id {
+                Some("probe-init") => {
+                    if response
+                        .and_then(|r| r.get("subtype"))
+                        .and_then(Value::as_str)
+                        != Some("success")
+                    {
+                        bail!("Claude Code initialization probe failed");
+                    }
+                    let info = InitInfo::from_response(body);
+                    identity = Some(ClaudeCodeIdentity {
+                        email: info.email.clone(),
+                        subscription: info.subscription.clone(),
+                        organization: info.organization.clone(),
+                        models: info.model_ids(),
+                        usage: usage::ClaudeCodeUsage::default(),
+                    });
+                    let usage_request = control::control_request(
+                        "probe-usage",
+                        serde_json::json!({"subtype": "get_usage"}),
+                    );
+                    stdin
+                        .write_all(format!("{usage_request}\n").as_bytes())
+                        .await?;
+                    stdin.flush().await?;
+                }
+                Some("probe-usage") => {
+                    let ok = response
+                        .and_then(|r| r.get("subtype"))
+                        .and_then(Value::as_str)
+                        == Some("success");
+                    if let Some(identity) = identity.as_mut()
+                        && ok
+                    {
+                        identity.usage = usage::parse_get_usage(body);
+                    }
+                    drop(stdin);
+                    finish(&mut child);
+                    return identity
+                        .ok_or_else(|| anyhow!("Claude Code probe answered out of order"));
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("Claude Code probe timed out"))?
+}
+
+/// Per-session state: the live child and the Claude session it continues.
+#[derive(Default)]
+struct SessionState {
+    child: Option<Arc<ChildHandle>>,
+    /// Claude session id to resume when the next child starts.
+    resume_id: Option<String>,
+    /// Whether the current Claude session already saw this conversation.
+    seeded: bool,
+    /// Fingerprints of the last request and the native output it produced.
+    history: Option<SeenHistory>,
+    /// The agent's persisted resume id may only be used for the first child.
+    /// Once a child ran (or the instance changed), it names a session this
+    /// provider already moved past, possibly under another account.
+    hint_spent: bool,
+}
+
+type ModelCatalogCache = Vec<(ClaudeCodeInstance, Instant, Vec<String>)>;
+
+/// Claude via the local Claude Code CLI.
+pub struct ClaudeCodeProvider {
+    settings: Arc<RwLock<ClaudeCodeSettings>>,
+    model: Arc<RwLock<String>>,
+    effort: Arc<RwLock<Option<String>>>,
+    pin: AccountPinSlot,
+    state: Arc<Mutex<SessionState>>,
+    /// Turn lock: one in-flight turn per provider instance.
+    turn_lock: Arc<Mutex<()>>,
+    result_tx: mpsc::Sender<NativeToolResult>,
+    result_rx: Arc<Mutex<mpsc::Receiver<NativeToolResult>>>,
+    rate_limits: Arc<StdMutex<Option<ClaudeCodeRateLimits>>>,
+    model_catalogs: Arc<StdMutex<ModelCatalogCache>>,
+    probe_cache: Arc<StdMutex<Vec<(ClaudeCodeInstance, Instant, ClaudeCodeIdentity)>>>,
+    probe_lock: Arc<Mutex<()>>,
+    /// jcode session served, for background-task rows between turns.
+    jcode_session: background::SessionSlot,
+    host_tool_executor: Arc<AtomicBool>,
+}
+
+impl Default for ClaudeCodeProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn read<T: Clone>(lock: &RwLock<T>) -> T {
+    lock.read().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
+fn write<T>(lock: &RwLock<T>, value: T) {
+    *lock.write().unwrap_or_else(|p| p.into_inner()) = value;
+}
+
+impl ClaudeCodeProvider {
+    /// Provider configured from `[provider.claude_code]`.
+    pub fn new() -> Self {
+        Self::with_settings(jcode_base::config::config().provider.claude_code.clone())
+    }
+
+    /// Provider with explicit settings (tests, embedding).
+    pub fn with_settings(settings: ClaudeCodeSettings) -> Self {
+        let default_model = jcode_base::config::config()
+            .provider
+            .default_model
+            .clone()
+            .map(|m| settings::normalize_model_id(&m))
+            .filter(|m| m.starts_with("claude-"))
+            .unwrap_or_else(|| jcode_provider_core::DEFAULT_CLAUDE_MODEL.to_string());
+        let (result_tx, result_rx) = mpsc::channel(64);
+        Self {
+            settings: Arc::new(RwLock::new(settings)),
+            model: Arc::new(RwLock::new(default_model)),
+            effort: Arc::new(RwLock::new(None)),
+            pin: AccountPinSlot::default(),
+            state: Arc::new(Mutex::new(SessionState::default())),
+            turn_lock: Arc::new(Mutex::new(())),
+            result_tx,
+            result_rx: Arc::new(Mutex::new(result_rx)),
+            rate_limits: Arc::new(StdMutex::new(None)),
+            model_catalogs: Arc::new(StdMutex::new(Vec::new())),
+            probe_cache: Arc::new(StdMutex::new(Vec::new())),
+            probe_lock: Arc::new(Mutex::new(())),
+            jcode_session: Default::default(),
+            host_tool_executor: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn settings(&self) -> ClaudeCodeSettings {
+        read(&self.settings)
+    }
+
+    fn binary(&self) -> String {
+        self.settings().resolved_binary()
+    }
+
+    /// Configured instances (implicit `default` when none).
+    pub fn instances(&self) -> Vec<ClaudeCodeInstance> {
+        self.settings().effective_instances()
+    }
+
+    /// Instance this session uses: the pin, else the default instance.
+    pub fn active_instance(&self) -> ClaudeCodeInstance {
+        let settings = self.settings();
+        self.pin
+            .get()
+            .and_then(|pin| settings.instance(&pin.label))
+            .or_else(|| settings.instance(&settings.resolved_default_instance()))
+            .unwrap_or_else(ClaudeCodeInstance::implicit_default)
+    }
+
+    /// Latest rate-limit snapshot reported by the CLI.
+    pub fn rate_limit_snapshot(&self) -> Option<ClaudeCodeRateLimits> {
+        self.rate_limits
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    fn cache_models(&self, instance: &ClaudeCodeInstance, models: Vec<String>) {
+        if models.is_empty() {
+            return;
+        }
+        let mut cache = self
+            .model_catalogs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let changed = cache
+            .iter()
+            .find(|(key, _, _)| key == instance)
+            .is_none_or(|(_, _, cached)| cached != &models);
+        cache.retain(|(key, _, _)| key != instance);
+        cache.push((instance.clone(), Instant::now(), models));
+        drop(cache);
+        if changed {
+            jcode_base::bus::Bus::global().publish_models_updated();
+        }
+    }
+
+    /// This instance's discovered models, else the offline fallback list.
+    fn models_for(&self, instance: &ClaudeCodeInstance) -> Vec<String> {
+        self.model_catalogs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .find(|(key, _, _)| key == instance)
+            .map(|(_, _, models)| models.clone())
+            .unwrap_or_else(|| FALLBACK_MODELS.iter().map(|m| m.to_string()).collect())
+    }
+
+    /// Probe every instance whose catalog is stale (all of them when `force`).
+    /// Only the active instance's failure is an error, returned after the
+    /// others are probed; another instance that fails keeps its last good one.
+    async fn discover_models(&self, force: bool) -> Result<()> {
+        let active = self.active_instance();
+        let mut active_error = None;
+        for instance in self.instances() {
+            let fresh = self
+                .model_catalogs
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .iter()
+                .any(|(key, at, _)| key == &instance && at.elapsed() < PROBE_CACHE_TTL);
+            if fresh && !force {
+                continue;
+            }
+            let result = self
+                .probe_identity_inner(&instance, force)
+                .await
+                .and_then(|identity| {
+                    anyhow::ensure!(
+                        !identity.models.is_empty(),
+                        "Claude Code returned no discoverable models"
+                    );
+                    Ok(())
+                });
+            match result {
+                Err(error) if instance == active => active_error = Some(error),
+                Err(error) => jcode_base::logging::warn(&format!(
+                    "Claude Code model discovery failed for instance '{}': {error:#}",
+                    instance.id
+                )),
+                Ok(()) => {}
+            }
+        }
+        active_error.map_or(Ok(()), Err)
+    }
+
+    fn login_hint(&self, instance: &ClaudeCodeInstance) -> String {
+        settings::login_command(&self.binary(), instance)
+    }
+
+    fn expose_mcp(&self, tools: &[ToolDefinition]) -> bool {
+        self.settings().expose_jcode_tools
+            && !control::exposed_tools_with_file_tools(
+                tools,
+                &file_tool_routing::host_file_tools(
+                    tools,
+                    self.host_tool_executor.load(Ordering::Acquire),
+                ),
+            )
+            .is_empty()
+    }
+
+    /// Stop the live child (the Claude session stays resumable).
+    pub async fn shutdown(&self) {
+        let child = self.state.lock().await.child.take();
+        if let Some(child) = child {
+            child.shutdown().await;
+        }
+    }
+
+    /// Run an init-only probe for `instance` (no prompt is sent, no tokens are
+    /// used). Cached for five minutes.
+    pub async fn probe_identity(
+        &self,
+        instance: &ClaudeCodeInstance,
+    ) -> Result<ClaudeCodeIdentity> {
+        self.probe_identity_inner(instance, false).await
+    }
+
+    async fn probe_identity_inner(
+        &self,
+        instance: &ClaudeCodeInstance,
+        force: bool,
+    ) -> Result<ClaudeCodeIdentity> {
+        let _probe = self.probe_lock.lock().await;
+        if !force
+            && let Some((_, _, cached)) = self
+                .probe_cache
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .iter()
+                .find(|(key, at, _)| key == instance && at.elapsed() < PROBE_CACHE_TTL)
+        {
+            return Ok(cached.clone());
+        }
+        let identity = probe_instance(&self.settings(), instance).await?;
+        self.cache_models(instance, identity.models.clone());
+        let mut cache = self.probe_cache.lock().unwrap_or_else(|p| p.into_inner());
+        cache.retain(|(key, _, _)| key != instance);
+        cache.push((instance.clone(), Instant::now(), identity.clone()));
+        Ok(identity)
+    }
+
+    /// The live child for this session, spawning (or respawning with
+    /// `--resume`) when needed.
+    async fn ensure_child(
+        &self,
+        state: &mut SessionState,
+        tools: &[ToolDefinition],
+        cwd: Option<PathBuf>,
+        resume_hint: Option<&str>,
+        append_system_prompt: &str,
+    ) -> Result<Arc<ChildHandle>> {
+        let instance = self.active_instance();
+        let model = settings::normalize_model_id(&read(&self.model));
+        let effort = read(&self.effort);
+        let expose_mcp = self.expose_mcp(tools);
+        let host_file_tools = file_tool_routing::host_file_tools(
+            tools,
+            self.host_tool_executor.load(Ordering::Acquire) && self.settings().expose_jcode_tools,
+        );
+        let settings = self.settings();
+        let launch_args = instance
+            .launch_args
+            .as_deref()
+            .map(settings::parse_launch_args)
+            .unwrap_or_default();
+        let permission_mode =
+            settings::effective_permission_mode(&settings.permission_mode, &launch_args);
+
+        if let Some(child) = state.child.take() {
+            let launch = &child.launch;
+            let same_home = launch.instance.resolved_home() == instance.resolved_home()
+                && launch.instance.env == instance.env
+                && launch.instance.launch_args == instance.launch_args;
+            let same_shape = launch.spec.expose_mcp == expose_mcp
+                && launch.spec.permission_mode == permission_mode
+                && launch.spec.host_file_tools == host_file_tools
+                && launch.spec.effort == effort
+                && launch.cwd == cwd
+                && launch.append_system_prompt == append_system_prompt;
+            let mut reusable = child.is_alive() && same_home && same_shape;
+            if reusable && child.model() != model {
+                let request = serde_json::json!({"subtype": "set_model", "model": model});
+                match child.control(request, Duration::from_secs(15)).await {
+                    Ok(_) => child.set_model(&model),
+                    Err(err) => {
+                        jcode_base::logging::warn(&format!(
+                            "Claude Code: set_model failed, restarting the CLI: {err}"
+                        ));
+                        reusable = false;
+                    }
+                }
+            }
+            if reusable {
+                child.set_tools(tools);
+                state.child = Some(child.clone());
+                return Ok(child);
+            }
+            if same_home {
+                state.resume_id = Some(child.session_id().to_string());
+            } else {
+                // Another account cannot resume this account's session.
+                state.resume_id = None;
+                state.seeded = false;
+            }
+            child.shutdown().await;
+        }
+
+        let hint = if state.hint_spent {
+            None
+        } else {
+            resume_hint.map(str::to_string)
+        };
+        state.hint_spent = true;
+        let resume = state
+            .resume_id
+            .clone()
+            .or(hint)
+            .filter(|id| uuid::Uuid::parse_str(id).is_ok());
+        let make_launch = |session: SessionStart| LaunchConfig {
+            binary: settings.resolved_binary(),
+            instance: instance.clone(),
+            spec: SpawnSpec {
+                model: model.clone(),
+                effort: effort.clone(),
+                permission_mode: permission_mode.to_string(),
+                setting_sources: settings.setting_sources.clone(),
+                session,
+                expose_mcp,
+                host_file_tools: host_file_tools.clone(),
+                launch_args: launch_args.clone(),
+            },
+            cwd: cwd.clone(),
+            append_system_prompt: append_system_prompt.to_string(),
+            jcode_session: self.jcode_session.clone(),
+        };
+
+        let child = match resume {
+            Some(id) => {
+                match process::spawn(make_launch(SessionStart::Resume(id.clone())), tools).await {
+                    Ok(child) => {
+                        state.seeded = true;
+                        child
+                    }
+                    Err(err) => {
+                        jcode_base::logging::warn(&format!(
+                            "Claude Code: could not resume session {id}, starting a new one: {err}"
+                        ));
+                        state.seeded = false;
+                        process::spawn(
+                            make_launch(SessionStart::New(uuid::Uuid::new_v4().to_string())),
+                            tools,
+                        )
+                        .await?
+                    }
+                }
+            }
+            None => {
+                state.seeded = false;
+                process::spawn(
+                    make_launch(SessionStart::New(uuid::Uuid::new_v4().to_string())),
+                    tools,
+                )
+                .await?
+            }
+        };
+        let info = child.init.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        self.cache_models(&instance, info.model_ids());
+        self.pin.set_resolved_label(Some(instance.id.clone()));
+        state.resume_id = Some(child.session_id().to_string());
+        state.child = Some(child.clone());
+        Ok(child)
+    }
+
+    /// Independent provider for another session: same settings, model and
+    /// pin, its own child and tool-result channel.
+    fn fork_inner(&self) -> Self {
+        let (result_tx, result_rx) = mpsc::channel(64);
+        Self {
+            settings: Arc::new(RwLock::new(self.settings())),
+            model: Arc::new(RwLock::new(read(&self.model))),
+            effort: Arc::new(RwLock::new(read(&self.effort))),
+            pin: self.pin.fork(),
+            state: Arc::new(Mutex::new(SessionState::default())),
+            turn_lock: Arc::new(Mutex::new(())),
+            result_tx,
+            result_rx: Arc::new(Mutex::new(result_rx)),
+            rate_limits: Arc::new(StdMutex::new(self.rate_limit_snapshot())),
+            model_catalogs: self.model_catalogs.clone(),
+            probe_cache: self.probe_cache.clone(),
+            probe_lock: self.probe_lock.clone(),
+            jcode_session: Default::default(),
+            host_tool_executor: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for ClaudeCodeProvider {
+    fn set_host_tool_executor_available(&self, available: bool) {
+        self.host_tool_executor.store(available, Ordering::Release);
+    }
+
+    async fn reset_conversation_state(&self) -> Result<()> {
+        let _turn_guard = self.turn_lock.lock().await;
+        let mut state = self.state.lock().await;
+        let child = state.child.take();
+        state.resume_id = None;
+        state.seeded = false;
+        // The Agent may still supply the last SessionId it observed. It must
+        // never resurrect the discarded branch, even after this child exits.
+        state.hint_spent = true;
+        if let Some(child) = child {
+            child.shutdown().await;
+        }
+        let mut results = self.result_rx.lock().await;
+        while results.try_recv().is_ok() {}
+        Ok(())
+    }
+
+    async fn complete(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+        resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let cwd = prompt::working_dir_from_system(system).or_else(|| std::env::current_dir().ok());
+        let append_system_prompt = prompt::append_system_prompt(system);
+        let (tx, rx) = mpsc::channel(256);
+        let this = self.fork_shared();
+        let messages = messages.to_vec();
+        let tools = tools.to_vec();
+        let resume = resume_session_id.map(str::to_string);
+        tokio::spawn(async move {
+            this.run_turn(messages, tools, cwd, resume, append_system_prompt, tx)
+                .await;
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        PROVIDER_NAME
+    }
+
+    fn display_name(&self) -> String {
+        "Claude Code".into()
+    }
+
+    fn model(&self) -> String {
+        read(&self.model)
+    }
+
+    fn active_auth_method_label(&self) -> Option<&'static str> {
+        Some("Claude Code CLI")
+    }
+
+    fn supports_image_input(&self) -> bool {
+        true
+    }
+
+    fn set_model(&self, model: &str) -> Result<()> {
+        let model = settings::normalize_model_id(model);
+        if model.is_empty() {
+            bail!("Model id is empty");
+        }
+        write(&self.model, model);
+        Ok(())
+    }
+
+    fn available_models(&self) -> Vec<&'static str> {
+        FALLBACK_MODELS.to_vec()
+    }
+
+    fn available_models_display(&self) -> Vec<String> {
+        self.models_for(&self.active_instance())
+    }
+
+    fn model_routes(&self) -> Vec<ModelRoute> {
+        jcode_base::provider::claude_code_routes_for(&self.settings(), |instance| {
+            self.models_for(instance)
+                .into_iter()
+                .map(|model| settings::normalize_model_id(&model))
+                .filter(|model| !model.is_empty())
+                .collect()
+        })
+    }
+
+    fn available_models_for_switching(&self) -> Vec<String> {
+        self.available_models_display()
+    }
+
+    async fn prefetch_models(&self) -> Result<()> {
+        self.discover_models(false).await
+    }
+
+    async fn refresh_model_catalog(&self) -> Result<ModelCatalogRefreshSummary> {
+        let before_models = self.available_models_display();
+        let before_routes = self.model_routes();
+        self.discover_models(true).await?;
+        Ok(summarize_model_catalog_refresh(
+            before_models,
+            self.available_models_display(),
+            before_routes,
+            self.model_routes(),
+        ))
+    }
+
+    fn reasoning_effort(&self) -> Option<String> {
+        read(&self.effort)
+    }
+
+    fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
+        let trimmed = effort.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") {
+            write(&self.effort, None);
+            return Ok(());
+        }
+        if settings::map_effort(trimmed).is_none() {
+            bail!(
+                "Unsupported Claude Code effort '{trimmed}'. Use one of: {}",
+                settings::CLAUDE_EFFORTS.join(", ")
+            );
+        }
+        write(&self.effort, Some(trimmed.to_ascii_lowercase()));
+        Ok(())
+    }
+
+    fn available_efforts(&self) -> Vec<&'static str> {
+        settings::CLAUDE_EFFORTS.to_vec()
+    }
+
+    fn handles_tools_internally(&self) -> bool {
+        true
+    }
+
+    fn uses_own_system_prompt(&self) -> bool {
+        true
+    }
+
+    fn account_pin(&self, kind: AccountProviderKind) -> Option<AccountPin> {
+        (kind == AccountProviderKind::ClaudeCode)
+            .then(|| self.pin.get())
+            .flatten()
+    }
+
+    fn set_account_pin(&self, kind: AccountProviderKind, pin: Option<AccountPin>) -> Result<()> {
+        if kind != AccountProviderKind::ClaudeCode {
+            bail!("Claude Code only manages Claude Code instances");
+        }
+        if let Some(pin) = pin.as_ref()
+            && self.settings().instance(&pin.label).is_none()
+        {
+            bail!(
+                "No Claude Code instance '{}' configured. Known instances: {}",
+                pin.label,
+                self.instances()
+                    .into_iter()
+                    .map(|i| i.id)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        // The next turn notices the instance change and restarts the child
+        // under the new CLAUDE_CONFIG_DIR.
+        self.pin.set(pin);
+        Ok(())
+    }
+
+    fn resolved_account_label(&self, kind: AccountProviderKind) -> Option<String> {
+        if kind != AccountProviderKind::ClaudeCode {
+            return None;
+        }
+        self.pin
+            .resolved_label()
+            .or_else(|| Some(self.active_instance().id))
+    }
+
+    fn supports_compaction(&self) -> bool {
+        // Claude Code compacts its own transcript.
+        false
+    }
+
+    fn context_window(&self) -> usize {
+        jcode_provider_core::context_limit_for_model(&self.model())
+            .unwrap_or(jcode_provider_core::DEFAULT_CONTEXT_LIMIT)
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.fork_inner())
+    }
+
+    fn native_result_sender(&self) -> Option<NativeToolResultSender> {
+        Some(self.result_tx.clone())
+    }
+
+    fn bind_session(&self, session_id: &str) {
+        *self.jcode_session.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(session_id.to_string());
+    }
+
+    async fn complete_simple(&self, prompt_text: &str, system: &str) -> Result<String> {
+        let instance = self.active_instance();
+        let model = settings::normalize_model_id(&self.model());
+        let mut command = tokio::process::Command::new(self.binary());
+        command
+            .args(settings::build_oneshot_argv(&model, system))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        settings::apply_instance_env(&mut command, &instance);
+        let output = tokio::time::timeout(ONESHOT_TIMEOUT, async {
+            use tokio::io::AsyncWriteExt;
+            let mut child = command.spawn().context("start Claude Code")?;
+            let mut stdin = child.stdin.take().context("Claude Code stdin")?;
+            stdin.write_all(prompt_text.as_bytes()).await?;
+            drop(stdin);
+            child.wait_with_output().await.map_err(anyhow::Error::from)
+        })
+        .await
+        .map_err(|_| anyhow!("Claude Code one-shot request timed out"))??;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let value: Value = serde_json::from_str(stdout.trim()).with_context(|| {
+            format!(
+                "Claude Code returned no JSON result: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+        })?;
+        if value.get("is_error").and_then(Value::as_bool) == Some(true) {
+            let detail = value
+                .get("result")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error");
+            if value.get("api_error_status").and_then(Value::as_u64) == Some(401) {
+                bail!(
+                    "Claude Code could not authenticate. Run `{}` and try again.",
+                    self.login_hint(&instance)
+                );
+            }
+            bail!("Claude Code error: {detail}");
+        }
+        Ok(value
+            .get("result")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string())
+    }
+}
+
+impl ClaudeCodeProvider {
+    /// Clone sharing all session state (used to move the turn into a task).
+    fn fork_shared(&self) -> Self {
+        Self {
+            settings: self.settings.clone(),
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+            pin: self.pin.clone(),
+            state: self.state.clone(),
+            turn_lock: self.turn_lock.clone(),
+            result_tx: self.result_tx.clone(),
+            result_rx: self.result_rx.clone(),
+            rate_limits: self.rate_limits.clone(),
+            model_catalogs: self.model_catalogs.clone(),
+            probe_cache: self.probe_cache.clone(),
+            probe_lock: self.probe_lock.clone(),
+            jcode_session: self.jcode_session.clone(),
+            host_tool_executor: self.host_tool_executor.clone(),
+        }
+    }
+}

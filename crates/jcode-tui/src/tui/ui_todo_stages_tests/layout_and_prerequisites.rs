@@ -25,7 +25,7 @@ fn pinned_todo_band_stays_left_anchored_with_centered_code_blocks() {
             let first = lines[0].to_string();
             assert_eq!(
                 first.len() - first.trim_start().len(),
-                2,
+                0,
                 "pinned todo header must stay at the left gutter: centered={centered}, width={width}, {first:?}"
             );
         }

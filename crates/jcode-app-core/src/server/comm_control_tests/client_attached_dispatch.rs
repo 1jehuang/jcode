@@ -42,6 +42,8 @@ async fn assign_task_to_client_attached_session_skips_server_side_run() {
             is_processing: false,
             current_tool_name: None,
             terminal_env: Vec::new(),
+            supports_user_response: false,
+            ask_user_tx: None,
             disconnect_tx,
         },
     )])));

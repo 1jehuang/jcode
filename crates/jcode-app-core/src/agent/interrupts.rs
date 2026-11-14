@@ -405,6 +405,19 @@ impl Agent {
             }
             let content = parts.join("\n\n");
             parts.clear();
+            let checkpoint = match agent.checkpoint_user_input(
+                &content,
+                !images.is_empty(),
+                source != SoftInterruptSource::User,
+            ) {
+                Ok(checkpoint) => checkpoint,
+                Err(error) => {
+                    // Keep delivered human input even when its optional file
+                    // snapshot fails. Transcript-based rewind remains usable.
+                    logging::warn(&format!("Steering checkpoint capture failed: {error:#}"));
+                    None
+                }
+            };
             let mut blocks: Vec<ContentBlock> = std::mem::take(images)
                 .into_iter()
                 .map(|(media_type, data)| ContentBlock::Image { media_type, data })
@@ -420,6 +433,9 @@ impl Agent {
                 blocks,
                 soft_interrupt_session_display_role(source),
             );
+            if let Err(error) = agent.bind_user_checkpoint(checkpoint) {
+                logging::warn(&format!("Steering checkpoint binding failed: {error:#}"));
+            }
             injected.push(InjectedSoftInterrupt {
                 content,
                 source,
@@ -428,10 +444,11 @@ impl Agent {
         };
 
         for message in messages {
-            // User follow-ups may share a model message. Notifications must
-            // retain their own delivery events and transcript entries.
+            // Every message gets its own model message: each user follow-up
+            // keeps its own rewind checkpoint, and notifications keep their
+            // own delivery events and transcript entries.
             match current_source {
-                Some(source) if source != message.source || source != SoftInterruptSource::User => {
+                Some(source) => {
                     flush_group(
                         self,
                         &mut injected,
@@ -443,7 +460,6 @@ impl Agent {
                     current_source = Some(message.source);
                 }
                 None => current_source = Some(message.source),
-                _ => {}
             }
             current_parts.push(message.content);
             current_images.extend(message.images);

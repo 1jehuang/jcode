@@ -197,7 +197,7 @@ async fn run_unix(args: Args) -> Result<()> {
     let mut quit = signal(SignalKind::quit())?;
     let result = tokio::select! {
         result = super::tui_launch::run_tui_client(
-            args.resume.clone(), None, false, true, Some(working_dir.clone()), false, false,
+            args.resume.clone(), None, false, true, Some(working_dir.clone()), args.agent_profile_name.clone(), false, false,
         ) => result,
         _ = hup.recv() => Ok(()),
         _ = term.recv() => Ok(()),

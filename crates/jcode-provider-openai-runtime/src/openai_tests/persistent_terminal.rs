@@ -235,8 +235,7 @@ async fn persistent_terminal_public_case(
     let (ws_stream, _) = connect_ws(format!("ws://{addr}/v1/responses"))
         .await
         .unwrap();
-    let provider = OpenAIProvider::new(prewarm_test_credentials());
-    *provider.credentials.write().await = prewarm_test_credentials();
+    let provider = prewarm_test_provider().await;
     provider.set_model("gpt-5.6-sol").unwrap();
     provider.set_transport("websocket").unwrap();
     *provider.persistent_ws.lock().await = Some(PersistentWsState {
@@ -453,8 +452,7 @@ async fn fresh_ws_terminal_error_ends_stream_with_socket_open() {
         ws.send(WsMessage::Text(frame.to_string())).await.unwrap();
         while ws.next().await.is_some_and(|frame| frame.is_ok()) {}
     });
-    let provider = OpenAIProvider::new(prewarm_test_credentials());
-    *provider.credentials.write().await = prewarm_test_credentials();
+    let provider = prewarm_test_provider().await;
     provider.set_model("gpt-5.6-sol").unwrap();
     provider.set_transport("websocket").unwrap();
     let messages = vec![ChatMessage::user("hi")];

@@ -11,6 +11,23 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// Account a session uses for one provider family, as reported to clients.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionAccountInfo {
+    /// "claude" | "openai"
+    pub provider: String,
+    /// Label the session currently resolves to (pin or default). `None` when
+    /// no stored account exists for this provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// True when this session is pinned to `label`; false when it follows the default.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pinned: bool,
+    /// True when `label` is also the stored default account.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_default: bool,
+}
+
 /// SDK-owned session tool declaration. Parameters is a JSON schema object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionToolDefinition {
@@ -113,6 +130,18 @@ pub enum Request {
     #[serde(rename = "rewind_undo")]
     RewindUndo { id: u64 },
 
+    /// List durable checkpoints taken before user prompts in this session.
+    #[serde(rename = "list_rewind_checkpoints")]
+    ListRewindCheckpoints { id: u64 },
+
+    /// Restore state before a user prompt, addressed by its stable checkpoint ID.
+    #[serde(rename = "rewind_checkpoint")]
+    RewindCheckpoint {
+        id: u64,
+        checkpoint_id: String,
+        mode: RewindMode,
+    },
+
     /// Health check
     #[serde(rename = "ping")]
     Ping { id: u64 },
@@ -161,6 +190,9 @@ pub enum Request {
     #[serde(rename = "subscribe")]
     Subscribe {
         id: u64,
+        /// Named agent profile, resolved on the server for new sessions only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_profile_name: Option<String>,
         /// Full system prompt override for a new session only.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         system_prompt: Option<String>,
@@ -170,6 +202,9 @@ pub enum Request {
         /// Desktop can render user_response tool calls as inline answers.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         supports_user_response: bool,
+        /// The TUI renders `ask_user` question dialogs and answers them.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        supports_ask_user: bool,
         /// The client has no account-router countdown of its own (Desktop,
         /// SDK). On a usage/rate-limit failure the server switches to the next
         /// pool-approved account and retries the turn itself.
@@ -214,6 +249,12 @@ pub enum Request {
         /// to the client's terminal instead of its own stale startup env (#405).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         terminal_env: Vec<(String, String)>,
+        /// Account pins for a new session (`--account`), as (provider, label).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        account_pins: Vec<(String, String)>,
+        /// Opt in to per-session account events (`session_account_changed`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        supports_session_accounts: bool,
         /// Connecting app name from the API Hello (e.g. `jcode-ios/0.3.0`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_name: Option<String>,
@@ -501,7 +542,12 @@ pub enum Request {
 
     /// Split the current session — clone conversation into a new session
     #[serde(rename = "split")]
-    Split { id: u64 },
+    Split {
+        id: u64,
+        /// Feedback splits resolve their role on the server, never the client.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feedback_role: Option<String>,
+    },
 
     /// Transfer the current session into a compacted handoff session
     #[serde(rename = "transfer")]
@@ -550,6 +596,51 @@ pub enum Request {
     #[serde(rename = "switch_openai_account")]
     SwitchOpenAiAccount { id: u64, label: String },
 
+    /// Pin this session to one stored account (`label: None` unpins it so the
+    /// session follows the default again). Never changes other sessions.
+    #[serde(rename = "set_session_account")]
+    SetSessionAccount {
+        id: u64,
+        /// "claude" | "openai"
+        provider: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+
+    /// Change the stored default account used by new and unpinned sessions.
+    #[serde(rename = "set_default_account")]
+    SetDefaultAccount {
+        id: u64,
+        provider: String,
+        label: String,
+    },
+
+    /// Per-session same-provider account failover toggle. `None` = config default.
+    #[serde(rename = "set_account_failover")]
+    SetAccountFailover {
+        id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enabled: Option<bool>,
+    },
+
+    /// Conditionally move this session from a replaced OAuth login to its new
+    /// identity. The session's pin for `provider` and its failover home are each
+    /// migrated only when they exactly equal `{ label, old_identity }`; anything
+    /// else (another label, another identity, no pin) is left untouched. Never
+    /// changes the stored default, other sessions, or an unrelated pin/home, and
+    /// never clears the failover home the way `set_session_account` does.
+    #[serde(rename = "replace_session_account_identity")]
+    ReplaceSessionAccountIdentity {
+        id: u64,
+        /// "claude" | "openai"
+        provider: String,
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        old_identity: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_identity: Option<String>,
+    },
+
     /// Invalidate daemon-local usage and quota cooldown state after a banked reset.
     /// This never redeems a reset or switches accounts. `None` pins the default
     /// account scope, not whichever account is active when the request arrives.
@@ -566,6 +657,15 @@ pub enum Request {
     InvalidateAnthropicUsage {
         id: u64,
         account_label: Option<String>,
+    },
+
+    /// Answers to an `ask_user` event. `None` means the user dismissed it.
+    #[serde(rename = "ask_user_response")]
+    AskUserResponse {
+        id: u64,
+        request_id: String,
+        #[serde(default)]
+        answers: Option<Vec<jcode_message_types::ask_user::AskUserAnswer>>,
     },
 
     /// Send stdin input to a running command that requested it

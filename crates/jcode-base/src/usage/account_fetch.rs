@@ -53,7 +53,7 @@ pub async fn fetch_oauth_account_usage(
             let accounts = auth::claude::list_accounts().unwrap_or_default();
             join_all(accounts.into_iter().map(|account| {
                 bounded_probe(account.label.clone(), account.email.clone(), async move {
-                    let cache_key =
+                    let mut cache_key =
                         anthropic_usage_cache_key(&account.access, Some(&account.label));
                     let usage = if let Some(cached) = cached_or_shared_anthropic_usage(&cache_key) {
                         Ok(cached)
@@ -74,8 +74,8 @@ pub async fn fetch_oauth_account_usage(
                             };
                         match token {
                             Ok(token) => {
-                                let key = anthropic_usage_cache_key(&token, Some(&account.label));
-                                fetch_anthropic_usage_data(token, key).await
+                                cache_key = anthropic_usage_cache_key(&token, Some(&account.label));
+                                fetch_anthropic_usage_data(token, cache_key.clone()).await
                             }
                             Err(error) => Err(error),
                         }

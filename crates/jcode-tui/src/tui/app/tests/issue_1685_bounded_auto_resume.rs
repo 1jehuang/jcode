@@ -13,6 +13,7 @@ fn issue_1685_user_turn(
         system_reminder: None,
         auto_retry,
         retry_attempts,
+        overload_attempts: 0,
         retry_at: None,
     }
 }
@@ -26,6 +27,7 @@ fn issue_1685_error(
         id,
         message: message.to_string(),
         retry_after_secs,
+        server_resumes: false,
     }
 }
 

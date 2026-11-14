@@ -61,6 +61,9 @@ pub(super) struct ClientConnectionInfo {
     /// kitty/DISPLAY/...). Used to route spawn/focus hooks to the client's
     /// terminal instead of the long-lived server's stale startup env (#405).
     pub(super) terminal_env: Vec<(String, String)>,
+    pub(super) supports_user_response: bool,
+    /// Set when this client renders `ask_user` dialogs: its input forwarder.
+    pub(super) ask_user_tx: Option<mpsc::UnboundedSender<crate::tool::ClientInputRequest>>,
     pub(super) disconnect_tx: mpsc::UnboundedSender<()>,
 }
 
@@ -359,6 +362,7 @@ pub(super) async fn handle_debug_client(
                     id: 0,
                     message: format!("Invalid request: {}", e),
                     retry_after_secs: None,
+                    server_resumes: false,
                 };
                 let json = encode_event(&event);
                 writer.write_all(json.as_bytes()).await?;
@@ -395,6 +399,7 @@ pub(super) async fn handle_debug_client(
                 writer
                     .write_all(
                         encode_event(&ServerEvent::Error {
+                            server_resumes: false,
                             id: request.id(),
                             message: error.to_string(),
                             retry_after_secs: None,
@@ -455,6 +460,7 @@ pub(super) async fn handle_debug_client(
                         id,
                         message: err.to_string(),
                         retry_after_secs: None,
+                        server_resumes: false,
                     },
                 };
                 let json = encode_event(&event);
@@ -480,6 +486,7 @@ pub(super) async fn handle_debug_client(
                         id,
                         message: "Debug control is disabled. Set JCODE_DEBUG_CONTROL=1, enable display.debug_socket, or start the shared server from a self-dev session.".to_string(),
                         retry_after_secs: None,
+                        server_resumes: false,
                     };
                     let json = encode_event(&event);
                     writer.write_all(json.as_bytes()).await?;
@@ -705,6 +712,7 @@ pub(super) async fn handle_debug_client(
                     id: request.id(),
                     message: "Debug socket only allows ping, state, and debug_command".to_string(),
                     retry_after_secs: None,
+                    server_resumes: false,
                 };
                 let json = encode_event(&event);
                 writer.write_all(json.as_bytes()).await?;

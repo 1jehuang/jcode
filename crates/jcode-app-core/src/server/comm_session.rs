@@ -3,14 +3,12 @@ use super::swarm_mutation_state::{
     PersistedSwarmMutationResponse, SwarmMutationRuntime, begin_or_replay, finish_request,
     request_key,
 };
-use super::turn_failover::process_reserved_locked_message_with_server_failover;
 use super::{
     SessionInterruptQueues, SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan,
     broadcast_swarm_plan, broadcast_swarm_status, create_headless_session, fanout_session_event,
     persist_swarm_state_for, record_swarm_event, record_swarm_event_for_session,
     remove_background_tool_signal, remove_session_channel_subscriptions, remove_session_from_swarm,
-    remove_session_interrupt_queue, set_member_task_label, truncate_detail, update_member_status,
-    update_member_status_with_report,
+    remove_session_interrupt_queue, set_member_task_label, truncate_detail,
 };
 use crate::config::SwarmSpawnMode;
 use crate::protocol::{NotificationType, ServerEvent};
@@ -68,6 +66,7 @@ fn create_visible_spawn_session(
     provider_key_override: Option<&str>,
     route_api_method_override: Option<&str>,
     effort_override: Option<&str>,
+    accounts: &crate::session_accounts::AccountInheritance,
     selfdev_requested: bool,
 ) -> anyhow::Result<(String, PathBuf)> {
     let cwd = working_dir
@@ -94,6 +93,9 @@ fn create_visible_spawn_session(
         // headed client attaches to this session.
         session.reasoning_effort = Some(effort.to_string());
     }
+    // Restored by `restore_account_pins_from_session` when the headed client
+    // attaches, like the model and effort above.
+    accounts.apply_to_session(&mut session);
     if selfdev_requested {
         session.set_canary("self-dev");
     }
@@ -236,6 +238,7 @@ fn prepare_visible_spawn_session<F>(
     provider_key_override: Option<&str>,
     route_api_method_override: Option<&str>,
     effort_override: Option<&str>,
+    accounts: &crate::session_accounts::AccountInheritance,
     selfdev_requested: bool,
     startup_message: Option<&str>,
     launch_visible: F,
@@ -250,6 +253,7 @@ where
         provider_key.as_deref(),
         route_api_method_override,
         effort_override,
+        accounts,
         selfdev_requested,
     )?;
 
@@ -460,6 +464,7 @@ pub(super) async fn spawn_swarm_agent(
             spawn_provider_key.as_deref(),
             spawn_route_api_method.as_deref(),
             spawn_effort.as_deref(),
+            &coordinator.accounts,
             coordinator_is_canary,
             startup_message.as_deref(),
             |session_id, cwd, selfdev_requested, provider_key| {
@@ -516,6 +521,7 @@ pub(super) async fn spawn_swarm_agent(
                 spawn_provider_key.clone(),
                 spawn_route_api_method.clone(),
                 spawn_effort.clone(),
+                coordinator.accounts.clone(),
                 Some(Arc::clone(mcp_pool)),
                 Some(req_session_id.to_string()),
                 super::headless::HeadlessMemoryScope::RealProject,
@@ -611,79 +617,56 @@ pub(super) async fn spawn_swarm_agent(
             agent_sessions.get(&new_session_id).cloned()
         };
         if let Some(agent_arc) = agent_arc {
-            let sid_clone = new_session_id.clone();
-            let swarm_members2 = Arc::clone(swarm_members);
-            let swarms_by_id2 = Arc::clone(swarms_by_id);
-            let event_history2 = Arc::clone(event_history);
-            let event_counter2 = Arc::clone(event_counter);
-            let swarm_event_tx2 = swarm_event_tx.clone();
-            crate::runtime_activity::spawn_session(&new_session_id, async move {
-                let mut agent = agent_arc.lock().await;
-                let Ok(lease) = agent.claim_server_turn() else {
-                    return;
-                };
-                update_member_status(
-                    &sid_clone,
-                    "running",
-                    Some(truncate_detail(&initial_msg, 120)),
-                    &swarm_members2,
-                    &swarms_by_id2,
-                    Some(&event_history2),
-                    Some(&event_counter2),
-                    Some(&swarm_event_tx2),
-                )
-                .await;
-                let (fallback, _) = tokio::sync::mpsc::unbounded_channel();
-                let events = super::state::TurnEventChannel::new(
-                    sid_clone.clone(),
-                    Arc::clone(&swarm_members2),
-                    fallback,
-                    &lease,
-                );
-                let start_message_index = agent.message_count();
-                let result = process_reserved_locked_message_with_server_failover(
-                    &mut agent,
-                    &lease,
-                    &initial_msg,
-                    vec![],
-                    None,
-                    events.sender(),
-                )
-                .await;
-                let completion_report =
-                    agent.recent_assistant_output_tail_after(start_message_index);
-                let (new_status, new_detail) = match &result {
-                    Ok(()) => ("ready", None),
-                    Err(error) => ("failed", Some(truncate_detail(&error.to_string(), 120))),
-                };
-                update_member_status_with_report(
-                    &sid_clone,
-                    new_status,
-                    new_detail,
-                    completion_report,
-                    &swarm_members2,
-                    &swarms_by_id2,
-                    Some(&event_history2),
-                    Some(&event_counter2),
-                    Some(&swarm_event_tx2),
-                )
-                .await;
-                let terminal = match result {
-                    Ok(()) => ServerEvent::Done { id: 0 },
-                    Err(error) => ServerEvent::Error {
-                        id: 0,
-                        message: crate::util::format_error_chain(&error),
-                        retry_after_secs: None,
-                    },
-                };
-                let _ = events.sender().send(terminal);
-                drop(agent);
-                events.finish().await;
-            });
+            let held = Arc::clone(&agent_arc).lock_owned().await;
+            let publication = super::swarm::begin_turn_publication(&new_session_id).await;
+            let detail = Some(truncate_detail(&initial_msg, 120));
+            let mut swarm = super::live_turn::LiveTurnSwarmContext::new(
+                swarm_members,
+                swarms_by_id,
+                event_history,
+                event_counter,
+                swarm_event_tx,
+            );
+            swarm.recovery_swarm = Some(swarm_state);
+            super::live_turn::spawn_tracked_live_turn_with_publication(
+                &new_session_id,
+                held,
+                initial_msg,
+                None,
+                None,
+                detail,
+                swarm,
+                publication,
+            )
+            .await;
         }
     }
 
     Ok(new_session_id)
+}
+
+#[cfg(test)]
+pub(super) async fn complete_headless_turn(
+    session_id: &str,
+    publication: &super::swarm::TurnPublication,
+    result: anyhow::Result<()>,
+    completion_report: Option<String>,
+    swarm: &super::live_turn::LiveTurnSwarmContext,
+) {
+    let (event_tx, mut events) = mpsc::unbounded_channel();
+    super::live_turn::complete_live_turn(
+        session_id,
+        publication,
+        result.map_err(|error| (error, None)),
+        completion_report,
+        crate::protocol::TurnStopReason::Failure,
+        &event_tx,
+        swarm,
+    )
+    .await;
+    while let Ok(event) = events.try_recv() {
+        super::state::fanout_session_event(&swarm.members, session_id, event).await;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -887,6 +870,7 @@ pub(super) async fn handle_comm_stop(
             id,
             message: "Not in a swarm.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     };
@@ -899,6 +883,7 @@ pub(super) async fn handle_comm_stop(
                     id,
                     message,
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             }
@@ -926,6 +911,7 @@ pub(super) async fn handle_comm_stop(
                 "Refusing to stop session '{target_session}' because it was not spawned by this coordinator. Pass force=true to stop a non-owned/user-created swarm session explicitly."
             ),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     }
@@ -1205,6 +1191,7 @@ async fn ensure_spawn_coordinator_swarm(
             id,
             message: "Not in a swarm.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return None;
     };
@@ -1213,6 +1200,7 @@ async fn ensure_spawn_coordinator_swarm(
     // create workers.
     if !is_root {
         let _ = client_event_tx.send(ServerEvent::Error {
+server_resumes: false,
             id,
             message: format!(
                 "Recursive swarm spawning is disabled. Only the root session ({root_session_id}) may spawn agents."
@@ -1231,6 +1219,7 @@ async fn ensure_spawn_coordinator_swarm(
                 super::MAX_SWARM_MEMBERS
             ),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return None;
     }
@@ -1248,6 +1237,7 @@ async fn ensure_spawn_coordinator_swarm(
                 "Swarm live-agent limit reached (max {limit}, configured by agents.swarm_max_concurrent_agents). This swarm already has {live_spawned_agent_count} active spawned agents. Let existing agents finish or stop them before spawning more."
             ),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return None;
     }
@@ -1312,3 +1302,7 @@ async fn ensure_spawn_coordinator_swarm(
 #[cfg(test)]
 #[path = "comm_session_tests.rs"]
 mod comm_session_tests;
+
+#[cfg(test)]
+#[path = "comm_spawn_recovery_tests.rs"]
+mod comm_spawn_recovery_tests;

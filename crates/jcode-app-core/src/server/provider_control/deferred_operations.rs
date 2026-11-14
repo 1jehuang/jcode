@@ -254,3 +254,13 @@ pub(super) async fn apply_auth_route_to_agent(
         }
     }
 }
+
+pub(super) fn begin_auth_refresh(session_id: &str) -> u64 {
+    let generation = NEXT_AUTH_REFRESH_GENERATION.fetch_add(1, Ordering::Relaxed);
+    let mut generations = AUTH_REFRESH_GENERATIONS
+        .get_or_init(|| StdMutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    generations.insert(session_id.to_string(), generation);
+    generation
+}

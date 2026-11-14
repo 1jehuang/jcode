@@ -16,6 +16,7 @@ use std::path::Path;
 pub use streaming::StreamingGuard;
 pub use window_closures::{clear_window_closed, recent_window_closures, record_window_closed};
 
+pub use jcode_provider_core::AccountPin;
 mod agent_models;
 mod crash;
 pub use agent_models::AgentModelOverrides;
@@ -28,6 +29,7 @@ mod parallel_messages;
 mod persistence;
 pub mod prewarm;
 mod render;
+mod rewind;
 mod storage_paths;
 pub use crash::{
     CrashedSessionsInfo, detect_crashed_sessions, find_recent_crashed_sessions,
@@ -47,9 +49,9 @@ use model::SESSION_CONTEXT_PREFIX;
 pub use model::{StoredReplayEvent, StoredReplayEventKind};
 pub use render::{
     RenderedCompactedHistoryInfo, RenderedImage, RenderedImageAnchor, RenderedImageSource,
-    RenderedMessage, has_rendered_images, is_attached_image_label_text, render_images,
-    render_messages, render_messages_and_images, render_messages_and_images_with_compacted_history,
-    summarize_tool_calls,
+    RenderedMessage, has_rendered_images, is_attached_image_label_text, is_authentic_user_input,
+    is_authentic_user_prompt, render_images, render_messages, render_messages_and_images,
+    render_messages_and_images_with_compacted_history, summarize_tool_calls,
 };
 pub use storage_paths::session_journal_path_from_snapshot;
 pub(crate) mod resume_cache;
@@ -113,6 +115,9 @@ pub struct Session {
     /// Full assembled system prompt replacement, including an intentionally empty prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    /// Selected agent instructions, snapshotted at selection rather than read on resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_profile: Option<crate::agent_profile::AgentProfile>,
     /// Durable logical input turn identity for per-route usage deduplication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_usage_turn_id: Option<String>,
@@ -137,6 +142,16 @@ pub struct Session {
     /// Provider reasoning/thinking effort for this session (e.g., OpenAI low|medium|high|xhigh).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Per-provider account pins for this session ("claude" | "openai" -> pin).
+    /// Empty means the session follows the default account.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub account_pins: BTreeMap<String, AccountPin>,
+    /// Per-session same-provider account failover toggle. `None` = config default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_failover: Option<bool>,
+    /// Preferred pin to return to after an automatic failover move.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub account_failover_home: BTreeMap<String, AccountPin>,
     /// Per-session context ceiling. Missing values follow the global cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_cap: Option<usize>,
@@ -228,6 +243,8 @@ struct SessionStartupStub {
     custom_title: Option<String>,
     #[serde(default)]
     system_prompt: Option<String>,
+    #[serde(default)]
+    agent_profile: Option<crate::agent_profile::AgentProfile>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     #[serde(default)]
@@ -243,6 +260,11 @@ struct SessionStartupStub {
     #[serde(default)]
     reasoning_effort: Option<String>,
     #[serde(default)]
+    account_pins: BTreeMap<String, AccountPin>,
+    #[serde(default)]
+    account_failover: Option<bool>,
+    #[serde(default)]
+    account_failover_home: BTreeMap<String, AccountPin>,
     context_cap: Option<usize>,
     #[serde(default)]
     subagent_model: Option<String>,
@@ -337,6 +359,9 @@ pub fn derive_session_provider_key(provider_name: &str) -> Option<String> {
 
     let fallback = match normalized_name.as_str() {
         "anthropic" | "claude" | "claude cli" => "claude",
+        // Claude Code mode (`MultiProvider::name()` = "Claude Code") is its
+        // own runtime, never native Claude.
+        "claude code" | "claude-code" => "claude-code",
         "openai" => "openai",
         "github copilot" | "copilot" => "copilot",
         "openrouter" => "openrouter",
@@ -355,6 +380,7 @@ impl Session {
         let mut session = Self::create_with_id(stub.id, stub.parent_id, stub.title);
         session.custom_title = stub.custom_title;
         session.system_prompt = stub.system_prompt;
+        session.agent_profile = stub.agent_profile;
         session.created_at = stub.created_at;
         session.updated_at = stub.updated_at;
         session.compaction = stub.compaction;
@@ -363,6 +389,9 @@ impl Session {
         session.model = stub.model;
         session.route_api_method = stub.route_api_method;
         session.reasoning_effort = stub.reasoning_effort;
+        session.account_pins = stub.account_pins;
+        session.account_failover = stub.account_failover;
+        session.account_failover_home = stub.account_failover_home;
         session.context_cap = stub.context_cap;
         session.subagent_model = stub.subagent_model;
         session.agent_model_overrides = stub.agent_model_overrides;
@@ -395,6 +424,7 @@ impl Session {
         let mut session = Self::create_with_id(snapshot.id, snapshot.parent_id, snapshot.title);
         session.custom_title = snapshot.custom_title;
         session.system_prompt = snapshot.system_prompt;
+        session.agent_profile = snapshot.agent_profile;
         session.created_at = snapshot.created_at;
         session.updated_at = snapshot.updated_at;
         session.messages = snapshot.messages;
@@ -404,6 +434,9 @@ impl Session {
         session.model = snapshot.model;
         session.route_api_method = snapshot.route_api_method;
         session.reasoning_effort = snapshot.reasoning_effort;
+        session.account_pins = snapshot.account_pins;
+        session.account_failover = snapshot.account_failover;
+        session.account_failover_home = snapshot.account_failover_home;
         session.context_cap = snapshot.context_cap;
         session.subagent_model = snapshot.subagent_model;
         session.agent_model_overrides = snapshot.agent_model_overrides;
@@ -539,6 +572,7 @@ impl Session {
             title: self.title.clone(),
             custom_title: self.custom_title.clone(),
             system_prompt: self.system_prompt.clone(),
+            agent_profile: self.agent_profile.clone(),
             updated_at: self.updated_at,
             compaction: self.compaction.clone(),
             compaction_unchanged: false,
@@ -549,6 +583,9 @@ impl Session {
             route_api_method_present: true,
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
+            account_pins: self.account_pins.clone(),
+            account_failover: self.account_failover,
+            account_failover_home: self.account_failover_home.clone(),
             context_cap: self.context_cap,
             subagent_model: self.subagent_model.clone(),
             agent_model_overrides: self.agent_model_overrides.clone(),
@@ -745,6 +782,7 @@ impl Session {
         self.title = meta.title;
         self.custom_title = meta.custom_title;
         self.system_prompt = meta.system_prompt;
+        self.agent_profile = meta.agent_profile;
         self.updated_at = meta.updated_at;
         if !meta.compaction_unchanged {
             self.compaction = meta.compaction;
@@ -757,6 +795,9 @@ impl Session {
         }
         self.model = meta.model;
         self.reasoning_effort = meta.reasoning_effort;
+        self.account_pins = meta.account_pins;
+        self.account_failover = meta.account_failover;
+        self.account_failover_home = meta.account_failover_home;
         self.context_cap = meta.context_cap;
         self.subagent_model = meta.subagent_model;
         self.agent_model_overrides = meta.agent_model_overrides;
@@ -795,6 +836,7 @@ impl Session {
             updated_at: now,
             messages: Vec::new(),
             system_prompt: None,
+            agent_profile: None,
             model_usage_turn_id: None,
             compaction: None,
             provider_session_id: None,
@@ -802,6 +844,9 @@ impl Session {
             model: None,
             route_api_method: None,
             reasoning_effort: None,
+            account_pins: BTreeMap::new(),
+            account_failover: None,
+            account_failover_home: BTreeMap::new(),
             context_cap: None,
             subagent_model: None,
             agent_model_overrides: AgentModelOverrides::new(),
@@ -855,6 +900,7 @@ impl Session {
             updated_at: now,
             messages: Vec::new(),
             system_prompt: None,
+            agent_profile: None,
             model_usage_turn_id: None,
             compaction: None,
             provider_session_id: None,
@@ -862,6 +908,9 @@ impl Session {
             model: None,
             route_api_method: None,
             reasoning_effort: None,
+            account_pins: BTreeMap::new(),
+            account_failover: None,
+            account_failover_home: BTreeMap::new(),
             context_cap: None,
             subagent_model: None,
             agent_model_overrides: AgentModelOverrides::new(),
@@ -1519,33 +1568,6 @@ request in this new forked session, using the inherited conversation only as con
         None
     }
 
-    /// Stored-message indices of the rewind targets shown in the TUI's
-    /// numbered `/rewind` list, in display order.
-    ///
-    /// The TUI numbers user/assistant *transcript entries* (what the user
-    /// actually sees), not raw stored messages. Stored tool-result messages
-    /// and tool-call-only assistant messages render as tool cards or nothing,
-    /// so counting raw stored messages diverges wildly from the on-screen
-    /// numbering in tool-heavy sessions (issue #432). Deriving targets from
-    /// the same rendering used for the transcript keeps `/rewind N` aligned
-    /// with the numbers `/rewind` prints.
-    ///
-    /// A single stored message can produce multiple transcript entries (text
-    /// split around a tool result); each entry keeps its own number and maps
-    /// to the same stored index so numbering matches the visible list exactly.
-    pub fn rewind_target_stored_indices(&self) -> Vec<usize> {
-        render_messages(self)
-            .into_iter()
-            .filter(|message| matches!(message.role.as_str(), "user" | "assistant"))
-            .filter_map(|message| message.stored_index)
-            .collect()
-    }
-
-    /// Number of `/rewind` targets (see [`Self::rewind_target_stored_indices`]).
-    pub fn rewind_target_count(&self) -> usize {
-        self.rewind_target_stored_indices().len()
-    }
-
     /// Record a memory injection event for replay visualization
     pub fn record_memory_injection(
         &mut self,
@@ -1745,6 +1767,8 @@ struct RemoteStartupSessionSnapshot {
     custom_title: Option<String>,
     #[serde(default)]
     system_prompt: Option<String>,
+    #[serde(default)]
+    agent_profile: Option<crate::agent_profile::AgentProfile>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     #[serde(default, deserialize_with = "parallel_messages::deserialize")]
@@ -1762,6 +1786,11 @@ struct RemoteStartupSessionSnapshot {
     #[serde(default)]
     reasoning_effort: Option<String>,
     #[serde(default)]
+    account_pins: BTreeMap<String, AccountPin>,
+    #[serde(default)]
+    account_failover: Option<bool>,
+    #[serde(default)]
+    account_failover_home: BTreeMap<String, AccountPin>,
     context_cap: Option<usize>,
     #[serde(default)]
     subagent_model: Option<String>,

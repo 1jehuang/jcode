@@ -187,6 +187,20 @@ impl App {
         (provider, model)
     }
 
+    pub(super) fn remember_remote_effort_before_request(&mut self) {
+        if self.remote_reasoning_effort_before_request.is_none() {
+            self.remote_reasoning_effort_before_request =
+                Some(self.remote_reasoning_effort.clone());
+        }
+    }
+
+    pub(super) fn restore_rejected_remote_effort(&mut self) {
+        if let Some(confirmed) = self.remote_reasoning_effort_before_request.take() {
+            self.remote_reasoning_effort = confirmed;
+            self.invalidate_model_picker_cache();
+        }
+    }
+
     /// Best-known current reasoning effort for the remote session. Falls back
     /// to the configured provider-family default when the server has not
     /// reported one yet, so pre-settle effort cycling starts from the value the
@@ -346,7 +360,7 @@ impl App {
     /// * Local sessions prefer the provider's *explicitly pinned* credential
     ///   ([`Provider::active_explicit_credential`]) so the widget reflects the
     ///   credential the next request will actually use the instant the user
-    ///   switches OAuth<->API (model picker, `/account`, header toggle). That
+    ///   switches OAuth<->API (model picker, `/accounts`, header toggle). That
     ///   read is in-memory and cache-free, so it never lingers on a stale
     ///   [`AuthStatus`] snapshot (cached up to 60s) or a `JCODE_RUNTIME_PROVIDER`
     ///   pin that drifted out of sync with the provider. When the provider is in
@@ -633,7 +647,7 @@ impl App {
                     cache_write_tokens: None,
                     output_tps,
                     limit_reached: false,
-                    available: usage.last_error.is_none(),
+                    available: usage.last_error.is_none() && usage.fetched_at.is_some(),
                     account_hint: None,
                 })
             }
@@ -1272,6 +1286,10 @@ impl crate::tui::TuiState for App {
         self.dictation_key_label().map(|s| s.to_string())
     }
 
+    fn jump_to_bottom_key_label(&self) -> Option<String> {
+        self.scroll_keys.to_bottom_label()
+    }
+
     fn animation_elapsed(&self) -> f32 {
         self.app_started.elapsed().as_secs_f32()
     }
@@ -1754,10 +1772,12 @@ impl crate::tui::TuiState for App {
             None
         };
 
-        // Gather background task info. Session-scoped rows come from task
-        // events (works when tasks run in the server process). The global
-        // manager only knows tasks spawned in this process.
-        let background_info = {
+        // Session-scoped task rows already have compact rows in the pinned
+        // band. Keep the overview fallback for local tasks that have not yet
+        // produced session events, without showing the same tasks twice.
+        let background_info = if !self.background_task_rows_ref().is_empty() {
+            None
+        } else {
             let bg_manager = crate::background::global();
             let (running_count, running_tasks, progress) = bg_manager.running_snapshot();
             let rows = self.background_task_rows_ref().to_vec();
@@ -1782,6 +1802,7 @@ impl crate::tui::TuiState for App {
         let route = self.widget_route_info(model.as_deref());
         let auth_method = self.widget_auth_method(route);
         let usage_info = self.widget_usage_info(route, auth_method);
+        let window_account = self.widget_window_account(auth_method);
 
         let tokens_per_second = if matches!(self.status, ProcessingStatus::Streaming) {
             self.compute_streaming_tps()
@@ -1806,11 +1827,10 @@ impl crate::tui::TuiState for App {
             read_tokens: history_read.saturating_add(self.token_accounting.total_cache_read_tokens),
             creation_tokens: history_write
                 .saturating_add(self.token_accounting.total_cache_creation_tokens),
-            optimal_input_tokens: if history_read == 0 {
-                self.token_accounting.total_cache_optimal_input_tokens
-            } else {
-                0
-            },
+            // History has no optimal denominator, so the yield uses live-only
+            // reads against live-only optimal input.
+            optimal_input_tokens: self.token_accounting.total_cache_optimal_input_tokens,
+            optimal_read_tokens: Some(self.token_accounting.total_cache_optimal_read_tokens),
             last_reported_input_tokens: self.token_accounting.last_cache_reported_input_tokens,
             last_read_tokens: self.token_accounting.last_cache_read_tokens,
             last_creation_tokens: self.token_accounting.last_cache_creation_tokens,
@@ -1968,6 +1988,7 @@ impl crate::tui::TuiState for App {
             cloud_working: self.is_processing,
             dual_git_info: crate::tui::cloud_git::gather(),
             agent_edited: self.agent_edited_paths(),
+            window_account,
         }
     }
 
@@ -2273,6 +2294,10 @@ impl crate::tui::TuiState for App {
         self.account_picker_overlay.as_ref()
     }
 
+    fn dialog(&self) -> Option<&crate::tui::dialog::Dialog> {
+        self.dialog.as_ref()
+    }
+
     fn usage_overlay(&self) -> Option<&RefCell<crate::tui::usage_overlay::UsageOverlay>> {
         self.usage_overlay.as_ref()
     }
@@ -2302,6 +2327,10 @@ impl crate::tui::TuiState for App {
 
     fn copy_selection_range(&self) -> Option<crate::tui::CopySelectionRange> {
         self.normalized_copy_selection()
+    }
+
+    fn input_selection_range(&self) -> Option<(usize, usize)> {
+        self.input_selection()
     }
 
     fn input_drag_scroll_offset(&self) -> Option<usize> {
@@ -2465,6 +2494,14 @@ impl App {
                 self.move_swarm_panel_selection(-1);
                 true
             }
+            Some(SwarmPanelAction::Enter) => {
+                self.enter_selected_swarm_agent();
+                true
+            }
+            Some(SwarmPanelAction::ReturnToParent) => {
+                self.return_to_swarm_parent();
+                true
+            }
             Some(SwarmPanelAction::PopOut) => {
                 self.pop_out_selected_swarm_agent();
                 true
@@ -2480,6 +2517,66 @@ impl App {
             }
             None => false,
         }
+    }
+
+    /// Queue the selected agent session in this terminal and remember the
+    /// current session as the return target.
+    pub(crate) fn enter_selected_swarm_agent(&mut self) {
+        if self.is_processing {
+            self.set_status_notice("Finish current work before entering an agent");
+            return;
+        }
+        let members = self.inline_swarm_members();
+        let Some(member) = crate::tui::info_widget::swarm_gallery::members_display_order(&members)
+            .get(
+                self.swarm_panel_selected
+                    .min(members.len().saturating_sub(1)),
+            )
+            .and_then(|session_id| {
+                members
+                    .iter()
+                    .find(|member| member.session_id == *session_id)
+            })
+        else {
+            self.set_status_notice("No swarm agents to enter");
+            return;
+        };
+        let session_id = member.session_id.clone();
+        let label = member
+            .friendly_name
+            .clone()
+            .unwrap_or_else(|| session_id.chars().take(8).collect());
+        let parent = self
+            .remote_session_id
+            .as_deref()
+            .or(self.resume_session_id.as_deref())
+            .unwrap_or(&self.session.id)
+            .to_string();
+        if session_id == parent {
+            self.set_status_notice("Already in this agent session");
+            return;
+        }
+        self.swarm_parent_session_id = Some(parent);
+        self.swarm_panel_focused = false;
+        self.swarm_panel_full_page = false;
+        self.workspace_client.queue_resume_session(session_id);
+        self.set_status_notice(format!("Entering {label}…"));
+    }
+
+    /// Queue a return to the parent captured when entering a swarm agent.
+    pub(crate) fn return_to_swarm_parent(&mut self) {
+        if self.is_processing {
+            self.set_status_notice("Finish current work before returning to the parent");
+            return;
+        }
+        let Some(parent) = self.swarm_parent_session_id.take() else {
+            self.set_status_notice("No parent session to return to");
+            return;
+        };
+        self.workspace_client.queue_resume_session(parent);
+        self.swarm_panel_focused = false;
+        self.swarm_panel_full_page = false;
+        self.set_status_notice("Returning to parent session…");
     }
 
     pub(crate) fn handle_swarm_agent_shortcut(
@@ -2730,6 +2827,8 @@ fn swarm_popout_launch_context(
 pub(crate) enum SwarmPanelAction {
     SelectNext,
     SelectPrev,
+    Enter,
+    ReturnToParent,
     PopOut,
     OpenPrompt,
     Exit,
@@ -2741,7 +2840,9 @@ pub(crate) enum SwarmPanelAction {
 /// user may keep writing into the chat input while glancing at agents), so
 /// only Esc and Alt-chords are claimed:
 /// - Alt+↑ / Alt+↓ (also Alt+k / Alt+j): move the selection
-/// - Alt+o / Alt+Enter: pop the selected agent out to a terminal
+/// - Alt+Enter: enter the selected agent in this terminal
+/// - Alt+o: pop the selected agent out to another terminal
+/// - Alt+b: return to the parent session
 /// - Alt+Shift+p: open the active swarm routing prompt in the editor
 /// - Esc: exit the panel
 pub(crate) fn swarm_panel_action_for_key(
@@ -2764,7 +2865,9 @@ pub(crate) fn swarm_panel_action_for_key(
     match code {
         KeyCode::Down | KeyCode::Char('j') if alt => Some(SwarmPanelAction::SelectNext),
         KeyCode::Up | KeyCode::Char('k') if alt => Some(SwarmPanelAction::SelectPrev),
-        KeyCode::Char('o') | KeyCode::Enter if alt => Some(SwarmPanelAction::PopOut),
+        KeyCode::Enter if alt => Some(SwarmPanelAction::Enter),
+        KeyCode::Char('b') if alt => Some(SwarmPanelAction::ReturnToParent),
+        KeyCode::Char('o') if alt => Some(SwarmPanelAction::PopOut),
         KeyCode::Char('P') if alt => Some(SwarmPanelAction::OpenPrompt),
         KeyCode::Char('p') if alt && modifiers.contains(KeyModifiers::SHIFT) => {
             Some(SwarmPanelAction::OpenPrompt)

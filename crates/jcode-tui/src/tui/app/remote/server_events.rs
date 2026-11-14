@@ -1,3 +1,14 @@
+#[path = "server_events/runtime_identity.rs"]
+mod runtime_identity;
+use runtime_identity::{
+    client_release_version, server_release_is_older_than_client,
+    should_defer_history_for_runtime_identity,
+};
+#[cfg(test)]
+use runtime_identity::{
+    parse_release_semver, should_defer_history_for_runtime_identity_with_allow,
+};
+
 use super::*;
 
 #[cfg(test)]
@@ -11,129 +22,6 @@ use crate::tui::app::remote::input_dispatch::restore_pending_startup_prompt_echo
 use crate::tui::app::remote::swarm_plan_core::RemoteSwarmPlanSnapshot;
 use crate::tui::app::remote::swarm_status_core::swarm_status_transition_notice;
 use crate::tui::app::{KvCacheMissReason, KvCacheMissSample};
-
-fn allow_runtime_identity_mismatch() -> bool {
-    std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some()
-}
-
-/// Parse a jcode version string into an orderable `(major, minor, patch)`, but
-/// only for *clean release* builds.
-///
-/// Dev/dirty builds share a base semver and cannot be ordered against each other
-/// or against releases (issue #277/#291: a self-dev / branched daemon must never
-/// be force-downgraded just because its version string differs). So we refuse to
-/// classify anything carrying a `-dev` or `dirty` marker as an orderable version
-/// and return `None`, leaving such daemons to the existing `server_has_update`
-/// (mtime-directional) path.
-fn parse_release_semver(version: &str) -> Option<(u32, u32, u32)> {
-    let lower = version.trim().to_ascii_lowercase();
-    if lower.contains("-dev") || lower.contains("dirty") {
-        return None;
-    }
-    // Take the leading token, e.g. "v0.17.0 (d741696f)" -> "0.17.0".
-    let token = lower
-        .split([' ', '(', ')', ','])
-        .next()
-        .unwrap_or(&lower)
-        .trim();
-    let token = token.strip_prefix('v').unwrap_or(token);
-    let mut parts = token.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch = parts.next().unwrap_or("0").parse().ok()?;
-    Some((major, minor, patch))
-}
-
-/// True when the connected server reports a clean release version strictly older
-/// than this client's own clean release version.
-///
-/// This is the missing client-side staleness signal behind issue #295: a server
-/// old enough to predate the self-reported staleness machinery reports
-/// `server_has_update: None`, so it can never tell us it is stale and the client
-/// happily attaches to it (then a `set_route`-shaped request explodes against the
-/// ancient protocol). We detect that case independently here.
-///
-/// Gated on clean release semvers on BOTH sides, so dev/dirty/self-dev daemons
-/// (which cannot be ordered) are never affected.
-fn server_release_is_older_than_client(server_version: Option<&str>, client_version: &str) -> bool {
-    let Some(server) = server_version.and_then(parse_release_semver) else {
-        return false;
-    };
-    let Some(client) = parse_release_semver(client_version) else {
-        return false;
-    };
-    server < client
-}
-
-/// Decide whether to defer applying remote session state because the server we
-/// attached to is not running the binary we expect.
-///
-/// Precedence:
-/// - The client independently measured the server's release version as strictly
-///   older than its own clean release version -> defer. This wins even over the
-///   server's own `server_has_update: Some(false)` self-report, because a stale
-///   long-lived daemon legitimately reports "no newer binary to reload into"
-///   (its `shared-server` channel still points at its own old build) while the
-///   client can plainly see it is an older release. Trusting the server here is
-///   exactly what left "current client, stale server" stuck (the daemon's reload
-///   decision runs old code that can never drag itself forward). The newer
-///   client is authoritative, so it defers and repairs the channel before
-///   reloading.
-/// - `Some(true)`: the server self-reported a newer binary on disk -> defer.
-/// - `Some(false)`: the server is new enough to self-assess and found nothing
-///   newer to reload into, AND the client could not prove it is older -> trust
-///   it, do not fight it with a forced reload.
-/// - `None`: the server is too old to self-report. Fall back to our own
-///   client-side release-version comparison, which is the only signal that can
-///   catch a pre-self-heal daemon.
-fn should_defer_history_for_runtime_identity_with_allow(
-    server_has_update: Option<bool>,
-    client_detected_stale: bool,
-    allow_mismatch: bool,
-) -> bool {
-    if allow_mismatch {
-        return false;
-    }
-    // A client-proven-older server always wins: never let an old daemon's
-    // (locally correct but globally wrong) "no update" self-report veto the
-    // client's own release-order comparison.
-    if client_detected_stale {
-        return true;
-    }
-    match server_has_update {
-        Some(true) => true,
-        Some(false) => false,
-        None => false,
-    }
-}
-
-/// The client's own version string, used for release-staleness comparison.
-///
-/// Production always reads the compiled-in build metadata. A test-only env
-/// override exists so the end-to-end `handle_server_event` path can be exercised
-/// from a dev/dirty test binary (whose real version would otherwise be
-/// unorderable and short-circuit the comparison).
-fn client_release_version() -> String {
-    if (cfg!(test) || cfg!(debug_assertions))
-        && let Some(v) = std::env::var_os("JCODE_TEST_CLIENT_VERSION_OVERRIDE")
-    {
-        return v.to_string_lossy().into_owned();
-    }
-    jcode_build_meta::version().to_string()
-}
-
-fn should_defer_history_for_runtime_identity(
-    server_has_update: Option<bool>,
-    server_version: Option<&str>,
-) -> bool {
-    let client_detected_stale =
-        server_release_is_older_than_client(server_version, &client_release_version());
-    should_defer_history_for_runtime_identity_with_allow(
-        server_has_update,
-        client_detected_stale,
-        allow_runtime_identity_mismatch(),
-    )
-}
 
 #[cfg(test)]
 #[path = "kv_cache_miss_tests.rs"]
@@ -383,6 +271,80 @@ fn handle_server_event_inner(
         return true;
     }
 
+    // Replies to this window's account requests (/accounts switch, default,
+    // unpin, failover). Only these settle the change the user asked for.
+    match &event {
+        ServerEvent::Done { id } if app.settle_account_request(*id, Ok(())) => return true,
+        ServerEvent::Error { id, message, .. }
+            if app.settle_account_request(*id, Err(message.as_str())) =>
+        {
+            return true;
+        }
+        _ => {}
+    }
+
+    if app_mod::rewind::handle_checkpoint_event(app, &event, remote) {
+        return true;
+    }
+
+    // Replies to `/mcp` (dialog refresh or reconnect/enable/disable).
+    match &event {
+        ServerEvent::RuntimeCommandResult {
+            id, command, data, ..
+        } if command == "agent" && app.agent_profile_picker_request_id == Some(*id) => {
+            app.agent_profile_picker_request_id = None;
+            app.agent_profile_request_ids.remove(id);
+            app.apply_agent_profile_list(data);
+            return true;
+        }
+        ServerEvent::Error { id, message, .. }
+            if app.handle_agent_profile_list_error(*id, message) =>
+        {
+            return true;
+        }
+        ServerEvent::RuntimeCommandResult {
+            id,
+            command,
+            message,
+            ..
+        } if command == "agent" && app.settle_agent_profile_apply(*id, None) => {
+            app.push_display_message(
+                DisplayMessage::system(message.clone()).with_title("Agent profile"),
+            );
+            return true;
+        }
+        ServerEvent::Error { id, message, .. }
+            if app.settle_agent_profile_apply(*id, Some(message)) =>
+        {
+            return true;
+        }
+        ServerEvent::RuntimeCommandResult { id, message, .. }
+            if app.agent_profile_request_ids.remove(id) =>
+        {
+            app.push_display_message(
+                DisplayMessage::system(message.clone()).with_title("Agent profile"),
+            );
+            return true;
+        }
+        ServerEvent::Error { id, message, .. } if app.agent_profile_request_ids.remove(id) => {
+            app.push_display_message(DisplayMessage::error(message.clone()));
+            return true;
+        }
+        ServerEvent::RuntimeCommandResult {
+            id, data, message, ..
+        } if app.mcp_request_id == Some(*id) => {
+            app.mcp_request_id = None;
+            app.apply_mcp_reply(Ok((data.clone(), message.clone())));
+            return true;
+        }
+        ServerEvent::Error { id, message, .. } if app.mcp_request_id == Some(*id) => {
+            app.mcp_request_id = None;
+            app.apply_mcp_reply(Err(message.clone()));
+            return true;
+        }
+        _ => {}
+    }
+
     // Control failures use the shared Error wire shape, but must not end an
     // unrelated active turn, trigger rate-limit retry, or discard draft input.
     if let ServerEvent::Error { id, message, .. } = &event
@@ -416,6 +378,13 @@ fn handle_server_event_inner(
     if let ServerEvent::Done { id } | ServerEvent::Error { id, .. } = &event
         && app.current_message_id.is_some_and(|current| current != *id)
         && app.pending_agent_model_request_id != Some(*id)
+        && !matches!(
+            &event,
+            ServerEvent::Error {
+                server_resumes: true,
+                ..
+            }
+        )
     {
         crate::logging::debug(&format!(
             "Ignoring unrelated terminal id={} while current_message_id={:?}",
@@ -496,6 +465,21 @@ fn handle_server_event_inner(
     }
 
     let call_output_tokens_seen = remote.call_output_tokens_seen();
+
+    // Remember that this send already put model output on screen, so an
+    // overload failure after it is not answered with a full-turn resend.
+    // Reasoning only counts when it is displayed: hidden reasoning shows the
+    // user nothing, so a resend cannot duplicate anything on screen.
+    let shows_output = match &event {
+        ServerEvent::TextDelta { .. }
+        | ServerEvent::TextReplace { .. }
+        | ServerEvent::ToolStart { .. } => true,
+        ServerEvent::ReasoningDelta { .. } => crate::config::config().display.reasoning_enabled(),
+        _ => false,
+    };
+    if shows_output {
+        app.remote_turn_streamed_output = true;
+    }
 
     match event {
         ServerEvent::TextDelta { text } => {
@@ -796,13 +780,21 @@ fn handle_server_event_inner(
                         .token_accounting
                         .total_cache_reported_input_tokens
                         .saturating_add(reported_delta);
-                    app.token_accounting.total_cache_read_tokens =
-                        app.token_accounting.total_cache_read_tokens.saturating_add(
-                            app.streaming
-                                .streaming_cache_read_tokens
-                                .unwrap_or(0)
-                                .saturating_sub(previous_cache_read.unwrap_or(0)),
-                        );
+                    let read_delta = app
+                        .streaming
+                        .streaming_cache_read_tokens
+                        .unwrap_or(0)
+                        .saturating_sub(previous_cache_read.unwrap_or(0));
+                    app.token_accounting.total_cache_read_tokens = app
+                        .token_accounting
+                        .total_cache_read_tokens
+                        .saturating_add(read_delta);
+                    if app.token_accounting.current_request_has_optimal {
+                        app.token_accounting.total_cache_optimal_read_tokens = app
+                            .token_accounting
+                            .total_cache_optimal_read_tokens
+                            .saturating_add(read_delta);
+                    }
                     app.token_accounting.total_cache_creation_tokens = app
                         .token_accounting
                         .total_cache_creation_tokens
@@ -983,6 +975,8 @@ fn handle_server_event_inner(
                 attempt, max
             ));
             app.rollback_streaming_attempt();
+            // The partial output is gone, so the retried attempt starts clean.
+            app.remote_turn_streamed_output = false;
             remote.clear_pending();
             app.connection_phase_started = Some(Instant::now());
             app.status = ProcessingStatus::Connecting(crate::message::ConnectionPhase::Retrying {
@@ -1258,8 +1252,9 @@ fn handle_server_event_inner(
             id,
             message,
             retry_after_secs,
-            ..
+            server_resumes,
         } => {
+            app.cancel_prompt_history_switch();
             if app.pending_agent_model_request_id == Some(id) {
                 app.pending_agent_model_request_id = None;
                 app.push_display_message(DisplayMessage::error(format!(
@@ -1283,6 +1278,32 @@ fn handle_server_event_inner(
                 return false;
             }
             app.refresh_openai_usage_after_quota_error(&message);
+            let invalid_tool_calls_exhausted =
+                message.starts_with(crate::agent::Agent::MALFORMED_TOOL_CALL_ERROR_PREFIX);
+            // A server-initiated turn (scheduled task, swarm wake, DM) hit a
+            // usage limit and the server will resume it at the reset. Settle
+            // the adopted turn and say when it resumes. This client did not
+            // send the turn, so it must not hold or resend anything itself.
+            // Only the explicit `server_resumes` flag means that: an id-0
+            // error with just a retry hint is terminal and shown normally.
+            if !invalid_tool_calls_exhausted
+                && server_resumes
+                && let Some(resume_in) = retry_after_secs
+            {
+                let resume_in = resume_in.min(24 * 60 * 60);
+                if app.current_message_id.is_none() {
+                    app.handle_server_owned_usage_limit_resume(resume_in);
+                    remote.reset_call_output_tokens_seen();
+                } else {
+                    // The user's own turn is in flight. The notice is about a
+                    // different, server-owned turn: show it, but do not settle
+                    // the user's turn or spend its retry budget.
+                    app.push_display_message(DisplayMessage::system(
+                        App::server_usage_limit_resume_notice(resume_in),
+                    ));
+                }
+                return true;
+            }
             // The server rejects a Message request with this error while its
             // previous turn is still running. This typically happens when a
             // reload/reconnect raced the turn-end dispatch: the history
@@ -1290,9 +1311,10 @@ fn handle_server_event_inner(
             // queued follow-up, but the server-side turn had not actually
             // finished. Dropping the pending send here would silently lose the
             // user's queued message (issue #391). Instead, put it back on the
-            // queue and re-adopt the running-turn state so the queue
-            // dispatches once the real turn completes.
+            // queue and re-adopt the running-turn state so queued prompts
+            // dispatch once the real turn completes.
             if message == "Already processing a message"
+                && app.current_message_id == Some(id)
                 && recover_rejected_queued_continuation(app)
             {
                 remote.clear_pending();
@@ -1334,45 +1356,61 @@ fn handle_server_event_inner(
                 crate::provider::parse_failover_prompt_message(&message).is_some();
             let is_permanent_refresh_rejection =
                 crate::auth::refresh_state::error_is_permanent_rejection(&message);
-            let reset_duration = if is_failover_prompt || is_permanent_refresh_rejection {
+            let reset_duration = if invalid_tool_calls_exhausted
+                || is_failover_prompt
+                || is_permanent_refresh_rejection
+            {
                 None
             } else {
                 retry_after_secs
                     .map(|secs| Duration::from_secs(secs.min(MAX_TURN_HOLD_SECS)))
                     .or_else(|| parse_rate_limit_error(&message))
             };
-            // A stale reset or a limit that never clears must not resend the
-            // same turn forever. Rate-limit holds share the per-turn retry
-            // budget, which begin_remote_send carries across resends.
+            let previous_account_limit = app.turn_predates_credentials_change();
             let rate_limit_retry_exhausted = reset_duration.is_some()
+                && !previous_account_limit
                 && app
                     .rate_limit_pending_message
                     .as_ref()
                     .is_some_and(|pending| pending.retry_attempts >= App::AUTO_RETRY_MAX_ATTEMPTS);
-            if let Some(reset_duration) = reset_duration
-                && !rate_limit_retry_exhausted
-                && let Some(is_system) = app.rate_limit_pending_message.as_mut().map(|pending| {
+            if let Some(reset_duration) = reset_duration {
+                // The limit was hit by a turn sent before the account changed,
+                // so it reports the previous account's reset time (possibly
+                // hours away). Resend now on the new credentials instead.
+                if !rate_limit_retry_exhausted
+                    && let Some(pending) = app.rate_limit_pending_message.as_mut()
+                {
+                    // A stale reset timestamp or repeated 429 must not bypass
+                    // the normal retry budget forever. Carry this count through
+                    // begin_remote_send, just like other continuation retries.
+                    if previous_account_limit {
+                        pending.retry_attempts = 0;
+                    }
                     pending.retry_attempts = pending.retry_attempts.saturating_add(1);
-                    pending.is_system
-                })
-            {
-                app.rate_limit_reset = Some(Instant::now() + reset_duration);
-                let rate_limit_line = app.rate_limit_notice_with_nudge(reset_duration.as_secs());
-                app.push_display_message(DisplayMessage::system(rate_limit_line));
-                if is_system {
-                    app.set_status_notice("Rate limited; queued system retry");
-                } else {
-                    app.set_status_notice("Rate limited; queued retry");
+                    let is_system = pending.is_system;
+                    app.rate_limit_reset = Some(Instant::now() + reset_duration);
+                    if previous_account_limit {
+                        app.arm_account_change_resend(Instant::now());
+                    } else {
+                        let rate_limit_line =
+                            app.rate_limit_notice_with_nudge(reset_duration.as_secs());
+                        app.push_display_message(DisplayMessage::system(rate_limit_line));
+                        if is_system {
+                            app.set_status_notice("Rate limited; queued system retry");
+                        } else {
+                            app.set_status_notice("Rate limited; queued retry");
+                        }
+                    }
+                    app.is_processing = false;
+                    app.status = ProcessingStatus::Idle;
+                    app.stream_message_ended = false;
+                    app.processing_started = None;
+                    app.clear_visible_turn_started();
+                    app.current_message_id = None;
+                    remote.clear_pending();
+                    remote.reset_call_output_tokens_seen();
+                    return false;
                 }
-                app.is_processing = false;
-                app.status = ProcessingStatus::Idle;
-                app.stream_message_ended = false;
-                app.processing_started = None;
-                app.clear_visible_turn_started();
-                app.current_message_id = None;
-                remote.clear_pending();
-                remote.reset_call_output_tokens_seen();
-                return false;
             }
             // Snapshot the failed turn's payload before the cleanup below (and
             // the retry-budget bookkeeping) clears it, so a fallback offer
@@ -1447,16 +1485,23 @@ fn handle_server_event_inner(
                 app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
                 return false;
             }
-            if rate_limit_retry_exhausted {
-                // Do not fall through to the generic retry or turn-end
-                // auto-poke: either would immediately restart the loop.
-                app.pause_exhausted_auto_resume(
-                    format!(
-                        "Rate-limit retry limit reached after {} automatic resumes. The provider still reports a limit. Your message is back in the input box. Wait for the limit to reset, check the provider account, or switch with /model.",
-                        App::AUTO_RETRY_MAX_ATTEMPTS
-                    ),
-                    "Paused: provider limit did not clear",
-                );
+            if rate_limit_retry_exhausted || invalid_tool_calls_exhausted {
+                // Do not fall through to generic retry or turn-end auto-poke:
+                // either would immediately restart the exhausted hold loop.
+                if invalid_tool_calls_exhausted {
+                    app.pause_exhausted_auto_resume(
+                        "Paused because the model kept sending invalid tool arguments. Your progress is saved. Re-send the message or switch with /model.".to_string(),
+                        "Paused: invalid tool arguments",
+                    );
+                } else {
+                    app.pause_exhausted_auto_resume(
+                        format!(
+                            "Rate-limit retry limit reached after {} automatic resumes. The provider still reports a limit. Your progress is saved. Wait for a valid reset, check the provider account, or switch with /model.",
+                            App::AUTO_RETRY_MAX_ATTEMPTS
+                        ),
+                        "Paused: provider limit did not clear",
+                    );
+                }
                 app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
                 return false;
             }
@@ -1500,19 +1545,51 @@ fn handle_server_event_inner(
                 return false;
             }
             if is_connectivity_error && app.rate_limit_pending_message.is_some() {
-                // The generic connectivity probe can succeed while this
-                // provider's host stays unreachable (for example a DNS
-                // failure for one endpoint). The budget is spent: pause
-                // instead of resending, and keep auto-poke from restarting it.
+                // Generic connectivity can be healthy while this provider's
+                // DNS remains broken. Do not let auto-poke reset the budget.
                 app.pause_exhausted_auto_resume(
                     format!(
-                        "Connection retry limit reached after {} automatic resumes. Your message is back in the input box. Check the provider endpoint or DNS, then re-send or switch with /model.",
+                        "Connection retry limit reached after {} automatic resumes. Your progress is saved. Check the provider endpoint or DNS, then re-send the message or switch with /model.",
                         App::AUTO_RETRY_MAX_ATTEMPTS
                     ),
                     "Paused: provider connection did not recover",
                 );
                 app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
                 return false;
+            }
+            // Provider overload (5xx, 529 "heavy usage, try again in a
+            // moment"): the provider answered, so this is not a connectivity
+            // problem, but the same request usually succeeds a little later.
+            // Hold the turn and resend it, also for turns the user typed,
+            // before any path below can fail it or stop auto-poke.
+            // A turn that already streamed output or ran tools is continued
+            // from the server's saved history instead of resent in full.
+            if !is_connectivity_error
+                && crate::tui::app::commands::is_provider_overload_error(&message)
+            {
+                if app.schedule_pending_remote_overload_retry(&message) {
+                    return false;
+                }
+                // An exhausted overload budget must not fall through to the
+                // generic retry path, which would grant the same turn a new
+                // budget and let turn-end auto-poke restart it again.
+                if app
+                    .rate_limit_pending_message
+                    .as_ref()
+                    .is_some_and(|pending| {
+                        pending.overload_attempts >= App::OVERLOAD_RETRY_MAX_ATTEMPTS
+                    })
+                {
+                    app.pause_exhausted_auto_resume(
+                        format!(
+                            "Provider overload retry limit reached after {} automatic resumes. Your progress is saved. Re-send the message later or switch with /model.",
+                            App::OVERLOAD_RETRY_MAX_ATTEMPTS
+                        ),
+                        "Paused: provider overload did not recover",
+                    );
+                    app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
+                    return false;
+                }
             }
             // Credential-failure circuit breaker: repeated auth failures mean
             // the login/API key is dead. Resending the identical request can
@@ -1578,8 +1655,7 @@ fn handle_server_event_inner(
                 );
                 return false;
             }
-            if !is_failover_prompt && !app.schedule_pending_remote_retry("⚠ Remote request failed.")
-            {
+            if !app.schedule_pending_remote_retry("⚠ Remote request failed.") {
                 app.clear_pending_remote_retry();
                 // No automatic retry will resend this turn, so restore the prompt the
                 // user typed back into the input box instead of dropping it.
@@ -1594,10 +1670,13 @@ fn handle_server_event_inner(
             false
         }
         ServerEvent::SessionId { session_id } => {
-            if app.remote_session_id.as_deref() != Some(session_id.as_str()) {
+            if app.remote_session_id.as_ref() != Some(&session_id) {
                 app.remote_available_service_tiers = None;
+                app.invalidate_rewind_ui();
+                app.invalidate_agent_profile_ui();
             }
             remote.set_session_id(session_id.clone());
+            app.set_remote_prompt_history_session(&session_id);
             app.cloud_environment_session_changed(&session_id);
             app.remote_session_id = Some(session_id.clone());
             crate::set_current_session(&session_id);
@@ -1733,8 +1812,10 @@ fn handle_server_event_inner(
             activity,
             token_usage_totals,
             side_panel,
+            account_labels,
             ..
         } => {
+            app.replace_window_accounts(account_labels);
             if let Some(base_count) = messages_base_count {
                 // Delta History: the server verified our advertised prefix and
                 // sent only the messages after it. Rebuild the full list so the
@@ -1792,6 +1873,16 @@ fn handle_server_event_inner(
             let mut history_lap = Instant::now();
             let mut history_laps: Vec<(&'static str, u128)> = Vec::new();
             let prev_session_id = app.remote_session_id.clone();
+            if prev_session_id.as_ref() != Some(&session_id) {
+                app.invalidate_agent_profile_ui();
+            }
+            app.rewind_ui.last_empty_escape = None;
+            if prev_session_id
+                .as_ref()
+                .is_some_and(|previous| previous != &session_id)
+            {
+                app.invalidate_rewind_ui();
+            }
             app.remote_provider_oauth_email = provider_oauth_email.clone();
             app.remote_provider_oauth_account_label = provider_oauth_account_label;
             if resolved_credential == Some(jcode_provider_core::ResolvedCredential::Oauth)
@@ -1804,7 +1895,10 @@ fn handle_server_event_inner(
             let history_mcp_count = mcp_servers.len();
             let history_model = provider_model.clone();
 
-            if !crate::tui::is_ssh_remote()
+            // Do not defer authoritative history behind a reload this client
+            // cannot perform automatically, including hot-exec resume handoffs.
+            if app.auto_server_reload
+                && !crate::tui::is_ssh_remote()
                 && should_defer_history_for_runtime_identity(
                     server_has_update,
                     server_version.as_deref(),
@@ -1877,6 +1971,7 @@ fn handle_server_event_inner(
             }
 
             remote.set_session_id(session_id.clone());
+            app.set_remote_prompt_history_session(&session_id);
             app.cloud_environment_session_changed(&session_id);
             app.remote_session_id = Some(session_id.clone());
             history_laps.push(("pre_set_session", history_lap.elapsed().as_millis()));
@@ -1934,12 +2029,14 @@ fn handle_server_event_inner(
                 app.token_accounting.total_cache_read_tokens = 0;
                 app.token_accounting.total_cache_creation_tokens = 0;
                 app.token_accounting.total_cache_optimal_input_tokens = 0;
+                app.token_accounting.total_cache_optimal_read_tokens = 0;
                 app.token_accounting.last_cache_reported_input_tokens = None;
                 app.token_accounting.last_cache_prompt_tokens = None;
                 app.token_accounting.last_cache_read_tokens = None;
                 app.token_accounting.last_cache_creation_tokens = None;
                 app.token_accounting.last_cache_optimal_input_tokens = None;
                 app.token_accounting.cache_next_optimal_input_tokens = None;
+                app.token_accounting.current_request_has_optimal = false;
                 app.kv_cache.kv_cache_baseline = None;
                 app.kv_cache.pending_kv_cache_request = None;
                 app.kv_cache.kv_cache_turn_number = None;
@@ -1960,6 +2057,7 @@ fn handle_server_event_inner(
                 app.follow_chat_bottom();
                 if prev_session_id.is_some() {
                     app.queued_messages.clear();
+                    app.queued_message_images.clear();
                     app.queued_commands.clear();
                     app.interleave_message = None;
                     app.interleave_images.clear();
@@ -2008,14 +2106,27 @@ fn handle_server_event_inner(
             // real switch and must announce itself.
             app.remote_session_facts_provisional = false;
             app.clear_remote_startup_phase();
-            app.session.subagent_model = subagent_model;
-            app.session.agent_model_overrides = agent_model_overrides;
-            app.session.autoreview_enabled = autoreview_enabled;
-            app.session.autojudge_enabled = autojudge_enabled;
-            app.autoreview_enabled =
-                autoreview_enabled.unwrap_or(crate::config::config().autoreview.enabled);
-            app.autojudge_enabled =
-                autojudge_enabled.unwrap_or(crate::config::config().autojudge.enabled);
+            // The model-catalog response reuses the History event shape with
+            // every server-identity, session-list and session-setting field left
+            // empty. Applying those empties wiped the server name/icon/version/
+            // canary flag, skills, and session list for a frame right after
+            // startup, so the header and the Overview session row flickered
+            // (`peak hare` -> `hare`), and reset per-session subagent/autoreview
+            // settings. Only overwrite what the event actually carries; a real
+            // session switch still resets everything.
+            let carries_server_identity =
+                server_name.is_some() || server_version.is_some() || is_canary.is_some();
+            let authoritative = session_changed || carries_server_identity;
+            if authoritative {
+                app.session.subagent_model = subagent_model;
+                app.session.agent_model_overrides = agent_model_overrides;
+                app.session.autoreview_enabled = autoreview_enabled;
+                app.session.autojudge_enabled = autojudge_enabled;
+                app.autoreview_enabled =
+                    autoreview_enabled.unwrap_or(crate::config::config().autoreview.enabled);
+                app.autojudge_enabled =
+                    autojudge_enabled.unwrap_or(crate::config::config().autojudge.enabled);
+            }
             if upstream_provider.is_some() {
                 app.upstream_provider = upstream_provider;
             }
@@ -2029,6 +2140,7 @@ fn handle_server_event_inner(
                 app.status_detail = status_detail;
             }
             if session_changed || reasoning_effort.is_some() {
+                app.remote_reasoning_effort_before_request = None;
                 app.remote_reasoning_effort = reasoning_effort;
             }
             app.remote_service_tier = service_tier;
@@ -2109,6 +2221,12 @@ fn handle_server_event_inner(
                 app.token_accounting.total_cache_read_tokens = 0;
                 app.token_accounting.total_cache_creation_tokens = 0;
                 app.token_accounting.total_cache_optimal_input_tokens = 0;
+                app.token_accounting.total_cache_optimal_read_tokens = 0;
+                // Restart the yield window: a baseline from before the refresh
+                // must not become the denominator of the next request.
+                app.token_accounting.cache_next_optimal_input_tokens = None;
+                app.token_accounting.last_cache_optimal_input_tokens = None;
+                app.token_accounting.current_request_has_optimal = false;
                 // Token totals are restored from history above, but the dollar
                 // cost was never reconstructed, so resumed sessions showed `$0`
                 // in the cost widget until a new call happened. Price the
@@ -2130,7 +2248,8 @@ fn handle_server_event_inner(
             app.workspace_client
                 .sync_after_history(&session_id, &app.remote_sessions);
 
-            if !crate::tui::is_ssh_remote()
+            if app.auto_server_reload
+                && !crate::tui::is_ssh_remote()
                 && server_has_update == Some(true)
                 && !app.pending_server_reload
             {
@@ -2199,6 +2318,9 @@ fn handle_server_event_inner(
             }
             history_laps.push(("pre_bootstrap_log", history_lap.elapsed().as_millis()));
             if should_apply_history_payload {
+                if app.conversation_rewind_history_pending(&session_id) {
+                    app.clear_rewind_continuation_state();
+                }
                 crate::logging::info(&format!(
                     "[TIMING] remote bootstrap: history after {}ms (session={}, resumed={}, messages={}, mcp_servers={}, model={})",
                     app.app_started.elapsed().as_millis(),
@@ -2225,6 +2347,7 @@ fn handle_server_event_inner(
                     && messages.is_empty()
                     && !session_changed
                     && !app.display_messages().is_empty()
+                    && !app.checkpoint_conversation_restore_pending(&session_id)
                 {
                     crate::logging::info(
                         "Preserving locally restored display history for metadata-only History bootstrap",
@@ -2301,6 +2424,7 @@ fn handle_server_event_inner(
                             // is processing, so streaming state present at this
                             // point is stale by construction.
                             if app.pending_remote_rewind_notice.is_some()
+                                || app.checkpoint_conversation_restore_pending(&session_id)
                                 || crate::tui::is_ssh_remote()
                             {
                                 app.stream_buffer.clear();
@@ -2338,24 +2462,7 @@ fn handle_server_event_inner(
                 restore_pending_startup_prompt_echo(app);
                 app.note_runtime_memory_event_force("history_loaded", "remote_history_applied");
                 crate::process_memory::release_retained_heap("client_history_loaded");
-                if let Some(notice) = app.pending_remote_rewind_notice.take() {
-                    let content = if notice.undo {
-                        "✓ Undid rewind. Restored the messages removed by the last rewind."
-                            .to_string()
-                    } else {
-                        format!(
-                            "✓ Rewound to message {}. Removed {} message{}. Undo anytime with /rewind undo.",
-                            notice.message_index.unwrap_or_default(),
-                            notice.changed_messages,
-                            if notice.changed_messages == 1 {
-                                ""
-                            } else {
-                                "s"
-                            }
-                        )
-                    };
-                    app.push_display_message(DisplayMessage::system(content));
-                }
+                app.finish_legacy_rewind_notice();
             } else {
                 crate::logging::info(
                     "Ignoring duplicate History event for active session after local state was restored",
@@ -2795,6 +2902,7 @@ fn handle_server_event_inner(
                 // Always replace: the server reports the effort the new model
                 // runs with (`None` = cleared), so the chip must not keep the
                 // previous model's level.
+                app.remote_reasoning_effort_before_request = None;
                 app.remote_reasoning_effort = reasoning_effort;
                 app.invalidate_model_picker_cache();
                 app.persist_remote_header_hint();
@@ -2854,12 +2962,47 @@ fn handle_server_event_inner(
             app.invalidate_model_picker_cache();
             true
         }
+        ServerEvent::CredentialsChanged {
+            provider,
+            account_label,
+        } => {
+            if !app
+                .credential_change_is_for_this_window(provider.as_deref(), account_label.as_deref())
+            {
+                crate::logging::info(&format!(
+                    "Credentials changed for {:?} ({:?}), not this window's account; keeping hold",
+                    provider, account_label
+                ));
+                return false;
+            }
+            crate::logging::info(&format!(
+                "Credentials changed on server (provider={:?}); releasing any rate-limit hold",
+                provider
+            ));
+            app.release_rate_limit_hold_after_credentials_changed(provider.as_deref())
+        }
+        ServerEvent::SessionAccountChanged {
+            provider,
+            label,
+            pinned,
+            is_default,
+            reason,
+        } => {
+            app.handle_session_account_changed(provider, label, pinned, is_default, reason);
+            true
+        }
         ServerEvent::AvailableModelsUpdated {
             provider_name,
             provider_model,
             available_models,
             available_model_routes,
         } => {
+            // The server downgrades oversized catalog changes to names-only, which
+            // cannot add routes for names already listed (a new gateway serving an
+            // existing model id). Refetch full routes once `/model` is open.
+            if available_model_routes.is_empty() && !available_models.is_empty() {
+                app.remote_model_routes_stale = true;
+            }
             // Prefetch can hydrate account capabilities after initial History.
             // This legacy event has no tiers, so request authoritative metadata.
             app.model_catalog_after_history = true;
@@ -2915,12 +3058,25 @@ fn handle_server_event_inner(
         }
         ServerEvent::ReasoningEffortChanged { effort, error, .. } => {
             if let Some(err) = error {
+                app.restore_rejected_remote_effort();
+                app.set_status_notice("Effort switch failed");
                 app.push_display_message(DisplayMessage::error(format!(
                     "Failed to set effort: {}",
                     err
                 )));
             } else {
+                app.remote_reasoning_effort_before_request = None;
                 app.remote_reasoning_effort = effort.clone();
+                app.invalidate_model_picker_cache();
+                // ChatGPT web levels have their own context window (Instant
+                // 52K, Thinking 262K, Pro 410K) from the shared catalog.
+                if let Some(model) = app.effective_remote_provider_model()
+                    && jcode_provider_core::is_chatgpt_web_model(&model)
+                    && let Some(window) =
+                        crate::provider::chatgpt_web::context_tokens(&model, effort.as_deref())
+                {
+                    app.update_context_limit_for_model(&model, Some(window as u64));
+                }
                 let label = effort
                     .as_deref()
                     .map(app_mod::effort_display_label)
@@ -3524,6 +3680,18 @@ fn handle_server_event_inner(
                 app.set_status_notice(format!("Resuming {} sessions", resumed));
             }
             false
+        }
+        ServerEvent::AskUser {
+            request_id,
+            questions,
+            ..
+        } => {
+            app.open_ask_user_dialog(request_id, questions);
+            true
+        }
+        ServerEvent::AskUserClosed { request_id, error } => {
+            app.close_ask_user_request(&request_id, error);
+            true
         }
         ServerEvent::StdinRequest { .. } => {
             app.set_status_notice("⌨ Interactive terminal detected (command will timeout)");

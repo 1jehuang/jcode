@@ -5,7 +5,9 @@
 //!
 //! Also provides debug socket events for exposing full TUI state.
 
+mod soft_interrupts;
 mod ssh_sessions;
+pub(crate) use soft_interrupts::soft_interrupt_client_id;
 
 use crate::message::ToolCall;
 use crate::protocol::{AuthChanged, FeatureToggle, HistoryBase, Request, ServerEvent};
@@ -310,11 +312,6 @@ const READ_BUFFER_SHRINK_THRESHOLD: usize = 256 * 1024;
 /// grow/shrink thrash.
 const READ_BUFFER_RETAIN_CAPACITY: usize = 64 * 1024;
 
-/// Caller id attached to a TUI soft interrupt, derived from its request id.
-pub(crate) fn soft_interrupt_client_id(request_id: u64) -> String {
-    format!("tui-{request_id}")
-}
-
 /// Usage poll period for a window the user is looking at.
 const ACCOUNT_USAGE_POLL: Duration = Duration::from_secs(30);
 /// Usage poll period for an unfocused window. The quota display there is not
@@ -369,6 +366,27 @@ pub(crate) struct ReplayRemoteState {
     call_output_tokens_seen: u64,
 }
 
+/// `--account` pins for this TUI's first Subscribe, as (provider, label).
+static STARTUP_ACCOUNT_PINS: std::sync::Mutex<Vec<(String, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Record `jcode --account` pins. They are sent once, with the first
+/// Subscribe, so a reconnect does not undo a later `/accounts switch`.
+pub fn set_startup_account_pins(pins: Vec<(String, String)>) {
+    *STARTUP_ACCOUNT_PINS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = pins;
+}
+
+/// Subscribe's `account_pins` (taken once) and `supports_session_accounts`.
+pub(crate) fn take_subscribe_account_fields() -> (Vec<(String, String)>, bool) {
+    let pins = std::mem::take(
+        &mut *STARTUP_ACCOUNT_PINS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    );
+    (pins, true)
+}
 #[path = "backend_auth.rs"]
 mod auth;
 #[path = "backend_cloud.rs"]
@@ -429,6 +447,30 @@ impl RemoteConnection {
         allow_session_takeover: bool,
         remote_working_dir: Option<&str>,
     ) -> Result<Self> {
+        Self::connect_with_session_and_profile(
+            resume_session,
+            client_instance_id,
+            client_has_local_history,
+            history_base,
+            allow_session_takeover,
+            remote_working_dir,
+            None,
+        )
+        .await
+    }
+
+    pub async fn connect_with_session_and_profile(
+        resume_session: Option<&str>,
+        client_instance_id: Option<&str>,
+        client_has_local_history: bool,
+        history_base: Option<crate::protocol::HistoryBase>,
+        allow_session_takeover: bool,
+        remote_working_dir: Option<&str>,
+        agent_profile_name: Option<&str>,
+    ) -> Result<Self> {
+        if resume_session.is_some() && agent_profile_name.is_some() {
+            anyhow::bail!("--agent cannot be used when resuming or attaching to a session");
+        }
         let mut timing = super::cloud_latency::Span::new("connect");
         timing.operation("socket_connect");
         let connect_start = Instant::now();
@@ -498,10 +540,13 @@ impl RemoteConnection {
                 super::is_ssh_remote() || crate::session::session_exists(session_id)
             })
             .map(|session_id| session_id.to_string());
+        let (account_pins, supports_session_accounts) = take_subscribe_account_fields();
         conn.send_request(Request::Subscribe {
+            agent_profile_name: agent_profile_name.map(str::to_owned),
             system_prompt: None,
             supports_pdf_panels: false,
             supports_user_response: false,
+            supports_ask_user: true,
             supports_server_failover: false,
             supports_turn_identity: true,
             id: conn.next_request_id,
@@ -519,6 +564,10 @@ impl RemoteConnection {
             } else {
                 crate::terminal_launch::snapshot_client_terminal_env()
             },
+            // Filled once from `--account`; the TUI handles
+            // `session_account_changed`.
+            account_pins,
+            supports_session_accounts,
             client_name: None,
         })
         .await?;
@@ -1062,6 +1111,34 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    pub async fn list_rewind_checkpoints(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::ListRewindCheckpoints { id })
+            .await?;
+        Ok(id)
+    }
+
+    pub async fn rewind_checkpoint(
+        &mut self,
+        checkpoint_id: String,
+        mode: crate::protocol::RewindMode,
+    ) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::RewindCheckpoint {
+            id,
+            checkpoint_id,
+            mode,
+        })
+        .await?;
+        // Conversation restores redeliver History before their completion.
+        if mode.restores_conversation() {
+            self.has_loaded_history = false;
+        }
+        Ok(id)
+    }
+
     /// Ask the server to truncate the active session to a 1-based message index.
     pub async fn rewind(&mut self, message_index: usize) -> Result<u64> {
         let id = self.next_request_id;
@@ -1230,7 +1307,7 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
-    /// Set connection transport on the server (for OpenAI models)
+    /// Set connection transport on the server (for OpenAI models).
     pub async fn set_transport(&mut self, transport: &str) -> Result<()> {
         let request = Request::SetTransport {
             id: self.next_request_id,
@@ -1325,6 +1402,21 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
+    /// Answer an `ask_user` request; `None` means the user dismissed it.
+    pub async fn send_ask_user_response(
+        &mut self,
+        request_id: String,
+        answers: Option<Vec<crate::protocol::AskUserAnswer>>,
+    ) -> Result<()> {
+        let request = Request::AskUserResponse {
+            id: self.next_request_id,
+            request_id,
+            answers,
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await
+    }
+
     /// Cancel the current generation on the server
     pub async fn cancel(&mut self) -> Result<()> {
         self.cancel_with_reason("remote.cancel").await
@@ -1350,59 +1442,14 @@ impl RemoteConnection {
             .await
     }
 
-    /// Queue a soft interrupt message to be injected at the next safe point
-    /// This doesn't cancel anything - the message is naturally incorporated
-    pub async fn soft_interrupt(
-        &mut self,
-        content: String,
-        images: Vec<(String, String)>,
-        urgent: bool,
-    ) -> Result<u64> {
-        let id = self.next_request_id;
-        let request = Request::SoftInterrupt {
-            id,
-            content,
-            images,
-            urgent,
-            // Named so stranded-interrupt recovery can ask the server exactly
-            // which interrupts are still queued instead of guessing.
-            client_id: Some(soft_interrupt_client_id(id)),
-        };
-        self.next_request_id += 1;
-        self.send_request_with_interrupt_trigger(request, Some("soft_interrupt"))
-            .await?;
-        Ok(id)
-    }
-
-    /// Cancel only the named soft interrupts. The server answers with
-    /// `SoftInterruptsCancelled`, splitting the ids into still-queued (now
-    /// removed) and not-queued (already injected or started as a turn).
-    pub async fn cancel_soft_interrupts_by_id(&mut self, client_ids: Vec<String>) -> Result<u64> {
-        let id = self.next_request_id;
-        let request = Request::CancelSoftInterrupts {
-            id,
-            client_ids: Some(client_ids),
-        };
-        self.next_request_id += 1;
-        self.send_request_with_interrupt_trigger(request, Some("cancel_soft_interrupts"))
-            .await?;
-        Ok(id)
-    }
-
-    pub async fn cancel_soft_interrupts(&mut self) -> Result<()> {
-        let request = Request::CancelSoftInterrupts {
-            id: self.next_request_id,
-            client_ids: None,
-        };
-        self.next_request_id += 1;
-        self.send_request_with_interrupt_trigger(request, Some("cancel_soft_interrupts"))
-            .await
-    }
-
     /// Split the current session - ask server to clone conversation into a new session
     pub async fn split(&mut self) -> Result<u64> {
+        self.split_feedback(None).await
+    }
+
+    pub async fn split_feedback(&mut self, feedback_role: Option<String>) -> Result<u64> {
         let id = self.next_request_id;
-        let request = Request::Split { id };
+        let request = Request::Split { id, feedback_role };
         self.next_request_id += 1;
         self.send_request(request).await?;
         Ok(id)
@@ -1774,6 +1821,9 @@ impl RemoteConnection {
 
 #[path = "backend/event_state.rs"]
 mod event_state;
+
+#[path = "backend_accounts.rs"]
+mod accounts;
 
 #[cfg(test)]
 #[path = "backend_tests.rs"]

@@ -1,6 +1,6 @@
 # Dependency Security Triage
 
-Last reviewed: 2026-11-03
+Last reviewed: 2026-11-10
 
 This file tracks the current `cargo audit` findings for jcode and the intended remediation path.
 It is not an allowlist. It is a triage record so advisories are visible and actionable.

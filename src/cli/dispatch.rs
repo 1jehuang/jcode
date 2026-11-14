@@ -72,7 +72,33 @@ fn arm_debug_client_parent_death_signal() {
 fn arm_debug_client_parent_death_signal() {}
 
 pub(crate) async fn run_main(mut args: Args) -> Result<()> {
+    args.validate_agent_profile_selection()
+        .map_err(anyhow::Error::msg)?;
     arm_debug_client_parent_death_signal();
+    // Plugin management is filesystem-only and must not bootstrap providers or a daemon.
+    if matches!(args.command, Some(Command::Plugin(_))) {
+        let Some(Command::Plugin(plugin)) = args.command else {
+            unreachable!("plugin command checked above");
+        };
+        return super::plugin::run(plugin);
+    }
+    if !args.account.is_empty() {
+        // `jcode --account <label>`: pin the new window's session. Sent once
+        // with the TUI's first Subscribe.
+        let pins = if args.ssh.is_some() {
+            // Labels belong to the remote host; infer from the prefix only.
+            args.account
+                .iter()
+                .filter_map(|label| {
+                    crate::auth::AccountProviderKind::from_label(label)
+                        .map(|kind| (kind.key().to_string(), label.clone()))
+                })
+                .collect()
+        } else {
+            super::account_pins::resolve_account_pins(&args.account)?
+        };
+        crate::tui::backend::set_startup_account_pins(pins);
+    }
     if args.ssh.is_some() {
         // A remote session ID and working directory belong to the remote host.
         // Do not run local resume lookup, provider bootstrap, or self-dev setup.
@@ -149,6 +175,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     }
 
     match args.command {
+        Some(Command::Plugin(plugin)) => super::plugin::run(plugin)?,
         Some(Command::Mcp { action }) => super::mcp::run(action).await?,
         Some(Command::Serve {
             temporary_server,
@@ -300,10 +327,14 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             }
         },
         Some(Command::Run {
+            account,
             message,
             json,
             ndjson,
         }) => {
+            // `jcode --account X run ...`: the global flag applies to run too;
+            // a `run --account` value wins for the same provider.
+            let pins = super::account_pins::merge_account_values(&args.account, &account)?;
             register_on_demand_server_spawner_for_run(
                 args.provider,
                 args.model.clone(),
@@ -316,13 +347,18 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 &message,
                 json,
                 ndjson,
+                &pins,
             )
             .await?;
         }
         Some(Command::Login {
             provider: login_provider,
             account,
+            make_default,
+            enterprise_url,
             no_browser,
+            claude_code,
+            oauth,
             print_auth_url,
             callback_url,
             auth_code,
@@ -337,8 +373,36 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             api_key,
             api_key_env,
         }) => {
+            let login_choice = login_provider.unwrap_or(args.provider);
+            // Claude Code accounts sign in through the installed CLI by
+            // default. Only when that path is valid for this call: Jcode
+            // OAuth stays for account labels, --default, browserless and
+            // scriptable flows, non-interactive shells, and `--oauth`.
+            let claude_code = claude_code
+                || (!oauth
+                    && matches!(login_choice, provider_init::ProviderChoice::Claude)
+                    && account.is_none()
+                    && !make_default
+                    && !no_browser
+                    && !json
+                    && !print_auth_url
+                    && !complete
+                    && callback_url.is_none()
+                    && auth_code.is_none()
+                    && flow_id.is_none()
+                    && !cancel
+                    && crate::external_auth::can_prompt_for_external_auth()
+                    && auth::claude::prefer_claude_code_cli_login());
+            let default_family = match &login_choice {
+                provider_init::ProviderChoice::Claude => Some("claude"),
+                provider_init::ProviderChoice::Openai => Some("openai"),
+                _ => None,
+            };
+            let before = default_family.map(login_account_labels);
             let mut options = login::LoginOptions {
+                copilot_enterprise_url: enterprise_url,
                 no_browser,
+                claude_code,
                 print_auth_url,
                 callback_url,
                 auth_code,
@@ -355,12 +419,10 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 ..Default::default()
             };
             google.apply(&mut options)?;
-            login::run_login(
-                &login_provider.unwrap_or(args.provider),
-                account.as_deref(),
-                options,
-            )
-            .await?;
+            login::run_login(&login_choice, account.as_deref(), options).await?;
+            if make_default {
+                make_login_default(default_family, before, account.as_deref())?;
+            }
         }
         Some(Command::Account { action }) => match action {
             super::args::AccountCommand::Login { no_browser } => {
@@ -383,6 +445,9 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         }
         Some(Command::Version { json }) => {
             commands::run_version_command(json)?;
+        }
+        Some(command @ (Command::PruneBuilds { .. } | Command::PublishBuild(_))) => {
+            commands::build_store::run(command)?;
         }
         Some(Command::Usage { json }) => {
             commands::run_usage_command(json).await?;
@@ -687,13 +752,6 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     Ok(())
 }
 
-/// Transport for `--provider-profile <name>` (issue #1560: this used to force
-/// OpenAI-compatible unconditionally). Anthropic-compatible profiles go
-/// through `Auto`, the same path as `default_provider = "<name>"`: the env
-/// applied by `apply_named_provider_profile_env` already selects the
-/// Anthropic Messages runtime with the profile's base URL and auth, while
-/// `AnthropicApi` would pin an Anthropic API-key credential the profile may
-/// not have (e.g. `auth = "none"`).
 #[path = "dispatch/named_profiles.rs"]
 mod named_profiles;
 use named_profiles::provider_choice_for_named_profile;
@@ -807,6 +865,7 @@ async fn run_default_command(args: Args) -> Result<()> {
         || args.disabled_tools.is_some()
         || args.disable_base_tools;
     if args.resume.is_none()
+        && args.agent_profile_name.is_none()
         && !explicit_provider_or_model
         && !explicit_tool_options
         && commands::maybe_run_pending_restart_restore_on_startup().await?
@@ -962,6 +1021,7 @@ async fn run_default_command(args: Args) -> Result<()> {
         !server_running,
         args.fresh_spawn,
         args.remote_working_dir,
+        args.agent_profile_name,
         args.onboarding_sim,
         args.update_sim,
     )
@@ -979,6 +1039,67 @@ fn print_provider_test_coverage_report(report: &str, colorize: bool) {
     } else {
         print!("{}", report);
     }
+}
+
+/// Stored account labels for a provider family, used to find the label a
+/// login just created.
+fn login_account_labels(family: &str) -> Vec<String> {
+    match family {
+        "claude" => crate::auth::claude::list_accounts()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|a| a.label)
+            .collect(),
+        _ => crate::auth::codex::list_accounts()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|a| a.label)
+            .collect(),
+    }
+}
+
+/// `jcode login --default`: make the account just logged in the default for
+/// new windows. Existing pinned windows keep their account.
+fn make_login_default(
+    family: Option<&str>,
+    before: Option<Vec<String>>,
+    requested: Option<&str>,
+) -> Result<()> {
+    let Some(family) = family else {
+        anyhow::bail!("--default applies to Claude and OpenAI logins only.");
+    };
+    let after = login_account_labels(family);
+    let before = before.unwrap_or_default();
+    let label = after
+        .iter()
+        .find(|label| !before.contains(label))
+        .cloned()
+        .or_else(|| {
+            requested
+                .filter(|r| after.iter().any(|l| l == r))
+                .map(str::to_string)
+        })
+        .or_else(|| match family {
+            "claude" => crate::auth::claude::active_account_label(),
+            _ => crate::auth::codex::active_account_label(),
+        });
+    let Some(label) = label else {
+        anyhow::bail!("No saved account to make the default.");
+    };
+    match family {
+        "claude" => crate::auth::claude::set_active_account(&label)?,
+        _ => crate::auth::codex::set_active_account(&label)?,
+    }
+    let route = if family == "claude" {
+        "claude-oauth"
+    } else {
+        "openai-oauth"
+    };
+    let _ = crate::auth::account_pool::sync_order_with_default_route(route);
+    output::stderr_info(format!(
+        "{label} is now the default account for new windows."
+    ));
+    Ok(())
 }
 
 pub(crate) async fn server_is_running() -> bool {

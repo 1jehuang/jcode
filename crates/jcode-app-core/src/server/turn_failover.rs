@@ -432,6 +432,7 @@ mod tests {
         }
         fn model_routes(&self) -> Vec<ModelRoute> {
             vec![ModelRoute {
+                catalog_metadata: Default::default(),
                 model: "gpt-6.1-sol".into(),
                 provider: "OpenAI".into(),
                 api_method: "openai-api".into(),

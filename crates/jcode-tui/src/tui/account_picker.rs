@@ -48,7 +48,7 @@ mod tests {
         );
 
         for provider in providers.iter().copied() {
-            let command = format!("/account {} login", provider.id);
+            let command = format!("/accounts {} login", provider.id);
             let title = format!("Login / refresh {}", provider.display_name);
             let subtitle = format!("state-space account action for {}", provider.id);
             let mut picker = AccountPicker::with_summary(

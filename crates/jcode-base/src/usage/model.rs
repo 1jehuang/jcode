@@ -372,6 +372,33 @@ impl OpenAIUsageData {
             || self.spark.is_some()
             || !self.additional_windows.is_empty()
     }
+
+    /// True only when this snapshot positively shows ordinary usage is open
+    /// again: fetched without error, no hard limit, and either the explicit
+    /// `allowed` flag or every reported window clearly below its limit. Used
+    /// to drop a usage-limit mark after an early reset, so it must never
+    /// guess "available" from missing data.
+    pub fn confirms_usage_available(&self) -> bool {
+        if self.fetched_at.is_none() || self.last_error.is_some() || self.hard_limit_reached {
+            return false;
+        }
+        if let Some(allowed) = self
+            .openai_reset_credits
+            .as_ref()
+            .and_then(|credits| credits.ordinary_usage_allowed)
+        {
+            return allowed;
+        }
+        self.has_limits()
+            && [
+                self.five_hour.as_ref(),
+                self.seven_day.as_ref(),
+                self.spark.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .all(|window| window.usage_ratio < 0.99)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,8 +417,8 @@ impl MultiAccountProviderKind {
 
     pub fn switch_command(self, label: &str) -> String {
         match self {
-            Self::Anthropic => format!("/account switch {}", label),
-            Self::OpenAI => format!("/account openai switch {}", label),
+            Self::Anthropic => format!("/accounts switch {}", label),
+            Self::OpenAI => format!("/accounts openai switch {}", label),
         }
     }
 }
@@ -530,10 +557,11 @@ pub fn usage_error_with_retry(error: Option<String>, retry: Option<Instant>) -> 
     }
     let wait = retry.saturating_duration_since(Instant::now());
     let Ok(wait) = chrono::Duration::from_std(wait) else {
-        // A deadline outside chrono's range must not erase the original error.
         return Some(error);
     };
-    let at = chrono::Utc::now() + wait;
+    let Some(at) = chrono::Utc::now().checked_add_signed(wait) else {
+        return Some(error);
+    };
     Some(format!(
         "{error} ({RETRY_AT_MARKER}{})",
         at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
@@ -546,10 +574,9 @@ pub fn usage_error_retry_at(error: &str) -> Option<&str> {
     let rest = &error[start..];
     let end = rest.find(')').unwrap_or(rest.len());
     let at = &rest[..end];
-    match chrono::DateTime::parse_from_rfc3339(at) {
-        Ok(_) => Some(at),
-        Err(_) => None, // Malformed annotations are not usable retry deadlines.
-    }
+    chrono::DateTime::parse_from_rfc3339(at)
+        .is_ok()
+        .then_some(at)
 }
 
 #[cfg(test)]
@@ -568,6 +595,7 @@ mod retry_hint_tests {
         let secs = at.signed_duration_since(chrono::Utc::now()).num_seconds();
         assert!((2990..=3001).contains(&secs), "{secs}");
         assert!(usage_error_retry_at("HTTP 429").is_none());
+        assert!(usage_error_retry_at("HTTP 429 (retry at invalid)").is_none());
         assert_eq!(
             usage_error_with_retry(Some("x".into()), None).as_deref(),
             Some("x")

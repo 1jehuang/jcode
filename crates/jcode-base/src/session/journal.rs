@@ -14,6 +14,8 @@ pub(super) struct SessionJournalMeta {
     pub(super) custom_title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) agent_profile: Option<crate::agent_profile::AgentProfile>,
     pub(super) updated_at: DateTime<Utc>,
     pub(super) compaction: Option<StoredCompactionState>,
     /// Compaction state can be several MB (OpenAI encrypted context). When it
@@ -36,6 +38,12 @@ pub(super) struct SessionJournalMeta {
     pub(super) model: Option<String>,
     #[serde(default)]
     pub(super) reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub(super) account_pins: std::collections::BTreeMap<String, super::AccountPin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) account_failover: Option<bool>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub(super) account_failover_home: std::collections::BTreeMap<String, super::AccountPin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) context_cap: Option<usize>,
     pub(super) subagent_model: Option<String>,
@@ -105,6 +113,7 @@ pub(super) fn metadata_requires_snapshot(
         || prev.title != current.title
         || prev.custom_title != current.custom_title
         || prev.system_prompt != current.system_prompt
+        || prev.agent_profile != current.agent_profile
         || prev.provider_key != current.provider_key
         || prev.route_api_method != current.route_api_method
         || prev.reasoning_effort != current.reasoning_effort

@@ -1,3 +1,6 @@
+#[path = "out_of_credit_tests.rs"]
+mod out_of_credit;
+
 #[test]
 fn test_cancel_pending_provider_failover_clears_countdown() {
     with_temp_jcode_home(|| {
@@ -126,7 +129,7 @@ fn test_restore_failover_payload_preserves_images_without_duplicates() {
     let mut payload = failover_test_payload(None);
     payload.images = vec![existing.clone(), failed.clone(), failed.clone()];
     app.restore_failover_payload(payload);
-    assert_eq!(app.input, "expanded failed request");
+    assert_eq!(app.input, "expanded failed request [image 1] [image 2]");
     assert_eq!(app.pending_images, vec![existing, failed]);
 }
 
@@ -180,6 +183,7 @@ fn assert_manual_failover_restores_remote_payload(mode: &str) {
         system_reminder: None,
         retry_at: None,
         retry_attempts: 0,
+        overload_attempts: 0,
     });
     app.last_submitted_input = Some("original request".into());
     app.handle_turn_error(failover_error_message(&prompt));
@@ -451,6 +455,7 @@ impl Provider for AuthRefreshingMockProvider {
         if *self.logged_in.lock().unwrap() {
             vec![
                 crate::provider::ModelRoute {
+                    catalog_metadata: None,
                     model: "claude-opus-4.6".to_string(),
                     provider: "Copilot".to_string(),
                     api_method: "copilot".to_string(),
@@ -460,6 +465,7 @@ impl Provider for AuthRefreshingMockProvider {
                     cheapness: None,
                 },
                 crate::provider::ModelRoute {
+                    catalog_metadata: None,
                     model: "grok-code-fast-1".to_string(),
                     provider: "Copilot".to_string(),
                     api_method: "copilot".to_string(),
@@ -471,6 +477,7 @@ impl Provider for AuthRefreshingMockProvider {
             ]
         } else {
             vec![crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "gpt-5.4".to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: "openai-oauth".to_string(),
@@ -578,6 +585,7 @@ impl Provider for AntigravityMockProvider {
     fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
         vec![
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "claude-sonnet-4-6".to_string(),
                 provider: "Antigravity".to_string(),
                 api_method: "cli".to_string(),
@@ -587,6 +595,7 @@ impl Provider for AntigravityMockProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "gpt-oss-120b-medium".to_string(),
                 provider: "Antigravity".to_string(),
                 api_method: "cli".to_string(),
@@ -652,6 +661,7 @@ impl Provider for LoginSmokeModelProvider {
     fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
         vec![
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "gpt-5.4".to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: "openai-oauth".to_string(),
@@ -661,6 +671,7 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "gpt-5.4".to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: "openai-api-key".to_string(),
@@ -670,6 +681,7 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "openai/gpt-5.5".to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: "openrouter".to_string(),
@@ -679,6 +691,7 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "glm-51-nvfp4".to_string(),
                 provider: "Comtegra GPU Cloud".to_string(),
                 api_method: "openai-compatible:comtegra".to_string(),
@@ -688,6 +701,7 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "claude-opus-4.6".to_string(),
                 provider: "Copilot".to_string(),
                 api_method: "copilot".to_string(),
@@ -697,6 +711,7 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "deepseek/deepseek-v4-pro".to_string(),
                 provider: "auto".to_string(),
                 api_method: "openrouter".to_string(),
@@ -706,6 +721,7 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "deepseek/deepseek-v4-pro".to_string(),
                 provider: "DeepSeek".to_string(),
                 api_method: "openrouter".to_string(),
@@ -715,6 +731,7 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "moonshotai/kimi-k2.5".to_string(),
                 provider: "auto".to_string(),
                 api_method: "openrouter".to_string(),
@@ -770,6 +787,7 @@ impl Provider for FailingModelSwitchProvider {
 
     fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
         vec![crate::provider::ModelRoute {
+            catalog_metadata: None,
             model: "claude-opus-4.6".to_string(),
             provider: "Copilot".to_string(),
             api_method: "copilot".to_string(),
@@ -903,6 +921,7 @@ impl Provider for DualMethodMockProvider {
     fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
         vec![
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "claude-sonnet-4".to_string(),
                 provider: "Anthropic".to_string(),
                 api_method: "claude-api".to_string(),
@@ -912,6 +931,7 @@ impl Provider for DualMethodMockProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "claude-sonnet-4".to_string(),
                 provider: "Anthropic".to_string(),
                 api_method: "claude-oauth".to_string(),
@@ -1037,6 +1057,7 @@ fn test_fallback_uses_remote_openai_credential_over_stale_route() {
         app.remote_model_options = ["openai-api", "openai-oauth"]
             .into_iter()
             .map(|method| crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "gpt-6-astra".to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: method.to_string(),
@@ -1114,50 +1135,4 @@ fn test_fallback_remote_without_credential_preserves_route_metadata() {
         app.session.route_api_method = None;
         assert_eq!(app.current_route_api_method(), None);
     });
-}
-
-#[test]
-fn test_local_failover_revalidates_runtime_source_pool_at_expiry() {
-    for (initial_provider, source_key, exclude) in [
-        ("claude", "anthropic-api", false),
-        ("openai", "openai:openai-otter", true),
-    ] {
-        with_temp_jcode_home(|| {
-            write_test_config(
-                "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
-            );
-            let (mut app, active_provider) = create_switchable_test_app(initial_provider);
-            // Deliberately stale metadata must not override runtime identity.
-            app.session.route_api_method = Some("claude-oauth@stale-account".into());
-            let prompt = crate::provider::ProviderFailoverPrompt {
-                from_provider: "stale-provider".into(),
-                from_label: "Previous account".into(),
-                to_provider: "openai".into(),
-                to_label: "OpenAI fox".into(),
-                target_route: Some("openai-oauth@openai-fox:gpt-5.4".into()),
-                reason: "OAuth usage exhausted".into(),
-                estimated_input_chars: 400,
-                estimated_input_tokens: 100,
-            };
-            app.handle_turn_error(failover_error_message(&prompt));
-            assert!(app.pending_provider_failover.is_some());
-            let mut pool = crate::auth::account_pool::AccountPool::load();
-            pool.members.retain(|member| member != source_key);
-            if exclude {
-                pool.excluded.push(source_key.into());
-            }
-            pool.save().unwrap();
-            app.pending_provider_failover.as_mut().unwrap().deadline =
-                Instant::now() - Duration::from_secs(1);
-            app.maybe_progress_provider_failover_countdown();
-            assert_eq!(active_provider.lock().unwrap().as_str(), initial_provider);
-            assert!(!app.pending_turn);
-            assert!(app.pending_provider_failover.is_none());
-            assert!(app.display_messages.iter().any(|message| {
-                message
-                    .content
-                    .contains("Source is no longer in the auto-switch pool")
-            }));
-        });
-    }
 }

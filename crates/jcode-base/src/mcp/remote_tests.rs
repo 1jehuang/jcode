@@ -828,6 +828,8 @@ async fn owned_manager_reconnects_only_on_next_call_after_session_404() {
     server.shared = false;
     let config = McpConfig {
         servers: HashMap::from([("reconnect".to_string(), server)]),
+
+        ..Default::default()
     };
     let manager = McpManager::with_config(config);
     let error = manager
@@ -879,11 +881,33 @@ async fn shared_manager_and_pool_replace_expired_handles_without_replaying_calls
     let fixture = Fixture::start(Plan::default()).await;
     let config = McpConfig {
         servers: HashMap::from([("reconnect".to_string(), fixture.config("http"))]),
+
+        ..Default::default()
     };
     let project = tempfile::tempdir().unwrap();
     std::fs::write(
         project.path().join(".mcp.json"),
         serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
+    // A project `.mcp.json` server needs approval before anything may start
+    // it; record one in a throwaway jcode home.
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    McpConfig::set_project_approval(
+        project.path(),
+        "reconnect",
+        crate::mcp::McpApproval::Approve,
     )
     .unwrap();
     let pool = Arc::new(SharedMcpPool::new(config));

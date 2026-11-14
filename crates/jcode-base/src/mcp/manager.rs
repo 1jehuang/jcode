@@ -13,6 +13,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, watch};
 
+#[path = "manager/plugin_reload.rs"]
+mod plugin_reload;
+
 /// Bound on how long a tool call will wait for a not-yet-connected MCP server
 /// to come up before failing with a clean tool error. Keeps a slow/hanging
 /// server from blocking a single tool call forever (and never blocks spawn).
@@ -64,6 +67,8 @@ pub struct McpManager {
     /// Project directory used to resolve project-local MCP config. `None`
     /// loads only global config and never consults the process working directory.
     project_dir: Option<std::path::PathBuf>,
+    /// Last connection error per server, cleared on success. Shown by `/mcp`.
+    last_errors: std::sync::Mutex<HashMap<String, String>>,
 }
 
 struct OwnedConnectionAttemptGuard {
@@ -120,7 +125,12 @@ impl Drop for OwnedConnectionAttemptGuard {
 impl McpManager {
     /// Create a new manager in owned in-process mode (used by tests and local harnesses).
     pub fn new() -> Self {
-        let project_dir = std::env::current_dir().ok();
+        Self::for_dir(std::env::current_dir().ok())
+    }
+
+    /// Create an owned manager for an explicit session directory. An unbound
+    /// manager loads only user configuration, never the daemon's cwd.
+    pub fn for_dir(project_dir: Option<std::path::PathBuf>) -> Self {
         Self {
             pool: None,
             pool_handles: RwLock::new(HashMap::new()),
@@ -129,6 +139,7 @@ impl McpManager {
             config: McpConfig::load_for_dir(project_dir.as_deref()),
             session_id: "owned".to_string(),
             project_dir,
+            last_errors: Default::default(),
         }
     }
 
@@ -153,6 +164,7 @@ impl McpManager {
             config: McpConfig::load_for_dir(project_dir.as_deref()),
             session_id,
             project_dir,
+            last_errors: Default::default(),
         }
     }
 
@@ -166,6 +178,7 @@ impl McpManager {
             config,
             session_id: "owned".to_string(),
             project_dir: None,
+            last_errors: Default::default(),
         }
     }
 
@@ -249,11 +262,51 @@ impl McpManager {
     }
 
     /// Connect to a specific server
+    pub async fn connect(&self, name: &str, config: &McpServerConfig) -> Result<()> {
+        let result = self.connect_inner(name, config).await;
+        let mut errors = self
+            .last_errors
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match &result {
+            Ok(()) => errors.remove(name),
+            Err(error) => errors.insert(name.to_string(), format!("{error:#}")),
+        };
+        result
+    }
+
+    /// Project directory project-local config is resolved against.
+    pub fn project_dir(&self) -> Option<&std::path::Path> {
+        self.project_dir.as_deref()
+    }
+
+    /// Last connection error per server since its last successful connect.
+    pub fn last_errors(&self) -> HashMap<String, String> {
+        self.last_errors
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     #[expect(
         clippy::collapsible_if,
         reason = "MCP connect flow keeps shared-pool and owned-server paths explicit"
     )]
-    pub async fn connect(&self, name: &str, config: &McpServerConfig) -> Result<()> {
+    async fn connect_inner(&self, name: &str, config: &McpServerConfig) -> Result<()> {
+        if self
+            .config
+            .sources
+            .get(name)
+            .is_some_and(|source| super::is_plugin_mcp_source(source))
+        {
+            anyhow::ensure!(
+                !config.shared,
+                "Plugin MCP servers must use owned execution"
+            );
+            if let Some(reason) = self.connect_refusal(name) {
+                anyhow::bail!("{reason}");
+            }
+        }
         // Partner-discovery provenance: if this server's command matches a
         // setup the agent saw in a discover_tools listing, tag it so calls to
         // it are metered coarsely (counts only; see sponsors::provenance).
@@ -333,8 +386,25 @@ impl McpManager {
         let sender = sender.expect("owned MCP connection leader must have a sender");
         let mut attempt_guard =
             OwnedConnectionAttemptGuard::new(Arc::clone(&self.connecting), name, sender.clone());
-        let connection =
-            McpClient::connect_in_dir(name.to_string(), config, self.project_dir.as_deref()).await;
+        let connection = async {
+            if self
+                .config
+                .sources
+                .get(name)
+                .is_some_and(|source| super::is_plugin_mcp_source(source))
+            {
+                if let Some(reason) = self.connect_refusal(name) {
+                    anyhow::bail!("{reason}");
+                }
+                super::plugin_source::prepare_for_execution(
+                    name,
+                    config,
+                    self.project_dir.as_deref(),
+                )?;
+            }
+            McpClient::connect_in_dir(name.to_string(), config, self.project_dir.as_deref()).await
+        }
+        .await;
 
         let mut connecting = self.connecting.lock().await;
         let mut clients = self.owned_clients.write().await;
@@ -425,6 +495,18 @@ impl McpManager {
         names
     }
 
+    /// Instructions a connected server sent in its `initialize` result.
+    pub async fn server_instructions(&self, server: &str) -> Option<String> {
+        if let Some(handle) = self.pool_handles.read().await.get(server) {
+            return handle.instructions();
+        }
+        self.owned_clients
+            .read()
+            .await
+            .get(server)
+            .and_then(|client| client.handle().instructions())
+    }
+
     /// Tool definitions for one connected server, or `None` when it is not
     /// connected. Cheaper than [`Self::all_tools`] when reacting to a single
     /// server's connection.
@@ -480,7 +562,8 @@ impl McpManager {
         let schema_cache = super::McpSchemaCache::load();
 
         for (server, config) in &self.config.servers {
-            if !config.is_enabled() {
+            // Nothing the user turned off or has not approved is offered.
+            if !config.is_enabled() || self.connect_refusal(server).is_some() {
                 continue;
             }
             if let Some(cached) = schema_cache.tools_for(server, config) {
@@ -516,6 +599,13 @@ impl McpManager {
         tool: &str,
         arguments: serde_json::Value,
     ) -> Result<ToolCallResult> {
+        // Re-read policy before either live-connection path: a different session
+        // may have disabled the server or withdrawn project approval since this
+        // manager acquired its handle.
+        if let Some(reason) = self.connect_refusal(server) {
+            anyhow::bail!(reason);
+        }
+
         // Fast path: already connected via pool handle.
         {
             let handles = self.pool_handles.read().await;
@@ -539,7 +629,11 @@ impl McpManager {
             }
         }
 
-        // Not connected yet. If the server is configured, connect-on-first-call.
+        // Not connected yet. If the server is configured, connect-on-first-call,
+        // unless it may not run (unapproved project server, disabled in /mcp).
+        if let Some(reason) = self.connect_refusal(server) {
+            anyhow::bail!(reason);
+        }
         if let Some(config) = self.config.servers.get(server).cloned() {
             crate::logging::info(&format!(
                 "MCP: connecting to '{server}' on first tool call (connect-on-first-call)"
@@ -588,6 +682,46 @@ impl McpManager {
 
     /// Ensure a configured server is connected, bounded by `timeout`. No-op if
     /// already connected or not configured. Used to warm a server proactively.
+    /// Why `server` may not be started now: a project-file server that is not
+    /// approved, or one the user disabled in `/mcp`. Read fresh from disk, so
+    /// `/mcp` approve/enable (which record the choice first) can then connect.
+    pub fn connect_refusal(&self, server: &str) -> Option<String> {
+        if let Some(state) = self.project_server_state(server) {
+            return McpConfig::project_server_refusal(state, server);
+        }
+        (McpConfig::enabled_overrides().get(server) == Some(&false)).then(|| {
+            format!("MCP server '{server}' is disabled in /mcp; the user can enable it there")
+        })
+    }
+
+    /// Approval state of a server from a project config file (`None` for any
+    /// other server). Fresh from disk; the loaded config may predate an answer.
+    pub fn project_server_state(&self, server: &str) -> Option<super::ProjectServerState> {
+        let from_project = self
+            .config
+            .sources
+            .get(server)
+            .is_some_and(|source| super::is_project_mcp_source(source));
+        if !from_project {
+            return None;
+        }
+        Some(match self.project_dir.as_deref() {
+            Some(root) => McpConfig::project_server_state(root, server),
+            None if self.config.pending_approval.contains(server) => {
+                super::ProjectServerState::Pending
+            }
+            None if self
+                .config
+                .servers
+                .get(server)
+                .is_some_and(|c| c.is_enabled()) =>
+            {
+                super::ProjectServerState::Approved
+            }
+            None => super::ProjectServerState::Rejected,
+        })
+    }
+
     pub async fn ensure_server_connected(
         &self,
         server: &str,
@@ -595,6 +729,9 @@ impl McpManager {
     ) -> Result<()> {
         if self.connected_servers().await.iter().any(|s| s == server) {
             return Ok(());
+        }
+        if let Some(reason) = self.connect_refusal(server) {
+            anyhow::bail!(reason);
         }
         let Some(config) = self.config.servers.get(server).cloned() else {
             anyhow::bail!("MCP server '{server}' is not configured");
@@ -753,6 +890,78 @@ mod tests {
             err.to_string().contains("ghost"),
             "error should name the missing server: {err}"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn call_tool_refuses_existing_connection_after_global_disable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env_lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("home");
+        crate::env::set_var("JCODE_HOME", home.path());
+
+        let temp = tempfile::tempdir().expect("server directory");
+        let script = temp.path().join("mcp-server.sh");
+        let calls = temp.path().join("calls");
+        std::fs::write(
+            &script,
+            r##"while IFS= read -r line; do
+  id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*)
+      echo '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}}}' ;;
+    *'"tools/list"'*)
+      echo '{"jsonrpc":"2.0","id":'"$id"',"result":{"tools":[{"name":"probe","inputSchema":{"type":"object"}}]}}' ;;
+    *'"tools/call"'*)
+      printf 'called\n' >> "$MCP_CALLS"
+      echo '{"jsonrpc":"2.0","id":'"$id"',"result":{"content":[{"type":"text","text":"ran"}]}}' ;;
+    *'"shutdown"'*) exit 0 ;;
+  esac
+done
+"##,
+        )
+        .expect("write MCP server");
+        let mut permissions = std::fs::metadata(&script)
+            .expect("server metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("make server executable");
+
+        crate::env::set_var("MCP_CALLS", &calls);
+        let mut config = McpConfig::default();
+        config.servers.insert(
+            "fixture".to_string(),
+            McpServerConfig {
+                command: script.display().to_string(),
+                args: vec![],
+                env: HashMap::new(),
+                shared: false,
+                transport: None,
+                url: None,
+                headers: HashMap::new(),
+                enabled: None,
+                disabled: None,
+                timeout_secs: Some(5),
+            },
+        );
+        let manager = McpManager::with_config(config);
+        manager
+            .connect("fixture", &manager.config().servers["fixture"])
+            .await
+            .expect("connect before disabling");
+        McpConfig::set_enabled_override("fixture", false).expect("disable fixture");
+
+        let error = manager
+            .call_tool("fixture", "probe", serde_json::json!({}))
+            .await
+            .expect_err("disabled server must not receive calls through a live handle");
+        assert!(error.to_string().contains("disabled in /mcp"), "{error}");
+        assert!(
+            !calls.exists(),
+            "the connected server must not receive a call"
+        );
+        manager.disconnect_all().await;
     }
 
     #[tokio::test]

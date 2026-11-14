@@ -1,0 +1,262 @@
+use super::{AnthropicAccount, JcodeAuthFile, account_identity, load_auth_file, save_auth_file};
+use anyhow::Result;
+
+/// Stored tokens for the refresh coordinator's current account snapshot.
+pub(in crate::auth) fn stored_claude_tokens(
+    label: &str,
+) -> Option<crate::auth::oauth::OAuthTokens> {
+    let Ok(accounts) = super::list_accounts() else {
+        return None;
+    };
+    let account = accounts
+        .into_iter()
+        .find(|account| account.label == label)?;
+    Some(crate::auth::oauth::OAuthTokens {
+        access_token: account.access,
+        refresh_token: account.refresh,
+        expires_at: account.expires,
+        id_token: None,
+        scopes: account.scopes,
+    })
+}
+
+/// Replace exactly one existing saved login, without adding a label or moving defaults.
+pub fn replace_account_if_unchanged(
+    label: &str,
+    expected_identity: Option<&str>,
+    replacement: AnthropicAccount,
+) -> Result<()> {
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
+    let mut auth = load_auth_file()?;
+    replace_saved_login(&mut auth, label, expected_identity, replacement)?;
+    save_auth_file(&auth)
+}
+
+/// `None` means no login is saved under `label` and an approved external
+/// source (Claude Code, OpenCode) holds the token, so it may still refresh.
+/// A saved login removed while its refresh was pending is rejected instead.
+pub(in crate::auth) fn capture_refresh_account(
+    label: &str,
+    refresh_token: &str,
+) -> Result<Option<AnthropicAccount>> {
+    let account = load_auth_file()?
+        .anthropic_accounts
+        .into_iter()
+        .find(|account| account.label == label);
+    anyhow::ensure!(
+        !refresh_token.is_empty()
+            && account.as_ref().map_or_else(
+                || approved_external_source_holds(refresh_token),
+                |account| account.refresh == refresh_token
+            ),
+        "Claude login changed before token refresh; retry with the current login"
+    );
+    Ok(account)
+}
+
+/// Same consent rules as `load_credentials`, uncached so revocation applies.
+fn approved_external_source_holds(refresh_token: &str) -> bool {
+    use crate::config::Config;
+    let holds = |creds: super::ClaudeCredentials| creds.refresh_token == refresh_token;
+    let claude_code = super::claude_code_path().is_ok_and(|path| {
+        Config::external_auth_source_allowed_for_path(super::CLAUDE_CODE_AUTH_SOURCE_ID, &path)
+    }) && super::load_claude_code_credentials().is_ok_and(holds);
+    let native = super::native_source_allowed()
+        && super::load_claude_code_env_credentials().is_some_and(holds);
+    let opencode = super::opencode_path().is_ok_and(|path| {
+        Config::external_auth_source_allowed_for_path(super::OPENCODE_AUTH_SOURCE_ID, &path)
+            || Config::external_auth_source_allowed_for_path(
+                crate::auth::external::OPENCODE_AUTH_JSON_SOURCE_ID,
+                &path,
+            )
+    }) && super::load_opencode_credentials().is_ok_and(holds);
+    claude_code || native || opencode
+}
+
+/// Commit tokens refreshed after [`capture_refresh_account`], retaining the original token.
+pub(in crate::auth) fn commit_captured_refresh(
+    label: &str,
+    expected: Option<&AnthropicAccount>,
+    refresh_token: &str,
+    tokens: &crate::auth::oauth::OAuthTokens,
+) -> Result<()> {
+    match expected {
+        Some(expected) => commit_refresh_account(expected, tokens),
+        None => commit_external_refresh(label, refresh_token, tokens),
+    }
+}
+
+/// Anthropic rotates refresh tokens, so an external login's old token is spent
+/// once refreshed. Keep the new tokens, unless a login took the label meanwhile.
+pub(super) fn commit_external_refresh(
+    label: &str,
+    refresh_token: &str,
+    tokens: &crate::auth::oauth::OAuthTokens,
+) -> Result<()> {
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
+    let mut auth = load_auth_file()?;
+    anyhow::ensure!(
+        !auth
+            .anthropic_accounts
+            .iter()
+            .any(|account| account.label == label),
+        "Claude login changed while token refresh was pending; refreshed tokens were not saved"
+    );
+    anyhow::ensure!(
+        !refresh_token.is_empty() && approved_external_source_holds(refresh_token),
+        "Claude external login approval changed while token refresh was pending; refreshed tokens were not saved"
+    );
+    crate::auth::account_store::upsert_account(
+        super::ACCOUNT_LABEL_PREFIX,
+        &mut auth.anthropic_accounts,
+        &mut auth.active_anthropic_account,
+        AnthropicAccount {
+            label: label.to_string(),
+            access: tokens.access_token.clone(),
+            refresh: tokens.refresh_token.clone(),
+            expires: tokens.expires_at,
+            email: None,
+            subscription_type: None,
+            scopes: tokens.scopes.clone(),
+        },
+        |account| account.label.as_str(),
+        |account, label| account.label = label,
+    );
+    save_auth_file(&auth)
+}
+
+pub(super) fn commit_refresh_account(
+    expected: &AnthropicAccount,
+    tokens: &crate::auth::oauth::OAuthTokens,
+) -> Result<()> {
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
+    let mut auth = load_auth_file()?;
+    let mut matches = auth.anthropic_accounts.iter_mut().filter(|account| {
+        account.refresh == expected.refresh
+            && account_identity(account) == account_identity(expected)
+    });
+    let account = matches.next().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Claude login changed while token refresh was pending; refreshed tokens were not saved"
+        )
+    })?;
+    anyhow::ensure!(
+        matches.next().is_none(),
+        "Claude refresh login is ambiguous; refreshed tokens were not saved"
+    );
+    let label = account.label.clone();
+    let previous_access = account.access.clone();
+    account.access = tokens.access_token.clone();
+    account.refresh = tokens.refresh_token.clone();
+    account.expires = tokens.expires_at;
+    if !tokens.scopes.is_empty() {
+        account.scopes = tokens.scopes.clone();
+    }
+    save_auth_file(&auth)?;
+    crate::usage::carry_anthropic_usage_across_token_refresh(
+        &label,
+        &previous_access,
+        &tokens.access_token,
+    );
+    Ok(())
+}
+
+pub(super) fn replace_saved_login(
+    auth: &mut JcodeAuthFile,
+    label: &str,
+    expected_identity: Option<&str>,
+    mut replacement: AnthropicAccount,
+) -> Result<()> {
+    let index = auth
+        .anthropic_accounts
+        .iter()
+        .position(|a| a.label == label)
+        .ok_or_else(|| {
+            anyhow::anyhow!("The saved login was removed or renamed. No credentials were replaced.")
+        })?;
+    if account_identity(&auth.anthropic_accounts[index]).as_deref() != expected_identity {
+        anyhow::bail!(
+            "The saved login changed while authentication was pending. No credentials were replaced."
+        );
+    }
+    let email = replacement
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Could not verify the replacement login identity. No credentials were replaced."
+            )
+        })?;
+    if auth.anthropic_accounts.iter().enumerate().any(|(i, a)| {
+        i != index
+            && a.email
+                .as_deref()
+                .is_some_and(|existing| existing.trim().eq_ignore_ascii_case(email))
+    }) {
+        anyhow::bail!(
+            "This identity is already saved under another account. Use that saved login instead. No credentials were replaced."
+        );
+    }
+    replacement.label = label.to_string();
+    auth.anthropic_accounts[index] = replacement;
+    Ok(())
+}
+
+/// Rename an account's label. The label is the human-facing name shown in the
+/// picker, so this is the account "rename". References to the old label (the
+/// active account and the runtime override) are migrated. Identity-based session
+/// pins continue resolving to the renamed login.
+pub fn rename_account(old_label: &str, new_label: &str) -> Result<()> {
+    let new_label = new_label.trim();
+    if new_label.is_empty() {
+        anyhow::bail!("New account name cannot be empty");
+    }
+    if matches!(new_label, "default" | "main")
+        || new_label
+            .strip_prefix("claude-")
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
+    {
+        anyhow::bail!("That name is reserved for legacy account migration; choose a custom name");
+    }
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
+    let mut auth = load_auth_file()?;
+    if new_label == old_label {
+        if auth
+            .anthropic_accounts
+            .iter()
+            .any(|account| account.label == old_label)
+        {
+            return Ok(());
+        }
+        anyhow::bail!("No account with label '{}' found", old_label);
+    }
+    if auth.anthropic_accounts.iter().any(|a| a.label == new_label) {
+        anyhow::bail!("An account named '{}' already exists", new_label);
+    }
+    let Some(account) = auth
+        .anthropic_accounts
+        .iter_mut()
+        .find(|a| a.label == old_label)
+    else {
+        anyhow::bail!("No account with label '{}' found", old_label);
+    };
+    account.label = new_label.to_string();
+
+    if auth.active_anthropic_account.as_deref() == Some(old_label) {
+        auth.active_anthropic_account = Some(new_label.to_string());
+    }
+
+    save_auth_file(&auth)?;
+
+    if super::get_active_account_override().as_deref() == Some(old_label) {
+        super::set_active_account_override(Some(new_label.to_string()));
+    }
+
+    Ok(())
+}

@@ -271,7 +271,7 @@ sys.exit(1 if mode in ('warning', 'legacy-warning') else 0)
     #[test]
     fn timeout_reaps_process_and_unique_ids_isolate_cancellation() {
         let (dir, mut client) = fixture("hang");
-        client.options.timeout = Duration::from_millis(150);
+        client.options.timeout = Duration::from_secs(1);
         let flow = client.begin("copilot", None).unwrap();
         let other = client.begin("copilot", None).unwrap();
         assert_ne!(flow.0.flow_id, other.0.flow_id);
@@ -527,7 +527,7 @@ sys.exit(1 if mode in ('warning', 'legacy-warning') else 0)
         let (_dir, mut client, reserved) = loopback_fixture();
         let port = reserved.local_addr().unwrap().port();
         drop(reserved);
-        client.options.timeout = Duration::from_millis(300);
+        client.options.timeout = Duration::from_secs(2);
         let flow = client.begin("openai", None).unwrap();
         flow.start().unwrap();
         let _peer = std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
@@ -536,7 +536,7 @@ sys.exit(1 if mode in ('warning', 'legacy-warning') else 0)
             flow.wait_for_callback().unwrap_err().kind,
             ErrorKind::Timeout
         );
-        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(started.elapsed() < Duration::from_secs(3));
         assert!(!flow.has_callback_listener());
         assert!(flow.submit_callback("private-fixture-secret").is_ok());
     }

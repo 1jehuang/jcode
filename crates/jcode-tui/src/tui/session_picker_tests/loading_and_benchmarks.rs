@@ -155,7 +155,7 @@ fn loading_picker_search_is_editable_and_escape_clears_without_closing() {
             .expect("leave search"),
         OverlayAction::Continue
     ));
-    assert!(!picker.search_active);
+    assert!(picker.search_active);
     assert!(picker.search_query.is_empty());
     assert!(picker.loading_message.is_some());
     assert!(matches!(
@@ -468,4 +468,86 @@ fn benchmark_real_resume_cached_first_render_reports_timings() {
         render_elapsed.as_millis(),
         refresh_elapsed.as_millis(),
     );
+}
+
+#[test]
+fn cloud_history_mixes_with_local_and_preserves_real_servers_and_saved_boost() {
+    let now = Utc::now();
+    let mut local = make_session("local", "local", false, SessionStatus::Closed);
+    local.last_message_time = now;
+    let mut cloud = make_session("cloud", "cloud", false, SessionStatus::Closed);
+    cloud.server_name = Some("cloud: host".into());
+    cloud.server_icon = Some("☁".into());
+    cloud.last_message_time = now - ChronoDuration::minutes(2);
+    let mut old_local = local.clone();
+    old_local.id = "old_local".into();
+    old_local.last_message_time = now - ChronoDuration::minutes(3);
+    let mut saved_cloud = cloud.clone();
+    saved_cloud.id = "saved_cloud".into();
+    saved_cloud.saved = true;
+    let cloud_group = ServerGroup {
+        name: "cloud: host".into(),
+        icon: "☁".into(),
+        version: String::new(),
+        git_hash: String::new(),
+        is_running: false,
+        sessions: vec![cloud, saved_cloud],
+    };
+    let mut picker = SessionPicker::new_grouped(vec![cloud_group], vec![old_local, local]);
+    assert_eq!(
+        picker
+            .visible_sessions
+            .iter()
+            .map(|r| picker.session_by_ref(*r).unwrap().id.clone())
+            .collect::<Vec<_>>(),
+        ["saved_cloud", "local", "cloud", "old_local"]
+    );
+    assert!(matches!(
+        picker.items[0],
+        PickerItem::SavedHeader { session_count: 1 }
+    ));
+    assert!(!picker.items.iter().any(|item| matches!(
+        item,
+        PickerItem::ServerHeader { .. } | PickerItem::OrphanHeader { .. }
+    )));
+
+    let real = make_session("real", "real", false, SessionStatus::Closed);
+    picker.all_server_groups.push(ServerGroup {
+        name: "real server".into(),
+        icon: "🛰".into(),
+        version: "1".into(),
+        git_hash: String::new(),
+        is_running: true,
+        sessions: vec![real],
+    });
+    picker.rebuild_items();
+    assert_eq!(
+        picker
+            .visible_sessions
+            .iter()
+            .map(|r| picker.session_by_ref(*r).unwrap().id.clone())
+            .collect::<Vec<_>>(),
+        ["saved_cloud", "real", "local", "cloud", "old_local"]
+    );
+    assert!(picker.items.iter().any(|item| matches!(item, PickerItem::ServerHeader { name, session_count: 1, .. } if name == "real server")));
+    picker.filter_mode = SessionFilterMode::Cloud;
+    picker.rebuild_items();
+    assert_eq!(
+        picker
+            .visible_sessions
+            .iter()
+            .map(|r| picker.session_by_ref(*r).unwrap().id.clone())
+            .collect::<Vec<_>>(),
+        ["cloud", "saved_cloud"]
+    );
+    assert!(
+        picker
+            .items
+            .iter()
+            .all(|item| matches!(item, PickerItem::Session))
+    );
+    picker.search_query = "local".into();
+    picker.rebuild_items();
+    wait_for_picker_search(&mut picker);
+    assert!(picker.visible_sessions.is_empty());
 }

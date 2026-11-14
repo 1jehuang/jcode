@@ -885,7 +885,105 @@ fn test_mouse_click_in_main_chat_switches_focus_from_side_panel() {
 }
 
 #[test]
-fn test_side_panel_dismiss_survives_local_page_refresh() {
+fn test_side_panel_header_close_hides_without_deleting_page() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram_pane_enabled = false;
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.side_panel = test_side_panel_snapshot("plan", "Plan");
+
+    let backend = ratatui::backend::TestBackend::new(80, 16);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    render_and_snap(&app, &mut terminal);
+
+    let pane = crate::tui::ui::last_layout_snapshot()
+        .unwrap()
+        .diff_pane_area
+        .unwrap();
+    let close_column = pane.right() - 2;
+    let close_label = (pane.right() - 8..pane.right())
+        .map(|x| {
+            terminal.backend().buffer()[(x, pane.y)]
+                .symbol()
+                .to_string()
+        })
+        .collect::<String>();
+    assert_eq!(close_label, " [close]");
+    let header = (pane.x..pane.right())
+        .map(|x| {
+            terminal.backend().buffer()[(x, pane.y)]
+                .symbol()
+                .to_string()
+        })
+        .collect::<String>();
+    assert!(!header.contains("fullscre"), "clipped header: {header}");
+
+    let redraw = app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: close_column,
+        row: pane.y,
+        modifiers: KeyModifiers::empty(),
+    });
+    assert!(!redraw);
+    assert!(app.side_panel.focused_page().is_none());
+    assert_eq!(app.side_panel.pages[0].id, "plan");
+    assert_eq!(app.status_notice(), Some(crate::tui::ui::SIDE_PANEL_DISMISSED_HINT.to_string()));
+
+    app.set_side_panel_snapshot(test_side_panel_snapshot("plan", "Updated plan"));
+    assert!(app.side_panel.focused_page().is_none());
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
+        .unwrap();
+    assert_eq!(app.side_panel.focused_page().unwrap().title, "Updated plan");
+}
+
+#[test]
+fn test_side_command_repeated_close_preserves_selected_document() {
+    with_temp_jcode_home(|| {
+        for format in [
+            crate::side_panel::SidePanelPageFormat::Markdown,
+            crate::side_panel::SidePanelPageFormat::Pdf,
+        ] {
+            let mut app = create_test_app();
+            app.side_panel = test_side_panel_snapshot("first", "First");
+            let mut selected = app.side_panel.pages[0].clone();
+            selected.id = "selected".to_string();
+            selected.title = "Selected".to_string();
+            selected.format = format;
+            selected.content = "```mermaid\ngraph TD\nA --> B\n```".to_string();
+            if format == crate::side_panel::SidePanelPageFormat::Pdf {
+                selected.pdf_data = Some("JVBERi0xLjQK".to_string());
+            }
+            app.side_panel.pages.push(selected.clone());
+            app.side_panel.focused_page_id = Some(selected.id.clone());
+            for _ in 0..3 {
+                for command in ["/side", "/side off", "/side off"] {
+                    app.input = command.to_string();
+                    app.submit_input();
+                    assert!(app.side_panel.focused_page().is_none());
+                    assert!(app.side_panel_user_hidden);
+                    assert_eq!(app.last_side_panel_focus_id.as_deref(), Some("selected"));
+                }
+                let mut update = app.side_panel.clone();
+                update.focused_page_id = Some("first".to_string());
+                app.set_side_panel_snapshot(update);
+                assert!(app.side_panel.focused_page().is_none());
+                app.input = "/side".to_string();
+                app.submit_input();
+                assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("selected"));
+                assert_eq!(app.side_panel.focused_page().unwrap(), &selected);
+                assert_eq!(app.side_panel.pages.len(), 2);
+                assert!(!app.side_panel_user_hidden);
+                app.input = "/side on".to_string();
+                app.submit_input();
+                assert!(!app.side_panel_fullscreen, "on must be idempotent");
+            }
+        }
+    });
+}
+
+#[test]
+fn test_side_panel_app_refresh_stays_closed_and_reopens_current_selection() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         for (command, page_id) in [
@@ -928,6 +1026,208 @@ fn test_side_panel_dismiss_survives_local_page_refresh() {
 }
 
 #[test]
+fn test_remote_side_command_reopens_after_keyboard_close() {
+    let mut app = create_test_app();
+    app.side_panel = test_side_panel_snapshot("plan", "Plan");
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    for _ in 0..3 {
+        for _ in 0..2 {
+            rt.block_on(app.handle_remote_key(KeyCode::Char('m'), KeyModifiers::ALT, &mut remote))
+                .unwrap();
+        }
+        assert!(app.side_panel.focused_page().is_none());
+        app.input = "/side".to_string();
+        rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+            .unwrap();
+        assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("plan"));
+        assert!(!app.side_panel_fullscreen);
+    }
+}
+
+#[test]
+fn test_side_panel_button_close_stays_closed_after_split_view_refresh() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram_pane_enabled = false;
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.input = "/splitview on".to_string();
+    app.submit_input();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 16)).unwrap();
+    for _ in 0..3 {
+        render_and_snap(&app, &mut terminal);
+        let pane = crate::tui::ui::last_layout_snapshot()
+            .unwrap()
+            .diff_pane_area
+            .unwrap();
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: pane.right() - 2,
+            row: pane.y,
+            modifiers: KeyModifiers::empty(),
+        });
+        app.push_display_message(DisplayMessage::assistant("new content while closed"));
+        app.refresh_split_view_if_needed();
+        assert!(app.side_panel.focused_page().is_none());
+        render_and_snap(&app, &mut terminal);
+        assert!(
+            crate::tui::ui::last_layout_snapshot()
+                .unwrap()
+                .diff_pane_area
+                .is_none()
+        );
+        app.input = "/side".to_string();
+        app.submit_input();
+        assert_eq!(
+            app.side_panel.focused_page_id.as_deref(),
+            Some("split_view")
+        );
+        assert!(
+            app.side_panel
+                .focused_page()
+                .unwrap()
+                .content
+                .contains("new content while closed")
+        );
+    }
+}
+
+#[test]
+fn test_side_panel_close_keeps_inline_diff_visible_and_restores_composer() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = make_edit_badge_test_app(30);
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram_pane_enabled = false;
+    // Diffs stay in the transcript. Only the side-panel page owns a pane.
+    app.diff_mode = crate::config::DiffDisplayMode::FullInline;
+    app.side_panel = test_side_panel_snapshot("plan", "Plan");
+    app.diff_pane_focus = true;
+
+    render_and_snap(&app, &mut terminal);
+    let pane = crate::tui::ui::last_layout_snapshot()
+        .unwrap()
+        .diff_pane_area
+        .unwrap();
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: pane.right() - 2,
+        row: pane.y,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(app.side_panel.focused_page().is_none());
+    assert!(!app.diff_pane_visible(), "inline diffs must not allocate a pane");
+    assert!(!app.diff_pane_focus, "closed pane must release composer focus");
+    let text = render_and_snap(&app, &mut terminal);
+    assert!(crate::tui::ui::last_layout_snapshot()
+        .unwrap()
+        .diff_pane_area
+        .is_none());
+    assert!(text.contains("new line 0"), "inline diff must remain visible:\n{text}");
+    app.handle_key(KeyCode::Char('j'), KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(app.input, "j", "typing must return to the composer");
+    assert_eq!(app.diff_pane_scroll, 0, "no hidden pane should scroll");
+    app.input = "/side".to_string();
+    app.submit_input();
+    assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("plan"));
+    assert!(app.diff_pane_visible(), "reopening should reveal the retained page");
+    assert!(!app.diff_pane_focus, "revealing a page must not steal composer focus");
+    app.handle_key(KeyCode::Char('k'), KeyModifiers::empty()).unwrap();
+    assert_eq!(app.input, "k", "reopening must preserve normal typing");
+}
+
+#[test]
+fn test_fullscreen_side_panel_header_close_restores_chat() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.side_panel = test_side_panel_snapshot("plan", "Plan");
+    app.side_panel_fullscreen = true;
+    app.diff_pane_focus = true;
+
+    let backend = ratatui::backend::TestBackend::new(80, 16);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    render_and_snap(&app, &mut terminal);
+    let pane = crate::tui::ui::last_layout_snapshot()
+        .unwrap()
+        .diff_pane_area
+        .unwrap();
+    let close_column = pane.right() - 2;
+    let close_label = (pane.right() - 8..pane.right())
+        .map(|x| {
+            terminal.backend().buffer()[(x, pane.y)]
+                .symbol()
+                .to_string()
+        })
+        .collect::<String>();
+    assert_eq!(close_label, " [close]");
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: close_column,
+        row: pane.y,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(app.side_panel.focused_page().is_none());
+    assert!(!app.side_panel_fullscreen);
+    assert!(!app.diff_pane_focus);
+}
+
+#[test]
+fn test_side_panel_close_in_file_mode_without_edits_restores_composer() {
+    let _render_lock = scroll_render_test_lock();
+    for close_with_button in [true, false] {
+        let mut app = create_test_app();
+        app.diagram_mode = crate::config::DiagramDisplayMode::None;
+        app.diagram_pane_enabled = false;
+        app.diff_mode = crate::config::DiffDisplayMode::File;
+        app.side_panel = test_side_panel_snapshot("plan", "Plan");
+        app.diff_pane_focus = true;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 16)).unwrap();
+        render_and_snap(&app, &mut terminal);
+        if close_with_button {
+            let pane = crate::tui::ui::last_layout_snapshot()
+                .unwrap()
+                .diff_pane_area
+                .unwrap();
+            app.handle_mouse_event(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: pane.right() - 2,
+                row: pane.y,
+                modifiers: KeyModifiers::empty(),
+            });
+        } else {
+            app.input = "/side off".to_string();
+            app.submit_input();
+        }
+        assert!(!app.diff_pane_visible());
+        assert!(
+            !app.diff_pane_focus,
+            "invisible pane must not capture input"
+        );
+        render_and_snap(&app, &mut terminal);
+        assert!(
+            crate::tui::ui::last_layout_snapshot()
+                .unwrap()
+                .diff_pane_area
+                .is_none()
+        );
+        app.handle_key(KeyCode::Char('j'), KeyModifiers::empty())
+            .unwrap();
+        assert_eq!(app.input, "j", "normal typing must reach the composer");
+        app.input = "/side on".to_string();
+        app.submit_input();
+        assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("plan"));
+    }
+}
+
+#[test]
 fn test_side_panel_close_keeps_visible_file_diff_focused_and_scrollable() {
     let _render_lock = scroll_render_test_lock();
     let (mut app, _) = make_edit_badge_test_app(30);
@@ -964,57 +1264,22 @@ fn test_side_panel_close_keeps_visible_file_diff_focused_and_scrollable() {
     render_and_snap(&app, &mut terminal);
     app.handle_key(KeyCode::Char('j'), KeyModifiers::empty())
         .unwrap();
-    assert!(
-        app.diff_pane_scroll > 0,
-        "j should still scroll the File diff"
-    );
-    app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
-        .unwrap();
-    assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("plan"));
-    assert!(app.diff_pane_focus);
+    assert!(app.diff_pane_scroll > 0, "j should still scroll the File diff");
 }
 
 #[test]
-fn test_side_panel_close_in_file_mode_without_edits_restores_composer() {
+fn test_drag_release_over_side_panel_close_does_not_hide_page() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
     app.diagram_mode = crate::config::DiagramDisplayMode::None;
-    app.diagram_pane_enabled = false;
-    app.diff_mode = crate::config::DiffDisplayMode::File;
     app.side_panel = test_side_panel_snapshot("plan", "Plan");
-    app.diff_pane_focus = true;
-    assert_eq!(app.display_edit_tool_message_count, 0);
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 16)).unwrap();
+
+    let backend = ratatui::backend::TestBackend::new(80, 16);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
     render_and_snap(&app, &mut terminal);
-    let pane = crate::tui::ui::last_layout_snapshot()
+    let _pane = crate::tui::ui::last_layout_snapshot()
         .unwrap()
         .diff_pane_area
-        .unwrap();
-    app.handle_mouse_event(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: pane.right() - 2,
-        row: pane.y,
-        modifiers: KeyModifiers::empty(),
-    });
-
-    assert!(app.side_panel.focused_page().is_none());
-    assert!(!app.diff_pane_visible());
-    assert!(
-        !app.diff_pane_focus,
-        "focus must not stay on an invisible File diff pane"
-    );
-    render_and_snap(&app, &mut terminal);
-    assert!(
-        crate::tui::ui::last_layout_snapshot()
-            .unwrap()
-            .diff_pane_area
-            .is_none(),
-        "no right pane should remain without edits"
-    );
-    app.handle_key(KeyCode::Char('j'), KeyModifiers::empty())
-        .unwrap();
-    assert_eq!(app.input, "j", "normal typing must reach the composer");
-    app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
         .unwrap();
     assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("plan"));
 }
@@ -1405,6 +1670,15 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
             .0
     };
 
+    // Materialized images deliberately release their staged copy payload.
+    // Pin that state before drawing so worker/cache timing cannot change the
+    // click's copy eligibility. This test exercises expansion, not clipboard I/O.
+    crate::tui::ui::inline_image_ui::register_payload(
+        image_id, "image/png", REPRO_TINY_PNG_B64,
+    );
+    assert!(crate::tui::ui::inline_image_ui::materialize_visible(image_id));
+    assert!(crate::tui::ui::inline_image_ui::payload_for_copy(image_id).is_none());
+
     let backend = ratatui::backend::TestBackend::new(80, 40);
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
 
@@ -1478,6 +1752,10 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
         "clicking the rendered image label must cycle Fit -> Large \
          (this is the exact path the user reported as broken)"
     );
+    // The materialized fixture has no staged payload to copy, so only the
+    // expansion action should be reported. Copy-eligible images are separate.
+    assert!(crate::tui::ui::inline_image_ui::payload_for_copy(image_id).is_none());
+    assert_eq!(app.status_notice(), Some("Image size: large".to_string()));
     assert!(
         app.status_notice()
             .is_some_and(|notice| notice.starts_with("Image size: large"))
@@ -1681,4 +1959,48 @@ fn test_click_on_inline_image_body_cycles_level() {
 mod image_zoom;
 
 include!("math_selection.rs");
+
+#[test]
+fn test_side_panel_dismiss_survives_local_page_refresh() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        for (command, page_id) in [
+            ("/splitview on", "split_view"),
+            ("/observe on", "observe"),
+            ("/todos on", "session_todos"),
+        ] {
+            app.input = command.to_string();
+            app.submit_input();
+            assert_eq!(app.side_panel.focused_page_id.as_deref(), Some(page_id));
+            app.dismiss_side_panel();
+            app.push_display_message(DisplayMessage::assistant("new live content"));
+            app.refresh_split_view_if_needed();
+            app.observe_tool_call(&crate::message::ToolCall {
+                id: "side-refresh".to_string(),
+                name: "read".to_string(),
+                input: serde_json::json!({"file_path": "AGENTS.md"}),
+                intent: None,
+                thought_signature: None,
+            });
+            app.refresh_todos_view_if_needed();
+            assert!(
+                app.side_panel.focused_page().is_none(),
+                "refresh reopened {page_id}"
+            );
+            assert_eq!(app.last_side_panel_focus_id.as_deref(), Some(page_id));
+            app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
+                .unwrap();
+            assert_eq!(app.side_panel.focused_page_id.as_deref(), Some(page_id));
+            app.dismiss_side_panel();
+            app.input = command.to_string();
+            app.submit_input();
+            assert_eq!(app.side_panel.focused_page_id.as_deref(), Some(page_id));
+            assert!(
+                !app.side_panel_user_hidden,
+                "explicit app command should reveal"
+            );
+        }
+    });
+}
+
 include!("badge_partial_selection.rs");

@@ -65,6 +65,8 @@ async fn exercise_clear_session(shared_source: bool) -> Result<()> {
             is_processing: false,
             current_tool_name: None,
             terminal_env: Vec::new(),
+            supports_user_response: false,
+            ask_user_tx: None,
             disconnect_tx: mpsc::unbounded_channel().0,
         },
     )])));

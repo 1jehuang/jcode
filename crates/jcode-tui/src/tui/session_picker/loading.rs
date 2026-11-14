@@ -429,8 +429,6 @@ fn send_session_list_updates_with_discovery(
 mod search_text;
 pub(super) use super::transcript_search::source::SourceBuckets;
 use super::transcript_search::source::{BucketSink, Source, Walk, message_role_source, push_mark};
-#[cfg(test)]
-use search_text::raw_value_search_excerpt;
 pub(super) use search_text::{
     build_search_index, classified_search_excerpt, classify_json_into, push_sampled_search_text,
     raw_value_display_text,
@@ -2455,12 +2453,6 @@ pub(super) fn load_codex_external_preview(path: &Path) -> Option<ExternalPreview
     out.non_empty()
 }
 
-#[cfg(test)]
-pub(super) fn load_codex_preview(session_id: &str) -> Option<Vec<PreviewMessage>> {
-    let path = find_codex_session_file(session_id)?;
-    load_codex_preview_from_path(&path)
-}
-
 pub(super) fn load_codex_external_preview_by_id(session_id: &str) -> Option<ExternalPreview> {
     load_codex_external_preview(&find_codex_session_file(session_id)?)
 }
@@ -2469,9 +2461,123 @@ pub(super) fn load_codex_external_preview_by_id(session_id: &str) -> Option<Exte
 mod pi_sessions;
 use pi_sessions::load_external_pi_sessions;
 pub(super) use pi_sessions::load_pi_external_preview;
-#[cfg(test)]
-pub(super) use pi_sessions::load_pi_preview_from_path;
 fn load_external_opencode_sessions(scan_limit: usize) -> Vec<SessionInfo> {
+    // OpenCode 1.17+ stores sessions in SQLite; older installs use JSON files.
+    // Read both, preferring the database when a session id appears in both.
+    let mut sessions = load_opencode_db_sessions(scan_limit);
+    let seen: std::collections::HashSet<String> =
+        sessions.iter().map(|session| session.id.clone()).collect();
+    sessions.extend(
+        load_legacy_opencode_sessions(scan_limit)
+            .into_iter()
+            .filter(|session| !seen.contains(&session.id)),
+    );
+    sessions
+}
+
+fn load_opencode_db_sessions(scan_limit: usize) -> Vec<SessionInfo> {
+    let Some(db) = crate::opencode_db::existing_db_path() else {
+        return Vec::new();
+    };
+    match crate::opencode_db::list_sessions(&db, scan_limit) {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|row| opencode_db_session_info(&db, row, Vec::new()))
+            .collect(),
+        Err(err) => {
+            crate::logging::warn(&format!(
+                "Failed to read OpenCode sessions from {}: {err}",
+                db.display()
+            ));
+            Vec::new()
+        }
+    }
+}
+
+fn opencode_db_session_info(
+    db: &Path,
+    row: crate::opencode_db::OpenCodeDbSession,
+    preview: Vec<PreviewMessage>,
+) -> SessionInfo {
+    let session_id = row.id;
+    let short_name = format!(
+        "opencode {}",
+        jcode_core::util::truncate_str(&session_id, 8)
+    );
+    let title = row
+        .title
+        .as_deref()
+        .map(|s| truncate_title_text(s, 72))
+        .unwrap_or_else(|| {
+            format!(
+                "OpenCode session {}",
+                jcode_core::util::truncate_str(&session_id, 8)
+            )
+        });
+    let search_index = build_search_index(
+        &format!("opencode:{session_id}"),
+        &short_name,
+        &title,
+        row.directory.as_deref(),
+        None,
+        &preview,
+    );
+    let first_user_prompt = preview
+        .iter()
+        .find(|msg| msg.role == "user" && !msg.content.trim().is_empty())
+        .map(|msg| msg.content.clone());
+    let db_path = db.to_string_lossy().to_string();
+    SessionInfo {
+        todo_statuses: Vec::new(),
+        id: format!("opencode:{session_id}"),
+        parent_id: None,
+        short_name,
+        icon: "◌".to_string(),
+        title,
+        message_count: row.message_count,
+        user_message_count: 0,
+        assistant_message_count: 0,
+        created_at: row.created_at,
+        last_message_time: row.updated_at,
+        last_active_at: Some(row.updated_at),
+        working_dir: row.directory,
+        model: row.model_id,
+        provider_key: Some(row.provider_id.unwrap_or_else(|| "opencode".to_string())),
+        is_canary: false,
+        is_debug: false,
+        saved: false,
+        save_label: None,
+        status: SessionStatus::Closed,
+        needs_catchup: false,
+        estimated_tokens: 0,
+        first_user_prompt,
+        messages_preview: preview,
+        search_index,
+        server_name: None,
+        server_icon: None,
+        source: SessionSource::OpenCode,
+        resume_target: ResumeTarget::OpenCodeSession {
+            session_id,
+            session_path: db_path.clone(),
+        },
+        external_path: Some(db_path),
+    }
+}
+
+const OPENCODE_DB_PREVIEW_MESSAGES: usize = 40;
+
+fn load_opencode_db_preview(db: &Path, session_id: &str) -> Option<Vec<PreviewMessage>> {
+    let messages =
+        crate::opencode_db::load_messages(db, session_id, Some(OPENCODE_DB_PREVIEW_MESSAGES))
+            .ok()?;
+    let mut preview = Vec::new();
+    for msg in messages {
+        push_preview_message(&mut preview, &msg.role, msg.text);
+    }
+    Some(preview)
+}
+
+fn load_legacy_opencode_sessions(scan_limit: usize) -> Vec<SessionInfo> {
     let Ok(root) = crate::storage::user_home_path(".local/share/opencode/storage/session") else {
         return Vec::new();
     };
@@ -2489,11 +2595,29 @@ fn load_external_opencode_sessions(scan_limit: usize) -> Vec<SessionInfo> {
 }
 
 #[cfg(test)]
-pub(super) fn load_opencode_preview_from_path(path: &Path) -> Option<Vec<PreviewMessage>> {
-    load_opencode_external_preview(path).map(|preview| preview.messages)
+pub(super) fn load_opencode_preview_from_path(
+    path: &Path,
+    session_id: &str,
+) -> Option<Vec<PreviewMessage>> {
+    load_opencode_external_preview(path, session_id).map(|preview| preview.messages)
 }
 
-pub(super) fn load_opencode_external_preview(path: &Path) -> Option<ExternalPreview> {
+pub(super) fn load_opencode_external_preview(
+    path: &Path,
+    session_id: &str,
+) -> Option<ExternalPreview> {
+    if crate::opencode_db::is_db_path(path) {
+        let messages = load_opencode_db_preview(path, session_id)?;
+        let mut search = SourceBuckets::default();
+        for message in &messages {
+            search.push(
+                message_role_source(&message.role),
+                &message.content,
+                SEARCH_CONTENT_BUDGET_BYTES,
+            );
+        }
+        return Some(ExternalPreview { messages, search });
+    }
     let (session, search) = load_opencode_session_info(path).ok().flatten()?;
     Some(ExternalPreview {
         messages: session.messages_preview,
@@ -2766,11 +2890,6 @@ fn load_external_cursor_sessions(scan_limit: usize) -> Vec<SessionInfo> {
         .into_iter()
         .flatten()
         .collect()
-}
-
-#[cfg(test)]
-pub(super) fn load_cursor_preview_from_path(path: &Path) -> Option<Vec<PreviewMessage>> {
-    load_cursor_external_preview(path).map(|preview| preview.messages)
 }
 
 pub(super) fn load_cursor_external_preview(path: &Path) -> Option<ExternalPreview> {
@@ -3168,3 +3287,6 @@ pub(crate) fn load_external_cli_sessions_grouped(
 #[cfg(test)]
 #[path = "loading_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+use search_text::raw_value_search_excerpt;

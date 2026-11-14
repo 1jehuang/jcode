@@ -99,3 +99,99 @@ pub(super) fn handle_generated_image(
     app.status = ProcessingStatus::Streaming;
     true
 }
+
+pub(in super::super) fn handle_disconnect(
+    app: &mut App,
+    state: &mut RemoteRunState,
+    reason: Option<RemoteDisconnectReason>,
+) {
+    app.invalidate_rewind_ui();
+    app.close_ask_user_dialogs_on_disconnect();
+    // The daemon may have applied the switch, but the acknowledgement was
+    // lost. Never wait on an old connection's request ID or blindly resend.
+    if app.pending_automatic_failover_request_id.is_some() {
+        fail_pending_automatic_failover(app, "Connection lost before route confirmation");
+    }
+    app.revoke_cloud_environment();
+    let detail = if state.server_reload_in_progress {
+        "server reload in progress".to_string()
+    } else if let Some(reason) = reason.as_ref() {
+        format_disconnect_reason(reason)
+    } else {
+        "connection to server dropped".to_string()
+    };
+    crate::logging::warn(&format!(
+        "handle_disconnect: session={:?}, remote_session_id={:?}, reason={:?}, detail={}",
+        app.resume_session_id, app.remote_session_id, reason, detail
+    ));
+    // A disconnect can drop the final auth catalog completion event. Keep any
+    // queued prompt for reconnect, but release the transient model-setup gate so
+    // it cannot remain blocked forever waiting for an event that was lost.
+    app.finish_auth_catalog_refresh();
+    // The cancel answer cannot arrive on a dead connection. Ask again later.
+    app.soft_interrupt_recovery = None;
+    state.last_disconnect_reason = Some(detail.clone());
+
+    let scheduled_retry =
+        app.schedule_pending_remote_retry(&format!("⚡ Connection lost ({detail})."));
+    if !scheduled_retry {
+        // A queued follow-up that was already dispatched (dequeued into an
+        // in-flight send) has no auto-retry path. Dropping it here would lose
+        // the user's queued message when a reload/disconnect races the
+        // turn-end dispatch (issue #391); put it back on the queue instead so
+        // it is re-sent once the turn is proven idle after reconnect.
+        if !recover_undelivered_queued_continuation(app, "disconnect") {
+            app.clear_pending_remote_retry();
+        }
+    }
+    let recovered_local = recover_local_interleave_to_queue(app, "disconnect");
+    app.current_message_id = None;
+    app.last_stream_activity = None;
+    app.remote_resume_activity = None;
+    let ops = app.stream_buffer.flush();
+    app.apply_stream_ops(ops);
+    if !app.streaming.streaming_text.is_empty() {
+        let content = app.take_streaming_text();
+        let content = app.collapse_reasoning_for_commit(content);
+        if !content.trim().is_empty() {
+            app.push_display_message(DisplayMessage {
+                role: "assistant".to_string(),
+                content,
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+        }
+    }
+    app.clear_streaming_render_state();
+    app.streaming_tool_calls.clear();
+    app.batch_progress = None;
+    app.thought_line_inserted = false;
+    app.thinking_prefix_emitted = false;
+    app.thinking_buffer.clear();
+    if recovered_local || !app.pending_soft_interrupts.is_empty() {
+        crate::logging::info(&format!(
+            "Preserving {} pending soft interrupt(s) across disconnect",
+            app.pending_soft_interrupts.len()
+        ));
+    }
+    app.reset_streaming_tps();
+    app.is_processing = false;
+    app.status = ProcessingStatus::Idle;
+    app.stream_message_ended = false;
+    app.clear_visible_turn_started();
+    state.disconnect_start = Some(Instant::now());
+    state.reconnect_attempts = state.reconnect_attempts.max(1);
+    state.reload_recovery_attempted = false;
+    app.push_display_message(DisplayMessage {
+        role: "system".to_string(),
+        content: reconnect_status_message(app, state, &detail),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: Some(CONNECTION_MESSAGE_TITLE.to_string()),
+        tool_data: None,
+    });
+    state.disconnect_msg_idx = Some(app.display_messages.len() - 1);
+    state.reconnect_attempts = 1;
+}

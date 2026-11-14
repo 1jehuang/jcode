@@ -177,16 +177,13 @@ pub(super) fn normalize_todo_snapshot(value: Value) -> Result<String> {
         serde_json::from_value::<crate::todo::TodoItem>(todo.clone())
             .context("invalid todo item")?;
     }
-    payload
+    let object = payload
         .as_object_mut()
-        .context("todo snapshot must be an object")?
+        .context("todo snapshot must be an object")?;
+    object
         .entry("plan")
         .or_insert_with(|| json!(crate::todo::TodoPlan::default()));
-    payload
-        .as_object_mut()
-        .unwrap()
-        .entry("goals")
-        .or_insert_with(|| json!([]));
+    object.entry("goals").or_insert_with(|| json!([]));
     let _: crate::todo::TodoPlan =
         serde_json::from_value(payload["plan"].clone()).context("invalid todo plan")?;
     let _: Vec<crate::todo::TodoGoal> =

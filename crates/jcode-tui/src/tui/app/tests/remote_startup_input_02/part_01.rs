@@ -113,6 +113,7 @@ fn test_model_picker_bedrock_selection_prefixes_model() {
     app.is_remote = true;
     app.remote_available_entries = vec!["amazon.nova-pro-v1:0".to_string()];
     app.remote_model_options = vec![crate::provider::ModelRoute {
+        catalog_metadata: None,
         model: "amazon.nova-pro-v1:0".to_string(),
         provider: "AWS Bedrock".to_string(),
         api_method: "bedrock".to_string(),
@@ -157,6 +158,7 @@ fn test_model_picker_bedrock_arn_selection_prefixes_model() {
     let model = "arn:aws:bedrock:us-east-2:302154194530:inference-profile/us.deepseek.r1-v1:0";
     app.remote_available_entries = vec![model.to_string()];
     app.remote_model_options = vec![crate::provider::ModelRoute {
+        catalog_metadata: None,
         model: model.to_string(),
         provider: "AWS Bedrock".to_string(),
         api_method: "bedrock".to_string(),
@@ -229,6 +231,7 @@ fn test_remote_placeholder_only_openai_routes_are_replaced_with_real_routes() {
         app.remote_provider_name = Some("OpenAI".to_string());
         app.remote_available_entries = vec![model.to_string()];
         app.remote_model_options = vec![crate::provider::ModelRoute {
+            catalog_metadata: None,
             model: model.to_string(),
             provider: "OpenAI".to_string(),
             api_method: "remote-catalog".to_string(),
@@ -268,6 +271,7 @@ fn test_remote_hydrated_catalog_restores_missing_direct_bedrock_route() {
         app.remote_provider_name = Some("OpenAI".to_string());
         app.remote_available_entries = vec![model.to_string()];
         app.remote_model_options = vec![crate::provider::ModelRoute {
+            catalog_metadata: None,
             model: model.to_string(),
             provider: "OpenAI".to_string(),
             api_method: "remote-catalog".to_string(),
@@ -391,6 +395,7 @@ fn test_remote_cached_oauth_only_claude_route_gains_api_key_route_in_picker() {
         app.is_remote = true;
         app.remote_available_entries = vec!["claude-fable-5".to_string()];
         app.remote_model_options = vec![crate::provider::ModelRoute {
+            catalog_metadata: None,
             model: "claude-fable-5".to_string(),
             provider: "Anthropic".to_string(),
             api_method: "claude-oauth".to_string(),
@@ -442,6 +447,7 @@ fn test_remote_jcode_subscription_catalog_is_not_augmented_with_local_auth_route
             "gpt-5.6-sol".to_string(),
         ];
         app.remote_model_options = vec![crate::provider::ModelRoute {
+            catalog_metadata: None,
             model: "claude-opus-4-8".to_string(),
             provider: "Anthropic".to_string(),
             api_method: "claude-api".to_string(),
@@ -516,6 +522,7 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
         ];
         app.remote_model_options = vec![
             crate::provider::ModelRoute {
+catalog_metadata: Default::default(),
                 model: "claude-fable-5".to_string(),
                 provider: "Anthropic".to_string(),
                 api_method: "claude-oauth".to_string(),
@@ -525,6 +532,7 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+catalog_metadata: Default::default(),
                 model: "claude-opus-4-8".to_string(),
                 provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
                 api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
@@ -534,6 +542,7 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+catalog_metadata: Default::default(),
                 model: "gpt-5.5".to_string(),
                 provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
                 api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
@@ -543,6 +552,7 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+catalog_metadata: Default::default(),
                 model: "gpt-5.6-sol".to_string(),
                 provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
                 api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
@@ -552,6 +562,7 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+catalog_metadata: Default::default(),
                 model: "deepseek/deepseek-v4-pro".to_string(),
                 provider: "auto".to_string(),
                 api_method: "openrouter".to_string(),
@@ -624,6 +635,7 @@ fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
         ];
         app.remote_model_options = vec![
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "claude-opus-4-8".to_string(),
                 provider: "Anthropic".to_string(),
                 api_method: "claude-api".to_string(),
@@ -633,6 +645,7 @@ fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "gpt-5.5".to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: "openai-oauth".to_string(),
@@ -642,6 +655,7 @@ fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "gpt-5.6-sol".to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: "openai-oauth".to_string(),
@@ -651,6 +665,7 @@ fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "deepseek/deepseek-v4-pro".to_string(),
                 provider: "auto".to_string(),
                 api_method: "openrouter".to_string(),
@@ -734,6 +749,7 @@ fn test_remote_non_jcode_catalog_repairs_poisoned_all_jcode_routes() {
             .remote_available_entries
             .iter()
             .map(|model| crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: model.clone(),
                 provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
                 api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
@@ -792,6 +808,7 @@ fn test_model_picker_ctrl_b_bedrock_selection_saves_bedrock_default() {
         app.is_remote = true;
         app.remote_available_entries = vec!["amazon.nova-pro-v1:0".to_string()];
         app.remote_model_options = vec![crate::provider::ModelRoute {
+            catalog_metadata: None,
             model: "amazon.nova-pro-v1:0".to_string(),
             provider: "AWS Bedrock".to_string(),
             api_method: "bedrock".to_string(),
@@ -2062,16 +2079,15 @@ fn test_interleave_submission_preserves_pending_images() {
     let mut app = create_test_app();
     app.is_processing = true;
     app.queue_mode = false;
-    app.input = "[image 1] describe this".to_string();
-    app.cursor_pos = app.input.len();
-    let images = vec![("image/png".to_string(), "ZmFrZQ==".to_string())];
-    app.pending_images = images.clone();
+    let png = paste_selection_test_png(&mut app, 84);
+    input::insert_input_text(&mut app, " describe this");
+    let images = vec![("image/png".to_string(), png)];
 
     assert!(input::handle_enter(&mut app));
 
     assert_eq!(
         app.interleave_message.as_deref(),
-        Some("[image 1] describe this")
+        Some(" describe this")
     );
     assert_eq!(app.interleave_images, images);
     assert!(app.pending_images.is_empty());
@@ -2116,8 +2132,8 @@ fn test_handle_input_shell_completed_renders_markdown_blocks() {
     );
 }
 
-/// Regression for issue #427: selecting an effort-variant model row (e.g.
-/// "gpt-5.5 (high)") in the remote model picker must stage the chosen effort
+/// Regression for issue #427: choosing a model and a reasoning level (e.g.
+/// gpt-5.5 at high) in the remote model picker must stage the chosen effort
 /// alongside the pending model switch. Previously only the model spec was
 /// staged, so the server kept its configured default effort (low) and the
 /// session silently ran gpt-5.5 at low effort.
@@ -2136,21 +2152,31 @@ fn test_model_picker_effort_variant_selection_stages_effort_in_remote_mode() {
     let entry_idx = picker
         .entries
         .iter()
-        .position(|m| m.name == "gpt-5.5 (high)")
-        .expect("gpt-5.5 (high) should be in picker");
-    assert_eq!(
-        picker.entries[entry_idx].effort.as_deref(),
-        Some("high"),
-        "effort variant rows must carry their effort"
+        .position(|m| m.name == "gpt-5.5")
+        .expect("gpt-5.5 should be in picker");
+    assert!(
+        picker.entries[entry_idx].effort.is_none(),
+        "model rows carry no effort; it is picked in the level step"
     );
 
     let filtered_pos = picker
         .filtered
         .iter()
         .position(|&i| i == entry_idx)
-        .expect("gpt-5.5 (high) should be in filtered list");
+        .expect("gpt-5.5 should be in filtered list");
     app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
 
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+    {
+        let picker = app.inline_interactive_state.as_mut().expect("level step");
+        assert!(picker.effort_step.is_some(), "Enter opens the level step");
+        picker.selected = picker
+            .entries
+            .iter()
+            .position(|entry| entry.effort.as_deref() == Some("high"))
+            .expect("high level row");
+    }
     app.handle_key(KeyCode::Enter, KeyModifiers::empty())
         .unwrap();
 
@@ -2165,7 +2191,7 @@ fn test_model_picker_effort_variant_selection_stages_effort_in_remote_mode() {
     assert_eq!(
         app.pending_reasoning_effort.as_deref(),
         Some("high"),
-        "the picked effort variant must be staged so it reaches the server (issue #427)"
+        "the picked level must be staged so it reaches the server (issue #427)"
     );
 }
 
@@ -2174,6 +2200,7 @@ fn test_model_picker_effort_variants_follow_each_route_vocabulary() {
     let mut app = create_test_app();
     configure_test_remote_models_with_openai_recommendations(&mut app);
     app.remote_model_options.push(crate::provider::ModelRoute {
+        catalog_metadata: None,
         model: "gpt-5.5".to_string(),
         provider: "OpenRouter".to_string(),
         api_method: "openrouter".to_string(),
@@ -2184,34 +2211,55 @@ fn test_model_picker_effort_variants_follow_each_route_vocabulary() {
     });
 
     app.open_model_picker();
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("model picker should be open");
-    let has_route_effort = |api_method: &str, effort: &str| {
-        picker.entries.iter().any(|entry| {
-            entry.name.starts_with("gpt-5.5 (")
-                && entry.effort.as_deref() == Some(effort)
-                && entry
-                    .options
-                    .first()
-                    .is_some_and(|route| route.api_method == api_method)
-        })
+    // The level step lists the ladder of the picked route only.
+    let levels_for = |app: &mut App, api_method: &str| -> Vec<String> {
+        {
+            let picker = app.inline_interactive_state.as_mut().expect("picker open");
+            picker.selected = picker
+                .filtered
+                .iter()
+                .position(|&i| {
+                    picker.entries[i].name == "gpt-5.5"
+                        && picker.entries[i]
+                            .active_option()
+                            .is_some_and(|route| route.api_method == api_method)
+                })
+                .expect("gpt-5.5 row for route");
+            picker.column = picker.max_navigable_column();
+        }
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
+        let levels = app
+            .inline_interactive_state
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .filter_map(|entry| entry.effort.clone())
+            .collect();
+        app.handle_key(KeyCode::Esc, KeyModifiers::empty()).unwrap();
+        levels
     };
 
-    assert!(has_route_effort("openai-oauth", "max"));
-    assert!(has_route_effort("openai-oauth", "minimal"));
-    assert!(has_route_effort("openrouter", "xhigh"));
-    assert!(has_route_effort("openrouter", "minimal"));
+    let native = levels_for(&mut app, "openai-oauth");
+    let openrouter = levels_for(&mut app, "openrouter");
+    assert!(native.iter().any(|e| e == "max"));
+    assert!(native.iter().any(|e| e == "minimal"));
+    assert!(openrouter.iter().any(|e| e == "xhigh"));
+    assert!(openrouter.iter().any(|e| e == "minimal"));
     assert!(
-        !has_route_effort("openrouter", "max"),
+        !openrouter.iter().any(|e| e == "max"),
         "OpenRouter must not advertise max as a distinct rung because it aliases xhigh"
+    );
+    assert!(
+        !native.iter().chain(&openrouter).any(|e| e.starts_with("swarm")),
+        "swarm modes are not reasoning levels"
     );
 }
 
-/// Plain model rows (no effort suffix) must not stage a reasoning effort.
-/// Routes whose runtime cannot apply a reasoning effort (e.g. Copilot) get
-/// plain rows even for models that have an effort ladder elsewhere.
+/// Routes whose runtime cannot apply a reasoning effort (e.g. Copilot) switch
+/// at once without a level step and must not stage a reasoning effort, even
+/// for models that have an effort ladder on other routes.
 #[test]
 fn test_model_picker_plain_selection_stages_no_effort_in_remote_mode() {
     let mut app = create_test_app();
@@ -2219,6 +2267,7 @@ fn test_model_picker_plain_selection_stages_no_effort_in_remote_mode() {
     // A Copilot-backed route cannot apply per-request reasoning effort, so it
     // must render as a plain row (issue #458 route gating).
     app.remote_model_options.push(crate::provider::ModelRoute {
+        catalog_metadata: None,
         model: "claude-opus-4-8".to_string(),
         provider: "Copilot".to_string(),
         api_method: "copilot".to_string(),
@@ -2238,8 +2287,12 @@ fn test_model_picker_plain_selection_stages_no_effort_in_remote_mode() {
     let entry_idx = picker
         .entries
         .iter()
-        .position(|m| m.name == "claude-opus-4-8" && m.effort.is_none())
-        .expect("claude-opus-4-8 should be in picker without an effort variant");
+        .position(|m| {
+            m.name == "claude-opus-4-8"
+                && m.active_option()
+                    .is_some_and(|route| route.api_method == "copilot")
+        })
+        .expect("claude-opus-4-8 via Copilot should be in picker");
 
     let filtered_pos = picker
         .filtered
@@ -2274,6 +2327,7 @@ fn test_model_switch_notice_omits_placeholder_route_details() {
         app.remote_provider_model = Some("other-model".to_string());
         app.remote_available_entries = vec![model.to_string()];
         app.remote_model_options = vec![crate::provider::ModelRoute {
+            catalog_metadata: None,
             model: model.to_string(),
             provider: "Some Server".to_string(),
             api_method: "remote-catalog".to_string(),
@@ -2332,5 +2386,6 @@ fn test_model_switch_notice_omits_placeholder_route_details() {
         assert!(!notice.contains(" via "), "got {notice}");
     });
 }
+
 
 include!("catalog_refresh.rs");

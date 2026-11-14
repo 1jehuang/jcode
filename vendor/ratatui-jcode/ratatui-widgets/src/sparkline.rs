@@ -391,7 +391,7 @@ impl Sparkline<'_> {
                     } else {
                         (*value * u64::from(spark_area.height) * 8)
                             .checked_div(max_height)
-                            .unwrap_or_default()
+                            .unwrap_or(0)
                     };
                     (height, None, *style)
                 }
@@ -561,9 +561,11 @@ mod tests {
     #[test]
     fn it_does_not_panic_if_max_is_set_to_zero() {
         // see https://github.com/rust-lang/rust-clippy/issues/13191
-        let widget = Sparkline::default().data([0, 1, 2]).max(0);
-        let buffer = render(widget, 6);
-        assert_eq!(buffer, Buffer::with_lines(["   xxx"]));
+        for data in [[0, 1, 2], [u64::MAX, 1, 0]] {
+            let widget = Sparkline::default().data(data).max(0);
+            let buffer = render(widget, 6);
+            assert_eq!(buffer, Buffer::with_lines(["   xxx"]));
+        }
     }
 
     #[test]

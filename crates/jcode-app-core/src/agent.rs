@@ -24,7 +24,7 @@ mod turn_execution;
 mod turn_loops;
 mod turn_ownership;
 pub(crate) use turn_ownership::{
-    RuntimeMutationLease, TurnLease, TurnObserver, TurnPublicationPin,
+    RuntimeMutationLease, TurnLease, TurnObserver, TurnPublicationPin, TurnReleaseSignal,
 };
 mod turn_streaming_mpsc;
 mod utils;
@@ -258,8 +258,6 @@ pub struct TokenUsage {
 #[derive(Debug, Clone)]
 struct RewindUndoSnapshot {
     messages: Vec<StoredMessage>,
-    provider_session_id: Option<String>,
-    session_provider_session_id: Option<String>,
     visible_message_count: usize,
 }
 
@@ -278,12 +276,26 @@ pub struct Agent {
     mcp_tools_mode: crate::config::McpToolsMode,
     /// Provider-specific session ID for conversation resume (e.g., Claude Code CLI session)
     provider_session_id: Option<String>,
+    /// A failed rewind reset must be retried before any provider completion.
+    provider_conversation_reset_pending: bool,
+    /// Instruction-only changes retire upstream prompt snapshots without
+    /// discarding the active compacted conversation. History rewinds win.
+    preserve_compaction_on_provider_reset: bool,
     /// Last upstream provider (OpenRouter) observed for this session
     last_upstream_provider: Option<String>,
     /// Last observed transport/connection type for this session
     last_connection_type: Option<String>,
     /// Last provider-supplied human-readable transport detail for this session
     last_status_detail: Option<String>,
+    /// Per-provider account pin the provider reported after the last pin
+    /// change or post-stream sync. Only a change from this baseline is a move
+    /// made by the provider itself (failover).
+    observed_account_pins: std::collections::BTreeMap<
+        crate::provider::AccountProviderKind,
+        Option<crate::provider::AccountPin>,
+    >,
+    /// Account pins restore dropped, with the reason to show the user.
+    pending_account_notices: Vec<(crate::provider::AccountProviderKind, String)>,
     /// Pending swarm alerts to inject into the next turn
     pending_alerts: Vec<String>,
     /// Tool call ids observed in the current session transcript.
@@ -334,6 +346,10 @@ pub struct Agent {
     announced_mcp_tools: HashSet<String>,
     /// Transcript index already scanned for MCP tools described there.
     announced_mcp_scan_index: usize,
+    /// `server:status` problems (failed, needs approval) already told to the model.
+    announced_mcp_problems: HashSet<String>,
+    /// When MCP server problems were last checked; the check is throttled.
+    mcp_problems_checked_at: Option<Instant>,
     /// AGENTS.md is session bootstrap input. Keep the captured text stable so
     /// tool writes do not mutate the provider's cacheable prefix mid-session.
     agents_md_snapshot: (Option<String>, crate::prompt::ContextInfo),
@@ -352,7 +368,9 @@ pub struct Agent {
     /// One-step undo snapshot captured before the most recent rewind.
     rewind_undo_snapshot: Option<RewindUndoSnapshot>,
     /// Channel for tools to request stdin input from the user
-    stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::tool::StdinInputRequest>>,
+    stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::tool::ClientInputRequest>>,
+    /// Whether `ask_user` is registered for an attached client that renders it.
+    ask_user_enabled: bool,
     /// Canonical reducer-backed view of runtime provider/model selection.
     provider_runtime_state: ProviderRuntimeState,
     /// When true, this session is an inline swarm worker: stream a throttled
@@ -389,6 +407,13 @@ impl Agent {
         self.turn_ownership.claim()
     }
 
+    /// A signal that resolves once the current server turn releases its lease.
+    /// Grab it under the agent lock, then await it without the lock held, so a
+    /// just-cancelled resume can drop its lease before a replacement claims.
+    pub(crate) fn turn_release_signal(&self) -> TurnReleaseSignal {
+        self.turn_ownership.release_signal()
+    }
+
     pub(crate) fn validate_server_turn(&self, lease: &TurnLease) -> Result<()> {
         self.turn_ownership.validate(lease)
     }
@@ -403,8 +428,8 @@ impl Agent {
         self.refresh_prompt_skills_snapshot();
     }
 
-    /// Re-capture the frozen skills list. Only called at session boundaries
-    /// (new/restored session, working directory change), never mid-turn.
+    /// Re-capture the frozen skills list at session boundaries or before a new
+    /// prompt after plugin registry changes, never during model/tool execution.
     fn refresh_prompt_skills_snapshot(&mut self) {
         self.prompt_skills_snapshot = self.current_prompt_skill_infos();
         self.announced_skills = self
@@ -416,14 +441,7 @@ impl Agent {
     }
 
     fn current_prompt_skill_infos(&self) -> Vec<crate::prompt::SkillInfo> {
-        self.current_skills_snapshot()
-            .list()
-            .iter()
-            .map(|skill| crate::prompt::SkillInfo {
-                name: skill.name.clone(),
-                description: skill.description.clone(),
-            })
-            .collect()
+        crate::skill_overrides::model_skill_infos(&self.current_skills_snapshot())
     }
 
     fn should_track_client_cache(&self) -> bool {
@@ -439,10 +457,16 @@ impl Agent {
     fn build_base(
         provider: Arc<dyn Provider>,
         registry: Registry,
-        session: Session,
+        mut session: Session,
         allowed_tools: Option<HashSet<String>>,
         disabled_tools: HashSet<String>,
     ) -> Self {
+        // A selected profile may come from an older additive-prompt release.
+        // Never resume an upstream session that may still contain those files.
+        let profile_reset_pending = session.agent_profile.is_some();
+        if profile_reset_pending {
+            session.provider_session_id = None;
+        }
         let t = Instant::now();
         provider.set_session_id(&session.id);
         let skills = SkillRegistry::shared_snapshot();
@@ -470,9 +494,13 @@ impl Agent {
             _tool_policy_registration: tool_policy_registration,
             mcp_tools_mode: tool_config.mcp_tools,
             provider_session_id: None,
+            provider_conversation_reset_pending: profile_reset_pending,
+            preserve_compaction_on_provider_reset: profile_reset_pending,
             last_upstream_provider: None,
             last_connection_type: None,
             last_status_detail: None,
+            observed_account_pins: std::collections::BTreeMap::new(),
+            pending_account_notices: Vec::new(),
             pending_alerts: Vec::new(),
             tool_call_ids: HashSet::new(),
             tool_result_ids: HashSet::new(),
@@ -489,6 +517,8 @@ impl Agent {
             locked_tools_native_deferred: false,
             announced_mcp_tools: HashSet::new(),
             announced_mcp_scan_index: 0,
+            announced_mcp_problems: HashSet::new(),
+            mcp_problems_checked_at: None,
             agents_md_snapshot,
             prompt_skills_snapshot: Vec::new(),
             announced_skills: HashSet::new(),
@@ -496,6 +526,7 @@ impl Agent {
             memory_enabled: crate::config::config().features.memory,
             rewind_undo_snapshot: None,
             stdin_request_tx: None,
+            ask_user_enabled: false,
             provider_runtime_state: ProviderRuntimeState::observed(initial_provider_model),
             inline_output_tap: false,
             inline_tail: inline_tail::InlineTailBuffer::default(),
@@ -676,6 +707,7 @@ impl Agent {
         }
         agent.restore_session_model_from_session();
         agent.restore_reasoning_effort_from_session();
+        agent.restore_account_pins_from_session();
         agent.session.ensure_initial_session_context_message();
         agent.sync_memory_dedup_state_from_session();
         agent.seed_compaction_from_session();
@@ -708,7 +740,7 @@ impl Agent {
         };
         manager.reset();
         manager.set_context_cap_override(self.session.context_cap);
-        let budget = self.provider.context_window();
+        let budget = self.provider.input_token_limit();
         manager.set_budget(budget);
         if let Some(state) = self.session.compaction.as_ref() {
             manager.restore_persisted_stored_state_with(state, &self.session.messages);
@@ -800,26 +832,6 @@ impl Agent {
                 context, self.session.id, err
             ));
         }
-    }
-
-    fn reset_runtime_state_for_session_change(&mut self) {
-        self.active_skill = None;
-        self.last_upstream_provider = None;
-        self.last_connection_type = None;
-        self.last_status_detail = None;
-        self.pending_alerts.clear();
-        self.reset_tool_output_tracking();
-        if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
-            queue.clear();
-        }
-        self.background_tool_signal.reset();
-        self.graceful_shutdown.reset();
-        self.cache_tracker.reset();
-        self.kv_cache_monitor.reset();
-        self.last_usage = TokenUsage::default();
-        self.locked_tools = None;
-        self.mcp_late_register_resolved = false;
-        self.rewind_undo_snapshot = None;
     }
 
     /// Synchronize the remote client's selected skill, accepting only names
@@ -920,7 +932,7 @@ impl Agent {
         self.session.compaction = Some(state.clone());
         let mut post_tokens = None;
         if let Ok(mut manager) = compaction.try_write() {
-            manager.set_budget(self.provider.context_window());
+            manager.set_budget(self.provider.input_token_limit());
             manager.restore_persisted_stored_state_with(&state, &self.session.messages);
             post_tokens =
                 Some(manager.token_estimate_with(self.session.provider_messages()) as u64);
@@ -949,6 +961,7 @@ impl Agent {
             let compaction = self.registry.compaction();
             match compaction.try_write() {
                 Ok(mut manager) => {
+                    manager.set_budget(self.provider.input_token_limit());
                     let discarded_oversized_native =
                         manager.discard_oversized_openai_native_compaction();
                     let messages = {
@@ -1259,7 +1272,7 @@ impl Agent {
     /// Fire a session lifecycle observer hook (`session_start`/`session_end`).
     /// No-op when the hook is not configured.
     pub(crate) fn fire_session_lifecycle_hook(&self, event_name: &'static str, source: &str) {
-        if !crate::hooks::hook_configured(event_name) {
+        if !crate::hooks::hook_configured_for_dir(event_name, self.working_dir()) {
             return;
         }
         let mut event = crate::hooks::HookEvent::new(event_name)

@@ -276,6 +276,7 @@ fn http_retry_decision_with_policy(
                     Err(error) => panic!("local HTTP accept failed: {error}"),
                 }
             };
+            socket.set_nonblocking(false).unwrap();
             socket
                 .set_read_timeout(Some(std::time::Duration::from_secs(3)))
                 .unwrap();
@@ -304,7 +305,7 @@ fn http_retry_decision_with_policy(
                                 "access-second"
                             }
                         } else {
-                            "test-token"
+                            "access-first"
                         };
                         assert!(
                             headers
@@ -412,9 +413,30 @@ fn http_retry_decision_with_policy(
                 } else {
                     router.complete(&[], &[], "Test", None).await
                 };
-                let initial_error = initial_result
-                    .err()
-                    .expect("first account returns a pre-switch prompt");
+                let initial_error = match initial_result {
+                    // The per-window account failover moves this window to
+                    // the next pool login before any output, without a
+                    // prompt and without touching the global preference.
+                    Ok(mut stream) => {
+                        while let Some(event) = stream.next().await {
+                            let event = event.expect("moved window streams the alternate");
+                            if matches!(event, StreamEvent::MessageEnd { .. }) {
+                                assert_eq!(
+                                    jcode_base::auth::claude::active_account_label().as_ref(),
+                                    Some(&account_labels[0]),
+                                    "a window move must not mutate global account preference"
+                                );
+                                assert_eq!(
+                                    requests.load(Ordering::SeqCst),
+                                    usize::from(!case.cached_first_rejection) + 1
+                                );
+                                return (RetryDecision::Complete, false);
+                            }
+                        }
+                        panic!("moved window stream must end with MessageEnd");
+                    }
+                    Err(error) => error,
+                };
                 let initial_prompt =
                     jcode_provider_core::parse_failover_prompt_message(&initial_error.to_string())
                         .expect("exact account fallback prompt");
@@ -563,7 +585,7 @@ fn http_retry_decision_with_policy(
             let (tx, mut rx) = mpsc::channel(64);
             let task = tokio::spawn(run_stream_with_retries(
                 Client::builder().no_proxy().build().unwrap(),
-                "test-token".into(),
+                "access-first".into(),
                 true,
                 ApiRequest {
                     model: "claude-sonnet-4-6".into(),
@@ -580,7 +602,11 @@ fn http_retry_decision_with_policy(
                 },
                 tx,
                 Arc::new(RwLock::new(None)),
-                Some(account_labels[0].clone()),
+                {
+                    let pin = AccountPinSlot::default();
+                    pin.set(Some(AccountPin::new(account_labels[0].clone(), None)));
+                    pin
+                },
                 "claude-sonnet-4-6".into(),
                 "test-session".into(),
                 Arc::new(std::sync::RwLock::new("claude-sonnet-4-6".into())),
@@ -737,39 +763,6 @@ fn oauth_account_failover_router_recovers_cached_refresh_rejection() {
         assert_eq!(requests, 1, "only the healthy alternate may reach HTTP");
         assert!(!rolled_back);
     }
-}
-
-#[test]
-fn oauth_account_failover_router_reports_exhaustion_after_distinct_tokens_each_receive_429() {
-    for split in [false, true] {
-        let (decision, requests, rolled_back) = http_retry_decision(
-            true,
-            true,
-            &rate_limit_http_response(),
-            Some(RouterCase {
-                split,
-                exhaust_alternate: true,
-                cached_first_rejection: false,
-            }),
-            false,
-        );
-        assert!(matches!(decision, RetryDecision::Yield(_)));
-        assert_eq!(
-            requests, 2,
-            "each distinct OAuth token must be attempted exactly once"
-        );
-        assert!(!rolled_back);
-    }
-}
-
-#[test]
-fn oauth_account_failover_yields_http_429_when_alternate_is_cooling_down() {
-    let (decision, requests, _) =
-        http_retry_decision(true, true, &rate_limit_http_response(), None, true);
-    assert!(
-        matches!(decision, RetryDecision::Yield(ref error) if error.contains("429 Too Many Requests"))
-    );
-    assert_eq!(requests, 1);
 }
 
 #[test]

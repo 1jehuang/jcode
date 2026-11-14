@@ -1,4 +1,12 @@
 #![cfg_attr(test, allow(clippy::clone_on_copy))]
+#[path = "tests/agent_profile_commands.rs"]
+mod agent_profile_commands;
+#[path = "tests/plugin_commands.rs"]
+mod plugin_commands;
+#[path = "tests/rewind_checkpoint.rs"]
+mod rewind_checkpoint;
+#[path = "tests/rewind_recovery.rs"]
+mod rewind_recovery;
 mod tool_duration;
 include!("tests/provider_env.rs");
 include!("tests/cache_diagnostics.rs");
@@ -36,8 +44,13 @@ include!("tests/native_citations.rs");
 include!("tests/remote_events_reload_05.rs");
 include!("tests/swarm_plan_no_inline_graph.rs");
 include!("tests/remote_model_picker_hotkeys.rs");
+include!("tests/model_browser.rs");
+include!("tests/model_effort_step.rs");
+include!("tests/chatgpt_web_efforts.rs");
 include!("tests/scroll_copy_01/part_01.rs");
 include!("tests/scroll_copy_01/part_02.rs");
+#[path = "tests/attachment_redirect.rs"]
+mod attachment_redirect;
 include!("tests/scroll_copy_02/part_01.rs");
 include!("tests/scroll_copy_02/part_02.rs");
 include!("tests/scroll_copy_03.rs");
@@ -46,6 +59,8 @@ include!("tests/issue_1642_panel_dismiss.rs");
 include!("tests/resize_anchor.rs");
 include!("tests/recent_history.rs");
 include!("tests/input_copy_selection.rs");
+include!("tests/input_text_selection.rs");
+include!("tests/input_image_selection.rs");
 include!("tests/onboarding_flow.rs");
 include!("tests/onboarding_golden.rs");
 include!("tests/onboarding_eval.rs");
@@ -55,6 +70,8 @@ include!("tests/smoothness_benchmark.rs");
 include!("tests/long_transcript_scroll_perf.rs");
 include!("tests/hotkey_feedback_e2e.rs");
 include!("tests/todo_card.rs");
+include!("tests/long_session_todo_mouse.rs");
+include!("tests/jump_to_bottom.rs");
 include!("tests/background_todo_dependencies.rs");
 include!("tests/todo_completion.rs");
 include!("tests/final_response_followup.rs");
@@ -64,7 +81,6 @@ include!("tests/oauth_login_progress.rs");
 include!("tests/issue_544_paste_enter.rs");
 include!("tests/keybinding_hot_reload.rs");
 include!("tests/latex_command.rs");
-include!("tests/key_release_redraw.rs");
 include!("tests/terminal_setup_command.rs");
 include!("tests/issue_497_copy_ctrl_c.rs");
 include!("tests/issue_699_ctrl_d_delete.rs");
@@ -79,8 +95,13 @@ include!("tests/skill_invocation_multi_word.rs");
 include!("tests/remote_header_hint_facts.rs");
 include!("tests/slash_command_boundaries.rs");
 include!("tests/prompt_history_cross_session.rs");
+include!("tests/prompt_history_lifecycle.rs");
 include!("tests/ssh_remote.rs");
 include!("tests/skill_startup.rs");
+include!("tests/resume_search_first.rs");
+include!("tests/usage_limit_resume.rs");
+include!("tests/credentials_changed_resend.rs");
+include!("tests/window_accounts_local.rs");
 #[test]
 fn kv_cache_signature_prefix_match_allows_appended_messages() {
     let baseline_messages = vec![
@@ -1045,7 +1066,10 @@ fn version_command_shows_remote_server_identity_and_update_status() {
 fn skills_command_lists_loaded_and_endorsed_skills() {
     let mut app = create_test_app();
 
-    assert!(super::state_ui::handle_info_command(&mut app, "/skills"));
+    assert!(super::state_ui::handle_info_command(
+        &mut app,
+        "/skills list"
+    ));
     let content = app.display_messages().last().unwrap().content.clone();
 
     assert!(content.contains("Loaded skills"), "{content}");
@@ -1092,7 +1116,10 @@ fn skills_command_marks_active_skill_in_remote_mode() {
     app.remote_skills = vec!["optimization".to_string(), "firefox-browser".to_string()];
     app.active_skill = Some("optimization".to_string());
 
-    assert!(super::state_ui::handle_info_command(&mut app, "/skills"));
+    assert!(super::state_ui::handle_info_command(
+        &mut app,
+        "/skills list"
+    ));
     let content = app.display_messages().last().unwrap().content.clone();
 
     assert!(content.contains("- /optimization (active)"), "{content}");
@@ -1101,6 +1128,104 @@ fn skills_command_marks_active_skill_in_remote_mode() {
     assert!(
         content.contains("/firefox-browser [installed]"),
         "{content}"
+    );
+}
+
+#[test]
+fn skills_command_opens_dialog_with_project_skill() {
+    let mut app = create_test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let skill_dir = temp
+        .path()
+        .join(".jcode")
+        .join("skills")
+        .join("dialog-skill");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: dialog-skill\ndescription: Shown in the dialog\n---\nBody\n",
+    )
+    .expect("write SKILL.md");
+    app.session.working_dir = Some(temp.path().to_string_lossy().to_string());
+
+    assert!(super::state_ui::handle_info_command(&mut app, "/skills"));
+    let dialog = app.dialog.as_ref().expect("skills dialog opens");
+    assert!(!dialog.is_mcp());
+    let row = dialog
+        .item_summaries()
+        .into_iter()
+        .find(|row| row.starts_with("dialog-skill"))
+        .expect("project skill listed");
+    assert!(row.contains("project"), "{row}");
+
+    // Esc saves nothing and, like Claude Code, says so.
+    let messages = app.display_messages().len();
+    app.handle_dialog_key_offline(KeyCode::Esc, KeyModifiers::empty());
+    assert!(app.dialog.is_none());
+    assert_eq!(app.display_messages().len(), messages + 1);
+    assert_eq!(
+        app.display_messages().last().map(|m| m.content.as_str()),
+        Some("No changes")
+    );
+}
+
+#[test]
+fn remote_mcp_command_opens_dialog_and_applies_daemon_reply() {
+    use crate::protocol::ServerEvent;
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    app.is_remote = true;
+    app.input = "/mcp".to_string();
+    app.cursor_pos = app.input.len();
+
+    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+        .expect("remote /mcp should succeed");
+    assert!(app.dialog.as_ref().is_some_and(|dialog| dialog.is_mcp()));
+    let id = app.mcp_request_id.expect("mcp runtime command sent");
+
+    app.handle_server_event(
+        ServerEvent::RuntimeCommandResult {
+            id,
+            command: "mcp".into(),
+            data: serde_json::json!({"servers": [{"name": "github", "status": "connected",
+                "enabled": true, "transport": "stdio", "target": "gh-mcp",
+                "source": "~/.jcode/mcp.json", "tools": []}]}),
+            message: String::new(),
+        },
+        &mut remote,
+    );
+    assert_eq!(app.mcp_request_id, None);
+    let rows = app.dialog.as_ref().unwrap().item_summaries();
+    // Claude Code's facts for a connected server with no tools.
+    assert_eq!(rows, ["github · no tools · connected"]);
+
+    // Enter opens the server; Reconnect sends `mcp reconnect github`.
+    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+        .unwrap();
+    assert_eq!(
+        app.dialog.as_ref().unwrap().item_summaries(),
+        ["Reconnect", "Disable"]
+    );
+    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+        .unwrap();
+    let id = app.mcp_request_id.expect("reconnect sent");
+    app.handle_server_event(
+        ServerEvent::RuntimeCommandResult {
+            id,
+            command: "mcp".into(),
+            data: serde_json::json!({"servers": []}),
+            message: "Reconnected to github.".into(),
+        },
+        &mut remote,
+    );
+    // Like Claude Code, a reconnect closes the dialog and reports in the transcript.
+    assert!(app.dialog.is_none());
+    assert_eq!(
+        app.display_messages().last().unwrap().content,
+        "Reconnected to github."
     );
 }
 
@@ -1131,7 +1256,10 @@ fn skills_command_refreshes_registry_from_disk_before_listing() {
         "project-local skill must be visible immediately without reload"
     );
 
-    assert!(super::state_ui::handle_info_command(&mut app, "/skills"));
+    assert!(super::state_ui::handle_info_command(
+        &mut app,
+        "/skills list"
+    ));
     let content = app.display_messages().last().unwrap().content.clone();
 
     assert!(
@@ -1329,6 +1457,7 @@ fn update_command_reloads_stale_remote_server_before_client_update_check() {
 
 #[test]
 fn stale_server_history_is_deferred_before_remote_state_is_applied() {
+    let _env_guard = crate::storage::lock_test_env();
     crate::env::remove_var("JCODE_ALLOW_SERVER_VERSION_MISMATCH");
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1382,6 +1511,7 @@ fn stale_server_history_is_deferred_before_remote_state_is_applied() {
             resolved_credential: None,
             reasoning_effort: Some("high".to_string()),
             service_tier: Some("stale-tier".to_string()),
+            account_labels: Vec::new(),
             available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
@@ -1482,6 +1612,7 @@ fn deferred_stale_server_history_captures_session_id_for_reload_handoff() {
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            account_labels: Vec::new(),
             available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
@@ -1572,6 +1703,7 @@ fn ancient_server_history_is_deferred_via_client_side_release_check() {
             resolved_credential: None,
             reasoning_effort: Some("high".to_string()),
             service_tier: Some("ancient-tier".to_string()),
+            account_labels: Vec::new(),
             available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
@@ -1661,6 +1793,7 @@ fn older_server_reporting_no_update_is_still_deferred_via_client_check() {
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            account_labels: Vec::new(),
             available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
@@ -1770,6 +1903,7 @@ fn older_server_history_repairs_stale_shared_server_channel_end_to_end() {
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            account_labels: Vec::new(),
             available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
@@ -1853,6 +1987,7 @@ fn current_release_server_history_is_not_deferred_by_client_check() {
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            account_labels: Vec::new(),
             available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
@@ -1938,7 +2073,5 @@ fn oversized_pasted_submit_is_rejected_and_preserves_input() {
 include!("tests/clear_runtime_state.rs");
 
 include!("tests/kv_cache_provider_identity.rs");
-
 include!("tests/cache_retention_routes.rs");
-
 include!("tests/cache_prompt_accounting.rs");

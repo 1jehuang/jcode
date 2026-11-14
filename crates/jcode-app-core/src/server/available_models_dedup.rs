@@ -43,6 +43,7 @@ pub(super) fn available_models_dedup_key(event: &ServerEvent) -> String {
                 api_method,
                 available,
                 detail,
+                catalog_metadata,
                 usage,
                 cheapness,
             } = route;
@@ -52,6 +53,7 @@ pub(super) fn available_models_dedup_key(event: &ServerEvent) -> String {
                 api_method,
                 available,
                 strip_relative_age_text(detail),
+                catalog_metadata,
                 usage,
                 cheapness,
             )

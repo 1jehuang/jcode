@@ -220,11 +220,18 @@ pub(super) async fn fetch_openai_usage_for_account(
         return provider_report_from_openai_usage_data(display_name, &cached);
     }
 
+    let Some(usage_url) = super::openai_usage_url() else {
+        return ProviderUsage {
+            provider_name: display_name,
+            error: Some("Usage endpoint unavailable in unit tests".to_string()),
+            ..Default::default()
+        };
+    };
     let probe_started = Instant::now();
     let client = crate::provider::shared_http_client();
     let request = || {
         let mut builder = client
-            .get(OPENAI_USAGE_URL)
+            .get(&usage_url)
             .header("Accept", "application/json")
             .header("Authorization", format!("Bearer {}", creds.access_token));
         if let Some(ref account_id) = creds.account_id {
@@ -334,7 +341,7 @@ pub(super) async fn fetch_openai_usage_for_account(
             limit.usage_percent.is_finite() && (0.0..99.0).contains(&limit.usage_percent)
         })
     {
-        crate::provider::models::clear_quota_unavailability_after_probe(
+        crate::provider::models::clear_quota_unavailability_observed_before(
             "openai",
             label,
             probe_started,
@@ -795,6 +802,16 @@ pub(super) async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
     }
 
     let github_token = auth::copilot::load_github_token().ok()?;
+    let endpoints = match auth::copilot::CopilotEndpoints::load() {
+        Ok(endpoints) => endpoints,
+        Err(error) => {
+            return Some(ProviderUsage {
+                provider_name: "Copilot".to_string(),
+                error: Some(error.to_string()),
+                ..Default::default()
+            });
+        }
+    };
 
     let mut limits = Vec::new();
     let mut extra_info = Vec::new();
@@ -802,7 +819,7 @@ pub(super) async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
     // Fetch plan/quota info from the token endpoint
     let client = crate::provider::shared_http_client();
     let api_result = client
-        .get(auth::copilot::COPILOT_TOKEN_URL)
+        .get(&endpoints.token_url)
         .header("Authorization", format!("token {}", github_token))
         .header("User-Agent", auth::copilot::EDITOR_VERSION)
         .header("Editor-Version", auth::copilot::EDITOR_VERSION)

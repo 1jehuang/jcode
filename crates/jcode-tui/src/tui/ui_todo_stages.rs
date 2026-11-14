@@ -1088,33 +1088,6 @@ pub(super) fn push_lane_status_lines_below_rows(
     push_lane_status_lines_inner(lines, todos, agents, indent, width, true);
 }
 
-/// `Waiting for <task> · 18m` for a live worker blocked on this todo.
-pub(crate) fn todo_wait_note(
-    todo: &crate::todo::TodoItem,
-    agents: &[TodoCardAgent],
-) -> Option<String> {
-    if crate::todo::todo_requires_user_auth(todo) || is_done(todo) {
-        return None;
-    }
-    let agent = todo
-        .assigned_to
-        .as_deref()
-        .and_then(|owner| agents.iter().find(|agent| agent.matches(owner)))?;
-    if !is_live_status(&agent.status) && agent.status != "waiting" {
-        return None;
-    }
-    let reason = agent.wait_reason.as_deref()?.lines().next()?.trim();
-    if reason.is_empty() {
-        return None;
-    }
-    let mut note = reason.to_string();
-    if let Some(age) = agent.wait_age_secs.filter(|age| *age >= 2) {
-        note.push_str(" · ");
-        note.push_str(&jcode_tui_render::swarm_gallery::humanize_age(age));
-    }
-    Some(note)
-}
-
 fn push_lane_status_lines_inner(
     lines: &mut Vec<Line<'static>>,
     todos: &[&crate::todo::TodoItem],
@@ -1213,8 +1186,10 @@ fn dim_span(span: Span<'static>) -> Span<'static> {
 
 #[path = "ui_todo_stages/item_rows.rs"]
 mod item_rows;
-pub(crate) use item_rows::render_todo_item_line;
-use item_rows::truncate_to_width;
+#[cfg(test)]
+use item_rows::render_todo_item_line;
+pub(crate) use item_rows::render_todo_item_line_with_background;
+use item_rows::{todo_wait_note, truncate_to_width};
 
 #[cfg(test)]
 #[path = "ui_todo_stages_tests.rs"]

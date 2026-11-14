@@ -74,10 +74,8 @@ fn oauth_login_progress_exchange_input_never_becomes_ai_prompt() {
     assert!(!app.is_processing);
     app.set_input_for_test("/cancel");
     app.submit_input();
-    assert!(matches!(
-        app.pending_login,
-        Some(PendingLogin::Exchanging { .. })
-    ));
+    assert!(app.pending_login.is_none());
+    assert!(app.input.is_empty());
 }
 
 #[test]
@@ -87,6 +85,7 @@ fn oauth_login_progress_failure_replaces_card_and_clears_typed_callback() {
     let index = app.display_messages.len() - 1;
     app.toggle_swarm_message_expand(index);
     app.set_input_for_test("http://localhost:1455/auth/callback?code=secret");
+    app.handle_debug_command("login-progress-exchange-fixture");
     app.handle_login_completed(LoginCompleted {
         provider: "openai".to_string(),
         success: false,
@@ -146,6 +145,10 @@ fn oauth_login_progress_enter_shortcuts_cannot_queue_or_launch_credentials() {
 fn oauth_login_progress_foreign_completion_keeps_auth_input_captured() {
     let mut app = create_test_app();
     app.pending_login = Some(PendingLogin::ClaudeAccount {
+expected_existing: false,
+expected_identity: None,
+replace: false,
+attempt: Default::default(),
         verifier: "fixture".to_string(),
         label: "fixture".to_string(),
         redirect_uri: None,

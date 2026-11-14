@@ -1080,21 +1080,20 @@ fn test_provider_failover_defaults_match_new_behavior() {
         super::CrossProviderFailoverMode::Countdown
     );
     assert!(provider.same_provider_account_failover);
-    assert!(provider.openai_auto_banked_reset);
+    assert!(!provider.openai_auto_banked_reset);
     assert!(!provider.anthropic_auto_fable_reset);
 }
 
 #[test]
-fn automatic_banked_reset_defaults_on_and_supports_explicit_opt_out() {
-    let cfg: Config = toml::from_str("[provider]\nopenai_auto_banked_reset = false\n").unwrap();
-    assert!(!cfg.provider.openai_auto_banked_reset);
-    let cfg: Config = toml::from_str("[provider]\n").unwrap();
+fn automatic_banked_reset_requires_explicit_opt_in() {
+    let cfg: Config = toml::from_str("[provider]\nopenai_auto_banked_reset = true\n").unwrap();
     assert!(cfg.provider.openai_auto_banked_reset);
-    assert!(cfg.provider.auto_reset_only_when_no_routes);
+    let cfg: Config = toml::from_str("[provider]\n").unwrap();
+    assert!(!cfg.provider.openai_auto_banked_reset);
     assert!(!cfg.provider.anthropic_auto_fable_reset);
     let cfg: Config = toml::from_str("[provider]\nanthropic_auto_fable_reset = true\n").unwrap();
     assert!(cfg.provider.anthropic_auto_fable_reset);
-    assert!(cfg.provider.openai_auto_banked_reset);
+    assert!(!cfg.provider.openai_auto_banked_reset);
 }
 
 #[test]
@@ -1306,6 +1305,7 @@ fn populate_context_limits_from_config_ref_seeds_global_cache() {
                 reasoning_effort: None,
                 context_window: Some(1_000_000),
                 input: Vec::new(),
+                ..Default::default()
             }],
             ..Default::default()
         },
@@ -1342,6 +1342,7 @@ fn populate_context_limits_from_config_seeds_qualified_runtime_model_shapes() {
                     reasoning_effort: None,
                     context_window: Some(131_072),
                     input: Vec::new(),
+                    ..Default::default()
                 },
                 NamedProviderModelConfig {
                     id: "/opt/models/issue421-ornith-35b-q4.gguf".to_string(),
@@ -1349,6 +1350,7 @@ fn populate_context_limits_from_config_seeds_qualified_runtime_model_shapes() {
                     reasoning_effort: None,
                     context_window: Some(131_072),
                     input: Vec::new(),
+                    ..Default::default()
                 },
             ],
             ..Default::default()
@@ -1570,13 +1572,12 @@ fn sponsors_optout_survives_config_save_and_reload() {
             );
             let saved = std::fs::read_to_string(&path).expect("read saved config");
             let saved: toml::Value = toml::from_str(&saved).expect("parse saved config");
-            assert_eq!(
-                saved
+            assert!(
+                !saved
                     .get("sponsors")
                     .and_then(|s| s.get("enabled"))
                     .and_then(toml::Value::as_bool)
-                    .unwrap_or(false),
-                false
+                    .unwrap_or(false)
             );
         }
     }

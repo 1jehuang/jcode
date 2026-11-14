@@ -23,6 +23,7 @@ fn ndjson_preserves_wrapped_text_tool_and_error_payloads() {
         },
         ServerEvent::Interrupted,
         ServerEvent::Error {
+            server_resumes: false,
             id: 9,
             message: "failure".into(),
             retry_after_secs: None,

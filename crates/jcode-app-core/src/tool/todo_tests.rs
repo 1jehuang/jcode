@@ -410,7 +410,7 @@ fn schema_advertises_intent_and_todos() {
     assert!(plan_props.contains_key("understands_user_intent"));
     assert!(!plan_props.contains_key("alignment_score"));
     assert!(!plan_props.contains_key("user_intention_alignment"));
-    assert!(plan_props.contains_key("title"));
+    assert_eq!(plan_props["title"]["type"], "string");
     assert_eq!(plan_props.len(), 3);
     let plan_required = props["plan"]["required"]
         .as_array()

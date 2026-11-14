@@ -52,6 +52,7 @@ fn session_picker_resume_action_keeps_overlay_open() {
     assert!(app.session_picker_overlay.is_some());
 }
 
+
 #[test]
 fn session_picker_enter_queues_current_terminal_resume_and_closes_overlay() {
     let mut app = create_test_app();

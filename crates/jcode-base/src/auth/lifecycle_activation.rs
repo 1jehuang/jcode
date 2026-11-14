@@ -280,6 +280,7 @@ pub(super) fn direct_provider_runtime_ids(
         "gemini" => (RuntimeProviderId::Gemini, ActiveProvider::Gemini),
         "antigravity" => (RuntimeProviderId::Antigravity, ActiveProvider::Antigravity),
         "grok-build" => (RuntimeProviderId::GrokBuild, ActiveProvider::OpenRouter),
+        "claude-code" => (RuntimeProviderId::ClaudeCode, ActiveProvider::ClaudeCode),
         _ => return None,
     })
 }

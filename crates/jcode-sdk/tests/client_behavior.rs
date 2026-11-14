@@ -1,10 +1,4 @@
-//! Client behavior against a fake harness.
-//!
-//! The correlation logic is the part of an SDK that fails silently: a reply
-//! delivered to the wrong waiter, or a stream event swallowed by a request
-//! that happened to be in flight, produces a hang rather than an error. None
-//! of that is visible from a passing `cargo build`, so it is driven here
-//! against a scripted server on a real socket pair.
+//! Client correlation and streaming against a fake harness on real socket pairs.
 
 #![cfg(unix)]
 
@@ -26,6 +20,9 @@ mod protocol_partial_disconnect;
 /// A socket-pair transport, so the test drives the client over the same code
 /// path a real connection uses.
 struct PairTransport(UnixStream);
+
+#[path = "client_behavior/rewind_tests.rs"]
+mod rewind_tests;
 
 impl Transport for PairTransport {
     fn split(
@@ -428,49 +425,6 @@ fn an_error_mid_turn_fails_the_run_instead_of_hanging() {
         .expect_err("must fail");
     assert_eq!(error.code(), "internal");
     assert!(error.message.contains("provider exploded"));
-}
-
-/// When the harness goes away, in-flight requests fail instead of blocking on
-/// a reply that can never arrive.
-#[test]
-fn a_lost_connection_fails_requests_in_flight() {
-    // A server that reads the request and then hangs up without replying.
-    let (ours, theirs) = UnixStream::pair().expect("socket pair");
-    std::thread::spawn(move || {
-        let mut reader = BufReader::new(theirs.try_clone().expect("clone"));
-        let mut writer = theirs;
-        let hello: ClientFrame = read_frame(&mut reader).expect("hello");
-        write_frame(
-            &mut writer,
-            &ServerFrame {
-                v: API_VERSION_MAJOR,
-                reply_to: Some(hello.id),
-                event: ApiEvent::HelloOk {
-                    version: API_VERSION_MAJOR,
-                    server: "fake/1.0".to_string(),
-                    capabilities: vec![],
-                },
-            },
-        )
-        .expect("hello reply");
-        let _: ClientFrame = read_frame(&mut reader).expect("request");
-        // Drop both ends: the client's pending request must be failed.
-    });
-
-    let client = JcodeClient::connect_with(
-        Box::new(PairTransport(ours)),
-        ConnectOptions {
-            request_timeout: Some(Duration::from_secs(5)),
-            ensure_runtime: false,
-            ..Default::default()
-        },
-    )
-    .expect("handshake");
-    let error = client
-        .ping()
-        .expect_err("a dropped harness must fail the request");
-    assert_eq!(error.code(), "disconnected");
-    assert_eq!(client.disconnect_reason().unwrap().code(), "disconnected");
 }
 
 #[test]

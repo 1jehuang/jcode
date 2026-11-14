@@ -453,9 +453,9 @@ impl PreparedPatch {
             if let Some(parent) = self.path.parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
-            tokio::fs::write(&self.path, new).await?;
+            crate::file_history::tracked_write(&ctx.session_id, &self.path, new.as_bytes()).await?;
         } else {
-            tokio::fs::remove_file(&self.path).await?;
+            crate::file_history::tracked_remove(&ctx.session_id, &self.path).await?;
         }
         let old = self.old.as_deref().unwrap_or("");
         let new = self.new.as_deref().unwrap_or("");

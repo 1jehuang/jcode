@@ -1,16 +1,19 @@
+#[path = "ui_messages/todo_payload_cache.rs"]
+mod todo_payload_cache;
+use todo_payload_cache::{cached_todo_payload, render_todo_blocker_footer};
+
 #[path = "ui_messages/gmail_drafts.rs"]
 mod gmail_drafts;
 use gmail_drafts::*;
 #[path = "ui_messages/todo_completion.rs"]
 mod todo_completion;
-#[cfg(test)]
-#[path = "ui_messages/todo_payload_cache_tests.rs"]
-mod todo_payload_cache_tests;
 #[path = "ui_todo_stages.rs"]
 mod todo_stages;
 pub(crate) use todo_stages::TodoCardAgent;
 pub(crate) use todo_stages::animate_lane_spinners;
-use todo_stages::{agent_roster_spans, push_stage_lines, push_stage_pips, render_todo_item_line};
+use todo_stages::{
+    agent_roster_spans, push_stage_lines, push_stage_pips, render_todo_item_line_with_background,
+};
 
 use super::*;
 #[path = "ui_messages_cache.rs"]
@@ -353,8 +356,6 @@ fn render_agentgrep_output_body(content: &str, row_width: usize) -> Vec<Line<'st
 
 #[path = "ui_messages/kv_cache_footer.rs"]
 mod kv_cache_footer;
-#[cfg(test)]
-use kv_cache_footer::kv_cache_footer_summary;
 use kv_cache_footer::{kv_cache_footer_body, render_kv_cache_footer};
 
 /// Cache diagnostics belong to the preceding message, not a new transcript block.
@@ -811,40 +812,6 @@ fn todo_confidence_color() -> Color {
     rgb(135, 155, 180)
 }
 
-// Cache data only: time-sensitive blocker policy and width/style rendering
-// remain live on every draw. One bounded entry retains no transcript history.
-const MAX_CACHED_TODO_PAYLOAD_BYTES: usize = 256 * 1024;
-
-#[derive(Default)]
-struct TodoPayloadCache {
-    entry: Option<(String, Option<std::sync::Arc<TodoCardPayload>>)>,
-}
-
-impl TodoPayloadCache {
-    fn get(&mut self, content: &str) -> Option<std::sync::Arc<TodoCardPayload>> {
-        if let Some((source, parsed)) = &self.entry
-            && source == content
-        {
-            return parsed.clone();
-        }
-        let parsed = serde_json::from_str::<TodoCardPayload>(content)
-            .ok()
-            .map(std::sync::Arc::new);
-        self.entry = (content.len() <= MAX_CACHED_TODO_PAYLOAD_BYTES)
-            .then(|| (content.to_owned(), parsed.clone()));
-        parsed
-    }
-}
-
-thread_local! {
-    static TODO_PAYLOAD_CACHE: std::cell::RefCell<TodoPayloadCache> =
-        std::cell::RefCell::new(TodoPayloadCache::default());
-}
-
-fn cached_todo_payload(content: &str) -> Option<std::sync::Arc<TodoCardPayload>> {
-    TODO_PAYLOAD_CACHE.with_borrow_mut(|cache| cache.get(content))
-}
-
 impl TodoCardPayload {
     fn todos(&self) -> &[crate::todo::TodoItem] {
         match self {
@@ -1008,7 +975,26 @@ pub(crate) fn render_todos_message(
     width: u16,
     diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
-    render_todos_message_with_cap(msg, width, diff_mode, true)
+    let Some(body) = render_todo_card_body(&msg.content, width.saturating_sub(4), true) else {
+        return render_system_message(msg, width, diff_mode);
+    };
+    let (done, total) = todo_payload_counts(&msg.content).unwrap_or((0, 0));
+    let mut lines = render_rounded_box(
+        &format!("Todos {}/{}", done, total),
+        body,
+        width as usize,
+        Style::default().fg(todo_border_color()),
+    );
+    if markdown::center_code_blocks() {
+        left_pad_lines_for_centered_mode(&mut lines, width);
+    }
+    lines
+}
+
+/// Border colour shared by the inline todo card and the pinned todo band.
+/// Clearly brighter than the dim info-box border so the list stands out.
+pub(crate) fn todo_border_color() -> Color {
+    rgb(130, 115, 175)
 }
 
 /// Dedicated composer chrome, one non-wrapping row per todo awaiting the
@@ -1018,60 +1004,6 @@ pub(super) fn todo_blocker_footer(payload: Option<&str>, width: u16) -> Vec<Line
         return Vec::new();
     };
     render_todo_blocker_footer(&payload, width)
-}
-
-fn render_todo_blocker_footer(payload: &TodoCardPayload, width: u16) -> Vec<Line<'static>> {
-    let row = |text: String| {
-        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        super::truncate_line_with_ellipsis_to_width(
-            &Line::styled(text, Style::default().fg(todo_warning_color())),
-            usize::from(width),
-        )
-    };
-    let todos = payload.todos();
-    let goals = match payload {
-        TodoCardPayload::Current { goals, .. } => goals.as_slice(),
-        TodoCardPayload::Legacy(_) => &[],
-    };
-    let mut lines: Vec<Line<'static>> = todos
-        .iter()
-        .filter(|todo| crate::todo::is_incomplete_todo(todo))
-        .filter_map(|todo| {
-            if crate::todo::todo_requires_user_auth(todo) {
-                let reason = &todo.requires_user_auth.as_ref()?.reason;
-                Some(row(format!("✋ Needs you · {}: {}", todo.content, reason)))
-            } else if !todo.blocked_by.is_empty() {
-                Some(row(format!(
-                    "Blocked · {}: waiting on {}",
-                    todo.content,
-                    todo.blocked_by.join(", ")
-                )))
-            } else {
-                None
-            }
-        })
-        .collect();
-    // A goal declared impossible stops its todos, so say so once per goal
-    // while any of that goal's work is still open.
-    for goal in goals {
-        let Some(reason) = crate::todo::goal_cannot_complete(goal) else {
-            continue;
-        };
-        let open = todos.iter().any(|todo| {
-            crate::todo::is_incomplete_todo(todo)
-                && crate::todo::todo_goal_cannot_complete(todo, std::slice::from_ref(goal))
-        });
-        if open {
-            let label = goal
-                .group
-                .as_deref()
-                .map(str::trim)
-                .filter(|group| !group.is_empty())
-                .unwrap_or("goal");
-            lines.push(row(format!("Cannot complete · {label}: {reason}")));
-        }
-    }
-    lines
 }
 
 /// Full blocker prose belongs below the response, outside the pinned chrome.
@@ -1110,39 +1042,34 @@ pub(super) fn todo_blocker_notes(payload: Option<&str>) -> Vec<Line<'static>> {
 pub(crate) fn render_pinned_todos_message(
     msg: &DisplayMessage,
     width: u16,
-    diff_mode: crate::config::DiffDisplayMode,
+    _diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
-    render_todos_message_with_cap(msg, width, diff_mode, false)
-        .into_iter()
-        .map(|line| super::truncate_line_with_ellipsis_to_width(&line, usize::from(width)))
-        .collect()
+    render_todo_card_body(&msg.content, width, false).unwrap_or_default()
 }
 
-fn render_todos_message_with_cap(
-    msg: &DisplayMessage,
+/// Unboxed todo card rows for `content` at `width` columns. Returns `None`
+/// when the payload is not a todo card. Callers add the border. `cap_width`
+/// applies the transcript's readability cap.
+pub(crate) fn render_todo_card_body(
+    content: &str,
     width: u16,
-    diff_mode: crate::config::DiffDisplayMode,
     cap_width: bool,
-) -> Vec<Line<'static>> {
-    let Ok(payload) = serde_json::from_str::<TodoCardPayload>(&msg.content) else {
-        return render_system_message(msg, width, diff_mode);
-    };
+) -> Option<Vec<Line<'static>>> {
+    if width == 0 {
+        return Some(Vec::new());
+    }
+    let payload = serde_json::from_str::<TodoCardPayload>(content).ok()?;
     let (todos, plan, goals, agents, background_tasks) = payload.into_parts();
 
-    // Pinned todos are viewport chrome, not a centered transcript card. Using
-    // the code-block preference here makes short plans float in the middle of
-    // wide terminals, detached from the conversation's left edge.
-    let centered = cap_width && markdown::center_code_blocks();
+    let centered = false;
     let meta_style = Style::default().fg(todo_meta_color());
-    let card_width = match (centered, cap_width) {
-        (true, true) => (width.saturating_sub(4) as usize).min(120),
-        (true, false) => width.saturating_sub(4) as usize,
-        (false, true) => (width.saturating_sub(2) as usize).min(100),
-        (false, false) => width.saturating_sub(2) as usize,
-    }
-    .max(1);
-    let base_indent = if centered { "" } else { "  " };
-    let inner_width = card_width.saturating_sub(base_indent.width()).max(1);
+    let card_width = if cap_width {
+        (width as usize).clamp(1, 120)
+    } else {
+        (width as usize).max(1)
+    };
+    let base_indent = "";
+    let inner_width = card_width.saturating_sub(base_indent.width());
     // Long assessment prose is useful in a wide transcript, but wrapping it
     // with a hanging label quickly overwhelms the actual task list in a narrow
     // terminal. Keep those details to one ellipsized line at small widths.
@@ -1164,10 +1091,12 @@ fn render_todos_message_with_cap(
             left_pad_lines_for_centered_mode(&mut lines, width);
         }
         // At widths below the normal card gutter, even the indent must fit.
-        return lines
-            .iter()
-            .map(|line| super::truncate_line_with_ellipsis_to_width(line, width as usize))
-            .collect();
+        return Some(
+            lines
+                .iter()
+                .map(|line| super::truncate_line_with_ellipsis_to_width(line, width as usize))
+                .collect(),
+        );
     }
     push_todo_plan_details(&mut lines, &plan, base_indent, inner_width, compact_details);
     if todos.is_empty() {
@@ -1291,10 +1220,7 @@ fn render_todos_message_with_cap(
             ));
         }
     }
-    if centered {
-        left_pad_lines_for_centered_mode(&mut lines, width);
-    }
-    lines
+    Some(lines)
 }
 
 /// Compact finished work by existing subgroup/lane, without inventing a new
@@ -2158,56 +2084,6 @@ fn todo_running_dependencies<'a>(
         .iter()
         .filter(|task| todo.waiting_on.contains(&task.task_id))
         .collect()
-}
-
-fn render_todo_item_line_with_background(
-    todo: &crate::todo::TodoItem,
-    agents: &[TodoCardAgent],
-    tasks: &[TodoCardBackgroundTask],
-    base_indent: &str,
-    inner_width: usize,
-) -> Line<'static> {
-    let dependencies = todo_running_dependencies(todo, tasks);
-    let wait_note = todo_stages::todo_wait_note(todo, agents);
-    if dependencies.is_empty() || crate::todo::todo_requires_user_auth(todo) {
-        let mut line = render_todo_item_line(todo, agents, base_indent, inner_width);
-        if let Some(note) = wait_note {
-            line.spans.push(Span::styled(
-                format!("  ◷ {note}"),
-                Style::default().fg(todo_warning_color()),
-            ));
-            line = super::truncate_line_with_ellipsis_to_width(
-                &line,
-                inner_width.saturating_add(base_indent.width()),
-            );
-        }
-        return line;
-    }
-    let mut spans = todo_card_item_spans(todo, false);
-    spans[1] = Span::styled("◷ ", Style::default().fg(todo_warning_color()));
-    if let Some(note) = wait_note {
-        spans.push(Span::styled(
-            format!("  {note}"),
-            Style::default().fg(todo_warning_color()),
-        ));
-    }
-    let title_width = spans.iter().map(|span| span.content.width()).sum::<usize>();
-    let progress = todo_dependency_progress(
-        &dependencies,
-        inner_width
-            .saturating_sub(title_width + 2)
-            .max(inner_width.saturating_sub(12).min(inner_width / 2)),
-    );
-    let progress_width = progress.width();
-    if progress_width > 0 {
-        let left_width = inner_width.saturating_sub(progress_width + 2);
-        let mut left = super::truncate_line_with_ellipsis_to_width(&Line::from(spans), left_width);
-        let pad = inner_width.saturating_sub(left.width() + progress_width);
-        left.spans.push(Span::raw(" ".repeat(pad)));
-        left.spans.extend(progress.spans);
-        spans = left.spans;
-    }
-    todo_card_line(spans, base_indent, inner_width)
 }
 
 /// Reuse the info widget's bar cells, colors and used/remaining convention.
@@ -4639,126 +4515,12 @@ fn tool_output_token_badge(content: &str) -> ToolOutputTokenBadge {
 #[path = "ui_messages/tests.rs"]
 mod tests;
 
-#[cfg(test)]
-mod kv_cache_footer_tests {
-    #[test]
-    fn preserves_prefix_evidence_tag_and_keeps_footer_width_bounded() {
-        let body = "KV cache miss [low read] [prefix unchanged] turn 2 call 3: 4.35K cached / 20K expected tokens: ~15.6K tokens resent (cause unconfirmed).";
-        assert_eq!(
-            super::kv_cache_footer_summary(body).as_deref(),
-            Some("15.6K KV cache miss · low read · prefix unchanged · 22% hit")
-        );
-        let message = super::DisplayMessage::system(format!("ℹ️ {body}"));
-        for width in [0_u16, 1, 2, 3, 12, 30, 80, 120] {
-            let lines = super::render_kv_cache_footer(&message, width).unwrap();
-            assert_eq!(lines.len(), 1);
-            assert!(lines[0].width() <= usize::from(width));
-            if width >= 80 {
-                assert!(lines[0].to_string().contains("prefix unchanged"));
-            }
-        }
-        let unrelated = "KV cache miss [low read] turn 2: ~15K tokens resent (detail mentions [prefix unchanged]).";
-        assert!(
-            !super::kv_cache_footer_summary(unrelated)
-                .unwrap()
-                .contains("prefix unchanged")
-        );
-    }
-
-    #[test]
-    fn cache_miss_footer_colors_only_the_label_by_absolute_token_loss() {
-        for (amount, expected) in [
-            ("0", super::dim_color()),
-            ("4.2K", super::dim_color()),
-            ("9,999", super::dim_color()),
-            ("10K", super::warning_color()),
-            ("20.4k", super::warning_color()),
-            ("49,999", super::warning_color()),
-            ("50K", super::error_color()),
-            ("86.1K", super::error_color()),
-            ("1.2M", super::error_color()),
-            ("unknown", super::warning_color()),
-            ("NaN", super::warning_color()),
-            ("inf", super::warning_color()),
-            ("-1", super::warning_color()),
-        ] {
-            // Hit percentage is intentionally identical across severities.
-            let message = super::DisplayMessage::system(format!(
-                "ℹ️ KV cache miss [low read] [prefix unchanged]: 4K cached / 20K expected tokens: ~{amount} tokens resent"
-            ));
-            let lines = super::render_kv_cache_footer(&message, 160).unwrap();
-            assert_eq!(lines[0].spans[0].style.fg, Some(super::dim_color()));
-            assert_eq!(lines[0].spans[1].style.fg, Some(expected), "{amount}");
-            assert_eq!(lines[0].spans[1].content, format!("{amount} KV cache miss"));
-            assert_eq!(lines[0].spans[2].style.fg, Some(super::dim_color()));
-            assert_eq!(
-                lines[0].spans[2].content,
-                " · low read · prefix unchanged · 20% hit"
-            );
-            for width in 0..=100 {
-                let clipped = super::render_kv_cache_footer(&message, width).unwrap();
-                assert_eq!(clipped.len(), 1);
-                assert!(
-                    clipped[0].width() <= usize::from(width),
-                    "{amount}, {width}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn missing_amount_stays_amber_and_refreshes_are_not_loss_severity() {
-        for body in [
-            "KV cache miss [low read]: provider reported no cache read",
-            "KV cache miss without structured evidence",
-        ] {
-            let message = super::DisplayMessage::system(body);
-            let lines = super::render_kv_cache_footer(&message, 120).unwrap();
-            assert_eq!(lines[0].spans[1].style.fg, Some(super::warning_color()));
-        }
-        for (icon, color) in [("ℹ️ ", super::dim_color()), ("⚠️ ", super::warning_color())]
-        {
-            let message = super::DisplayMessage::system(format!(
-                "{icon}KV cache refresh [compaction]: ~100K tokens resent"
-            ));
-            let lines = super::render_kv_cache_footer(&message, 120).unwrap();
-            assert_eq!(lines[0].spans[1].style.fg, Some(color));
-            assert_eq!(lines[0].spans[2].style.fg, Some(super::dim_color()));
-        }
-    }
-
-    #[test]
-    fn only_system_cache_notices_attach() {
-        let body = "KV cache miss [low read]: ~4K tokens resent";
-        let message = super::DisplayMessage::system(format!("ℹ️ {body}"));
-        assert!(!super::needs_message_separator(&message));
-        let lines = super::render_kv_cache_footer(&message, 80).unwrap();
-        assert_eq!(lines[0].spans[1].style.fg, Some(super::dim_color()));
-        let assistant = super::DisplayMessage::assistant(body);
-        assert!(super::needs_message_separator(&assistant));
-        assert!(super::render_kv_cache_footer(&assistant, 80).is_none());
-        assert!(super::needs_message_separator(
-            &super::DisplayMessage::system("ordinary notice")
-        ));
-        let refresh =
-            super::DisplayMessage::system("KV cache refresh [compaction]: ~4K tokens resent");
-        assert!(!super::needs_message_separator(&refresh));
-        assert_eq!(
-            super::render_kv_cache_footer(&refresh, 80).unwrap()[0].spans[1]
-                .style
-                .fg,
-            Some(super::dim_color())
-        );
-    }
-
-    #[test]
-    fn summarizes_miss_reason_missed_and_hit_pct() {
-        let s = super::kv_cache_footer_summary(
-            "KV cache miss [provider switch] turn 3 call 2: 28.6K cached / 47.6K expected tokens: ~19.0K tokens resent (x). See KV_CACHE_USAGE in logs.",
-        );
-        assert_eq!(
-            s.as_deref(),
-            Some("19.0K KV cache miss · provider switch · 60% hit")
-        );
-    }
+/// `(done, total)` todo counts for a todo-card payload, used by the pinned
+/// band's border title. Returns `None` for unparseable payloads.
+pub(crate) fn todo_payload_counts(content: &str) -> Option<(usize, usize)> {
+    let (todos, ..) = serde_json::from_str::<TodoCardPayload>(content)
+        .ok()?
+        .into_parts();
+    let done = todos.iter().filter(|t| t.status == "completed").count();
+    Some((done, todos.len()))
 }

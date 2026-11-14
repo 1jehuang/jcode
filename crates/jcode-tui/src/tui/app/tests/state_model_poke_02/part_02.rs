@@ -31,15 +31,7 @@ fn test_agents_review_picker_saves_session_override_without_global_write() {
         let expected = {
             let picker = app.inline_interactive_state.as_ref().unwrap();
             let entry = &picker.entries[picker.filtered[selected]];
-            let base = if entry.effort.is_some() {
-                entry
-                    .name
-                    .rsplit_once(" (")
-                    .map(|(base, _)| base.to_string())
-                    .unwrap_or_else(|| entry.name.clone())
-            } else {
-                entry.name.clone()
-            };
+            let base = entry.name.clone();
             let route = &entry.options[entry.selected_option];
             if route.api_method == "copilot" {
                 format!("copilot:{}", base)
@@ -129,7 +121,12 @@ fn test_agents_ctrl_g_toggles_scope_and_saves_to_the_chosen_scope() {
         assert!(!app.agent_models_global_scope);
         let roles = app.inline_interactive_state.as_ref().expect("role list");
         assert!(roles.is_agent_target_picker());
-        assert!(roles.entries.iter().all(|entry| entry.name.ends_with("[session]")));
+        assert!(
+            roles
+                .entries
+                .iter()
+                .all(|entry| entry.name.ends_with("[session]"))
+        );
         configure_test_remote_models(&mut app);
         app.open_agent_model_picker(crate::tui::AgentModelTarget::Review);
         app.is_remote = false;
@@ -238,7 +235,7 @@ fn test_agents_global_scope_and_distinct_session_clear_and_inherit() {
 }
 
 #[test]
-fn test_agents_remote_feedback_honors_session_global_and_inherit() {
+fn test_agents_remote_feedback_defers_session_global_and_inherit_to_server() {
     with_temp_jcode_home(|| {
         let auth_path = crate::storage::jcode_dir()
             .unwrap()
@@ -262,20 +259,13 @@ fn test_agents_remote_feedback_honors_session_global_and_inherit() {
         config.save().unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
-        for (command, role, global) in [
-            ("/review", "review", "claude-api:global-review"),
-            ("/judge", "judge", "claude-api:global-judge"),
-            ("/autoreview now", "review", "claude-api:global-review"),
-            ("/autojudge now", "judge", "claude-api:global-judge"),
+        for (command, role) in [
+            ("/review", "review"),
+            ("/judge", "judge"),
+            ("/autoreview now", "review"),
+            ("/autojudge now", "judge"),
         ] {
-            for (override_model, expected) in [
-                (
-                    Some("openai-api:session-worker"),
-                    Some("openai-api:session-worker"),
-                ),
-                (Some("inherit"), None),
-                (None, Some(global)),
-            ] {
+            for override_model in [Some("openai-api:session-worker"), Some("inherit"), None] {
                 let mut app = create_test_app();
                 app.session
                     .set_agent_model_override(role, override_model.map(str::to_string))
@@ -293,8 +283,8 @@ fn test_agents_remote_feedback_honors_session_global_and_inherit() {
                 .unwrap();
                 assert_eq!(
                     app.pending_split_model_override.as_deref(),
-                    expected,
-                    "{command} with {override_model:?}"
+                    None,
+                    "{command} with {override_model:?} must resolve on the server"
                 );
                 assert!(
                     app.pending_split_provider_key_override.is_none(),
@@ -484,7 +474,7 @@ fn test_model_picker_preview_stays_open_and_updates_filter() {
         picker
             .filtered
             .iter()
-            .any(|&i| picker.entries[i].name.starts_with("gpt-5.2-codex ("))
+            .any(|&i| picker.entries[i].name == "gpt-5.2-codex")
     );
     assert_eq!(app.input(), "/model g52c");
 }
@@ -492,16 +482,19 @@ fn test_model_picker_preview_stays_open_and_updates_filter() {
 #[test]
 fn test_model_picker_preview_enter_selects_model() {
     let mut app = create_test_app();
-    configure_test_remote_models(&mut app);
+    configure_available_model_browser_routes(&mut app);
 
     for c in "/model g52c".chars() {
         app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
             .unwrap();
     }
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
-        .unwrap();
+    // A route with a reasoning ladder asks for the level first.
+    enter_and_confirm_level(&mut app);
 
-    // Enter from preview mode selects the model and closes the picker
+    // Enter from preview mode stages the actual route and closes the picker.
+    let route = app.pending_route_selection.as_ref().expect("model switch staged");
+    assert_eq!(route.model, "gpt-5.2-codex");
+    assert_eq!(route.api_method, "openai-oauth");
     assert!(app.inline_interactive_state.is_none());
     assert!(app.input().is_empty());
     assert_eq!(app.cursor_pos(), 0);

@@ -69,6 +69,8 @@ mod inline_interactive_ui;
 mod inline_ui;
 #[path = "ui_input.rs"]
 pub(crate) mod input_ui;
+#[path = "ui_interactive_state.rs"]
+pub(crate) mod interactive_state;
 #[path = "ui_memory_estimates.rs"]
 mod memory_estimates;
 #[path = "ui_memory.rs"]
@@ -97,6 +99,8 @@ pub(crate) mod tools_ui;
 mod transitions;
 #[path = "ui_viewport.rs"]
 pub(crate) mod viewport;
+#[path = "ui_viewport_pinned_todo.rs"]
+mod viewport_pinned_todo;
 use crate::tui::mermaid;
 #[cfg(test)]
 pub(crate) use box_utils::truncate_line_to_width;
@@ -2577,6 +2581,29 @@ pub(crate) fn input_pane_line_count() -> Option<usize> {
     copy_pane_line_count(crate::tui::CopySelectionPane::Input)
 }
 
+/// Convert a composer (`Input` pane) selection point into a byte offset into
+/// `input`, on a char boundary. Uses the last rendered composer snapshot to
+/// undo soft wrapping and the prompt prefix, so it is exact for wrapped and
+/// multi-line drafts as long as `input` is what was last drawn.
+pub(crate) fn input_byte_offset_for_copy_point(
+    input: &str,
+    point: crate::tui::CopySelectionPoint,
+) -> Option<usize> {
+    if point.pane != crate::tui::CopySelectionPane::Input {
+        return None;
+    }
+    let snapshot = copy_snapshot_for_pane(crate::tui::CopySelectionPane::Input)?;
+    let (raw_line, column) = copy_selection::raw_line_column_from_snapshot(&snapshot, point)?;
+    let mut offset = 0usize;
+    for (index, line) in input.split('\n').enumerate() {
+        if index == raw_line {
+            return Some(offset + display_width::display_col_to_byte_offset(line, column));
+        }
+        offset += line.len() + 1;
+    }
+    Some(input.len())
+}
+
 pub(crate) fn copy_viewport_visible_range() -> Option<(usize, usize)> {
     let snapshot = copy_snapshot_for_pane(crate::tui::CopySelectionPane::Chat)?;
     Some((snapshot.scroll, snapshot.visible_end))
@@ -2982,6 +3009,12 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let secondary = secondary_render_active();
     if !secondary {
         panel_image_preview::clear_regions();
+        // `draw_messages` republishes the pill rect when it draws one; frames that
+        // skip the chat viewport (overlays, swarm page, collapsed clear) must not
+        // leave a stale clickable rect behind.
+        viewport::set_jump_to_bottom_area(None);
+        // Only a TODO card drawn in this frame may intercept mouse input.
+        viewport::clear_pinned_todo_click_areas();
     }
     let area = frame.area().intersection(*frame.buffer_mut().area());
     if area.width == 0 || area.height == 0 {
@@ -3088,6 +3121,9 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         );
         return;
     }
+
+    // The `/mcp` and `/skills` dialogs are drawn below the transcript, in
+    // place of the input (see `dialog_height`), like Claude Code.
 
     if let Some(picker_cell) = app.account_picker_overlay() {
         let mut picker = picker_cell.borrow_mut();
@@ -3335,20 +3371,50 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         input_ui::wrapped_input_line_count(app, chat_area.width, next_prompt).min(10) as u16;
     // Add 1 line for command suggestions, shell mode hints, or the Ctrl+Enter hint.
     let hint_line_height = input_ui::input_hint_line_height(app);
-    let inline_block_height: u16 = inline_ui_height(app);
+    // An open `/mcp` or `/skills` dialog replaces the input and inline UI,
+    // drawn under the transcript like Claude Code's. It grows with its
+    // content, up to about two thirds of the screen.
+    let dialog_height = app.dialog().map(|dialog| {
+        let cap = (chat_area.height.saturating_mul(2) / 3).max(8);
+        dialog.desired_height(chat_area.width).clamp(4, cap)
+    });
+    let inline_block_height: u16 = if dialog_height.is_some() {
+        0
+    } else {
+        inline_ui_height(app)
+    };
     let blocker_lines = messages::todo_blocker_footer(app.pinned_todos_payload(), chat_area.width);
     let blocker_height = blocker_lines
         .len()
         .min(usize::from(chat_area.height.saturating_sub(6))) as u16;
     let inline_ui_gap_height: u16 = blocker_height.max(if inline_block_height > 0 { 1 } else { 0 });
-    let input_height = base_input_height + hint_line_height;
+    let input_height = dialog_height.unwrap_or(base_input_height + hint_line_height);
 
     if let Some(ref mut capture) = debug_capture {
         capture.render_order.push("prepare_messages".to_string());
     }
     let prep_start = Instant::now();
-    let chat_left_inset = left_aligned_content_inset(chat_area.width, app.centered_mode());
-    let wide_prepare_width = chat_area.width.saturating_sub(chat_left_inset);
+    // Docked info column: reserve a fixed column on the right of the
+    // transcript so the info box never covers chat text and never moves with
+    // scrolling or streaming. The transcript wraps to the remaining width.
+    // Its rows still span the full chat column (status, input and the rest of
+    // the chrome are unchanged).
+    let dock_data = (crate::config::config().display.info_widget_layout
+        == crate::config::InfoWidgetLayout::Dock
+        && app.info_widget_overlays_enabled()
+        && info_widget::is_enabled()
+        && !swarm_page_active
+        && diff_pane_area.is_none()
+        && diagram_area.is_none())
+    .then(|| app.info_widget_data())
+    .filter(|data| !data.is_empty());
+    let info_dock_width = dock_data
+        .as_ref()
+        .and_then(|data| info_widget::dock_width(data, chat_area.width))
+        .unwrap_or(0);
+    let transcript_width = chat_area.width.saturating_sub(info_dock_width);
+    let chat_left_inset = left_aligned_content_inset(transcript_width, app.centered_mode());
+    let wide_prepare_width = transcript_width.saturating_sub(chat_left_inset);
     let narrow_prepare_width = wide_prepare_width.saturating_sub(1);
     let pinned_mermaid_aspect_ratio =
         diagram_area.and_then(|area| pinned_diagram_preferred_aspect_ratio(area, pane_position));
@@ -3416,13 +3482,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         + overscroll_height
         + donut_height; // status + queued + swarm strip + notification + inline UI + gap + input + overscroll + donut
     let available_height = chat_area.height;
-    let stable_fixed_height = fixed_height;
     let overflows = |prepared: &PreparedChatFrame| {
-        let started = Instant::now();
-        let result =
-            (prepared.total_wrapped_lines().max(1) as u16) + stable_fixed_height > available_height;
-        note_prep_overflow(started.elapsed());
-        result
+        interactive_state::transcript_overflows(prepared, fixed_height, available_height)
     };
 
     // Resolving native-scrollbar overflow can require wrapping the transcript at
@@ -3437,18 +3498,18 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let initial_content_height;
     let (prepared, chat_scrollbar_visible) = if !scrollbar_enabled {
         let prepared_wide = prepare_at(wide_prepare_width);
-        initial_content_height = prepared_wide.total_wrapped_lines().max(1) as u16;
+        initial_content_height = prepared_wide.total_wrapped_lines().max(1);
         (prepared_wide, false)
     } else if last_chat_scrollbar_visible()
         || transcript_definitely_overflows(
             app.display_messages(),
-            available_height.saturating_sub(stable_fixed_height) as usize,
+            available_height.saturating_sub(fixed_height) as usize,
         )
     {
         // Prior visibility or the source-row lower bound suggests starting
         // narrow. Still check the actual layout before keeping the scrollbar.
         let prepared_narrow = prepare_at(narrow_prepare_width);
-        initial_content_height = prepared_narrow.total_wrapped_lines().max(1) as u16;
+        initial_content_height = prepared_narrow.total_wrapped_lines().max(1);
         if overflows(&prepared_narrow) {
             (prepared_narrow, true)
         } else {
@@ -3460,7 +3521,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         // No scrollbar last frame: prepare the wide layout first. Only when it
         // overflows do we evaluate the narrow layout to decide on the scrollbar.
         let prepared_wide = prepare_at(wide_prepare_width);
-        initial_content_height = prepared_wide.total_wrapped_lines().max(1) as u16;
+        initial_content_height = prepared_wide.total_wrapped_lines().max(1);
         if !overflows(&prepared_wide) {
             (prepared_wide, false)
         } else {
@@ -3498,9 +3559,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             .width
             .saturating_sub(u16::from(chat_scrollbar_visible));
         let width = width.saturating_sub(left_aligned_content_inset(width, app.centered_mode()));
-        viewport::pinned_todo_band_lines(app, width, available_height.saturating_sub(fixed_height))
-            .0
-            .len()
+        viewport::pinned_todo_band(app, width, available_height.saturating_sub(fixed_height))
+            .height() as usize
     };
     // A fresh cloud transcript is short even on a tall terminal. Keep enough
     // packed rows for the cloud card stack instead of hiding directory counts
@@ -3679,7 +3739,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     note_chat_layout(ChatLayoutMetrics {
         chat_area,
         messages_area,
-        initial_content_height: initial_content_height as usize,
+        initial_content_height,
         content_height: content_height as usize,
         chat_scrollbar_visible,
         use_packed_layout: use_packed,
@@ -3737,16 +3797,48 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             ..Default::default()
         }
     } else {
+        // With the info dock, the transcript is drawn only in the columns
+        // left of it (matching the width it was wrapped to).
+        let transcript_area = Rect {
+            width: messages_area.width.saturating_sub(info_dock_width),
+            ..messages_area
+        };
         let (margins, scrollbar) = draw_messages(
             frame,
             app,
-            messages_area,
+            transcript_area,
             prepared.clone(),
             chat_scrollbar_visible,
         );
         chat_scrollbar = scrollbar;
         margins
     };
+
+    // Docked info box. Its top edge sits a third of the way down the chat
+    // column and it grows downward, pulled up only near the status line. Its
+    // position and width depend only on the terminal size; its height on its
+    // own content. Never on the scroll position, streaming, or the input.
+    let dock_rect = dock_data
+        .as_ref()
+        .filter(|_| info_dock_width > 0)
+        .and_then(|data| {
+            let column = Rect {
+                x: chat_area.x + chat_area.width - info_dock_width,
+                y: chat_area.y,
+                width: info_dock_width,
+                height: chat_area.height,
+            };
+            info_widget::dock_rect(
+                column,
+                chunks[3].y,
+                info_widget::dock_height(data, info_dock_width),
+            )
+        });
+    if let (Some(rect), Some(data)) = (dock_rect, dock_data.as_ref())
+        && !show_donut
+    {
+        info_widget::render_dock(frame, rect, data);
+    }
 
     crate::tui::reset_pinned_diagram_debug_snapshot();
     // Render pinned diagram if we have one
@@ -3808,6 +3900,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             left_widths: margins.left_widths.clone(),
             right_widths: margins.right_widths.clone(),
             centered: margins.centered,
+            content_start_row: margins.content_start_row,
         });
     }
     let chrome_start = Instant::now();
@@ -3836,13 +3929,18 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         frame.render_widget(Paragraph::new(blocker_lines), chunks[6]);
     }
 
-    let _input_cursor = input_ui::draw_input(
-        frame,
-        app,
-        chunks[7],
-        user_count + pending_count + 1,
-        &mut debug_capture,
-    );
+    let _input_cursor = if let Some(dialog) = app.dialog() {
+        dialog.render(frame, chunks[7]);
+        None
+    } else {
+        Some(input_ui::draw_input(
+            frame,
+            app,
+            chunks[7],
+            user_count + pending_count + 1,
+            &mut debug_capture,
+        ))
+    };
 
     if overscroll_height > 0 {
         input_ui::draw_overscroll_status(frame, app, chunks[8]);
@@ -3858,6 +3956,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let mut placements: Vec<info_widget::WidgetPlacement> = Vec::new();
     let widget_bounds = messages_area;
     if app.info_widget_overlays_enabled()
+        && info_dock_width == 0
         && !widget_data.is_empty()
         && !show_donut
         && !swarm_page_active

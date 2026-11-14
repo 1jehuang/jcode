@@ -34,6 +34,26 @@ Key facts that trip people up:
   availability. Having a Claude subscription login (OAuth) does **not** make
   `anthropic-api` usable, and vice versa.
 
+To sign in through the installed Claude Code CLI instead of Jcode's OAuth
+browser flow, run `jcode login --provider claude --claude-code` in an interactive
+terminal on the machine running Jcode. When the `claude` binary is installed,
+this is the default: `jcode login --provider claude` and the local `/login`
+Claude choice (press Enter) both use the Claude Code CLI. Use
+`jcode login --provider claude --oauth`, choose 1 in `/login`, or set
+`JCODE_CLAUDE_LOGIN_METHOD=oauth` to keep Jcode's OAuth flow. Account labels,
+`--default`, `--no-browser`, scriptable flags, and non-interactive shells
+always use Jcode's OAuth flow. Jcode asks permission before using Claude Code's login.
+Claude Code retains its own credential; on macOS, Jcode copies its Keychain
+credential into `~/.jcode/auth.json` so Jcode's direct API runtime can use it.
+With a custom `CLAUDE_CONFIG_DIR` or `JCODE_HOME`, run the command in a shell
+with the same environment as Jcode. The TUI will not open a new terminal in
+that case because a new login shell can lose those settings.
+Because both tools may refresh the same initial token, a copied login may need
+to be renewed independently. Over SSH, run this command on the remote host;
+the SSH login bridge does not transfer the CLI's credentials.
+This method does not select a Jcode account label or support `--default`;
+choose Jcode's OAuth login for managed per-account defaults.
+
 ### How to actually check (don't guess)
 
 ```sh
@@ -49,6 +69,24 @@ Programmatically, the single source of truth is
 `AuthStatus::assessment_for_provider(descriptor)` in
 `crates/jcode-base/src/auth/mod.rs`, which returns a `ProviderAuthAssessment`.
 
+## Claude Code mode: credentials jcode never holds
+
+`claude-code` is a third, independent way to run Claude. The Claude Code CLI
+owns the login; jcode only spawns `claude` and never reads, refreshes or imports
+its tokens.
+
+| Concept | Login provider id | Where the credential lives |
+|---|---|---|
+| Claude Code, default instance | `claude-code` | Claude Code's default home (`~/.claude`, macOS Keychain) |
+| Claude Code, instance `<id>` with `home` | `claude-code --account <id>` | `CLAUDE_CONFIG_DIR=<home>` for that instance |
+
+"Is Claude Code mode available?" only means the configured binary exists
+(`[provider.claude_code].binary` or `JCODE_CLAUDE_CODE_BIN`). Whether its login
+works is checked by Claude Code: run `claude auth status`, with
+`CLAUDE_CONFIG_DIR=<home>` for non-default instances. A missing native Claude
+login in `~/.jcode/auth.json` says nothing about Claude Code mode, and the other
+way round.
+
 ## Selecting a default via config
 
 `~/.jcode/config.toml`:
@@ -57,6 +95,7 @@ Programmatically, the single source of truth is
 [provider]
 default_provider = "claude"        # Claude subscription (OAuth)
 # default_provider = "anthropic-api" # Claude via direct Anthropic API key
+# default_provider = "claude-code"   # Claude via the local Claude Code CLI
 default_model = "claude-opus-4-8"
 anthropic_reasoning_effort = "xhigh"
 ```

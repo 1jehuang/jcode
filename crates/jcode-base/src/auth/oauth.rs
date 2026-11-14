@@ -28,6 +28,57 @@ pub mod claude {
 
 const CLAUDE_TOKEN_TIMEOUT_SECS: u64 = 15;
 
+/// Test-only token endpoint overrides so refresh paths can hit a local mock.
+#[cfg(any(test, feature = "test-support"))]
+static TOKEN_URL_OVERRIDES: std::sync::RwLock<(Option<String>, Option<String>)> =
+    std::sync::RwLock::new((None, None));
+
+/// Which provider's token endpoint a test override applies to.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, Copy)]
+pub enum TokenUrlProvider {
+    Claude,
+    OpenAi,
+}
+
+/// Point Claude or OpenAI token refreshes at `url`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_token_url_override_for_tests(provider: TokenUrlProvider, url: Option<String>) {
+    let mut guard = TOKEN_URL_OVERRIDES
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match provider {
+        TokenUrlProvider::Claude => guard.0 = url,
+        TokenUrlProvider::OpenAi => guard.1 = url,
+    }
+}
+
+fn claude_token_url() -> String {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(url) = TOKEN_URL_OVERRIDES
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .0
+        .clone()
+    {
+        return url;
+    }
+    claude::TOKEN_URL.to_string()
+}
+
+fn openai_token_url() -> String {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(url) = TOKEN_URL_OVERRIDES
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .1
+        .clone()
+    {
+        return url;
+    }
+    openai::TOKEN_URL.to_string()
+}
+
 /// OpenAI Codex OAuth configuration
 pub mod openai {
     pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -861,6 +912,16 @@ async fn fetch_claude_profile_at_url(
     Ok(resp.json().await?)
 }
 
+/// Fetch the browser login identity without changing any saved credentials.
+pub async fn fetch_claude_profile_email(access_token: &str) -> Result<Option<String>> {
+    Ok(
+        fetch_claude_profile_at_url(access_token, claude::PROFILE_URL)
+            .await?
+            .account
+            .email,
+    )
+}
+
 /// Fetch profile metadata for a Claude account and persist any discovered fields.
 pub async fn update_claude_account_profile(
     label: &str,
@@ -1020,7 +1081,7 @@ async fn send_claude_refresh_request(
 
     let client = crate::provider::shared_http_client();
     let resp = client
-        .post(claude::TOKEN_URL)
+        .post(claude_token_url())
         .header("Content-Type", "application/json")
         .timeout(Duration::from_secs(CLAUDE_TOKEN_TIMEOUT_SECS))
         .json(&payload)
@@ -1040,10 +1101,8 @@ async fn send_claude_refresh_request(
     Ok(resp.json().await?)
 }
 
-async fn refresh_claude_tokens_inner(
-    refresh_token: &str,
-    label: Option<&str>,
-) -> Result<OAuthTokens> {
+async fn refresh_claude_tokens_inner(refresh_token: &str, label: &str) -> Result<OAuthTokens> {
+    let expected = claude_auth::capture_refresh_account(label, refresh_token)?;
     let scoped_result =
         send_claude_refresh_request(refresh_token, Some(claude::REFRESH_SCOPES)).await;
     let tokens = match scoped_result {
@@ -1077,10 +1136,7 @@ async fn refresh_claude_tokens_inner(
         scopes,
     };
 
-    let save_label = label.map(ToString::to_string).unwrap_or_else(|| {
-        claude_auth::active_account_label().unwrap_or_else(claude_auth::primary_account_label)
-    });
-    save_claude_tokens_for_account(&oauth_tokens, &save_label)?;
+    claude_auth::commit_captured_refresh(label, expected.as_ref(), refresh_token, &oauth_tokens)?;
 
     Ok(oauth_tokens)
 }
@@ -1092,19 +1148,23 @@ pub async fn refresh_claude_tokens(refresh_token: &str) -> Result<OAuthTokens> {
     refresh_claude_tokens_for_account(refresh_token, &label).await
 }
 
-/// Stored Claude tokens for `label`, expressed as [`OAuthTokens`].
-fn stored_claude_tokens(label: &str) -> Option<OAuthTokens> {
-    let account = claude_auth::list_accounts()
-        .ok()?
-        .into_iter()
-        .find(|account| account.label == label)?;
-    Some(OAuthTokens {
-        access_token: account.access,
-        refresh_token: account.refresh,
-        expires_at: account.expires,
-        id_token: None,
-        scopes: account.scopes,
-    })
+/// Refresh Claude tokens for `scope`. `Pinned` refreshes and persists to the
+/// pinned account's current label only. `Default` keeps the legacy behaviour.
+pub async fn refresh_claude_tokens_scoped(
+    refresh_token: &str,
+    scope: crate::auth::AccountScope<'_>,
+) -> Result<OAuthTokens> {
+    match scope {
+        crate::auth::AccountScope::Default => refresh_claude_tokens(refresh_token).await,
+        crate::auth::AccountScope::Pinned(pin) => {
+            let label = claude_auth::resolve_pin(pin).ok_or_else(|| {
+                anyhow::Error::new(crate::auth::account_store::PinnedAccountMissing(
+                    pin.label.clone(),
+                ))
+            })?;
+            refresh_claude_tokens_for_account(refresh_token, &label).await
+        }
+    }
 }
 
 /// Refresh Claude OAuth tokens for a specific account.
@@ -1122,7 +1182,7 @@ pub async fn refresh_claude_tokens_for_account(
         format!("claude:{label}"),
         {
             let label = label.clone();
-            move || stored_claude_tokens(&label)
+            move || claude_auth::stored_claude_tokens(&label)
         },
         {
             let observed = observed_refresh.clone();
@@ -1146,7 +1206,7 @@ pub async fn refresh_claude_tokens_for_account(
                 &token,
                 "Run `/login claude` to sign in again.",
             )?;
-            refresh_claude_tokens_inner(&token, Some(&label)).await
+            refresh_claude_tokens_inner(&token, &label).await
         },
     )
     .await;
@@ -1190,12 +1250,32 @@ pub async fn refresh_openai_tokens(refresh_token: &str) -> Result<OAuthTokens> {
     // External token (not stored in jcode auth) has no label: nothing on disk
     // to coordinate against, refresh directly.
     refresh_openai_tokens_at(
-        openai::TOKEN_URL,
+        &openai_token_url(),
         OPENAI_REFRESH_TIMEOUT,
         refresh_token,
         crate::auth::codex::active_account_label(),
     )
     .await
+}
+
+/// Refresh OpenAI tokens for `scope`. `Pinned` refreshes and persists to the
+/// pinned account's current label only. `Default` keeps the legacy behaviour
+/// (active label, or an unstored external token).
+pub async fn refresh_openai_tokens_scoped(
+    refresh_token: &str,
+    scope: crate::auth::AccountScope<'_>,
+) -> Result<OAuthTokens> {
+    match scope {
+        crate::auth::AccountScope::Default => refresh_openai_tokens(refresh_token).await,
+        crate::auth::AccountScope::Pinned(pin) => {
+            let label = crate::auth::codex::resolve_pin(pin).ok_or_else(|| {
+                anyhow::Error::new(crate::auth::account_store::PinnedAccountMissing(
+                    pin.label.clone(),
+                ))
+            })?;
+            refresh_openai_tokens_for_account(refresh_token, &label).await
+        }
+    }
 }
 
 /// Stored OpenAI tokens for `label`, expressed as [`OAuthTokens`].
@@ -1223,7 +1303,7 @@ pub async fn refresh_openai_tokens_for_account(
     label: &str,
 ) -> Result<OAuthTokens> {
     refresh_openai_tokens_at(
-        openai::TOKEN_URL,
+        &openai_token_url(),
         OPENAI_REFRESH_TIMEOUT,
         refresh_token,
         Some(label.to_string()),
@@ -1389,18 +1469,29 @@ async fn refresh_openai_tokens_inner(
     refresh_token: &str,
     label: Option<&str>,
 ) -> Result<OAuthTokens> {
-    let result: Result<OAuthTokens> = async {
-        let oauth_tokens = request_openai_token_refresh(token_url, timeout, refresh_token).await?;
+    refresh_openai_tokens_with(
+        refresh_token,
+        label,
+        request_openai_token_refresh(token_url, timeout, refresh_token),
+    )
+    .await
+}
 
-        if let Some(label) = label {
-            crate::auth::codex::update_account_tokens(
-                label,
-                &oauth_tokens.access_token,
-                &oauth_tokens.refresh_token,
-                oauth_tokens.id_token.clone(),
-                None,
-                Some(oauth_tokens.expires_at),
-            )?;
+async fn refresh_openai_tokens_with(
+    refresh_token: &str,
+    label: Option<&str>,
+    request: impl std::future::Future<Output = Result<OAuthTokens>>,
+) -> Result<OAuthTokens> {
+    let result: Result<OAuthTokens> = async {
+        // Capture before HTTP yields. A later lookup of this label can name
+        // an entirely different login, regardless of the runtime cache guard.
+        let expected = label
+            .map(|label| crate::auth::codex::capture_refresh_account(label, refresh_token))
+            .transpose()?;
+        let oauth_tokens = request.await?;
+
+        if let Some(expected) = expected {
+            crate::auth::codex::commit_refresh_account(&expected, &oauth_tokens)?;
         } else {
             crate::logging::info(
                 "Refreshed OpenAI/Codex tokens from an external source without storing them in jcode auth",
@@ -1418,193 +1509,15 @@ async fn refresh_openai_tokens_inner(
     result
 }
 
-/// Build a Claude token exchange request (extracted for testability).
-/// Returns (url, content_type, body_bytes).
 #[cfg(test)]
-fn build_claude_exchange_request(
-    code: &str,
-    verifier: &str,
-    redirect_uri: &str,
-    state: Option<&str>,
-) -> (String, String, Vec<u8>) {
-    let effective_state = state.unwrap_or(verifier);
-    let body = serde_json::json!({
-        "grant_type": "authorization_code",
-        "code": code,
-        "redirect_uri": redirect_uri,
-        "client_id": claude::CLIENT_ID,
-        "code_verifier": verifier,
-        "state": effective_state,
-    });
-    (
-        claude::TOKEN_URL.to_string(),
-        "application/json".to_string(),
-        serde_json::to_vec(&body).expect("Claude exchange test body should serialize"),
-    )
-}
+#[path = "oauth_tests/request_helpers.rs"]
+mod request_helpers;
 
-/// Build a Claude token refresh request (extracted for testability).
 #[cfg(test)]
-fn build_claude_refresh_request(refresh_token: &str) -> (String, String, Vec<u8>) {
-    build_claude_refresh_request_with_scope(refresh_token, Some(claude::REFRESH_SCOPES))
-}
-
-/// Build a Claude token refresh request with configurable scope (extracted for testability).
+#[path = "oauth_refresh_cas_tests.rs"]
+mod refresh_cas_tests;
 #[cfg(test)]
-fn build_claude_refresh_request_with_scope(
-    refresh_token: &str,
-    scope: Option<&'static str>,
-) -> (String, String, Vec<u8>) {
-    let body = serde_json::json!({
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "client_id": claude::CLIENT_ID,
-    });
-    let mut body = body.as_object().expect("refresh body object").clone();
-    if let Some(scope) = scope {
-        body.insert(
-            "scope".to_string(),
-            serde_json::Value::String(scope.to_string()),
-        );
-    }
-    (
-        claude::TOKEN_URL.to_string(),
-        "application/json".to_string(),
-        serde_json::to_vec(&body).expect("Claude refresh test body should serialize"),
-    )
-}
-
-/// Build an OpenAI token exchange request (extracted for testability).
-#[cfg(test)]
-fn build_openai_exchange_request(
-    code: &str,
-    verifier: &str,
-    redirect_uri: &str,
-) -> (String, String, Vec<u8>) {
-    let body = format!(
-        "grant_type=authorization_code&client_id={}&code={}&code_verifier={}&redirect_uri={}",
-        openai::CLIENT_ID,
-        code,
-        verifier,
-        urlencoding::encode(redirect_uri)
-    );
-    (
-        openai::TOKEN_URL.to_string(),
-        "application/x-www-form-urlencoded".to_string(),
-        body.into_bytes(),
-    )
-}
-
-/// Build an OpenAI token refresh request (extracted for testability).
-#[cfg(test)]
-fn build_openai_refresh_request(refresh_token: &str) -> (String, String, Vec<u8>) {
-    let body = format!(
-        "grant_type=refresh_token&client_id={}&refresh_token={}",
-        openai::CLIENT_ID,
-        urlencoding::encode(refresh_token)
-    );
-    (
-        openai::TOKEN_URL.to_string(),
-        "application/x-www-form-urlencoded".to_string(),
-        body.into_bytes(),
-    )
-}
-
-/// Exchange an auth code for tokens against a configurable URL.
-/// Used by tests with a mock server.
-#[cfg(test)]
-async fn exchange_code_at_url(
-    token_url: &str,
-    code: &str,
-    verifier: &str,
-    redirect_uri: &str,
-    state: Option<&str>,
-) -> Result<OAuthTokens> {
-    let effective_state = state.unwrap_or(verifier);
-    let payload = serde_json::json!({
-        "grant_type": "authorization_code",
-        "code": code,
-        "redirect_uri": redirect_uri,
-        "client_id": claude::CLIENT_ID,
-        "code_verifier": verifier,
-        "state": effective_state,
-    });
-
-    let client = crate::provider::shared_http_client();
-    let resp = client
-        .post(token_url)
-        .header("Content-Type", "application/json")
-        .json(&payload)
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        let text = resp.text().await?;
-        anyhow::bail!("Token exchange failed: {}", text);
-    }
-
-    #[derive(Deserialize)]
-    struct TokenResponse {
-        access_token: String,
-        refresh_token: String,
-        expires_in: i64,
-        id_token: Option<String>,
-    }
-
-    let tokens: TokenResponse = resp.json().await?;
-    let expires_at = chrono::Utc::now().timestamp_millis() + (tokens.expires_in * 1000);
-
-    Ok(OAuthTokens {
-        access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token,
-        expires_at,
-        id_token: tokens.id_token,
-        scopes: Vec::new(),
-    })
-}
-
-/// Refresh tokens against a configurable URL.
-/// Used by tests with a mock server.
-#[cfg(test)]
-async fn refresh_tokens_at_url(token_url: &str, refresh_token: &str) -> Result<OAuthTokens> {
-    let payload = serde_json::json!({
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "client_id": claude::CLIENT_ID,
-        "scope": claude::REFRESH_SCOPES,
-    });
-
-    let client = crate::provider::shared_http_client();
-    let resp = client
-        .post(token_url)
-        .header("Content-Type", "application/json")
-        .json(&payload)
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        let text = resp.text().await?;
-        anyhow::bail!("Token refresh failed: {}", text);
-    }
-
-    #[derive(Deserialize)]
-    struct TokenResponse {
-        access_token: String,
-        refresh_token: String,
-        expires_in: i64,
-    }
-
-    let tokens: TokenResponse = resp.json().await?;
-    let expires_at = chrono::Utc::now().timestamp_millis() + (tokens.expires_in * 1000);
-
-    Ok(OAuthTokens {
-        access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token,
-        expires_at,
-        id_token: None,
-        scopes: Vec::new(),
-    })
-}
+use request_helpers::*;
 
 #[cfg(test)]
 #[path = "oauth_tests/mod.rs"]

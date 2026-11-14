@@ -11,7 +11,11 @@ mod catalog_routes;
 pub use catalog_memo::bump_catalog_generation;
 use catalog_memo::{RoutesMemoEntry, catalog_generation, next_catalog_scope};
 pub mod catalog_scheduler;
+pub mod chatgpt_web;
+pub mod chatgpt_web_instance;
+mod conversation_lifecycle;
 pub mod copilot;
+mod credit_failover;
 pub mod cursor;
 mod dispatch;
 pub mod external;
@@ -32,15 +36,13 @@ mod routing;
 mod selection;
 mod startup;
 mod state;
+mod stream_peek;
 mod stream_start;
 mod stream_timeout;
 
 use crate::auth;
 use crate::message::{Message, ToolDefinition};
-use account_failover::{
-    account_usage_probe, active_account_label_for_provider, maybe_annotate_limit_summary,
-    same_provider_account_failover_enabled,
-};
+use account_failover::{active_account_label_for_provider, maybe_annotate_limit_summary};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 #[cfg(test)]
@@ -52,7 +54,8 @@ use std::time::Instant;
 
 pub use account_failover::{has_alternate_account_in_pool, has_eligible_alternate_account};
 pub use catalog_routes::{
-    append_simplified_anthropic_model_routes, remote_current_openai_compatible_route_for_model,
+    append_simplified_anthropic_model_routes, claude_code_routes_for,
+    named_provider_model_supports_chat, remote_current_openai_compatible_route_for_model,
     remote_model_is_server_copilot_only, remote_model_routes_fallback,
     remote_model_routes_lightweight_fallback, remote_model_should_offer_copilot_route,
     remote_openai_compatible_route_for_model, simplified_model_routes_for_picker,
@@ -65,12 +68,13 @@ pub use jcode_provider_core::{
     JCODE_USER_AGENT, ModelCapabilities, ModelCatalogRefreshSummary, ModelRoute,
     ModelRouteApiMethod, NativeCompactionResult, NativeToolResult, NativeToolResultSender,
     PremiumMode, Provider, RouteBillingKind, RouteCheapnessEstimate, RouteCostConfidence,
-    RouteCostSource, RouteSelection, RuntimeKey, dedupe_model_routes,
-    explicit_model_provider_prefix, fresh_transport_client, grok_build_model_spec,
-    inferred_reasoning_efforts, model_name_for_provider, normalize_copilot_model_name,
-    oauth_account_label, provider_from_model_key, shared_http_client,
-    summarize_model_catalog_refresh,
+    RouteCostSource, RouteSelection, RuntimeKey, claude_code_api_method, claude_code_model_spec,
+    dedupe_model_routes, explicit_model_provider_prefix, fresh_transport_client,
+    grok_build_model_spec, inferred_reasoning_efforts, is_chatgpt_web_model,
+    model_name_for_provider, normalize_copilot_model_name, oauth_account_label,
+    provider_from_model_key, shared_http_client, summarize_model_catalog_refresh,
 };
+pub use jcode_provider_core::{AccountPin, AccountProviderKind, AccountScope};
 pub use jcode_provider_core::{
     FallbackPickOptions, error_looks_like_credential_failure, model_route_provider_labels_match,
     normalize_model_route_provider_label, pick_next_fallback_route,
@@ -272,6 +276,7 @@ fn direct_openai_compatible_profile_routes(
         }
 
         routes.push(ModelRoute {
+            catalog_metadata: None,
             model,
             provider: provider.clone(),
             api_method: api_method.clone(),
@@ -346,7 +351,8 @@ pub use self::models::{
     clear_all_provider_unavailability_for_account,
     clear_claude_provider_unavailability_for_account_label, clear_model_unavailable_for_account,
     clear_openai_provider_unavailability_for_account_label, clear_provider_unavailable_for_account,
-    context_limit_for_model, context_limit_for_model_with_provider, fetch_anthropic_model_catalog,
+    clear_provider_unavailable_for_label, context_limit_for_model,
+    context_limit_for_model_with_provider, fetch_anthropic_model_catalog,
     fetch_anthropic_model_catalog_oauth, fetch_openai_api_key_model_catalog,
     fetch_openai_context_limits, fetch_openai_model_catalog,
     finish_anthropic_model_catalog_refresh_for_scope, finish_openai_model_catalog_refresh,
@@ -407,6 +413,10 @@ pub struct MultiProvider {
     /// `jcode-provider-cursor-runtime` and is instantiated through
     /// `external::instantiate_external_provider`.
     cursor: RwLock<Option<Arc<dyn Provider>>>,
+    /// Claude Code CLI runtime (Claude through the official `claude` binary).
+    /// Present when the configured binary exists. Held as `dyn Provider`: the
+    /// runtime lives downstream in `jcode-provider-claude-code-runtime`.
+    claude_code: RwLock<Option<Arc<dyn Provider>>>,
     /// AWS Bedrock provider (native Converse/ConverseStream, IAM/SigV4)
     bedrock: RwLock<Option<Arc<bedrock::BedrockProvider>>>,
     /// OpenRouter API provider
@@ -444,6 +454,9 @@ pub struct MultiProvider {
     /// Shared by forks so the server can wait for real work rather than sleeping
     /// through a fixed quiet period after login.
     post_auth_refreshes_pending: Arc<std::sync::atomic::AtomicUsize>,
+    /// Same-provider account failover state of this session: the per-session
+    /// toggle and the preferred ("home") pin to return to after a move.
+    account_failover: account_failover::SessionAccountFailover,
 }
 
 impl MultiProvider {
@@ -457,143 +470,6 @@ impl MultiProvider {
     fn bind_provider_session(&self, provider: &dyn Provider) {
         if let Some(session_id) = self.bound_session_id() {
             provider.set_session_id(&session_id);
-        }
-    }
-
-    #[cfg(test)]
-    fn same_provider_account_candidates(provider: ActiveProvider) -> Vec<String> {
-        account_failover::same_provider_account_candidates(provider)
-    }
-
-    async fn try_auto_banked_reset(
-        &self,
-        provider: ActiveProvider,
-        reason: &str,
-        messages: &[Message],
-        tools: &[ToolDefinition],
-        mode: CompletionMode<'_>,
-    ) -> Result<bool> {
-        if !self.provider_uses_oauth_accounts(provider) {
-            return Ok(false);
-        }
-        let config = crate::config::Config::load().provider;
-        let enabled = match provider {
-            ActiveProvider::OpenAI => config.openai_auto_banked_reset,
-            ActiveProvider::Claude => config.anthropic_auto_fable_reset,
-            _ => false,
-        };
-        if !enabled {
-            return Ok(false);
-        }
-        if let Some(prompt) = self.auto_reset_route_prompt(provider, reason, messages, tools, mode)
-        {
-            // Preserve the router's exact-route approval/countdown boundary.
-            // A reset must not spend a grant while a permitted route is ready.
-            let account = self
-                .selected_account_for_provider(provider)
-                .or_else(|| active_account_label_for_provider(provider));
-            models::record_provider_unavailable_for_account_label(
-                Self::provider_key(provider),
-                account.as_deref(),
-                reason,
-            );
-            return Err(anyhow::anyhow!(prompt.to_error_message()));
-        }
-        let account = self
-            .selected_account_for_provider(provider)
-            .or_else(|| active_account_label_for_provider(provider));
-        let reset = match provider {
-            ActiveProvider::OpenAI => crate::usage::auto_reset_weekly_usage(account).await,
-            ActiveProvider::Claude => crate::usage::auto_reset_fable_usage(account).await,
-            _ => return Ok(false),
-        };
-        Ok(match reset {
-            Ok(true) => {
-                self.startup_notices
-                    .write()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .push(format!(
-                        "{} usage is available again after earned-reset recovery. Continuing automatically.",
-                        Self::provider_label(provider)
-                    ));
-                true
-            }
-            Ok(false) => false,
-            Err(error) => {
-                crate::logging::warn(&format!("Automatic banked reset failed: {error:#}"));
-                false
-            }
-        })
-    }
-
-    /// Use the same capacity, cooldown, pool and context filters as normal failover.
-    fn auto_reset_route_prompt(
-        &self,
-        provider: ActiveProvider,
-        reason: &str,
-        messages: &[Message],
-        tools: &[ToolDefinition],
-        mode: CompletionMode<'_>,
-    ) -> Option<ProviderFailoverPrompt> {
-        if !crate::config::Config::load()
-            .provider
-            .auto_reset_only_when_no_routes
-        {
-            return None;
-        }
-        let (chars, tokens) = Self::estimate_request_input(messages, tools, mode);
-        self.cross_provider_pool_prompt(provider, provider, reason.to_owned(), chars, tokens)
-    }
-
-    /// Retry only before the stream is accepted, never replay partial output.
-    async fn complete_with_auto_reset(
-        &self,
-        provider: ActiveProvider,
-        messages: &[Message],
-        tools: &[ToolDefinition],
-        mode: CompletionMode<'_>,
-        resume_session_id: Option<&str>,
-    ) -> Result<EventStream> {
-        let mut may_reset = true;
-        loop {
-            let attempt = match mode {
-                CompletionMode::Unified { system } => {
-                    self.complete_on_provider(provider, messages, tools, system, resume_session_id)
-                        .await
-                }
-                CompletionMode::Split {
-                    system_static,
-                    system_dynamic,
-                } => {
-                    self.complete_split_on_provider(
-                        provider,
-                        messages,
-                        tools,
-                        system_static,
-                        system_dynamic,
-                        resume_session_id,
-                    )
-                    .await
-                }
-            };
-            let attempt = self.await_account_stream_start(provider, attempt).await;
-            if may_reset
-                && let Err(error) = &attempt
-                && Self::classify_failover_error(error).should_mark_provider_unavailable()
-                && self
-                    .try_auto_banked_reset(
-                        provider,
-                        &Self::summarize_error(error),
-                        messages,
-                        tools,
-                        mode,
-                    )
-                    .await?
-            {
-                may_reset = false;
-                continue;
-            }
-            return attempt;
         }
     }
 
@@ -639,23 +515,18 @@ impl MultiProvider {
         // members may propose another exact account after a startup failure.
         if let Some(bound_label) = self.selected_account_for_provider(active) {
             let key = Self::provider_key(active);
-            let exists = match active {
-                ActiveProvider::OpenAI => crate::auth::codex::list_accounts()?
-                    .iter()
-                    .any(|a| a.label == bound_label),
-                ActiveProvider::Claude => crate::auth::claude::list_accounts()?
-                    .iter()
-                    .any(|a| a.label == bound_label),
-                _ => false,
-            };
+            let exists = self.saved_account_binding_exists(active, &bound_label)?;
             if !exists {
                 anyhow::bail!(
                     "Saved account '{}' no longer exists. Select an account with /model.",
                     bound_label
                 );
             }
+            self.revalidate_marked_openai_account(active, Some(&bound_label))
+                .await;
             if let Some(reason) =
                 models::provider_unavailability_detail_for_account_label(key, Some(&bound_label))
+                    .or_else(|| self.session_account_exhausted(active))
                     .or_else(|| {
                         account_failover::multi_account_provider_kind(active)
                             .filter(|kind| {
@@ -807,8 +678,20 @@ impl MultiProvider {
 
             let attempt_started = Instant::now();
             let attempt = self
-                .complete_with_auto_reset(candidate, messages, tools, mode, resume_session_id)
+                .complete_candidate_with_credit_failover(
+                    candidate,
+                    active,
+                    messages,
+                    tools,
+                    mode,
+                    resume_session_id,
+                )
                 .await;
+            if let Err(error) = &attempt
+                && parse_failover_prompt_message(&error.to_string()).is_some()
+            {
+                return attempt;
+            }
 
             match attempt {
                 Ok(stream) => {
@@ -913,7 +796,9 @@ impl MultiProvider {
                 if uses_api_key {
                     "claude:api-key".to_string()
                 } else {
-                    let label = crate::auth::claude::active_account_label()
+                    let label = self
+                        .resolved_account_label(AccountProviderKind::Claude)
+                        .or_else(crate::auth::claude::active_account_label)
                         .unwrap_or_else(|| "default".to_string());
                     format!("claude:oauth:{}", label)
                 }
@@ -932,7 +817,9 @@ impl MultiProvider {
                 if uses_api_key {
                     "openai:api-key".to_string()
                 } else {
-                    let label = crate::auth::codex::active_account_label()
+                    let label = self
+                        .resolved_account_label(AccountProviderKind::OpenAi)
+                        .or_else(crate::auth::codex::active_account_label)
                         .unwrap_or_else(|| "default".to_string());
                     format!("openai:oauth:{}", label)
                 }
@@ -965,48 +852,6 @@ impl MultiProvider {
 
         let profile = crate::provider_catalog::openai_compatible_profile_by_id(prefix)?;
         Some((profile, rest))
-    }
-
-    /// Find the configured OpenAI-compatible profile that serves a bare model
-    /// id, using the live route catalog as the source of truth.
-    ///
-    /// Route specs from the picker carry a `<profile>:<model>` prefix, but
-    /// hand-typed `/model <id>` and saved sessions can carry the bare id. The
-    /// active profile wins when several profiles serve the same id, so a
-    /// re-select of the current model never silently hops endpoints.
-    fn openai_compatible_profile_owning_model(
-        &self,
-        model: &str,
-    ) -> Option<crate::provider_catalog::OpenAiCompatibleProfile> {
-        let model = model.trim();
-        if model.is_empty() {
-            return None;
-        }
-
-        let active_profile_id = ProviderRegistry::new(self).active_compatible_profile_id();
-        let mut fallback: Option<String> = None;
-        for route in &self.fresh_routes_memo_entry().routes {
-            if !route.available || route.model != model {
-                continue;
-            }
-            let Some(profile_id) = route
-                .api_method
-                .strip_prefix("openai-compatible:")
-                .map(str::trim)
-                .filter(|profile_id| !profile_id.is_empty())
-            else {
-                continue;
-            };
-            if active_profile_id.as_deref() == Some(profile_id) {
-                fallback = Some(profile_id.to_string());
-                break;
-            }
-            if fallback.is_none() {
-                fallback = Some(profile_id.to_string());
-            }
-        }
-
-        crate::provider_catalog::openai_compatible_profile_by_id(&fallback?)
     }
 
     /// Return the active direct OpenAI-compatible runtime when its own catalog
@@ -1104,7 +949,7 @@ impl MultiProvider {
                 let provider = external::instantiate_openrouter_runtime(
                     external::OpenRouterRuntimeSpec::NamedProfile {
                         name: profile_name.to_string(),
-                        config,
+                        config: Box::new(config),
                     },
                 )?;
                 registry
@@ -1289,6 +1134,17 @@ impl MultiProvider {
                 };
                 cursor.set_model(model)?;
                 self.set_active_provider(ActiveProvider::Cursor);
+                Ok(())
+            }
+            ActiveProvider::ClaudeCode => {
+                let Some(claude_code) = self.claude_code_provider() else {
+                    anyhow::bail!(
+                        "Claude Code is not available. Install the Claude Code CLI (`claude`) or set [provider.claude_code].binary."
+                    );
+                };
+                let model = jcode_provider_core::strip_own_model_prefix(model, "claude-code:");
+                claude_code.set_model(model)?;
+                self.set_active_provider(ActiveProvider::ClaudeCode);
                 Ok(())
             }
             ActiveProvider::Bedrock => {
@@ -1590,6 +1446,18 @@ impl MultiProvider {
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(cursor);
         }
 
+        if self.claude_code_provider().is_none()
+            && crate::auth::claude_code::binary_available()
+            && let Some(claude_code) =
+                external::instantiate_external_provider(external::CLAUDE_CODE_RUNTIME)
+        {
+            crate::logging::info("Hot-initialized Claude Code provider after login");
+            *self
+                .claude_code
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(claude_code);
+        }
+
         let already_has_bedrock = self.bedrock_provider().is_some();
         if !already_has_bedrock && bedrock::BedrockProvider::has_credentials() {
             crate::logging::info("Hot-initialized AWS Bedrock provider after login");
@@ -1745,7 +1613,9 @@ impl MultiProvider {
     }
 
     fn fork_model_switch_request(&self, active: ActiveProvider, current_model: &str) -> String {
-        if let Some(label) = self.selected_account_for_provider(active) {
+        if self.provider_uses_oauth_accounts(active)
+            && let Some(label) = self.selected_account_for_provider(active)
+        {
             let method = if active == ActiveProvider::Claude {
                 "claude-oauth"
             } else {
@@ -1782,6 +1652,7 @@ impl MultiProvider {
             ActiveProvider::Antigravity => "antigravity",
             ActiveProvider::Gemini => "gemini",
             ActiveProvider::Cursor => "cursor",
+            ActiveProvider::ClaudeCode => "claude-code",
             ActiveProvider::Bedrock => "bedrock",
             ActiveProvider::OpenRouter => {
                 if let Some(openrouter) = self.active_openrouter_execution_provider()
@@ -1809,6 +1680,19 @@ impl MultiProvider {
 impl Default for MultiProvider {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+async fn prefetch_openai_or_web_catalog<F>(
+    openai: Option<Arc<dyn Provider>>,
+    browser_refresh: F,
+) -> Result<()>
+where
+    F: std::future::Future<Output = Result<()>>,
+{
+    match openai {
+        Some(provider) => provider.prefetch_models().await,
+        None => browser_refresh.await,
     }
 }
 
@@ -1841,6 +1725,7 @@ impl Provider for MultiProvider {
             ActiveProvider::Antigravity => self.antigravity_provider(),
             ActiveProvider::Gemini => self.gemini_provider(),
             ActiveProvider::Cursor => self.cursor_provider(),
+            ActiveProvider::ClaudeCode => self.claude_code_provider(),
             ActiveProvider::Bedrock => self
                 .bedrock_provider()
                 .map(|provider| provider as Arc<dyn Provider>),
@@ -1897,6 +1782,7 @@ impl Provider for MultiProvider {
             ActiveProvider::Antigravity => "Antigravity",
             ActiveProvider::Gemini => "Gemini",
             ActiveProvider::Cursor => "Cursor",
+            ActiveProvider::ClaudeCode => "Claude Code",
             ActiveProvider::Bedrock => "Bedrock",
             ActiveProvider::OpenRouter => "OpenRouter",
         }
@@ -1945,6 +1831,10 @@ impl Provider for MultiProvider {
                 .cursor_provider()
                 .map(|o| o.model())
                 .unwrap_or_else(|| "composer-2.5".to_string()),
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
+                .map(|o| o.model())
+                .unwrap_or_else(|| jcode_provider_core::DEFAULT_CLAUDE_MODEL.to_string()),
             ActiveProvider::Bedrock => self
                 .bedrock_provider()
                 .map(|o| o.model())
@@ -1999,6 +1889,47 @@ impl Provider for MultiProvider {
             }
             _ => None,
         }
+    }
+
+    fn account_pin(&self, kind: AccountProviderKind) -> Option<AccountPin> {
+        self.account_runtime(kind)
+            .and_then(|provider| provider.account_pin(kind))
+    }
+
+    fn set_account_pin(&self, kind: AccountProviderKind, pin: Option<AccountPin>) -> Result<()> {
+        match self.account_runtime(kind) {
+            Some(provider) => provider.set_account_pin(kind, pin),
+            None if pin.is_none() => Ok(()),
+            None => Err(anyhow!(
+                "{} provider is not configured",
+                match kind {
+                    AccountProviderKind::Claude => "Anthropic",
+                    AccountProviderKind::OpenAi => "OpenAI",
+                    AccountProviderKind::ClaudeCode => "Claude Code",
+                }
+            )),
+        }
+    }
+
+    fn resolved_account_label(&self, kind: AccountProviderKind) -> Option<String> {
+        self.account_runtime(kind)
+            .and_then(|provider| provider.resolved_account_label(kind))
+    }
+
+    fn set_account_failover(&self, enabled: Option<bool>) {
+        self.account_failover.set_enabled(enabled);
+    }
+
+    fn account_failover_home(&self, kind: AccountProviderKind) -> Option<AccountPin> {
+        self.account_failover.home(kind)
+    }
+
+    fn set_account_failover_home(&self, kind: AccountProviderKind, home: Option<AccountPin>) {
+        self.account_failover.set_home(kind, home);
+    }
+
+    fn return_account_home_if_reset(&self) -> Vec<AccountProviderKind> {
+        self.return_home_if_reset()
     }
 
     fn credential_mode(&self) -> CredentialMode {
@@ -2061,6 +1992,7 @@ impl Provider for MultiProvider {
             ActiveProvider::Antigravity => self.antigravity_provider(),
             ActiveProvider::Gemini => self.gemini_provider(),
             ActiveProvider::Cursor => self.cursor_provider(),
+            ActiveProvider::ClaudeCode => self.claude_code_provider(),
             ActiveProvider::Bedrock => self.bedrock_provider().map(|p| p as Arc<dyn Provider>),
             ActiveProvider::OpenRouter => self.active_openrouter_execution_provider(),
         }?;
@@ -2136,6 +2068,10 @@ impl Provider for MultiProvider {
                 .cursor_provider()
                 .map(|provider| provider.supports_image_input())
                 .unwrap_or(false),
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
+                .map(|provider| provider.supports_image_input())
+                .unwrap_or(false),
             ActiveProvider::Bedrock => self
                 .bedrock_provider()
                 .map(|provider| provider.supports_image_input())
@@ -2172,6 +2108,17 @@ impl Provider for MultiProvider {
         let requested_model = model.trim();
         if requested_model.is_empty() {
             anyhow::bail!("Model cannot be empty");
+        }
+
+        // Claude Code routes run through the official CLI runtime. Intercept
+        // the prefix before profile/named-provider resolution so it can never
+        // land on native Claude or a same-named compatible profile.
+        if let Some(target_model) = requested_model.strip_prefix("claude-code:") {
+            let target_model = target_model.trim();
+            if target_model.is_empty() {
+                anyhow::bail!("Claude Code model cannot be empty");
+            }
+            return self.set_model_on_provider(ActiveProvider::ClaudeCode, target_model);
         }
 
         if let Some((prefix, target_model)) = requested_model.split_once(':')
@@ -2343,6 +2290,22 @@ impl Provider for MultiProvider {
             return self.set_model_on_jcode_subscription(&selection.model);
         }
 
+        // A Claude Code route names an instance (account) as well as a model:
+        // switch the instance for this session first, then the model.
+        if let RuntimeKey::ClaudeCode { instance } = &selection.runtime_key {
+            let target = instance
+                .clone()
+                .unwrap_or_else(crate::auth::claude_code::default_instance_id);
+            let current = self
+                .account_pin(AccountProviderKind::ClaudeCode)
+                .map(|pin| pin.label)
+                .unwrap_or_else(crate::auth::claude_code::default_instance_id);
+            if current != target {
+                let pin = crate::auth::claude_code::pin_for_label(&target)?;
+                self.set_account_pin(AccountProviderKind::ClaudeCode, Some(pin))?;
+            }
+        }
+
         // Routing-prefix policy lives once in RouteSelection::routed_model_spec
         // so this orchestrator and every single-runtime provider agree on the
         // spec string. set_model then dispatches it to the right sub-provider.
@@ -2383,6 +2346,10 @@ impl Provider for MultiProvider {
                 .unwrap_or_default(),
             ActiveProvider::Cursor => self
                 .cursor_provider()
+                .map(|cursor| cursor.available_models_for_switching())
+                .unwrap_or_default(),
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
                 .map(|cursor| cursor.available_models_for_switching())
                 .unwrap_or_default(),
             ActiveProvider::Bedrock => self
@@ -2513,9 +2480,20 @@ impl Provider for MultiProvider {
                 .cursor_provider()
                 .map(|o| o.handles_tools_internally())
                 .unwrap_or(false),
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
+                .map(|o| o.handles_tools_internally())
+                .unwrap_or(false),
             ActiveProvider::Bedrock => false, // jcode executes Bedrock tool calls
             ActiveProvider::OpenRouter => false, // jcode executes tools
         }
+    }
+
+    fn uses_own_system_prompt(&self) -> bool {
+        self.active_provider() == ActiveProvider::ClaudeCode
+            && self
+                .claude_code_provider()
+                .is_some_and(|p| p.uses_own_system_prompt())
     }
 
     fn reasoning_effort(&self) -> Option<String> {
@@ -2525,6 +2503,9 @@ impl Provider for MultiProvider {
                 .and_then(|provider| provider.reasoning_effort()),
             ActiveProvider::OpenAI => self.openai_provider().and_then(|o| o.reasoning_effort()),
             ActiveProvider::Copilot => self.copilot_provider().and_then(|o| o.reasoning_effort()),
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
+                .and_then(|o| o.reasoning_effort()),
             ActiveProvider::OpenRouter => self
                 .active_openrouter_execution_provider()
                 .and_then(|o| o.reasoning_effort()),
@@ -2545,6 +2526,10 @@ impl Provider for MultiProvider {
             ActiveProvider::Copilot => self
                 .copilot_provider()
                 .ok_or_else(|| anyhow::anyhow!("Copilot provider not available"))?
+                .set_reasoning_effort(effort),
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
+                .ok_or_else(|| anyhow::anyhow!("Claude Code provider not available"))?
                 .set_reasoning_effort(effort),
             ActiveProvider::OpenRouter => self
                 .active_openrouter_execution_provider()
@@ -2574,8 +2559,19 @@ impl Provider for MultiProvider {
                 Some(provider) => provider.available_efforts(),
                 None => vec![],
             },
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
+                .map(|o| o.available_efforts())
+                .unwrap_or_default(),
             _ => vec![],
         }
+    }
+
+    fn model_metadata(&self, model: &str) -> Option<jcode_provider_core::ModelMetadata> {
+        if matches!(self.active_provider(), ActiveProvider::Copilot) {
+            return self.copilot_provider()?.model_metadata(model);
+        }
+        None
     }
 
     fn service_tier(&self) -> Option<String> {
@@ -2619,6 +2615,10 @@ impl Provider for MultiProvider {
                 .unwrap_or_default(),
             ActiveProvider::Cursor => self
                 .cursor_provider()
+                .map(|c| c.available_service_tiers())
+                .unwrap_or_default(),
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
                 .map(|c| c.available_service_tiers())
                 .unwrap_or_default(),
             _ => vec![],
@@ -2697,6 +2697,10 @@ impl Provider for MultiProvider {
                 .cursor_provider()
                 .map(|o| o.supports_compaction())
                 .unwrap_or(false),
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
+                .map(|o| o.supports_compaction())
+                .unwrap_or(false),
             ActiveProvider::Bedrock => self
                 .bedrock_provider()
                 .map(|o| o.uses_jcode_compaction())
@@ -2729,6 +2733,10 @@ impl Provider for MultiProvider {
                 .unwrap_or(false),
             ActiveProvider::Cursor => self
                 .cursor_provider()
+                .map(|o| o.uses_jcode_compaction())
+                .unwrap_or(false),
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
                 .map(|o| o.uses_jcode_compaction())
                 .unwrap_or(false),
             ActiveProvider::Bedrock => false,
@@ -2817,6 +2825,9 @@ impl Provider for MultiProvider {
                     Err(anyhow::anyhow!("Cursor provider unavailable"))
                 }
             }
+            ActiveProvider::ClaudeCode => Err(anyhow::anyhow!(
+                "Claude Code compacts its own context; jcode native compaction is not available"
+            )),
             ActiveProvider::Bedrock => Err(anyhow::anyhow!(
                 "AWS Bedrock does not support native compaction"
             )),
@@ -2889,6 +2900,10 @@ impl Provider for MultiProvider {
                 .cursor_provider()
                 .map(|o| o.context_window())
                 .unwrap_or(DEFAULT_CONTEXT_LIMIT),
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
+                .map(|o| o.context_window())
+                .unwrap_or(DEFAULT_CONTEXT_LIMIT),
             ActiveProvider::Bedrock => self
                 .bedrock_provider()
                 .map(|o| o.context_window())
@@ -2950,6 +2965,9 @@ impl Provider for MultiProvider {
         } else {
             None
         };
+        // Each fork gets independent Claude Code child state (its own
+        // process and session), carrying the instance and model over.
+        let claude_code_provider = self.claude_code_provider().map(|provider| provider.fork());
         mark("cursor", &mut laps);
         let bedrock_provider = if self.bedrock_provider().is_some() {
             Some(Arc::new(new_bedrock_provider()))
@@ -2976,6 +2994,7 @@ impl Provider for MultiProvider {
             antigravity: RwLock::new(antigravity_provider),
             gemini: RwLock::new(gemini_provider),
             cursor: RwLock::new(cursor_provider),
+            claude_code: RwLock::new(claude_code_provider),
             bedrock: RwLock::new(bedrock_provider),
             openrouter: RwLock::new(openrouter),
             openai_compatible_profiles: RwLock::new(HashMap::new()),
@@ -2987,6 +3006,7 @@ impl Provider for MultiProvider {
             catalog_scope: self.catalog_scope,
             routes_memo: Mutex::new(None),
             post_auth_refreshes_pending: Arc::clone(&self.post_auth_refreshes_pending),
+            account_failover: self.account_failover.copy(),
         };
 
         let runtimes_ms = fork_start.elapsed().as_millis();
@@ -2997,6 +3017,19 @@ impl Provider for MultiProvider {
         let set_model_start = std::time::Instant::now();
         let switch_request = self.fork_model_switch_request(active, &current_model);
         let _ = provider.set_model(&switch_request);
+        // A fork continues this session, so it keeps this session's accounts.
+        // `fork_for_new_session` deliberately does not: a new window starts on
+        // the default account.
+        for kind in AccountProviderKind::ALL {
+            if let Some(pin) = self.account_pin(kind)
+                && let Err(err) = provider.set_account_pin(kind, Some(pin))
+            {
+                crate::logging::warn(&format!(
+                    "Failed to carry the {} account pin into a fork: {err:#}",
+                    kind.key()
+                ));
+            }
+        }
         crate::logging::info(&format!(
             "[TIMING] provider fork: runtimes={}ms ({}), catalog_spawn={}ms, set_model={}ms, total={}ms",
             runtimes_ms,
@@ -3040,6 +3073,20 @@ impl Provider for MultiProvider {
         Arc::new(provider)
     }
 
+    fn bind_session(&self, session_id: &str) {
+        self.bind_existing_claude_session(session_id);
+    }
+
+    async fn reset_conversation_state(&self) -> Result<()> {
+        self.reset_existing_conversation_state().await
+    }
+
+    fn set_host_tool_executor_available(&self, available: bool) {
+        if let Some(provider) = self.claude_code_provider() {
+            provider.set_host_tool_executor_available(available);
+        }
+    }
+
     fn native_result_sender(&self) -> Option<NativeToolResultSender> {
         match self.active_provider() {
             // Direct API doesn't use native result sender
@@ -3054,6 +3101,11 @@ impl Provider for MultiProvider {
             // ran locally.
             ActiveProvider::Cursor => self
                 .cursor_provider()
+                .and_then(|provider| provider.native_result_sender()),
+            // Claude Code calls jcode tools through its SDK MCP bridge and
+            // waits for results on the runtime's channel.
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
                 .and_then(|provider| provider.native_result_sender()),
             ActiveProvider::Bedrock => None,
             ActiveProvider::OpenRouter => None,
@@ -3070,7 +3122,6 @@ impl Provider for MultiProvider {
             );
         }
         self.set_active_provider(target);
-        self.auto_select_multi_account_for_provider(target);
         Ok(())
     }
 }
@@ -3135,6 +3186,7 @@ mod bedrock_placeholder_default_tests {
 
     fn route(model: &str, available: bool) -> ModelRoute {
         ModelRoute {
+            catalog_metadata: None,
             model: model.to_string(),
             provider: "AWS Bedrock".to_string(),
             api_method: "bedrock".to_string(),

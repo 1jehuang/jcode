@@ -301,33 +301,41 @@ pub(super) fn store_response_limits(
 
 pub(super) fn clear_auth_failure(key: &str) {
     // Avoid creating a cache entry or writing on every normal token refresh.
-    if !load()
-        .get(key)
-        .and_then(|entry| entry.error.as_deref())
-        .is_some_and(super::anthropic_response::is_auth_failure)
-    {
-        return;
+    let prefix = format!("{key}:");
+    let keys: Vec<_> = load()
+        .into_iter()
+        .filter_map(|(name, entry)| {
+            ((name == key || name.starts_with(&prefix))
+                && entry
+                    .error
+                    .as_deref()
+                    .is_some_and(super::anthropic_response::is_auth_failure))
+            .then_some(name)
+        })
+        .collect();
+    for key in keys {
+        update(&key, |entry| {
+            if entry
+                .error
+                .as_deref()
+                .is_some_and(super::anthropic_response::is_auth_failure)
+            {
+                // Preserve a longer provider deadline inherited from an earlier
+                // 429, but discard the ordinary authentication retry floor.
+                let auth_deadline = entry
+                    .error_unix_ms
+                    .unwrap_or_else(now_ms)
+                    .saturating_add(ERROR_BACKOFF.as_millis() as i64);
+                entry.retry_not_before_ms =
+                    entry.retry_not_before_ms.filter(|at| *at > auth_deadline);
+                entry.error = None;
+                entry.error_unix_ms = None;
+                // A new login must not inherit the rejected login's quotas.
+                entry.last_good = None;
+                entry.reset_status = None;
+            }
+        });
     }
-    update(key, |entry| {
-        if entry
-            .error
-            .as_deref()
-            .is_some_and(super::anthropic_response::is_auth_failure)
-        {
-            // Preserve a longer provider deadline inherited from an earlier
-            // 429, but discard the ordinary authentication retry floor.
-            let auth_deadline = entry
-                .error_unix_ms
-                .unwrap_or_else(now_ms)
-                .saturating_add(ERROR_BACKOFF.as_millis() as i64);
-            entry.retry_not_before_ms = entry.retry_not_before_ms.filter(|at| *at > auth_deadline);
-            entry.error = None;
-            entry.error_unix_ms = None;
-            // A new login must not inherit the rejected login's quotas.
-            entry.last_good = None;
-            entry.reset_status = None;
-        }
-    });
 }
 
 pub(super) fn store_success_with_reset_status(
@@ -454,6 +462,21 @@ pub fn import_last_good(bytes: &[u8]) {
             local.last_good = Some(good);
         }
     }
+    let _ = crate::storage::write_json_secret(&path, &map);
+}
+
+/// Move persisted data from `from` to `to` (a refreshed token of the same
+/// login), unless `to` already has its own entry.
+pub(super) fn rename(from: &str, to: &str) {
+    let Some(path) = path() else { return };
+    let mut map = load();
+    if map.contains_key(to) {
+        return;
+    }
+    let Some(entry) = map.remove(from) else {
+        return;
+    };
+    map.insert(to.to_string(), entry);
     let _ = crate::storage::write_json_secret(&path, &map);
 }
 
@@ -670,11 +693,14 @@ mod tests {
     #[test]
     fn new_credentials_clear_auth_errors_but_not_inherited_rate_limit_deadlines() {
         with_home(|| {
-            let key = "label:relogin-policy";
+            let key = "label:relogin-policy:credential";
+            let unrelated = "label:relogin-policy-other:credential";
+            store_error(unrelated, "Usage API error (401)");
             store_error_with_hint(key, "Usage API error (429)", Some("3600"));
             let deadline = load()[key].retry_not_before_ms;
             store_error(key, "Usage API error (401)");
-            clear_auth_failure(key);
+            clear_auth_failure("label:relogin-policy");
+            assert!(load()[unrelated].error.is_some());
             let entry = load().remove(key).unwrap();
             assert_eq!(entry.retry_not_before_ms, deadline);
             assert_eq!(entry.adaptive_interval_secs, 1800);

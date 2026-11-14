@@ -6,6 +6,9 @@ use crate::{terminal_eprintln as eprintln, terminal_print as print, terminal_pri
 #[path = "provider_prewarm.rs"]
 mod provider_prewarm;
 
+#[path = "turn_nudges.rs"]
+mod turn_nudges;
+
 impl Agent {
     /// Run turns until no more tool calls
     /// Maximum number of context-limit compaction retries before giving up.
@@ -18,33 +21,18 @@ impl Agent {
     /// task half-done. The counter is per turn-loop, so a genuinely finished
     /// agent still exits promptly.
     pub(crate) const MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS: u32 = 5;
-    const SEQUENTIAL_TOOL_ROUNDS_BEFORE_BATCH_NUDGE: u32 = 3;
-    const BATCH_NUDGE: &str = "<system-reminder>Several tool calls have been made one at a time. If the next independent operations can run concurrently, use the batch tool instead of making more sequential calls. Keep sequential calls when one result is required to decide the next operation.</system-reminder>";
-    const TOOL_CALLS_BEFORE_TODO_NUDGE: usize = 20;
-    const TODO_NUDGE: &str = "<system-reminder>Many tool calls have been made but this session has no todos. Use the todo tool to plan and track this task.</system-reminder>";
-    fn update_sequential_tool_rounds(current: u32, tool_count: usize, used_batch: bool) -> u32 {
-        if tool_count == 1 && !used_batch {
-            current.saturating_add(1)
-        } else {
-            0
-        }
-    }
-
-    fn should_inject_batch_nudge(pending: bool, batch_available: bool) -> bool {
-        pending && batch_available
-    }
-
-    pub(super) fn plan_limit_reminder(
-        notice: &crate::subscription_notice::QuotaExceeded,
-    ) -> String {
-        format!(
-            "<system-reminder>Jcode plan limit: {notice} An upgrade card with a button is already shown to the user in the chat. Mention the limit in one short sentence, including the upgrade link if one is given. Do not open checkout or purchase anything. Continue the task without that feature.</system-reminder>"
-        )
-    }
-
     pub(super) async fn run_turn(&mut self, print_output: bool) -> Result<String> {
         let _runtime_activity =
             crate::runtime_activity::global().try_enter_session(&self.session.id)?;
+        self.return_account_home_at_turn_start(None);
+        let result = self.run_turn_inner(print_output).await;
+        // Persist an account move made by failover, on success and on error.
+        self.sync_account_pins_after_stream(None);
+        result
+    }
+
+    async fn run_turn_inner(&mut self, print_output: bool) -> Result<String> {
+        self.ensure_provider_conversation_reset().await?;
         self.ensure_session_lease()?;
         self.set_log_context();
         let usage_turn_id = self.model_usage_turn_id();
@@ -205,6 +193,8 @@ impl Agent {
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
             self.last_status_detail = None;
+            self.provider.set_host_tool_executor_available(true);
+            self.provider.bind_session(&self.session.id);
             self.provider.set_session_id(&self.session.id);
             let completion = self
                 .provider
@@ -648,6 +638,11 @@ impl Agent {
                         openai_reasoning_items.clear();
                         provider_native_items.clear();
                         openai_native_compaction = None;
+                        // Usage belongs to the discarded attempt, not its replacement.
+                        usage_input = None;
+                        usage_output = None;
+                        usage_cache_read = None;
+                        usage_cache_creation = None;
                         saw_message_end = false;
                         stop_reason = None;
                     }
@@ -767,7 +762,7 @@ impl Agent {
                             crate::telemetry::record_tool_failure();
                         }
                         let native_result = match tool_result {
-                            Ok(output) => NativeToolResult::success(request_id, output.output),
+                            Ok(output) => NativeToolResult::from_tool_output(request_id, output),
                             Err(e) => NativeToolResult::error(request_id, e.to_string()),
                         };
                         // Send result back to SDK bridge
@@ -1368,3 +1363,7 @@ impl Agent {
 #[cfg(test)]
 #[path = "turn_loops_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "retry_rollback_usage_tests.rs"]
+mod retry_rollback_usage_tests;

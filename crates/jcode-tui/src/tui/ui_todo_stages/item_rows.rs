@@ -90,3 +90,80 @@ pub(super) fn truncate_to_width(text: &str, max: usize) -> String {
     }
     out
 }
+
+/// `Waiting for <task> · 18m` for a live worker blocked on this todo.
+pub(crate) fn todo_wait_note(
+    todo: &crate::todo::TodoItem,
+    agents: &[TodoCardAgent],
+) -> Option<String> {
+    if crate::todo::todo_requires_user_auth(todo) || is_done(todo) {
+        return None;
+    }
+    let agent = todo
+        .assigned_to
+        .as_deref()
+        .and_then(|owner| agents.iter().find(|agent| agent.matches(owner)))?;
+    if !is_live_status(&agent.status) && agent.status != "waiting" {
+        return None;
+    }
+    let reason = agent.wait_reason.as_deref()?.lines().next()?.trim();
+    if reason.is_empty() {
+        return None;
+    }
+    let mut note = reason.to_string();
+    if let Some(age) = agent.wait_age_secs.filter(|age| *age >= 2) {
+        note.push_str(" · ");
+        note.push_str(&jcode_tui_render::swarm_gallery::humanize_age(age));
+    }
+    Some(note)
+}
+
+pub(crate) fn render_todo_item_line_with_background(
+    todo: &crate::todo::TodoItem,
+    agents: &[TodoCardAgent],
+    tasks: &[TodoCardBackgroundTask],
+    base_indent: &str,
+    inner_width: usize,
+) -> Line<'static> {
+    let dependencies = todo_running_dependencies(todo, tasks);
+    let wait_note = todo_wait_note(todo, agents);
+    if dependencies.is_empty() || crate::todo::todo_requires_user_auth(todo) {
+        let mut line = render_todo_item_line(todo, agents, base_indent, inner_width);
+        if let Some(note) = wait_note {
+            line.spans.push(Span::styled(
+                format!("  ◷ {note}"),
+                Style::default().fg(todo_warning_color()),
+            ));
+            line = super::truncate_line_with_ellipsis_to_width(
+                &line,
+                inner_width.saturating_add(base_indent.width()),
+            );
+        }
+        return line;
+    }
+    let mut spans = todo_card_item_spans(todo, false);
+    spans[1] = Span::styled("◷ ", Style::default().fg(todo_warning_color()));
+    if let Some(note) = wait_note {
+        spans.push(Span::styled(
+            format!("  {note}"),
+            Style::default().fg(todo_warning_color()),
+        ));
+    }
+    let title_width = spans.iter().map(|span| span.content.width()).sum::<usize>();
+    let progress = todo_dependency_progress(
+        &dependencies,
+        inner_width
+            .saturating_sub(title_width + 2)
+            .max(inner_width.saturating_sub(12).min(inner_width / 2)),
+    );
+    let progress_width = progress.width();
+    if progress_width > 0 {
+        let left_width = inner_width.saturating_sub(progress_width + 2);
+        let mut left = super::truncate_line_with_ellipsis_to_width(&Line::from(spans), left_width);
+        let pad = inner_width.saturating_sub(left.width() + progress_width);
+        left.spans.push(Span::raw(" ".repeat(pad)));
+        left.spans.extend(progress.spans);
+        spans = left.spans;
+    }
+    todo_card_line(spans, base_indent, inner_width)
+}

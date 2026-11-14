@@ -17,6 +17,7 @@ fn stale_terminals_cannot_settle_or_touch_newer_work() {
     for event in [
         ServerEvent::Done { id: 98 },
         ServerEvent::Error {
+            server_resumes: false,
             id: 98,
             message: "late failure".into(),
             retry_after_secs: None,
@@ -57,6 +58,7 @@ fn runtime_command_error_preserves_active_turn_and_clears_request_ownership() {
         assert!(handle_server_event(
             &mut app,
             ServerEvent::Error {
+                server_resumes: false,
                 id,
                 message: "Session is busy. Retry this command after the current turn.".into(),
                 retry_after_secs: None,

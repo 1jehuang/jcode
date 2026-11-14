@@ -394,7 +394,18 @@ fn websocket_nonempty_terminal_output_remains_authoritative() {
 
 #[test]
 fn max_and_swarm_efforts_are_preserved_at_the_strongest_api_level() {
+    // Browser routes read the process-global web catalog keyed by JCODE_HOME.
+    let _guard = jcode_base::storage::lock_test_env();
     let provider = OpenAIProvider::new_browser_only();
+    *provider.model.try_write().unwrap() = "gpt-9.9-unobserved[web]".to_string();
+    assert!(is_chatgpt_web_model(&provider.model()));
+    // An unobserved web route must not invent a strongest enabled Power level.
+    assert_eq!(
+        provider.api_reasoning_effort_with_swarm_root(Some("swarm"), Some("max")),
+        None
+    );
+    // This payload regression covers native API reasoning, not web availability.
+    *provider.model.try_write().unwrap() = "gpt-5.4".to_string();
     // The swarm sentinel is a valid stored effort...
     assert_eq!(
         OpenAIProvider::normalize_reasoning_effort("swarm").as_deref(),
@@ -473,7 +484,6 @@ fn gpt_5_6_sol_defaults_to_low_reasoning_effort() {
     // With no stored effort, the surfaced status reflects the Sol default.
     let _guard = jcode_base::storage::lock_test_env();
     jcode_base::auth::codex::set_active_account_override(Some("sol-low-default-test".to_string()));
-    jcode_base::provider::populate_account_models(vec!["gpt-5.6-sol".to_string()]);
     let provider = OpenAIProvider::new(CodexCredentials {
         access_token: "test".to_string(),
         refresh_token: String::new(),
@@ -481,6 +491,10 @@ fn gpt_5_6_sol_defaults_to_low_reasoning_effort() {
         account_id: None,
         expires_at: None,
     });
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec!["gpt-5.6-sol".to_string()],
+    );
     provider.set_model("gpt-5.6-sol").unwrap();
     *provider
         .reasoning_effort
@@ -545,6 +559,7 @@ fn test_build_response_request_passes_system_prompt_through_verbatim() {
 
 #[tokio::test]
 async fn configured_swarm_root_effort_resolves_without_changing_stored_mode() {
+    let _guard = jcode_base::storage::lock_test_env();
     let provider = OpenAIProvider::new_browser_only();
     *provider.model.write().await = "gpt-5.6".to_string();
     provider.model_reasoning_efforts.write().unwrap().insert(

@@ -65,6 +65,23 @@ impl App {
         &mut self,
         terminal: &mut DefaultTerminal,
         event_stream: &mut EventStream,
+        bus_receiver: Option<&mut tokio::sync::broadcast::Receiver<crate::bus::BusEvent>>,
+    ) -> Result<()> {
+        self.ensure_local_rewind_provider_reset().await?;
+        // Same account bookkeeping as the server agent's turn: return home at
+        // turn start, save a failover move on every exit path.
+        let observed = self.local_account_turn_start();
+        let result = self
+            .run_turn_interactive_inner(terminal, event_stream, bus_receiver)
+            .await;
+        self.local_account_turn_end(observed);
+        result
+    }
+
+    async fn run_turn_interactive_inner(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+        event_stream: &mut EventStream,
         mut bus_receiver: Option<&mut tokio::sync::broadcast::Receiver<crate::bus::BusEvent>>,
     ) -> Result<()> {
         let eager_stream_redraw = !crate::perf::tui_policy().enable_decorative_animations;
@@ -1168,7 +1185,7 @@ impl App {
                                             crate::telemetry::record_tool_failure();
                                         }
                                         let native_result = match tool_result {
-                                            Ok(output) => crate::provider::NativeToolResult::success(request_id, output.output),
+                                            Ok(output) => crate::provider::NativeToolResult::from_tool_output(request_id, output),
                                             Err(e) => crate::provider::NativeToolResult::error(request_id, e.to_string()),
                                         };
                                         if let Some(sender) = self.provider.native_result_sender() {

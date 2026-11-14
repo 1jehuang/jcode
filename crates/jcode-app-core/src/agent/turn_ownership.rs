@@ -98,6 +98,21 @@ pub(crate) struct TurnPublicationPin {
     _reservation: Arc<Reservation>,
 }
 
+/// Resolves once no turn holds the reservation. A cancelled server turn drops
+/// its [`TurnLease`] only when its task is next polled, so a replacement turn
+/// must await this before claiming or it races the stale lease and is rejected.
+pub(crate) struct TurnReleaseSignal {
+    gate: Arc<Mutex<()>>,
+}
+
+impl TurnReleaseSignal {
+    /// Acquiring and immediately releasing the gate proves the prior lease was
+    /// dropped. Wrap in a timeout: another legitimate turn may hold it.
+    pub(crate) async fn wait(self) {
+        drop(Arc::clone(&self.gate).lock_owned().await);
+    }
+}
+
 impl std::fmt::Debug for TurnPublicationPin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("TurnPublicationPin")
@@ -129,6 +144,12 @@ impl TurnOwnership {
                 .try_lock_owned()
                 .map_err(|_| anyhow::anyhow!("Already processing a message"))?,
         })
+    }
+
+    pub(super) fn release_signal(&self) -> TurnReleaseSignal {
+        TurnReleaseSignal {
+            gate: Arc::clone(&self.gate),
+        }
     }
 
     pub(super) fn claim(&self) -> anyhow::Result<TurnLease> {
@@ -233,5 +254,36 @@ mod tests {
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         assert!(runtime.claim().is_ok());
+    }
+
+    #[tokio::test]
+    async fn release_signal_resolves_only_after_the_held_lease_drops() {
+        let runtime = Arc::new(TurnOwnership::default());
+        let lease = runtime.claim().unwrap();
+        // A task holds the lease until told to release, mirroring a resume
+        // turn that keeps its reservation while waiting for a reset.
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let held = tokio::spawn(async move {
+            let _lease = lease;
+            release_rx.await.unwrap();
+        });
+
+        // The signal must not resolve while the lease is still held.
+        let mut wait = Box::pin(runtime.release_signal().wait());
+        tokio::select! {
+            biased;
+            _ = &mut wait => panic!("release signal resolved while the lease was held"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+        }
+        assert!(runtime.claim().is_err(), "lease still blocks a claim");
+
+        // Once the holder drops the lease, the signal resolves and the
+        // replacement can claim, exactly as the message path relies on.
+        release_tx.send(()).unwrap();
+        held.await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), wait)
+            .await
+            .expect("release signal must resolve after the lease drops");
+        assert!(runtime.claim().is_ok(), "claim succeeds after release");
     }
 }

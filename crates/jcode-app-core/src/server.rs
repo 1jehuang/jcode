@@ -28,6 +28,7 @@ mod comm_plan;
 mod comm_session;
 mod comm_sync;
 mod configured_name;
+mod credential_watch;
 use configured_name::normalize_configured_server_name;
 mod debug;
 mod debug_ambient;
@@ -74,6 +75,7 @@ mod swarm_persistence;
 pub(crate) mod swarm_todo_link;
 mod swarm_watchdog;
 mod turn_failover;
+mod usage_limit_resume;
 mod util;
 mod worker_revive;
 
@@ -103,11 +105,11 @@ use self::swarm_channels::{
 };
 pub(super) use self::swarm_mutation_state::SwarmMutationRuntime;
 use self::swarm_persistence::{
-    LoadedSwarmRuntimeState, capture_swarm_state_version,
-    load_runtime_state as load_persisted_swarm_runtime_state,
-    persist_swarm_state as persist_swarm_state_snapshot, remove_swarm_state_if_version,
-    swarm_operation_lock,
+    LoadedSwarmRuntimeState, load_runtime_state as load_persisted_swarm_runtime_state,
+    persist_swarm_state as persist_swarm_state_snapshot, swarm_operation_lock,
 };
+#[cfg(test)]
+use self::swarm_persistence::{capture_swarm_state_version, remove_swarm_state_if_version};
 use self::util::get_shared_mcp_pool;
 use crate::agent::Agent;
 use crate::ambient_runner::AmbientRunnerHandle;
@@ -192,6 +194,7 @@ pub(super) async fn remove_session_entry(
     sessions: &SessionAgents,
     session_id: &str,
 ) -> Option<Arc<Mutex<Agent>>> {
+    swarm::cancel_session_turn(session_id).await;
     let removed = sessions.remove(session_id).await;
     if removed.is_some() {
         crate::storage::unregister_active_pid(session_id);
@@ -400,6 +403,7 @@ pub(super) async fn persist_swarm_state_for(swarm_id: &str, swarm_state: &SwarmS
     );
 }
 
+#[cfg(test)]
 pub(super) async fn remove_persisted_swarm_state_for(swarm_id: &str, swarm_state: &SwarmState) {
     // Persist and remove share one per-swarm ordering domain. The file version
     // is an extra CAS guard against direct/recovery writers outside this path.
@@ -417,7 +421,7 @@ fn headless_member_should_restore(status: &str, is_headless: bool) -> bool {
     is_headless
         && !matches!(
             status,
-            "ready" | "completed" | "done" | "failed" | "stopped"
+            "ready" | "completed" | "done" | "failed" | "stopped" | "suspended" | "paused"
         )
 }
 
@@ -502,6 +506,12 @@ pub use self::socket::{
 };
 use self::socket::{signal_ready_fd, socket_has_live_listener};
 
+/// Pin this process's executable before asynchronous provider initialization.
+/// Repeated calls return the same launch target, even after an install moves
+/// the channel link. Binary entry points should call this before startup work.
+pub fn pin_running_binary() -> Option<std::path::PathBuf> {
+    self::util::running_server_binary()
+}
 pub(crate) use self::util::server_has_newer_binary;
 pub use self::util::{MANAGED_CLOUD_LIVE_RELOAD_MARKER, ServerIdentity};
 use self::util::{
@@ -526,6 +536,15 @@ mod queue_tests;
 
 #[cfg(test)]
 mod file_activity_tests;
+
+#[cfg(test)]
+mod usage_limit_resume_tests;
+
+mod headless_recovery;
+#[cfg(test)]
+mod headless_recovery_tests;
+mod power_activity;
+mod recovered_assignment;
 
 /// Idle timeout for the shared server when no clients are connected (5 minutes)
 const IDLE_TIMEOUT_SECS: u64 = 300;
@@ -748,378 +767,7 @@ impl Server {
     }
 
     async fn recover_headless_sessions_on_startup(&self) {
-        let sessions_to_restore = {
-            let members = self.swarm_state.members.read().await;
-            members
-                .values()
-                .filter(|member| {
-                    // Shutdown can persist `ready` after recording recovery
-                    // intent. On load that becomes `stopped`, but the durable
-                    // continuation must still take priority over that status.
-                    member.is_headless
-                        && (headless_member_should_restore(&member.status, true)
-                            || reload_recovery::has_pending_for_session(&member.session_id))
-                })
-                .map(|member| member.session_id.clone())
-                .collect::<Vec<_>>()
-        };
-
-        if sessions_to_restore.is_empty() {
-            return;
-        }
-
-        crate::logging::info(&format!(
-            "Recovering {} headless session(s) after startup: {:?}",
-            sessions_to_restore.len(),
-            sessions_to_restore
-        ));
-
-        if let Some(delay) = startup_headless_recovery_test_delay() {
-            crate::logging::info(&format!(
-                "Applying test-only headless startup recovery delay of {}ms",
-                delay.as_millis()
-            ));
-            tokio::time::sleep(delay).await;
-        }
-
-        let mcp_pool = get_shared_mcp_pool(&self.mcp_pool).await;
-        let recovery_started = Instant::now();
-        let mut stats = HeadlessRecoveryStats::default();
-        let mut swarms_to_persist = HashSet::new();
-
-        for session_id in sessions_to_restore {
-            let runtime_slot = self.sessions.reserve(&session_id).await;
-            if runtime_slot.existing().await.is_some() {
-                continue;
-            }
-            if let Err(error) = runtime_slot.ensure_vacant() {
-                crate::logging::warn(&format!("Cannot recover session {session_id}: {error}"));
-                continue;
-            }
-            stats.candidates += 1;
-            let session = match crate::session::Session::load(&session_id) {
-                Ok(session) => session,
-                Err(error) => {
-                    stats.failed_to_load += 1;
-                    crate::logging::warn(&format!(
-                        "Failed to load headless session {} during startup recovery: {}",
-                        session_id, error
-                    ));
-                    update_member_status(
-                        &session_id,
-                        "failed",
-                        Some(truncate_detail(&error.to_string(), 120)),
-                        &self.swarm_state.members,
-                        &self.swarm_state.swarms_by_id,
-                        Some(&self.event_history),
-                        Some(&self.event_counter),
-                        Some(&self.swarm_event_tx),
-                    )
-                    .await;
-                    if let Some(swarm_id) = {
-                        let members = self.swarm_state.members.read().await;
-                        members
-                            .get(&session_id)
-                            .and_then(|member| member.swarm_id.clone())
-                    } {
-                        persist_swarm_state_for(&swarm_id, &self.swarm_state).await;
-                    }
-                    continue;
-                }
-            };
-
-            let previous_status = session.status.clone();
-            let provider = self.provider.fork();
-            let registry = crate::tool::Registry::new(provider.clone()).await;
-            if session.is_canary {
-                registry.register_selfdev_tools().await;
-            }
-            registry
-                .register_mcp_tools_for_dir(
-                    None,
-                    Some(Arc::clone(&mcp_pool)),
-                    Some("headless".to_string()),
-                    session.working_dir.as_ref().map(std::path::PathBuf::from),
-                )
-                .await;
-
-            let agent = Arc::new(Mutex::new(Agent::new_with_session(
-                provider, registry, session, None,
-            )));
-
-            if let Err(error) = runtime_slot.publish(Arc::clone(&agent)).await {
-                crate::logging::warn(&format!(
-                    "Cannot publish recovered session {session_id}: {error}"
-                ));
-                continue;
-            }
-            drop(runtime_slot);
-
-            {
-                let agent_guard = agent.lock().await;
-                register_session_interrupt_queue(
-                    &self.soft_interrupt_queues,
-                    &session_id,
-                    agent_guard.soft_interrupt_queue(),
-                )
-                .await;
-                let mut shutdown_signals = self.shutdown_signals.write().await;
-                shutdown_signals.insert(session_id.clone(), agent_guard.graceful_shutdown_signal());
-                register_background_tool_signal(&session_id, agent_guard.background_tool_signal());
-            }
-
-            let stored_recovery_record = reload_recovery::peek_for_session(&session_id)
-                .ok()
-                .flatten();
-            let has_stored_recovery_intent = stored_recovery_record
-                .as_ref()
-                .map(|record| record.status == reload_recovery::ReloadRecoveryStatus::Pending)
-                .unwrap_or(false);
-            let should_resume = has_stored_recovery_intent || {
-                let agent_guard = agent.lock().await;
-                self::client_session::restored_session_was_interrupted(
-                    &session_id,
-                    &previous_status,
-                    &agent_guard,
-                )
-            };
-            if let Some(record) = stored_recovery_record.as_ref() {
-                reload_trace::record_value(
-                    &record.reload_id,
-                    "startup_recovery_decision",
-                    serde_json::json!({
-                        "session_id": session_id,
-                        "has_stored_recovery_intent": has_stored_recovery_intent,
-                        "should_resume": should_resume,
-                        "previous_status": previous_status,
-                        "is_headless": true,
-                    }),
-                );
-            }
-
-            if !should_resume {
-                ReloadContext::log_recovery_outcome(
-                    "server_startup_headless",
-                    &session_id,
-                    "skipped",
-                    "restored session was not interrupted by reload",
-                );
-                stats.skipped += 1;
-                update_member_status(
-                    &session_id,
-                    "ready",
-                    None,
-                    &self.swarm_state.members,
-                    &self.swarm_state.swarms_by_id,
-                    Some(&self.event_history),
-                    Some(&self.event_counter),
-                    Some(&self.swarm_event_tx),
-                )
-                .await;
-                if let Some(swarm_id) = {
-                    let members = self.swarm_state.members.read().await;
-                    members
-                        .get(&session_id)
-                        .and_then(|member| member.swarm_id.clone())
-                } {
-                    swarms_to_persist.insert(swarm_id);
-                }
-                continue;
-            }
-
-            let stored_directive = reload_recovery::pending_directive_for_session(&session_id)
-                .ok()
-                .flatten();
-            let reload_ctx = if stored_directive.is_none() {
-                ReloadContext::load_for_session(&session_id).ok().flatten()
-            } else {
-                None
-            };
-            let reminder = stored_directive
-                .map(|directive| directive.continuation_message)
-                .or_else(|| headless_reload_continuation_message(reload_ctx));
-            let Some(reminder) = reminder else {
-                ReloadContext::log_recovery_outcome(
-                    "server_startup_headless",
-                    &session_id,
-                    "failed",
-                    "recovery directive missing for interrupted headless session",
-                );
-                continue;
-            };
-            stats.resumed += 1;
-            ReloadContext::log_recovery_outcome(
-                "server_startup_headless",
-                &session_id,
-                "resuming",
-                "restored interrupted headless session after reload",
-            );
-            let recover_swarm_members = Arc::clone(&self.swarm_state.members);
-            let recover_swarms_by_id = Arc::clone(&self.swarm_state.swarms_by_id);
-            let recover_event_history = Arc::clone(&self.event_history);
-            let recover_event_counter = Arc::clone(&self.event_counter);
-            let recover_swarm_event_tx = self.swarm_event_tx.clone();
-            let recover_swarm_state = self.swarm_state.clone();
-            let recovery_reload_id = stored_recovery_record.map(|record| record.reload_id);
-
-            tokio::spawn(async move {
-                let lease = match agent.lock().await.claim_server_turn() {
-                    Ok(lease) => lease,
-                    Err(error) => {
-                        crate::logging::info(&format!(
-                            "Skipping duplicate startup recovery for {session_id}: {error}"
-                        ));
-                        return;
-                    }
-                };
-                if let Some(reload_id) = recovery_reload_id.as_deref() {
-                    reload_trace::record_value(
-                        reload_id,
-                        "continuation_started",
-                        serde_json::json!({
-                            "session_id": session_id,
-                            "source": "server_startup_headless",
-                        }),
-                    );
-                }
-                update_member_status(
-                    &session_id,
-                    "running",
-                    Some("resuming after reload".to_string()),
-                    &recover_swarm_members,
-                    &recover_swarms_by_id,
-                    Some(&recover_event_history),
-                    Some(&recover_event_counter),
-                    Some(&recover_swarm_event_tx),
-                )
-                .await;
-                if let Some(swarm_id) = {
-                    let members = recover_swarm_members.read().await;
-                    members
-                        .get(&session_id)
-                        .and_then(|member| member.swarm_id.clone())
-                } {
-                    persist_swarm_state_for(&swarm_id, &recover_swarm_state).await;
-                }
-
-                match reload_recovery::mark_delivered_if_matching_continuation(
-                    &session_id,
-                    &reminder,
-                    "server_startup_headless",
-                ) {
-                    Ok(true) => {}
-                    Ok(false) => {}
-                    Err(error) => crate::logging::warn(&format!(
-                        "Failed to mark headless reload recovery intent delivered for {}: {}",
-                        session_id, error
-                    )),
-                }
-
-                let (fallback, _) = mpsc::unbounded_channel();
-                let events = self::state::TurnEventChannel::new(
-                    session_id.clone(),
-                    Arc::clone(&recover_swarm_members),
-                    fallback,
-                    &lease,
-                );
-                let result = self::turn_failover::process_reserved_message_with_server_failover(
-                    Arc::clone(&agent),
-                    &lease,
-                    "",
-                    vec![],
-                    Some(reminder),
-                    events.sender(),
-                    true,
-                )
-                .await;
-
-                let terminal = match &result {
-                    Ok(()) => ServerEvent::Done { id: 0 },
-                    Err(error) => ServerEvent::Error {
-                        id: 0,
-                        message: crate::util::format_error_chain(error),
-                        retry_after_secs: None,
-                    },
-                };
-
-                let (status, detail) = match result {
-                    Ok(()) => {
-                        if let Some(reload_id) = recovery_reload_id.as_deref() {
-                            reload_trace::record_value(
-                                reload_id,
-                                "continuation_finished",
-                                serde_json::json!({
-                                    "session_id": session_id,
-                                    "source": "server_startup_headless",
-                                    "status": "ready",
-                                }),
-                            );
-                        }
-                        ReloadContext::log_recovery_outcome(
-                            "server_startup_headless",
-                            &session_id,
-                            "resumed",
-                            "continuation dispatched successfully",
-                        );
-                        ("ready", None)
-                    }
-                    Err(error) => {
-                        if let Some(reload_id) = recovery_reload_id.as_deref() {
-                            reload_trace::record_value(
-                                reload_id,
-                                "continuation_failed",
-                                serde_json::json!({
-                                    "session_id": session_id,
-                                    "source": "server_startup_headless",
-                                    "error": error.to_string(),
-                                }),
-                            );
-                        }
-                        ReloadContext::log_recovery_outcome(
-                            "server_startup_headless",
-                            &session_id,
-                            "failed",
-                            &error.to_string(),
-                        );
-                        ("failed", Some(truncate_detail(&error.to_string(), 120)))
-                    }
-                };
-                update_member_status(
-                    &session_id,
-                    status,
-                    detail,
-                    &recover_swarm_members,
-                    &recover_swarms_by_id,
-                    Some(&recover_event_history),
-                    Some(&recover_event_counter),
-                    Some(&recover_swarm_event_tx),
-                )
-                .await;
-                if let Some(swarm_id) = {
-                    let members = recover_swarm_members.read().await;
-                    members
-                        .get(&session_id)
-                        .and_then(|member| member.swarm_id.clone())
-                } {
-                    persist_swarm_state_for(&swarm_id, &recover_swarm_state).await;
-                }
-                let _ = events.sender().send(terminal);
-                events.finish().await;
-            });
-        }
-
-        for swarm_id in swarms_to_persist {
-            persist_swarm_state_for(&swarm_id, &self.swarm_state).await;
-        }
-
-        crate::logging::info(&format!(
-            "[TIMING] headless reload startup recovery: candidates={}, resumed={}, skipped={}, failed_to_load={}, total={}ms",
-            stats.candidates,
-            stats.resumed,
-            stats.skipped,
-            stats.failed_to_load,
-            recovery_started.elapsed().as_millis()
-        ));
+        headless_recovery::recover(self).await;
     }
 
     async fn finish_startup_after_bind(
@@ -1211,6 +859,10 @@ impl Server {
         // keeps the first agent `session_search` call from paying the cold
         // indexing cost while leaving exhaustive searches available on demand.
         crate::tool::spawn_recent_index_warmup();
+
+        // Announce account swaps made outside this server (CLI switch, another
+        // process, manual auth-file edit) so held turns resend promptly.
+        credential_watch::spawn();
 
         // Reconcile background-task status files orphaned by a previous
         // process image (crash or exec-based reload). Non-detached tasks die
@@ -1867,102 +1519,6 @@ impl Server {
         });
     }
 
-    /// Spawn the background loop that keeps the machine awake while any session
-    /// is actively streaming/processing.
-    ///
-    /// The shared daemon owns every session, so a single inhibitor here covers
-    /// all of them. We poll the swarm-member map (the authoritative "running"
-    /// signal that also drives Waybar's "N streaming" indicator) on a short
-    /// interval and reconcile a best-effort OS power inhibitor against it. The
-    /// inhibitor blocks automatic system sleep; Linux also blocks lid-switch
-    /// handling. Windows still honors explicit lid/power-button actions from the
-    /// active power plan. The display can turn off. When no session is running,
-    /// the guard is released so normal power management resumes immediately.
-    fn spawn_power_inhibitor(swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>) {
-        // Reconcile interval. Short enough that the inhibitor engages promptly
-        // when a turn starts and releases promptly when work finishes, but cheap
-        // (a read lock + a scan) so it adds no meaningful load.
-        const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
-
-        let mut inhibitor = crate::power_inhibit::PowerInhibitor::new();
-        if !inhibitor.is_available() {
-            // Disabled via the legacy env escape hatch, or unsupported platform.
-            crate::logging::info(
-                "power_inhibit: unavailable (unsupported platform or JCODE_DISABLE_POWER_INHIBIT set); not monitoring",
-            );
-            return;
-        }
-
-        crate::logging::info(
-            "power_inhibit: monitoring active sessions to prevent sleep while streaming",
-        );
-
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut last_active: Option<bool> = None;
-            // macOS/Windows have no process-scoped lid lock, so lid-close
-            // blocking changes a persistent OS setting. That belongs to the
-            // user's desktop session, not the agent runtime: tell `jcode
-            // companion`, which journals and restores it. No companion (a
-            // headless or remote server) means no lid override.
-            let mut lid_reported: Option<bool> = None;
-            loop {
-                interval.tick().await;
-
-                // Re-evaluate the config each tick so toggling it at runtime
-                // takes effect without restarting the daemon.
-                let power = &crate::config::config().power;
-                let enabled = power.prevent_sleep_while_streaming;
-                let block_lid = enabled && power.block_lid_close;
-
-                let active = enabled && Self::any_session_streaming(&swarm_members).await;
-                if last_active != Some(active) {
-                    crate::logging::info(&format!(
-                        "power_inhibit: {} (streaming sessions {})",
-                        if active { "engaging" } else { "releasing" },
-                        if active { "present" } else { "absent" },
-                    ));
-                    last_active = Some(active);
-                }
-                inhibitor.set_active(active);
-                let want_lid = active && block_lid;
-                // Re-send while active so a companion started mid-turn engages
-                // too. Idle state is sent once.
-                if want_lid || lid_reported != Some(false) {
-                    let reported = crate::companion_client::request_async(
-                        crate::companion_client::CompanionRequest::PowerActivity {
-                            active: want_lid,
-                        },
-                        Duration::from_secs(2),
-                    )
-                    .await
-                    .is_ok();
-                    lid_reported = reported.then_some(want_lid);
-                }
-            }
-        });
-    }
-
-    /// On Jcode Cloud the host powers off after 30 minutes without an SSH
-    /// client unless the busy marker is fresh. Turns keep running after the
-    /// client disconnects, so mark the host busy while any session runs.
-    fn spawn_cloud_activity_keepalive(swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>) {
-        if !crate::mobile_runner::is_cloud_machine() {
-            return;
-        }
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                interval.tick().await;
-                if Self::any_session_streaming(&swarm_members).await {
-                    crate::mobile_runner::touch_cloud_activity_marker();
-                }
-            }
-        });
-    }
-
     /// Whether at least one session is currently in the "running" state, i.e.
     /// actively streaming/processing a turn. This is the same signal that drives
     /// the Waybar "N streaming" indicator.
@@ -2433,7 +1989,7 @@ impl Server {
             .spawn(|| {
                 loop {
                     crate::scratch_maintenance::prune_stale_scratch();
-                    crate::build::prune_old_versions();
+                    crate::build::prune_old_versions_on_idle();
                     std::thread::sleep(std::time::Duration::from_secs(6 * 60 * 60));
                 }
             });

@@ -5,7 +5,11 @@ pub(super) fn auto_scriptable_flow_reason(
     options: &LoginOptions,
     stdin_is_terminal: bool,
 ) -> Option<&'static str> {
-    if options.print_auth_url || options.complete || options.has_provided_input() {
+    if options.claude_code
+        || options.print_auth_url
+        || options.complete
+        || options.has_provided_input()
+    {
         return None;
     }
 
@@ -79,8 +83,10 @@ pub(super) async fn run_automatic_google_login(
         .google_access_tier
         .unwrap_or(auth::google::GmailAccessTier::Full);
     let services = default_google_services(options);
-    let tokens = auth::google::login(&services, tier, options.no_browser).await?;
-    let credentials_path = auth::google::credentials_path()?;
+    let creds = google_login_credentials(options)?;
+    let tokens =
+        auth::google::login_with_credentials(&creds, &services, tier, options.no_browser).await?;
+    let credentials_path = auth::google::tokens_path()?;
     let tokens_path = auth::google::tokens_path()?;
 
     emit_scriptable_auth_success(
@@ -226,9 +232,7 @@ pub(super) async fn start_scriptable_login(
             )
         }
         LoginProviderTarget::Google => {
-            let creds = auth::google::load_credentials().context(
-                "Google/Gmail scriptable auth requires saved OAuth credentials first. Run `jcode login --provider google` once or save google credentials manually.",
-            )?;
+            let creds = google_login_credentials(options)?;
             let tier = options
                 .google_access_tier
                 .unwrap_or(auth::google::GmailAccessTier::Full);
@@ -251,6 +255,7 @@ pub(super) async fn start_scriptable_login(
                     redirect_uri,
                     tier,
                     services: services.clone(),
+                    credentials: Some(creds),
                 },
                 auth_url,
                 "callback_url",
@@ -261,6 +266,7 @@ pub(super) async fn start_scriptable_login(
                     redirect_uri: String::new(),
                     tier,
                     services,
+                    credentials: None,
                 }
                 .default_expires_at_ms(),
             )
@@ -673,6 +679,7 @@ pub(super) async fn complete_scriptable_google_login(
         redirect_uri,
         tier,
         services,
+        credentials,
     } = load_pending_login(&pending_path, "google")?
     else {
         anyhow::bail!("Pending Google login state is invalid.");
@@ -684,9 +691,16 @@ pub(super) async fn complete_scriptable_google_login(
             anyhow::bail!("Google completion requires --callback-url.")
         }
     };
-    let creds = auth::google::load_credentials().context(
-        "Google/Gmail completion requires saved OAuth credentials first. Run `jcode login --provider google` once or save google credentials manually.",
-    )?;
+    anyhow::ensure!(
+        options.google_client_json.is_none(),
+        "--google-client-json selects a client when starting a Google login, not when completing one. Start a new flow to change clients."
+    );
+    let creds = match credentials {
+        Some(creds) => creds,
+        None => auth::google::load_credentials().context(
+            "Google/Gmail completion requires the original saved OAuth client. Start a new Google login if it is no longer available.",
+        )?,
+    };
     let tokens = auth::google::exchange_callback_input(
         &creds,
         &verifier,
@@ -778,12 +792,20 @@ pub(super) async fn complete_scriptable_copilot_login(
     let PendingScriptableLogin::Copilot {
         device_code,
         interval,
+        verification_uri,
         ..
     } = load_pending_login(&pending_path, "copilot")?
     else {
         anyhow::bail!("Pending Copilot login state is invalid.");
     };
 
+    let endpoints = auth::copilot::CopilotEndpoints::load()?;
+    let verification_url = reqwest::Url::parse(&verification_uri)
+        .context("Invalid pending Copilot verification URL")?;
+    anyhow::ensure!(
+        verification_url.host_str() == Some(endpoints.host.as_str()),
+        "Copilot login host changed. Start a new login with --print-auth-url."
+    );
     let client = crate::provider::shared_http_client();
     let token = auth::copilot::poll_for_access_token(&client, &device_code, interval).await?;
     let username = auth::copilot::fetch_github_username(&client, &token)

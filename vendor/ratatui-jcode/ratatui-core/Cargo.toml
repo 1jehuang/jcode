@@ -47,7 +47,6 @@ keywords = [
 categories = ["command-line-interface"]
 license = "MIT"
 repository = "https://github.com/ratatui/ratatui"
-resolver = "2"
 
 [package.metadata.docs.rs]
 all-features = true

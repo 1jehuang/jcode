@@ -342,7 +342,7 @@ fn test_remote_poke_status_and_off_update_state() {
 }
 
 #[test]
-fn test_remote_rewind_lists_display_history_when_session_transcript_is_empty() {
+fn test_remote_rewind_requests_checkpoints_even_when_local_session_transcript_is_empty() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -358,34 +358,10 @@ fn test_remote_rewind_lists_display_history_when_session_transcript_is_empty() {
     rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
         .expect("/rewind should be handled remotely");
 
-    let last = app.display_messages().last().expect("history message");
-    assert!(last.content.contains("Conversation history:"));
-    assert!(last.content.contains("1 👤 User - hello"));
-    assert!(last.content.contains("2 🤖 Assistant - hi there"));
-    assert_eq!(last.title.as_deref(), Some("Rewind"));
-    let rows: Vec<String> =
-        crate::tui::ui::render_system_message(last, 100, crate::config::DiffDisplayMode::default())
-            .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect()
-            })
-            .collect();
-    let first = rows
-        .iter()
-        .position(|row| row.contains("1 👤 User - hello"))
-        .expect("first entry visible");
-    let second = rows
-        .iter()
-        .position(|row| row.contains("2 🤖 Assistant - hi there"))
-        .expect("second entry visible");
-    assert!(
-        first < second,
-        "rewind entries must occupy separate ordered rows: {rows:?}"
-    );
-    assert!(!last.content.contains("No messages in conversation"));
+    assert!(app.dialog.as_ref().is_some_and(|dialog| dialog.is_rewind()));
+    assert!(app.rewind_ui.list_request.is_some());
+    assert_eq!(app.display_messages().last().unwrap().content, "hi
+there");
 }
 
 #[test]
@@ -397,7 +373,8 @@ fn test_remote_rewind_completion_shows_undo_hint_after_history_refresh() {
 
     app.is_remote = true;
     app.push_display_message(DisplayMessage::user("hello"));
-    app.push_display_message(DisplayMessage::assistant("hi there"));
+    app.push_display_message(DisplayMessage::assistant("hi
+there"));
 
     app.input = "/rewind 1".to_string();
     app.cursor_pos = app.input.len();
@@ -447,6 +424,7 @@ fn test_remote_rewind_completion_shows_undo_hint_after_history_refresh() {
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            account_labels: Vec::new(),
             available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,

@@ -463,6 +463,12 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
             push("glm-4.7-flash");
             push("glm-4.7-flashx");
         }
+        // A6 marketplace exchange: static seed so the model picker and auth
+        // activation work before the live /v1/models catalog is fetched. The
+        // live catalog takes over once cached.
+        "a6api" => {
+            push("gpt-6-astra");
+        }
         "302ai" => {
             push("qwen3-235b-a22b-instruct-2507");
             push("glm-4.7");
@@ -554,7 +560,6 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
             push("step-3.7-flash");
             push("step-3.7-flash-novita");
             push("hy3");
-            push("hy3-tencent");
             push("hy3-novita");
             push("ling-3.0-flash");
             push("inkling");
@@ -748,8 +753,23 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
     models
 }
 
-pub fn openai_compatible_profile_model_supports_chat(_profile_id: &str, _model: &str) -> bool {
-    true
+pub fn openai_compatible_profile_model_supports_chat(profile_id: &str, model: &str) -> bool {
+    let config = crate::config::config();
+    let profile = config.providers.get(profile_id).or_else(|| {
+        config
+            .providers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(profile_id))
+            .map(|(_, profile)| profile)
+    });
+    profile
+        .and_then(|profile| {
+            profile
+                .models
+                .iter()
+                .find(|entry| entry.id.trim().eq_ignore_ascii_case(model.trim()))
+        })
+        .is_none_or(crate::provider::named_provider_model_supports_chat)
 }
 
 pub fn openai_compatible_profile_static_context_limits(
@@ -778,6 +798,10 @@ pub fn openai_compatible_profile_context_limit(profile_id: &str, model: &str) ->
         // direct profile runs through the OpenRouter/OpenAI-compatible provider
         // implementation, whose live catalog can be unavailable during startup.
         "deepseek" if model.starts_with("deepseek-v4-") => Some(1_000_000),
+        // gpt-6-astra through the A6 exchange carries the same 400K context
+        // window as the direct OpenAI line; the marketplace /v1/models catalog
+        // does not advertise context_length.
+        "a6api" if model.contains("astra") => Some(400_000),
         // Fall back to the shared open-weight family classifier. Many bundled
         // OpenAI-compatible gateways (Z.AI/GLM, Moonshot/Kimi, MiniMax, Qwen,
         // etc.) serve `/v1/models` entries without a `context_length`, so this
@@ -797,7 +821,7 @@ fn conifer_context_limit(model: &str) -> Option<usize> {
         "grok-4.3" => 1_000_000,
         "seed-2.0-pro" | "seed-2.0-code" | "seed-2.0-mini" => 256_000,
         "step-3.7-flash" | "step-3.7-flash-novita" => 262_144,
-        "hy3" | "hy3-tencent" | "hy3-novita" => 262_144,
+        "hy3" | "hy3-novita" => 262_144,
         "ling-3.0-flash" => 131_072,
         "inkling" | "inkling-small" => 524_288,
         "nemotron-3-ultra" | "nemotron-3-super-120b" | "nemotron-3.5-lightning" => 262_144,
@@ -1096,6 +1120,7 @@ pub fn apply_named_provider_profile_env_from_config(
     let static_models = profile
         .models
         .iter()
+        .filter(|model| crate::provider::named_provider_model_supports_chat(model))
         .map(|model| model.id.trim())
         .filter(|id| !id.is_empty())
         .collect::<Vec<_>>();

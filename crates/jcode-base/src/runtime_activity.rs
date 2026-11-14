@@ -2,12 +2,14 @@
 //!
 //! Unknown ownership is deliberately global. Scoped transfer reservations never
 //! queue, and hold their fences until durable ownership has been changed.
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use tokio::sync::{Notify, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 tokio::task_local! {
     static SESSION: String;
+    static ADMISSION: RefCell<Option<ActivityReservation>>;
 }
 
 #[derive(Default)]
@@ -37,7 +39,7 @@ fn lock_state(state: &Mutex<ScopedState>) -> MutexGuard<'_, ScopedState> {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ActivityGate {
     runtime: Arc<RwLock<()>>,
     scoped: Arc<Mutex<ScopedState>>,
@@ -46,7 +48,7 @@ pub struct ActivityGate {
 
 pub struct ActivityReservation {
     _runtime: OwnedRwLockReadGuard<()>,
-    state: Arc<Mutex<ScopedState>>,
+    gate: ActivityGate,
     session: Option<String>,
     origin: &'static std::panic::Location<'static>,
     changed: Arc<Notify>,
@@ -57,7 +59,7 @@ impl ActivityReservation {
     /// detached callbacks inherit the same owner even after this future ends.
     pub async fn scope<F: std::future::Future>(self, future: F) -> F::Output {
         let session = self.session.clone();
-        let _activity = self;
+        let future = ADMISSION.scope(RefCell::new(Some(self)), future);
         match session {
             Some(session) => SESSION.scope(session, future).await,
             None => future.await,
@@ -67,7 +69,7 @@ impl ActivityReservation {
 
 impl Drop for ActivityReservation {
     fn drop(&mut self) {
-        let mut state = lock_state(&self.state);
+        let mut state = lock_state(&self.gate.scoped);
         if self.session.is_none()
             && let Some(origin) = state.unknown_origins.get_mut(self.origin)
         {
@@ -102,6 +104,26 @@ impl Drop for ActivityReservation {
         // Wake transfer admission waiting for this work to drain.
         self.changed.notify_waiters();
     }
+}
+
+/// A provider reset is idle time, while its logical turn remains reserved.
+/// Cancellation leaves the scope idle; a continuation reacquires admission
+/// before it can touch the runtime again.
+pub async fn wait_without_activity(wait: impl std::future::Future<Output = bool>) -> bool {
+    let held = match ADMISSION.try_with(|slot| slot.borrow_mut().take()) {
+        Ok(Some(held)) => held,
+        _ => return wait.await,
+    };
+    let gate = held.gate.clone();
+    let session = held.session.clone();
+    let origin = held.origin;
+    drop(held);
+    if !wait.await {
+        return false;
+    }
+    let held = gate.enter_owned(session, origin).await;
+    ADMISSION.with(|slot| *slot.borrow_mut() = Some(held));
+    true
 }
 
 pub struct SessionIdleReservation {
@@ -197,7 +219,7 @@ impl ActivityGate {
         }
         Ok(ActivityReservation {
             _runtime: runtime,
-            state: self.scoped.clone(),
+            gate: self.clone(),
             session,
             origin,
             changed: self.changed.clone(),
@@ -412,6 +434,65 @@ where
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn paused_wait_allows_upgrade_and_reacquires_before_continuing() {
+        for resume in [false, true] {
+            let gate = ActivityGate::default();
+            let task_gate = gate.clone();
+            let (waiting, ready) = tokio::sync::oneshot::channel();
+            let (release, wake) = tokio::sync::oneshot::channel();
+            let task = gate
+                .spawn_session("paused", async move {
+                    let continued = wait_without_activity(async {
+                        waiting.send(()).unwrap();
+                        wake.await.unwrap()
+                    })
+                    .await;
+                    assert_eq!(continued, resume);
+                    if continued {
+                        assert!(task_gate.try_idle().is_none());
+                    }
+                })
+                .unwrap();
+            ready.await.unwrap();
+            let upgrade = gate
+                .try_idle()
+                .expect("waiting turn must not block an idle upgrade");
+            release.send(resume).unwrap();
+            tokio::task::yield_now().await;
+            if resume {
+                assert!(!task.is_finished());
+            } else {
+                task.await.unwrap();
+                drop(upgrade);
+                continue;
+            }
+            drop(upgrade);
+            task.await.unwrap();
+            assert!(gate.try_idle().is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn unscoped_wait_retains_its_original_diagnostic_origin() {
+        let gate = ActivityGate::default();
+        let selected = BTreeSet::new();
+        let held = gate.try_enter_global().unwrap();
+        let original = gate.busy_summary(&selected);
+        held.scope(async {
+            assert!(
+                wait_without_activity(async {
+                    assert_eq!(gate.busy_summary(&selected), "nothing (transient)");
+                    true
+                })
+                .await
+            );
+            assert_eq!(gate.busy_summary(&selected), original);
+        })
+        .await;
+        assert_eq!(gate.busy_summary(&selected), "nothing (transient)");
+    }
+
     fn poison(gate: &ActivityGate) {
         let state = gate.scoped.clone();
         assert!(
@@ -588,9 +669,9 @@ mod tests {
         let gate = Arc::new(ActivityGate::default());
         let selected = BTreeSet::from(["selected".into()]);
         let other_gate = gate.clone();
-        let child = gate
+        let (child,) = gate
             .spawn_session("selected", async move {
-                other_gate.spawn(std::future::pending::<()>()).unwrap()
+                (other_gate.spawn(std::future::pending::<()>()).unwrap(),)
             })
             .unwrap()
             .await

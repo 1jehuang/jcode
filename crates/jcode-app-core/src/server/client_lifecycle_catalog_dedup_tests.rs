@@ -25,6 +25,7 @@ fn relative_age_text_is_normalized_out_of_the_catalog_dedup_key() {
 #[test]
 fn catalog_dedup_key_ignores_age_drift_but_keeps_real_changes() {
     let route = |detail: &str| crate::provider::ModelRoute {
+        catalog_metadata: None,
         model: "claude-opus-4.6".to_string(),
         provider: "OpenRouter".to_string(),
         api_method: "openrouter".to_string(),
@@ -82,6 +83,7 @@ fn catalog_dedup_keeps_model_and_auth_route_changes() {
         provider_model: Some("model 12m ago".into()),
         available_models: vec!["model 12m ago".into()],
         available_model_routes: vec![crate::provider::ModelRoute {
+            catalog_metadata: None,
             model: "model 12m ago".into(),
             provider: "test 12m ago".into(),
             api_method: "oauth".into(),

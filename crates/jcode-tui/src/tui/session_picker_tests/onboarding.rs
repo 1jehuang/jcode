@@ -141,7 +141,7 @@ fn onboarding_banner_offers_review_then_new_session() {
     assert!(picker.onboarding_review_recent_project_highlighted());
 }
 
-fn render_onboarding_picker_lines(
+pub(super) fn render_onboarding_picker_lines(
     picker: &mut SessionPicker,
     width: u16,
     height: u16,

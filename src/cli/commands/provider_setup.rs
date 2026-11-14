@@ -182,8 +182,12 @@ pub(crate) fn configure_provider_profile(
             reasoning_effort: None,
             context_window: options.context_window,
             input: Vec::new(),
+            ..Default::default()
         }],
         extra_body: None,
+        thinking_prefill: None,
+        prefill_name: None,
+        thinking_prefill_non_kimi: false,
         supports_reasoning_effort: None,
         disable_reasoning_heuristics: false,
     };

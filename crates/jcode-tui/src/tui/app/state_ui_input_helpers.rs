@@ -1,5 +1,7 @@
 use super::*;
 
+include!("state_ui_input_undo.rs");
+
 #[derive(Clone, Copy)]
 struct RegisteredCommand {
     name: &'static str,
@@ -34,6 +36,7 @@ impl RegisteredCommand {
 }
 
 const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
+    RegisteredCommand::public("/side", "Show or hide the side panel"),
     RegisteredCommand::public("/help", "Show help and keyboard shortcuts"),
     RegisteredCommand::public("/?", "Show help and keyboard shortcuts"),
     RegisteredCommand::public("/commands", "Alias for /help"),
@@ -45,7 +48,14 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     ),
     RegisteredCommand::hidden("/model-status", "Alias for /provider-test-coverage"),
     RegisteredCommand::public("/refresh-model-list", "Refresh provider model catalogs"),
-    RegisteredCommand::public("/agents", "Configure models for agent roles"),
+    RegisteredCommand::public(
+        "/agents",
+        "Choose session instructions or configure role models",
+    ),
+    RegisteredCommand::remote(
+        "/agent",
+        "List or select an additive Markdown agent profile",
+    ),
     RegisteredCommand::public(
         "/swarm-prompt",
         "Open the active swarm routing prompt in your editor",
@@ -132,7 +142,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/clear", "Clear conversation history"),
     RegisteredCommand::public("/cls", "Clear the view only, keeping context"),
     RegisteredCommand::hidden("/clear-view", "Alias for /cls"),
-    RegisteredCommand::public("/rewind", "Rewind conversation to previous message"),
+    RegisteredCommand::public(
+        "/rewind",
+        "Restore a previous prompt's conversation or tracked files",
+    ),
     RegisteredCommand::public("/poke", "Poke model to resume with incomplete todos"),
     RegisteredCommand::public("/plan", "Create a plan-only response as a plan card"),
     RegisteredCommand::public("/improve", "Autonomously improve the repository"),
@@ -154,7 +167,15 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/context", "Show the full session context snapshot"),
     RegisteredCommand::public(
         "/skills",
-        "Show loaded skills and jcode-endorsed recommendations",
+        "Browse skills and turn them on or off (/skills list: endorsed skills)",
+    ),
+    RegisteredCommand::public(
+        "/plugin",
+        "Manage plugins: discover, installed, marketplaces, errors",
+    ),
+    RegisteredCommand::public(
+        "/mcp",
+        "Manage MCP servers: status, tools, reconnect, enable/disable",
     ),
     RegisteredCommand::public("/version", "Show current version"),
     RegisteredCommand::public("/changelog", "Show recent changes in this build"),
@@ -230,8 +251,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/auth", "Show authentication status"),
     RegisteredCommand::public("/login", "Login to a provider"),
     RegisteredCommand::public("/logout", "Log out of a provider"),
-    RegisteredCommand::public("/account", "Open the combined account picker"),
-    RegisteredCommand::public("/accounts", "Alias for /account"),
+    RegisteredCommand::public("/accounts", "Manage accounts, logins, and usage"),
     RegisteredCommand::public("/cache", "Show cache stats; extend/5m saves Anthropic TTL"),
     RegisteredCommand::public("/debug-visual", "Toggle visual debug overlay"),
     RegisteredCommand::public("/screenshot-mode", "Toggle screenshot capture mode"),
@@ -605,6 +625,19 @@ impl App {
             return self.rank_suggestions(input, suggestions);
         }
 
+        if prefix.starts_with("/agent ") {
+            return self.rank_suggestions(
+                input,
+                vec![
+                    ("/agent off".into(), "Clear the selected agent profile"),
+                    (
+                        "/agent reload".into(),
+                        "Explicitly reload the selected profile from the server",
+                    ),
+                ],
+            );
+        }
+
         if prefix.starts_with("/agents ") {
             return self.rank_suggestions(
                 input,
@@ -761,7 +794,10 @@ impl App {
         }
 
         if prefix_trimmed == "/agents" {
-            return vec![("/agents".into(), "Open agent model config picker")];
+            return vec![(
+                "/agents".into(),
+                "Open instruction profile and role model picker",
+            )];
         }
 
         if prefix.starts_with("/help ") || prefix.starts_with("/? ") {
@@ -928,64 +964,110 @@ impl App {
             return self.rank_suggestions(input, suggestions);
         }
 
-        if prefix.starts_with("/account ") || prefix.starts_with("/accounts ") {
+        if prefix.starts_with("/accounts ") {
             let mut suggestions = vec![
-                ("/account list".into(), "Open all provider/account actions"),
-                ("/account switch".into(), "Switch active account by label"),
                 (
-                    "/account default-provider".into(),
+                    "/accounts add".into(),
+                    "Choose a provider and add an account",
+                ),
+                (
+                    "/accounts list".into(),
+                    "Open all provider/accounts actions",
+                ),
+                (
+                    "/accounts switch".into(),
+                    "Use a saved account in this window",
+                ),
+                (
+                    "/accounts default".into(),
+                    "Set the default account for new windows",
+                ),
+                (
+                    "/accounts unpin".into(),
+                    "This window follows the default account",
+                ),
+                (
+                    "/accounts failover".into(),
+                    "Per-window account failover on|off|status",
+                ),
+                (
+                    "/accounts default-provider".into(),
                     "Set preferred default provider",
                 ),
                 (
-                    "/account default-model".into(),
+                    "/accounts default-model".into(),
                     "Set preferred default model",
                 ),
                 (
-                    "/account openai-compatible settings".into(),
+                    "/accounts openai-compatible settings".into(),
                     "Inspect custom OpenAI-compatible settings",
                 ),
                 (
-                    "/account openai-compatible api-base".into(),
+                    "/accounts openai-compatible api-base".into(),
                     "Set custom OpenAI-compatible API base",
                 ),
             ];
             for provider in crate::provider_catalog::login_providers() {
                 suggestions.push((
-                    format!("/account {}", provider.id),
+                    format!("/accounts {}", provider.id),
                     "Open this provider's account/settings actions",
                 ));
                 suggestions.push((
-                    format!("/account {} settings", provider.id),
+                    format!("/accounts {} settings", provider.id),
                     "Show provider-specific settings",
                 ));
                 suggestions.push((
-                    format!("/account {} login", provider.id),
+                    format!("/accounts {} login", provider.id),
                     "Start or refresh login for this provider",
                 ));
             }
-            suggestions.push(("/account claude add".into(), "Add a new Claude account"));
-            suggestions.push(("/account openai add".into(), "Add a new OpenAI account"));
+            suggestions.push(("/accounts claude add".into(), "Add a new Claude account"));
+            suggestions.push(("/accounts openai add".into(), "Add a new OpenAI account"));
             suggestions.push((
-                "/account openai transport".into(),
+                "/accounts openai transport".into(),
                 "Set OpenAI transport preference",
             ));
             suggestions.push((
-                "/account openai effort".into(),
+                "/accounts openai effort".into(),
                 "Set OpenAI reasoning effort preference",
             ));
             if let Ok(accounts) = crate::auth::claude::list_accounts() {
                 for account in accounts {
                     suggestions.push((
-                        format!("/account claude switch {}", account.label),
+                        format!("/accounts claude switch {}", account.label),
                         "Switch to this Claude account",
+                    ));
+                    suggestions.push((
+                        format!("/accounts claude rename {}", account.label),
+                        "Rename this Claude account",
+                    ));
+                    suggestions.push((
+                        format!("/accounts claude reauth {}", account.label),
+                        "Sign in again to this Claude account",
+                    ));
+                    suggestions.push((
+                        format!("/accounts claude remove {}", account.label),
+                        "Remove this saved Claude login",
                     ));
                 }
             }
             if let Ok(accounts) = crate::auth::codex::list_accounts() {
                 for account in accounts {
                     suggestions.push((
-                        format!("/account openai switch {}", account.label),
+                        format!("/accounts openai switch {}", account.label),
                         "Switch to this OpenAI account",
+                    ));
+                    suggestions.push((
+                        format!("/accounts openai rename {}", account.label),
+                        "Rename this OpenAI account",
+                    ));
+                    suggestions.push((
+                        format!("/accounts openai reauth {}", account.label),
+                        "Sign in again to this OpenAI account",
+                    ));
+                    suggestions.push((
+                        format!("/accounts openai remove {}", account.label),
+                        "Remove this saved OpenAI login",
                     ));
                 }
             }
@@ -1399,11 +1481,22 @@ impl App {
     }
 
     pub(super) fn accept_selected_command_suggestion(&mut self) -> bool {
+        // Complete account-center commands open the manager, even with trailing
+        // whitespace. A suggested login must never consume their Enter key.
+        if super::auth::requests_account_center(&self.input) {
+            return false;
+        }
         let suggestions = self.clamp_command_suggestion_selection();
         let Some((cmd, _)) = suggestions.get(self.command_suggestion_selected).cloned() else {
             return false;
         };
         if cmd == self.input.trim() {
+            return false;
+        }
+        // The input is already a complete command that means the same thing
+        // as the highlighted suggestion (e.g. `/accounts switch claude-fox`
+        // vs `/accounts claude switch claude-fox`): let Enter submit it.
+        if super::auth::same_account_command(self.input.trim(), &cmd) {
             return false;
         }
 
@@ -1690,40 +1783,6 @@ impl App {
         self.command_suggestion_selected = 0;
     }
 
-    pub(super) fn remember_input_undo_state(&mut self) {
-        self.input_typing_undo = None;
-        let snapshot = (self.input.clone(), self.cursor_pos.min(self.input.len()));
-        if self.input_undo_stack.last() == Some(&snapshot) {
-            return;
-        }
-        if self.input_undo_stack.len() >= Self::INPUT_UNDO_LIMIT {
-            self.input_undo_stack.remove(0);
-        }
-        self.input_undo_stack.push(snapshot);
-    }
-
-    pub(super) fn clear_input_undo_history(&mut self) {
-        self.input_undo_stack.clear();
-        self.input_typing_undo = None;
-        self.history_draft = None;
-    }
-
-    pub(super) fn undo_input_change(&mut self) {
-        self.input_typing_undo = None;
-        if let Some((input, cursor_pos)) = self.input_undo_stack.pop() {
-            // The composer now holds a restored draft, so the copy stashed by a
-            // history jump is stale: a later Down must not resurrect it.
-            self.history_draft = None;
-            self.input = input;
-            self.cursor_pos = cursor_pos.min(self.input.len());
-            self.reset_tab_completion();
-            self.sync_model_picker_preview_from_input();
-            self.set_status_notice("↶ Input restored");
-        } else {
-            self.set_status_notice("Nothing to undo");
-        }
-    }
-
     pub(super) fn command_accepts_args(cmd: &str) -> bool {
         matches!(
             cmd.trim(),
@@ -1739,22 +1798,23 @@ impl App {
                 | "/split-view"
                 | "/model"
                 | "/agents"
+                | "/agent"
                 | "/effort"
                 | "/fast"
                 | "/transport"
                 | "/login"
                 | "/auth"
-                | "/account"
-                | "/account claude"
-                | "/account switch"
-                | "/account openai"
-                | "/account openai-compatible"
-                | "/account default-provider"
-                | "/account default-model"
-                | "/account claude switch"
-                | "/account claude remove"
-                | "/account openai switch"
-                | "/account openai remove"
+                | "/accounts"
+                | "/accounts claude"
+                | "/accounts switch"
+                | "/accounts openai"
+                | "/accounts openai-compatible"
+                | "/accounts default-provider"
+                | "/accounts default-model"
+                | "/accounts claude switch"
+                | "/accounts claude remove"
+                | "/accounts openai switch"
+                | "/accounts openai remove"
                 | "/usage"
                 | "/reset"
                 | "/subscription"

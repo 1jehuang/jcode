@@ -480,6 +480,7 @@ pub(in crate::tui::app) async fn connect_with_retry(
     state: &mut RemoteRunState,
     session_to_resume: Option<&str>,
     remote_working_dir: Option<&str>,
+    agent_profile_name: Option<&str>,
 ) -> Result<ConnectOutcome> {
     if let Some(outcome) =
         wait_for_reload_handoff_before_reconnect(app, terminal, event_stream, state).await?
@@ -494,13 +495,14 @@ pub(in crate::tui::app) async fn connect_with_retry(
         session_to_resume.and_then(|session_id| app.take_history_base_for_subscribe(session_id));
     let client_instance_id = app.remote_client_instance_id.clone();
     let allow_session_takeover = should_allow_reconnect_takeover(app, state, session_to_resume);
-    let connect = RemoteConnection::connect_with_session(
+    let connect = RemoteConnection::connect_with_session_and_profile(
         session_to_resume,
         Some(client_instance_id.as_str()),
         client_has_local_history,
         history_base,
         allow_session_takeover,
         remote_working_dir,
+        agent_profile_name,
     );
     crate::logging::info(&format!(
         "Remote reconnect attempt: resume={:?}, reconnect_attempts={}, client_instance_id={}, local_history={}, allow_takeover={}",
@@ -530,6 +532,7 @@ pub(in crate::tui::app) async fn connect_with_retry(
             // Request IDs are scoped to a connection. Old acknowledgements cannot
             // arrive on this new socket and must not swallow a new turn's Done.
             app.usage_reset.invalidate_requests.clear();
+            app.reset_account_requests_for_new_connection();
             crate::logging::info(&format!(
                 "[TIMING] remote bootstrap: connected after {}ms (resume={:?}, reconnect_attempts={})",
                 app.app_started.elapsed().as_millis(),
@@ -721,6 +724,10 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
     state: &mut RemoteRunState,
     session_to_resume: Option<&str>,
 ) -> Result<PostConnectOutcome> {
+    if app.rewind_ui.list_request.is_some() || app.rewind_ui.restore_request.is_some() {
+        app.invalidate_rewind_ui();
+        app.set_status_notice("Reconnected; reopen /rewind to refresh checkpoints.");
+    }
     crate::logging::info(&format!(
         "Reload check: session_to_resume={:?}, remote_session_id={:?}, reconnect_attempts={}",
         session_to_resume, app.remote_session_id, state.reconnect_attempts
@@ -865,6 +872,13 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
     // this follow-up the public picker exposes generic `remote-catalog` rows.
     // Request ordering keeps the authoritative History snapshot ahead of this
     // expanded catalog response on a newly connected transport.
+    // Claude Code asks about servers a project config file adds before they
+    // run; this silent `/mcp` check opens that prompt only when one is waiting.
+    if !app.mcp_approval_checked {
+        app.mcp_approval_checked = true;
+        crate::tui::app::dialog_actions::send_mcp_command(app, remote, Vec::new()).await;
+    }
+
     //
     // The catalog is ~1MB. Requesting it alongside the bootstrap made every
     // reconnecting client compete with every other client's History during a

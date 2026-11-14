@@ -67,7 +67,7 @@ async fn http_transport_idle_case(heartbeats: bool, complete: bool) {
         openai_stream_runtime::stream_response(
             Client::new(),
             creds,
-            None,
+            AccountPinSlot::default(),
             serde_json::json!({"model":"fixture-model", "stream":true, "input":[]}),
             "fixture".into(),
             tx,

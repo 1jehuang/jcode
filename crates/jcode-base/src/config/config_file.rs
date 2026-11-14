@@ -2,12 +2,7 @@ use super::*;
 use crate::storage::jcode_dir;
 use std::path::PathBuf;
 
-type TrustedExternalAuthKey = (
-    Option<PathBuf>,
-    Option<std::time::SystemTime>,
-    Option<u64>,
-    Option<String>,
-);
+type TrustedExternalAuthKey = (Option<PathBuf>, [u8; 32], Option<String>);
 type TrustedExternalAuthLists = std::sync::Arc<(Vec<String>, Vec<String>)>;
 static TRUSTED_EXTERNAL_AUTH_MEMO: std::sync::Mutex<
     Option<(TrustedExternalAuthKey, TrustedExternalAuthLists)>,
@@ -29,6 +24,7 @@ impl Config {
     /// Load config from file, with environment variable overrides
     pub fn load() -> Self {
         let mut config = Self::load_from_file().unwrap_or_default();
+        Self::apply_global_agent_defaults(&mut config);
         config.apply_env_overrides();
         config
     }
@@ -39,6 +35,7 @@ impl Config {
     /// to distinguish a malformed config from an absent config.
     pub fn load_strict() -> anyhow::Result<Self> {
         let mut config = Self::load_from_file_strict()?.unwrap_or_default();
+        Self::apply_global_agent_defaults(&mut config);
         config.apply_env_overrides();
         Ok(config)
     }
@@ -101,8 +98,7 @@ impl Config {
 
     /// Mark the process-cached config as stale and notify dependent caches.
     pub fn invalidate_cache() {
-        // Also drop the trust-list memo: its mtime key can miss two same-length
-        // saves inside one filesystem timestamp tick.
+        // Saved trust decisions must also discard the content-keyed memo.
         if let Ok(mut guard) = TRUSTED_EXTERNAL_AUTH_MEMO.lock() {
             *guard = None;
         }
@@ -115,7 +111,37 @@ impl Config {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
-        let mut cfg = Self::load_for_update()?;
+        let path = Self::global_path().ok_or_else(|| anyhow::anyhow!("No config path"))?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("No config directory"))?;
+        std::fs::create_dir_all(parent)?;
+        // Lock a stable sibling, not config.toml's inode, which replacement changes.
+        // Never unlink this file: concurrent processes must all lock the same inode.
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(parent.join("config.toml.lock"))?;
+        let started = std::time::Instant::now();
+        loop {
+            match lock.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    #[cfg(test)]
+                    role_transaction_tests::contended();
+                    if started.elapsed() >= std::time::Duration::from_secs(30) {
+                        anyhow::bail!("Timed out waiting for config update lock");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+            }
+        }
+        let mut cfg = Self::load_from_path(&path)?.unwrap_or_default();
+        #[cfg(test)]
+        role_transaction_tests::loaded();
         match target {
             "swarm" => cfg.agents.swarm_model = value,
             "review" => cfg.autoreview.model = value,
@@ -123,6 +149,94 @@ impl Config {
             "memory" => cfg.agents.memory_model = value,
             "ambient" => cfg.ambient.model = value,
             other => anyhow::bail!("Unknown agent model target: {other}"),
+        }
+        use std::io::Write;
+        let mut replacement = tempfile::NamedTempFile::new_in(parent)?;
+        match std::fs::metadata(&path) {
+            Ok(metadata) => replacement
+                .as_file()
+                .set_permissions(metadata.permissions())?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        replacement.write_all(toml::to_string_pretty(&cfg)?.as_bytes())?;
+        replacement.as_file().sync_all()?;
+        replacement.persist(&path)?;
+        Self::invalidate_cache();
+        Ok(())
+    }
+
+    /// The config file that owns global agent defaults.
+    ///
+    /// Private SDK instances keep an isolated config for ordinary settings but
+    /// point agent defaults at the user's home so `/agents global` is shared by
+    /// every instance. Normal processes have no override and use their local
+    /// config as before.
+    pub(crate) fn global_path() -> Option<PathBuf> {
+        std::env::var_os("JCODE_GLOBAL_HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join("config.toml"))
+            .or_else(Self::path)
+    }
+
+    fn apply_global_agent_defaults(config: &mut Self) {
+        let Some(global_home) = std::env::var_os("JCODE_GLOBAL_HOME") else {
+            return;
+        };
+        let path = PathBuf::from(global_home).join("config.toml");
+        let Ok(Some(global)) = Self::load_from_path(&path) else {
+            return;
+        };
+        config.agents.swarm_model = global.agents.swarm_model;
+        config.agents.memory_model = global.agents.memory_model;
+        config.autoreview.model = global.autoreview.model;
+        config.autojudge.model = global.autojudge.model;
+        config.ambient.model = global.ambient.model;
+    }
+
+    fn load_from_path(path: &std::path::Path) -> anyhow::Result<Option<Self>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = std::fs::read_to_string(path)?;
+        let mut config = toml::from_str::<Self>(&content)?;
+        config.display.apply_legacy_compat();
+        Ok(Some(config))
+    }
+
+    /// Persist a named OpenAI-compatible model's default reasoning effort.
+    pub fn set_named_provider_model_reasoning_effort(
+        profile: &str,
+        model: &str,
+        value: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let mut cfg = Self::load_for_update()?;
+        let provider = cfg
+            .providers
+            .iter_mut()
+            .find(|(id, _)| id.eq_ignore_ascii_case(profile))
+            .map(|(_, provider)| provider)
+            .ok_or_else(|| {
+                anyhow::anyhow!("Named provider profile `{profile}` is not in the config file")
+            })?;
+        anyhow::ensure!(
+            provider.provider_type == NamedProviderType::OpenAiCompatible,
+            "Named provider profile `{profile}` does not support OpenAI-compatible reasoning efforts"
+        );
+        let model = model.trim();
+        anyhow::ensure!(!model.is_empty(), "Model must not be empty");
+        match provider
+            .models
+            .iter_mut()
+            .find(|entry| entry.id.trim().eq_ignore_ascii_case(model))
+        {
+            Some(entry) => entry.reasoning_effort = value.map(str::to_string),
+            None if value.is_some() => provider.models.push(NamedProviderModelConfig {
+                id: model.to_string(),
+                reasoning_effort: value.map(str::to_string),
+                ..Default::default()
+            }),
+            None => {}
         }
         cfg.save()
     }
@@ -145,6 +259,15 @@ impl Config {
             mode.unwrap_or("(none)")
         ));
         Ok(())
+    }
+
+    /// Persist a validated Copilot login hostname without changing other settings.
+    pub fn set_copilot_enterprise_url(host: Option<&str>) -> anyhow::Result<()> {
+        let endpoints = crate::auth::copilot::CopilotEndpoints::from_enterprise_url(host)?;
+        let mut cfg = Self::load_for_update()?;
+        cfg.provider.copilot_enterprise_url =
+            (endpoints.host != "github.com").then_some(endpoints.host);
+        cfg.save()
     }
 
     /// Update just the default model and provider in the config file.
@@ -657,19 +780,24 @@ impl Config {
 
     /// Fresh `(trusted_external_sources, trusted_external_source_paths)`.
     ///
-    /// Trust checks must observe a just-saved decision immediately, so they
-    /// cannot use the throttled [`config()`] snapshot. Re-parsing config.toml
-    /// on every call was the alternative, and a single auth probe makes a dozen
-    /// of these checks (~0.5ms of TOML parsing each, on the TUI's first frame).
-    /// Memoize the two lists keyed on everything that can change them: the
-    /// config path, the file's mtime and length, and the env override.
+    /// Authorization cannot use file metadata or the throttled [`config()`]
+    /// snapshot: manual revocation can preserve both length and mtime. Read the
+    /// contents on every trust check, but memoize parsing by SHA-256, config path,
+    /// and the trust override. Parse the same bytes we hashed, not a second read.
+    /// General configuration reads retain their existing cache.
     fn trusted_external_auth_lists() -> TrustedExternalAuthLists {
+        use sha2::{Digest, Sha256};
+
+        let empty = || std::sync::Arc::new((Vec::new(), Vec::new()));
         let path = Self::path();
-        let metadata = path.as_ref().and_then(|path| std::fs::metadata(path).ok());
+        let content = match path.as_ref().map(std::fs::read_to_string) {
+            Some(Ok(content)) => content,
+            Some(Err(error)) if error.kind() != std::io::ErrorKind::NotFound => return empty(),
+            _ => String::new(),
+        };
         let key: TrustedExternalAuthKey = (
             path,
-            metadata.as_ref().and_then(|meta| meta.modified().ok()),
-            metadata.as_ref().map(std::fs::Metadata::len),
+            Sha256::digest(content.as_bytes()).into(),
             std::env::var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES").ok(),
         );
         if let Ok(guard) = TRUSTED_EXTERNAL_AUTH_MEMO.lock()
@@ -679,7 +807,25 @@ impl Config {
             return lists.clone();
         }
 
-        let cfg = Self::load();
+        let mut cfg = match toml::from_str::<Self>(&content) {
+            Ok(cfg) => cfg,
+            // Explicit process authorization replaces both trust lists, even
+            // when unrelated TOML is malformed, as with Config::load().
+            Err(_) if key.2.is_some() => Self::default(),
+            Err(_) => return empty(),
+        };
+        // Use the override captured in the key, not a second environment read.
+        if let Some(value) = &key.2 {
+            (
+                cfg.auth.trusted_external_sources,
+                cfg.auth.trusted_external_source_paths,
+            ) = value
+                .split([',', '\n'])
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_ascii_lowercase)
+                .partition(|value| !value.contains('|'));
+        }
         let lists = std::sync::Arc::new((
             cfg.auth.trusted_external_sources,
             cfg.auth.trusted_external_source_paths,
@@ -690,35 +836,13 @@ impl Config {
         lists
     }
 
-    /// Startup-sensitive variant that uses the process-cached config snapshot.
-    ///
-    /// This avoids reloading config.toml repeatedly during cold-start probes.
+    /// Compatibility entry point for startup probes. Trust authorization always
+    /// checks current contents, while unchanged lists still avoid TOML parsing.
     pub fn external_auth_source_allowed_for_path_cached(
         source_id: &str,
         path: &std::path::Path,
     ) -> bool {
-        let Ok(entry) = Self::trusted_external_auth_path_entry(source_id, path) else {
-            return false;
-        };
-
-        if config()
-            .auth
-            .trusted_external_source_paths
-            .iter()
-            .any(|value| value.trim().eq_ignore_ascii_case(&entry))
-        {
-            return true;
-        }
-
-        // The global config snapshot can be initialized before an auth flow saves
-        // a new path-bound trust decision, or before tests switch JCODE_HOME. Fall
-        // back to a fresh read on cache misses so fast auth probes remain correct
-        // without penalizing the common already-trusted path. The memo re-stats
-        // config.toml, so it is as fresh as a full reload.
-        Self::trusted_external_auth_lists()
-            .1
-            .iter()
-            .any(|value| value.trim().eq_ignore_ascii_case(&entry))
+        Self::external_auth_source_allowed_for_path(source_id, path)
     }
 
     pub fn allow_external_auth_source(source_id: &str) -> anyhow::Result<()> {
@@ -813,6 +937,14 @@ impl Config {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "role_transaction_tests.rs"]
+mod role_transaction_tests;
+
+#[cfg(test)]
+#[path = "trust_tests.rs"]
+mod trust_tests;
 
 #[cfg(test)]
 mod issue_1056_tests {
@@ -920,5 +1052,36 @@ reasoning_effort = "max"
 
         assert!(error.to_string().contains("Failed to parse config file"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn global_agent_defaults_override_private_instance_config() {
+        let _lock = crate::storage::lock_test_env();
+        let instance = tempfile::tempdir().unwrap();
+        let global = tempfile::tempdir().unwrap();
+        std::fs::write(
+            instance.path().join("config.toml"),
+            "[agents]\nswarm_model = \"private\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            global.path().join("config.toml"),
+            "[agents]\nswarm_model = \"shared\"\n",
+        )
+        .unwrap();
+        let _home = EnvGuard::set("JCODE_HOME", instance.path());
+        let _global_home = EnvGuard::set("JCODE_GLOBAL_HOME", global.path());
+
+        assert_eq!(Config::load().agents.swarm_model.as_deref(), Some("shared"));
+        Config::set_agent_model_default("swarm", Some("updated")).unwrap();
+        let saved = std::fs::read_to_string(global.path().join("config.toml")).unwrap();
+        assert_eq!(
+            toml::from_str::<Config>(&saved)
+                .unwrap()
+                .agents
+                .swarm_model
+                .as_deref(),
+            Some("updated")
+        );
     }
 }

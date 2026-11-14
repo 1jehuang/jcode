@@ -6,6 +6,12 @@ use async_trait::async_trait;
 use futures::stream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[path = "client_checkpoint_tests.rs"]
+mod checkpoint_tests;
+#[path = "client_response_capability_tests.rs"]
+mod response_capability_tests;
+#[path = "client_lifecycle_socket_tests.rs"]
+mod socket_tests;
 
 #[test]
 fn identity_transport_negotiation_preserves_legacy_payload_shape() {
@@ -65,7 +71,6 @@ struct IsolatedRuntimeDir {
     _prev_runtime: Option<std::ffi::OsString>,
     _temp: tempfile::TempDir,
 }
-
 struct IsolatedReloadRecoveryEnv {
     prev_home: Option<std::ffi::OsString>,
     prev_runtime: Option<std::ffi::OsString>,
@@ -452,9 +457,11 @@ fn ping_request_is_lightweight_control_request() {
 
 fn subscribe_request(working_dir: Option<&str>) -> Request {
     Request::Subscribe {
+        agent_profile_name: None,
         system_prompt: None,
         supports_pdf_panels: false,
         supports_user_response: false,
+        supports_ask_user: false,
         supports_server_failover: false,
         supports_turn_identity: false,
         id: 1,
@@ -468,6 +475,8 @@ fn subscribe_request(working_dir: Option<&str>) -> Request {
         crash_on_disconnect: false,
         continue_on_disconnect: false,
         terminal_env: Vec::new(),
+        account_pins: Vec::new(),
+        supports_session_accounts: false,
         client_name: None,
     }
 }
@@ -773,7 +782,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
         }
     }
 
-    let (done_id, result, _, _, _) =
+    let (done_id, result, _, _, _, _) =
         tokio::time::timeout(Duration::from_secs(2), processing_done_rx.recv())
             .await
             .expect("processing should complete promptly")
@@ -1011,7 +1020,9 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
             // Delayed duplicates, including errors, must not clear the new
             // turn's handle or session and must not emit duplicate terminals.
             let stale_owner = tokio::spawn(async {}).id();
-            done_tx.send((2, Ok(()), None, stale_owner, None)).unwrap();
+            done_tx
+                .send((2, Ok(()), None, stale_owner, None, false))
+                .unwrap();
             done_tx
                 .send((
                     2,
@@ -1019,6 +1030,7 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
                     None,
                     stale_owner,
                     None,
+                    false,
                 ))
                 .unwrap();
             reconcile_processing_completions(
@@ -1092,12 +1104,13 @@ async fn terminal_reconciliation_waits_for_terminal_enqueue_for_done_and_error()
                 Ok(())
             };
             done_tx
-                .send((7, result, None, tokio::task::id(), None))
+                .send((7, result, None, tokio::task::id(), None, false))
                 .unwrap();
             // Deterministically simulate preemption between the two sends.
             release_rx.await.unwrap();
             let terminal = if failed {
                 ServerEvent::Error {
+                    server_resumes: false,
                     id: 7,
                     message: "terminal test error".into(),
                     retry_after_secs: Some(3),
@@ -1121,6 +1134,8 @@ async fn terminal_reconciliation_waits_for_terminal_enqueue_for_done_and_error()
         let connections = Arc::new(RwLock::new(HashMap::from([(
             "connection".into(),
             ClientConnectionInfo {
+                supports_user_response: false,
+                ask_user_tx: None,
                 client_id: "connection".into(),
                 session_id: "session_terminal_enqueue_gap".into(),
                 client_instance_id: None,
@@ -1272,7 +1287,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
             "server acceptance of the exact hidden continuation should consume the durable intent"
         );
 
-        let (done_id, result, _report, _, _) =
+        let (done_id, result, _report, _, _, _) =
             tokio::time::timeout(std::time::Duration::from_secs(5), processing_done_rx.recv())
                 .await
                 .expect("processing task should finish")
@@ -1389,7 +1404,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
             .await;
             assert!(client_is_processing);
             assert_eq!(processing_message_id, Some(id));
-            let (done_id, result, _, _, _) =
+            let (done_id, result, _, _, _, _) =
                 tokio::time::timeout(std::time::Duration::from_secs(5), processing_done_rx.recv())
                     .await?
                     .expect("accepted turn completion");
@@ -1654,9 +1669,219 @@ fn soft_interrupt_dispatch_starts_idle_session_and_queues_busy_session() {
     assert!(!should_start_idle_soft_interrupt(false, false, true));
 }
 
-#[path = "client_lifecycle_socket_tests.rs"]
-mod socket_workflows;
+#[tokio::test]
+async fn lone_notify_auth_changed_is_applied_without_subscribe() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("auth sandbox");
+    let _runtime = IsolatedRuntimeDir::new();
+    let (server_stream, client_stream) = crate::transport::Stream::pair().expect("socket pair");
+    let forked = Arc::new(AtomicBool::new(false));
+    let provider_template: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {
+        forked: Arc::clone(&forked),
+    });
+    let mut bus_rx = crate::bus::Bus::global().subscribe();
 
+    let sessions: SessionAgents = Arc::new(crate::server::session_manager::SessionManager::new());
+    let client_connections = Arc::new(RwLock::new(HashMap::new()));
+    let (global_event_tx, _) = broadcast::channel(8);
+    let (debug_response_tx, _) = broadcast::channel(8);
+    let (swarm_event_tx, _) = broadcast::channel(8);
+    let server_task = tokio::spawn(handle_client(
+        server_stream,
+        Arc::clone(&sessions),
+        global_event_tx,
+        provider_template,
+        Arc::new(RwLock::new(false)),
+        Arc::new(RwLock::new(String::new())),
+        Arc::new(RwLock::new(0usize)),
+        Arc::clone(&client_connections),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        FileTouchService::new(),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(ClientDebugState::default())),
+        debug_response_tx,
+        Arc::new(RwLock::new(std::collections::VecDeque::new())),
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        swarm_event_tx,
+        "jcode-test".to_string(),
+        "🧪".to_string(),
+        Arc::new(crate::mcp::SharedMcpPool::from_default_config()),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        AwaitMembersRuntime::default(),
+        SwarmMutationRuntime::default(),
+    ));
+
+    let (client_reader, mut client_writer) = client_stream.into_split();
+    let mut client_reader = BufReader::new(client_reader);
+    let request = Request::NotifyAuthChanged {
+        id: 9,
+        provider: Some("claude".to_string()),
+        auth: None,
+        prefer_strongest: false,
+    };
+    let payload = serde_json::to_string(&request).expect("serialize request") + "\n";
+    client_writer
+        .write_all(payload.as_bytes())
+        .await
+        .expect("write request");
+
+    loop {
+        let mut line = String::new();
+        let n = tokio::time::timeout(Duration::from_secs(5), client_reader.read_line(&mut line))
+            .await
+            .expect("reply before timeout")
+            .expect("read reply");
+        assert!(n > 0, "server hung up without confirming the auth change");
+        match decode_request_or_event(&line) {
+            ServerEvent::Ack { id: 9 } => {}
+            ServerEvent::Done { id: 9 } => break,
+            ServerEvent::Error { message, .. } => {
+                panic!("lone notify_auth_changed was rejected: {message}")
+            }
+            other => panic!("unexpected reply {other:?}"),
+        }
+    }
+    // Like `jcode login`, hang up after Done. The server must end cleanly.
+    drop(client_writer);
+    tokio::time::timeout(Duration::from_secs(5), server_task)
+        .await
+        .expect("server ends after the one-shot client hangs up")
+        .expect("server task join")
+        .expect("server task result");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let event = tokio::time::timeout(remaining, bus_rx.recv())
+            .await
+            .expect("CredentialsChanged must reach every client after a one-shot notify");
+        if let Ok(crate::bus::BusEvent::CredentialsChanged { .. }) = event {
+            break;
+        }
+    }
+    assert!(
+        !forked.load(Ordering::SeqCst),
+        "one-shot notify must not fork a session provider"
+    );
+    assert!(client_connections.read().await.is_empty());
+    assert!(sessions.read().await.is_empty());
+}
+
+/// Fails every request with the Anthropic fail-fast usage-limit error.
+struct UsageLimitedStreamProvider;
+
+#[async_trait]
+impl Provider for UsageLimitedStreamProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let error = jcode_provider_core::usage_limit_resume::with_usage_limit_reset(
+            anyhow::anyhow!(
+                "Anthropic API error (429 Too Many Requests): rate_limit_error Usage limit reached for this Claude account; resets in 40m (2026-09-30 13:30 UTC)."
+            ),
+            Some(Duration::from_secs(40 * 60)),
+        );
+        Ok(Box::pin(stream::iter(vec![Err(error)])))
+    }
+
+    fn name(&self) -> &str {
+        "usage-limited"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+}
+
+/// The client's own turn gets `retry_after_secs` for a usage limit, so it can
+/// hold the turn and resend at the reset without parsing the message text.
+#[tokio::test]
+async fn client_turn_usage_limit_error_carries_retry_after_secs() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let session_id = "session_usage_limit_retry_after";
+
+    let provider: Arc<dyn Provider> = Arc::new(UsageLimitedStreamProvider);
+    let registry = Registry::new(Arc::clone(&provider)).await;
+    let session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider, registry, session, None,
+    )));
+    let (client_tx, mut client_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+    let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+    let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (swarm_event_tx, _) = broadcast::channel(8);
+    let (processing_done_tx, _processing_done_rx) = mpsc::unbounded_channel();
+    let mut client_is_processing = false;
+    let mut processing_message_id = None;
+    let mut processing_session_id = None;
+    let mut processing_task = None;
+
+    start_processing_message(
+        ProcessingMessage {
+            id: 91,
+            server_failover: false,
+            content: "hello".to_string(),
+            images: Vec::new(),
+            system_reminder: None,
+            active_skill: None,
+        },
+        session_id,
+        &mut ProcessingState {
+            client_is_processing: &mut client_is_processing,
+            message_id: &mut processing_message_id,
+            session_id: &mut processing_session_id,
+            task: &mut processing_task,
+        },
+        &agent,
+        &client_tx,
+        &processing_done_tx,
+        Vec::new(),
+        &SwarmStatusRefs {
+            members: &swarm_members,
+            swarms_by_id: &swarms_by_id,
+            event_history: &event_history,
+            event_counter: &event_counter,
+            event_tx: &swarm_event_tx,
+        },
+    )
+    .await;
+
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), recv_turn_payload(&mut client_rx))
+            .await
+            .expect("terminal event")
+            .expect("channel open");
+        if let ServerEvent::Error {
+            id,
+            message,
+            retry_after_secs,
+            ..
+        } = event
+        {
+            assert_eq!(id, 91);
+            assert!(message.contains("Usage limit reached"), "{message}");
+            let secs = retry_after_secs.expect("usage limit must carry retry_after_secs");
+            assert!((40 * 60 - 5..=40 * 60).contains(&secs), "{secs}");
+            break;
+        }
+    }
+}
+#[path = "client_lifecycle_tests/agent_profile.rs"]
+mod agent_profile;
+#[path = "client_lifecycle_tests/agent_task.rs"]
+mod agent_task;
 #[path = "client_lifecycle_tests/system_prompt.rs"]
 mod system_prompt;
 

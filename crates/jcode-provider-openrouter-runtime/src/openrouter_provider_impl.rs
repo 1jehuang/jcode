@@ -105,13 +105,45 @@ impl Provider for OpenRouterProvider {
             false
         };
 
-        let api_messages = jcode_provider_openrouter::request::build_chat_messages(
+        let mut api_messages = jcode_provider_openrouter::request::build_chat_messages(
             &effective_messages,
             system,
             allow_reasoning,
             include_reasoning_content,
             allow_image_input,
         );
+
+        // Kimi partial-mode thinking prefill (Moonshot partial mode): append a
+        // final assistant message with `partial: true`, empty `content`, and the
+        // configured seed in `reasoning_content`. The model continues the
+        // seeded thinking instead of starting deliberation from scratch, so a
+        // long-CoT model cannot re-derive a refusal from a clean slate. Opt-in
+        // via named-profile `thinking_prefill` config or the
+        // `JCODE_KIMI_THINKING_PREFILL` env/env-file value; Kimi models only
+        // (or any model when the profile sets `thinking_prefill_non_kimi`),
+        // suppressed on strict-schema endpoints.
+        if let Some(seed) = self
+            .thinking_prefill_seed
+            .as_deref()
+            .filter(|seed| !seed.trim().is_empty())
+            && (Self::is_kimi_model(&model) || self.thinking_prefill_non_kimi)
+            && !strict_openai_schema
+        {
+            let mut partial_message = serde_json::json!({
+                "role": "assistant",
+                "partial": true,
+                "content": "",
+                "reasoning_content": seed,
+            });
+            if let Some(name) = self
+                .thinking_prefill_name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+            {
+                partial_message["name"] = serde_json::json!(name);
+            }
+            api_messages.push(partial_message);
+        }
 
         // Build tools in OpenAI format
         let api_tools: Vec<Value> = tools
@@ -300,6 +332,8 @@ impl Provider for OpenRouterProvider {
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
         let client = self.client.clone();
         let api_base = self.api_base.clone();
+        // Resolve credentials before spawning so a lost or revoked key is
+        // returned to the caller instead of silently closing the stream.
         let auth = (self.auth)()?;
         let send_openrouter_headers = self.send_openrouter_headers;
         let conversation_id = self.conversation_id.clone();
@@ -394,6 +428,37 @@ impl Provider for OpenRouterProvider {
         !self.supports_provider_features
     }
 
+    fn model_metadata(&self, model: &str) -> Option<jcode_provider_core::ModelMetadata> {
+        self.profile_id.as_deref()?;
+        let configured = self.model_config(model)?;
+        let input = configured.input.clone();
+        Some(jcode_provider_core::ModelMetadata {
+            context_window: configured.context_window.or_else(|| {
+                jcode_provider_core::context_limit_for_model_with_provider(
+                    model,
+                    Some("openai-compatible"),
+                )
+            }),
+            max_input_tokens: configured.max_input_tokens,
+            max_output_tokens: configured.max_output_tokens,
+            supports_chat: configured.supports_chat,
+            supports_thinking: configured.supports_thinking,
+            input_modalities: input.clone(),
+            output_modalities: configured.output.clone(),
+            supported_endpoints: configured.supported_endpoints.clone(),
+            reasoning_efforts: configured.reasoning_efforts.clone(),
+            supports_image_input: (!input.is_empty()).then(|| {
+                input
+                    .iter()
+                    .any(|modality| modality.eq_ignore_ascii_case("image"))
+            }),
+            supports_tool_calls: configured.supports_tool_calls,
+            supports_streaming: configured.supports_streaming,
+            supports_structured_outputs: configured.supports_structured_outputs,
+            ..Default::default()
+        })
+    }
+
     fn set_model(&self, model: &str) -> Result<()> {
         // OpenRouter accepts any model ID - validation happens at API call time
         // This allows using any model without needing to pre-fetch the list
@@ -427,14 +492,11 @@ impl Provider for OpenRouterProvider {
             // preserve the caller's model string exactly for custom endpoints.
             (trimmed.to_string(), None)
         };
-        if let Some(profile_id) = self.profile_id.as_deref()
-            && !jcode_base::provider_catalog::openai_compatible_profile_model_supports_chat(
-                profile_id, &model_id,
-            )
-        {
+        if self.profile_id.is_some() && !self.model_supports_chat(&model_id) {
             anyhow::bail!(
-                "Model '{}' is listed by the provider catalog but is not currently usable for chat completions through this direct provider. Choose another model from `/model`.",
-                model_id
+                "Model '{}' is not configured as chat-capable for provider profile '{}'.",
+                model_id,
+                self.profile_id.as_deref().unwrap_or_default()
             );
         }
         if let Ok(mut current) = self.model.try_write() {
@@ -524,6 +586,16 @@ impl Provider for OpenRouterProvider {
     }
 
     fn available_efforts(&self) -> Vec<&'static str> {
+        if let Some(configured) = self.configured_reasoning_efforts() {
+            let mut efforts: Vec<&'static str> = configured
+                .iter()
+                .filter_map(|effort| jcode_provider_core::canonical_reasoning_effort(effort))
+                .collect();
+            jcode_provider_core::sort_reasoning_efforts(&mut efforts);
+            efforts.dedup();
+            efforts.push("swarm");
+            return efforts;
+        }
         if self.supports_deepseek_reasoning_effort() {
             jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS.to_vec()
         } else if self.supports_openai_reasoning_effort() {
@@ -667,6 +739,7 @@ impl Provider for OpenRouterProvider {
                     detail.clone()
                 };
                 jcode_provider_core::ModelRoute {
+                    catalog_metadata: None,
                     model,
                     provider: provider_label.clone(),
                     api_method: api_method.clone(),
@@ -793,6 +866,12 @@ impl Provider for OpenRouterProvider {
             return ctx as usize;
         }
         let normalized_model_id = model_id.trim().to_ascii_lowercase();
+        if let Some(limit) = self
+            .model_config(&normalized_model_id)
+            .and_then(|configured| configured.context_window)
+        {
+            return limit;
+        }
         if let Some(limit) = self.static_context_limits.get(&normalized_model_id) {
             return *limit;
         }
@@ -802,6 +881,15 @@ impl Provider for OpenRouterProvider {
             jcode_base::provider::cached_context_limit_for_model(&normalized_model_id)
         {
             return limit;
+        }
+        // VSLLM's public catalog omits context limits, and its gateway can leave
+        // oversized requests waiting on an upstream channel until they look like
+        // connectivity failures. Keep the unverified default conservative while
+        // allowing an explicit model/profile setting above to override it.
+        if self.profile_id.as_deref().is_some_and(|id| {
+            id.eq_ignore_ascii_case("vsllm") || id.eq_ignore_ascii_case("vsllm-api")
+        }) {
+            return 32_768;
         }
         // Ollama caps the served window server-side (OLLAMA_CONTEXT_LENGTH,
         // default 4096) and silently truncates anything longer, so a model's
@@ -849,7 +937,11 @@ impl Provider for OpenRouterProvider {
             static_reasoning_config: self.static_reasoning_config.clone(),
             max_tokens: self.max_tokens,
             extra_body: self.extra_body.clone(),
+            thinking_prefill_seed: self.thinking_prefill_seed.clone(),
+            thinking_prefill_name: self.thinking_prefill_name.clone(),
+            thinking_prefill_non_kimi: self.thinking_prefill_non_kimi,
             static_models: self.static_models.clone(),
+            static_model_config: self.static_model_config.clone(),
             static_context_limits: self.static_context_limits.clone(),
             static_image_input_support: self.static_image_input_support.clone(),
             send_openrouter_headers: self.send_openrouter_headers,

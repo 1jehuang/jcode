@@ -201,6 +201,7 @@ fn explicit_generic_provider_maps_to_generic_auth_target() {
 fn collect_cli_model_names_prefers_available_routes_and_dedupes() {
     let routes = vec![
         ModelRoute {
+            catalog_metadata: None,
             model: "gpt-5.4".to_string(),
             provider: "OpenAI".to_string(),
             api_method: "openai-oauth".to_string(),
@@ -210,6 +211,7 @@ fn collect_cli_model_names_prefers_available_routes_and_dedupes() {
             usage: None,
         },
         ModelRoute {
+            catalog_metadata: None,
             model: "gpt-5.4".to_string(),
             provider: "auto".to_string(),
             api_method: "openrouter".to_string(),
@@ -219,6 +221,7 @@ fn collect_cli_model_names_prefers_available_routes_and_dedupes() {
             usage: None,
         },
         ModelRoute {
+            catalog_metadata: None,
             model: "openrouter models".to_string(),
             provider: "—".to_string(),
             api_method: "openrouter".to_string(),
@@ -239,6 +242,7 @@ fn collect_cli_model_names_prefers_available_routes_and_dedupes() {
 
 fn test_route(model: &str, provider: &str, api_method: &str) -> ModelRoute {
     ModelRoute {
+        catalog_metadata: None,
         model: model.to_string(),
         provider: provider.to_string(),
         api_method: api_method.to_string(),
@@ -1130,7 +1134,7 @@ async fn auth_test_choice_plan_discovers_model_for_local_custom_compat_endpoint(
 }
 
 #[tokio::test]
-async fn auth_test_choice_plan_discovers_model_for_hosted_custom_compat_endpoint_with_api_key() {
+async fn auth_test_choice_plan_discovers_model_for_custom_compat_endpoint_with_api_key() {
     let _env_guard = crate::storage::lock_test_env();
     let _saved = SavedEnv::capture(&[
         "JCODE_OPENAI_COMPAT_API_BASE",
@@ -1146,14 +1150,9 @@ async fn auth_test_choice_plan_discovers_model_for_hosted_custom_compat_endpoint
         "NO_PROXY",
         "no_proxy",
     ]);
-    // Since #2018 a bare IP host is treated like loopback, so the profile
-    // needs no API key by default. A configured key must still be sent, so
-    // this checks model discovery with a key against a bare-IP endpoint.
-    let api_base = spawn_single_response_http_server_on_host(
-        "0.0.0.0",
-        200,
-        r#"{"data":[{"id":"hosted-compatible-model"}]}"#,
-    );
+    // IP-address endpoints remain self-hosted when an API key is configured.
+    let api_base =
+        spawn_single_response_http_server(200, r#"{"data":[{"id":"keyed-compatible-model"}]}"#);
     crate::env::set_var("JCODE_OPENAI_COMPAT_API_BASE", &api_base);
     crate::env::set_var("OPENAI_COMPAT_API_KEY", "test-key");
     crate::env::set_var("NO_PROXY", "0.0.0.0,127.0.0.1,localhost");
@@ -1176,7 +1175,7 @@ async fn auth_test_choice_plan_discovers_model_for_hosted_custom_compat_endpoint
 
     match plan {
         AuthTestChoicePlan::Run { model } => {
-            assert_eq!(model.as_deref(), Some("hosted-compatible-model"))
+            assert_eq!(model.as_deref(), Some("keyed-compatible-model"))
         }
         AuthTestChoicePlan::Skip(detail) => panic!("unexpected skip: {detail}"),
     }
@@ -1221,6 +1220,7 @@ async fn auth_test_choice_plan_skips_local_custom_compat_endpoint_without_models
 #[test]
 fn collect_cli_model_names_falls_back_when_no_routes_are_available() {
     let routes = vec![ModelRoute {
+        catalog_metadata: None,
         model: "claude-opus-4-6".to_string(),
         provider: "Anthropic".to_string(),
         api_method: "claude-oauth".to_string(),
@@ -1622,6 +1622,30 @@ async fn one_shot_cleanup_preserves_the_original_command_error() {
     }
 }
 
+#[test]
+fn run_explains_failover_offer_without_resending() {
+    let prompt = crate::provider::ProviderFailoverPrompt {
+        from_provider: "prof-a:glm-5.3".to_string(),
+        from_label: "prof-a".to_string(),
+        to_provider: "prof-b:glm-5.3".to_string(),
+        to_label: "prof-b (glm-5.3)".to_string(),
+        target_route: Some("prof-b:glm-5.3".to_string()),
+        reason: "out of credit (HTTP 402: Insufficient credits)".to_string(),
+        estimated_input_chars: 40,
+        estimated_input_tokens: 10,
+    };
+    let text = format!(
+        "{:#}",
+        explain_run_failover_prompt(anyhow::anyhow!(prompt.to_error_message()))
+    );
+    assert!(!text.contains("[jcode-provider-failover]"), "{text}");
+    assert!(text.contains("prof-a is out of credit"), "{text}");
+    assert!(text.contains("did not resend"), "{text}");
+    assert!(text.contains("--model prof-b:glm-5.3"), "{text}");
+
+    let other = format!("{:#}", explain_run_failover_prompt(anyhow::anyhow!("boom")));
+    assert_eq!(other, "boom");
+}
 #[path = "commands/tests/cloud_sessions_tests.rs"]
 mod cloud_sessions;
 #[path = "commands/tests/ndjson_metadata_tests.rs"]

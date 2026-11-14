@@ -1212,6 +1212,12 @@ mod tests {
 
     const FUTURE: i64 = 4_102_444_800_000;
 
+    // secure_publish refuses symlinked ancestors by design, and macOS keeps the
+    // temp dir under the /var -> /private/var symlink, so start from its real path.
+    fn tempdir() -> tempfile::TempDir {
+        tempfile::tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap()
+    }
+
     fn cloud_fixture(provider: TransferProvider, label: &str) -> Vec<u8> {
         let credential = match provider {
             TransferProvider::OpenAi => {
@@ -1235,7 +1241,7 @@ mod tests {
 
     #[test]
     fn cloud_enumerates_all_accounts_without_selecting_or_exporting_extra_fields() {
-        let home = tempfile::tempdir().unwrap();
+        let home = tempdir();
         assert!(cloud_accounts_at(home.path()).unwrap().is_empty());
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
             for label in ["first", "second"] {
@@ -1272,7 +1278,7 @@ mod tests {
     #[test]
     fn cloud_handoff_replaces_stale_rotated_copy_but_not_other_identity() {
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
-            let home = tempfile::tempdir().unwrap();
+            let home = tempdir();
             let original = cloud_fixture(provider, "chosen");
             import_cloud_at(home.path(), provider, "chosen", &original).unwrap();
             let (_, _, access, refresh) = cloud_keys(provider);
@@ -1309,7 +1315,7 @@ mod tests {
         // cloud copy can lack hints the laptop still has. That must not block
         // the handoff, while a hint that is present and different still does.
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
-            let home = tempfile::tempdir().unwrap();
+            let home = tempdir();
             let full = cloud_fixture(provider, "chosen");
             let stripped = revised(
                 &revised(&full, "email", Value::Null),
@@ -1341,8 +1347,8 @@ mod tests {
     #[test]
     fn cloud_roundtrip_preserves_exact_label_and_expired_refreshable_account() {
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
-            let local = tempfile::tempdir().unwrap();
-            let remote = tempfile::tempdir().unwrap();
+            let local = tempdir();
+            let remote = tempdir();
             let bytes = cloud_fixture(provider, "my original account");
             import_cloud_at(local.path(), provider, "my original account", &bytes).unwrap();
             let before = fs::read(local.path().join(provider.store_name())).unwrap();
@@ -1390,7 +1396,7 @@ mod tests {
     fn cloud_merge_preserves_unrelated_accounts_fields_and_active_selection() {
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
             for active_value in [json!("second"), Value::Null] {
-                let home = tempfile::tempdir().unwrap();
+                let home = tempdir();
                 let source_bytes = source(home.path(), provider);
                 let selected = export_cloud_account_at(home.path(), provider, None).unwrap();
                 assert_eq!(selected.label(), "second");
@@ -1442,7 +1448,7 @@ mod tests {
     #[test]
     fn cloud_refresh_requires_same_identity_and_preserves_unknown_account_fields() {
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
-            let home = tempfile::tempdir().unwrap();
+            let home = tempdir();
             let bytes = cloud_fixture(provider, "selected");
             import_cloud_at(home.path(), provider, "selected", &bytes).unwrap();
             let path = home.path().join(provider.store_name());
@@ -1490,7 +1496,7 @@ mod tests {
     #[test]
     fn cloud_identityless_return_requires_original_departure_and_no_intervening_update() {
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
-            let home = tempfile::tempdir().unwrap();
+            let home = tempdir();
             let identity = if provider == TransferProvider::OpenAi {
                 "account_id"
             } else {
@@ -1528,7 +1534,7 @@ mod tests {
     #[test]
     fn cloud_validation_is_bounded_and_does_not_modify_existing_store() {
         let provider = TransferProvider::OpenAi;
-        let home = tempfile::tempdir().unwrap();
+        let home = tempdir();
         let valid = cloud_fixture(provider, "chosen");
         import_cloud_at(home.path(), provider, "chosen", &valid).unwrap();
         let before = fs::read(home.path().join(provider.store_name())).unwrap();
@@ -1588,7 +1594,7 @@ mod tests {
     fn cloud_rejects_unsafe_files_and_ancestors_without_touching_targets() {
         let provider = TransferProvider::Claude;
         let bytes = cloud_fixture(provider, "chosen");
-        let target = tempfile::tempdir().unwrap();
+        let target = tempdir();
         import_cloud_at(target.path(), provider, "chosen", &bytes).unwrap();
         let before = fs::read(target.path().join(provider.store_name())).unwrap();
         fs::set_permissions(
@@ -1606,7 +1612,7 @@ mod tests {
         )
         .unwrap();
         for hardlink in [false, true] {
-            let home = tempfile::tempdir().unwrap();
+            let home = tempdir();
             let path = home.path().join(provider.store_name());
             if hardlink {
                 fs::hard_link(target.path().join(provider.store_name()), &path).unwrap();
@@ -1616,7 +1622,7 @@ mod tests {
             assert!(import_cloud_at(home.path(), provider, "chosen", &bytes).is_err());
             assert!(export_cloud_account_at(home.path(), provider, None).is_err());
         }
-        let parent = tempfile::tempdir().unwrap();
+        let parent = tempdir();
         symlink(target.path(), parent.path().join("linked")).unwrap();
         assert!(
             import_cloud_at(&parent.path().join("linked"), provider, "chosen", &bytes).is_err()
@@ -1626,7 +1632,7 @@ mod tests {
             fs::read(target.path().join(provider.store_name())).unwrap(),
             before
         );
-        let untouched = tempfile::tempdir().unwrap();
+        let untouched = tempdir();
         fs::write(untouched.path().join("sentinel"), b"unchanged").unwrap();
         symlink(untouched.path(), parent.path().join("fresh-link")).unwrap();
         assert!(
@@ -1648,7 +1654,7 @@ mod tests {
     #[test]
     fn cloud_concurrent_imports_do_not_lose_unrelated_accounts() {
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
-            let home = tempfile::tempdir().unwrap();
+            let home = tempdir();
             let barrier = Arc::new(Barrier::new(8));
             let threads: Vec<_> = (0..8)
                 .map(|i| {
@@ -1674,7 +1680,7 @@ mod tests {
 
     #[test]
     fn cloud_rejects_unlabeled_legacy_and_duplicate_labels() {
-        let home = tempfile::tempdir().unwrap();
+        let home = tempdir();
         let path = home.path().join("auth.json");
         let legacy = br#"{"anthropic":{"access":"synthetic","refresh":"synthetic","expires":1}}"#;
         fs::write(&path, legacy).unwrap();
@@ -1741,8 +1747,8 @@ mod tests {
     #[test]
     fn round_trip_only_active_account_leaves_source_and_other_stores_unchanged() {
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
-            let local = tempfile::tempdir().unwrap();
-            let remote = tempfile::tempdir().unwrap();
+            let local = tempdir();
+            let remote = tempdir();
             let home = remote.path().join("jcode");
             fs::create_dir(&home).unwrap();
             let original = source(local.path(), provider);
@@ -1793,7 +1799,7 @@ mod tests {
     #[test]
     fn explicit_selection_is_respected_and_missing_selection_never_falls_back() {
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
-            let local = tempfile::tempdir().unwrap();
+            let local = tempdir();
             source(local.path(), provider);
             let chosen = export_account_at(local.path(), provider, Some("first")).unwrap();
             assert!(
@@ -1810,7 +1816,7 @@ mod tests {
 
     #[test]
     fn availability_never_discovers_external_or_unrelated_credentials() {
-        let local = tempfile::tempdir().unwrap();
+        let local = tempdir();
         for (directory, filename) in [
             (".codex", "auth.json"),
             (".claude", ".credentials.json"),
@@ -1861,7 +1867,7 @@ mod tests {
             );
         }
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
-            let remote = tempfile::tempdir().unwrap();
+            let remote = tempdir();
             let mut payload: Value =
                 serde_json::from_slice(&fixture(provider, "synthetic")).unwrap();
             let expiry = match provider {
@@ -1911,8 +1917,8 @@ mod tests {
             (jwt(1), Some(FUTURE), Some(FUTURE)),
             ("synthetic-opaque-token".to_string(), None, None),
         ] {
-            let local = tempfile::tempdir().unwrap();
-            let remote = tempfile::tempdir().unwrap();
+            let local = tempdir();
+            let remote = tempdir();
             let source = serde_json::to_vec(&json!({
                 "openai_accounts": [{
                     "label": "active", "access_token": token,
@@ -1962,7 +1968,7 @@ mod tests {
 
     #[test]
     fn legacy_claude_export_does_not_migrate_the_source() {
-        let local = tempfile::tempdir().unwrap();
+        let local = tempdir();
         let bytes = serde_json::to_vec(&json!({"anthropic":{"access":"legacy-access","refresh":"legacy-refresh","expires":FUTURE}})).unwrap();
         fs::write(local.path().join("auth.json"), &bytes).unwrap();
         let payload = export_at(local.path(), TransferProvider::Claude).unwrap();
@@ -1984,7 +1990,7 @@ mod tests {
                 b"{\"other_provider\":{\"access\":\"untouched\"}}",
                 b"{\"OPENAI_API_KEY\":\"untouched\"}",
             ] {
-                let remote = tempfile::tempdir().unwrap();
+                let remote = tempdir();
                 let path = remote.path().join(provider.store_name());
                 fs::write(&path, existing).unwrap();
                 fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
@@ -2002,7 +2008,7 @@ mod tests {
 
     #[test]
     fn payload_validation_precedes_all_filesystem_writes_and_errors_are_static() {
-        let remote = tempfile::tempdir().unwrap();
+        let remote = tempdir();
         let home = remote.path().join("not-created");
         let provider = TransferProvider::OpenAi;
         let valid: Value =
@@ -2059,7 +2065,7 @@ mod tests {
 
     #[test]
     fn source_bounds_malformed_and_expired_stores_fail_closed() {
-        let local = tempfile::tempdir().unwrap();
+        let local = tempdir();
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
             assert!(matches!(
                 export_at(local.path(), provider),
@@ -2107,7 +2113,7 @@ mod tests {
 
     #[test]
     fn symlink_and_nonregular_destinations_cannot_be_followed() {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempdir();
         let remote = root.path().join("remote");
         fs::create_dir(&remote).unwrap();
         let target = root.path().join("unrelated");
@@ -2145,7 +2151,7 @@ mod tests {
 
     #[test]
     fn racing_imports_have_exactly_one_winner_and_no_partial_or_leftover_files() {
-        let remote = tempfile::tempdir().unwrap();
+        let remote = tempdir();
         let home = Arc::new(remote.path().join("jcode"));
         let barrier = Arc::new(Barrier::new(8));
         let threads: Vec<_> = (0..8)

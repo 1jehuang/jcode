@@ -57,8 +57,12 @@ struct LegacyTokens {
 
 const ACCOUNT_LABEL_PREFIX: &str = "openai";
 
+#[path = "codex_refresh_cas.rs"]
+mod refresh_cas;
+pub(super) use refresh_cas::{capture_refresh_account, commit_refresh_account};
+
 /// Set the runtime override for the active account label.
-/// This allows `/account switch <label>` to take effect without rewriting the file.
+/// This allows `/accounts switch <label>` to take effect without rewriting the file.
 pub fn set_active_account_override(label: Option<String>) {
     crate::auth::account_store::set_runtime_active_override(ACCOUNT_LABEL_PREFIX, label);
 }
@@ -160,8 +164,11 @@ pub fn has_unconsented_legacy_credentials() -> bool {
 }
 
 pub fn load_auth_file() -> Result<JcodeOpenAiAuthFile> {
-    let _store_lock =
-        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "openai-auth.json")?;
+    let _lock = refresh_cas::lock_auth_file()?;
+    load_auth_file_unlocked()
+}
+
+fn load_auth_file_unlocked() -> Result<JcodeOpenAiAuthFile> {
     let path = jcode_auth_path()?;
     let mut auth = if path.exists() {
         crate::storage::harden_secret_file_permissions(&path);
@@ -175,15 +182,18 @@ pub fn load_auth_file() -> Result<JcodeOpenAiAuthFile> {
         crate::logging::info(
             "Renaming OpenAI accounts to animal labels (openai-otter, openai-fox, ...)",
         );
-        save_auth_file(&auth)?;
+        save_auth_file_unlocked(&auth)?;
     }
 
     Ok(auth)
 }
 
 pub fn save_auth_file(auth: &JcodeOpenAiAuthFile) -> Result<()> {
-    let _store_lock =
-        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "openai-auth.json")?;
+    let _lock = refresh_cas::lock_auth_file()?;
+    save_auth_file_unlocked(auth)
+}
+
+fn save_auth_file_unlocked(auth: &JcodeOpenAiAuthFile) -> Result<()> {
     let auth_path = jcode_auth_path()?;
     let clean = JcodeOpenAiAuthFile {
         openai_accounts: auth.openai_accounts.clone(),
@@ -237,9 +247,15 @@ pub fn active_account_label() -> Option<String> {
 }
 
 pub fn set_active_account(label: &str) -> Result<()> {
-    let _store_lock =
-        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "openai-auth.json")?;
-    let mut auth = load_auth_file()?;
+    set_default_account(label)?;
+    set_active_account_override(Some(label.to_string()));
+    Ok(())
+}
+
+/// Persist the stored default account without setting the runtime override.
+pub fn set_default_account(label: &str) -> Result<()> {
+    let _lock = refresh_cas::lock_auth_file()?;
+    let mut auth = load_auth_file_unlocked()?;
     crate::auth::account_store::set_active_account(
         label,
         &auth.openai_accounts,
@@ -247,15 +263,16 @@ pub fn set_active_account(label: &str) -> Result<()> {
         "No OpenAI account with label '{}' found",
         |account| account.label.as_str(),
     )?;
-    save_auth_file(&auth)?;
-    set_active_account_override(Some(label.to_string()));
-    Ok(())
+    save_auth_file_unlocked(&auth)
 }
 
 pub fn upsert_account(account: OpenAiAccount) -> Result<String> {
-    let _store_lock =
-        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "openai-auth.json")?;
-    let mut auth = load_auth_file()?;
+    let _lock = refresh_cas::lock_auth_file()?;
+    upsert_account_unlocked(account)
+}
+
+fn upsert_account_unlocked(account: OpenAiAccount) -> Result<String> {
+    let mut auth = load_auth_file_unlocked()?;
     let label = crate::auth::account_store::upsert_account(
         ACCOUNT_LABEL_PREFIX,
         &mut auth.openai_accounts,
@@ -264,14 +281,13 @@ pub fn upsert_account(account: OpenAiAccount) -> Result<String> {
         |account| account.label.as_str(),
         |account, label| account.label = label,
     );
-    save_auth_file(&auth)?;
+    save_auth_file_unlocked(&auth)?;
     Ok(label)
 }
 
 pub fn remove_account(label: &str) -> Result<()> {
-    let _store_lock =
-        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "openai-auth.json")?;
-    let mut auth = load_auth_file()?;
+    let _lock = refresh_cas::lock_auth_file()?;
+    let mut auth = load_auth_file_unlocked()?;
     let before = auth.openai_accounts.len();
     auth.openai_accounts
         .retain(|account| account.label != label);
@@ -283,7 +299,7 @@ pub fn remove_account(label: &str) -> Result<()> {
         auth.active_openai_account = auth.openai_accounts.first().map(|a| a.label.clone());
     }
 
-    save_auth_file(&auth)?;
+    save_auth_file_unlocked(&auth)?;
 
     if get_active_account_override().as_deref() == Some(label) {
         set_active_account_override(auth.active_openai_account.clone());
@@ -292,14 +308,65 @@ pub fn remove_account(label: &str) -> Result<()> {
     Ok(())
 }
 
+/// Rename an account's label (the human-facing name shown in the picker).
+/// References to the old label (active account and runtime override) are
+/// migrated; identity-based session pins continue resolving to the renamed login.
+pub fn rename_account(old_label: &str, new_label: &str) -> Result<()> {
+    let _lock = refresh_cas::lock_auth_file()?;
+    let new_label = new_label.trim();
+    if new_label.is_empty() {
+        anyhow::bail!("New account name cannot be empty");
+    }
+    if matches!(new_label, "default" | "main")
+        || new_label
+            .strip_prefix("openai-")
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
+    {
+        anyhow::bail!("That name is reserved for legacy account migration; choose a custom name");
+    }
+    let mut auth = load_auth_file_unlocked()?;
+    if new_label == old_label {
+        if auth
+            .openai_accounts
+            .iter()
+            .any(|account| account.label == old_label)
+        {
+            return Ok(());
+        }
+        anyhow::bail!("No OpenAI account with label '{}' found", old_label);
+    }
+    if auth.openai_accounts.iter().any(|a| a.label == new_label) {
+        anyhow::bail!("An account named '{}' already exists", new_label);
+    }
+    let Some(account) = auth
+        .openai_accounts
+        .iter_mut()
+        .find(|a| a.label == old_label)
+    else {
+        anyhow::bail!("No OpenAI account with label '{}' found", old_label);
+    };
+    account.label = new_label.to_string();
+
+    if auth.active_openai_account.as_deref() == Some(old_label) {
+        auth.active_openai_account = Some(new_label.to_string());
+    }
+
+    save_auth_file_unlocked(&auth)?;
+
+    if get_active_account_override().as_deref() == Some(old_label) {
+        set_active_account_override(Some(new_label.to_string()));
+    }
+
+    Ok(())
+}
+
 pub fn clear_accounts() -> Result<usize> {
-    let _store_lock =
-        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "openai-auth.json")?;
-    let mut auth = load_auth_file()?;
+    let _lock = refresh_cas::lock_auth_file()?;
+    let mut auth = load_auth_file_unlocked()?;
     let removed = auth.openai_accounts.len();
     auth.openai_accounts.clear();
     auth.active_openai_account = None;
-    save_auth_file(&auth)?;
+    save_auth_file_unlocked(&auth)?;
     set_active_account_override(None);
     Ok(removed)
 }
@@ -312,9 +379,8 @@ pub fn update_account_tokens(
     account_id: Option<String>,
     expires_at: Option<i64>,
 ) -> Result<()> {
-    let _store_lock =
-        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "openai-auth.json")?;
-    let mut auth = load_auth_file()?;
+    let _lock = refresh_cas::lock_auth_file()?;
+    let mut auth = load_auth_file_unlocked()?;
     if let Some(account) = auth
         .openai_accounts
         .iter_mut()
@@ -336,7 +402,7 @@ pub fn update_account_tokens(
             account.id_token = id_token;
         }
         account.expires_at = expires_at;
-        save_auth_file(&auth)?;
+        save_auth_file_unlocked(&auth)?;
         Ok(())
     } else {
         anyhow::bail!(
@@ -346,17 +412,74 @@ pub fn update_account_tokens(
     }
 }
 
+/// Replace exactly one existing saved login, without adding a label or moving defaults.
+pub fn replace_account_if_unchanged(
+    label: &str,
+    expected_identity: Option<&str>,
+    replacement: OpenAiAccount,
+) -> Result<()> {
+    let _lock = refresh_cas::lock_auth_file()?;
+    let mut auth = load_auth_file_unlocked()?;
+    replace_saved_login(&mut auth, label, expected_identity, replacement)?;
+    save_auth_file_unlocked(&auth)
+}
+
+fn replace_saved_login(
+    auth: &mut JcodeOpenAiAuthFile,
+    label: &str,
+    expected_identity: Option<&str>,
+    mut replacement: OpenAiAccount,
+) -> Result<()> {
+    let index = auth
+        .openai_accounts
+        .iter()
+        .position(|a| a.label == label)
+        .ok_or_else(|| {
+            anyhow::anyhow!("The saved login was removed or renamed. No credentials were replaced.")
+        })?;
+    if account_identity(&auth.openai_accounts[index]).as_deref() != expected_identity {
+        anyhow::bail!(
+            "The saved login changed while authentication was pending. No credentials were replaced."
+        );
+    }
+    // Only claims from the new login establish its identity, never old metadata
+    // or the refresh-token fingerprint used as a last-resort session pin.
+    let identity = account_identity(&replacement)
+        .filter(|id| !id.starts_with("rt:"))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Could not verify the replacement login identity. No credentials were replaced."
+            )
+        })?;
+    if auth
+        .openai_accounts
+        .iter()
+        .enumerate()
+        .any(|(i, a)| i != index && account_identity(a).as_deref() == Some(identity.as_str()))
+    {
+        anyhow::bail!(
+            "This identity is already saved under another account. Use that saved login instead. No credentials were replaced."
+        );
+    }
+    replacement.label = label.to_string();
+    auth.openai_accounts[index] = replacement;
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "codex_replacement_tests.rs"]
+mod replacement_tests;
+
 pub fn update_account_profile(label: &str, email: Option<String>) -> Result<()> {
-    let _store_lock =
-        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "openai-auth.json")?;
-    let mut auth = load_auth_file()?;
+    let _lock = refresh_cas::lock_auth_file()?;
+    let mut auth = load_auth_file_unlocked()?;
     if let Some(account) = auth
         .openai_accounts
         .iter_mut()
         .find(|account| account.label == label)
     {
         account.email = email;
-        save_auth_file(&auth)?;
+        save_auth_file_unlocked(&auth)?;
         Ok(())
     } else {
         anyhow::bail!(
@@ -384,6 +507,122 @@ pub fn load_credentials() -> Result<CodexCredentials> {
 
 pub fn load_oauth_credentials() -> Result<CodexCredentials> {
     load_oauth_credentials_internal(true)
+}
+
+/// Stable identity of a stored account (see [`crate::auth::AccountPin`]).
+pub fn account_identity(account: &OpenAiAccount) -> Option<String> {
+    let account_id = account
+        .account_id
+        .clone()
+        .or_else(|| account.id_token.as_deref().and_then(extract_account_id));
+    let email = account
+        .email
+        .clone()
+        .or_else(|| account.id_token.as_deref().and_then(extract_email));
+    // A login email can own multiple ChatGPT workspaces/subscriptions. The
+    // provider account ID identifies the workspace and survives token refresh.
+    crate::auth::account_store::account_identity(None, account_id.as_deref(), "").or_else(|| {
+        crate::auth::account_store::account_identity(email.as_deref(), None, &account.refresh_token)
+    })
+}
+
+/// Load OAuth credentials for `scope`, returning the jcode account label they
+/// came from (`None` when a legacy/external source served them).
+///
+/// `Default` behaves exactly like [`load_oauth_credentials`]. `Pinned` reads
+/// only the jcode-stored account the pin resolves to and fails with
+/// [`crate::auth::account_store::PinnedAccountMissing`] when it is gone.
+pub fn load_oauth_credentials_scoped(
+    scope: crate::auth::AccountScope<'_>,
+) -> Result<(CodexCredentials, Option<String>)> {
+    match scope {
+        crate::auth::AccountScope::Default => {
+            let creds = load_oauth_credentials()?;
+            let label = load_auth_file().ok().and_then(|auth| {
+                auth.openai_accounts
+                    .iter()
+                    .find(|account| {
+                        account.refresh_token == creds.refresh_token
+                            && account.access_token == creds.access_token
+                    })
+                    .map(|account| account.label.clone())
+            });
+            Ok((creds, label))
+        }
+        crate::auth::AccountScope::Pinned(pin) => {
+            let auth = load_auth_file()?;
+            let label = resolve_pin_in(pin, &auth).ok_or_else(|| {
+                if pin.identity.as_deref().is_some_and(|id| id.contains('@') && !id.starts_with("id:") && !id.starts_with("rt:")) {
+                    return anyhow::anyhow!("OpenAI email-only account pin is missing or ambiguous; select the workspace account again");
+                }
+                anyhow::Error::new(crate::auth::account_store::PinnedAccountMissing(
+                    pin.label.clone(),
+                ))
+            })?;
+            let account = auth
+                .openai_accounts
+                .iter()
+                .find(|account| account.label == label)
+                .context("pinned OpenAI account disappeared")?;
+            Ok((credentials_from_account(account), Some(label)))
+        }
+    }
+}
+
+fn resolve_pin_in(pin: &crate::auth::AccountPin, auth: &JcodeOpenAiAuthFile) -> Option<String> {
+    // Older sessions stored email-only pins. Migrate only when the email names
+    // exactly one saved account, never use the positional label to guess a
+    // workspace when multiple subscriptions share that email.
+    if let Some(identity) = pin.identity.as_deref()
+        && identity.contains('@')
+        && !identity.starts_with("id:")
+        && !identity.starts_with("rt:")
+    {
+        let mut matches = auth.openai_accounts.iter().filter(|account| {
+            account
+                .email
+                .clone()
+                .or_else(|| account.id_token.as_deref().and_then(extract_email))
+                .is_some_and(|email| email.trim().eq_ignore_ascii_case(identity))
+        });
+        let account = matches.next()?;
+        return matches.next().is_none().then(|| account.label.clone());
+    }
+    crate::auth::account_store::resolve_pin(
+        pin,
+        &auth.openai_accounts,
+        |account| account.label.as_str(),
+        account_identity,
+    )
+}
+
+/// Current label of the stored account a pin names (identity first, then label).
+pub fn resolve_pin(pin: &crate::auth::AccountPin) -> Option<String> {
+    let auth = load_auth_file().ok()?;
+    resolve_pin_in(pin, &auth)
+}
+
+/// Stored default account (persisted active, else first). Unlike
+/// [`active_account_label`] this ignores the one-shot runtime override.
+pub fn default_account_label() -> Option<String> {
+    let auth = load_auth_file().ok()?;
+    crate::auth::account_store::default_account_label(
+        auth.active_openai_account.as_deref(),
+        &auth.openai_accounts,
+        |account| account.label.as_str(),
+    )
+}
+
+/// Build a pin (label plus identity) for the stored account at `label`.
+pub fn pin_for_label(label: &str) -> Result<crate::auth::AccountPin> {
+    let auth = load_auth_file()?;
+    crate::auth::account_store::pin_for_label(
+        label,
+        &auth.openai_accounts,
+        |account| account.label.as_str(),
+        account_identity,
+        "No OpenAI account with label '{}' found",
+    )
 }
 
 fn load_oauth_credentials_internal(return_expired: bool) -> Result<CodexCredentials> {
@@ -475,6 +714,7 @@ pub fn upsert_account_from_tokens(
     id_token: Option<String>,
     expires_at: Option<i64>,
 ) -> Result<String> {
+    let _lock = refresh_cas::lock_auth_file()?;
     let creds = CodexCredentials {
         access_token: access_token.to_string(),
         refresh_token: refresh_token.to_string(),
@@ -483,7 +723,21 @@ pub fn upsert_account_from_tokens(
         expires_at,
     };
     let email = creds.id_token.as_deref().and_then(extract_email);
-    upsert_account(account_from_credentials(label, &creds, email))
+    let mut account = account_from_credentials(label, &creds, email);
+    // A refresh response without an id_token must not erase the identity
+    // (email/account id) that per-session account pins resolve against.
+    if let Some(existing) = load_auth_file_unlocked()
+        .ok()
+        .and_then(|auth| auth.openai_accounts.into_iter().find(|a| a.label == label))
+    {
+        if account.email.is_none() {
+            account.email = existing.email;
+        }
+        if account.account_id.is_none() {
+            account.account_id = existing.account_id;
+        }
+    }
+    upsert_account_unlocked(account)
 }
 
 fn load_jcode_credentials() -> Result<CodexCredentials> {

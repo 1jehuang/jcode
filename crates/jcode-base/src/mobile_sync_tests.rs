@@ -1,3 +1,6 @@
+#[path = "mobile_sync_tests/bounded_wire_tests.rs"]
+mod bounded_wire;
+
 use super::*;
 use jcode_session_types::StoredMessage;
 

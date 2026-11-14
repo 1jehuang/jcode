@@ -3,6 +3,8 @@ fn agent_failover_set_default_model(model: &str) -> anyhow::Result<()> {
 }
 
 fn agent_failover_catalog(provider: &MultiProvider, routes: Vec<ModelRoute>) {
+    // Loading a changed default can advance the catalog's config generation.
+    let _ = crate::config::config();
     *provider.routes_memo.lock().unwrap() = Some(Arc::new(RoutesMemoEntry {
         built_at: std::time::Instant::now(),
         scope_key: provider.routes_memo_key(),
@@ -129,8 +131,7 @@ fn automatic_reset_defers_to_ready_pool_route_before_any_redemption() {
                 &[],
                 CompletionMode::Unified { system: "" },
             ))
-            .err()
-            .expect("ready alternate must route, not redeem");
+            .expect_err("ready alternate must route, not redeem");
         assert!(error.to_string().contains("openai-api:gpt-5.4"));
         assert!(
             models::provider_unavailability_detail_for_account_label(
@@ -453,6 +454,7 @@ fn agent_failover_pool_order_beats_global_model_quality_and_configured_identity(
             vec![
                 build_openai_api_key_route("gpt-6-astra", true, ""),
                 ModelRoute {
+                    catalog_metadata: None,
                     model: "claude-sonnet-4-6".into(),
                     provider: "Anthropic".into(),
                     api_method: "anthropic-api-key".into(),

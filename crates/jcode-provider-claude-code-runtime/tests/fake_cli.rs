@@ -1,0 +1,1153 @@
+//! End-to-end tests of the Claude Code runtime against a fake `claude`
+//! (`tests/fake_claude.py`) that speaks the Agent SDK stream-json protocol.
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use futures::StreamExt;
+use jcode_message_types::{Message, StreamEvent, ToolDefinition};
+use jcode_provider_claude_code_runtime::ClaudeCodeProvider;
+use jcode_provider_claude_code_runtime::prompt::JCODE_APPEND_SYSTEM_PROMPT;
+use jcode_provider_claude_code_runtime::settings::{ClaudeCodeInstance, ClaudeCodeSettings};
+use jcode_provider_core::{AccountPin, AccountProviderKind, NativeToolResult, Provider};
+use serde_json::{Value, json};
+
+#[path = "cases/profile_sources.rs"]
+mod profile_sources;
+
+#[path = "cases/file_routing.rs"]
+mod file_routing;
+mod history_continuity;
+#[path = "cases/rewind.rs"]
+mod rewind;
+
+struct Fake {
+    _dir: tempfile::TempDir,
+    root: PathBuf,
+    log: PathBuf,
+}
+
+impl Fake {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let log = root.join("argv.log");
+        // A tiny wrapper so each test has its own state dir and argv log.
+        let wrapper = root.join("claude");
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fake_claude.py");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nFAKE_CLAUDE_STATE='{}' FAKE_CLAUDE_LOG='{}' exec python3 '{}' \"$@\"\n",
+                root.display(),
+                log.display(),
+                script.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        Self {
+            _dir: dir,
+            root,
+            log,
+        }
+    }
+
+    fn settings(&self) -> ClaudeCodeSettings {
+        ClaudeCodeSettings {
+            binary: self.root.join("claude").display().to_string(),
+            ..ClaudeCodeSettings::default()
+        }
+    }
+
+    fn provider(&self) -> ClaudeCodeProvider {
+        ClaudeCodeProvider::with_settings(self.settings())
+    }
+
+    fn launches(&self) -> Vec<Value> {
+        std::fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect()
+    }
+
+    fn catalog(&self, model: &str) {
+        std::fs::write(
+            self.root.join("initialize.json"),
+            json!({"subtype": "success", "response": {
+                "models": [{"value": "future", "resolvedModel": model}]
+            }})
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    fn inputs(&self) -> Vec<Value> {
+        std::fs::read_to_string(self.root.join("argv.log.stdin"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+}
+
+#[tokio::test]
+async fn model_catalog_prefetch_and_forced_refresh_preserve_live_turns_and_last_good_models() {
+    use jcode_base::bus::{Bus, BusEvent};
+    let fake = Fake::new();
+    let provider = fake.provider();
+    let fork = provider.fork();
+    let first_model = "claude-future-catalog-2099-alpha";
+    let second_model = "claude-future-catalog-2099-beta";
+    assert!(
+        !provider
+            .available_models_display()
+            .contains(&first_model.into())
+    );
+    fake.catalog(first_model);
+    jcode_base::bus::reset_models_updated_publish_state_for_tests();
+    let mut updates = Bus::global().subscribe();
+    let (first, second) = tokio::join!(provider.prefetch_models(), fork.prefetch_models());
+    first.unwrap();
+    second.unwrap();
+    assert_eq!(
+        fake.launches().len(),
+        1,
+        "concurrent prefetch shares a probe"
+    );
+    assert_eq!(provider.available_models_for_switching(), vec![first_model]);
+    assert_eq!(fork.available_models_display(), vec![first_model]);
+    assert!(
+        fake.inputs()
+            .iter()
+            .all(|row| row["message"]["type"] != "user")
+    );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if matches!(updates.recv().await.unwrap(), BusEvent::ModelsUpdated) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("discovery must notify attached pickers");
+
+    let first_turn = run_turn(&provider, &[Message::user("text")], None).await;
+    assert_eq!(text(&first_turn), "Hello from fake claude");
+    assert_eq!(fake.launches().len(), 2);
+    fake.catalog(second_model);
+    provider.prefetch_models().await.unwrap();
+    assert_eq!(fake.launches().len(), 2, "a fresh cache skips the probe");
+    let summary = provider.refresh_model_catalog().await.unwrap();
+    assert_eq!(summary.models_added_names, vec![second_model]);
+    assert_eq!(summary.models_removed_names, vec![first_model]);
+    assert_eq!(fork.available_models_display(), vec![second_model]);
+    let second_turn = run_turn(
+        &provider,
+        &[
+            Message::user("text"),
+            Message::assistant_text(&text(&first_turn)),
+            Message::user("text again"),
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(text(&second_turn), "Hello from fake claude");
+    assert_eq!(
+        fake.launches().len(),
+        3,
+        "refresh must preserve the live conversation child"
+    );
+    assert_eq!(provider.available_models_display(), vec![second_model]);
+
+    for response in [
+        json!({"subtype": "error", "error": "authentication_failed"}),
+        json!({"subtype": "success", "response": {"models": []}}),
+        json!({"subtype": "success", "response": {"models": "malformed"}}),
+    ] {
+        std::fs::write(fake.root.join("initialize.json"), response.to_string()).unwrap();
+        assert!(provider.refresh_model_catalog().await.is_err());
+        assert_eq!(provider.available_models_display(), vec![second_model]);
+        assert_eq!(fork.available_models_display(), vec![second_model]);
+    }
+    std::fs::write(fake.root.join("initialize.json"), "{").unwrap();
+    assert!(provider.refresh_model_catalog().await.is_err());
+    assert_eq!(provider.available_models_display(), vec![second_model]);
+    assert_eq!(
+        fake.inputs()
+            .iter()
+            .filter(|row| row["message"]["type"] == "user")
+            .count(),
+        2
+    );
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn model_catalog_is_scoped_to_instance_environment_even_with_the_same_home() {
+    let fake = Fake::new();
+    let mut instances = Vec::new();
+    for id in ["work", "personal"] {
+        let path = fake.root.join(format!("{id}.json"));
+        std::fs::write(
+            &path,
+            json!({"subtype": "success", "response": {
+                "models": [{"value": "future", "resolvedModel": format!("claude-future-{id}-2099")}]
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        instances.push(ClaudeCodeInstance {
+            id: id.into(),
+            env: [(
+                "FAKE_CLAUDE_CATALOG_FILE".into(),
+                path.display().to_string(),
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        });
+    }
+    let provider = ClaudeCodeProvider::with_settings(ClaudeCodeSettings {
+        instances,
+        default_instance: "work".into(),
+        ..fake.settings()
+    });
+    provider.prefetch_models().await.unwrap();
+    let fork = provider.fork();
+    provider
+        .set_account_pin(
+            AccountProviderKind::ClaudeCode,
+            Some(AccountPin::new("personal", None)),
+        )
+        .unwrap();
+    assert!(
+        !provider
+            .available_models_display()
+            .contains(&"claude-future-work-2099".into())
+    );
+    provider.prefetch_models().await.unwrap();
+    assert_eq!(
+        provider.available_models_display(),
+        vec!["claude-future-personal-2099"]
+    );
+    assert_eq!(
+        fork.available_models_display(),
+        vec!["claude-future-work-2099"]
+    );
+    assert_eq!(fake.launches().len(), 2);
+
+    // Routes come from each instance's own catalog, not the active one's.
+    let routes_for = |method: &str| -> Vec<String> {
+        provider
+            .model_routes()
+            .into_iter()
+            .filter(|route| route.api_method == method)
+            .map(|route| route.model)
+            .collect()
+    };
+    assert_eq!(routes_for("claude-code"), vec!["claude-future-work-2099"]);
+    assert_eq!(
+        routes_for("claude-code:personal"),
+        vec!["claude-future-personal-2099"]
+    );
+    let catalog = |id: &str, model: &str| {
+        let body = json!({"subtype": "success", "response": {
+            "models": [{"value": "next", "resolvedModel": model}]
+        }});
+        std::fs::write(fake.root.join(format!("{id}.json")), body.to_string()).unwrap();
+    };
+    // Forced refresh while pinned to `personal` still re-probes `work`.
+    catalog("work", "claude-next-work-2100");
+    catalog("personal", "claude-next-personal-2100");
+    provider.refresh_model_catalog().await.unwrap();
+    assert_eq!(routes_for("claude-code"), vec!["claude-next-work-2100"]);
+    assert_eq!(
+        routes_for("claude-code:personal"),
+        vec!["claude-next-personal-2100"]
+    );
+    // Another instance failing keeps its last good routes.
+    std::fs::write(fake.root.join("work.json"), "{").unwrap();
+    catalog("personal", "claude-last-personal-2101");
+    provider.refresh_model_catalog().await.unwrap();
+    assert_eq!(routes_for("claude-code"), vec!["claude-next-work-2100"]);
+    assert_eq!(
+        routes_for("claude-code:personal"),
+        vec!["claude-last-personal-2101"]
+    );
+    // A signed-out active instance listed first still lets later ones refresh.
+    catalog("personal", "claude-after-failure-2102");
+    assert!(fork.refresh_model_catalog().await.is_err());
+    assert_eq!(
+        routes_for("claude-code:personal"),
+        vec!["claude-after-failure-2102"]
+    );
+}
+
+fn tools() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition::new("bash", "Run a shell command", json!({"type": "object"})),
+        ToolDefinition::new(
+            "echo",
+            "Echo text back",
+            json!({"type": "object", "properties": {"text": {"type": "string"}}}),
+        ),
+    ]
+}
+
+const SYSTEM: &str = "You are jcode.";
+
+/// Answers a jcode tool call the way the agent loop would.
+type ToolAnswer<'a> = &'a dyn Fn(&str, &Value) -> NativeToolResult;
+
+/// Run one turn and collect every event. Answers NativeToolCalls the way the
+/// jcode agent loop does when `answer` is set.
+async fn run_turn(
+    provider: &ClaudeCodeProvider,
+    messages: &[Message],
+    answer: Option<ToolAnswer<'_>>,
+) -> Vec<StreamEvent> {
+    run_turn_with_system(provider, SYSTEM, messages, answer).await
+}
+
+async fn run_turn_with_system(
+    provider: &ClaudeCodeProvider,
+    system: &str,
+    messages: &[Message],
+    answer: Option<ToolAnswer<'_>>,
+) -> Vec<StreamEvent> {
+    let mut stream = provider
+        .complete(messages, &tools(), system, None)
+        .await
+        .unwrap();
+    let mut events = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while let Ok(Some(item)) = tokio::time::timeout_at(deadline, stream.next()).await {
+        let event = item.unwrap();
+        if let (
+            Some(answer),
+            StreamEvent::NativeToolCall {
+                request_id,
+                tool_name,
+                input,
+            },
+        ) = (answer, &event)
+        {
+            let mut result = answer(tool_name, input);
+            result.request_id = request_id.clone();
+            provider
+                .native_result_sender()
+                .unwrap()
+                .send(result)
+                .await
+                .unwrap();
+        }
+        let done = matches!(event, StreamEvent::MessageEnd { .. });
+        events.push(event);
+        if done {
+            break;
+        }
+    }
+    events
+}
+
+fn text(events: &[StreamEvent]) -> String {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::TextDelta(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn errors(events: &[StreamEvent]) -> Vec<(String, Option<u64>)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::Error {
+                message,
+                retry_after_secs,
+            } => Some((message.clone(), *retry_after_secs)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn text_turn_streams_once_and_reuses_the_child() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    let events = run_turn(&provider, &[Message::user("text please")], None).await;
+    assert_eq!(text(&events), "Hello from fake claude");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::SessionId(_)))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::TokenUsage { .. }))
+    );
+    assert!(errors(&events).is_empty(), "{events:?}");
+
+    let limits = provider.rate_limit_snapshot().expect("rate limits stored");
+    assert_eq!(limits.five_hour.unwrap().utilization, Some(0.25));
+
+    // Second turn goes to the same child: still one launch.
+    let events = run_turn(
+        &provider,
+        &[
+            Message::user("text please"),
+            Message::assistant_text("Hello from fake claude"),
+            Message::user("text again"),
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(text(&events), "Hello from fake claude");
+    assert_eq!(fake.launches().len(), 1);
+
+    // The CLI's model list replaces the fallback catalog.
+    assert_eq!(
+        provider.available_models_display(),
+        vec!["claude-opus-5-5".to_string(), "claude-sonnet-5".to_string()]
+    );
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn background_task_rows_follow_claude_code_between_turns() {
+    use jcode_base::bus::{BackgroundTaskStatus, Bus, BusEvent};
+    let fake = Fake::new();
+    let provider = fake.provider();
+    provider.bind_session("session-fake-bg");
+    let mut bus = Bus::global().subscribe();
+
+    let events = run_turn(&provider, &[Message::user("bgtask")], None).await;
+    assert_eq!(text(&events), "started");
+
+    // The finish arrives after the turn ended; it must still reach the bus.
+    let mut started = None;
+    let mut finished = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while finished.is_none() {
+        let event = tokio::time::timeout_at(deadline, bus.recv())
+            .await
+            .expect("background task finish published after the turn")
+            .unwrap();
+        match event {
+            BusEvent::UiActivity(a) if a.session_id.as_deref() == Some("session-fake-bg") => {
+                started = Some(a.message)
+            }
+            BusEvent::BackgroundTaskCompleted(c) if c.session_id == "session-fake-bg" => {
+                finished = Some(c)
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        started.as_deref(),
+        Some("**Background task started** `bgfake1` · `subagent: Fake background agent`")
+    );
+    let finished = finished.unwrap();
+    assert_eq!(finished.task_id, "bgfake1");
+    assert!(matches!(finished.status, BackgroundTaskStatus::Completed));
+    assert_eq!(
+        finished.output_preview,
+        "Agent \"Fake background agent\" completed"
+    );
+}
+
+#[tokio::test]
+async fn queued_turn_skips_claude_codes_own_follow_up_turn() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    let events = run_turn(&provider, &[Message::user("queued")], None).await;
+    // Not "follow-up": that turn belongs to Claude Code, and its result must
+    // not end ours. Its tool request was still answered, or this would hang.
+    assert_eq!(text(&events), "answer");
+    assert!(errors(&events).is_empty(), "{events:?}");
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn spawn_argv_matches_the_sdk_protocol() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    provider.set_reasoning_effort("high").unwrap();
+    run_turn(&provider, &[Message::user("text")], None).await;
+    let launch = &fake.launches()[0];
+    let argv: Vec<&str> = launch["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    for flag in [
+        "--output-format",
+        "stream-json",
+        "--input-format",
+        "--permission-prompt-tool",
+        "stdio",
+        "--include-partial-messages",
+        "--mcp-config",
+    ] {
+        assert!(argv.contains(&flag), "missing {flag} in {argv:?}");
+    }
+    assert!(argv.iter().any(|a| a.starts_with("--session-id=")));
+    assert!(argv.windows(2).any(|w| w == ["--effort", "high"]));
+    assert!(argv.windows(2).any(|w| w == ["--model", "claude-opus-5-5"]));
+    assert!(
+        launch["config_dir"].is_null(),
+        "default instance has no CLAUDE_CONFIG_DIR"
+    );
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn builtin_tool_turn_renders_tool_use_and_result() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    let events = run_turn(&provider, &[Message::user("tool")], None).await;
+    let start = events
+        .iter()
+        .position(|e| matches!(e, StreamEvent::ToolUseStart { name, .. } if name == "Read"));
+    let result = events.iter().position(|e| {
+        matches!(e, StreamEvent::ToolResult { content, is_error: false, .. } if content.contains("hello"))
+    });
+    assert!(start.is_some() && result.is_some(), "{events:?}");
+    assert!(start < result);
+    assert!(text(&events).contains("The file says hello"));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::NativeToolCall { .. })),
+        "built-in tools never round-trip through jcode"
+    );
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn permission_request_is_answered_by_mode() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    let events = run_turn(&provider, &[Message::user("perm")], None).await;
+    assert_eq!(text(&events), "permission:allow");
+    provider.shutdown().await;
+
+    let fake = Fake::new();
+    let provider = ClaudeCodeProvider::with_settings(ClaudeCodeSettings {
+        permission_mode: "dontAsk".into(),
+        ..fake.settings()
+    });
+    let events = run_turn(&provider, &[Message::user("perm")], None).await;
+    assert_eq!(text(&events), "permission:deny");
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn instance_permission_arguments_control_native_tool_replies() {
+    for args in [
+        "--permission-mode=default",
+        "--permission-mode plan",
+        "--permission-mode=acceptEdits",
+        "--permission-mode=dontAsk",
+        "--permission-mode=invalid",
+        "--permission-mode",
+    ] {
+        let fake = Fake::new();
+        let provider = ClaudeCodeProvider::with_settings(ClaudeCodeSettings {
+            instances: vec![ClaudeCodeInstance {
+                id: "restricted".into(),
+                launch_args: Some(args.into()),
+                ..Default::default()
+            }],
+            ..fake.settings()
+        });
+        let events = run_turn(&provider, &[Message::user("perm Bash")], None).await;
+        assert_eq!(text(&events), "permission:deny", "{args}");
+        provider.shutdown().await;
+    }
+}
+
+async fn native_permission_behavior(mode: &str, tool_name: &str) -> String {
+    let fake = Fake::new();
+    let provider = ClaudeCodeProvider::with_settings(ClaudeCodeSettings {
+        permission_mode: mode.into(),
+        ..fake.settings()
+    });
+    let events = run_turn(
+        &provider,
+        &[Message::user(&format!("perm {tool_name}"))],
+        None,
+    )
+    .await;
+    provider.shutdown().await;
+    text(&events)
+}
+
+#[tokio::test]
+async fn explicit_default_denies_native_permission_requests() {
+    for tool_name in ["Bash", "Write", "Edit"] {
+        assert_eq!(
+            native_permission_behavior("default", tool_name).await,
+            "permission:deny",
+            "{tool_name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn invalid_permission_mode_denies_native_permission_requests() {
+    for tool_name in ["Bash", "Write", "Edit"] {
+        assert_eq!(
+            native_permission_behavior("invalid", tool_name).await,
+            "permission:deny",
+            "{tool_name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn accept_edits_denies_bash_permission_request() {
+    assert_eq!(
+        native_permission_behavior("acceptEdits", "Bash").await,
+        "permission:deny"
+    );
+}
+
+#[tokio::test]
+async fn accept_edits_allows_native_edit_permission_requests() {
+    for tool_name in ["Write", "Edit", "MultiEdit", "NotebookEdit"] {
+        assert_eq!(
+            native_permission_behavior("acceptEdits", tool_name).await,
+            "permission:allow",
+            "{tool_name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn explicit_bypass_allows_bash_permission_request() {
+    assert_eq!(
+        native_permission_behavior("bypassPermissions", "Bash").await,
+        "permission:allow"
+    );
+}
+
+#[tokio::test]
+async fn restrictive_mode_preserves_jcode_mcp_permission_policy() {
+    assert_eq!(
+        native_permission_behavior("default", "mcp__jcode__echo").await,
+        "permission:allow"
+    );
+}
+
+#[tokio::test]
+async fn jcode_tool_is_bridged_over_sdk_mcp() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    let answer = |name: &str, input: &Value| {
+        assert_eq!(name, "echo");
+        NativeToolResult::success(
+            String::new(),
+            format!("echo:{}", input["text"].as_str().unwrap()),
+        )
+    };
+    let events = run_turn(&provider, &[Message::user("mcp echo")], Some(&answer)).await;
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            StreamEvent::NativeToolCall { tool_name, input, .. }
+                if tool_name == "echo" && input["text"] == "MCPOK"
+        )),
+        "{events:?}"
+    );
+    // Rendered under the bare jcode tool name.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::ToolUseStart { name, .. } if name == "echo"))
+    );
+    assert!(text(&events).contains("mcp:echo:MCPOK"), "{events:?}");
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn native_duplicate_tools_are_not_exposed() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    let events = run_turn(&provider, &[Message::user("mcp bash")], None).await;
+    // `bash` is not served over MCP, so the call is refused without reaching jcode.
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::NativeToolCall { .. }))
+    );
+    assert!(text(&events).contains("Unknown jcode tool"), "{events:?}");
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn rejected_rate_limit_stops_the_turn_with_retry_after() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    let mut stream = provider
+        .complete(&[Message::user("ratelimit")], &tools(), SYSTEM, None)
+        .await
+        .unwrap();
+    let mut events = Vec::new();
+    while let Ok(Some(item)) = tokio::time::timeout(Duration::from_secs(20), stream.next()).await {
+        events.push(item.unwrap());
+    }
+    let errs = errors(&events);
+    assert_eq!(errs.len(), 1, "{events:?}");
+    assert!(errs[0].0.contains("5-hour limit"), "{errs:?}");
+    assert!(errs[0].1.unwrap() > 3600);
+    let events = run_turn(
+        &provider,
+        &[Message::user("ratelimit"), Message::user("text")],
+        None,
+    )
+    .await;
+    assert_eq!(text(&events), "Hello from fake claude");
+    assert_eq!(fake.launches().len(), 1);
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn auth_failure_points_at_the_instance_login() {
+    let fake = Fake::new();
+    let home = fake.root.join("work-home");
+    let provider = ClaudeCodeProvider::with_settings(ClaudeCodeSettings {
+        default_instance: "work".into(),
+        instances: vec![ClaudeCodeInstance {
+            id: "work".into(),
+            home: Some(home.display().to_string()),
+            ..ClaudeCodeInstance::default()
+        }],
+        ..fake.settings()
+    });
+    let events = run_turn(&provider, &[Message::user("authfail")], None).await;
+    let errs = errors(&events);
+    assert_eq!(errs.len(), 1, "{events:?}");
+    assert!(
+        errs[0]
+            .0
+            .contains(&format!("CLAUDE_CONFIG_DIR={}", home.display())),
+        "{errs:?}"
+    );
+    assert!(errs[0].0.contains("auth login"));
+    assert_eq!(
+        fake.launches()[0]["config_dir"],
+        json!(home.display().to_string())
+    );
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn crash_restarts_with_resume_once() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    let first = run_turn(&provider, &[Message::user("session")], None).await;
+    let session = text(&first);
+    assert!(session.starts_with("session:new:"), "{session}");
+    let session_id = session.trim_start_matches("session:new:").to_string();
+
+    let events = run_turn(
+        &provider,
+        &[
+            Message::user("session"),
+            Message::assistant_text(&session),
+            Message::user("crash"),
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(text(&events), "recovered after crash", "{events:?}");
+    let launches = fake.launches();
+    assert_eq!(launches.len(), 2);
+    let argv = launches[1]["argv"].as_array().unwrap();
+    assert!(
+        argv.iter()
+            .any(|a| a.as_str() == Some(&format!("--resume={session_id}"))),
+        "{argv:?}"
+    );
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn unknown_resume_id_falls_back_to_a_new_session() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    let mut stream = provider
+        .complete(
+            &[Message::user("session")],
+            &tools(),
+            SYSTEM,
+            Some("6f1d2c3b-0000-4000-8000-000000000000"),
+        )
+        .await
+        .unwrap();
+    let mut events = Vec::new();
+    while let Ok(Some(item)) = tokio::time::timeout(Duration::from_secs(20), stream.next()).await {
+        let event = item.unwrap();
+        let done = matches!(event, StreamEvent::MessageEnd { .. });
+        events.push(event);
+        if done {
+            break;
+        }
+    }
+    assert!(text(&events).starts_with("session:new:"), "{events:?}");
+    assert_eq!(
+        fake.launches().len(),
+        2,
+        "failed resume, then a new session"
+    );
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn dropping_the_stream_interrupts_and_keeps_the_child() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    let mut stream = provider
+        .complete(&[Message::user("slow")], &tools(), SYSTEM, None)
+        .await
+        .unwrap();
+    // Wait for the turn to start, then cancel like Esc does.
+    let first = tokio::time::timeout(Duration::from_secs(20), stream.next())
+        .await
+        .unwrap();
+    assert!(first.is_some());
+    drop(stream);
+    let events = run_turn(
+        &provider,
+        &[Message::user("slow"), Message::user("text")],
+        None,
+    )
+    .await;
+    assert_eq!(text(&events), "Hello from fake claude");
+    assert_eq!(fake.launches().len(), 1, "interrupt keeps the child alive");
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancelling_before_the_turn_sends_never_delivers_the_prompt() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    // A conversation with earlier context, so the first send would carry a
+    // transcript. Cancelling before it sends must not record that history as
+    // seen, or the next request drops the earlier context.
+    let history = [
+        Message::user("earlier-context-xyz"),
+        Message::assistant_text("ok"),
+        Message::user("cancel-me"),
+    ];
+    let stream = provider
+        .complete(&history, &tools(), SYSTEM, None)
+        .await
+        .unwrap();
+    // Cancel before consuming any event: the CLI start handshake is still in
+    // flight, so the turn must see the closed stream and skip the send.
+    drop(stream);
+    // The next cumulative request must resend the earlier context, because the
+    // cancelled turn delivered nothing to the child.
+    let next = [
+        Message::user("earlier-context-xyz"),
+        Message::assistant_text("ok"),
+        Message::user("text"),
+    ];
+    let events = run_turn(&provider, &next, None).await;
+    assert_eq!(text(&events), "Hello from fake claude");
+    assert_eq!(fake.launches().len(), 1, "the started child is reused");
+    assert!(
+        fake.inputs()
+            .iter()
+            .all(|row| !row.to_string().contains("cancel-me")),
+        "the cancelled prompt must never reach the CLI: {:?}",
+        fake.inputs()
+    );
+    assert!(
+        fake.inputs()
+            .iter()
+            .any(|row| row.to_string().contains("earlier-context-xyz")),
+        "earlier context must be resent after a before-send cancel: {:?}",
+        fake.inputs()
+    );
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn model_switch_uses_set_model_and_instance_switch_restarts() {
+    let fake = Fake::new();
+    let other_home = fake.root.join("personal");
+    let provider = ClaudeCodeProvider::with_settings(ClaudeCodeSettings {
+        instances: vec![
+            ClaudeCodeInstance {
+                id: "default".into(),
+                ..ClaudeCodeInstance::default()
+            },
+            ClaudeCodeInstance {
+                id: "personal".into(),
+                home: Some(other_home.display().to_string()),
+                ..ClaudeCodeInstance::default()
+            },
+        ],
+        ..fake.settings()
+    });
+    let mut history = vec![Message::user("text")];
+    let first = run_turn(&provider, &history, None).await;
+    history.push(Message::assistant_text(&text(&first)));
+    history.push(Message::user("model"));
+    provider.set_model("claude-code:claude-sonnet-5").unwrap();
+    let events = run_turn(&provider, &history, None).await;
+    assert_eq!(text(&events), "model:claude-sonnet-5");
+    assert_eq!(fake.launches().len(), 1, "set_model is a control request");
+
+    provider
+        .set_account_pin(
+            AccountProviderKind::ClaudeCode,
+            Some(AccountPin::new("personal", None)),
+        )
+        .unwrap();
+    assert!(
+        provider
+            .set_account_pin(
+                AccountProviderKind::ClaudeCode,
+                Some(AccountPin::new("missing", None)),
+            )
+            .is_err()
+    );
+    history.push(Message::assistant_text(&text(&events)));
+    history.push(Message::user("session"));
+    let events = run_turn(&provider, &history, None).await;
+    assert!(
+        text(&events).starts_with("session:new:"),
+        "another account starts a new Claude session"
+    );
+    let launches = fake.launches();
+    assert_eq!(launches.len(), 2);
+    assert_eq!(
+        launches[1]["config_dir"],
+        json!(other_home.display().to_string())
+    );
+    assert_eq!(
+        provider.resolved_account_label(AccountProviderKind::ClaudeCode),
+        Some("personal".into())
+    );
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn supplied_system_prompt_reaches_claude_and_a_change_restarts_with_resume() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    let french = "Answer in French.";
+    let mut history = vec![Message::user("system")];
+    let events = run_turn_with_system(&provider, french, &history, None).await;
+    let reply = text(&events);
+    assert!(
+        reply.starts_with("system:You are running inside jcode"),
+        "{reply}"
+    );
+    assert!(reply.ends_with("\n\nAnswer in French."), "{reply}");
+
+    history.push(Message::assistant_text(&reply));
+    history.push(Message::user("text"));
+    let second = run_turn_with_system(&provider, french, &history, None).await;
+    assert_eq!(
+        fake.launches().len(),
+        1,
+        "same instructions reuse the child"
+    );
+
+    history.push(Message::assistant_text(&text(&second)));
+    history.push(Message::user("system"));
+    let events = run_turn_with_system(&provider, "Answer in German.", &history, None).await;
+    assert!(
+        text(&events).ends_with("\n\nAnswer in German."),
+        "{events:?}"
+    );
+    let launches = fake.launches();
+    assert_eq!(launches.len(), 2, "new instructions restart the child");
+    assert!(
+        launches[1]["argv"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a.as_str().unwrap().starts_with("--resume=")),
+        "the restarted child keeps the Claude session"
+    );
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn session_working_dir_becomes_the_child_cwd_and_is_not_appended() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    let dir = tempfile::tempdir().unwrap();
+    let system = format!(
+        "{}\n\nAnswer in French.",
+        jcode_base::prompt::own_prompt_session_context(&dir.path().display().to_string())
+    );
+    let events = run_turn_with_system(&provider, &system, &[Message::user("system")], None).await;
+    assert_eq!(
+        text(&events),
+        format!("system:{JCODE_APPEND_SYSTEM_PROMPT}\n\nAnswer in French.")
+    );
+    let cwd = fake.launches()[0]["cwd"].as_str().unwrap().to_string();
+    assert_eq!(Path::new(&cwd), dir.path().canonicalize().unwrap());
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn instance_switch_ignores_the_agents_stale_resume_id() {
+    // The agent keeps passing the last SessionId it saw as
+    // resume_session_id. After switching accounts that id belongs to the old
+    // instance and must not be resumed under the new one.
+    let fake = Fake::new();
+    let other_home = fake.root.join("personal");
+    let provider = ClaudeCodeProvider::with_settings(ClaudeCodeSettings {
+        instances: vec![
+            ClaudeCodeInstance {
+                id: "default".into(),
+                ..ClaudeCodeInstance::default()
+            },
+            ClaudeCodeInstance {
+                id: "personal".into(),
+                home: Some(other_home.display().to_string()),
+                ..ClaudeCodeInstance::default()
+            },
+        ],
+        ..fake.settings()
+    });
+    let first = run_turn(&provider, &[Message::user("session")], None).await;
+    let old_session = text(&first).trim_start_matches("session:new:").to_string();
+    provider
+        .set_account_pin(
+            AccountProviderKind::ClaudeCode,
+            Some(AccountPin::new("personal", None)),
+        )
+        .unwrap();
+    let history = [
+        Message::user("session"),
+        Message::assistant_text(&text(&first)),
+        Message::user("echo-prompt"),
+    ];
+    let mut stream = provider
+        .complete(&history, &tools(), SYSTEM, Some(&old_session))
+        .await
+        .unwrap();
+    let mut events = Vec::new();
+    while let Ok(Some(item)) = tokio::time::timeout(Duration::from_secs(20), stream.next()).await {
+        let event = item.unwrap();
+        let done = matches!(event, StreamEvent::MessageEnd { .. });
+        events.push(event);
+        if done {
+            break;
+        }
+    }
+    let launches = fake.launches();
+    assert_eq!(launches.len(), 2);
+    let argv: Vec<&str> = launches[1]["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(
+        !argv.iter().any(|a| a.starts_with("--resume=")),
+        "new account must not resume the old account's session: {argv:?}"
+    );
+    assert!(argv.iter().any(|a| a.starts_with("--session-id=")));
+    // The new session gets the conversation so far.
+    assert!(
+        text(&events).contains("previous_conversation"),
+        "{events:?}"
+    );
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn complete_simple_uses_a_one_shot_child() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    let out = provider
+        .complete_simple("summarize this", "be brief")
+        .await
+        .unwrap();
+    assert_eq!(out, "oneshot:summarize this");
+    let argv = fake.launches()[0]["argv"].clone();
+    let argv: Vec<&str> = argv
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(argv.contains(&"-p"));
+    assert!(
+        argv.windows(2)
+            .any(|w| w == ["--system-prompt", "be brief"])
+    );
+}
+
+#[tokio::test]
+async fn probe_reports_identity_without_a_prompt() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    let identity = provider
+        .probe_identity(&ClaudeCodeInstance::implicit_default())
+        .await
+        .unwrap();
+    assert_eq!(identity.email.as_deref(), Some("fake@example.com"));
+    assert_eq!(identity.subscription.as_deref(), Some("Claude Max"));
+    assert_eq!(identity.models, vec!["claude-opus-5-5", "claude-sonnet-5"]);
+    let usage = identity.usage;
+    let windows: Vec<(&str, f32)> = usage
+        .windows
+        .iter()
+        .map(|w| (w.name.as_str(), w.percent))
+        .collect();
+    assert_eq!(
+        windows,
+        vec![
+            ("5-hour window", 42.0),
+            ("7-day window", 17.0),
+            ("7-day window (Fable)", 3.0)
+        ]
+    );
+    // Cached: a second probe does not spawn again.
+    provider
+        .probe_identity(&ClaudeCodeInstance::implicit_default())
+        .await
+        .unwrap();
+    assert_eq!(fake.launches().len(), 1);
+}
+
+#[tokio::test]
+async fn forks_get_their_own_child() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    run_turn(&provider, &[Message::user("text")], None).await;
+    let fork = provider.fork();
+    assert!(fork.handles_tools_internally());
+    let mut stream = fork
+        .complete(&[Message::user("text")], &tools(), SYSTEM, None)
+        .await
+        .unwrap();
+    while let Ok(Some(item)) = tokio::time::timeout(Duration::from_secs(20), stream.next()).await {
+        if matches!(item.unwrap(), StreamEvent::MessageEnd { .. }) {
+            break;
+        }
+    }
+    assert_eq!(fake.launches().len(), 2);
+    provider.shutdown().await;
+}

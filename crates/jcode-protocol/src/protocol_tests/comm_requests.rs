@@ -96,6 +96,68 @@ fn test_stdin_request_event_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn test_ask_user_roundtrip() -> Result<()> {
+    use jcode_message_types::ask_user::{AskUserAnswer, AskUserOption, AskUserQuestion};
+    let event = ServerEvent::AskUser {
+        request_id: "ask-call_1".to_string(),
+        tool_call_id: "call_1".to_string(),
+        questions: vec![AskUserQuestion {
+            question: "Which db?".to_string(),
+            header: "Database".to_string(),
+            options: vec![AskUserOption {
+                label: "Postgres".to_string(),
+                description: "Server".to_string(),
+            }],
+            multi_select: true,
+        }],
+    };
+    let json = encode_event(&event);
+    assert!(json.contains("\"type\":\"ask_user\""));
+    assert!(json.contains("\"multiSelect\":true"));
+    let ServerEvent::AskUser {
+        request_id,
+        questions,
+        ..
+    } = parse_event_json(json.trim())?
+    else {
+        return Err(anyhow!("expected AskUser"));
+    };
+    assert_eq!(request_id, "ask-call_1");
+    // Newer daemons may add question fields; older clients must still parse.
+    let extended = json.trim().replace("\"header\"", "\"future\":1,\"header\"");
+    assert!(matches!(
+        parse_event_json(&extended)?,
+        ServerEvent::AskUser { .. }
+    ));
+    assert_eq!(questions[0].options[0].label, "Postgres");
+    assert!(questions[0].multi_select);
+
+    let answers = vec![AskUserAnswer {
+        question: "Which db?".to_string(),
+        answers: vec!["Postgres".to_string(), "custom".to_string()],
+    }];
+    for answers in [Some(answers), None] {
+        let req = Request::AskUserResponse {
+            id: 7,
+            request_id: "ask-call_1".to_string(),
+            answers: answers.clone(),
+        };
+        let json = serde_json::to_string(&req)?;
+        assert!(json.contains("\"type\":\"ask_user_response\""));
+        let decoded = parse_request_json(&json)?;
+        assert_eq!(decoded.id(), 7);
+        let Request::AskUserResponse {
+            answers: decoded, ..
+        } = decoded
+        else {
+            return Err(anyhow!("expected AskUserResponse"));
+        };
+        assert_eq!(decoded, answers);
+    }
+    Ok(())
+}
+
+#[test]
 fn test_stdin_request_event_defaults() -> Result<()> {
     // is_password defaults to false when not present
     let json = r#"{"type":"stdin_request","request_id":"r1","prompt":"","tool_call_id":"tc1"}"#;
@@ -588,6 +650,18 @@ fn test_comm_list_models_roundtrip() -> Result<()> {
 
 #[test]
 fn targeted_notification_does_not_require_subscription() -> Result<()> {
+    let auth_changed = Request::NotifyAuthChanged {
+        id: 93,
+        provider: Some("claude".to_string()),
+        auth: None,
+        prefer_strongest: false,
+    };
+    let decoded = parse_request_json(&serde_json::to_string(&auth_changed)?)?;
+    assert!(
+        decoded.is_lightweight_control_request(),
+        "a lone notify_auth_changed from `jcode login` must not need a Subscribe"
+    );
+
     let request = Request::NotifySession {
         id: 92,
         session_id: "existing-session".to_string(),

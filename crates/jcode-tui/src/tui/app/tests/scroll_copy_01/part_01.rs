@@ -33,6 +33,9 @@ fn create_scroll_test_app(
     crate::tui::mermaid::clear_streaming_preview_diagram();
 
     let mut app = create_test_app();
+    // These fixtures measure transcript wrapping at exact terminal widths;
+    // the info dock would take part of that width.
+    crate::tui::info_widget::set_dock_disabled_for_test(true);
     if diagrams == 0 {
         // Process-global diagrams can be registered by sibling tests after the
         // clear above. Keep text-only geometry deterministic at the App level.

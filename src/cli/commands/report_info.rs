@@ -647,6 +647,7 @@ pub(super) fn list_cli_providers() -> Vec<ProviderListEntry> {
         ProviderChoice::Novita,
         ProviderChoice::Xai,
         ProviderChoice::GrokBuild,
+        ProviderChoice::ClaudeCode,
         ProviderChoice::Chutes,
         ProviderChoice::Cerebras,
         ProviderChoice::AlibabaCodingPlan,

@@ -12,10 +12,42 @@ use std::time::Instant;
 static ANTHROPIC_USAGE_CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, UsageData>>> =
     std::sync::OnceLock::new();
 
+static ANTHROPIC_USAGE_KEYS: std::sync::LazyLock<std::sync::RwLock<HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(HashMap::new()));
+
+/// Publish credential fingerprints when the auth store is read or saved, so
+/// render-time quota lookups need no file access and cannot reuse another login.
+pub(crate) fn update_anthropic_usage_credentials<'a>(
+    accounts: impl Iterator<Item = (&'a str, &'a str)>,
+) {
+    let keys = accounts
+        .filter(|(_, token)| !token.trim().is_empty())
+        .map(|(label, token)| {
+            (
+                label.to_owned(),
+                format!(
+                    "{}{}",
+                    anthropic_label_key_prefix(label),
+                    anthropic_token_fingerprint(token)
+                ),
+            )
+        })
+        .collect();
+    *ANTHROPIC_USAGE_KEYS
+        .write()
+        .unwrap_or_else(|p| p.into_inner()) = keys;
+}
+
 static OPENAI_USAGE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-pub(super) fn openai_usage_generation() -> u64 {
+pub(crate) fn openai_usage_generation() -> u64 {
     OPENAI_USAGE_GENERATION.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Called while holding the lock that publishes an OpenAI unavailability mark.
+/// Its version lets a deferred snapshot clear only observations it includes.
+pub(crate) fn note_openai_unavailability_observed() -> u64 {
+    OPENAI_USAGE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
 }
 
 /// Shared OpenAI usage cache keyed by account label/token prefix.
@@ -59,7 +91,7 @@ pub fn cached_account_usage_status_snapshot(
     match provider {
         super::MultiAccountProviderKind::Anthropic => {
             let map = ANTHROPIC_USAGE_CACHE.get()?.try_lock().ok()?;
-            let data = map.get(&key)?;
+            let data = anthropic_usage_for_label(&map, label)?;
             if data.is_stale() {
                 return None;
             }
@@ -103,7 +135,7 @@ pub fn account_known_exhausted(provider: super::MultiAccountProviderKind, label:
         super::MultiAccountProviderKind::Anthropic => ANTHROPIC_USAGE_CACHE
             .get()
             .and_then(|cache| cache.try_lock().ok())
-            .and_then(|map| map.get(&key).map(anthropic_known_exhausted))
+            .and_then(|map| anthropic_usage_for_label(&map, label).map(anthropic_known_exhausted))
             .unwrap_or(false),
         super::MultiAccountProviderKind::OpenAI => OPENAI_ACCOUNT_USAGE_CACHE
             .get()
@@ -223,7 +255,8 @@ mod account_snapshot_tests {
         let accounts = [("saved-a", token)];
         let key =
             |label| anthropic_usage_cache_key_with_accounts(token, label, accounts.into_iter());
-        assert_eq!(key(Some("saved-a")), "label:saved-a");
+        assert!(key(Some("saved-a")).starts_with("label:saved-a:"));
+        assert!(!key(Some("saved-a")).contains(token));
         assert_eq!(key(None), key(Some("saved-a")));
         assert_eq!(key(Some("default")), key(None));
         let unknown = anthropic_usage_cache_key_with_accounts(token, None, std::iter::empty());
@@ -270,9 +303,15 @@ mod account_snapshot_tests {
 
     #[test]
     fn cached_account_snapshot_is_scoped_fresh_and_nonblocking() {
+        let _env_lock = crate::storage::lock_test_env();
         let label = "router-cache-only-test";
-        let key = format!("label:{label}");
+        let key = anthropic_usage_cache_key_with_accounts(
+            "fixture-token",
+            Some(label),
+            std::iter::empty(),
+        );
         let provider = MultiAccountProviderKind::Anthropic;
+        update_anthropic_usage_credentials([(label, "fixture-token")].into_iter());
         let data = UsageData {
             five_hour: 0.42,
             fetched_at: Some(Instant::now()),
@@ -288,6 +327,11 @@ mod account_snapshot_tests {
         assert!(cached_account_usage_snapshot(MultiAccountProviderKind::OpenAI, label).is_none());
         {
             let _guard = anthropic_usage_cache().lock().unwrap();
+            assert!(cached_account_usage_snapshot(provider, label).is_none());
+            assert!(cached_account_usage_status_snapshot(provider, label).is_none());
+        }
+        {
+            let _guard = ANTHROPIC_USAGE_KEYS.write().unwrap();
             assert!(cached_account_usage_snapshot(provider, label).is_none());
             assert!(cached_account_usage_status_snapshot(provider, label).is_none());
         }
@@ -325,22 +369,30 @@ mod account_snapshot_tests {
 
     #[test]
     fn pool_prefers_fresh_quota_within_priority_tier() {
+        let _env_lock = crate::storage::lock_test_env();
         use crate::auth::account_pool::AccountPool;
         let unknown = "claude:quota-order-unknown".to_string();
         let healthy = "claude:quota-order-healthy".to_string();
         let lower = "claude:quota-order-lower".to_string();
-        let mut pool = AccountPool::default();
-        pool.members = vec![unknown.clone(), healthy.clone(), lower.clone()];
+        let mut pool = AccountPool {
+            members: vec![unknown.clone(), healthy.clone(), lower.clone()],
+            ..Default::default()
+        };
         pool.set_priority(&unknown, 0);
         pool.set_priority(&healthy, 0);
         pool.set_priority(&lower, 1);
-        let key = "label:quota-order-healthy".to_string();
+        let key = anthropic_usage_cache_key_with_accounts(
+            "fixture-token",
+            Some("quota-order-healthy"),
+            std::iter::empty(),
+        );
         let data = UsageData {
             five_hour: 0.2,
             fetched_at: Some(Instant::now()),
             ..Default::default()
         };
         store_anthropic_usage(key.clone(), data.clone());
+        update_anthropic_usage_credentials([("quota-order-healthy", "fixture-token")].into_iter());
         assert_eq!(
             pool.ordered_members(),
             vec![healthy.clone(), unknown.clone(), lower.clone()]
@@ -425,10 +477,14 @@ pub(super) fn invalidate_anthropic_usage_after_reset(account_label: Option<&str>
     if let Ok(mut map) = anthropic_usage_cache().lock() {
         match label {
             Some(label) => {
-                map.remove(&format!("label:{label}"));
+                let prefix = anthropic_label_key_prefix(label);
+                map.retain(|key, _| !key.starts_with(&prefix));
             }
             None => {
-                map.retain(|key, _| !key.starts_with("token:") && key != "label:default");
+                let default_prefix = anthropic_label_key_prefix("default");
+                map.retain(|key, _| {
+                    !key.starts_with("token:") && !key.starts_with(&default_prefix)
+                });
             }
         }
     }
@@ -436,12 +492,12 @@ pub(super) fn invalidate_anthropic_usage_after_reset(account_label: Option<&str>
     // Fetch completion writes disk first, then memory.
     match label {
         Some(label) => {
-            let key = format!("label:{label}");
-            super::disk_cache::invalidate(|candidate| candidate == key);
+            let prefix = anthropic_label_key_prefix(label);
+            super::disk_cache::invalidate(|candidate| candidate.starts_with(&prefix));
         }
-        None => {
-            super::disk_cache::invalidate(|key| key.starts_with("token:") || key == "label:default")
-        }
+        None => super::disk_cache::invalidate(|key| {
+            key.starts_with("token:") || key.starts_with("label:default:")
+        }),
     }
     if let Some(cache) = super::PROVIDER_USAGE_CACHE.get()
         && let Ok(mut map) = cache.lock()
@@ -451,6 +507,22 @@ pub(super) fn invalidate_anthropic_usage_after_reset(account_label: Option<&str>
     }
 }
 
+/// Key prefix shared by every credential stored under one Claude label.
+fn anthropic_label_key_prefix(label: &str) -> String {
+    format!("label:{label}:")
+}
+
+/// Short, non-reversible fingerprint of an access token.
+fn anthropic_token_fingerprint(access_token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(access_token.trim().as_bytes());
+    format!("{:x}", digest)[..16].to_string()
+}
+
+/// Usage is keyed by the label *and* the credential. A relogin that reuses a
+/// label (often "default") for a different Claude account must not inherit
+/// the old account's exhausted limits or its shared 429 backoff, while the
+/// same credential keeps one key so the cross-process backoff still applies.
 pub(super) fn anthropic_usage_cache_key(access_token: &str, account_label: Option<&str>) -> String {
     let accounts = crate::auth::claude::list_accounts().unwrap_or_default();
     anthropic_usage_cache_key_with_accounts(
@@ -458,7 +530,7 @@ pub(super) fn anthropic_usage_cache_key(access_token: &str, account_label: Optio
         account_label,
         accounts
             .iter()
-            .map(|a| (a.label.as_str(), a.access.as_str())),
+            .map(|account| (account.label.as_str(), account.access.as_str())),
     )
 }
 
@@ -467,29 +539,44 @@ fn anthropic_usage_cache_key_with_accounts<'a>(
     account_label: Option<&str>,
     accounts: impl Iterator<Item = (&'a str, &'a str)>,
 ) -> String {
-    // Routing passes a token while account polling passes a label. Resolve the
-    // exact full token so both paths share freshness and, critically, backoff.
-    if !access_token.is_empty()
-        && let Some((label, _)) = accounts
-            .into_iter()
-            .find(|(_, token)| *token == access_token)
-    {
-        return format!("label:{label}");
-    }
-    if let Some(label) = account_label
+    let actual_label = accounts
+        .into_iter()
+        .find(|(_, token)| !access_token.is_empty() && *token == access_token)
+        .map(|(label, _)| label);
+    let fingerprint = anthropic_token_fingerprint(access_token);
+    match actual_label
+        .or(account_label.filter(|label| label.trim() != "default"))
         .map(str::trim)
-        .filter(|label| !label.is_empty() && *label != "default")
+        .filter(|label| !label.is_empty())
     {
-        return format!("label:{}", label);
+        Some(label) => format!("{}{fingerprint}", anthropic_label_key_prefix(label)),
+        None => format!("token:sha256:{fingerprint}"),
     }
+}
 
-    // Unknown/external credentials have no stable saved label. Never persist
-    // credential prefixes, and never merge tokens that share the same prefix.
-    use sha2::{Digest, Sha256};
-    format!(
-        "token:sha256:{}",
-        hex::encode(Sha256::digest(access_token.as_bytes()))
-    )
+/// A token refresh rotates the access token of the same Claude login, which
+/// changes its usage cache key. Carry the cached usage and the shared 429
+/// backoff over to the new key so the refreshed login is not refetched (and
+/// rejected) as if it were a new account. A relogin under the same label does
+/// not go through here and still starts with a clean key.
+pub fn carry_anthropic_usage_across_token_refresh(
+    account_label: &str,
+    old_access_token: &str,
+    new_access_token: &str,
+) {
+    if old_access_token.trim().is_empty() || old_access_token == new_access_token {
+        return;
+    }
+    let from = anthropic_usage_cache_key(old_access_token, Some(account_label));
+    let to = anthropic_usage_cache_key(new_access_token, Some(account_label));
+    if let Ok(mut map) = anthropic_usage_cache().lock()
+        && !map.contains_key(&to)
+        && let Some(entry) = map.remove(&from)
+    {
+        map.insert(to.clone(), entry);
+    }
+    super::disk_cache::rename(&from, &to);
+    super::accessors::rename_active_usage_key(&from, &to);
 }
 
 pub(super) fn openai_usage_cache_key(access_token: &str, account_label: Option<&str>) -> String {
@@ -513,6 +600,36 @@ pub(super) fn cached_anthropic_usage(cache_key: &str) -> Option<UsageData> {
     let map = cache.lock().ok()?;
     let cached = map.get(cache_key)?.clone();
     (!cached.is_stale()).then_some(cached)
+}
+
+fn anthropic_usage_for_label<'a>(
+    map: &'a HashMap<String, UsageData>,
+    label: &str,
+) -> Option<&'a UsageData> {
+    let Ok(keys) = ANTHROPIC_USAGE_KEYS.try_read() else {
+        return None;
+    };
+    map.get(keys.get(label)?)
+}
+
+/// Fresh cached usage for the credential currently saved under a Claude label.
+pub(super) fn cached_anthropic_usage_for_label(label: &str) -> Option<UsageData> {
+    let map = anthropic_usage_cache().lock().ok()?;
+    anthropic_usage_for_label(&map, label)
+        .filter(|data| !data.is_stale())
+        .cloned()
+}
+
+/// Fresh cached usage for an OpenAI account label.
+pub(super) fn cached_openai_usage_for_label(label: &str) -> Option<OpenAIUsageData> {
+    cached_openai_usage(&openai_usage_cache_key("", Some(label)))
+}
+
+/// Forget one OpenAI label's cached usage so the next read refetches it.
+pub(super) fn forget_openai_usage_for_label(label: &str) {
+    if let Ok(mut map) = openai_usage_cache().lock() {
+        map.remove(&openai_usage_cache_key("", Some(label)));
+    }
 }
 
 /// Credential refresh callers must respect the shared backoff too, before
@@ -590,10 +707,30 @@ pub(super) fn store_openai_usage_for_generation(
     cache_key: String,
     data: OpenAIUsageData,
 ) {
+    store_openai_usage_for_generation_then(generation, cache_key, data, || {});
+}
+
+pub(crate) fn store_openai_usage_for_generation_then(
+    generation: u64,
+    cache_key: String,
+    data: OpenAIUsageData,
+    before_clear: impl FnOnce(),
+) {
+    // Some(None) identifies an accepted token-key snapshot for the literal
+    // default scope. None means no confirmed scope should be cleared.
+    // Clear after the cache lock is released to keep lock order flat.
+    let mut reset_scope: Option<Option<String>> = None;
     if let Ok(mut map) = openai_usage_cache().lock() {
         // A request begun before a reset must not reinstate the old exhausted quota.
         if generation != openai_usage_generation() {
             return;
+        }
+        if data.confirms_usage_available() {
+            if let Some(label) = cache_key.strip_prefix("label:") {
+                reset_scope = Some(Some(label.to_string()));
+            } else if cache_key.starts_with("token:") {
+                reset_scope = Some(None);
+            }
         }
         let previous = map.get(&cache_key).cloned();
         let previous_exhausted = previous
@@ -620,6 +757,15 @@ pub(super) fn store_openai_usage_for_generation(
             ));
         }
         map.insert(cache_key, data);
+    }
+    if let Some(scope) = reset_scope {
+        before_clear();
+        // Fresh usage says this exact scope is open again (an early or banked
+        // reset, or the window rolled over). Only named scopes have a ledger.
+        crate::provider::models::clear_openai_unavailability_through_generation(
+            scope.as_deref(),
+            generation,
+        );
     }
 }
 
@@ -928,166 +1074,5 @@ pub(super) fn anthropic_snapshot_from_usage(
 }
 
 #[cfg(test)]
-mod stale_account_snapshot_tests {
-    use super::*;
-
-    #[test]
-    fn account_snapshot_preserves_all_model_and_future_provider_windows() {
-        let data = UsageData {
-            model_scoped: vec![
-                super::super::ModelScopedUsageWindow {
-                    model_name: "Fable".into(),
-                    utilization: 0.73,
-                    resets_at: None,
-                },
-                super::super::ModelScopedUsageWindow {
-                    model_name: "Future Zenith 界".into(),
-                    utilization: 0.61,
-                    resets_at: None,
-                },
-            ],
-            seven_day_opus: Some(0.28),
-            ..Default::default()
-        };
-        let snapshot = anthropic_snapshot_from_usage("models".into(), None, &data);
-        assert_eq!(snapshot.additional_windows.len(), 3);
-        assert_eq!(snapshot.additional_windows[0].label, "Fable 7d");
-        assert_eq!(snapshot.additional_windows[0].usage_ratio, 0.73);
-        assert_eq!(snapshot.additional_windows[1].label, "Future Zenith 界 7d");
-        assert_eq!(snapshot.additional_windows[1].usage_ratio, 0.61);
-        assert_eq!(snapshot.additional_windows[2].label, "Opus 7d");
-        assert!(snapshot.summary().contains("Fable 7d 73%"));
-        assert!(snapshot.summary().contains("Future Zenith 界 7d 61%"));
-
-        let limits = [
-            "5-hour",
-            "7-day",
-            "Codex Spark",
-            "Future monthly",
-            "Future daily",
-        ]
-        .into_iter()
-        .map(|name| super::super::UsageLimit {
-            name: name.into(),
-            usage_percent: 32.0,
-            resets_at: None,
-        })
-        .collect::<Vec<_>>();
-        let usage = classify_openai_limits(&limits);
-        assert_eq!(usage.additional_windows.len(), 2);
-        let snapshot = openai_snapshot_from_usage("future".into(), None, &usage);
-        assert_eq!(snapshot.additional_windows.len(), 3);
-        assert_eq!(snapshot.additional_windows[0].label, "Codex Spark");
-        assert_eq!(snapshot.additional_windows[1].label, "Future monthly");
-        assert_eq!(snapshot.additional_windows[2].label, "Future daily");
-        assert!(
-            snapshot
-                .additional_windows
-                .iter()
-                .all(|window| window.usage_ratio == 0.32)
-        );
-    }
-
-    fn last_good() -> UsageData {
-        UsageData {
-            five_hour: 1.0,
-            seven_day: 0.42,
-            five_hour_resets_at: Some(
-                (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
-            ),
-            seven_day_resets_at: Some(
-                (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339(),
-            ),
-            fetched_at: Some(Instant::now()),
-            last_success_at: Some(Instant::now()),
-            last_error: Some("HTTP 429".into()),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn stale_limits_preserve_error_but_never_exhaust_or_route() {
-        let data = last_good();
-        let snapshot = anthropic_snapshot_from_usage("stale-test".into(), None, &data);
-        assert_eq!(snapshot.five_hour_ratio, Some(1.0));
-        assert_eq!(snapshot.seven_day_ratio, Some(0.42));
-        assert_eq!(snapshot.error.as_deref(), Some("HTTP 429"));
-        assert!(!snapshot.exhausted);
-    }
-
-    #[test]
-    fn additional_model_windows_filter_expiry_invalid_values_and_unproven_stale_data() {
-        let mut data = last_good();
-        let future = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
-        let past = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
-        data.model_scoped = vec![
-            super::super::ModelScopedUsageWindow {
-                model_name: "Fable".into(),
-                utilization: 0.8,
-                resets_at: Some(future),
-            },
-            super::super::ModelScopedUsageWindow {
-                model_name: "Expired".into(),
-                utilization: 1.0,
-                resets_at: Some(past),
-            },
-            super::super::ModelScopedUsageWindow {
-                model_name: "Invalid".into(),
-                utilization: f32::NAN,
-                resets_at: None,
-            },
-        ];
-        let snapshot = anthropic_snapshot_from_usage("test".into(), None, &data);
-        assert_eq!(snapshot.additional_windows.len(), 1);
-        assert_eq!(snapshot.additional_windows[0].label, "Fable 7d");
-        assert!(!snapshot.exhausted);
-        data.last_success_at = None;
-        assert!(
-            anthropic_snapshot_from_usage("test".into(), None, &data)
-                .additional_windows
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn stale_limits_require_provenance_and_each_unexpired_valid_window() {
-        let snapshot = |data: &UsageData| anthropic_snapshot_from_usage("test".into(), None, data);
-        let mut data = last_good();
-        data.last_success_at = None;
-        assert!(snapshot(&data).five_hour_ratio.is_none());
-        assert!(snapshot(&data).seven_day_ratio.is_none());
-        data = last_good();
-        data.fetched_at = None;
-        assert!(snapshot(&data).five_hour_ratio.is_none());
-        data = last_good();
-        for reset in [
-            None,
-            Some("invalid".into()),
-            Some((chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339()),
-        ] {
-            data.five_hour_resets_at = reset;
-            assert!(snapshot(&data).five_hour_ratio.is_none());
-            assert_eq!(snapshot(&data).seven_day_ratio, Some(0.42));
-            assert_eq!(snapshot(&data).resets_at, data.seven_day_resets_at);
-        }
-        data = last_good();
-        for ratio in [f32::NAN, f32::INFINITY, -0.1, 1.1] {
-            data.five_hour = ratio;
-            assert!(snapshot(&data).five_hour_ratio.is_none());
-        }
-    }
-
-    #[test]
-    fn successful_but_rolled_over_window_does_not_exhaust() {
-        let mut data = last_good();
-        data.last_error = None;
-        data.five_hour_resets_at =
-            Some((chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339());
-        let snapshot = anthropic_snapshot_from_usage("test".into(), None, &data);
-        assert!(snapshot.five_hour_ratio.is_none());
-        assert_eq!(snapshot.seven_day_ratio, Some(0.42));
-        assert_eq!(snapshot.resets_at, data.seven_day_resets_at);
-        assert!(!snapshot.exhausted);
-        assert!(snapshot.error.is_none());
-    }
-}
+#[path = "cache_snapshot_tests.rs"]
+mod stale_account_snapshot_tests;

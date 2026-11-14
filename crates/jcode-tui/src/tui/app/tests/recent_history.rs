@@ -19,7 +19,7 @@ fn recent_history_bootstrap_renders_latest_frame_without_older_transcript() {
     app.status = ProcessingStatus::Idle;
     let messages = std::iter::once(app.display_messages[0].clone())
         .chain((0..128).map(|i| {
-            DisplayMessage::assistant(format!("RECENT{i:03} {}", "bounded history ".repeat(128)))
+            DisplayMessage::assistant(format!("RECENT{i:03} {} RECENT{i:03}", "bounded history ".repeat(128)))
         }))
         .map(|message| crate::protocol::HistoryMessage {
             role: message.role,
@@ -41,7 +41,8 @@ fn recent_history_bootstrap_renders_latest_frame_without_older_transcript() {
     render_and_snap(&app, &mut terminal);
     let elapsed = start.elapsed();
     assert_eq!(app.display_messages.len(), 129);
-    assert!(buffer_to_text(&terminal).contains("RECENT127"));
+    let text = buffer_to_text(&terminal);
+    assert!(text.contains("RECENT127"), "{text}");
     assert_eq!(app.compacted_hidden_user_prompts(), 99);
     eprintln!(
         "recent_history initial event + 128-message frame: {:.2}ms",

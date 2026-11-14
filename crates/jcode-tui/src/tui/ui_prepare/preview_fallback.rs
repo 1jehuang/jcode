@@ -1,4 +1,5 @@
 //! Recoverable placeholder for an unexpectedly incomplete unbounded preview.
+#[cfg(test)]
 use super::*;
 
 #[cfg(test)]
@@ -20,6 +21,7 @@ pub(super) fn unavailable(width: u16) -> PreparedMessages {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(test)]
     use super::*;
 
     #[test]

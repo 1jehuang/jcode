@@ -10,6 +10,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static PENDING: AtomicBool = AtomicBool::new(false);
+#[cfg(all(target_os = "linux", not(test)))]
 static STARTED: AtomicBool = AtomicBool::new(false);
 
 /// True once since the last call if a watched binary location changed.
@@ -23,6 +24,7 @@ pub(super) fn rearm() {
 }
 
 pub(super) fn ensure_started() {
+    #[cfg(all(target_os = "linux", not(test)))]
     if STARTED.swap(true, Ordering::AcqRel) {
         return;
     }

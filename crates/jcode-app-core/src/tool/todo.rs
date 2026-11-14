@@ -1587,7 +1587,7 @@ impl Tool for TodoTool {
                             "description": "Earlier-phase prerequisite task names; replaces phase barrier. Omit/null for normal ordering."
                         }, "owner": {
                             "type": "string", "enum": ["self", "worker"],
-                            "description": "Default self. worker: a swarm worker auto-spawns when the lane is ready, no launch call."
+                            "description": "Lane owner, default self. worker: auto-spawn a swarm worker when ready; no launch call."
                         }, "items": {"type": "array", "minItems": 1, "items": item}}
                     }
                 }}}

@@ -110,40 +110,6 @@ async fn fetch_swarm_members(session_id: &str) -> Result<Vec<AgentInfo>> {
     }
 }
 
-#[cfg(test)]
-fn swarm_member_is_in_flight(member: &AgentInfo) -> bool {
-    matches!(
-        member.status.as_deref(),
-        Some("queued" | "running" | "running_stale")
-    )
-}
-
-#[cfg(test)]
-fn coordination_in_flight_count(
-    summary: &PlanGraphStatus,
-    members: &[AgentInfo],
-    current_session_id: &str,
-) -> usize {
-    summary.active_ids.len().max(
-        members
-            .iter()
-            .filter(|member| member.session_id != current_session_id)
-            .filter(|member| swarm_member_is_in_flight(member))
-            .filter(|member| swarm_member_is_drivable_worker(member, current_session_id))
-            .count(),
-    )
-}
-
-/// Whether `member` is a worker the coordinator can rely on to autonomously execute an
-/// assignment (and therefore one it is safe to await): a spawned headless worker,
-/// or one owned by the coordinator that issued the run. Foreign client-attached
-/// sessions are not drivable and must not count toward its in-flight workers.
-#[cfg(test)]
-fn swarm_member_is_drivable_worker(member: &AgentInfo, coordinator_session_id: &str) -> bool {
-    member.is_headless.unwrap_or(false)
-        || member.report_back_to_session_id.as_deref() == Some(coordinator_session_id)
-}
-
 async fn cleanup_swarm_workers(ctx: &ToolContext, params: &CommunicateInput) -> Result<String> {
     let members = fetch_swarm_members(&ctx.session_id).await?;
     let target_status = params
@@ -480,15 +446,23 @@ impl CommunicateTool {
     }
 
     fn new_for_working_dir(working_dir: Option<&std::path::Path>) -> Self {
+        Self {
+            description: Self::description_with_prompt(&crate::prompt::load_swarm_prompt(
+                working_dir,
+            )),
+        }
+    }
+
+    pub(crate) fn description_with_prompt(swarm_prompt: &str) -> String {
         const BASE_DESCRIPTION: &str =
-            "Coordinate agents: spawn todo-lane workers, message them, and manage plans.";
-        let swarm_prompt = crate::prompt::load_swarm_prompt(working_dir);
-        let description = if swarm_prompt.is_empty() {
+            "Coordinate agents: spawn workers with a prompt, message them, and manage swarm plans.";
+        if swarm_prompt.is_empty() {
             BASE_DESCRIPTION.to_string()
         } else {
-            format!("{BASE_DESCRIPTION}\n\nSwarm prompt:\n{swarm_prompt}")
-        };
-        Self { description }
+            format!(
+                "{BASE_DESCRIPTION}\n\nSwarm prompt (user-tunable via ~/.jcode/swarm-prompt.md):\n{swarm_prompt}"
+            )
+        }
     }
 }
 

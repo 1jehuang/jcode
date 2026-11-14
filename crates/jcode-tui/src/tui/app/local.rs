@@ -31,6 +31,7 @@ pub(super) async fn process_turn_with_input(
     {
         Ok(()) => {
             app.last_stream_error = None;
+            app.local_usage_limit_resume_attempts = 0;
             app.last_submitted_input = None;
         }
         Err(error) => {
@@ -63,6 +64,12 @@ pub(super) async fn process_turn_with_input(
         return;
     }
 
+    // A quota hold remains the same logical turn. Do not queue pokes or
+    // drain user followups while waiting, or after its resume budget trips.
+    if app.local_usage_limit_resume_attempts > 0 {
+        finish_turn(app);
+        return;
+    }
     // Commands queued with Ctrl+Enter run before queued prompts, matching the
     // remote dispatcher. If one starts its own turn, the prompts wait for it.
     if !app.queued_commands.is_empty() {
@@ -97,6 +104,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
         | crate::tui::periodic_redraw_required(app)
         | crate::tui::terminal_events::theme_redraw_pending();
     needs_redraw |= app.poll_oauth_account_telemetry();
+    needs_redraw |= app.poll_account_picker_usage();
     needs_redraw |= app.retire_expired_status_notice();
     needs_redraw |= app.flush_pending_resize_redraw();
     app.maybe_capture_runtime_memory_heartbeat();
@@ -172,13 +180,16 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
         && std::time::Instant::now() >= reset_time
     {
         app.rate_limit_reset = None;
+        let account_change_resend = app.account_change_resend_at.take() == Some(reset_time);
         let queued_count = app.queued_messages.len();
-        let msg = if queued_count > 0 {
-            format!("✓ Rate limit reset. Retrying... (+{} queued)", queued_count)
-        } else {
-            "✓ Rate limit reset. Retrying...".to_string()
-        };
-        app.push_display_message(DisplayMessage::system(msg));
+        if !account_change_resend {
+            let msg = if queued_count > 0 {
+                format!("✓ Rate limit reset. Retrying... (+{} queued)", queued_count)
+            } else {
+                "✓ Rate limit reset. Retrying...".to_string()
+            };
+            app.push_display_message(DisplayMessage::system(msg));
+        }
         app.pending_turn = true;
         needs_redraw = true;
     }
@@ -252,8 +263,22 @@ pub(super) fn handle_bus_event(
             app.handle_usage_report_progress(progress);
             true
         }
+        Ok(BusEvent::SavedAccountLoginCompleted(completion)) => {
+            let success = completion.login.success;
+            let provider = completion.login.provider.clone();
+            let handled = app.handle_saved_account_login_completed(completion);
+            if handled && success {
+                app.release_rate_limit_hold_after_credentials_changed(Some(&provider));
+            }
+            handled
+        }
         Ok(BusEvent::LoginCompleted(login)) => {
+            let success = login.success;
+            let provider = login.provider.clone();
             app.handle_login_completed(login);
+            if success {
+                app.release_rate_limit_hold_after_credentials_changed(Some(&provider));
+            }
             true
         }
         Ok(BusEvent::OnboardingModelValidated(result)) => {
@@ -674,9 +699,10 @@ pub(super) fn finish_turn(app: &mut App) {
     app.thinking_prefix_emitted = false;
     app.thinking_buffer.clear();
     app.note_runtime_memory_event_force("turn_completed", "local_turn_finished");
-    let followup_scheduled = app.schedule_turn_end_followups_after_response(
-        app.last_stream_error.is_none() && app.streaming.response_output.has_final_response(),
-    );
+    let followup_scheduled = app.local_usage_limit_resume_attempts == 0
+        && app.schedule_turn_end_followups_after_response(
+            app.last_stream_error.is_none() && app.streaming.response_output.has_final_response(),
+        );
     if !followup_scheduled {
         app.clear_visible_turn_started();
         if !app.pending_queued_dispatch && app.queued_messages.is_empty() {

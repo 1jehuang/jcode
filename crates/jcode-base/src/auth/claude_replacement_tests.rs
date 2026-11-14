@@ -1,0 +1,303 @@
+use super::replacement::{commit_external_refresh, commit_refresh_account};
+use super::*;
+
+struct TestHome(Option<std::ffi::OsString>);
+
+impl Drop for TestHome {
+    fn drop(&mut self) {
+        match self.0.as_ref() {
+            Some(previous) => crate::env::set_var("JCODE_HOME", previous),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+}
+
+struct ClaudeConfigDir(Option<std::ffi::OsString>);
+
+impl Drop for ClaudeConfigDir {
+    fn drop(&mut self) {
+        match self.0.as_ref() {
+            Some(previous) => crate::env::set_var("CLAUDE_CONFIG_DIR", previous),
+            None => crate::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+    }
+}
+
+#[test]
+fn replacement_public_api_roundtrip_preserves_defaults_and_rejections_preserve_disk_bytes() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = TestHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let mut initial = fixture();
+    initial.active_anthropic_account = Some("work".into());
+    save_auth_file(&initial).unwrap();
+    let other = serde_json::to_value(&initial.anthropic_accounts[1]).unwrap();
+    let replacement = account("unused-label", Some("new@example.com"));
+    replace_account_if_unchanged("work", Some("old@example.com"), replacement.clone()).unwrap();
+    let saved = load_auth_file().unwrap();
+    assert_eq!(saved.anthropic_accounts.len(), 2);
+    assert_eq!(saved.active_anthropic_account.as_deref(), Some("work"));
+    assert_eq!(saved.anthropic_accounts[0].label, "work");
+    assert_eq!(
+        saved.anthropic_accounts[0].email.as_deref(),
+        Some("new@example.com")
+    );
+    assert_eq!(saved.anthropic_accounts[0].access, replacement.access);
+    assert_eq!(saved.anthropic_accounts[0].refresh, replacement.refresh);
+    assert_eq!(
+        serde_json::to_value(&saved.anthropic_accounts[1]).unwrap(),
+        other
+    );
+    let path = jcode_path().unwrap();
+    let before = std::fs::read(&path).unwrap();
+    assert!(
+        replace_account_if_unchanged(
+            "work",
+            Some("new@example.com"),
+            account("unused", Some("OTHER@EXAMPLE.COM"))
+        )
+        .is_err()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(
+        replace_account_if_unchanged(
+            "work",
+            Some("old@example.com"),
+            account("unused", Some("third@example.com"))
+        )
+        .is_err()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(
+        replace_account_if_unchanged(
+            "missing",
+            Some("old@example.com"),
+            account("unused", Some("third@example.com"))
+        )
+        .is_err()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+fn account(label: &str, email: Option<&str>) -> AnthropicAccount {
+    AnthropicAccount {
+        label: label.into(),
+        access: format!("access-{label}"),
+        refresh: format!("refresh-{label}"),
+        expires: 100,
+        email: email.map(str::to_string),
+        subscription_type: None,
+        scopes: vec![],
+    }
+}
+
+fn fixture() -> JcodeAuthFile {
+    JcodeAuthFile {
+        anthropic_accounts: vec![
+            account("work", Some("old@example.com")),
+            account("personal", Some("other@example.com")),
+        ],
+        active_anthropic_account: Some("personal".into()),
+        anthropic: None,
+    }
+}
+
+#[test]
+fn pending_refresh_cannot_overwrite_a_replacement_login_or_recreate_a_removed_one() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = TestHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", temp.path());
+    save_auth_file(&fixture()).unwrap();
+    let expected = capture_refresh_account("work", "refresh-work")
+        .unwrap()
+        .unwrap();
+    let tokens = crate::auth::oauth::OAuthTokens {
+        access_token: "refreshed-old-access".into(),
+        refresh_token: "rotated-old-refresh".into(),
+        expires_at: 999,
+        id_token: None,
+        scopes: vec![],
+    };
+    replace_account_if_unchanged(
+        "work",
+        Some("old@example.com"),
+        account("replacement", Some("new@example.com")),
+    )
+    .unwrap();
+    let path = jcode_path().unwrap();
+    let before = std::fs::read(&path).unwrap();
+    assert!(commit_refresh_account(&expected, &tokens).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    remove_account("work").unwrap();
+    let before = std::fs::read(&path).unwrap();
+    assert!(commit_refresh_account(&expected, &tokens).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn refresh_follows_the_original_login_across_rename_without_changing_metadata() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = TestHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", temp.path());
+    save_auth_file(&fixture()).unwrap();
+    let expected = capture_refresh_account("work", "refresh-work")
+        .unwrap()
+        .unwrap();
+    rename_account("work", "renamed").unwrap();
+    let tokens = crate::auth::oauth::OAuthTokens {
+        access_token: "new-access".into(),
+        refresh_token: "new-refresh".into(),
+        expires_at: 999,
+        id_token: None,
+        scopes: vec![],
+    };
+    commit_refresh_account(&expected, &tokens).unwrap();
+    let saved = load_auth_file().unwrap();
+    let updated = saved
+        .anthropic_accounts
+        .iter()
+        .find(|a| a.label == "renamed")
+        .unwrap();
+    assert_eq!(updated.access, "new-access");
+    assert_eq!(updated.email, expected.email);
+    assert_eq!(saved.active_anthropic_account.as_deref(), Some("personal"));
+    let before = std::fs::read(jcode_path().unwrap()).unwrap();
+    assert!(
+        commit_refresh_account(&expected, &tokens).is_err(),
+        "a rotated refresh is stale too"
+    );
+    assert_eq!(std::fs::read(jcode_path().unwrap()).unwrap(), before);
+}
+
+#[test]
+fn replacement_preserves_slot_default_and_other_account_and_clears_old_metadata() {
+    let mut auth = fixture();
+    auth.anthropic_accounts[0].subscription_type = Some("old-plan".into());
+    auth.anthropic_accounts[0].scopes = vec!["old-scope".into()];
+    let other = serde_json::to_value(&auth.anthropic_accounts[1]).unwrap();
+    let mut replacement = account("ignored-new-label", Some("new@example.com"));
+    replacement.scopes = vec!["new-scope".into()];
+    replace_saved_login(&mut auth, "work", Some("old@example.com"), replacement).unwrap();
+    assert_eq!(auth.anthropic_accounts.len(), 2);
+    assert_eq!(auth.active_anthropic_account.as_deref(), Some("personal"));
+    assert_eq!(auth.anthropic_accounts[0].label, "work");
+    assert_eq!(
+        auth.anthropic_accounts[0].email.as_deref(),
+        Some("new@example.com")
+    );
+    assert_eq!(auth.anthropic_accounts[0].subscription_type, None);
+    assert_eq!(auth.anthropic_accounts[0].scopes, vec!["new-scope"]);
+    assert_eq!(
+        serde_json::to_value(&auth.anthropic_accounts[1]).unwrap(),
+        other
+    );
+}
+
+#[test]
+fn replacement_rejects_missing_changed_duplicate_and_unproven_identity_without_mutation() {
+    for (label, expected, email) in [
+        ("removed", Some("old@example.com"), Some("new@example.com")),
+        ("work", Some("changed@example.com"), Some("new@example.com")),
+        ("work", Some("old@example.com"), Some(" OTHER@EXAMPLE.COM ")),
+        ("work", Some("old@example.com"), None),
+        ("work", Some("old@example.com"), Some("  ")),
+    ] {
+        let mut auth = fixture();
+        let before = serde_json::to_value(&auth).unwrap();
+        assert!(replace_saved_login(&mut auth, label, expected, account("new", email)).is_err());
+        assert_eq!(serde_json::to_value(&auth).unwrap(), before);
+    }
+}
+
+#[test]
+fn replacement_accepts_own_identity_without_duplicate_label() {
+    let mut auth = fixture();
+    replace_saved_login(
+        &mut auth,
+        "work",
+        Some("old@example.com"),
+        account("new", Some("OLD@EXAMPLE.COM")),
+    )
+    .unwrap();
+    assert_eq!(auth.anthropic_accounts.len(), 2);
+    assert_eq!(auth.anthropic_accounts[0].label, "work");
+}
+
+#[test]
+fn approved_external_login_refreshes_without_a_saved_record_but_never_clobbers_one() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = TestHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", temp.path());
+    save_auth_file(&JcodeAuthFile::default()).unwrap();
+    let config = temp.path().join("claude-config");
+    let _config = ClaudeConfigDir(std::env::var_os("CLAUDE_CONFIG_DIR"));
+    crate::env::set_var("CLAUDE_CONFIG_DIR", &config);
+    let external = config.join(".credentials.json");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        &external,
+        r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"external-refresh","expiresAt":1}}"#,
+    )
+    .unwrap();
+    // Unapproved files and removed saved logins are not external logins.
+    assert!(capture_refresh_account("claude-1", "external-refresh").is_err());
+    crate::config::Config::allow_external_auth_source_for_path(
+        CLAUDE_CODE_AUTH_SOURCE_ID,
+        &external,
+    )
+    .unwrap();
+    assert!(capture_refresh_account("claude-1", "removed-saved-refresh").is_err());
+    let captured = capture_refresh_account("claude-1", "external-refresh").unwrap();
+    assert!(captured.is_none());
+    let tokens = crate::auth::oauth::OAuthTokens {
+        access_token: "external-access".into(),
+        refresh_token: "external-rotated".into(),
+        expires_at: 999,
+        id_token: None,
+        scopes: vec![],
+    };
+    // Approval can be revoked while the captured login's HTTP refresh is pending.
+    crate::config::Config::revoke_external_auth_source_for_path(
+        CLAUDE_CODE_AUTH_SOURCE_ID,
+        &external,
+    )
+    .unwrap();
+    let before = std::fs::read(jcode_path().unwrap()).unwrap();
+    let error = commit_captured_refresh("claude-1", captured.as_ref(), "external-refresh", &tokens)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("approval changed"));
+    assert!(!error.contains("external-refresh"));
+    assert_eq!(std::fs::read(jcode_path().unwrap()).unwrap(), before);
+    assert!(load_auth_file().unwrap().anthropic_accounts.is_empty());
+    crate::config::Config::allow_external_auth_source_for_path(
+        CLAUDE_CODE_AUTH_SOURCE_ID,
+        &external,
+    )
+    .unwrap();
+    commit_captured_refresh("claude-1", captured.as_ref(), "external-refresh", &tokens).unwrap();
+    let saved = load_auth_file().unwrap();
+    assert_eq!(saved.anthropic_accounts.len(), 1);
+    let stored = &saved.anthropic_accounts[0];
+    assert_eq!(stored.refresh, "external-rotated");
+    assert_eq!(
+        saved.active_anthropic_account.as_deref(),
+        Some(stored.label.as_str())
+    );
+    // The rotated login is now saved, so the next refresh takes the strict path.
+    assert!(
+        capture_refresh_account(&stored.label, "external-rotated")
+            .unwrap()
+            .is_some()
+    );
+    assert!(capture_refresh_account(&stored.label, "external-refresh").is_err());
+
+    save_auth_file(&fixture()).unwrap();
+    let before = std::fs::read(jcode_path().unwrap()).unwrap();
+    assert!(commit_external_refresh("work", "external-refresh", &tokens).is_err());
+    assert_eq!(std::fs::read(jcode_path().unwrap()).unwrap(), before);
+}

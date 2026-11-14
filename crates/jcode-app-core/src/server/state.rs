@@ -427,6 +427,26 @@ pub(super) fn send_event_to_targets<'a>(
     delivered
 }
 
+pub(super) fn collect_event_targets<'a>(
+    members: &mut HashMap<String, SwarmMember>,
+    session_ids: impl IntoIterator<Item = &'a str>,
+) -> Vec<mpsc::UnboundedSender<ServerEvent>> {
+    let mut targets = Vec::new();
+    for sid in session_ids {
+        let Some(member) = members.get_mut(sid) else {
+            continue;
+        };
+        member.event_txs.retain(|_, tx| !tx.is_closed());
+        if let Some((_, tx)) = member.event_txs.iter().next() {
+            member.event_tx = tx.clone();
+            targets.extend(member.event_txs.values().cloned());
+        } else if !member.event_tx.is_closed() {
+            targets.push(member.event_tx.clone());
+        }
+    }
+    targets
+}
+
 pub(super) async fn fanout_session_event(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     session_id: &str,
@@ -435,21 +455,11 @@ pub(super) async fn fanout_session_event(
     super::live_status::observe(session_id, &event);
     let targets = {
         let mut members = swarm_members.write().await;
-        let Some(member) = members.get_mut(session_id) else {
-            return 0;
-        };
-
-        member.event_txs.retain(|_, tx| !tx.is_closed());
-        crate::stream_batching::note_session_targets(session_id, member.event_txs.keys());
-
-        if member.event_txs.is_empty() {
-            vec![member.event_tx.clone()]
-        } else {
-            if let Some((_, tx)) = member.event_txs.iter().next() {
-                member.event_tx = tx.clone();
-            }
-            member.event_txs.values().cloned().collect::<Vec<_>>()
+        let targets = collect_event_targets(&mut members, std::iter::once(session_id));
+        if let Some(member) = members.get(session_id) {
+            crate::stream_batching::note_session_targets(session_id, member.event_txs.keys());
         }
+        targets
     };
 
     send_event_to_targets(&targets, event)

@@ -4,6 +4,8 @@ use super::{ApiEvent, BridgeState, ErrorCode, ServerFrame, Value};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum SimpleKind {
+    RewindCheckpoints,
+    RewindComplete,
     RuntimeCommand,
     Detach,
     Tools,

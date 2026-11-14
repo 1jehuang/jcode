@@ -447,6 +447,95 @@ fn test_rewind_undo_request_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn checkpoint_rewind_requests_roundtrip() -> Result<()> {
+    let list = parse_request_json(r#"{"type":"list_rewind_checkpoints","id":41}"#)?;
+    assert!(matches!(list, Request::ListRewindCheckpoints { id: 41 }));
+    assert_eq!(list.id(), 41);
+    for mode in [
+        RewindMode::ConversationAndFiles,
+        RewindMode::ConversationOnly,
+        RewindMode::FilesOnly,
+    ] {
+        let request = Request::RewindCheckpoint {
+            id: 42,
+            checkpoint_id: "checkpoint-stable-id".into(),
+            mode,
+        };
+        let encoded = serde_json::to_string(&request)?;
+        let decoded = parse_request_json(&encoded)?;
+        assert_eq!(decoded.id(), 42);
+        let Request::RewindCheckpoint {
+            checkpoint_id,
+            mode: decoded_mode,
+            ..
+        } = decoded
+        else {
+            return Err(anyhow!("wrong checkpoint request type"));
+        };
+        assert_eq!(checkpoint_id, "checkpoint-stable-id");
+        assert_eq!(decoded_mode, mode);
+    }
+    Ok(())
+}
+
+#[test]
+fn checkpoint_rewind_events_roundtrip() -> Result<()> {
+    let checkpoint = RewindCheckpoint {
+        target_kind: Default::default(),
+        id: "checkpoint-stable-id".into(),
+        message_index: 8,
+        prompt: "Try a different approach\nwith Unicode: 日本語".into(),
+        timestamp: Some("2026-10-22T17:16:53Z".into()),
+        can_restore_files: true,
+        changed_file_count: 2,
+    };
+    let event = ServerEvent::RewindCheckpoints {
+        id: 41,
+        session_id: "session-a".into(),
+        checkpoints: vec![checkpoint.clone()],
+    };
+    let decoded: ServerEvent = serde_json::from_str(&encode_event(&event))?;
+    let ServerEvent::RewindCheckpoints {
+        id,
+        session_id,
+        checkpoints,
+    } = decoded
+    else {
+        return Err(anyhow!("wrong checkpoint list event"));
+    };
+    assert_eq!(id, 41);
+    assert_eq!(session_id, "session-a");
+    assert_eq!(checkpoints, vec![checkpoint]);
+
+    let result = RewindResult {
+        target_kind: Default::default(),
+        mode: RewindMode::FilesOnly,
+        prompt: "original prompt".into(),
+        removed_messages: 0,
+        restored_files: 2,
+        skipped_files: Vec::new(),
+        images: Vec::new(),
+    };
+    let event = ServerEvent::RewindComplete {
+        id: 42,
+        session_id: "session-a".into(),
+        result: result.clone(),
+    };
+    let decoded: ServerEvent = serde_json::from_str(&encode_event(&event))?;
+    let ServerEvent::RewindComplete {
+        id,
+        result: decoded_result,
+        ..
+    } = decoded
+    else {
+        return Err(anyhow!("wrong checkpoint completion event"));
+    };
+    assert_eq!(id, 42);
+    assert_eq!(decoded_result, result);
+    Ok(())
+}
+
+#[test]
 fn test_rename_session_request_roundtrip() -> Result<()> {
     let req = Request::RenameSession {
         id: 10,
@@ -461,6 +550,46 @@ fn test_rename_session_request_roundtrip() -> Result<()> {
         return Err(anyhow!("wrong request type"));
     };
     assert_eq!(title.as_deref(), Some("Release planning"));
+    Ok(())
+}
+
+#[test]
+fn rewind_target_kind_payloads_preserve_legacy_wire_shape() -> Result<()> {
+    for target_kind in [None, Some("assistant_message")] {
+        let mut checkpoint = serde_json::json!({
+            "id": "cp1", "message_index": 2, "prompt": "selected message",
+            "can_restore_files": true, "changed_file_count": 1
+        });
+        let mut result = serde_json::json!({
+            "mode": "conversation_only", "prompt": "", "removed_messages": 2,
+            "restored_files": 0, "images": [["image/png", "aW1hZ2U="]]
+        });
+        if let Some(kind) = target_kind {
+            checkpoint["target_kind"] = kind.into();
+            result["target_kind"] = kind.into();
+        }
+        let expected_kind = if target_kind.is_some() {
+            jcode_session_types::RewindTargetKind::AssistantMessage
+        } else {
+            jcode_session_types::RewindTargetKind::UserPrompt
+        };
+        let decoded_checkpoint: RewindCheckpoint = serde_json::from_value(checkpoint.clone())?;
+        let decoded_result: RewindResult = serde_json::from_value(result.clone())?;
+        assert_eq!(decoded_checkpoint.target_kind, expected_kind);
+        assert_eq!(decoded_result.target_kind, expected_kind);
+        assert_eq!(serde_json::to_value(decoded_checkpoint)?, checkpoint);
+        assert_eq!(serde_json::to_value(decoded_result)?, result);
+        for wire in [
+            serde_json::json!({"type": "rewind_checkpoints", "id": 41, "session_id": "s1", "checkpoints": [checkpoint]}),
+            serde_json::json!({"type": "rewind_complete", "id": 42, "session_id": "s1", "result": result}),
+        ] {
+            let event = parse_event_json(&wire.to_string())?;
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&encode_event(&event))?,
+                wire
+            );
+        }
+    }
     Ok(())
 }
 
@@ -787,6 +916,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         provider_oauth_account_label: None,
         reasoning_effort: None,
         service_tier: None,
+        account_labels: Vec::new(),
         subagent_model: None,
         agent_model_overrides: Default::default(),
         autoreview_enabled: None,
@@ -920,6 +1050,7 @@ fn test_error_event_retry_after_roundtrip() -> Result<()> {
         id: 42,
         message: "rate limited".to_string(),
         retry_after_secs: Some(17),
+        server_resumes: false,
     };
     let json = encode_event(&event);
     let decoded = parse_event_json(json.trim())?;
@@ -927,6 +1058,7 @@ fn test_error_event_retry_after_roundtrip() -> Result<()> {
         id,
         message,
         retry_after_secs,
+        ..
     } = decoded
     else {
         return Err(anyhow!("wrong event type"));
@@ -945,6 +1077,7 @@ fn test_error_event_retry_after_back_compat_default() -> Result<()> {
         id,
         message,
         retry_after_secs,
+        ..
     } = decoded
     else {
         return Err(anyhow!("wrong event type"));
@@ -1011,7 +1144,7 @@ fn history_prefix_fingerprint_is_stable_and_streaming_consistent() {
         tool_calls: None,
         tool_data: None,
     };
-    let messages = vec![message("user", "hi"), message("assistant", "hello")];
+    let messages = [message("user", "hi"), message("assistant", "hello")];
     let whole =
         crate::history_prefix_fingerprint(messages.iter().map(crate::HistoryMessageRef::from));
     // Pinned value: client and server may run different builds, so the
@@ -1025,7 +1158,7 @@ fn history_prefix_fingerprint_is_stable_and_streaming_consistent() {
     assert_eq!(streaming.base().count, 2);
     assert_ne!(first, whole);
     // Field boundaries must not alias.
-    let shifted = vec![message("user", "hia"), message("ssistant", "hello")];
+    let shifted = [message("user", "hia"), message("ssistant", "hello")];
     assert_ne!(
         crate::history_prefix_fingerprint(shifted.iter().map(crate::HistoryMessageRef::from)),
         whole

@@ -472,6 +472,10 @@ mod tests {
 
 #[cfg(test)]
 #[derive(Debug, Deserialize)]
+#[expect(
+    dead_code,
+    reason = "reference legacy wire schema used only to check rejection of new variants"
+)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum OldCompanionRequest {
     Status,

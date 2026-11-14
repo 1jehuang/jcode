@@ -1,4 +1,4 @@
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum AccountProviderKind {
     Anthropic,
@@ -9,6 +9,8 @@ pub enum AccountProviderKind {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum AccountPickerCommand {
     SubmitInput(String),
+    /// Open provider-wide controls without mixing them into the account list.
+    OpenProviderSettings,
     OpenAccountCenter {
         provider_filter: Option<String>,
     },
@@ -21,11 +23,32 @@ pub enum AccountPickerCommand {
         empty_value: Option<String>,
         status_notice: String,
     },
+    /// Use this saved account in this window only (pins the session).
     Switch {
         provider: AccountProviderKind,
         label: String,
     },
+    /// Make this saved account the default for new and unpinned windows.
+    SetDefault {
+        provider: AccountProviderKind,
+        label: String,
+    },
+    /// Unpin this window so it follows the default account again.
+    Unpin {
+        provider: AccountProviderKind,
+    },
+    /// Toggle same-provider account failover for this window.
+    ToggleFailover,
     Login {
+        provider: AccountProviderKind,
+        label: String,
+    },
+    /// Replace this exact saved login after explicit confirmation.
+    Replace {
+        provider: AccountProviderKind,
+        label: String,
+    },
+    Rename {
         provider: AccountProviderKind,
         label: String,
     },
@@ -89,7 +112,8 @@ pub struct AccountPickerSummary {
 
 pub fn action_kind_label(command: &AccountPickerCommand) -> &'static str {
     match command {
-        AccountPickerCommand::OpenAccountCenter { .. } => "overview",
+        AccountPickerCommand::OpenAccountCenter { .. }
+        | AccountPickerCommand::OpenProviderSettings => "overview",
         AccountPickerCommand::OpenAddReplaceFlow { .. } => "account",
         AccountPickerCommand::SubmitInput(input) if input.ends_with(" settings") => "overview",
         AccountPickerCommand::SubmitInput(input) if input.contains(" remove ") => "danger",
@@ -98,7 +122,12 @@ pub fn action_kind_label(command: &AccountPickerCommand) -> &'static str {
         AccountPickerCommand::SubmitInput(input) if input.contains(" switch ") => "account",
         AccountPickerCommand::PromptValue { .. } => "setting",
         AccountPickerCommand::Switch { .. } => "account",
+        AccountPickerCommand::SetDefault { .. } => "default",
+        AccountPickerCommand::Unpin { .. } => "account",
+        AccountPickerCommand::ToggleFailover => "setting",
         AccountPickerCommand::Login { .. } => "login",
+        AccountPickerCommand::Replace { .. } => "login",
+        AccountPickerCommand::Rename { .. } => "setting",
         AccountPickerCommand::Remove { .. } => "danger",
         AccountPickerCommand::PromptNew { .. } => "account",
         AccountPickerCommand::SubmitInput(_) => "action",

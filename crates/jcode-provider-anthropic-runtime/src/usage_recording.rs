@@ -2,6 +2,39 @@
 use super::*;
 use crate::sse_types::UsageInfo;
 
+/// "3h 17m" style duration that the TUI rate-limit hold parser understands.
+pub(super) fn format_reset_duration(secs: u64) -> String {
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3600;
+    let minutes = (secs % 3600).div_ceil(60).min(59);
+    match (days, hours) {
+        (0, 0) => format!("{}m", minutes.max(1)),
+        (0, h) => format!("{h}h {minutes}m"),
+        (d, h) => format!("{d}d {h}h {minutes}m"),
+    }
+}
+
+pub(super) fn response_limits(
+    is_oauth: bool,
+    token: &str,
+    label: Option<&str>,
+    response: &reqwest::Response,
+) {
+    if !response.status().is_success() && response.status().as_u16() != 429 {
+        return;
+    }
+    let Some(label) = label.filter(|_| is_oauth) else {
+        return;
+    };
+    // Persist subscription telemetry off the streaming worker, including quota walls.
+    let headers = response.headers().clone();
+    let label = label.to_owned();
+    let token = token.to_owned();
+    tokio::task::spawn_blocking(move || {
+        jcode_base::usage::record_anthropic_response_limits(&token, Some(&label), &headers);
+    });
+}
+
 pub(super) fn update_usage(state: &mut SseStreamState, usage: UsageInfo) {
     state.output_tokens = usage.output_tokens.map(u64::from).or(state.output_tokens);
     state.input_tokens = usage.input_tokens.map(u64::from).or(state.input_tokens);
@@ -164,12 +197,36 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
+        let mut captured_label = String::new();
+        let mut incomplete_label = String::new();
         for (label, terminal, limited) in [
             (Some("captured"), true, false),
             (None, true, false),
             (Some("incomplete"), false, false),
             (Some("quota-limited"), false, true),
         ] {
+            let token = format!("token-{}", label.unwrap_or("api-key"));
+            let saved_label = label.map(|name| {
+                let saved = jcode_base::auth::claude::upsert_account(
+                    jcode_base::auth::claude::AnthropicAccount {
+                        label: name.into(),
+                        access: token.clone(),
+                        refresh: format!("refresh-{name}"),
+                        expires: i64::MAX,
+                        email: Some(format!("{name}@example.com")),
+                        subscription_type: None,
+                        scopes: Vec::new(),
+                    },
+                )
+                .unwrap();
+                match name {
+                    "captured" => captured_label = saved.clone(),
+                    "incomplete" => incomplete_label = saved.clone(),
+                    _ => {}
+                }
+                saved
+            });
+            let label = saved_label.as_deref();
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let endpoint = format!("http://{}/messages", listener.local_addr().unwrap());
             let server = std::thread::spawn(move || {
@@ -238,7 +295,7 @@ mod tests {
                 };
                 let result = stream_response(
                     Client::builder().no_proxy().build().unwrap(),
-                    "token".into(),
+                    token,
                     label.is_some(),
                     request,
                     tx,
@@ -288,7 +345,7 @@ mod tests {
             });
             server.join().unwrap();
         }
-        let rows = jcode_base::provider_activity::anthropic_oauth_usage_summary("captured");
+        let rows = jcode_base::provider_activity::anthropic_oauth_usage_summary(&captured_label);
         let today = &rows.iter().find(|(key, _)| key == "Today").unwrap().1;
         assert!(
             today.contains("170 in · 20 out · 40 cached · 30 cache creation"),
@@ -299,7 +356,7 @@ mod tests {
             "served model should determine price: {today}"
         );
         assert!(
-            jcode_base::provider_activity::anthropic_oauth_usage_summary("incomplete")[0]
+            jcode_base::provider_activity::anthropic_oauth_usage_summary(&incomplete_label)[0]
                 .1
                 .contains("No recorded usage")
         );

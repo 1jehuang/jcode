@@ -172,6 +172,21 @@ pub enum ServerEvent {
     #[serde(rename = "ack")]
     Ack { id: u64 },
 
+    #[serde(rename = "rewind_checkpoints")]
+    RewindCheckpoints {
+        id: u64,
+        session_id: String,
+        checkpoints: Vec<RewindCheckpoint>,
+    },
+
+    /// Sent after replacement History for modes that restore conversation.
+    #[serde(rename = "rewind_complete")]
+    RewindComplete {
+        id: u64,
+        session_id: String,
+        result: RewindResult,
+    },
+
     /// Authoritative worker routing after a successful session preference update.
     #[serde(rename = "agent_models_changed")]
     AgentModelsChanged {
@@ -560,6 +575,9 @@ pub enum ServerEvent {
         message: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry_after_secs: Option<u64>,
+        /// True only when the server owns automatic usage-limit resumption.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        server_resumes: bool,
     },
 
     /// Pong response
@@ -721,6 +739,9 @@ pub enum ServerEvent {
         /// Service tier override for OpenAI models
         #[serde(skip_serializing_if = "Option::is_none")]
         service_tier: Option<String>,
+        /// Per-provider account selected for this session.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        account_labels: Vec<SessionAccountInfo>,
         /// Session-scoped preferred model for subagents.
         #[serde(skip_serializing_if = "Option::is_none")]
         subagent_model: Option<String>,
@@ -891,6 +912,29 @@ pub enum ServerEvent {
     #[serde(rename = "model_usage_updated")]
     ModelUsageUpdated {
         route: jcode_provider_core::ModelRoute,
+    },
+
+    /// Credentials changed server-wide, allowing held turns to retry.
+    #[serde(rename = "credentials_changed")]
+    CredentialsChanged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_label: Option<String>,
+    },
+
+    /// Session account selection changed for session-account-aware clients.
+    #[serde(rename = "session_account_changed")]
+    SessionAccountChanged {
+        provider: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        pinned: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        is_default: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
 
     /// Available models updated (pushed after auth changes)
@@ -1082,6 +1126,24 @@ pub enum ServerEvent {
         resumed_sessions: Vec<String>,
         /// Human-readable summary suitable for direct display.
         message: String,
+    },
+
+    /// The `ask_user` tool is waiting for the user to answer these questions.
+    #[serde(rename = "ask_user")]
+    AskUser {
+        request_id: String,
+        tool_call_id: String,
+        questions: Vec<jcode_message_types::ask_user::AskUserQuestion>,
+    },
+
+    /// The `ask_user` request ended without this client's answer (the call was
+    /// interrupted), or an answer arrived for a request that no longer waits.
+    #[serde(rename = "ask_user_closed")]
+    AskUserClosed {
+        request_id: String,
+        /// Shown to the user when set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 
     /// A running command is waiting for stdin input from the user

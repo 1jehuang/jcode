@@ -3,6 +3,7 @@ pub(crate) const BACKGROUND_WAIT_GUIDANCE: &str = "While this task runs, try to 
 mod agentgrep;
 pub mod ambient;
 mod apply_patch;
+mod ask_user;
 mod bash;
 mod batch;
 mod bg;
@@ -11,7 +12,7 @@ pub(crate) mod bridge_reload;
 mod browser;
 mod calendar;
 mod codemode;
-mod communicate;
+pub(crate) mod communicate;
 #[cfg(target_os = "macos")]
 mod computer;
 mod config_edit_notice;
@@ -32,7 +33,10 @@ pub mod applet;
 mod goal;
 pub mod inflight;
 mod jcode_docs;
+mod plugin_mcp_refresh;
+use plugin_mcp_refresh::PluginMcpRefresh;
 pub(crate) mod load_tools;
+mod lsp;
 pub use jcode_docs::{BundledDocs, bundled_docs, register_bundled_docs};
 pub mod mcp;
 mod memory;
@@ -104,8 +108,12 @@ fn is_mcp_tool_name(name: &str) -> bool {
 use std::sync::{LazyLock, RwLock as StdRwLock};
 use tokio::sync::RwLock;
 
+pub(crate) use ask_user::route as ask_user_route;
 pub(crate) use jcode_tool_core::intent_schema_property;
-pub use jcode_tool_core::{StdinInputRequest, Tool, ToolContext, ToolExecutionMode};
+pub use jcode_tool_core::{
+    AskUserInputRequest, ClientInputRequest, StdinInputRequest, Tool, ToolContext,
+    ToolExecutionMode,
+};
 pub use jcode_tool_types::{ToolImage, ToolOutput};
 pub(crate) use session_search::spawn_recent_index_warmup;
 
@@ -364,6 +372,7 @@ struct McpPolicyIndex {
 pub struct Registry {
     tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
     mcp_policy: Arc<StdRwLock<McpPolicyIndex>>,
+    plugin_mcp_refresh: Arc<RwLock<Option<PluginMcpRefresh>>>,
     skills: Arc<RwLock<SkillRegistry>>,
     compaction: Arc<RwLock<CompactionManager>>,
 }
@@ -376,6 +385,7 @@ pub struct Registry {
 pub(super) struct WeakRegistry {
     tools: std::sync::Weak<RwLock<HashMap<String, Arc<dyn Tool>>>>,
     mcp_policy: Arc<StdRwLock<McpPolicyIndex>>,
+    plugin_mcp_refresh: Arc<RwLock<Option<PluginMcpRefresh>>>,
     skills: Arc<RwLock<SkillRegistry>>,
     compaction: Arc<RwLock<CompactionManager>>,
 }
@@ -385,6 +395,7 @@ impl WeakRegistry {
         Some(Registry {
             tools: self.tools.upgrade()?,
             mcp_policy: Arc::clone(&self.mcp_policy),
+            plugin_mcp_refresh: Arc::clone(&self.plugin_mcp_refresh),
             skills: Arc::clone(&self.skills),
             compaction: Arc::clone(&self.compaction),
         })
@@ -396,6 +407,7 @@ impl Clone for Registry {
         Self {
             tools: self.tools.clone(),
             mcp_policy: Arc::clone(&self.mcp_policy),
+            plugin_mcp_refresh: Arc::clone(&self.plugin_mcp_refresh),
             skills: self.skills.clone(),
             // Each clone gets a fresh CompactionManager to prevent parallel
             // subagents from corrupting each other's message history
@@ -424,10 +436,23 @@ impl Registry {
         }
     }
 
+    /// A TUI that renders `ask_user` dialogs opts in through Subscribe. Like
+    /// the Desktop tools, keep it out of the base map so headless sessions
+    /// never advertise a question nobody can answer.
+    pub(crate) async fn set_ask_user_enabled(&self, enabled: bool) {
+        if enabled {
+            self.register("ask_user".into(), Arc::new(ask_user::AskUserTool))
+                .await;
+        } else {
+            self.unregister("ask_user").await;
+        }
+    }
+
     fn downgrade(&self) -> WeakRegistry {
         WeakRegistry {
             tools: Arc::downgrade(&self.tools),
             mcp_policy: Arc::clone(&self.mcp_policy),
+            plugin_mcp_refresh: Arc::clone(&self.plugin_mcp_refresh),
             skills: Arc::clone(&self.skills),
             compaction: Arc::clone(&self.compaction),
         }
@@ -463,6 +488,7 @@ impl Registry {
         Self {
             tools: Arc::new(RwLock::new(HashMap::new())),
             mcp_policy: Arc::default(),
+            plugin_mcp_refresh: Arc::default(),
             skills: Arc::new(RwLock::new(SkillRegistry::default())),
             compaction: Arc::new(RwLock::new(CompactionManager::new())),
         }
@@ -501,6 +527,7 @@ impl Registry {
                 "apply_patch",
                 apply_patch::ApplyPatchTool::new,
             );
+            Self::insert_tool_timed(&mut m, &mut timings, "lsp", lsp::LspTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "bash", bash::BashTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "browser", browser::BrowserTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "open", open::OpenTool::new);
@@ -608,6 +635,7 @@ impl Registry {
         let registry = Self {
             tools: Arc::new(RwLock::new(HashMap::new())),
             mcp_policy: Arc::default(),
+            plugin_mcp_refresh: Arc::default(),
             skills: skills.clone(),
             compaction: compaction.clone(),
         };
@@ -922,6 +950,10 @@ impl Registry {
         match result {
             Ok(output) => {
                 event = event.field("OUTPUT_BYTES", output.output.len().to_string());
+                if event_name == "post_tool" {
+                    event = event
+                        .plugin_tool_payload(input.clone(), Value::String(output.output.clone()));
+                }
             }
             Err(error) => {
                 const ERROR_LIMIT: usize = 1000;
@@ -941,7 +973,10 @@ impl Registry {
         result: &Result<ToolOutput>,
         latency_ms: u64,
     ) {
-        if !crate::hooks::hook_configured("post_tool") {
+        if !crate::hooks::hook_configured_for_dir(
+            "post_tool",
+            ctx.working_dir.as_ref().and_then(|p| p.to_str()),
+        ) {
             return;
         }
         crate::hooks::dispatch_observer(Self::post_tool_event(
@@ -1050,6 +1085,25 @@ impl Registry {
     }
 
     /// Execute a tool by name
+    /// Run a registered tool for jcode's own bookkeeping (the `/mcp` dialog,
+    /// background MCP status checks). Not a model or user tool call, so no
+    /// hooks, input transforms, telemetry or tool-lifecycle events fire.
+    pub(crate) async fn execute_internal(
+        &self,
+        name: &str,
+        input: Value,
+        ctx: ToolContext,
+    ) -> Result<ToolOutput> {
+        let tool = self
+            .tools
+            .read()
+            .await
+            .get(name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Unknown tool: {name}"))?;
+        tool.execute(input, ctx).await
+    }
+
     pub async fn execute(&self, name: &str, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let _runtime_activity =
             crate::runtime_activity::global().try_enter_session(&ctx.session_id)?;
@@ -1135,7 +1189,7 @@ impl Registry {
             .working_dir
             .as_ref()
             .map(|dir| dir.display().to_string());
-        let input = crate::hooks::transform_tool_input(
+        let mut input = crate::hooks::transform_tool_input(
             &ctx.session_id,
             working_dir.as_deref(),
             resolved_name,
@@ -1146,9 +1200,8 @@ impl Registry {
         // User-configured pre_tool gate: external policy hook that can block
         // this call (exit 2 or JSON deny), rewrite its input, or attach
         // context for the model. Skipped entirely when not configured.
-        let mut input = input;
         let mut gate_context: Vec<String> = Vec::new();
-        if crate::hooks::hook_configured("pre_tool") {
+        if crate::hooks::hook_configured_for_dir("pre_tool", working_dir.as_deref()) {
             let input_json = input.to_string();
             let outcome = crate::hooks::run_pre_tool_gate(
                 &ctx.session_id,
@@ -1457,17 +1510,6 @@ impl Registry {
             .any(|name| tool_name_is_disabled(disabled, name))
     }
 
-    /// Original `(server, tool)` for a registered MCP alias. Aliases are
-    /// sanitized for providers, so they cannot be split back reliably.
-    pub(crate) fn mcp_identity_for_alias(&self, alias: &str) -> Option<(String, String)> {
-        self.mcp_policy
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .current
-            .get(alias)
-            .cloned()
-    }
-
     /// Whether this exact configured server has registered tools. Dispatch
     /// aliases are normalized and may be collision-suffixed, so callers must
     /// not infer server membership by matching a name prefix.
@@ -1587,6 +1629,7 @@ impl Registry {
                 (
                     server.to_string(),
                     crate::mcp::McpToolDef {
+                        annotations: None,
                         name: raw.to_string(),
                         description: None,
                         input_schema: Value::Null,
@@ -1663,10 +1706,12 @@ impl Registry {
                 working_dir,
             )))
         } else {
-            Arc::new(RwLock::new(McpManager::new()))
+            Arc::new(RwLock::new(McpManager::for_dir(working_dir)))
         };
 
         // Register MCP management tool immediately (with registry for dynamic tool registration)
+        *self.plugin_mcp_refresh.write().await =
+            Some(PluginMcpRefresh::new(Arc::clone(&mcp_manager)));
         let mcp_tool =
             mcp::McpManagementTool::new(Arc::clone(&mcp_manager)).with_registry(self.clone());
         self.register("mcp".to_string(), Arc::new(mcp_tool) as Arc<dyn Tool>)
@@ -1806,10 +1851,23 @@ impl Registry {
                 let mut connections = futures::stream::FuturesUnordered::new();
                 for (name, config) in configs {
                     let manager = Arc::clone(&mcp_manager);
-                    connections.push(async move {
-                        let result = manager.read().await.connect(&name, &config).await;
+                    // Own task per connect: its read guard must still be
+                    // released while the loop below waits behind a writer.
+                    connections.push(tokio::spawn(async move {
+                        let manager = manager.read().await;
+                        // A prompt-boundary plugin reload may have removed or
+                        // replaced this startup snapshot while it was queued.
+                        let result = if manager.config().servers.get(&name).is_some_and(|current| {
+                            current.is_enabled()
+                                && serde_json::to_value(current).ok()
+                                    == serde_json::to_value(&config).ok()
+                        }) {
+                            manager.connect(&name, &config).await
+                        } else {
+                            return (name, Ok(()));
+                        };
                         (name, result)
-                    });
+                    }));
                 }
 
                 // Prune cache entries for servers no longer configured, once.
@@ -1829,7 +1887,10 @@ impl Registry {
                 }
                 let mut server_counts: std::collections::BTreeMap<String, usize> =
                     std::collections::BTreeMap::new();
-                while let Some((name, result)) = connections.next().await {
+                while let Some(joined) = connections.next().await {
+                    let Ok((name, result)) = joined else {
+                        continue;
+                    };
                     if let Err(error) = result {
                         crate::logging::event_rate_limited(
                             crate::logging::LogLevel::Error,
@@ -1848,7 +1909,8 @@ impl Registry {
                     // most of its CPU here.
                     let handler_cpu = crate::server::thread_cpu_ms();
                     let handler_start = std::time::Instant::now();
-                    let Some(defs) = mcp_manager.read().await.server_tools(&name).await else {
+                    let manager = mcp_manager.read().await;
+                    let Some(defs) = manager.server_tools(&name).await else {
                         continue;
                     };
                     let defs_cpu = crate::server::thread_cpu_ms() - handler_cpu;
@@ -1866,6 +1928,7 @@ impl Registry {
                     }
                     let build_cpu = crate::server::thread_cpu_ms() - handler_cpu;
                     registry.refresh_connected_mcp_server(tools, &name).await;
+                    drop(manager);
                     let refresh_cpu = crate::server::thread_cpu_ms() - handler_cpu;
 
                     let refresh_ms = handler_start.elapsed().as_millis();

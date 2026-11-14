@@ -8,16 +8,48 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
-use super::CHATGPT_WEB_MODEL;
+use jcode_base::provider::chatgpt_web::{self as web_catalog, ChatGptWebModel};
+use jcode_base::provider::chatgpt_web_instance as web_instance;
 
-const CHATGPT_WEB_URL: &str = "https://chatgpt.com/?model=gpt-5-6-pro&temporary-chat=true";
-const EDITOR_SELECTOR: &str = "[contenteditable=true][aria-label='Chat with ChatGPT']";
+#[path = "chatgpt_web/markup.rs"]
+mod markup;
+use markup::strip_web_markup;
+
+#[path = "chatgpt_web/refusal.rs"]
+mod refusal;
+use refusal::{claims_no_tool_access, only_announces_action};
+#[path = "chatgpt_web/sandbox.rs"]
+mod sandbox;
+use sandbox::{SandboxCall, sandbox_tools, sandbox_warning, with_sandbox_correction};
+
 const TOOL_CALL_START: &str = "<jcode_tool_call>";
 const TOOL_CALL_END: &str = "</jcode_tool_call>";
-const PROMPT_CHUNK_BYTES: usize = 24_000;
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
-const REQUIRED_STABLE_POLLS: usize = 8;
-const MODEL_SELECTION_TIMEOUT: Duration = Duration::from_secs(15);
+const NETWORK_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const PREVIEW_INTERVAL: Duration = Duration::from_millis(1000);
+/// Pro turns finish in the background; their transcript is polled this often.
+const BACKGROUND_POLL_INTERVAL: Duration = Duration::from_secs(3);
+/// A turn POST normally starts streaming within a few seconds. A sent request
+/// gets this long before jcode gives up; ChatGPT can queue busy accounts.
+const START_TIMEOUT: Duration = Duration::from_secs(120);
+/// If the page has not even sent the turn POST by then, Send is clicked once more.
+const UNSENT_RETRY_AFTER: Duration = Duration::from_secs(10);
+
+/// One-line live preview of a streaming web answer: its size and the tail
+/// of the latest text, whitespace collapsed.
+fn stream_preview(label: &str, texts: &[&str], chars: usize) -> String {
+    let latest = texts.last().copied().unwrap_or_default();
+    let flat = latest.split_whitespace().collect::<Vec<_>>().join(" ");
+    let tail: String = {
+        let count = flat.chars().count();
+        flat.chars().skip(count.saturating_sub(60)).collect()
+    };
+    if tail.is_empty() {
+        format!("{label} is writing ({chars} chars)")
+    } else {
+        format!("{label} is writing ({chars} chars): …{tail}")
+    }
+}
 
 static TOOL_CALL_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -41,9 +73,14 @@ impl ChatGptWebState {
         tools: &[ToolDefinition],
         system: &str,
         model: &str,
+        effort: Option<&str>,
     ) -> Result<EventStream> {
         let prompt = build_web_prompt(messages, tools, system)?;
-        let model = model.to_string();
+        // Sessions saved with a pre-discovery fixed ID keep their model and Power.
+        let (model, effort) = match web_catalog::legacy_web_alias(model) {
+            Some((family, power)) => (family.to_string(), Some(power.to_string())),
+            None => (model.to_string(), effort.map(str::to_string)),
+        };
         let advertised_tools: Vec<String> = tools.iter().map(|tool| tool.name.clone()).collect();
         let (tx, rx) = mpsc::channel(128);
 
@@ -59,8 +96,7 @@ impl ChatGptWebState {
             }
             if tx
                 .send(Ok(StreamEvent::StatusDetail {
-                    detail: "Using GPT-5.6 Pro through your logged-in ChatGPT web session"
-                        .to_string(),
+                    detail: format!("Using {model} through your logged-in ChatGPT web session"),
                 }))
                 .await
                 .is_err()
@@ -68,15 +104,98 @@ impl ChatGptWebState {
                 return;
             }
 
-            match self.run_turn(&prompt, &model, &tx).await {
-                Ok(response) => {
-                    if let Err(err) = emit_response(&tx, &response, &advertised_tools).await {
+            let mut prompt = prompt;
+            let mut corrected = false;
+            let mut refusal_corrected = false;
+            // With `bash` on offer, a ChatGPT sandbox shell call is run on
+            // this computer instead, so the turn can stop at that call.
+            let redirect = advertised_tools.iter().any(|tool| tool == "bash");
+            loop {
+                let mut answer = match self
+                    .run_turn(&prompt, &model, effort.as_deref(), redirect, &tx)
+                    .await
+                {
+                    Ok(answer) => answer,
+                    Err(err) => {
                         let _ = tx.send(Err(err)).await;
+                        return;
                     }
+                };
+                // The redirected answer requests a jcode tool, so the sandbox
+                // and refusal checks below let it through unchanged.
+                if let Some(redirected) = answer
+                    .sandbox_call
+                    .as_ref()
+                    .filter(|_| redirect)
+                    .and_then(sandbox::redirected_response)
+                {
+                    jcode_base::logging::warn(
+                        "ChatGPT web used its own sandbox shell; running that command on this computer instead",
+                    );
+                    let detail = format!(
+                        "{model} tried ChatGPT's remote sandbox. Running the command on this computer instead"
+                    );
+                    if tx
+                        .send(Ok(StreamEvent::StatusDetail { detail }))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    answer.text = redirected;
                 }
-                Err(err) => {
+                let sandbox = sandbox_tools(&answer.builtin);
+                // An answer that requests jcode tools is acted on locally, so
+                // only a final answer computed in the sandbox is suspect.
+                let requests_jcode_tools = parse_response(&answer.text)
+                    .map(|parsed| !parsed.calls.is_empty())
+                    .unwrap_or(true);
+                let mut text = answer.text;
+                if !sandbox.is_empty() && !requests_jcode_tools {
+                    jcode_base::logging::warn(&format!(
+                        "ChatGPT web answered from its own sandbox ({}) instead of jcode tools",
+                        sandbox.join(", ")
+                    ));
+                    if !corrected {
+                        corrected = true;
+                        let _ = tx
+                            .send(Ok(StreamEvent::StatusDetail {
+                                detail: format!(
+                                    "{model} used ChatGPT's remote sandbox instead of this computer. Retrying with a correction"
+                                ),
+                            }))
+                            .await;
+                        prompt = with_sandbox_correction(&prompt, &sandbox);
+                        continue;
+                    }
+                    text = format!("{}\n\n{text}", sandbox_warning(&sandbox));
+                } else if !requests_jcode_tools
+                    && !advertised_tools.is_empty()
+                    && !refusal_corrected
+                    && (claims_no_tool_access(&text) || only_announces_action(&text))
+                {
+                    // ChatGPT's own "I can't access your computer" prior
+                    // sometimes wins over the protocol, often after earlier
+                    // malformed calls were rejected. It may also stop right
+                    // after "I'll check the machine." Re-ask once.
+                    refusal_corrected = true;
+                    jcode_base::logging::warn(
+                        "ChatGPT web called no jcode tools (claimed no access or only announced an action); retrying with a correction",
+                    );
+                    let _ = tx
+                        .send(Ok(StreamEvent::StatusDetail {
+                            detail: format!(
+                                "{model} claimed it cannot use jcode tools. Retrying with a correction"
+                            ),
+                        }))
+                        .await;
+                    prompt = with_tool_access_correction(&prompt);
+                    continue;
+                }
+                if let Err(err) = emit_response(&tx, &text, &advertised_tools).await {
                     let _ = tx.send(Err(err)).await;
                 }
+                return;
             }
         });
 
@@ -87,65 +206,208 @@ impl ChatGptWebState {
         &self,
         prompt: &str,
         model: &str,
+        effort: Option<&str>,
+        redirect_sandbox: bool,
         tx: &mpsc::Sender<Result<StreamEvent>>,
-    ) -> Result<String> {
-        if model != CHATGPT_WEB_MODEL {
+    ) -> Result<WebAnswer> {
+        if !super::is_chatgpt_web_model(model) {
             anyhow::bail!("Unsupported ChatGPT web model: {model}");
         }
         if tx.is_closed() {
             anyhow::bail!("ChatGPT web response consumer was closed before browser setup");
         }
-
-        let status = jcode_base::browser::ensure_browser_ready_noninteractive()
-            .await
-            .context(
-                "ChatGPT web transport needs the Firefox Browser Agent Bridge. Run `jcode browser status`, start Firefox, and log in at chatgpt.com",
-            )?;
-        if !status.ready {
-            anyhow::bail!(
-                "Firefox Browser Agent Bridge is not ready. Run `jcode browser status`, start Firefox, and log in at chatgpt.com"
-            );
+        if !web_catalog::find_model(model).is_some_and(|model| model.available) {
+            // The user asked for a web model, so a signed-out profile may show
+            // the one-time sign-in window here.
+            web_catalog::refresh_models_with(web_instance::SignIn::Interactive)
+                .await
+                .context("Failed to refresh the connected account's ChatGPT web models")?;
         }
-
+        let selected = web_catalog::find_model(model).filter(|model| model.available)
+            .ok_or_else(|| anyhow::anyhow!("ChatGPT web model '{model}' was not observed as selectable in this browser account. Refresh /model and choose an available [web] route"))?;
         let _turn_guard = self.turn_lock.lock().await;
-        let (tab_id, fork_name) = open_chatgpt_tab().await?;
-        let result = async {
-            send_phase(tx, jcode_message_types::ConnectionPhase::Authenticating).await?;
-
-            wait_for_editor(tab_id).await?;
-            prepare_chatgpt_page(tab_id).await?;
-            insert_prompt(tab_id, prompt).await?;
-            if tx.is_closed() {
-                anyhow::bail!("ChatGPT web response consumer was closed before submission");
-            }
-
-            send_phase(tx, jcode_message_types::ConnectionPhase::SendingRequest).await?;
-            if tx.is_closed() {
-                anyhow::bail!("ChatGPT web response consumer was closed before submission");
-            }
-
-            bridge_command(
-                "click",
-                json!({ "tabId": tab_id, "selector": "#composer-submit-button" }),
-            )
-            .await
-            .context("Failed to submit the prompt in ChatGPT")?;
-
-            send_phase(tx, jcode_message_types::ConnectionPhase::WaitingForResponse).await?;
-
-            poll_for_response(tab_id, tx).await
+        let _session_guard = web_catalog::lock_session().await;
+        if tx.is_closed() {
+            anyhow::bail!("ChatGPT web response consumer was closed before creating its owned tab");
         }
-        .await;
-        let cleanup = close_chatgpt_tab(tab_id, &fork_name).await;
+        send_phase(tx, jcode_message_types::ConnectionPhase::Authenticating).await?;
+        // The turn runs in jcode's private, invisible browser. A visible
+        // window appears only if ChatGPT needs the user to sign in.
+        let (instance, page) =
+            web_instance::open_signed_in_page(web_instance::SignIn::Interactive).await?;
+        let browser = Tab {
+            instance: &instance,
+            page: &page,
+        };
+        let mut original = None;
+        let mut submission_started = false;
+        let mut restoration_allowed = true;
+        let mut early_cleanup_error = None;
+        let cancel_key = format!("{}-submit", next_owned_tab_name());
+        let result = async {
+            // Catalog routes name the exact ChatGPT model and thinking level in
+            // the request body; the picker (which shows only part of the
+            // catalog) is not touched. Picker-only routes use the old path.
+            let route = network_path_enabled()
+                .then(|| web_catalog::request_route(model, effort))
+                .flatten();
+            if let Some((slug, thinking)) = route.clone() {
+                browser.ui(json!({"op":"ready"})).await?;
+                let stream_key = format!("{cancel_key}-stream");
+                let route_json = json!({"slug": slug, "effort": thinking});
+                arm_network_send_route(&browser, &stream_key, prompt, Some(&route_json)).await?;
+                let composer_text = placeholder_for(&stream_key);
+                insert_prompt(&browser, &composer_text).await?;
+                arm_network_send_route(&browser, &stream_key, prompt, Some(&route_json)).await
+                    .context("ChatGPT network hook could not be re-armed before Send")?;
+                if tx.is_closed() { anyhow::bail!("ChatGPT web response consumer was closed before submission"); }
+                send_phase(tx, jcode_message_types::ConnectionPhase::SendingRequest).await?;
+                let (length, hash) = utf16_fingerprint(&composer_text);
+                submission_started = true;
+                let submission = browser.ui(json!({"op":"submit", "route": route_json, "length":length, "hash":hash, "cancelKey":cancel_key, "armedKey": stream_key}));
+                tokio::pin!(submission);
+                tokio::select! {
+                    biased;
+                    _ = tx.closed() => {
+                        if let Err(error) = cancel_submission(&browser, &cancel_key).await {
+                            restoration_allowed = false;
+                            return Err(error.context("Pending submission could not be cancelled, so its owned tab was closed"));
+                        }
+                        let _ = submission.await;
+                        anyhow::bail!("ChatGPT web response consumer was closed before submission");
+                    },
+                    response = &mut submission => { response.context("Failed to submit the temporary ChatGPT prompt")?; }
+                }
+                send_phase(tx, jcode_message_types::ConnectionPhase::WaitingForResponse).await?;
+                let answer = poll_network_stream(&browser, &selected, None, &stream_key, prompt, redirect_sandbox, tx).await?;
+                verify_served(&answer, &slug, thinking.as_deref())?;
+                jcode_base::logging::info(&format!(
+                    "ChatGPT web turn served model={} thinking_effort={} (requested route {} effort {})",
+                    answer.served.as_deref().unwrap_or("unknown"),
+                    answer.served_effort.as_deref().unwrap_or("none"),
+                    model,
+                    effort.unwrap_or("default"),
+                ));
+                return Ok(answer);
+            }
+            let selection = browser.ui(json!({"op":"prepare", "label":selected.label, "effort":effort})).await?;
+            original = selection.get("original").cloned();
+            let effective_effort = selection.get("effort").and_then(Value::as_str)
+                .filter(|value| !value.is_empty()).ok_or_else(|| anyhow::anyhow!("ChatGPT did not return a verified thinking effort"))?;
+            if !page_verification_ready(&selection, &selected.label, effective_effort) {
+                anyhow::bail!("ChatGPT did not verify the exact model, effort, and Temporary Chat before prompt insertion");
+            }
+            // Network path: the composer gets a short placeholder and the page
+            // sends it with its own sentinel headers. An in-page hook swaps the
+            // exact prompt into that request and streams the raw answer back.
+            // Any failure before Send falls back to pasting the full prompt.
+            let stream_key = format!("{cancel_key}-stream");
+            let network = network_path_enabled()
+                && arm_network_send(&browser, &stream_key, prompt).await.is_ok();
+            let composer_text = if network { placeholder_for(&stream_key) } else { prompt.to_string() };
+            insert_prompt(&browser, &composer_text).await?;
+            // Arming happens before the composer reflows, so re-check that
+            // the hook is still in place right before Send.
+            if network {
+                arm_network_send(&browser, &stream_key, prompt).await
+                    .context("ChatGPT network hook could not be re-armed before Send")?;
+            }
+            if tx.is_closed() { anyhow::bail!("ChatGPT web response consumer was closed before submission"); }
+            send_phase(tx, jcode_message_types::ConnectionPhase::SendingRequest).await?;
+            let (length, hash) = utf16_fingerprint(&composer_text);
+            submission_started = true;
+            let armed_key = network.then_some(stream_key.as_str());
+            let submission = browser.ui(json!({"op":"submit", "label":selected.label, "effort":effective_effort, "length":length, "hash":hash,"cancelKey":cancel_key, "armedKey": armed_key}));
+            tokio::pin!(submission);
+            tokio::select! {
+                biased;
+                _ = tx.closed() => {
+                    // Dropping a future does not stop JavaScript already running.
+                    // Await a successfully cancelled evaluation before restoration.
+                    if let Err(error) = cancel_submission(&browser, &cancel_key).await {
+                        restoration_allowed = false;
+                        return Err(error.context("Pending submission could not be cancelled, so its owned tab was closed before any preference restoration"));
+                    }
+                    let _ = submission.await;
+                    anyhow::bail!("ChatGPT web response consumer was closed before submission");
+                },
+                response = &mut submission => { response.context("Failed to verify and submit the temporary ChatGPT prompt")?; }
+            }
+            send_phase(tx, jcode_message_types::ConnectionPhase::WaitingForResponse).await?;
+            if network {
+                poll_network_stream(&browser, &selected, Some(effective_effort), &stream_key, prompt, redirect_sandbox, tx).await
+            } else {
+                poll_for_response(&browser, &selected, effective_effort, tx).await
+            }
+        }.await;
+        if let Err(error) = &result {
+            debug_dump(&browser, prompt, error).await;
+        }
+        // A page that stopped answering DevTools cannot run the cancel, stop
+        // or restore steps either; each would wait out its own timeout.
+        // Closing the owned tab ends its generation.
+        let unresponsive = result.as_ref().err().is_some_and(page_unresponsive);
+        if unresponsive {
+            restoration_allowed = false;
+        }
+        // Every post-submit failure must quiesce generation before changing
+        // account-wide preferences.
+        if result.is_err() && submission_started && restoration_allowed {
+            let quiescence = async {
+                cancel_submission(&browser, &cancel_key).await?;
+                let stopped = browser.ui(json!({"op":"stop"})).await?;
+                anyhow::ensure!(
+                    stopped.get("busy").and_then(Value::as_bool) == Some(false),
+                    "ChatGPT did not acknowledge idle generation"
+                );
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            if let Err(error) = quiescence {
+                restoration_allowed = false;
+                early_cleanup_error = Some(error.context("Could not confirm submission and generation stopped before closing the owned tab"));
+            }
+        }
+        let restoration = match original {
+            Some(original) if restoration_allowed => browser
+                .ui(json!({"op":"restore", "original":original}))
+                .await
+                .map(|_| ()),
+            Some(_) if unresponsive => Err(anyhow::anyhow!(
+                "the ChatGPT model picker could not be restored because the page stopped responding"
+            )),
+            Some(_) => Err(anyhow::anyhow!(
+                "Original preferences were not restored because pending browser execution could not be safely quiesced"
+            )),
+            None => Ok(()),
+        };
+        let close = instance
+            .close_page(&page)
+            .await
+            .context("Failed to close the owned ChatGPT tab");
+        let close = match (close, early_cleanup_error) {
+            (Ok(()), Some(error)) => Err(error),
+            (Err(error), Some(earlier)) => {
+                Err(error.context(format!("Earlier browser cleanup failed: {earlier:#}")))
+            }
+            (result, None) => result,
+        };
+        let cleanup = match (restoration, close) {
+            (Ok(()), result) => result,
+            (Err(error), Ok(())) => Err(error.context("The owned ChatGPT tab was closed, but original model/effort preferences could not be restored")),
+            (Err(error), Err(close_error)) => Err(error.context(format!("Browser cleanup also failed: {close_error:#}"))),
+        };
         match (result, cleanup) {
             (Ok(response), Ok(())) => Ok(response),
-            (Err(err), Ok(())) => Err(err),
-            (Ok(_), Err(cleanup_err)) => Err(cleanup_err.context(
-                "GPT-5.6 Pro answered, but jcode could not securely close its browser tab",
+            (Err(error), Ok(())) => Err(explain_turn_error(error, prompt.len())),
+            (Ok(_), Err(error)) => Err(error.context(
+                "ChatGPT answered, but its owned browser state could not be cleaned up safely",
             )),
-            (Err(err), Err(cleanup_err)) => {
-                Err(err.context(format!("Browser tab cleanup also failed: {cleanup_err:#}")))
-            }
+            // Lead with the cause; cleanup trouble is secondary detail.
+            (Err(error), Err(cleanup_error)) => Err(anyhow::anyhow!(
+                "{:#} (browser cleanup also failed: {cleanup_error:#})",
+                explain_turn_error(error, prompt.len())
+            )),
         }
     }
 }
@@ -159,61 +421,51 @@ async fn send_phase(
         .map_err(|_| anyhow::anyhow!("ChatGPT web response consumer was closed"))
 }
 
-async fn open_chatgpt_tab() -> Result<(u64, String)> {
-    let source = bridge_command("getActiveTab", json!({}))
-        .await
-        .context("Failed to find a Firefox tab to duplicate for ChatGPT")?;
-    let source_tab_id = source
-        .get("tabId")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| anyhow::anyhow!("Browser bridge did not return an active tab id"))?;
-    let fork_name = next_owned_tab_name();
-    let fork = bridge_command(
-        "fork",
-        json!({ "tabId": source_tab_id, "paths": [{ "name": fork_name }] }),
-    )
-    .await
-    .context("Failed to create a temporary Firefox tab for ChatGPT")?;
-    let tab_id = fork
-        .get("forks")
-        .and_then(Value::as_array)
-        .and_then(|forks| forks.first())
-        .and_then(|fork| fork.get("tabId"))
-        .and_then(Value::as_u64)
-        .ok_or_else(|| {
-            anyhow::anyhow!("Browser bridge did not return the forked ChatGPT tab id")
-        })?;
-
-    if let Err(err) = bridge_command(
-        "navigate",
-        json!({ "tabId": tab_id, "url": CHATGPT_WEB_URL, "wait": true }),
-    )
-    .await
-    {
-        let _ = bridge_command("killFork", json!({ "fork": fork_name })).await;
-        return Err(err).context("Failed to open ChatGPT in the temporary Firefox tab");
-    }
-    Ok((tab_id, fork_name))
+/// An owned page in jcode's private, invisible ChatGPT browser.
+struct Tab<'a> {
+    instance: &'a web_instance::Instance,
+    page: &'a web_instance::Page,
 }
 
-async fn close_chatgpt_tab(tab_id: u64, fork_name: &str) -> Result<()> {
-    match bridge_command("killFork", json!({ "fork": fork_name })).await {
-        Ok(_) => Ok(()),
-        Err(close_err) => {
-            bridge_command(
-                "navigate",
-                json!({ "tabId": tab_id, "url": "about:blank", "wait": true }),
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to close the owned browser tab ({close_err:#}) and failed to clear its sensitive prompt content"
-                )
-            })?;
-            Err(close_err).context(
-                "Failed to close the owned browser tab; its sensitive content was cleared to about:blank",
-            )
-        }
+impl Tab<'_> {
+    async fn ui(&self, request: Value) -> Result<Value> {
+        web_instance::ui_request(self.instance, self.page, &request).await
+    }
+}
+
+/// Opt-in failure diagnostics. With `JCODE_CHATGPT_WEB_DEBUG_DIR` set, a failed
+/// turn writes its prompt, error and owned page DOM there (owner-only). The
+/// files contain conversation data, so this is never on by default.
+async fn debug_dump(browser: &Tab<'_>, prompt: &str, error: &anyhow::Error) {
+    let Some(dir) = std::env::var_os("JCODE_CHATGPT_WEB_DEBUG_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir).join(next_owned_tab_name());
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let _ = std::fs::write(dir.join("prompt.txt"), prompt);
+    let _ = std::fs::write(dir.join("error.txt"), format!("{error:#}"));
+    if page_unresponsive(error) {
+        return;
+    }
+    let dom = browser
+        .instance
+        .evaluate(
+            browser.page,
+            "(document.querySelector('main') || document.body)?.outerHTML || ''",
+        )
+        .await;
+    if let Ok(Value::String(dom)) = dom {
+        let _ = std::fs::write(dir.join("page.html"), dom);
+    }
+    if let Ok(state) = browser.ui(json!({"op":"response"})).await {
+        let _ = std::fs::write(dir.join("response.json"), state.to_string());
     }
 }
 
@@ -226,164 +478,87 @@ fn next_owned_tab_name() -> String {
     format!("jcode-chatgpt-web-{millis}-{sequence}")
 }
 
-async fn wait_for_editor(tab_id: u64) -> Result<()> {
-    bridge_command(
-        "waitFor",
-        json!({
-            "tabId": tab_id,
-            "selector": EDITOR_SELECTOR,
-            "timeout": 30_000
-        }),
-    )
-    .await
-    .context(
-        "ChatGPT composer did not load. Confirm Firefox is logged in at chatgpt.com and the workspace is active",
-    )?;
+/// The page stopped answering DevTools (a frozen renderer), so no further
+/// in-page step can run.
+fn page_unresponsive(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains("DevTools Runtime.evaluate timed out")
+}
+
+/// Above this many prompt bytes, an empty answer is taken as ChatGPT's silent
+/// input limit: it finished turns with no reply once a session's prompt passed
+/// ~900K characters, instead of returning HTTP 413.
+/// shortcut: a size guess, not ChatGPT's real limit; replace it if ChatGPT starts reporting the limit.
+const SILENT_LIMIT_PROMPT_BYTES: usize = 500_000;
+
+/// Why a finished turn has no answer: ChatGPT's own tools, or the reply's shape.
+fn empty_answer_detail(builtin: &[String], state: &Value) -> String {
+    if !builtin.is_empty() {
+        return format!(" (it used its own tools instead: {})", builtin.join(", "));
+    }
+    match state.get("shape").and_then(Value::as_str) {
+        Some(shape) if !shape.is_empty() => format!(" (reply: {shape})"),
+        _ => " (reply: no assistant message)".to_string(),
+    }
+}
+
+/// Rewrites ChatGPT web failures into errors jcode can act on.
+fn explain_turn_error(error: anyhow::Error, prompt_bytes: usize) -> anyhow::Error {
+    let text = format!("{error:#}");
+    if prompt_bytes > SILENT_LIMIT_PROMPT_BYTES
+        && text.contains("completed the turn without an assistant response")
+        && !text.contains("its own tools")
+    {
+        // Worded as a context-limit error so jcode compacts and retries.
+        return error.context(format!(
+            "ChatGPT web returned no answer for a {prompt_bytes}-byte prompt: the conversation likely exceeds the context length limit of a single ChatGPT message. Compact the conversation to continue"
+        ));
+    }
+    if text.contains("message_length_exceeds_limit") || text.contains("HTTP 413") {
+        // Worded as a context-limit error so jcode compacts and retries.
+        return error.context(
+            "ChatGPT web rejected the prompt: the conversation exceeds the context length limit of a single ChatGPT message. Compact the conversation to continue",
+        );
+    }
+    if page_unresponsive(&error) {
+        // The user-facing message hides which in-page step hung.
+        jcode_base::logging::warn(&format!("ChatGPT web page stopped responding: {error:#}"));
+        return error.context(
+            "The ChatGPT web page stopped responding during the turn, so its tab was closed. Retry the message",
+        );
+    }
+    error
+}
+
+async fn cancel_submission(browser: &Tab<'_>, cancel_key: &str) -> Result<()> {
+    let state = browser
+        .ui(json!({"op":"cancel","cancelKey":cancel_key}))
+        .await?;
+    anyhow::ensure!(
+        state.get("cancelled").and_then(Value::as_bool) == Some(true)
+            && state.get("quiescent").and_then(Value::as_bool) == Some(true),
+        "ChatGPT did not acknowledge a cancelled, quiescent submission"
+    );
     Ok(())
 }
 
-async fn prepare_chatgpt_page(tab_id: u64) -> Result<()> {
-    // Temporary chat has a one-time explanatory screen. It is safe to dismiss,
-    // but workspace migration/onboarding is deliberately never auto-confirmed.
-    let preparation = evaluate(
-        tab_id,
-        r#"
-const onboarding = document.querySelector('[role="dialog"]');
-if (onboarding && onboarding.innerText.includes('Business workspace is ready')) {
-  return { onboarding: true };
-}
-const continueButton = Array.from(document.querySelectorAll('button')).find(b => {
-  if (b.innerText.trim() !== 'Continue') return false;
-  let node = b.parentElement;
-  for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
-    const text = node.innerText || '';
-    if (/temporary chat/i.test(text) && /(won't appear|not appear).*(history|conversation)/i.test(text)) {
-      return true;
-    }
-  }
-  return false;
-});
-if (continueButton) continueButton.click();
-const model = Array.from(document.querySelectorAll('button.__composer-pill'))
-  .map(b => b.innerText.trim()).find(Boolean) || '';
-const temporary = !!document.querySelector('button[aria-label="Turn off temporary chat"]')
-  || document.body.innerText.includes("This chat won't appear your conversation history");
-const signedOut = Array.from(document.querySelectorAll('button,a'))
-  .some(e => /^(log in|sign up)$/i.test(e.innerText.trim()));
-return { onboarding: false, model, temporary, signedOut };
-"#,
-    )
-    .await?;
-
-    if preparation.get("onboarding").and_then(Value::as_bool) == Some(true) {
-        anyhow::bail!(
-            "ChatGPT is waiting for a workspace onboarding choice. Open chatgpt.com in Firefox and finish onboarding; jcode will not merge or move your personal chat history automatically"
-        );
-    }
-    if preparation.get("signedOut").and_then(Value::as_bool) == Some(true) {
-        anyhow::bail!(
-            "Firefox is not logged in to ChatGPT. Log in at chatgpt.com, then retry the jcode turn"
-        );
-    }
-
-    // Dismissing the temporary-chat explainer can remount the composer.
-    wait_for_editor(tab_id).await?;
-    let verification = {
-        let deadline = Instant::now() + MODEL_SELECTION_TIMEOUT;
-        loop {
-            let current = evaluate(
-                tab_id,
-                r#"
-const model = Array.from(document.querySelectorAll('button.__composer-pill'))
-  .map(b => b.innerText.trim()).find(Boolean) || '';
-const temporary = !!document.querySelector('button[aria-label="Turn off temporary chat"]')
-  || document.body.innerText.includes("This chat won't appear your conversation history");
-return { model, temporary };
-"#,
-            )
-            .await?;
-            if page_verification_ready(&current) || Instant::now() >= deadline {
-                break current;
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
-    };
-    let selected_model = verification
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if selected_model != "Pro" {
-        anyhow::bail!(
-            "ChatGPT did not select GPT-5.6 Pro (model picker showed '{}'). Confirm this workspace has GPT-5.6 Pro access",
-            if selected_model.is_empty() {
-                "unknown"
-            } else {
-                selected_model
-            }
-        );
-    }
-    if verification.get("temporary").and_then(Value::as_bool) != Some(true) {
-        anyhow::bail!(
-            "ChatGPT did not enter Temporary Chat. Refusing to send the jcode system prompt into persistent web history"
-        );
-    }
-    Ok(())
-}
-
-fn page_verification_ready(verification: &Value) -> bool {
-    verification.get("model").and_then(Value::as_str) == Some("Pro")
+fn page_verification_ready(verification: &Value, label: &str, effort: &str) -> bool {
+    verification.get("model").and_then(Value::as_str) == Some(label)
+        && verification.get("effort").and_then(Value::as_str) == Some(effort)
         && verification.get("temporary").and_then(Value::as_bool) == Some(true)
 }
 
-async fn insert_prompt(tab_id: u64, prompt: &str) -> Result<()> {
-    let chunks = split_utf8_chunks(prompt, PROMPT_CHUNK_BYTES);
-    let Some((first, rest)) = chunks.split_first() else {
-        anyhow::bail!("Refusing to submit an empty ChatGPT web prompt");
-    };
-
-    bridge_command(
-        "fillForm",
-        json!({
-            "tabId": tab_id,
-            "fields": [{ "selector": EDITOR_SELECTOR, "value": first }]
-        }),
-    )
-    .await
-    .context("Failed to initialize the ChatGPT rich-text composer")?;
-
-    for chunk in rest {
-        bridge_command(
-            "type",
-            json!({
-                "tabId": tab_id,
-                "selector": EDITOR_SELECTOR,
-                "text": chunk,
-                "clear": false,
-                "append": true
-            }),
-        )
+async fn insert_prompt(browser: &Tab<'_>, prompt: &str) -> Result<()> {
+    anyhow::ensure!(
+        !prompt.is_empty(),
+        "Refusing to submit an empty ChatGPT web prompt"
+    );
+    // Literal paste keeps the prompt byte-exact. Typed text is re-serialized
+    // as escaped Markdown once ChatGPT autolinks a URL in it.
+    browser
+        .ui(json!({"op":"insert", "text": prompt}))
         .await
-        .context("Failed while appending a chunk to the ChatGPT composer")?;
-    }
-
-    let verification = evaluate(
-        tab_id,
-        r#"
-const editor = document.querySelector('[contenteditable=true][aria-label="Chat with ChatGPT"]');
-const submit = document.querySelector('#composer-submit-button');
-const text = editor
-  ? (editor.children.length > 0
-      ? Array.from(editor.children).map(child => child.textContent || '').join('\n')
-      : editor.innerText)
-  : '';
-let hash = 2166136261;
-for (let index = 0; index < text.length; index++) {
-  hash = Math.imul(hash ^ text.charCodeAt(index), 16777619);
-}
-return { length: text.length, hash: hash >>> 0, submitDisabled: !submit || submit.disabled };
-"#,
-    )
-    .await?;
+        .context("Failed to paste the prompt into the ChatGPT composer")?;
+    let verification = browser.ui(json!({"op":"prompt"})).await?;
     let actual_len = verification
         .get("length")
         .and_then(Value::as_u64)
@@ -404,66 +579,36 @@ return { length: text.length, hash: hash >>> 0, submitDisabled: !submit || submi
     Ok(())
 }
 
-async fn poll_for_response(tab_id: u64, tx: &mpsc::Sender<Result<StreamEvent>>) -> Result<String> {
+async fn poll_for_response(
+    browser: &Tab<'_>,
+    selected: &ChatGptWebModel,
+    effort: &str,
+    tx: &mpsc::Sender<Result<StreamEvent>>,
+) -> Result<WebAnswer> {
     let timeout_secs = std::env::var("JCODE_CHATGPT_WEB_TIMEOUT_SECS")
         .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
+        .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(900)
         .max(30);
     let started = Instant::now();
     let deadline = started + Duration::from_secs(timeout_secs);
-    let mut last_text = String::new();
-    let mut stable_polls = 0usize;
     let mut last_status_second = 0u64;
     let mut streaming_emitted = false;
-
+    let mut terminal_since: Option<Instant> = None;
     loop {
         if tx.is_closed() {
-            let _ = evaluate(
-                tab_id,
-                r#"
-const stop = Array.from(document.querySelectorAll('button')).find(b =>
-  /stop/i.test(b.getAttribute('aria-label') || '') || b.dataset.testid === 'stop-button'
-);
-if (stop) stop.click();
-return true;
-"#,
-            )
-            .await;
             anyhow::bail!("ChatGPT web response consumer was closed");
         }
         if Instant::now() >= deadline {
             anyhow::bail!(
-                "GPT-5.6 Pro web response timed out after {} seconds (override with JCODE_CHATGPT_WEB_TIMEOUT_SECS)",
-                timeout_secs
+                "{} web response timed out after {timeout_secs} seconds (override with JCODE_CHATGPT_WEB_TIMEOUT_SECS)",
+                selected.label
             );
         }
-
-        let state = evaluate(
-            tab_id,
-            r#"
-const sections = Array.from(document.querySelectorAll('section[data-turn="assistant"]'));
-const section = sections.at(-1) || null;
-const messages = section ? Array.from(section.querySelectorAll('[data-message-author-role="assistant"]')) : [];
-const visible = messages.filter(e => { const r=e.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
-const message = visible.at(-1) || messages.at(-1) || null;
-const markdowns = message ? Array.from(message.querySelectorAll('.markdown')) : [];
-const markdown = markdowns.at(-1) || null;
-const text = markdown ? markdown.innerText : (message ? message.innerText : '');
-const busy = Array.from(document.querySelectorAll('button')).some(b => {
-  const label = b.getAttribute('aria-label') || '';
-  return /stop (generating|streaming|response)/i.test(label) || b.dataset.testid === 'stop-button';
-});
-const alert = Array.from(document.querySelectorAll('[role="alert"]')).map(e => e.innerText.trim()).filter(Boolean).at(-1) || '';
-const terminal = !!section && !busy && !!section.querySelector(
-  '[data-testid="copy-turn-action-button"], button[aria-label="Copy"], button[aria-label*="Good response"], button[aria-label*="Bad response"]'
-);
-return { text, busy, terminal, alert, model: message ? message.dataset.messageModelSlug || '' : '' };
-"#,
-        )
-        .await
-        .context("Failed to read the ChatGPT response from Firefox")?;
-
+        let state = browser
+            .ui(json!({"op":"response"}))
+            .await
+            .context("Failed to read the owned ChatGPT web response")?;
         let text = state
             .get("text")
             .and_then(Value::as_str)
@@ -472,7 +617,6 @@ return { text, busy, terminal, alert, model: message ? message.dataset.messageMo
             .to_string();
         let busy = state.get("busy").and_then(Value::as_bool) == Some(true);
         let terminal = state.get("terminal").and_then(Value::as_bool) == Some(true);
-
         let alert = state
             .get("alert")
             .and_then(Value::as_str)
@@ -480,52 +624,512 @@ return { text, busy, terminal, alert, model: message ? message.dataset.messageMo
         if !busy && !alert.is_empty() && started.elapsed() > Duration::from_secs(3) {
             anyhow::bail!("ChatGPT web rejected the request: {alert}");
         }
-
         if !text.is_empty() && !streaming_emitted {
             send_phase(tx, jcode_message_types::ConnectionPhase::Streaming).await?;
             streaming_emitted = true;
         }
-
-        if !text.is_empty() && text == last_text && !busy {
-            stable_polls += 1;
-        } else {
-            stable_polls = 0;
-            last_text = text.clone();
-        }
-
-        if terminal || stable_polls >= REQUIRED_STABLE_POLLS {
-            if text.is_empty() {
-                anyhow::bail!("ChatGPT completed the turn without an assistant response");
-            }
+        // Quiet text alone is not completion. Thinking pauses must not truncate answers.
+        if terminal {
+            // The rendered message is lossy (Markdown, hidden wrapper tags,
+            // dropped backslashes). The raw transcript is the source of truth.
+            let since = *terminal_since.get_or_insert_with(Instant::now);
+            let (text, builtin, sandbox_call) = match read_transcript(browser, None).await? {
+                Transcript::Final {
+                    text,
+                    builtin,
+                    sandbox_call,
+                } => (text, builtin, sandbox_call),
+                Transcript::Pending if since.elapsed() < TRANSCRIPT_GRACE => {
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                }
+                Transcript::Pending | Transcript::Unavailable(_) if !text.is_empty() => {
+                    jcode_base::logging::warn(
+                        "ChatGPT web transcript was not usable, falling back to the rendered answer",
+                    );
+                    (text, Vec::new(), None)
+                }
+                Transcript::Unavailable(reason) => anyhow::bail!(
+                    "ChatGPT completed the turn without an assistant response (transcript unavailable: {reason})"
+                ),
+                Transcript::Pending => {
+                    anyhow::bail!("ChatGPT completed the turn without an assistant response")
+                }
+            };
             let upstream_model = state
                 .get("model")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            if upstream_model != "gpt-5-6-pro" {
+            if !upstream_model.is_empty()
+                && !selected
+                    .expected_upstream_models
+                    .iter()
+                    .any(|model| model == upstream_model)
+            {
                 anyhow::bail!(
-                    "ChatGPT answered with model '{}' instead of gpt-5-6-pro",
-                    if upstream_model.is_empty() {
-                        "unknown"
-                    } else {
-                        upstream_model
-                    }
+                    "ChatGPT reported unverified upstream model '{upstream_model}' for {}",
+                    selected.label
                 );
             }
-            return Ok(text);
+            // Current ChatGPT markup exposes no upstream slug. Require independent
+            // checked-radio and power-slider evidence again instead of inventing one.
+            browser.ui(json!({"op":"verify", "label":selected.label, "effort":effort, "requireTemporary":false})).await
+                .context("The requested ChatGPT model or thinking effort changed during the response")?;
+            return Ok(WebAnswer {
+                text,
+                builtin,
+                sandbox_call,
+                served: None,
+                served_effort: None,
+            });
+        } else {
+            terminal_since = None;
         }
-
         let elapsed = started.elapsed().as_secs();
         if elapsed >= last_status_second + 10 {
             last_status_second = elapsed;
             let _ = tx
                 .send(Ok(StreamEvent::StatusDetail {
-                    detail: format!("GPT-5.6 Pro is working in ChatGPT web ({}s)", elapsed),
+                    detail: format!("{} is working in ChatGPT web ({elapsed}s)", selected.label),
                 }))
                 .await;
         }
-
         tokio::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+/// How long a finished-looking page may wait for the backend transcript to
+/// record the final answer before falling back to the rendered text.
+const TRANSCRIPT_GRACE: Duration = Duration::from_secs(20);
+
+/// How long a turn whose stream dropped may take to appear in the conversation.
+const INTERRUPTED_RECOVERY: Duration = Duration::from_secs(180);
+
+/// The network path is on by default. `JCODE_CHATGPT_WEB_NETWORK=0` forces
+/// the composer-only path.
+fn network_path_enabled() -> bool {
+    !matches!(
+        std::env::var("JCODE_CHATGPT_WEB_NETWORK").as_deref(),
+        Ok("0" | "false" | "off")
+    )
+}
+
+/// Placeholder typed into the composer when the network hook carries the
+/// real prompt. Unique per turn, so the hook can match it exactly.
+fn placeholder_for(stream_key: &str) -> String {
+    format!("jcode turn {stream_key}")
+}
+
+async fn arm_network_send(browser: &Tab<'_>, stream_key: &str, prompt: &str) -> Result<()> {
+    arm_network_send_route(browser, stream_key, prompt, None).await
+}
+
+async fn arm_network_send_route(
+    browser: &Tab<'_>,
+    stream_key: &str,
+    prompt: &str,
+    route: Option<&Value>,
+) -> Result<()> {
+    let armed = browser
+        .ui(json!({"op":"arm_send", "key": stream_key, "text": prompt, "placeholder": placeholder_for(stream_key), "route": route}))
+        .await?;
+    anyhow::ensure!(
+        armed.get("armed").and_then(Value::as_bool) == Some(true),
+        "ChatGPT network hook did not arm"
+    );
+    Ok(())
+}
+
+/// ChatGPT reports the model and thinking level that actually ran. A
+/// different model means the request was silently rerouted, so the answer is
+/// not from the route the user picked.
+fn verify_served(answer: &WebAnswer, slug: &str, thinking: Option<&str>) -> Result<()> {
+    if let Some(served) = answer.served.as_deref() {
+        anyhow::ensure!(
+            served == slug,
+            "ChatGPT answered with '{served}' instead of the requested '{slug}'"
+        );
+    }
+    if let (Some(served), Some(thinking)) = (answer.served_effort.as_deref(), thinking) {
+        anyhow::ensure!(
+            served == thinking,
+            "ChatGPT used thinking level '{served}' instead of the requested '{thinking}'"
+        );
+    }
+    Ok(())
+}
+
+/// Streams the page's own response for this turn. Emits text as it arrives
+/// and verifies the request carried exactly jcode's prompt.
+async fn poll_network_stream(
+    browser: &Tab<'_>,
+    selected: &ChatGptWebModel,
+    effort: Option<&str>,
+    stream_key: &str,
+    prompt: &str,
+    redirect_sandbox: bool,
+    tx: &mpsc::Sender<Result<StreamEvent>>,
+) -> Result<WebAnswer> {
+    let timeout_secs = std::env::var("JCODE_CHATGPT_WEB_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(900)
+        .max(30);
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(timeout_secs);
+    let (expected_length, expected_hash) = utf16_fingerprint(prompt);
+    let mut verified = false;
+    let mut resent = false;
+    let mut streaming_emitted = false;
+    let mut last_status_second = 0u64;
+    let mut last_preview_chars = 0usize;
+    let mut last_preview = Instant::now() - PREVIEW_INTERVAL;
+    loop {
+        if tx.is_closed() {
+            anyhow::bail!("ChatGPT web response consumer was closed");
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "{} web response timed out after {timeout_secs} seconds (override with JCODE_CHATGPT_WEB_TIMEOUT_SECS)",
+                selected.label
+            );
+        }
+        let state = browser
+            .ui(json!({"op":"stream", "key": stream_key}))
+            .await
+            .context("Failed to read the owned ChatGPT web stream")?;
+        if let Some(error) = state.get("sendError").and_then(Value::as_str) {
+            anyhow::bail!("ChatGPT web send was refused before reaching the network: {error}");
+        }
+        // A rejected fetch may follow server acceptance. Without proof of
+        // non-delivery, resending could duplicate an at-most-once request.
+        if let Some(error) = state.get("fetchError").and_then(Value::as_str) {
+            anyhow::bail!(
+                "ChatGPT web request transport failed; delivery is unknown and the turn was not resent: {error}"
+            );
+        }
+        if state.get("started").and_then(Value::as_bool) == Some(true) {
+            if !verified {
+                let substituted = state.get("substituted");
+                let length = substituted
+                    .and_then(|s| s.get("length"))
+                    .and_then(Value::as_u64);
+                let hash = substituted
+                    .and_then(|s| s.get("hash"))
+                    .and_then(Value::as_u64);
+                anyhow::ensure!(
+                    length == Some(expected_length as u64)
+                        && hash == Some(u64::from(expected_hash)),
+                    "ChatGPT web request did not carry the exact jcode prompt"
+                );
+                verified = true;
+            }
+            if let Some(error) = state.get("error").and_then(Value::as_str) {
+                anyhow::bail!("ChatGPT web rejected the request: {error}");
+            }
+            let served = state
+                .get("served")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let served_effort = state
+                .get("servedEffort")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            // Its own sandbox call will be run locally, so the rest of this
+            // answer would build on the wrong machine. Stop here.
+            if let Some(call) = SandboxCall::from_state(&state)
+                .filter(|call| redirect_sandbox && sandbox::sandbox_command(&call.code).is_some())
+            {
+                if let Err(error) = browser.ui(json!({"op":"stop"})).await {
+                    jcode_base::logging::warn(&format!(
+                        "ChatGPT web could not stop the sandboxed answer: {error:#}"
+                    ));
+                }
+                return Ok(WebAnswer {
+                    text: String::new(),
+                    builtin: vec!["container.exec".to_string()],
+                    sandbox_call: Some(call),
+                    served,
+                    served_effort,
+                });
+            }
+            let texts: Vec<&str> = state
+                .get("texts")
+                .and_then(Value::as_array)
+                .map(|texts| texts.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            if !streaming_emitted && texts.iter().any(|text| !text.trim().is_empty()) {
+                send_phase(tx, jcode_message_types::ConnectionPhase::Streaming).await?;
+                streaming_emitted = true;
+            }
+            // Live progress only. Committed text is emitted once the answer is
+            // complete, because it may turn out to be a tool envelope or be
+            // discarded by the sandbox retry, and emitted text cannot be
+            // taken back.
+            let streamed: usize = texts.iter().map(|text| text.chars().count()).sum();
+            if streamed > last_preview_chars && last_preview.elapsed() >= PREVIEW_INTERVAL {
+                last_preview_chars = streamed;
+                last_preview = Instant::now();
+                let _ = tx
+                    .send(Ok(StreamEvent::StatusDetail {
+                        detail: stream_preview(&selected.label, &texts, streamed),
+                    }))
+                    .await;
+            }
+            if state.get("complete").and_then(Value::as_bool) == Some(true) {
+                let text = transcript_answer(&texts);
+                let builtin: Vec<String> = state
+                    .get("builtin")
+                    .and_then(Value::as_array)
+                    .map(|tools| {
+                        tools
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if text.is_empty() {
+                    anyhow::bail!(
+                        "ChatGPT completed the turn without an assistant response{}",
+                        empty_answer_detail(&builtin, &state)
+                    );
+                }
+                // Picker turns re-check the picker; route turns are checked
+                // against the model the server reports instead.
+                if let Some(effort) = effort {
+                    browser.ui(json!({"op":"verify", "label":selected.label, "effort":effort, "requireTemporary":false})).await
+                        .context("The requested ChatGPT model or thinking effort changed during the response")?;
+                }
+                return Ok(WebAnswer {
+                    text,
+                    builtin,
+                    sandbox_call: SandboxCall::from_state(&state),
+                    served,
+                    served_effort,
+                });
+            }
+            if state.get("done").and_then(Value::as_bool) == Some(true) {
+                // The stream ended without a finished assistant message. Pro
+                // models run as a background job: the stream closes early
+                // and the answer lands in the conversation later. Aborted
+                // turns end up here too; the transcript decides which.
+                let mut last_reason = String::from("the stream ended before the answer finished");
+                if let Some(interrupted) = state.get("interrupted").and_then(Value::as_str) {
+                    // The connection dropped ("BodyStreamBuffer was aborted"),
+                    // but ChatGPT keeps generating server-side.
+                    jcode_base::logging::warn(&format!(
+                        "ChatGPT web stream was interrupted ({interrupted}); reading the answer from the conversation"
+                    ));
+                    last_reason = format!("the stream was interrupted: {interrupted}");
+                }
+                // An interrupted turn usually lands in the conversation within
+                // seconds. If ChatGPT never records it, fail with the reason
+                // instead of waiting out the whole response timeout.
+                let interrupted = state.get("interrupted").and_then(Value::as_str).is_some();
+                let recovery_deadline = if interrupted {
+                    deadline.min(Instant::now() + INTERRUPTED_RECOVERY)
+                } else {
+                    deadline
+                };
+                while Instant::now() < recovery_deadline {
+                    if tx.is_closed() {
+                        anyhow::bail!("ChatGPT web response consumer was closed");
+                    }
+                    match read_transcript(browser, Some(stream_key)).await? {
+                        Transcript::Final {
+                            text,
+                            builtin,
+                            sandbox_call,
+                        } => {
+                            return Ok(WebAnswer {
+                                text,
+                                builtin,
+                                sandbox_call,
+                                served,
+                                served_effort,
+                            });
+                        }
+                        Transcript::Pending => {}
+                        Transcript::Unavailable(reason) => last_reason = reason,
+                    }
+                    let elapsed = started.elapsed().as_secs();
+                    if elapsed >= last_status_second + 10 {
+                        last_status_second = elapsed;
+                        let _ = tx
+                            .send(Ok(StreamEvent::StatusDetail {
+                                detail: format!(
+                                    "{} is working in ChatGPT web ({elapsed}s)",
+                                    selected.label
+                                ),
+                            }))
+                            .await;
+                    }
+                    tokio::time::sleep(BACKGROUND_POLL_INTERVAL).await;
+                }
+                if interrupted {
+                    anyhow::bail!(
+                        "{} web stream dropped and ChatGPT did not record the answer within {} seconds ({last_reason})",
+                        selected.label,
+                        INTERRUPTED_RECOVERY.as_secs()
+                    );
+                }
+                anyhow::bail!(
+                    "{} web response timed out after {timeout_secs} seconds while ChatGPT finished it in the background ({last_reason})",
+                    selected.label
+                );
+            }
+        } else {
+            // No response yet. Either the page never sent the turn POST (the
+            // deferred Send click did not take), or ChatGPT accepted it and is
+            // slow to answer (queueing, large prompt, heavy load).
+            let unsent = state.get("pending").and_then(Value::as_bool) == Some(true);
+            let waited = started.elapsed();
+            if unsent && !resent && waited > UNSENT_RETRY_AFTER {
+                // Nothing reached ChatGPT, so clicking Send again cannot
+                // duplicate the turn. The hook is still armed for this key.
+                resent = true;
+                let outcome = browser
+                    .ui(json!({"op":"click_send", "armedKey": stream_key}))
+                    .await;
+                jcode_base::logging::warn(&format!(
+                    "ChatGPT web Send did not reach the page; clicked Send again: {outcome:?}"
+                ));
+            } else if waited > START_TIMEOUT {
+                let cause = if unsent {
+                    "the page never sent the request"
+                } else {
+                    "the request was sent but ChatGPT did not answer"
+                };
+                match state.get("alert").and_then(Value::as_str) {
+                    Some(alert) => anyhow::bail!(
+                        "ChatGPT web did not start a response stream within {} seconds ({cause}; page says: {alert})",
+                        START_TIMEOUT.as_secs()
+                    ),
+                    None => anyhow::bail!(
+                        "ChatGPT web did not start a response stream within {} seconds ({cause})",
+                        START_TIMEOUT.as_secs()
+                    ),
+                }
+            }
+        }
+        let elapsed = started.elapsed().as_secs();
+        if elapsed >= last_status_second + 10 {
+            last_status_second = elapsed;
+            let _ = tx
+                .send(Ok(StreamEvent::StatusDetail {
+                    detail: format!("{} is working in ChatGPT web ({elapsed}s)", selected.label),
+                }))
+                .await;
+        }
+        tokio::time::sleep(NETWORK_POLL_INTERVAL).await;
+    }
+}
+
+enum Transcript {
+    /// The raw visible answer of the finished turn, the ChatGPT built-in
+    /// tools (message recipients) the model used for it, and its first
+    /// sandbox shell call, if any.
+    Final {
+        text: String,
+        builtin: Vec<String>,
+        sandbox_call: Option<SandboxCall>,
+    },
+    /// The backend has not recorded the end of the turn yet.
+    Pending,
+    /// The transcript cannot be read at all.
+    Unavailable(String),
+}
+
+/// A finished web answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WebAnswer {
+    text: String,
+    /// ChatGPT built-in tools used for this answer. Empty when unknown.
+    builtin: Vec<String>,
+    /// The first `container.exec` call, which jcode can run locally instead.
+    sandbox_call: Option<SandboxCall>,
+    /// Model slug and thinking level the server reports it used, when known.
+    served: Option<String>,
+    served_effort: Option<String>,
+}
+
+/// Correction appended to the prompt when the model answered that it cannot
+/// use Jcode's tools instead of calling them.
+fn with_tool_access_correction(prompt: &str) -> String {
+    format!(
+        "{prompt}\n# Correction\n\nA previous attempt at this exact turn called no tools: it either said it could not use the Jcode tools, run commands or access the user's computer, or only said what it would do next and stopped. You can use the Jcode tools: put {TOOL_CALL_START}...{TOOL_CALL_END} envelopes in your answer, Jcode runs them on the user's computer and returns the results to you automatically. Earlier rejected or failed calls only mean those calls were malformed or failed; fix them and try again. Call the tools you need now, in this answer. Only if a specific tool result shows a real blocker, describe that blocker instead.\n"
+    )
+}
+
+/// Reads the owned conversation's raw assistant text. `stream_key` names the
+/// network-path turn, whose stream carries the conversation id.
+async fn read_transcript(browser: &Tab<'_>, stream_key: Option<&str>) -> Result<Transcript> {
+    let state = match browser
+        .ui(json!({"op":"transcript", "key": stream_key}))
+        .await
+    {
+        Ok(state) => state,
+        Err(error) => return Ok(Transcript::Unavailable(format!("{error:#}"))),
+    };
+    if state.get("available").and_then(Value::as_bool) != Some(true) {
+        return Ok(Transcript::Unavailable(
+            state
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+        ));
+    }
+    anyhow::ensure!(
+        state.get("temporary").and_then(Value::as_bool) == Some(true),
+        "The owned ChatGPT conversation is not a Temporary Chat"
+    );
+    if state.get("complete").and_then(Value::as_bool) != Some(true) {
+        return Ok(Transcript::Pending);
+    }
+    let texts: Vec<&str> = state
+        .get("texts")
+        .and_then(Value::as_array)
+        .map(|texts| texts.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let text = transcript_answer(&texts);
+    let builtin: Vec<String> = state
+        .get("builtin")
+        .and_then(Value::as_array)
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let sandbox_call = SandboxCall::from_state(&state);
+    // A turn that only ran a sandbox call has no text, but jcode can still
+    // run that call locally.
+    if text.is_empty() && sandbox_call.is_none() {
+        anyhow::bail!(
+            "ChatGPT completed the turn without an assistant response{}",
+            empty_answer_detail(&builtin, &state)
+        );
+    }
+    Ok(Transcript::Final {
+        text,
+        builtin,
+        sandbox_call,
+    })
+}
+
+/// The visible answer of one turn. ChatGPT may split it into a progress note
+/// written before its own tool use and the final message. Keep both.
+fn transcript_answer(texts: &[&str]) -> String {
+    texts
+        .iter()
+        .map(|text| text.trim())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 async fn emit_response(
@@ -533,25 +1137,36 @@ async fn emit_response(
     response: &str,
     advertised_tools: &[String],
 ) -> Result<()> {
-    if let Some(parsed) = parse_tool_call(response)? {
-        if !advertised_tools.iter().any(|name| name == &parsed.name) {
-            anyhow::bail!(
-                "GPT-5.6 Pro requested unknown jcode tool '{}'; advertised tools were: {}",
-                parsed.name,
-                advertised_tools.join(", ")
-            );
+    let parsed = parse_response(response)?;
+    if !parsed.calls.is_empty() {
+        for call in &parsed.calls {
+            if !advertised_tools.iter().any(|name| name == &call.name) {
+                anyhow::bail!(
+                    "ChatGPT requested unknown jcode tool '{}'; advertised tools were: {}",
+                    call.name,
+                    advertised_tools.join(", ")
+                );
+            }
         }
-        let id = next_tool_call_id();
-        tx.send(Ok(StreamEvent::ToolUseStart {
-            id,
-            name: parsed.name,
-        }))
-        .await
-        .ok();
-        tx.send(Ok(StreamEvent::ToolInputDelta(parsed.input.to_string())))
+        if !parsed.text.is_empty() {
+            tx.send(Ok(StreamEvent::TextDelta(parsed.text))).await.ok();
+        }
+        for call in parsed.calls {
+            let id = next_tool_call_id();
+            tx.send(Ok(StreamEvent::ToolUseStart {
+                id: id.clone(),
+                name: call.name,
+            }))
             .await
             .ok();
-        tx.send(Ok(StreamEvent::ToolUseEnd)).await.ok();
+            tx.send(Ok(StreamEvent::ToolInputDeltaFor {
+                id: id.clone(),
+                delta: call.input.to_string(),
+            }))
+            .await
+            .ok();
+            tx.send(Ok(StreamEvent::ToolUseEndFor { id })).await.ok();
+        }
         tx.send(Ok(StreamEvent::MessageEnd {
             stop_reason: Some("tool_use".to_string()),
         }))
@@ -560,9 +1175,7 @@ async fn emit_response(
         return Ok(());
     }
 
-    tx.send(Ok(StreamEvent::TextDelta(response.to_string())))
-        .await
-        .ok();
+    tx.send(Ok(StreamEvent::TextDelta(parsed.text))).await.ok();
     tx.send(Ok(StreamEvent::MessageEnd {
         stop_reason: Some("end_turn".to_string()),
     }))
@@ -573,22 +1186,149 @@ async fn emit_response(
 
 struct ParsedToolCall {
     name: String,
+    /// Tool arguments. A malformed envelope keeps its tool name with a string
+    /// here, so the agent returns a schema correction to the model instead
+    /// of the whole turn failing.
     input: Value,
 }
 
-fn parse_tool_call(response: &str) -> Result<Option<ParsedToolCall>> {
-    let trimmed = response.trim();
-    if !trimmed.contains(TOOL_CALL_START) {
-        return Ok(None);
+/// A web answer split into visible text and the jcode tool calls it requests.
+struct ParsedResponse {
+    text: String,
+    calls: Vec<ParsedToolCall>,
+}
+
+/// Parses every `<jcode_tool_call>` envelope. Text outside envelopes is
+/// kept as the visible message. A malformed envelope fails loudly instead of
+/// being shown as prose, so a broken call is never silently dropped.
+fn parse_response(response: &str) -> Result<ParsedResponse> {
+    let cleaned = strip_web_markup(response);
+    let mut calls = Vec::new();
+    let mut text = String::new();
+    let mut rest = cleaned.as_str();
+    while let Some(start) = rest.find(TOOL_CALL_START) {
+        text.push_str(&rest[..start]);
+        let after = rest[start + TOOL_CALL_START.len()..].trim_start();
+        let (call, consumed) = parse_envelope(after)?;
+        calls.push(call);
+        rest = &after[consumed..];
     }
-    if !trimmed.starts_with(TOOL_CALL_START) || !trimmed.ends_with(TOOL_CALL_END) {
-        anyhow::bail!(
-            "GPT-5.6 Pro mentioned a jcode tool-call envelope without emitting it as the entire response"
-        );
+    text.push_str(rest);
+    Ok(ParsedResponse {
+        text: text.trim().to_string(),
+        calls,
+    })
+}
+
+/// Parses one envelope body that starts right after `<jcode_tool_call>`.
+/// Returns the call and how many bytes of `after` it consumed, including the
+/// closing tag.
+fn parse_envelope(after: &str) -> Result<(ParsedToolCall, usize)> {
+    // Parse one JSON value, so marker-like text inside JSON strings and stray
+    // characters after the object cannot confuse the boundaries.
+    let mut stream = serde_json::Deserializer::from_str(after).into_iter::<Value>();
+    let error = match stream.next() {
+        Some(Ok(payload)) => {
+            let tail = &after[stream.byte_offset()..];
+            let Some(end) = tail.find(TOOL_CALL_END) else {
+                // Observed live from GPT-5.6 Sol: a complete call followed by
+                // leaked notes and no closing tag. The JSON value bounds the
+                // call exactly, and nothing after a call is meant for the
+                // user, so take the call and drop the rest.
+                return Ok((tool_call_from_payload(payload)?, after.len()));
+            };
+            let between = tail[..end].trim();
+            // Tolerate a stray wrapper fragment (observed: a closing brace,
+            // a backslash, a fence backtick, and GPT-5.6 Sol's `>` and `/>`
+            // right before the closing tag), never real content.
+            anyhow::ensure!(
+                between
+                    .chars()
+                    .all(|c| matches!(c, '`' | '}' | '\\' | '>' | '/')),
+                "ChatGPT emitted unexpected text inside a jcode tool-call envelope: {between:?}"
+            );
+            let consumed = after.len() - tail.len() + end + TOOL_CALL_END.len();
+            return Ok((tool_call_from_payload(payload)?, consumed));
+        }
+        Some(Err(error)) => error,
+        None => anyhow::bail!("ChatGPT emitted an empty jcode tool-call envelope"),
+    };
+    let invalid =
+        || anyhow::anyhow!("ChatGPT emitted invalid JSON in a jcode tool-call envelope: {error}");
+    // Without a closing tag the envelope boundary is unknown: fail loudly.
+    let end = after.find(TOOL_CALL_END).ok_or_else(invalid)?;
+    let consumed = end + TOOL_CALL_END.len();
+    let raw = after[..end].trim();
+    // Models often write shell escapes such as `\(` inside JSON strings.
+    // Those are invalid JSON but unambiguous: keep the backslash literally.
+    if let Ok(payload) = serde_json::from_str::<Value>(&repair_json_escapes(raw)) {
+        return Ok((tool_call_from_payload(payload)?, consumed));
     }
-    let payload_text = &trimmed[TOOL_CALL_START.len()..trimmed.len() - TOOL_CALL_END.len()];
-    let payload: Value = serde_json::from_str(payload_text.trim())
-        .context("GPT-5.6 Pro emitted invalid JSON in a jcode tool-call envelope")?;
+    // Still malformed (often an unescaped quote). Keep the call so the agent
+    // returns a correction to the model, if its name is recoverable.
+    let name = recover_tool_name(raw).ok_or_else(invalid)?;
+    Ok((
+        ParsedToolCall {
+            name,
+            input: Value::String(format!(
+                "Invalid JSON in the <jcode_tool_call> envelope ({error}). Escape every double quote and backslash inside string values, then call the tool again. Raw envelope: {raw}"
+            )),
+        },
+        consumed,
+    ))
+}
+
+/// Doubles backslashes that start an invalid JSON escape inside strings, so
+/// `"grep \(x\)"` parses as the literal text the model meant. Valid escapes
+/// and text outside strings are unchanged.
+fn repair_json_escapes(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 8);
+    let mut in_string = false;
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if !in_string {
+            if c == '"' {
+                in_string = true;
+            }
+            out.push(c);
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = false;
+                out.push(c);
+            }
+            '\\' => match chars.peek() {
+                Some('"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' | 'u') => {
+                    out.push(c);
+                    out.push(chars.next().expect("peeked"));
+                }
+                _ => out.push_str("\\\\"),
+            },
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// The `"name":"..."` value at the start of a malformed envelope.
+fn recover_tool_name(raw: &str) -> Option<String> {
+    let after = raw
+        .split_once("\"name\"")?
+        .1
+        .trim_start()
+        .strip_prefix(':')?;
+    let value = after.trim_start().strip_prefix('"')?;
+    let name = &value[..value.find('"')?];
+    let valid = !name.is_empty()
+        && name.len() <= 128
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+    valid.then(|| name.to_string())
+}
+
+fn tool_call_from_payload(payload: Value) -> Result<ParsedToolCall> {
     let name = payload
         .get("name")
         .and_then(Value::as_str)
@@ -600,7 +1340,7 @@ fn parse_tool_call(response: &str) -> Result<Option<ParsedToolCall>> {
     if !input.is_object() {
         anyhow::bail!("jcode tool-call envelope input must be a JSON object");
     }
-    Ok(Some(ParsedToolCall { name, input }))
+    Ok(ParsedToolCall { name, input })
 }
 
 fn next_tool_call_id() -> String {
@@ -618,6 +1358,9 @@ fn build_web_prompt(
     system: &str,
 ) -> Result<String> {
     let mut prompt = String::new();
+    prompt.push_str(
+        "Jcode web transport: you are working on the user's own computer through the Jcode tools listed below. These tools work: you call them with <jcode_tool_call> envelopes, Jcode runs them on the user's computer, and their results come back to you automatically in the next turn. Never use ChatGPT's built-in tools (Python, code execution, browsing, canvas): their sandbox is not the user's computer. The full protocol is at the end.\n\n",
+    );
     prompt.push_str("# Jcode system instructions\n\n");
     prompt.push_str(system);
     prompt.push_str("\n\n# Jcode tools available for this turn\n\n");
@@ -689,43 +1432,49 @@ fn build_web_prompt(
 
 # Mandatory Jcode web-transport protocol
 
+You CAN use the Jcode tools in this conversation. They run on the user's computer and Jcode
+returns each result to you automatically. A tool call that was rejected or failed earlier
+(an `is_error` tool result, or a system reminder about a malformed call) only means that
+particular call was wrong: fix its JSON or arguments and call it again. It never means the
+tools are unavailable. Never tell the user that you cannot use Jcode tools, run commands,
+or access their computer or files. When the user asks you to do work, start it in this
+answer by calling the tools it needs: an answer that only describes a plan ends the turn
+and nothing happens."#,
+    );
+    if !tools.is_empty() {
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
+        prompt.push_str("\n\nJcode tools you can call now: ");
+        prompt.push_str(&names.join(", "));
+        prompt.push('.');
+    }
+    prompt.push_str(
+        r#"
+
 Act as the assistant for the conversation above and obey the Jcode system instructions.
-You do not have native access to Jcode tools in this web transport. When a tool is needed,
-request exactly one tool and stop by emitting this exact envelope with raw JSON and no code fence:
+You are reached through the ChatGPT web app, but you are working for Jcode on the user's
+own computer. You DO have access to the user's files, shell and other resources: through
+the Jcode tools above. Never ask the user to paste file contents or run commands that a
+Jcode tool can do; call the tool instead. ChatGPT's built-in tools (Python, code
+execution, web browsing, image generation, canvas, file search) run in a remote sandbox,
+not on the user's computer, so their results are wrong for this task. Never use them.
+
+To call Jcode tools, put one envelope per call in your answer, with raw JSON and no code
+fence or other wrapper:
 
 <jcode_tool_call>{"name":"tool_name","input":{"argument":"value"}}</jcode_tool_call>
 
-The name must exactly match one of the advertised Jcode tools. Put every required field,
-including `intent` when its schema requires one, inside `input`. Jcode will execute the tool
-and return its result in a later conversation turn. Never claim a tool ran unless its result is
-present above. If no tool is needed, answer normally and do not emit the envelope.
+You may write a short sentence before the envelopes. Emit several envelopes only for
+independent calls. After the last envelope, stop: Jcode runs the tools and returns their
+results to you automatically in the next turn, with no action needed from the user. The name must exactly match an advertised Jcode tool. Put every
+required field, including `intent` when its schema requires one, inside `input`. Never
+claim a tool ran unless its result is present above. If no tool is needed, answer normally
+without an envelope.
+
+Jcode shows your answer in a terminal as plain Markdown. Do not use ChatGPT's rich UI
+components (tags such as <box>, <row>, <grid>, <text> or <icon>), widgets, or citations.
 "#,
     );
     Ok(prompt)
-}
-
-fn split_utf8_chunks(value: &str, max_bytes: usize) -> Vec<&str> {
-    if value.is_empty() || max_bytes == 0 {
-        return Vec::new();
-    }
-    let mut chunks = Vec::new();
-    let mut start = 0;
-    while start < value.len() {
-        let mut end = (start + max_bytes).min(value.len());
-        while end > start && !value.is_char_boundary(end) {
-            end -= 1;
-        }
-        if end == start {
-            end = value[start..]
-                .char_indices()
-                .nth(1)
-                .map(|(offset, _)| start + offset)
-                .unwrap_or(value.len());
-        }
-        chunks.push(&value[start..end]);
-        start = end;
-    }
-    chunks
 }
 
 fn utf16_fingerprint(value: &str) -> (usize, u32) {
@@ -738,116 +1487,97 @@ fn utf16_fingerprint(value: &str) -> (usize, u32) {
     (len, hash)
 }
 
-async fn evaluate(tab_id: u64, script: &str) -> Result<Value> {
-    let output = bridge_command("evaluate", json!({ "tabId": tab_id, "script": script })).await?;
-    output
-        .get("result")
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Browser evaluate response did not contain a result"))
-}
-
-async fn bridge_command(action: &str, params: Value) -> Result<Value> {
-    let binary = jcode_base::browser::browser_binary_path();
-    if !binary.exists() {
-        anyhow::bail!(
-            "Browser bridge binary is not installed. Run `jcode browser setup` once, then log in at chatgpt.com in Firefox"
-        );
-    }
-
-    let params = serde_json::to_string(&params)?;
-    let mut command = tokio::process::Command::new(binary);
-    command
-        .arg(action)
-        .arg(params)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-
-    let output = tokio::time::timeout(Duration::from_secs(45), command.output())
-        .await
-        .with_context(|| format!("Browser bridge action '{action}' timed out"))?
-        .with_context(|| format!("Failed to run browser bridge action '{action}'"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !output.status.success() {
-        let detail = match (stdout.is_empty(), stderr.is_empty()) {
-            (false, false) => format!("{stderr}\n{stdout}"),
-            (false, true) => stdout,
-            (true, false) => stderr,
-            (true, true) => format!("browser bridge action '{action}' failed"),
-        };
-        anyhow::bail!(detail);
-    }
-    if stdout.is_empty() {
-        return Ok(json!({ "ok": true }));
-    }
-    serde_json::from_str(&stdout)
-        .with_context(|| format!("Browser bridge action '{action}' returned invalid JSON"))
-}
+#[cfg(test)]
+#[path = "chatgpt_web/envelope_tests.rs"]
+mod envelope_tests;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn tool_call_parser_accepts_valid_exact_envelope() {
-        let parsed = parse_tool_call(
-            "  <jcode_tool_call>{\"name\":\"bash\",\"input\":{\"command\":\"pwd\",\"intent\":\"Check cwd\"}}</jcode_tool_call>\n",
+    fn stream_preview_shows_size_and_a_flat_tail() {
+        assert_eq!(
+            stream_preview("GPT-6", &[], 0),
+            "GPT-6 is writing (0 chars)"
+        );
+        let long = "word ".repeat(30) + "\n\nend   of\tline";
+        let preview = stream_preview("GPT-6", &["first", &long], 160);
+        assert!(preview.starts_with("GPT-6 is writing (160 chars): …"));
+        assert!(preview.ends_with("end of line"));
+        assert!(!preview.contains('\n'));
+        let tail = preview.split_once(": …").unwrap().1;
+        assert_eq!(tail.chars().count(), 60);
+    }
+
+    #[test]
+    fn network_placeholder_is_unique_per_turn() {
+        assert_eq!(
+            placeholder_for("jcode-a-stream"),
+            "jcode turn jcode-a-stream"
+        );
+        assert_ne!(placeholder_for("jcode-a"), placeholder_for("jcode-b"));
+    }
+
+    #[test]
+    fn transcript_answer_keeps_progress_notes_and_final_text() {
+        assert_eq!(
+            transcript_answer(&["  Checking.  ", "", "Final."]),
+            "Checking.\n\nFinal."
+        );
+        assert_eq!(transcript_answer(&["", " "]), "");
+    }
+
+    #[tokio::test]
+    async fn multiple_calls_stream_as_one_tool_use_round_with_preamble_text() {
+        let (tx, mut rx) = mpsc::channel(32);
+        emit_response(
+            &tx,
+            "Looking.\n<jcode_tool_call>{\"name\":\"read\",\"input\":{\"path\":\"a\"}}</jcode_tool_call><jcode_tool_call>{\"name\":\"bash\",\"input\":{\"command\":\"ls\"}}</jcode_tool_call>",
+            &["read".to_string(), "bash".to_string()],
         )
-        .unwrap()
+        .await
         .unwrap();
-        assert_eq!(parsed.name, "bash");
-        assert_eq!(parsed.input["command"], "pwd");
-    }
-
-    #[test]
-    fn tool_call_parser_rejects_incomplete_envelope() {
-        let err = parse_tool_call("<jcode_tool_call>{\"name\":\"bash\"}")
-            .err()
-            .expect("incomplete marker should fail");
-        assert!(err.to_string().contains("entire response"));
-    }
-
-    #[test]
-    fn tool_call_parser_rejects_quoted_or_suffixed_envelope() {
-        for response in [
-            "Example: <jcode_tool_call>{\"name\":\"bash\",\"input\":{}}</jcode_tool_call>",
-            "<jcode_tool_call>{\"name\":\"bash\",\"input\":{}}</jcode_tool_call> done",
-        ] {
-            let err = parse_tool_call(response)
-                .err()
-                .expect("non-exact tool envelope should fail closed");
-            assert!(err.to_string().contains("entire response"));
+        drop(tx);
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event.unwrap());
         }
+        assert!(matches!(&events[0], StreamEvent::TextDelta(text) if text == "Looking."));
+        let starts: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::ToolUseStart { id, name } => Some((id.clone(), name.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts.len(), 2);
+        assert_ne!(starts[0].0, starts[1].0);
+        for (id, _) in &starts {
+            assert!(events.iter().any(|event| matches!(event, StreamEvent::ToolInputDeltaFor { id: delta_id, .. } if delta_id == id)));
+            assert!(events.iter().any(
+                |event| matches!(event, StreamEvent::ToolUseEndFor { id: end_id } if end_id == id)
+            ));
+        }
+        assert!(matches!(
+            events.last(),
+            Some(StreamEvent::MessageEnd { stop_reason: Some(reason) }) if reason == "tool_use"
+        ));
     }
 
-    #[test]
-    fn tool_call_parser_rejects_non_object_input() {
-        let err = parse_tool_call(
-            "<jcode_tool_call>{\"name\":\"bash\",\"input\":[\"not\",\"an\",\"object\"]}</jcode_tool_call>",
+    #[tokio::test]
+    async fn unknown_tool_in_any_envelope_fails_before_emitting_calls() {
+        let (tx, mut rx) = mpsc::channel(32);
+        let error = emit_response(
+            &tx,
+            "<jcode_tool_call>{\"name\":\"bash\",\"input\":{}}</jcode_tool_call><jcode_tool_call>{\"name\":\"python\",\"input\":{}}</jcode_tool_call>",
+            &["bash".to_string()],
         )
-        .err()
-        .expect("array tool input should fail");
-        assert!(err.to_string().contains("JSON object"));
-    }
-
-    #[test]
-    fn tool_call_parser_allows_marker_text_inside_json_string_values() {
-        let parsed = parse_tool_call(
-            "<jcode_tool_call>{\"name\":\"bash\",\"input\":{\"command\":\"printf '</jcode_tool_call>'\"}}</jcode_tool_call>",
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(parsed.input["command"], "printf '</jcode_tool_call>'");
-    }
-
-    #[test]
-    fn utf8_chunking_preserves_content_and_boundaries() {
-        let value = "ab😀cdéfg";
-        let chunks = split_utf8_chunks(value, 4);
-        assert_eq!(chunks.concat(), value);
-        assert!(chunks.iter().all(|chunk| chunk.len() <= 4));
+        .await
+        .expect_err("unknown tool should fail");
+        assert!(error.to_string().contains("unknown jcode tool 'python'"));
+        drop(tx);
+        assert!(rx.recv().await.is_none());
     }
 
     #[test]
@@ -858,19 +1588,88 @@ mod tests {
     }
 
     #[test]
-    fn page_verification_requires_exact_pro_and_temporary_chat() {
-        assert!(page_verification_ready(
-            &json!({ "model": "Pro", "temporary": true })
-        ));
-        assert!(!page_verification_ready(
-            &json!({ "model": "", "temporary": true })
-        ));
-        assert!(!page_verification_ready(
-            &json!({ "model": "Instant", "temporary": true })
-        ));
-        assert!(!page_verification_ready(
-            &json!({ "model": "Pro", "temporary": false })
-        ));
+    fn page_verification_requires_exact_model_effort_and_temporary_chat() {
+        for label in ["GPT-6", "GPT-5.6 Sol", "GPT-5.5"] {
+            assert!(page_verification_ready(
+                &json!({"model":label,"effort":"medium","temporary":true}),
+                label,
+                "medium"
+            ));
+            assert!(!page_verification_ready(
+                &json!({"model":"other","effort":"medium","temporary":true}),
+                label,
+                "medium"
+            ));
+            assert!(!page_verification_ready(
+                &json!({"model":label,"effort":"none","temporary":true}),
+                label,
+                "medium"
+            ));
+            assert!(!page_verification_ready(
+                &json!({"model":label,"effort":"medium","temporary":false}),
+                label,
+                "medium"
+            ));
+        }
+    }
+
+    #[test]
+    fn over_long_prompt_is_reported_as_a_context_limit_so_jcode_compacts() {
+        let raw = anyhow::anyhow!(
+            "ChatGPT web rejected the request: HTTP 413: {{\"detail\":{{\"code\":\"message_length_exceeds_limit\"}}}}"
+        );
+        let text = format!("{:#}", explain_turn_error(raw, 1_000)).to_lowercase();
+        // Same predicate as jcode's context-limit auto-compaction.
+        assert!(text.contains("context length"), "{text}");
+        assert!(
+            text.starts_with("chatgpt web rejected the prompt"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn empty_answer_to_a_huge_prompt_is_reported_as_a_context_limit() {
+        let state = json!({"shape": "text finished_successfully stop 0 chars"});
+        let empty = || {
+            anyhow::anyhow!(
+                "ChatGPT completed the turn without an assistant response{}",
+                empty_answer_detail(&[], &state)
+            )
+        };
+        let huge = format!("{:#}", explain_turn_error(empty(), 900_000));
+        assert!(huge.to_lowercase().contains("context length"), "{huge}");
+        assert!(
+            huge.contains("(reply: text finished_successfully stop 0 chars)"),
+            "{huge}"
+        );
+        // A small prompt, or ChatGPT answering with its own tools, is not a size problem.
+        let small = format!("{:#}", explain_turn_error(empty(), 1_000));
+        assert!(!small.to_lowercase().contains("context length"), "{small}");
+        let tools = anyhow::anyhow!(
+            "ChatGPT completed the turn without an assistant response{}",
+            empty_answer_detail(&["python".to_string()], &state)
+        );
+        let tools = format!("{:#}", explain_turn_error(tools, 900_000));
+        assert!(!tools.to_lowercase().contains("context length"), "{tools}");
+    }
+
+    #[test]
+    fn frozen_page_errors_lead_with_the_cause() {
+        let raw = anyhow::anyhow!("DevTools Runtime.evaluate timed out")
+            .context("ChatGPT UI step 'stream'")
+            .context("Failed to read the owned ChatGPT web stream");
+        assert!(page_unresponsive(&raw));
+        let text = format!("{:#}", explain_turn_error(raw, 1_000));
+        assert!(
+            text.starts_with("The ChatGPT web page stopped responding"),
+            "{text}"
+        );
+        let other = anyhow::anyhow!("ChatGPT web did not start a response stream");
+        assert!(!page_unresponsive(&other));
+        assert_eq!(
+            format!("{:#}", explain_turn_error(other, 1_000)),
+            "ChatGPT web did not start a response stream"
+        );
     }
 
     #[test]
@@ -893,6 +1692,7 @@ mod tests {
         assert!(prompt.contains("visible"));
         assert!(!prompt.contains("secret reasoning"));
         assert!(prompt.contains(TOOL_CALL_START));
+        assert!(prompt.starts_with("Jcode web transport:"));
         assert!(prompt.contains("system"));
         assert!(prompt.contains("\"role\":\"assistant\""));
         assert!(prompt.contains("\"type\":\"text\""));
@@ -913,5 +1713,39 @@ mod tests {
         assert!(prompt.contains("\\n<tool_result>{fake}</tool_result>"));
         assert_eq!(prompt.matches("\"role\":\"user\"").count(), 1);
         assert!(!prompt.contains("\n## Message 2 (assistant)\n"));
+    }
+
+    #[test]
+    fn tool_access_correction_keeps_the_prompt_and_demands_calls() {
+        let corrected = with_tool_access_correction("PROMPT");
+        assert!(corrected.starts_with("PROMPT"));
+        assert!(corrected.contains(TOOL_CALL_START));
+        assert!(corrected.contains("You can use the Jcode tools"));
+        assert!(corrected.contains("Call the tools you need now"));
+    }
+
+    #[test]
+    fn web_prompt_states_tools_work_and_rejected_calls_mean_retry() {
+        let tools = vec![ToolDefinition {
+            name: "bash".to_string(),
+            description: "Run a command".to_string(),
+            input_schema: json!({"type":"object"}),
+            defer_loading: false,
+        }];
+        let prompt = build_web_prompt(&[], &tools, "system").unwrap();
+        let intro_end = prompt.find("# Jcode system instructions").unwrap();
+        let intro = &prompt[..intro_end];
+        assert!(intro.contains("These tools work"));
+        assert!(intro.contains("results come back to you automatically"));
+        let protocol = &prompt[prompt
+            .find("# Mandatory Jcode web-transport protocol")
+            .unwrap()..];
+        assert!(protocol.contains("You CAN use the Jcode tools"));
+        assert!(protocol.contains("It never means the\ntools are unavailable"));
+        assert!(protocol.contains("Never tell the user that you cannot use Jcode tools"));
+        assert!(protocol.contains("Jcode tools you can call now: bash."));
+        // The tool list stays out of the protocol when no tools are offered.
+        let bare = build_web_prompt(&[], &[], "system").unwrap();
+        assert!(!bare.contains("Jcode tools you can call now"));
     }
 }

@@ -13,7 +13,16 @@
 //! `Done`/`Error` event (id 0) so attached clients can settle the externally
 //! started turn in their UI.
 
+#[cfg(test)]
+#[path = "headless_live_turn_tests.rs"]
+mod headless_live_turn_tests;
+
+#[cfg(test)]
+#[path = "headless_durable_recovery_tests.rs"]
+mod headless_durable_recovery_tests;
+
 use super::turn_failover::process_reserved_locked_context_with_server_failover;
+use super::usage_limit_resume::ResumeOutcome;
 use super::{
     SwarmEvent, SwarmMember, truncate_detail, update_member_status,
     update_member_status_with_report,
@@ -26,7 +35,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 #[cfg(test)]
 use tokio::sync::Mutex;
-use tokio::sync::{OwnedMutexGuard, RwLock, broadcast};
+use tokio::sync::{OwnedMutexGuard, RwLock, broadcast, mpsc};
 
 use super::SessionAgents;
 
@@ -39,6 +48,9 @@ pub(super) struct LiveTurnSwarmContext {
     pub event_history: Arc<RwLock<VecDeque<SwarmEvent>>>,
     pub event_counter: Arc<AtomicU64>,
     pub event_tx: broadcast::Sender<SwarmEvent>,
+    pub recovered_assignment: Option<super::recovered_assignment::RecoveredAssignment>,
+    pub recovery_reload_id: Option<String>,
+    pub recovery_swarm: Option<super::SwarmState>,
 }
 
 impl LiveTurnSwarmContext {
@@ -55,12 +67,61 @@ impl LiveTurnSwarmContext {
             event_history: Arc::clone(event_history),
             event_counter: Arc::clone(event_counter),
             event_tx: event_tx.clone(),
+            recovered_assignment: None,
+            recovery_reload_id: None,
+            recovery_swarm: None,
         }
+    }
+
+    /// Owned callback future, also usable by the restored provider-wait runner.
+    pub(super) fn on_wait(
+        &self,
+        plan: &super::usage_limit_resume::UsageLimitResumePlan,
+    ) -> futures::future::BoxFuture<'static, ()> {
+        let assignment = self.recovered_assignment.clone();
+        let plan = plan.clone();
+        Box::pin(async move {
+            if let Some(assignment) = assignment {
+                assignment.on_wait(&plan).await;
+            }
+        })
     }
 }
 
-/// Reserve the live agent for `session_id` when the session has at least one
-/// live client attachment and its agent is currently idle.
+/// A restored headless Agent is live without any client event receiver. A
+/// detached TUI is not. Terminal or deliberately suspended workers must not
+/// restart merely because a notification or resume-all sweep reaches them.
+pub(super) fn member_accepts_automatic_turn(member: &SwarmMember) -> bool {
+    !matches!(
+        member.status.as_str(),
+        "stopped" | "completed" | "done" | "suspended" | "paused"
+    ) && (member.is_headless
+        || !member.event_tx.is_closed()
+        || member.event_txs.values().any(|tx| !tx.is_closed()))
+        && !super::usage_limit_resume::has_pending_resume(&member.session_id)
+}
+
+/// An explicit resume sweep continues unanswered work, never an empty or
+/// already answered conversation. The caller still owns the Agent reservation.
+pub(super) fn live_session_owes_continuation(agent: &Agent) -> bool {
+    if agent.visible_conversation_message_count() == 0 {
+        return false;
+    }
+    super::reload_recovery::peek_for_session(agent.session_id())
+        .ok()
+        .flatten()
+        .is_some_and(|record| {
+            record.status == super::reload_recovery::ReloadRecoveryStatus::Pending
+        })
+        || super::client_session::session_was_interrupted_by_reload(agent)
+        || matches!(
+            agent.last_visible_conversation_role(),
+            Some(crate::message::Role::User)
+        )
+}
+
+/// Reserve a live, eligible session's idle agent, including a restored headless
+/// worker whose event receivers did not survive the restart.
 ///
 /// The returned guard *is* the reservation: it stays held until the tracked
 /// turn finishes, so two concurrent wakes cannot both observe the agent as
@@ -70,28 +131,29 @@ pub(super) async fn idle_live_agent(
     sessions: &SessionAgents,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) -> Option<OwnedMutexGuard<Agent>> {
+    if !swarm_members
+        .read()
+        .await
+        .get(session_id)
+        .is_some_and(member_accepts_automatic_turn)
+    {
+        return None;
+    }
     let agent =
         super::worker_revive::live_or_revived_agent(session_id, sessions, swarm_members).await?;
 
-    // Headless workers never have a client attachment by design, and members
-    // restored from disk after a server restart carry a closed placeholder
-    // channel. Both are still server-drivable, so they must remain wakeable:
-    // otherwise a wake falls back to a soft-interrupt queue that an idle agent
-    // never drains, and the worker silently stays idle.
-    let can_drive = {
+    let agent = agent.try_lock_owned().ok()?;
+    let eligible = {
         let members = swarm_members.read().await;
         members
             .get(session_id)
-            .map(|member| {
-                member.is_headless || !member.event_txs.is_empty() || !member.event_tx.is_closed()
-            })
+            .map(member_accepts_automatic_turn)
             .unwrap_or(false)
     };
-    if !can_drive {
+    if !eligible {
         return None;
     }
 
-    let agent = agent.try_lock_owned().ok()?;
     // A session that moved to another machine (or a stale copy) cannot run
     // turns here. Starting one only produces a lease error per wake, so leave
     // the wake queued for whichever copy is runnable.
@@ -110,12 +172,43 @@ pub(super) async fn idle_live_agent(
 /// finish rendering the externally started turn.
 pub(super) async fn spawn_tracked_live_turn(
     session_id: &str,
+    agent: OwnedMutexGuard<Agent>,
+    message: String,
+    system_reminder: Option<String>,
+    display_role: Option<crate::session::StoredDisplayRole>,
+    status_detail: Option<String>,
+    swarm: LiveTurnSwarmContext,
+) -> bool {
+    // Direct callers can explicitly replace a waiting turn. Automatic wake
+    // callers have already refused sessions whose provider wait still owns it.
+    super::usage_limit_resume::cancel_pending_resume(session_id);
+    let publication = super::swarm::begin_turn_publication(session_id).await;
+    spawn_tracked_live_turn_with_publication(
+        session_id,
+        agent,
+        message,
+        system_reminder,
+        display_role,
+        status_detail,
+        swarm,
+        publication,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "startup reserves publication before exposing the recovered runtime"
+)]
+pub(super) async fn spawn_tracked_live_turn_with_publication(
+    session_id: &str,
     mut agent: OwnedMutexGuard<Agent>,
     message: String,
     system_reminder: Option<String>,
     display_role: Option<crate::session::StoredDisplayRole>,
     status_detail: Option<String>,
     swarm: LiveTurnSwarmContext,
+    publication: Arc<super::swarm::TurnPublication>,
 ) -> bool {
     let Ok(_admission) = crate::runtime_activity::global().try_enter_session(session_id) else {
         return false;
@@ -132,19 +225,42 @@ pub(super) async fn spawn_tracked_live_turn(
     {
         agent.set_inline_output_tap(true);
     }
-    update_member_status(
-        session_id,
-        "running",
-        status_detail,
-        &swarm.members,
-        &swarm.swarms_by_id,
-        Some(&swarm.event_history),
-        Some(&swarm.event_counter),
-        Some(&swarm.event_tx),
-    )
-    .await;
+    let mut accepted = false;
+    publication
+        .publish_start(async {
+            if !swarm
+                .members
+                .read()
+                .await
+                .get(session_id)
+                .is_some_and(|member| {
+                    member_accepts_automatic_turn(member)
+                        || swarm.recovery_reload_id.is_some()
+                            && super::reload_recovery::has_pending_for_session(session_id)
+                })
+            {
+                return;
+            }
+            update_member_status(
+                session_id,
+                "running",
+                status_detail,
+                &swarm.members,
+                &swarm.swarms_by_id,
+                Some(&swarm.event_history),
+                Some(&swarm.event_counter),
+                Some(&swarm.event_tx),
+            )
+            .await;
+            super::swarm_persistence::persist_member_lifecycle(session_id, &swarm.members).await;
+            accepted = true;
+        })
+        .await;
+    if !accepted {
+        return false;
+    }
 
-    let (fallback, _) = tokio::sync::mpsc::unbounded_channel();
+    let (fallback, _) = mpsc::unbounded_channel();
     let events = super::state::TurnEventChannel::new(
         session_id.to_string(),
         Arc::clone(&swarm.members),
@@ -153,89 +269,204 @@ pub(super) async fn spawn_tracked_live_turn(
     );
     let event_tx = events.sender();
     let session_id = session_id.to_string();
+    let agent_arc = OwnedMutexGuard::mutex(&agent).clone();
     crate::runtime_activity::spawn_session(&session_id.clone(), async move {
         let start_message_index = agent.message_count();
+        let resume_reminder = system_reminder.clone();
         let pending_queue = agent.soft_interrupt_queue();
+        let signal = agent.graceful_shutdown_signal();
         let (result, stop_reason) = catch_live_turn_panic(async {
-            process_reserved_locked_context_with_server_failover(
-                &mut agent,
-                &turn_lease,
-                &message,
-                system_reminder,
-                display_role.unwrap_or(crate::session::StoredDisplayRole::System),
-                event_tx.clone(),
-            )
-            .await
+            publication
+                .run(
+                    signal,
+                    process_reserved_locked_context_with_server_failover(
+                        &mut agent,
+                        &turn_lease,
+                        &message,
+                        system_reminder,
+                        display_role.unwrap_or(crate::session::StoredDisplayRole::System),
+                        event_tx.clone(),
+                    ),
+                )
+                .await
+                .unwrap_or(Ok(()))
         })
         .await;
-        let completion_report = agent.recent_assistant_output_tail_after(start_message_index);
+        let completion_report = result
+            .is_ok()
+            .then(|| agent.latest_assistant_text_after(start_message_index))
+            .flatten();
+        // A usage limit that resets later is a pause, not a failure: wait for
+        // the reset and continue the same turn (bounded, see
+        // usage_limit_resume). Other errors and panics fail as before.
+        let (result, completion_report, mut reservation) = match result {
+            Err(error) if stop_reason == crate::protocol::TurnStopReason::Failure => {
+                match super::usage_limit_resume::resume_turn_after_usage_limit_with_publication(
+                    agent_arc,
+                    Some(agent),
+                    &session_id,
+                    error,
+                    resume_reminder,
+                    &event_tx,
+                    &swarm,
+                    &|plan| swarm.on_wait(plan),
+                    Some(&publication),
+                    Some(&turn_lease),
+                )
+                .await
+                {
+                    ResumeOutcome::NotUsageLimit { error, guard } => {
+                        (Err((error, None)), None, guard)
+                    }
+                    ResumeOutcome::Failed {
+                        error,
+                        retry_after_secs,
+                        guard,
+                    } => (Err((error, retry_after_secs)), None, guard),
+                    ResumeOutcome::Completed {
+                        guard,
+                        completion_report,
+                    } => (Ok(()), completion_report, Some(guard)),
+                    ResumeOutcome::Superseded => return,
+                }
+            }
+            Err(error) => {
+                let retry_after_secs = super::usage_limit_resume::error_retry_after_secs(&error);
+                (Err((error, retry_after_secs)), None, Some(agent))
+            }
+            Ok(()) => (Ok(()), completion_report, Some(agent)),
+        };
         // Keep the reservation until after the terminal status is published.
         // Releasing it earlier lets a follow-up wake reserve the agent and
         // publish `running`, which this turn's later `ready`/`failed` would
         // then overwrite, hiding the newer turn and suppressing its
         // coordinator completion notification.
-        let mut reservation = agent;
         let pending = pending_queue.lock().map(|queue| queue.len()).unwrap_or(0);
         if pending > 0 {
             let _ = event_tx.send(ServerEvent::SoftInterruptQueue { pending });
         }
-        match result {
-            Ok(()) => {
-                update_member_status_with_report(
-                    &session_id,
-                    "ready",
-                    None,
-                    completion_report,
-                    &swarm.members,
-                    &swarm.swarms_by_id,
-                    Some(&swarm.event_history),
-                    Some(&swarm.event_counter),
-                    Some(&swarm.event_tx),
-                )
+        if let (Err((error, _)), Some(agent)) = (&result, reservation.as_mut()) {
+            let message = crate::util::format_error_chain(error);
+            publication
+                .publish_start(async {
+                    if let Err(persist_error) = agent.persist_turn_error(&message) {
+                        crate::logging::warn(&format!(
+                            "Could not persist failed turn for {session_id}: {persist_error:#}"
+                        ));
+                    }
+                })
                 .await;
-                let _ = event_tx.send(ServerEvent::Done { id: 0 });
-            }
-            Err(error) => {
-                let message = crate::util::format_error_chain(&error);
-                if let Err(persist_error) = reservation.persist_turn_error(&message) {
-                    crate::logging::error(&format!(
-                        "Could not persist failed live turn for {}: {:#}",
-                        session_id, persist_error
-                    ));
-                }
-                crate::logging::error(&format!(
-                    "Server-initiated turn failed for live session {}: {}",
-                    session_id, error
-                ));
-                update_member_status_with_report(
-                    &session_id,
-                    "failed",
-                    Some(truncate_detail(&error.to_string(), 120)),
-                    completion_report,
-                    &swarm.members,
-                    &swarm.swarms_by_id,
-                    Some(&swarm.event_history),
-                    Some(&swarm.event_counter),
-                    Some(&swarm.event_tx),
-                )
-                .await;
-                let _ = event_tx.send(ServerEvent::TurnStopped {
-                    reason: stop_reason,
-                    message: message.clone(),
-                    provider_stop_reason: None,
-                });
-                let _ = event_tx.send(ServerEvent::Error {
-                    id: 0,
-                    message,
-                    retry_after_secs: None,
-                });
-            }
         }
+        complete_live_turn(
+            &session_id,
+            &publication,
+            result,
+            completion_report,
+            stop_reason,
+            &event_tx,
+            &swarm,
+        )
+        .await;
         drop(reservation);
         events.finish().await;
         drop(turn_lease);
-    })
-    .is_some()
+    });
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn complete_live_turn(
+    session_id: &str,
+    publication: &super::swarm::TurnPublication,
+    result: Result<(), (anyhow::Error, Option<u64>)>,
+    completion_report: Option<String>,
+    stop_reason: crate::protocol::TurnStopReason,
+    event_tx: &tokio::sync::mpsc::UnboundedSender<ServerEvent>,
+    swarm: &LiveTurnSwarmContext,
+) {
+    publication
+        .complete(async {
+            if let Some(reload_id) = &swarm.recovery_reload_id {
+                super::reload_trace::record_value(
+                    reload_id,
+                    if result.is_ok() {
+                        "continuation_finished"
+                    } else {
+                        "continuation_failed"
+                    },
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "source": "server_startup_headless",
+                        "status": if result.is_ok() { "ready" } else { "failed" },
+                        "error": result.as_ref().err().map(|(error, _)| error.to_string()),
+                    }),
+                );
+            }
+            if let Some(assignment) = &swarm.recovered_assignment {
+                let error = result.as_ref().err().map(|(error, _)| error.to_string());
+                assignment.complete(result.is_ok(), error.as_deref()).await;
+            }
+            match result {
+                Ok(()) => {
+                    update_member_status_with_report(
+                        session_id,
+                        "ready",
+                        None,
+                        completion_report,
+                        &swarm.members,
+                        &swarm.swarms_by_id,
+                        Some(&swarm.event_history),
+                        Some(&swarm.event_counter),
+                        Some(&swarm.event_tx),
+                    )
+                    .await;
+                    let _ = event_tx.send(ServerEvent::Done { id: 0 });
+                }
+                Err((error, retry_after_secs)) => {
+                    crate::logging::error(&format!(
+                        "Server-initiated turn failed for live session {}: {}",
+                        session_id, error
+                    ));
+                    update_member_status(
+                        session_id,
+                        "failed",
+                        Some(truncate_detail(&error.to_string(), 120)),
+                        &swarm.members,
+                        &swarm.swarms_by_id,
+                        Some(&swarm.event_history),
+                        Some(&swarm.event_counter),
+                        Some(&swarm.event_tx),
+                    )
+                    .await;
+                    let _ = event_tx.send(ServerEvent::TurnStopped {
+                        reason: stop_reason,
+                        message: crate::util::format_error_chain(&error),
+                        provider_stop_reason: None,
+                    });
+                    let _ = event_tx.send(ServerEvent::Error {
+                        id: 0,
+                        message: crate::util::format_error_chain(&error),
+                        retry_after_secs,
+                        server_resumes: false,
+                    });
+                }
+            }
+            if let Some(state) = &swarm.recovery_swarm {
+                let swarm_id = state
+                    .members
+                    .read()
+                    .await
+                    .get(session_id)
+                    .and_then(|member| member.swarm_id.clone());
+                if let Some(swarm_id) = swarm_id {
+                    super::persist_swarm_state_for(&swarm_id, state).await;
+                }
+            } else {
+                super::swarm_persistence::persist_member_lifecycle(session_id, &swarm.members)
+                    .await;
+            }
+        })
+        .await;
 }
 
 /// Run `message` immediately as a tracked turn if the session is live and

@@ -43,6 +43,44 @@ fn session(id: &str) -> SessionInfo {
     }
 }
 
+#[test]
+fn enter_after_tab_waits_for_the_edited_query() {
+    let mut old = session("old");
+    old.last_message_time += chrono::Duration::seconds(1);
+    let mut picker = SessionPicker::new(vec![old, session("needle")]);
+    assert_eq!(picker.selected_session().unwrap().id, "old");
+    picker.activate_search();
+    for c in "needle".chars() {
+        picker
+            .handle_overlay_key(KeyCode::Char(c), KeyModifiers::NONE)
+            .unwrap();
+    }
+    assert!(picker.search_edit_pending);
+    picker
+        .handle_overlay_key(KeyCode::Tab, KeyModifiers::NONE)
+        .unwrap();
+    assert!(!picker.search_active);
+    assert!(matches!(
+        picker
+            .handle_overlay_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap(),
+        OverlayAction::Continue
+    ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let action = loop {
+        if let Some(action) = picker.poll_search_submission() {
+            break action;
+        }
+        assert!(Instant::now() < deadline, "query submission timed out");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert!(matches!(action, OverlayAction::Selected(
+        PickerResult::SelectedInCurrentTerminal(targets)
+        | PickerResult::SelectedInNewTerminal(targets)
+    ) if matches!(targets.as_slice(), [ResumeTarget::CodexSession { session_id, .. }]
+        if session_id == "needle")));
+}
+
 fn pending_picker() -> (SessionPicker, mpsc::Sender<(String, SearchRank)>) {
     let mut picker = SessionPicker::new(vec![session("stale"), session("best")]);
     picker.search_active = true;

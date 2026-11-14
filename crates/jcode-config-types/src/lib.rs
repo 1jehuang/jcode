@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+mod claude_code;
+pub use claude_code::{
+    CLAUDE_CODE_BIN_ENV, CLAUDE_CODE_DEFAULT_BINARY, CLAUDE_CODE_DEFAULT_INSTANCE_ID,
+    ClaudeCodeConfig, ClaudeCodeInstanceConfig, is_valid_claude_code_instance_id,
+};
 mod display;
 mod update_policy;
 pub use update_policy::{CrossProviderFailoverMode, UpdateChannel};
@@ -8,7 +13,7 @@ mod power;
 mod session;
 pub use session::{HibernationMode, SessionConfig};
 pub use {
-    display::{DisplayConfig, ResumeOpenElsewhere, ResumeTimeMode},
+    display::{DisplayConfig, InfoWidgetLayout, ResumeOpenElsewhere, ResumeTimeMode},
     menubar::MenubarConfig,
     power::PowerConfig,
 };
@@ -392,6 +397,33 @@ pub enum NamedProviderAuth {
 #[serde(default)]
 pub struct NamedProviderModelConfig {
     pub id: String,
+    /// Whether this route accepts chat-completion requests. `false` keeps
+    /// generation-only models out of the chat picker while preserving their
+    /// model IDs for other provider APIs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_chat: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_thinking: Option<bool>,
+    /// Output modalities returned by the model (for example `text`, `image`,
+    /// or `video`). This is descriptive and does not imply matching input.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_endpoints: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_tool_calls: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_streaming: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_structured_outputs: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<usize>,
+    /// Model-specific OpenAI-compatible reasoning effort values, in any order.
+    /// The runtime normalizes these to Jcode's canonical effort names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_efforts: Vec<String>,
     /// Explicitly enable or disable `/effort` for this model. When omitted,
     /// the provider-level setting and built-in model-family detection apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -449,6 +481,30 @@ pub struct NamedProviderConfig {
     /// Must be a JSON object; keys here override jcode-generated body fields.
     #[serde(default, alias = "extra-body", skip_serializing_if = "Option::is_none")]
     pub extra_body: Option<serde_json::Value>,
+    /// Kimi partial-mode thinking prefill seed. When set, a final assistant
+    /// message with `partial: true`, empty `content`, and this string in
+    /// `reasoning_content` is appended to requests for Kimi-family models, so
+    /// the model continues the seeded thinking instead of starting deliberation
+    /// from scratch (Moonshot partial mode). Only sent when the active model is
+    /// a Kimi model and the endpoint is not a strict OpenAI-schema endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_prefill: Option<String>,
+    /// Optional `name` field for the partial-mode prefill message, anchoring
+    /// the response voice to a character (Moonshot docs: "compelling it to
+    /// output content in the voice of the specified character").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_name: Option<String>,
+    /// Apply the profile's `thinking_prefill` to every model on this profile,
+    /// not only Kimi-family models. Some gateways (GLM proxies, z.ai coding
+    /// endpoints) accept the partial-mode assistant prefill for non-Kimi
+    /// models too; this opts the profile in explicitly. The strict
+    /// OpenAI-schema suppression still applies.
+    #[serde(
+        default,
+        alias = "thinking-prefill-non-kimi",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub thinking_prefill_non_kimi: bool,
     /// Whether this endpoint accepts the DeepSeek-style top-level
     /// `reasoning_effort` request field (`/effort` support). When unset, jcode
     /// auto-detects it from the active model id (DeepSeek-family models
@@ -486,6 +542,9 @@ impl Default for NamedProviderConfig {
             allow_provider_pinning: false,
             models: Vec::new(),
             extra_body: None,
+            thinking_prefill: None,
+            prefill_name: None,
+            thinking_prefill_non_kimi: false,
             supports_reasoning_effort: None,
             disable_reasoning_heuristics: false,
         }
@@ -1036,6 +1095,9 @@ pub struct KeybindingsConfig {
     pub scroll_prompt_down: String,
     /// Scroll bookmark toggle key (default: "ctrl+g")
     pub scroll_bookmark: String,
+    /// Jump to the bottom of the chat and resume auto-follow (default:
+    /// "ctrl+end, alt+q"). Comma-separate aliases. Set "" to disable.
+    pub scroll_to_bottom: String,
     /// Toggle auto-poke (default: "ctrl+p"). Set "" to disable.
     pub auto_poke_toggle: String,
     /// Scroll up fallback key (default: unset; Cmd+K moves up by prompt on macOS)
@@ -1113,6 +1175,7 @@ impl Default for KeybindingsConfig {
             scroll_prompt_up: get("scroll_prompt_up", "ctrl+["),
             scroll_prompt_down: get("scroll_prompt_down", "ctrl+]"),
             scroll_bookmark: get("scroll_bookmark", "ctrl+g"),
+            scroll_to_bottom: get("scroll_to_bottom", "ctrl+end, alt+q"),
             auto_poke_toggle: get("auto_poke_toggle", "ctrl+p"),
             scroll_up_fallback: get("scroll_up_fallback", ""),
             scroll_down_fallback: get("scroll_down_fallback", ""),
@@ -1260,8 +1323,12 @@ pub struct ProviderConfig {
     /// Whether jcode should automatically try another account on the same provider
     /// before falling back to a different provider.
     pub same_provider_account_failover: bool,
+    /// After failover moved a session to another account, move it back to
+    /// the preferred account at the start of a turn once that account's
+    /// usage limit has reset.
+    pub account_failover_return_home: bool,
     /// Automatically redeem an earned OpenAI banked reset when weekly OAuth
-    /// usage is exhausted. Never purchases credits. Enabled by default.
+    /// usage is exhausted. Never purchases credits. Disabled by default.
     pub openai_auto_banked_reset: bool,
     /// Automatically redeem earned Anthropic Fable resets for exhausted weekly
     /// OAuth usage. Never purchases credits. Disabled by default.
@@ -1272,6 +1339,13 @@ pub struct ProviderConfig {
     /// Copilot premium request mode: "normal", "one", or "zero"
     /// "zero" means all requests are free (no premium requests consumed)
     pub copilot_premium: Option<String>,
+    /// Enterprise host for Copilot OAuth, GitHub REST, and inference endpoints.
+    pub copilot_enterprise_url: Option<String>,
+    /// Browser executable jcode runs ChatGPT `[web]` models in. Defaults to the
+    /// installed Google Chrome or Chromium. Set it to the browser your ChatGPT
+    /// account is signed into (for example Brave) so the session and its cookies
+    /// match. `JCODE_CHATGPT_WEB_CHROME` overrides this.
+    pub chatgpt_web_browser: Option<String>,
     /// Pin the `gemini` provider to Code Assist OAuth even when a Gemini
     /// Developer API key (`gemini.env` / `GEMINI_API_KEY`) is present. Without
     /// this an API key silently wins and every turn bills per token on the
@@ -1299,6 +1373,8 @@ pub struct ProviderConfig {
     /// Maximum exponential-backoff delay between transient-error retries.
     /// Default: 30 seconds. Overridable via `JCODE_RETRY_BACKOFF_CAP_SECS`.
     pub retry_backoff_cap_secs: u64,
+    /// `[provider.claude_code]`: Claude through the local Claude Code CLI.
+    pub claude_code: ClaudeCodeConfig,
     /// Request-body compression policy: "auto" (compress only when the
     /// measured uplink makes it faster), "always", or "off". Applies only to
     /// endpoints verified to accept it: gzip (Anthropic, ChatGPT HTTPS), zstd
@@ -1324,16 +1400,20 @@ impl Default for ProviderConfig {
             exhausted_usage_immediate_failover: true,
             anthropic_retry_recoverable_rate_limits: true,
             same_provider_account_failover: true,
-            openai_auto_banked_reset: true,
+            account_failover_return_home: true,
+            openai_auto_banked_reset: false,
             anthropic_auto_fable_reset: false,
             auto_reset_only_when_no_routes: true,
             copilot_premium: None,
+            copilot_enterprise_url: None,
+            chatgpt_web_browser: None,
             gemini_force_oauth: false,
             gemini_project: None,
             model_picker_providers: None,
             stream_idle_timeout_secs: 180,
             max_retries: 8,
             retry_backoff_cap_secs: 30,
+            claude_code: ClaudeCodeConfig::default(),
             request_compression: "auto".to_string(),
         }
     }
