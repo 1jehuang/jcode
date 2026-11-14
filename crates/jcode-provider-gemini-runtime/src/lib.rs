@@ -733,7 +733,7 @@ impl Provider for GeminiProvider {
                     // keyword. Learn the rejected construct from the error,
                     // persist it, and retry this turn without it. See
                     // `jcode-schema-dialect`.
-                    match provider
+                    let recovered = match provider
                         .retry_after_schema_rejection(
                             &err.to_string(),
                             &state,
@@ -745,16 +745,12 @@ impl Provider for GeminiProvider {
                         )
                         .await
                     {
-                        Some(Ok(response)) => response,
-                        Some(Err(retry_err)) => {
-                            let _ = tx.send(Err(retry_err)).await;
-                            return;
-                        }
+                        Some(result) => result,
                         None if is_missing_thought_signature_error(&err.to_string()) => {
                             jcode_base::logging::warn(
                                 "Gemini rejected function-call history; retrying with tool calls downgraded to text",
                             );
-                            match provider
+                            provider
                                 .generate_content(
                                     &state,
                                     &model,
@@ -765,16 +761,13 @@ impl Provider for GeminiProvider {
                                     SignaturePolicy::DowngradeToolCallsToText,
                                 )
                                 .await
-                            {
-                                Ok(response) => response,
-                                Err(retry_err) => {
-                                    let _ = tx.send(Err(retry_err)).await;
-                                    return;
-                                }
-                            }
                         }
-                        None => {
-                            let _ = tx.send(Err(err)).await;
+                        None => Err(err),
+                    };
+                    match recovered {
+                        Ok(response) => response,
+                        Err(final_err) => {
+                            let _ = tx.send(Err(final_err)).await;
                             return;
                         }
                     }
