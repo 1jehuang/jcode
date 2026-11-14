@@ -439,10 +439,9 @@ mod tests {
                 let _ = stream.read(&mut request).unwrap();
                 stream.write_all(wire.as_bytes()).unwrap();
             });
-            let response = reqwest::blocking::Client::builder()
-                .no_proxy()
-                .build()
-                .unwrap()
+            let client =
+                super::build_blocking_client(|builder| builder.no_proxy().build()).unwrap();
+            let response = client
                 .get(format!("http://{address}/"))
                 .timeout(Duration::from_secs(2))
                 .send()

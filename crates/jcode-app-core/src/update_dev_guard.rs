@@ -128,10 +128,7 @@ fn github_comparison(release_tag: &str, current_hash: &str) -> Result<bool> {
         "https://api.github.com/repos/{}/compare/{release_tag}...{current_hash}",
         super::GITHUB_REPO
     );
-    let client = reqwest::blocking::Client::builder()
-        .timeout(super::UPDATE_CHECK_TIMEOUT)
-        .user_agent("jcode-updater")
-        .build()
+    let client = super::github_api_client()
         .context("Cannot safely install release: failed to create GitHub comparison client")?;
     let response = super::github_api_request(&client, &url)
         .send()
@@ -509,14 +506,11 @@ mod tests {
             stream.write_all(reply.as_bytes()).unwrap();
         });
         // Never send the user's GitHub credentials to the test server.
-        let response = reqwest::blocking::Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .unwrap()
-            .get(format!("http://{address}"))
-            .send()
-            .unwrap();
+        let client = crate::update::build_blocking_client(|builder| {
+            builder.no_proxy().timeout(Duration::from_secs(5)).build()
+        })
+        .unwrap();
+        let response = client.get(format!("http://{address}")).send().unwrap();
         server.join().unwrap();
         response
     }

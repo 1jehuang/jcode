@@ -60,10 +60,7 @@ fn select_latest_preview(
 }
 
 pub fn fetch_latest_preview_blocking() -> Result<Option<GitHubRelease>> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(UPDATE_CHECK_TIMEOUT)
-        .user_agent("jcode-updater")
-        .build()?;
+    let client = github_api_client()?;
     let mut latest: Option<GitHubRelease> = None;
     // Paginate because stable releases may otherwise bury preview releases.
     // Bound work to avoid an unbounded automatic network check.

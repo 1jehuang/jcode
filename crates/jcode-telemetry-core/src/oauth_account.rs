@@ -131,11 +131,12 @@ fn send(command: Command) -> bool {
             let worker = std::thread::Builder::new()
                 .name("oauth-telemetry".into())
                 .spawn(move || {
-                    let Ok(client) = reqwest::blocking::Client::builder()
-                        .timeout(Duration::from_secs(5))
-                        .redirect(reqwest::redirect::Policy::none())
-                        .build()
-                    else {
+                    let Ok(client) = super::build_blocking_client(|builder| {
+                        builder
+                            .timeout(Duration::from_secs(5))
+                            .redirect(reqwest::redirect::Policy::none())
+                            .build()
+                    }) else {
                         return;
                     };
                     let transport = Http(client);

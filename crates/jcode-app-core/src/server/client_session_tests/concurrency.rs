@@ -3,6 +3,10 @@ use super::*;
 struct IsolatedConcurrencyEnv {
     _home: tempfile::TempDir,
     previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    /// Process-wide test env lock, held only while the environment is mutated.
+    test_lock: Option<std::sync::MutexGuard<'static, ()>>,
+    /// True while this env owns the lock and must re-take it for the restore.
+    owns_test_lock: bool,
 }
 
 impl IsolatedConcurrencyEnv {
@@ -17,12 +21,36 @@ impl IsolatedConcurrencyEnv {
         Self {
             _home: home,
             previous,
+            test_lock: None,
+            owns_test_lock: false,
         }
+    }
+
+    /// Like `new`, but takes the process-wide test env lock and makes this env
+    /// responsible for it: `release_test_lock` gives it up for the test body so
+    /// the guard is never held across blocking work, and `Drop` re-takes it
+    /// before restoring the environment.
+    fn new_owning_test_lock() -> Self {
+        let lock = crate::storage::lock_test_env();
+        let mut env = Self::new();
+        env.test_lock = Some(lock);
+        env.owns_test_lock = true;
+        env
+    }
+
+    /// Mutating the environment is the only part of a test that needs the
+    /// process-wide lock; network or other blocking work must not hold it.
+    fn release_test_lock(&mut self) {
+        self.test_lock = None;
     }
 }
 
 impl Drop for IsolatedConcurrencyEnv {
     fn drop(&mut self) {
+        let mut restore_lock = self.test_lock.take();
+        if self.owns_test_lock && restore_lock.is_none() {
+            restore_lock = Some(crate::storage::lock_test_env());
+        }
         for (key, value) in self.previous.drain(..) {
             match value {
                 Some(value) => crate::env::set_var(key, value),
@@ -145,8 +173,11 @@ async fn failed_server_resume_keeps_original_concurrency_owner() -> Result<()> {
 
 #[tokio::test]
 async fn viewer_attach_reuses_live_owner_without_tracking_placeholder() -> Result<()> {
-    let _lock = crate::storage::lock_test_env();
-    let _env = IsolatedConcurrencyEnv::new();
+    // The env lock only serializes environment mutation. Holding it across the
+    // resume can park this test behind another test's blocking HTTP client
+    // construction, so it is released for the body and re-taken for teardown.
+    let mut env = IsolatedConcurrencyEnv::new_owning_test_lock();
+    env.release_test_lock();
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider.clone()).await;
     let live = Arc::new(Mutex::new(Agent::new(provider.clone(), registry.clone())));

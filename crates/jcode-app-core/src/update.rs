@@ -200,6 +200,44 @@ fn release_url_override_with(value: Option<String>, sandboxed_home: bool) -> Opt
     Some(value)
 }
 
+/// Build a `reqwest::blocking::Client` on a dedicated OS thread.
+///
+/// `reqwest::blocking::Client::builder().build()` creates a private
+/// current-thread tokio runtime and parks the constructing thread until that
+/// runtime reports ready. Building it on a thread that is itself a tokio
+/// worker, or that holds a process-wide lock, can wedge unrelated work, so
+/// construction always runs off the caller's thread and the caller only waits
+/// for the finished handle.
+fn build_blocking_client<R>(
+    configure: impl FnOnce(reqwest::blocking::ClientBuilder) -> R + Send + 'static,
+) -> R
+where
+    R: Send + 'static,
+{
+    std::thread::spawn(move || configure(reqwest::blocking::Client::builder()))
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+/// Shared client for GitHub API reads.
+///
+/// Release lookups, preview pagination, and dev-guard comparisons all use the
+/// same timeout and user agent, so they share one connection pool. Cloning a
+/// `reqwest::blocking::Client` only clones a handle.
+fn github_api_client() -> Result<reqwest::blocking::Client> {
+    static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client.clone());
+    }
+    let client = build_blocking_client(|builder| {
+        builder
+            .timeout(UPDATE_CHECK_TIMEOUT)
+            .user_agent("jcode-updater")
+            .build()
+    })?;
+    Ok(CLIENT.get_or_init(|| client).clone())
+}
+
 pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
     let override_url = release_url_override();
     let url = override_url.clone().unwrap_or_else(|| {
@@ -209,10 +247,7 @@ pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
         )
     });
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(UPDATE_CHECK_TIMEOUT)
-        .user_agent("jcode-updater")
-        .build()?;
+    let client = github_api_client()?;
 
     let request = if override_url.is_some() {
         // Never send a GitHub token to a non-GitHub rehearsal endpoint.
@@ -268,10 +303,7 @@ fn github_api_request(
 
 fn latest_main_sha_blocking() -> Result<String> {
     let url = format!("https://api.github.com/repos/{}/commits/main", GITHUB_REPO);
-    let client = reqwest::blocking::Client::builder()
-        .timeout(UPDATE_CHECK_TIMEOUT)
-        .user_agent("jcode-updater")
-        .build()?;
+    let client = github_api_client()?;
 
     let response = github_api_request(&client, &url)
         .send()
@@ -975,11 +1007,13 @@ pub fn download_and_install_blocking_with_progress(
     // Range across attempts (up to DOWNLOAD_MAX_ATTEMPTS), so it can complete
     // even when a single attempt would not finish in time. A genuinely hung
     // connection is still bounded by the per-attempt timeout.
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(DOWNLOAD_CONNECT_TIMEOUT)
-        .timeout(DOWNLOAD_ATTEMPT_TIMEOUT)
-        .user_agent("jcode-updater")
-        .build()?;
+    let client = build_blocking_client(|builder| {
+        builder
+            .connect_timeout(DOWNLOAD_CONNECT_TIMEOUT)
+            .timeout(DOWNLOAD_ATTEMPT_TIMEOUT)
+            .user_agent("jcode-updater")
+            .build()
+    })?;
 
     let total_hint = if asset._size > 0 {
         Some(asset._size)

@@ -75,6 +75,36 @@ static TELEMETRY_HTTP_CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::ne
 #[cfg(test)]
 static TEST_EMITTED_PAYLOADS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
 
+/// Build a `reqwest::blocking::Client` on a dedicated OS thread.
+///
+/// `reqwest::blocking::Client::builder().build()` creates a private
+/// current-thread tokio runtime and parks the constructing thread until that
+/// runtime reports ready. Telemetry is emitted from arbitrary threads,
+/// including tokio workers, so construction must never happen on the caller's
+/// thread or the caller can be parked indefinitely.
+fn build_blocking_client<R>(
+    configure: impl FnOnce(reqwest::blocking::ClientBuilder) -> R + Send + 'static,
+) -> R
+where
+    R: Send + 'static,
+{
+    std::thread::spawn(move || configure(reqwest::blocking::Client::builder()))
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+#[cfg(not(test))]
+fn telemetry_http_client() -> &'static reqwest::blocking::Client {
+    TELEMETRY_HTTP_CLIENT.get_or_init(|| {
+        build_blocking_client(|builder| {
+            builder
+                .user_agent(jcode_provider_core::JCODE_USER_AGENT)
+                .build()
+                .expect("telemetry HTTP client should build")
+        })
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct DiscoveryTelemetry<'a> {
     pub request_id: &'a str,
@@ -1248,12 +1278,7 @@ fn post_payload(payload: serde_json::Value, timeout: Duration) -> bool {
     }
     // Newer event types can reach an older worker that rejects them as unknown.
     // That must only drop the one payload, never disable all telemetry.
-    let client = TELEMETRY_HTTP_CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
-            .user_agent(jcode_provider_core::JCODE_USER_AGENT)
-            .build()
-            .expect("telemetry HTTP client should build")
-    });
+    let client = telemetry_http_client();
     match client
         .post(telemetry_endpoint(&payload))
         .timeout(timeout)
@@ -1310,12 +1335,7 @@ fn post_payload_with_retry(payload: serde_json::Value, timeout: Duration) -> boo
 
 #[cfg(not(test))]
 fn post_transcript_payload(payload: serde_json::Value, timeout: Duration) -> bool {
-    let client = TELEMETRY_HTTP_CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
-            .user_agent(jcode_provider_core::JCODE_USER_AGENT)
-            .build()
-            .expect("telemetry HTTP client should build")
-    });
+    let client = telemetry_http_client();
     match client
         .post(TRANSCRIPT_ENDPOINT)
         .timeout(timeout)
