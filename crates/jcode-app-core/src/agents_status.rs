@@ -53,6 +53,8 @@ pub struct SessionStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Snapshot {
     pub host: String,
+    /// Human label for where these sessions run ("Cloud", "XPS 14").
+    pub origin: String,
     pub sessions: Vec<SessionStatus>,
 }
 
@@ -222,6 +224,7 @@ impl Tracker {
         sessions.truncate(MAX_SESSIONS);
         Snapshot {
             host: host.to_string(),
+            origin: crate::mobile_push::origin_label().to_string(),
             sessions,
         }
     }
@@ -483,6 +486,7 @@ mod tests {
         let json = serde_json::to_value(&snap).unwrap();
         assert_eq!(json["sessions"][1]["state"], "error");
         assert_eq!(json["host"], "host1");
+        assert!(!json["origin"].as_str().unwrap_or("").is_empty());
     }
 
     #[test]

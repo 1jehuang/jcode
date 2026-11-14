@@ -164,7 +164,7 @@ const LABEL_MAX_CHARS: usize = 24;
 const TITLE_MAX_CHARS: usize = 120;
 
 /// `Cloud` on a managed Jcode Cloud machine, otherwise this machine's name.
-fn origin_label() -> &'static str {
+pub(crate) fn origin_label() -> &'static str {
     static LABEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     LABEL.get_or_init(|| {
         if crate::mobile_runner::is_cloud_machine() {
