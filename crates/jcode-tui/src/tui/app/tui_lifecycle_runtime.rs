@@ -19,6 +19,8 @@ impl App {
         app.is_remote = false;
         app.is_replay = true;
         app.runtime_mode = AppRuntimeMode::Replay;
+        // Historical replay must never show today's on-disk todo state.
+        app.pinned_todos_payload = None;
         let model_name = app.session.model.clone().unwrap_or_default();
         let session_name = app.session.short_name.clone().unwrap_or_default();
 

@@ -955,7 +955,7 @@ fn parse_todo_tool_output(content: &str) -> Option<ParsedTodoToolOutput> {
     })
 }
 
-fn strip_todo_tool_output_headers(content: &str) -> &str {
+pub(crate) fn strip_todo_tool_output_headers(content: &str) -> &str {
     let mut content = content.trim_start();
     // Remote clients prefix outputs with the tool name, while restored history
     // may independently prefix timing metadata. Accept either order without

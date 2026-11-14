@@ -210,6 +210,11 @@ impl App {
     /// (`display.pin_todos`). Returns true when the payload changed and the
     /// viewport should redraw. Disk reads are throttled to once per second.
     pub(super) fn refresh_pinned_todos_if_needed(&mut self) -> bool {
+        // Replay state comes exclusively from historical events or explicit
+        // snapshots. Today's file must never replace a historical pinned card.
+        if self.is_replay {
+            return false;
+        }
         if !crate::config::config().display.pin_todos {
             if self.pinned_todos_payload.is_some() {
                 self.pinned_todos_payload = None;
