@@ -39,6 +39,10 @@ pub struct Account {
     pub api_key: String,
     #[serde(default)]
     pub email: Option<String>,
+    #[serde(default)]
+    pub given_name: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(default = "default_base")]
     pub api_base: String,
 }
@@ -246,8 +250,51 @@ impl CloudClient {
         Account {
             api_key: reply.api_key,
             email: reply.email,
+            given_name: reply.given_name,
+            name: reply.name,
             api_base: self.api_base.clone(),
         }
+    }
+
+    /// Refresh profile names using the account's API endpoint and credentials.
+    /// Missing or null names from older servers preserve the cached values.
+    pub fn refresh_account_profile(&self, account: &Account) -> Result<Account> {
+        #[derive(Deserialize)]
+        struct Profile {
+            #[serde(default)]
+            given_name: Option<String>,
+            #[serde(default)]
+            name: Option<String>,
+        }
+        let client = Self {
+            api_base: account.api_base.trim_end_matches('/').to_string(),
+            ..self.clone()
+        };
+        let (status, body) = client.send_raw(
+            "GET",
+            "/auth/verify",
+            Some(&account.api_key),
+            serde_json::Value::Null,
+        )?;
+        if !(200..300).contains(&status) {
+            let err = &body["error"];
+            return Err(describe(
+                status,
+                err["code"].as_str().unwrap_or(""),
+                err["message"].as_str().unwrap_or(""),
+            ));
+        }
+        let profile: Profile = serde_json::from_value(body).map_err(|e| {
+            Error::new(
+                ErrorKind::UnexpectedReply,
+                format!("Unexpected reply from jcode.sh: {e}"),
+            )
+        })?;
+        Ok(Account {
+            given_name: profile.given_name.or_else(|| account.given_name.clone()),
+            name: profile.name.or_else(|| account.name.clone()),
+            ..account.clone()
+        })
     }
 
     /// Email a 6-digit code. Returns the login token for [`Self::verify_email_login`].
@@ -595,6 +642,10 @@ struct LoginReply {
     api_key: String,
     #[serde(default)]
     email: Option<String>,
+    #[serde(default)]
+    given_name: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 fn sleep_unless(total: Duration, cancelled: &dyn Fn() -> bool) -> Result<()> {
@@ -741,7 +792,10 @@ mod tests {
     fn email_login_sends_client_name_and_returns_account() {
         let (base, seen) = serve(vec![
             (200, r#"{"login_token":"lt"}"#),
-            (200, r#"{"api_key":"k","email":"a@b"}"#),
+            (
+                200,
+                r#"{"api_key":"k","email":"a@b","given_name":"Ada","name":"Ada Lovelace"}"#,
+            ),
         ]);
         let cloud = CloudClient::new("jcode-test").with_api_base(base.clone());
         assert_eq!(cloud.start_email_login("a@b").unwrap(), "lt");
@@ -756,6 +810,8 @@ mod tests {
             Account {
                 api_key: "k".into(),
                 email: Some("a@b".into()),
+                given_name: Some("Ada".into()),
+                name: Some("Ada Lovelace".into()),
                 api_base: base
             }
         );
@@ -789,6 +845,113 @@ mod tests {
     }
 
     #[test]
+    fn account_legacy_persistence_and_profile_roundtrip() {
+        let legacy: Account =
+            serde_json::from_str(r#"{"api_key":"legacy","email":"a@b"}"#).unwrap();
+        assert_eq!(legacy.api_base, DEFAULT_API_BASE);
+        assert_eq!(legacy.given_name, None);
+        assert_eq!(legacy.name, None);
+        let account = Account {
+            given_name: Some("Ada".into()),
+            name: Some("Ada Lovelace".into()),
+            ..legacy
+        };
+        let encoded = serde_json::to_value(&account).unwrap();
+        assert_eq!(encoded["given_name"], "Ada");
+        assert_eq!(encoded["name"], "Ada Lovelace");
+        assert_eq!(serde_json::from_value::<Account>(encoded).unwrap(), account);
+    }
+
+    #[test]
+    fn device_login_propagates_profile_names() {
+        let (base, _seen) = serve(vec![(
+            200,
+            r#"{"api_key":"k","given_name":"Ada","name":"Ada Lovelace"}"#,
+        )]);
+        let mut login = DeviceLogin {
+            device_code: "d".into(),
+            verification_uri_complete: "u".into(),
+            interval: 5,
+            expires_in: 0,
+        };
+        let account = CloudClient::new("t")
+            .with_api_base(base)
+            .poll_device_login(&mut login)
+            .unwrap()
+            .unwrap();
+        assert_eq!(account.given_name.as_deref(), Some("Ada"));
+        assert_eq!(account.name.as_deref(), Some("Ada Lovelace"));
+    }
+
+    #[test]
+    fn refresh_profile_uses_account_endpoint_and_preserves_legacy_names() {
+        let (base, seen) = serve(vec![
+            (
+                200,
+                r#"{"valid":true,"given_name":"Ada","name":"Ada Lovelace"}"#,
+            ),
+            (200, r#"{"valid":true}"#),
+            (200, r#"{"valid":true,"given_name":null,"name":null}"#),
+            (200, r#"{"given_name":"Augusta"}"#),
+        ]);
+        let original: Account = serde_json::from_value(serde_json::json!({
+            "api_key": "secret", "email": "a@b", "api_base": format!("{base}/")
+        }))
+        .unwrap();
+        let cloud = CloudClient::new("t").with_api_base("http://127.0.0.1:1");
+        let refreshed = cloud.refresh_account_profile(&original).unwrap();
+        assert_eq!(refreshed.given_name.as_deref(), Some("Ada"));
+        assert_eq!(refreshed.name.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(refreshed.api_key, original.api_key);
+        assert_eq!(refreshed.email, original.email);
+        assert_eq!(refreshed.api_base, original.api_base);
+        assert_eq!(original.given_name, None);
+        assert_eq!(
+            cloud.refresh_account_profile(&refreshed).unwrap(),
+            refreshed
+        );
+        assert_eq!(
+            cloud.refresh_account_profile(&refreshed).unwrap(),
+            refreshed
+        );
+        let partial = cloud.refresh_account_profile(&refreshed).unwrap();
+        assert_eq!(partial.given_name.as_deref(), Some("Augusta"));
+        assert_eq!(partial.name, refreshed.name);
+        for request in seen.iter().take(4) {
+            assert!(request.starts_with("GET /auth/verify HTTP/1.1"));
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer secret")
+            );
+        }
+    }
+
+    #[test]
+    fn refresh_profile_rejects_auth_errors_and_malformed_profiles() {
+        let (base, _seen) = serve(vec![
+            (401, r#"{"error":{"code":"unauthorized"}}"#),
+            (200, r#"{"given_name":123}"#),
+            (200, "not json"),
+        ]);
+        let account: Account =
+            serde_json::from_value(serde_json::json!({"api_key":"k","api_base":base})).unwrap();
+        let cloud = CloudClient::new("t");
+        assert_eq!(
+            cloud.refresh_account_profile(&account).unwrap_err().kind,
+            ErrorKind::CloudAuth
+        );
+        assert_eq!(
+            cloud.refresh_account_profile(&account).unwrap_err().kind,
+            ErrorKind::UnexpectedReply
+        );
+        assert_eq!(
+            cloud.refresh_account_profile(&account).unwrap_err().kind,
+            ErrorKind::UnexpectedReply
+        );
+    }
+
+    #[test]
     fn host_connect_polls_until_ready_with_bearer_auth() {
         let (base, seen) = serve(vec![
             (200, r#"{"state":"provisioning","ready":false}"#),
@@ -802,6 +965,8 @@ mod tests {
         let account = Account {
             api_key: "secret".into(),
             email: None,
+            given_name: None,
+            name: None,
             api_base: base,
         };
         let progress = std::sync::Mutex::new(Vec::new());
@@ -837,6 +1002,8 @@ mod tests {
         let account = Account {
             api_key: "k".into(),
             email: None,
+            given_name: None,
+            name: None,
             api_base: base,
         };
         let device = PushDevice {
@@ -888,6 +1055,8 @@ mod tests {
         let account = Account {
             api_key: "k".into(),
             email: None,
+            given_name: None,
+            name: None,
             api_base: base,
         };
         let err = CloudClient::new("t")
