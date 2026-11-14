@@ -186,3 +186,135 @@ fn spawn_replacement_process_returns_without_waiting_for_child_exit() {
     child.kill().ok();
     let _ = child.wait();
 }
+
+/// Reads the `stat` field `ps` reports for `pid`, or `None` once the pid is gone.
+#[cfg(unix)]
+fn ps_process_state(pid: u32) -> Option<String> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .expect("run ps to inspect process state");
+    let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if state.is_empty() {
+        None
+    } else {
+        Some(state)
+    }
+}
+
+/// Regression test for the zombie-child leak: detached children that were
+/// dropped without a `wait()` accumulated as `<defunct>` processes under the
+/// long-lived server. `reap_detached` must remove the zombie entirely (not
+/// merely stop reporting it as running).
+#[cfg(unix)]
+#[test]
+fn reap_detached_removes_zombie_child() {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg("exit 0")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    let child = spawn_detached(&mut cmd).expect("spawn detached child");
+    let pid = child.id();
+
+    // Control: nothing waits on the child, so it must linger as a zombie. This
+    // also proves the observation method can actually see a zombie.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut zombie_state: Option<String> = None;
+    while Instant::now() < deadline {
+        match ps_process_state(pid) {
+            Some(state) if state.starts_with('Z') => {
+                zombie_state = Some(state);
+                break;
+            }
+            None => break,
+            Some(_) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+    let zombie_state = zombie_state.unwrap_or_else(|| {
+        panic!("pid {pid} should become an unreaped zombie before reap_detached")
+    });
+
+    reap_detached(child);
+
+    // Poll with a bounded timeout until the pid disappears completely. A
+    // leftover `Z` state is exactly the bug this test guards against.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut remaining_state: Option<String> = None;
+    while Instant::now() < deadline {
+        match ps_process_state(pid) {
+            None => {
+                remaining_state = None;
+                break;
+            }
+            Some(state) => {
+                remaining_state = Some(state);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+    assert!(
+        remaining_state.is_none(),
+        "reap_detached left pid {pid} behind (zombie before reap: {zombie_state}, \
+         still present as: {remaining_state:?}); expected the pid to disappear"
+    );
+
+    // Belt and braces: no `<defunct>` child of this process may keep the pid.
+    let pid_field = pid.to_string();
+    let self_pid = std::process::id().to_string();
+    let listing = Command::new("ps")
+        .args(["-ax", "-o", "pid=,ppid=,stat="])
+        .output()
+        .expect("run ps to list processes");
+    let listing = String::from_utf8_lossy(&listing.stdout);
+    let leftover_zombie = listing.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        let line_pid = fields.next().unwrap_or_default();
+        let line_ppid = fields.next().unwrap_or_default();
+        let line_stat = fields.next().unwrap_or_default();
+        line_pid == pid_field && line_ppid == self_pid && line_stat.starts_with('Z')
+    });
+    assert!(
+        !leftover_zombie,
+        "pid {self_pid} should have no <defunct> child with pid {pid_field}"
+    );
+}
+
+/// `reap_detached` must hand the wait off to a background thread instead of
+/// blocking the caller, otherwise spawning a long-lived detached child would
+/// stall the tool loop that called it.
+#[cfg(unix)]
+#[test]
+fn reap_detached_does_not_block_on_running_child() {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg("sleep 5")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    let child = spawn_detached(&mut cmd).expect("spawn long-lived detached child");
+    let pid = child.id();
+
+    let start = Instant::now();
+    reap_detached(child);
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "reap_detached must not block on a running child, took {elapsed:?}"
+    );
+    assert!(
+        is_process_running(pid),
+        "the reaping thread must not stop the running child"
+    );
+
+    // Clean up; the reaping thread observes the exit.
+    unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+}

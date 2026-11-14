@@ -202,7 +202,7 @@ fn extract_email_from_jwt() {
 #[test]
 fn load_credentials_falls_back_to_env_api_key() {
     let _lock = crate::storage::lock_test_env();
-    let temp = tempfile::TempDir::new().unwrap();
+    let temp = crate::test_temp::tempdir().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
     let _api_key = EnvVarGuard::set("OPENAI_API_KEY", "sk-env-test");
     set_active_account_override(None);
@@ -217,7 +217,7 @@ fn load_credentials_falls_back_to_env_api_key() {
 #[test]
 fn multi_account_active_switch_works() {
     let _lock = crate::storage::lock_test_env();
-    let temp = tempfile::TempDir::new().unwrap();
+    let temp = crate::test_temp::tempdir().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
     set_active_account_override(None);
 
@@ -254,7 +254,7 @@ fn multi_account_active_switch_works() {
 #[test]
 fn load_auth_file_migrates_legacy_codex_tokens() {
     let _lock = crate::storage::lock_test_env();
-    let temp = tempfile::TempDir::new().unwrap();
+    let temp = crate::test_temp::tempdir().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
     set_active_account_override(None);
 
@@ -289,7 +289,7 @@ fn load_auth_file_migrates_legacy_codex_tokens() {
 #[test]
 fn load_credentials_ignores_legacy_oauth_without_consent() {
     let _lock = crate::storage::lock_test_env();
-    let temp = tempfile::TempDir::new().unwrap();
+    let temp = crate::test_temp::tempdir().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
     set_active_account_override(None);
 
@@ -329,7 +329,7 @@ fn load_credentials_ignores_legacy_oauth_without_consent() {
 #[test]
 fn load_credentials_reads_legacy_oauth_when_allowed() {
     let _lock = crate::storage::lock_test_env();
-    let temp = tempfile::TempDir::new().unwrap();
+    let temp = crate::test_temp::tempdir().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
     let _allow = EnvVarGuard::set(ALLOW_LEGACY_AUTH_ENV, "1");
     set_active_account_override(None);
@@ -368,7 +368,7 @@ fn load_credentials_reads_legacy_oauth_without_changing_external_permissions() {
     use std::os::unix::fs::PermissionsExt;
 
     let _lock = crate::storage::lock_test_env();
-    let temp = tempfile::TempDir::new().unwrap();
+    let temp = crate::test_temp::tempdir().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
     let _allow = EnvVarGuard::set(ALLOW_LEGACY_AUTH_ENV, "1");
     set_active_account_override(None);
@@ -418,7 +418,7 @@ fn load_credentials_reads_legacy_oauth_without_changing_external_permissions() {
 #[test]
 fn load_auth_file_preserves_existing_named_labels() {
     let _lock = crate::storage::lock_test_env();
-    let temp = tempfile::TempDir::new().unwrap();
+    let temp = crate::test_temp::tempdir().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
     set_active_account_override(None);
 

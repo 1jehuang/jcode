@@ -13,7 +13,7 @@ fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
     // registry the binary uses. Registration is idempotent (last write wins),
     // and per-test overrides can re-register a different stub.
     register_test_external_runtimes();
-    let temp = tempfile::tempdir().expect("tempdir");
+    let temp = crate::test_temp::tempdir().expect("tempdir");
     let prev_home = std::env::var_os("JCODE_HOME");
     let prev_subscription =
         std::env::var_os(crate::subscription_catalog::JCODE_SUBSCRIPTION_ACTIVE_ENV);
@@ -1198,7 +1198,6 @@ fn new_session_fork_reloads_changed_config_provider_and_model() {
         });
     });
 }
-
 include!("tests/auth_refresh.rs");
 include!("tests/model_resolution.rs");
 include!("tests/model_picker_config_models.rs");
@@ -1206,6 +1205,7 @@ include!("tests/issue_534_profile_preservation.rs");
 include!("tests/fallback_failover.rs");
 include!("tests/account_failover.rs");
 include!("tests/catalog_subscription.rs");
+include!("tests/profile_id_shadowing.rs");
 
 #[test]
 fn jcode_subscription_model_prefix_parses_explicit_specs() {

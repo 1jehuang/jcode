@@ -81,7 +81,7 @@ fn auth_status_check_fast_includes_bedrock_probe() {
 #[test]
 fn full_and_fast_auth_status_match_for_shared_probe_fields() {
     let _lock = crate::storage::lock_test_env();
-    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let temp = crate::test_temp::tempdir().expect("create temp dir");
     let home = temp.path().join("home");
     let xdg = temp.path().join("xdg");
     std::fs::create_dir_all(&home).expect("create temp home");
@@ -190,7 +190,7 @@ fn full_and_fast_auth_status_match_for_shared_probe_fields() {
 #[test]
 fn full_and_fast_auth_status_document_cursor_cli_exception() {
     let _lock = crate::storage::lock_test_env();
-    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let temp = crate::test_temp::tempdir().expect("create temp dir");
     let home = temp.path().join("home");
     let xdg = temp.path().join("xdg");
     std::fs::create_dir_all(&home).expect("create temp home");
@@ -475,7 +475,7 @@ fn auth_status_check_fast_ignores_expired_full_cache() {
 #[test]
 fn copilot_recent_token_exchange_failure_is_not_auto_usable() {
     let _lock = crate::storage::lock_test_env();
-    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let temp = crate::test_temp::tempdir().expect("create temp dir");
     let prev_home = std::env::var_os("JCODE_HOME");
     let prev_copilot_token = std::env::var_os("COPILOT_GITHUB_TOKEN");
     let prev_gh_token = std::env::var_os("GH_TOKEN");
@@ -532,7 +532,7 @@ fn copilot_recent_token_exchange_failure_is_not_auto_usable() {
 #[test]
 fn openrouter_like_status_is_provider_specific() {
     let _lock = crate::storage::lock_test_env();
-    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let temp = crate::test_temp::tempdir().expect("create temp dir");
     // Issue #1479: a jcode-launched shell with an active named provider
     // profile exports these, and the named-profile check short-circuits the
     // per-provider key lookup. Clear them so the test sees only its own env.
@@ -579,7 +579,7 @@ fn openrouter_like_status_is_provider_specific() {
 #[test]
 fn openrouter_status_excludes_shared_compatible_transport() {
     let _lock = crate::storage::lock_test_env();
-    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let temp = crate::test_temp::tempdir().expect("create temp dir");
     let keys = [
         "JCODE_HOME",
         "OPENAI_API_KEY",
@@ -633,7 +633,7 @@ fn openrouter_status_excludes_shared_compatible_transport() {
 #[test]
 fn azure_readiness_distinguishes_credentials_from_deployment_validation() {
     let _lock = crate::storage::lock_test_env();
-    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let temp = crate::test_temp::tempdir().expect("create temp dir");
     let saved = [
         "JCODE_HOME",
         crate::auth::azure::ENDPOINT_ENV,
@@ -712,7 +712,7 @@ fn cursor_status_is_available_when_api_key_exists_without_cli() {
     let prev_refresh_token = std::env::var_os("CURSOR_REFRESH_TOKEN");
     let prev_api_key = std::env::var_os("CURSOR_API_KEY");
     let prev_cli_path = std::env::var_os("JCODE_CURSOR_CLI_PATH");
-    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let temp = crate::test_temp::tempdir().expect("create temp dir");
 
     crate::env::remove_var("CURSOR_ACCESS_TOKEN");
     crate::env::remove_var("CURSOR_REFRESH_TOKEN");
@@ -741,7 +741,7 @@ fn cursor_status_is_available_for_native_auth_without_cli() {
     let prev_refresh_token = std::env::var_os("CURSOR_REFRESH_TOKEN");
     let prev_api_key = std::env::var_os("CURSOR_API_KEY");
     let prev_cli_path = std::env::var_os("JCODE_CURSOR_CLI_PATH");
-    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let temp = crate::test_temp::tempdir().expect("create temp dir");
 
     crate::env::set_var(
         "CURSOR_ACCESS_TOKEN",
@@ -771,7 +771,7 @@ fn cursor_status_is_available_for_authenticated_cli_session() {
     let _lock = crate::storage::lock_test_env();
     let prev_api_key = std::env::var_os("CURSOR_API_KEY");
     let prev_cli_path = std::env::var_os("JCODE_CURSOR_CLI_PATH");
-    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let temp = crate::test_temp::tempdir().expect("create temp dir");
     let mock_cli = write_mock_cursor_agent(
         temp.path(),
         "#!/bin/sh\nif [ \"$1\" = \"status\" ]; then\n  echo \"Authenticated\\nAccount: test@example.com\"\n  exit 0\nfi\nexit 1\n",
@@ -864,7 +864,7 @@ fn anthropic_api_provider_reports_api_key_independently_of_oauth() {
     // configured, then fail at request time (API-key mode never falls back to
     // OAuth). It must report purely on the presence of an Anthropic API key.
     let _lock = crate::storage::lock_test_env();
-    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let temp = crate::test_temp::tempdir().expect("create temp dir");
     let home = temp.path().join("home");
     let xdg = temp.path().join("xdg");
     std::fs::create_dir_all(&home).expect("create temp home");
@@ -918,7 +918,7 @@ fn claude_oauth_provider_reports_oauth_independently_of_api_key() {
     // "available / OAuth + API key" with zero OAuth accounts -- contradicting
     // the separate `anthropic-api` row and the header's active-route tag.
     let _lock = crate::storage::lock_test_env();
-    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let temp = crate::test_temp::tempdir().expect("create temp dir");
     let home = temp.path().join("home");
     let xdg = temp.path().join("xdg");
     std::fs::create_dir_all(&home).expect("create temp home");

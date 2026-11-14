@@ -453,7 +453,7 @@ mod tests {
 
     impl HomeGuard {
         fn new(config_body: &str) -> Self {
-            let temp = tempfile::tempdir().expect("temp dir");
+            let temp = crate::test_temp::tempdir().expect("temp dir");
             std::fs::write(temp.path().join("config.toml"), config_body).expect("write config");
             let previous = std::env::var_os("JCODE_HOME");
             crate::env::set_var("JCODE_HOME", temp.path());

@@ -38,7 +38,10 @@ fn harden_secret_file_permissions_sets_owner_only_modes() {
 fn user_home_path_uses_external_dir_under_jcode_home() {
     let _guard = lock_test_env();
     let prev_home = std::env::var_os("JCODE_HOME");
-    let temp = tempfile::TempDir::new().expect("create temp dir");
+    // `tempfile::TempDir::new()` inherits TMPDIR, which the jcode bash tool
+    // points at ~/.jcode/scratch. Rooting a synthetic JCODE_HOME inside the
+    // live jcode tree would let the test read and write real scratch state.
+    let temp = crate::test_temp::tempdir().expect("create temp dir");
     crate::env::set_var("JCODE_HOME", temp.path());
 
     let resolved = user_home_path(".codex/auth.json").expect("resolve user home path");
@@ -76,7 +79,7 @@ fn validate_external_auth_file_rejects_symlink() {
 fn app_config_dir_uses_jcode_home_when_set() {
     let _guard = lock_test_env();
     let prev_home = std::env::var_os("JCODE_HOME");
-    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let temp = crate::test_temp::tempdir().expect("create temp dir");
     crate::env::set_var("JCODE_HOME", temp.path());
 
     let resolved = app_config_dir().expect("resolve app config dir");

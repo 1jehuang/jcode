@@ -239,6 +239,10 @@ pub fn register_external_provider_runtimes() {
         crate::provider::external::ANTHROPIC_RUNTIME,
         || std::sync::Arc::new(jcode_provider_anthropic_runtime::AnthropicProvider::new()),
     );
+    crate::provider::external::register_external_provider(
+        crate::provider::external::FORGECODE_RUNTIME,
+        || std::sync::Arc::new(jcode_provider_forgecode_runtime::ForgeCodeProvider::new()),
+    );
     // OpenRouter serves several identities (aggregator, pinned API-key
     // runtime, direct OpenAI-compatible profiles, named config profiles)
     // through one concrete type, so it registers a parameterized factory.

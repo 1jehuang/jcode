@@ -147,7 +147,7 @@ fn uses_hardcoded_credentials_when_env_missing() {
 #[test]
 fn imports_cli_oauth_tokens_when_native_tokens_missing() {
     let _guard = lock_test_env();
-    let temp = tempfile::TempDir::new().expect("tempdir");
+    let temp = crate::test_temp::tempdir().expect("tempdir");
     let prev_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp.path());
 
@@ -182,7 +182,7 @@ fn imports_cli_oauth_tokens_without_changing_external_permissions() {
     use std::os::unix::fs::PermissionsExt;
 
     let _guard = lock_test_env();
-    let temp = tempfile::TempDir::new().expect("tempdir");
+    let temp = crate::test_temp::tempdir().expect("tempdir");
     let prev_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp.path());
 

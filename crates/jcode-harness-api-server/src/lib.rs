@@ -713,18 +713,22 @@ mod public_acceptance_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn public_socket_keeps_its_attachment_after_another_sessions_state() {
-        let _home_lock = translate::jcode_home_test_lock();
-        let root = std::env::temp_dir().join(format!(
-            "jcode-api-attachment-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let previous_home = std::env::var_os("JCODE_HOME");
-        unsafe { std::env::set_var("JCODE_HOME", &root) };
+        // Scope the MutexGuard so it drops before the first .await point.
+        let (root, previous_home) = {
+            let _home_lock = translate::jcode_home_test_lock();
+            let root = std::env::temp_dir().join(format!(
+                "jcode-api-attachment-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            let previous_home = std::env::var_os("JCODE_HOME");
+            unsafe { std::env::set_var("JCODE_HOME", &root) };
+            (root, previous_home)
+        };
         let _home_guard = JcodeHomeGuard(previous_home);
         let sessions = root.join("sessions");
         std::fs::create_dir_all(&sessions).unwrap();

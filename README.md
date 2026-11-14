@@ -51,6 +51,18 @@
 curl -fsSL https://jcode.sh/install | bash
 ```
 
+```powershell
+# Windows 11 (PowerShell 5.1+)
+irm https://jcode.sh/install.ps1 | iex
+```
+
+```bash
+# Bun (requires Bun installed)
+bunx jcode-install
+# or
+bun run --bun https://jcode.sh/install_bun.sh
+```
+
 <div align="center">
 
 ## Benches

@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn create_and_resume_goal_persists_project_goal() {
     let _guard = crate::storage::lock_test_env();
-    let temp = tempfile::tempdir().expect("tempdir");
+    let temp = crate::test_temp::tempdir().expect("tempdir");
     let project = temp.path().join("repo");
     std::fs::create_dir_all(&project).expect("project dir");
     let prev_home = std::env::var_os("JCODE_HOME");
@@ -52,7 +52,7 @@ fn create_and_resume_goal_persists_project_goal() {
 #[test]
 fn write_goal_page_auto_focuses_first_goal_only() {
     let _guard = crate::storage::lock_test_env();
-    let temp = tempfile::tempdir().expect("tempdir");
+    let temp = crate::test_temp::tempdir().expect("tempdir");
     let project = temp.path().join("repo");
     std::fs::create_dir_all(&project).expect("project dir");
     let prev_home = std::env::var_os("JCODE_HOME");

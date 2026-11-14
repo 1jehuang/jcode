@@ -645,7 +645,7 @@ mod tests {
     fn hosted_catalog_access_does_not_depend_on_legacy_cached_tier() {
         let _guard = crate::storage::lock_test_env();
         crate::env::remove_var(JCODE_TIER_ENV);
-        let temp = tempfile::tempdir().expect("temp home");
+        let temp = crate::test_temp::tempdir().expect("temp home");
         crate::env::set_var("JCODE_HOME", temp.path().to_string_lossy().to_string());
 
         assert_eq!(cached_tier(), None);

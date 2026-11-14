@@ -26,7 +26,7 @@ impl Drop for EnvVarGuard {
 #[test]
 fn side_panel_pages_persist_and_focus_latest() {
     let _guard = crate::storage::lock_test_env();
-    let temp = tempfile::tempdir().expect("tempdir");
+    let temp = crate::test_temp::tempdir().expect("tempdir");
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
     let session_id = "ses_side_panel_test";
@@ -65,7 +65,7 @@ fn side_panel_pages_persist_and_focus_latest() {
 #[test]
 fn side_panel_delete_falls_back_to_most_recent_page() {
     let _guard = crate::storage::lock_test_env();
-    let temp = tempfile::tempdir().expect("tempdir");
+    let temp = crate::test_temp::tempdir().expect("tempdir");
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
     let session_id = "ses_side_panel_delete";
@@ -80,7 +80,7 @@ fn side_panel_delete_falls_back_to_most_recent_page() {
 #[test]
 fn load_markdown_file_uses_source_path_content() {
     let _guard = crate::storage::lock_test_env();
-    let temp = tempfile::tempdir().expect("tempdir");
+    let temp = crate::test_temp::tempdir().expect("tempdir");
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
     let source = temp.path().join("guide.md");
@@ -116,7 +116,7 @@ fn load_markdown_file_uses_source_path_content() {
 #[test]
 fn load_markdown_file_rejects_non_markdown_extensions() {
     let _guard = crate::storage::lock_test_env();
-    let temp = tempfile::tempdir().expect("tempdir");
+    let temp = crate::test_temp::tempdir().expect("tempdir");
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
     let source = temp.path().join("notes.txt");
@@ -163,7 +163,7 @@ fn status_output_marks_linked_and_managed_pages() {
 
 #[test]
 fn refresh_linked_page_content_updates_snapshot_in_memory() {
-    let temp = tempfile::tempdir().expect("tempdir");
+    let temp = crate::test_temp::tempdir().expect("tempdir");
     let file_path = temp.path().join("linked.md");
     std::fs::write(&file_path, "# First").expect("write initial");
 
@@ -236,7 +236,7 @@ fn synthetic_pdf(label: &str) -> Vec<u8> {
 #[test]
 fn pdf_load_hydrate_refresh_focus_delete_and_replace() {
     let _guard = crate::storage::lock_test_env();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_temp::tempdir().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
     let path = temp.path().join("Report.PdF");
     let bytes = synthetic_pdf("Hello");
@@ -299,7 +299,7 @@ fn pdf_load_hydrate_refresh_focus_delete_and_replace() {
 #[test]
 fn pdf_rejects_invalid_oversize_missing_and_clears_stale_payload() {
     let _guard = crate::storage::lock_test_env();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_temp::tempdir().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
     let path = temp.path().join("bad.pdf");
     assert!(load_file("bad-pdf", "bad", None, &path, true).is_err());
@@ -370,7 +370,7 @@ fn legacy_panel_serde_defaults_and_pdf_roundtrip() {
 #[test]
 fn focus_revision_tracks_explicit_intent_only() {
     let _guard = crate::storage::lock_test_env();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_temp::tempdir().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
     let initial = write_markdown_page("focus-rev", "a", None, "A", false).unwrap();
     assert_eq!(initial.focus_revision, 0);
@@ -394,7 +394,7 @@ fn focus_revision_tracks_explicit_intent_only() {
 #[test]
 fn pdf_aggregate_budget_rejects_before_mutation_and_bounds_hydration() {
     let _guard = crate::storage::lock_test_env();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_temp::tempdir().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
     let first = temp.path().join("one.pdf");
     let second = temp.path().join("two.pdf");

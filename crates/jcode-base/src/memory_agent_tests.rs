@@ -69,7 +69,7 @@ fn manager_without_working_dir_does_not_infer_process_project() {
 async fn retained_recall_pipeline_uses_jev_http_without_embeddings_or_sidecar() {
     use std::io::{Read, Write};
     let _lock = crate::storage::lock_test_env();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::test_temp::tempdir().unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let base = format!("http://{}/v1", listener.local_addr().unwrap());

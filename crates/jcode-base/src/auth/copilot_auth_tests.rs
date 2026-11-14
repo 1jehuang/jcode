@@ -1,8 +1,6 @@
 use super::*;
 use anyhow::{Result, anyhow};
 
-use tempfile::TempDir;
-
 #[test]
 fn copilot_api_token_not_expired() {
     let future_ts = chrono::Utc::now().timestamp() + 3600;
@@ -35,7 +33,7 @@ fn copilot_api_token_expiring_within_buffer() {
 
 #[test]
 fn load_token_from_hosts_json() -> Result<()> {
-    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
+    let dir = crate::test_temp::tempdir().map_err(|e| anyhow!(e))?;
     let hosts_path = dir.path().join("hosts.json");
     let data = serde_json::json!({
         "github.com": {
@@ -52,7 +50,7 @@ fn load_token_from_hosts_json() -> Result<()> {
 
 #[test]
 fn load_token_from_apps_json() -> Result<()> {
-    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
+    let dir = crate::test_temp::tempdir().map_err(|e| anyhow!(e))?;
     let apps_path = dir.path().join("apps.json");
     let data = serde_json::json!({
         "github.com": {
@@ -68,7 +66,7 @@ fn load_token_from_apps_json() -> Result<()> {
 
 #[test]
 fn load_token_missing_oauth_token_field() -> Result<()> {
-    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
+    let dir = crate::test_temp::tempdir().map_err(|e| anyhow!(e))?;
     let path = dir.path().join("hosts.json");
     let data = serde_json::json!({
         "github.com": {
@@ -84,7 +82,7 @@ fn load_token_missing_oauth_token_field() -> Result<()> {
 
 #[test]
 fn load_token_empty_oauth_token() -> Result<()> {
-    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
+    let dir = crate::test_temp::tempdir().map_err(|e| anyhow!(e))?;
     let path = dir.path().join("hosts.json");
     let data = serde_json::json!({
         "github.com": {
@@ -108,7 +106,7 @@ fn load_token_nonexistent_file() {
 
 #[test]
 fn load_token_invalid_json() -> Result<()> {
-    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
+    let dir = crate::test_temp::tempdir().map_err(|e| anyhow!(e))?;
     let path = dir.path().join("hosts.json");
     std::fs::write(&path, "not valid json{{{")?;
 
@@ -119,7 +117,7 @@ fn load_token_invalid_json() -> Result<()> {
 
 #[test]
 fn load_token_from_copilot_config_json() -> Result<()> {
-    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
+    let dir = crate::test_temp::tempdir().map_err(|e| anyhow!(e))?;
     let path = dir.path().join("config.json");
     std::fs::write(
         &path,
@@ -177,7 +175,7 @@ fn gh_cli_fallback_requires_explicit_opt_in() {
 
 #[test]
 fn save_and_load_github_token() -> Result<()> {
-    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
+    let dir = crate::test_temp::tempdir().map_err(|e| anyhow!(e))?;
     let config_dir = dir.path().join("github-copilot");
     std::fs::create_dir_all(&config_dir)?;
 
@@ -227,7 +225,7 @@ fn save_github_token_creates_config_dir() -> Result<()> {
     let _guard = crate::storage::lock_test_env();
     let _restore_jcode_home = EnvRestore::capture("JCODE_HOME");
     let _restore_xdg = EnvRestore::capture("XDG_CONFIG_HOME");
-    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
+    let dir = crate::test_temp::tempdir().map_err(|e| anyhow!(e))?;
 
     // The XDG location is only used when JCODE_HOME is unset. Check that
     // resolution as a pure path computation, without writing anything.
@@ -263,7 +261,7 @@ fn save_github_token_creates_config_dir() -> Result<()> {
 #[test]
 fn legacy_copilot_config_dir_uses_jcode_home_external_dir() -> Result<()> {
     let _guard = crate::storage::lock_test_env();
-    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
+    let dir = crate::test_temp::tempdir().map_err(|e| anyhow!(e))?;
     let prev = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", dir.path());
 
@@ -287,7 +285,7 @@ fn legacy_copilot_config_dir_uses_jcode_home_external_dir() -> Result<()> {
 #[test]
 fn save_github_token_makes_future_loads_available() -> Result<()> {
     let _guard = crate::storage::lock_test_env();
-    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
+    let dir = crate::test_temp::tempdir().map_err(|e| anyhow!(e))?;
     let prev_jcode_home = std::env::var_os("JCODE_HOME");
     let prev_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
 
@@ -324,7 +322,7 @@ fn save_github_token_makes_future_loads_available() -> Result<()> {
 fn load_token_from_json_does_not_change_external_permissions() -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
-    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
+    let dir = crate::test_temp::tempdir().map_err(|e| anyhow!(e))?;
     let path = dir.path().join("hosts.json");
     std::fs::write(
         &path,
@@ -582,7 +580,7 @@ fn copilot_model_info_minimal() -> Result<()> {
 
 #[test]
 fn load_token_multiple_hosts() -> Result<()> {
-    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
+    let dir = crate::test_temp::tempdir().map_err(|e| anyhow!(e))?;
     let path = dir.path().join("hosts.json");
     let data = serde_json::json!({
         "api.github.com": {
@@ -650,7 +648,7 @@ fn live_verify_failure_record_blocks_auto_use() -> Result<()> {
     // Lock the test env and isolate JCODE_HOME so the validation record we write
     // does not touch the developer's real auth-validation.json.
     let _guard = crate::storage::lock_test_env();
-    let dir = TempDir::new().map_err(|e| anyhow!(e))?;
+    let dir = crate::test_temp::tempdir().map_err(|e| anyhow!(e))?;
     let prev_jcode_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", dir.path());
 

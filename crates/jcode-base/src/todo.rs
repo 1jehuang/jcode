@@ -246,7 +246,7 @@ mod tests {
     fn gate_observations_round_trip_and_clear() {
         let _guard = crate::storage::lock_test_env();
         let previous_home = std::env::var_os("JCODE_HOME");
-        let dir = tempfile::TempDir::new().expect("tempdir");
+        let dir = crate::test_temp::tempdir().expect("tempdir");
         crate::env::set_var("JCODE_HOME", dir.path());
 
         let session = "gate-observation-round-trip";
@@ -291,7 +291,7 @@ mod tests {
     fn gate_observation_log_is_capped() {
         let _guard = crate::storage::lock_test_env();
         let previous_home = std::env::var_os("JCODE_HOME");
-        let dir = tempfile::TempDir::new().expect("tempdir");
+        let dir = crate::test_temp::tempdir().expect("tempdir");
         crate::env::set_var("JCODE_HOME", dir.path());
 
         let session = "gate-observation-cap";
@@ -336,7 +336,7 @@ mod tests {
     fn long_session_review_is_private_durable_and_one_shot() {
         let _guard = storage::lock_test_env();
         let previous_home = std::env::var_os("JCODE_HOME");
-        let dir = tempfile::TempDir::new().expect("tempdir");
+        let dir = crate::test_temp::tempdir().expect("tempdir");
         crate::env::set_var("JCODE_HOME", dir.path());
         let session = "long-review-one-shot";
         let todos = vec![todo("work", "in_progress", Some("ship"))];
@@ -375,7 +375,7 @@ mod tests {
     fn plan_intent_fields_round_trip_through_storage() {
         let _guard = crate::storage::lock_test_env();
         let previous_home = std::env::var_os("JCODE_HOME");
-        let dir = tempfile::TempDir::new().expect("tempdir");
+        let dir = crate::test_temp::tempdir().expect("tempdir");
         crate::env::set_var("JCODE_HOME", dir.path());
 
         let plan = TodoPlan {

@@ -192,7 +192,7 @@ mod tests {
     fn terminal_session_label_for_id_reads_custom_title_from_session() {
         let _guard = lock_test_env();
         let previous_home = std::env::var_os("JCODE_HOME");
-        let temp = tempfile::tempdir().expect("temp dir");
+        let temp = crate::test_temp::tempdir().expect("temp dir");
         crate::env::set_var("JCODE_HOME", temp.path());
 
         let mut session = crate::session::Session::create_with_id(
@@ -219,7 +219,7 @@ mod tests {
     fn terminal_session_label_for_id_prefers_todo_title_over_generated_title() {
         let _guard = lock_test_env();
         let previous_home = std::env::var_os("JCODE_HOME");
-        let temp = tempfile::tempdir().expect("temp dir");
+        let temp = crate::test_temp::tempdir().expect("temp dir");
         crate::env::set_var("JCODE_HOME", temp.path());
 
         let session_id = "session_fox_456";

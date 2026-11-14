@@ -531,7 +531,7 @@ mod tests {
     {
         let _guard = crate::storage::lock_test_env();
         let prev_home = std::env::var_os("JCODE_HOME");
-        let temp = tempfile::TempDir::new().expect("create temp dir");
+        let temp = crate::test_temp::tempdir().expect("create temp dir");
         crate::env::set_var("JCODE_HOME", temp.path());
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));

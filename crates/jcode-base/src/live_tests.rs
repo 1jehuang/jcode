@@ -2456,7 +2456,6 @@ pub fn concise_model_sample(models: &[String], limit: usize) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     struct EnvGuard {
         key: &'static str,
@@ -2518,9 +2517,13 @@ mod tests {
 
     #[test]
     fn live_verification_ledger_writes_events_and_coverage_without_secret() {
-        let temp = TempDir::new().expect("temp dir");
+        let temp = crate::test_temp::tempdir().expect("temp dir");
         let events_path = temp.path().join("events.jsonl");
         let coverage_path = temp.path().join("coverage.json");
+        // `LiveVerificationPaths::resolve` builds its fallback via `unwrap_or`,
+        // so `app_config_dir()` runs even when both env vars are set. Isolate
+        // JCODE_HOME so that fallback cannot resolve into a real jcode dir.
+        let _home = EnvGuard::set("JCODE_HOME", temp.path());
         let _events = EnvGuard::set(LEDGER_ENV, &events_path);
         let _coverage = EnvGuard::set(COVERAGE_ENV, &coverage_path);
         let secret = "sk-live-secret-that-must-not-appear";
