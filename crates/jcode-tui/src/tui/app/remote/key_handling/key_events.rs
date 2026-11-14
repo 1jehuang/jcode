@@ -26,6 +26,9 @@ pub(super) async fn handle_remote_key_internal(
     let mut code = code;
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
+    app.toggle_keys
+        .copy_last_response
+        .abandon_unless_continues(code, modifiers);
 
     if app.handle_key_during_provider_failover(code) {
         return Ok(());

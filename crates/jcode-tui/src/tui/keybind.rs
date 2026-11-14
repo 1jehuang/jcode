@@ -481,6 +481,21 @@ impl ChordSequence {
         self.pending = 0;
     }
 
+    /// Drop a pending prefix when `code` cannot continue or restart the
+    /// sequence, so a key another handler takes before `feed` (a picker,
+    /// overlay or other hotkey) does not leave the sequence armed.
+    /// Bare modifier presses keep the prefix.
+    pub fn abandon_unless_continues(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        if self.pending == 0 || matches!(code, KeyCode::Modifier(_)) {
+            return;
+        }
+        if !self.steps[self.pending].matches(code, modifiers)
+            && !self.steps[0].matches(code, modifiers)
+        {
+            self.pending = 0;
+        }
+    }
+
     pub fn label(&self) -> Option<&str> {
         self.label.as_deref()
     }

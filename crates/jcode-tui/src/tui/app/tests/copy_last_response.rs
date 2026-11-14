@@ -308,3 +308,68 @@ fn copy_last_answer_clipboard_tests_share_the_render_lock() {
         "do not keep a private clipboard mutex alongside TEST_CLIPBOARD"
     );
 }
+
+#[test]
+fn copy_last_response_prefix_drops_on_a_key_that_cannot_continue_it() {
+    let mut seq = crate::tui::keybind::ChordSequence::load("ctrl+x ctrl+y");
+    assert_eq!(
+        seq.feed(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        crate::tui::keybind::SequenceMatch::Prefix
+    );
+
+    seq.abandon_unless_continues(KeyCode::Modifier(crossterm::event::ModifierKeyCode::LeftControl), KeyModifiers::CONTROL);
+    assert!(seq.is_pending(), "a bare modifier press keeps the prefix");
+    seq.abandon_unless_continues(KeyCode::Char('y'), KeyModifiers::CONTROL);
+    assert!(seq.is_pending(), "the next step keeps the prefix");
+    seq.abandon_unless_continues(KeyCode::Char('x'), KeyModifiers::CONTROL);
+    assert!(seq.is_pending(), "the first step restarts, so it keeps the prefix");
+
+    seq.abandon_unless_continues(KeyCode::Esc, KeyModifiers::empty());
+    assert!(!seq.is_pending(), "any other key drops the prefix");
+}
+
+#[test]
+fn copy_last_response_remote_prefix_does_not_survive_a_picker_key() {
+    let _render_lock = scroll_render_test_lock();
+    let clipboard = CapturedClipboard::new();
+    let rt = tokio::runtime::Runtime::new().expect("test runtime");
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.is_remote = true;
+    app.toggle_keys.copy_last_response = crate::tui::keybind::ChordSequence::load("ctrl+x ctrl+y");
+    app.push_display_message(DisplayMessage::assistant("remote answer"));
+    let mut press = |app: &mut App, code: KeyCode, modifiers: KeyModifiers| {
+        rt.block_on(remote::handle_remote_key_event(
+            app,
+            crossterm::event::KeyEvent::new(code, modifiers),
+            &mut remote,
+        ))
+        .unwrap();
+    };
+
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL);
+    assert!(app.toggle_keys.copy_last_response.is_pending());
+
+    // A picker that is already open takes keys before the copy sequence is fed.
+    app.session_picker_overlay = Some(RefCell::new(
+        crate::tui::session_picker::SessionPicker::loading(),
+    ));
+    press(&mut app, KeyCode::Down, KeyModifiers::empty());
+    app.session_picker_overlay = None;
+    assert!(
+        !app.toggle_keys.copy_last_response.is_pending(),
+        "a key the picker took must drop the copy prefix"
+    );
+
+    press(&mut app, KeyCode::Char('y'), KeyModifiers::CONTROL);
+    assert_eq!(
+        clipboard.text().as_deref(),
+        Some(""),
+        "standalone Ctrl+Y after an abandoned prefix must not copy"
+    );
+
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL);
+    press(&mut app, KeyCode::Char('y'), KeyModifiers::CONTROL);
+    assert_eq!(clipboard.text().as_deref(), Some("remote answer"));
+}

@@ -3119,6 +3119,9 @@ impl App {
         let mut code = code;
         let mut modifiers = modifiers;
         ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
+        self.toggle_keys
+            .copy_last_response
+            .abandon_unless_continues(code, modifiers);
 
         if self.handle_ssh_login_key(code, modifiers, text_input.as_deref()) {
             return Ok(());
