@@ -593,3 +593,19 @@ fn startup_pool_compatible_aliases_rotate_only_enrolled_saved_logins() {
         }
     }
 }
+
+#[test]
+fn startup_config_default_honors_claude_5_5_models_without_a_catalog_cache() {
+    with_clean_provider_test_env(|| {
+        let runtime = enter_test_runtime();
+        let _guard = runtime.enter();
+        crate::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
+        for model in ["claude-haiku-5-5", "claude-sonnet-5-5"] {
+            crate::config::Config::set_default_model(Some(model), Some("anthropic-api"))
+                .expect("save Claude default");
+            let router = MultiProvider::new_fast();
+            assert_eq!(router.model(), model);
+            assert_eq!(router.fork_for_new_session().model(), model);
+        }
+    });
+}
