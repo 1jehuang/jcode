@@ -458,7 +458,7 @@ fn global_recency_budget_merges_sources_without_counting_test_sessions() {
 }
 
 #[test]
-fn cached_grouped_sessions_round_trip_from_disk() {
+fn cached_grouped_sessions_round_trip_from_disk_borrows_inventories() {
     let _env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("temp dir");
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
@@ -468,7 +468,7 @@ fn cached_grouped_sessions_round_trip_from_disk() {
     let sessions_dir = temp.path().join("sessions");
     std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
     let now = chrono::Utc::now();
-    let session = SessionInfo {
+    let mut session = SessionInfo {
         id: "session_cache_test_1770000000000".to_string(),
         parent_id: None,
         short_name: "cache-test".to_string(),
@@ -502,21 +502,101 @@ fn cached_grouped_sessions_round_trip_from_disk() {
         external_path: None,
         todo_statuses: Vec::new(),
     };
-    let cache = GroupedSessionListDiskCache {
+    // Large payloads must be serialized in place, not cloned for a cache write.
+    session.search_index = "search λ\n".repeat(32 * 1024);
+    session.messages_preview.push(PreviewMessage {
+        role: "assistant".into(),
+        content: "preview 🧪\n".repeat(32 * 1024),
+        tool_calls: vec!["tool".into()],
+        tool_data: None,
+        duration_secs: Some(1.25),
+        title: Some("Preview title".into()),
+        timestamp: Some(now),
+    });
+    let cache: GroupedSessionListDiskCache = GroupedSessionListDiskCache {
         version: SESSION_LIST_DISK_CACHE_VERSION,
         generated_at: now,
         sessions_dir,
         scan_limit: session_scan_limit(),
         include_old_saved_sessions: include_old_saved_sessions_on_initial_load(),
         external_sessions: include_external_sessions(),
-        server_groups: Vec::new(),
+        server_groups: vec![ServerGroup {
+            name: "test-server".into(),
+            icon: "🧪".into(),
+            version: "test-version".into(),
+            git_hash: "test-hash".into(),
+            is_running: true,
+            sessions: vec![session.clone()],
+        }],
         orphan_sessions: vec![session],
     };
 
-    let path = session_list_disk_cache_path().expect("cache path");
-    crate::storage::write_json_fast(&path, &cache).expect("write cache");
+    let mut borrowed = grouped_session_list_disk_cache(
+        &cache.sessions_dir,
+        cache.scan_limit,
+        &cache.server_groups,
+        &cache.orphan_sessions,
+    );
+    borrowed.generated_at = cache.generated_at;
+    assert!(std::ptr::eq(
+        borrowed.server_groups,
+        cache.server_groups.as_slice()
+    ));
+    assert!(std::ptr::eq(
+        borrowed.orphan_sessions,
+        cache.orphan_sessions.as_slice()
+    ));
+    for (borrowed_session, original) in borrowed.server_groups[0]
+        .sessions
+        .iter()
+        .chain(borrowed.orphan_sessions.iter())
+        .zip(
+            cache.server_groups[0]
+                .sessions
+                .iter()
+                .chain(cache.orphan_sessions.iter()),
+        )
+    {
+        assert_eq!(
+            borrowed_session.search_index.as_ptr(),
+            original.search_index.as_ptr()
+        );
+        assert_eq!(
+            borrowed_session.messages_preview[0].content.as_ptr(),
+            original.messages_preview[0].content.as_ptr()
+        );
+    }
+    let expected = serde_json::to_vec(&cache).expect("legacy owned encoding");
+    assert_eq!(
+        serde_json::to_vec(&borrowed).expect("borrowed encoding"),
+        expected
+    );
+    let decoded: GroupedSessionListDiskCache = serde_json::from_slice(&expected).unwrap();
+    assert_eq!(
+        decoded.server_groups[0].sessions[0].search_index,
+        cache.server_groups[0].sessions[0].search_index
+    );
+    assert_eq!(
+        decoded.orphan_sessions[0].messages_preview[0].content,
+        cache.orphan_sessions[0].messages_preview[0].content
+    );
 
-    let (_groups, orphans) = load_cached_sessions_grouped().expect("load cache");
+    write_grouped_session_list_disk_cache(
+        &cache.sessions_dir,
+        cache.scan_limit,
+        &cache.server_groups,
+        &cache.orphan_sessions,
+    );
+    let (groups, orphans) = load_cached_sessions_grouped().expect("load cache");
+    assert_eq!(groups.len(), 1);
+    assert_eq!(
+        groups[0].sessions[0].search_index,
+        cache.server_groups[0].sessions[0].search_index
+    );
+    assert_eq!(
+        orphans[0].messages_preview[0].content,
+        cache.orphan_sessions[0].messages_preview[0].content
+    );
     assert_eq!(orphans.len(), 1);
     assert_eq!(orphans[0].id, "session_cache_test_1770000000000");
     assert_eq!(orphans[0].title, "Cache test");

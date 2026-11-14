@@ -160,7 +160,7 @@ struct SessionListCacheState {
 }
 
 #[derive(Serialize, Deserialize)]
-struct GroupedSessionListDiskCache {
+struct GroupedSessionListDiskCache<Groups = Vec<ServerGroup>, Orphans = Vec<SessionInfo>> {
     version: u32,
     generated_at: chrono::DateTime<chrono::Utc>,
     sessions_dir: PathBuf,
@@ -171,8 +171,8 @@ struct GroupedSessionListDiskCache {
     /// file stays readable (it was written with externals on).
     #[serde(default = "crate::tui::session_picker::loading::default_true")]
     external_sessions: bool,
-    server_groups: Vec<ServerGroup>,
-    orphan_sessions: Vec<SessionInfo>,
+    server_groups: Groups,
+    orphan_sessions: Orphans,
 }
 
 pub(crate) fn default_true() -> bool {
@@ -237,6 +237,26 @@ fn session_list_disk_cache_is_usable(
             <= SESSION_LIST_DISK_CACHE_MAX_AGE_SECONDS
 }
 
+/// Borrow the inventories while writing. Cloning them here duplicates every
+/// search index and loaded transcript solely for the duration of serialization.
+fn grouped_session_list_disk_cache<'a>(
+    sessions_dir: &Path,
+    scan_limit: usize,
+    server_groups: &'a [ServerGroup],
+    orphan_sessions: &'a [SessionInfo],
+) -> GroupedSessionListDiskCache<&'a [ServerGroup], &'a [SessionInfo]> {
+    GroupedSessionListDiskCache {
+        version: SESSION_LIST_DISK_CACHE_VERSION,
+        generated_at: chrono::Utc::now(),
+        sessions_dir: sessions_dir.to_path_buf(),
+        scan_limit,
+        include_old_saved_sessions: include_old_saved_sessions_on_initial_load(),
+        external_sessions: include_external_sessions(),
+        server_groups,
+        orphan_sessions,
+    }
+}
+
 fn write_grouped_session_list_disk_cache(
     sessions_dir: &Path,
     scan_limit: usize,
@@ -246,16 +266,8 @@ fn write_grouped_session_list_disk_cache(
     let Ok(path) = session_list_disk_cache_path() else {
         return;
     };
-    let cache = GroupedSessionListDiskCache {
-        version: SESSION_LIST_DISK_CACHE_VERSION,
-        generated_at: chrono::Utc::now(),
-        sessions_dir: sessions_dir.to_path_buf(),
-        scan_limit,
-        include_old_saved_sessions: include_old_saved_sessions_on_initial_load(),
-        external_sessions: include_external_sessions(),
-        server_groups: server_groups.to_vec(),
-        orphan_sessions: orphan_sessions.to_vec(),
-    };
+    let cache =
+        grouped_session_list_disk_cache(sessions_dir, scan_limit, server_groups, orphan_sessions);
     if let Err(err) = storage::write_json_fast(&path, &cache) {
         crate::logging::debug(&format!(
             "failed to write session picker disk cache {}: {}",
