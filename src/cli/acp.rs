@@ -5,6 +5,7 @@ use crate::transport::{ReadHalf, WriteHalf};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -81,6 +82,27 @@ impl JsonRpcMessage {
             params: object.get("params").cloned().unwrap_or(Value::Null),
         })
     }
+}
+
+/// The daemon socket closed (EOF). Raised when the shared daemon exits or
+/// reloads, so callers can reattach instead of failing every later request.
+#[derive(Debug)]
+struct DaemonDisconnected;
+
+impl std::fmt::Display for DaemonDisconnected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Jcode daemon disconnected")
+    }
+}
+
+impl std::error::Error for DaemonDisconnected {}
+
+/// Whether `err` means the daemon connection is gone (EOF, broken pipe, reset)
+/// rather than a request-level failure reported by a live daemon.
+fn is_daemon_disconnect(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause.is::<DaemonDisconnected>() || cause.downcast_ref::<std::io::Error>().is_some()
+    })
 }
 
 struct DaemonSession {
@@ -358,9 +380,34 @@ impl DaemonSession {
     }
 
     async fn send(&self, request: &Request) -> Result<()> {
+        let mut writer = self.writer.lock().await;
+        Self::write_request(&mut writer, request).await
+    }
+
+    /// Serialize the cancellation check with sends and connection replacement.
+    /// If cancellation wins this lock, no prompt reaches the restored daemon;
+    /// otherwise the cancel is sent after the prompt on the same connection.
+    async fn send_prompt(&self, request: &Request) -> Result<bool> {
+        let mut writer = self.writer.lock().await;
+        if self.cancel_requested.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        Self::write_request(&mut writer, request).await?;
+        Ok(true)
+    }
+
+    async fn cancel_prompt(&self) -> Result<()> {
+        let mut writer = self.writer.lock().await;
+        if !self.prompt_running.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        self.cancel_requested.store(true, Ordering::SeqCst);
+        Self::write_request(&mut writer, &Request::Cancel { id: self.next_id() }).await
+    }
+
+    async fn write_request(writer: &mut WriteHalf, request: &Request) -> Result<()> {
         let mut json = serde_json::to_string(request)?;
         json.push('\n');
-        let mut writer = self.writer.lock().await;
         writer.write_all(json.as_bytes()).await?;
         writer.flush().await?;
         Ok(())
@@ -371,22 +418,35 @@ impl DaemonSession {
         let mut reader = self.reader.lock().await;
         let n = reader.read_line(&mut line).await?;
         if n == 0 {
-            anyhow::bail!("Jcode daemon disconnected");
+            return Err(DaemonDisconnected.into());
         }
         let event = serde_json::from_str(&line)
             .with_context(|| format!("failed to decode Jcode daemon event: {}", line.trim_end()))?;
         Ok(super::commands::unwrap_turn_event(event))
     }
+
+    /// Swap in a fresh daemon connection, keeping the session's identity and
+    /// state. Events buffered on the dead connection are discarded with it.
+    async fn replace_connection(&self, reader: ReadHalf, writer: WriteHalf) {
+        let mut current_reader = self.reader.lock().await;
+        let mut current_writer = self.writer.lock().await;
+        *current_reader = BufReader::new(reader);
+        *current_writer = writer;
+    }
 }
 
 #[derive(Clone)]
 struct AcpRuntime {
-    stdout: Arc<Mutex<tokio::io::Stdout>>,
+    /// ACP output channel: stdout in production, a pipe in tests.
+    stdout: Arc<Mutex<Box<dyn tokio::io::AsyncWrite + Send + Unpin>>>,
     sessions: Arc<Mutex<HashMap<String, Arc<DaemonSession>>>>,
     profile: AcpProfile,
     provider_choice: ProviderChoice,
     model: Option<String>,
     provider_profile: Option<String>,
+    /// Connect here instead of the shared daemon socket, without spawning a
+    /// daemon. Lets tests stand in a fake daemon.
+    socket_override: Option<PathBuf>,
 }
 
 impl AcpRuntime {
@@ -397,12 +457,13 @@ impl AcpRuntime {
         provider_profile: Option<String>,
     ) -> Self {
         Self {
-            stdout: Arc::new(Mutex::new(tokio::io::stdout())),
+            stdout: Arc::new(Mutex::new(Box::new(tokio::io::stdout()))),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             profile,
             provider_choice,
             model,
             provider_profile,
+            socket_override: None,
         }
     }
 
@@ -697,9 +758,7 @@ impl AcpRuntime {
             // daemon cancel can emit a stray interrupt that the next prompt
             // would otherwise misattribute to itself.
             if session.prompt_running.load(Ordering::SeqCst) {
-                session.cancel_requested.store(true, Ordering::SeqCst);
-                let cancel_id = session.next_id();
-                let _ = session.send(&Request::Cancel { id: cancel_id }).await;
+                let _ = session.cancel_prompt().await;
             }
         }
         if let Some(id) = message.id {
@@ -783,29 +842,11 @@ impl AcpRuntime {
             return Ok(());
         }
 
-        let request_id = session.next_id();
-        let apply_result = match config_id.as_str() {
-            CONFIG_ID_MODEL => {
-                session
-                    .send(&Request::SetModel {
-                        id: request_id,
-                        model: value.clone(),
-                    })
-                    .await?;
-                wait_for_model_changed(&session, request_id).await
-            }
-            CONFIG_ID_EFFORT => {
-                session
-                    .send(&Request::SetReasoningEffort {
-                        id: request_id,
-                        effort: value.clone(),
-                        target_session_id: None,
-                    })
-                    .await?;
-                wait_for_effort_changed(&session, request_id).await
-            }
-            other => Err(anyhow::anyhow!("Unknown config option id: {other}")),
-        };
+        let apply_result = self
+            .with_reconnect(&session, || {
+                apply_config_option(&session, &config_id, &value)
+            })
+            .await;
 
         match apply_result {
             Ok(()) => {
@@ -907,9 +948,85 @@ impl AcpRuntime {
     }
 
     async fn connect_daemon(&self) -> Result<(ReadHalf, WriteHalf)> {
-        self.ensure_daemon().await?;
-        let stream = crate::server::connect_socket(&crate::server::socket_path()).await?;
+        let socket = match &self.socket_override {
+            Some(socket) => socket.clone(),
+            None => {
+                // Waits out an in-progress reload handoff before spawning.
+                self.ensure_daemon().await?;
+                crate::server::socket_path()
+            }
+        };
+        let stream = crate::server::connect_socket(&socket).await?;
         Ok(stream.into_split())
+    }
+
+    /// Re-attach `session` to the daemon after its connection dropped, e.g.
+    /// because the shared daemon reloaded. The daemon persists sessions across
+    /// reloads, so this resubscribes to the same session id on a new socket.
+    async fn reconnect_session(&self, session: &DaemonSession) -> Result<()> {
+        let cwd = session
+            .working_dir
+            .clone()
+            .context("ACP session has no working directory to reattach with")?;
+        crate::logging::warn(&format!(
+            "ACP: daemon connection lost for session {}; reattaching",
+            session.session_id
+        ));
+        let (reader, writer) = self.connect_daemon().await?;
+        let fresh = self
+            .attach_existing_session_connected(
+                session.session_id.clone(),
+                cwd,
+                false,
+                reader,
+                writer,
+            )
+            .await?;
+        if fresh.session_id != session.session_id {
+            anyhow::bail!(
+                "daemon reattached session {} instead of {}",
+                fresh.session_id,
+                session.session_id
+            );
+        }
+        let DaemonSession {
+            reader,
+            writer,
+            ui_state,
+            ..
+        } = fresh;
+        session
+            .replace_connection(reader.into_inner().into_inner(), writer.into_inner())
+            .await;
+        // Keep the old model state if the reattach did not report one.
+        let fresh_state = ui_state.into_inner();
+        if fresh_state.model.is_some() {
+            *session.ui_state.lock().await = fresh_state;
+            self.write_config_option_update(session).await?;
+        }
+        crate::logging::info(&format!(
+            "ACP: reattached session {} to the daemon",
+            session.session_id
+        ));
+        Ok(())
+    }
+
+    /// Run a daemon request, reattaching and retrying once if the connection
+    /// turned out to be dead. Use only for requests that are safe to repeat.
+    async fn with_reconnect<T, F, Fut>(&self, session: &DaemonSession, mut op: F) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        match op().await {
+            Err(err) if is_daemon_disconnect(&err) => {
+                self.reconnect_session(session).await.with_context(|| {
+                    format!("{err:#}; reattaching to the restarted daemon failed")
+                })?;
+                op().await
+            }
+            other => other,
+        }
     }
 
     async fn create_new_session(&self, cwd: PathBuf) -> Result<DaemonSession> {
@@ -1114,7 +1231,12 @@ impl AcpRuntime {
     ) -> Result<()> {
         if let Some(command) = parse_acp_slash_command(&text) {
             let response = match command {
-                Ok(command) => self.run_session_command(&session, command).await,
+                Ok(command) => {
+                    self.with_reconnect(&session, || {
+                        self.run_session_command(&session, command.clone())
+                    })
+                    .await
+                }
                 Err(err) => Err(err),
             };
             cleanup_prompt_state(&session).await;
@@ -1186,19 +1308,32 @@ impl AcpRuntime {
             *active = Some(prompt_id);
         }
 
-        let send_result = session
-            .send(&Request::Message {
-                id: prompt_id,
-                content: text,
-                images,
-                system_reminder: None,
-                active_skill,
-                no_reply: false,
-            })
+        let request = Request::Message {
+            id: prompt_id,
+            content: text,
+            images,
+            system_reminder: None,
+            active_skill,
+            no_reply: false,
+        };
+        // An idle session's socket may have died with a daemon reload. A write
+        // to a closed socket fails (EPIPE) without reaching any daemon, so it
+        // is safe to reattach and send once more.
+        let send_result = self
+            .with_reconnect(&session, || session.send_prompt(&request))
             .await;
-        if let Err(err) = send_result {
-            cleanup_prompt_state(&session).await;
-            return Err(err);
+        match send_result {
+            Ok(true) => {}
+            Ok(false) => {
+                cleanup_prompt_state(&session).await;
+                self.write_result(rpc_id, prompt_response("cancelled", &TurnUsage::default()))
+                    .await?;
+                return Ok(());
+            }
+            Err(err) => {
+                cleanup_prompt_state(&session).await;
+                return Err(err);
+            }
         }
 
         let mut mapper = EventMapper::new(session.session_id.clone(), self.profile);
@@ -1207,6 +1342,24 @@ impl AcpRuntime {
         loop {
             let event = match session.read_event().await {
                 Ok(event) => event,
+                Err(err) if is_daemon_disconnect(&err) => {
+                    // The daemon took the prompt, then went away. Whether the
+                    // turn ran (or its user message was persisted) is unknown,
+                    // so never resend it. Reattach so the session keeps
+                    // working, and let the client decide whether to resend.
+                    let reattach = self.reconnect_session(&session).await;
+                    cleanup_prompt_state(&session).await;
+                    return Err(match reattach {
+                        Ok(()) => err.context(
+                            "Jcode daemon restarted during this turn; the session was \
+                             reattached, resend the prompt to continue",
+                        ),
+                        Err(reattach_err) => err.context(format!(
+                            "Jcode daemon restarted during this turn and reattaching \
+                             failed: {reattach_err:#}"
+                        )),
+                    });
+                }
                 Err(err) => {
                     cleanup_prompt_state(&session).await;
                     return Err(err);
@@ -1493,6 +1646,35 @@ impl AcpRuntime {
         stdout.write_all(line.as_bytes()).await?;
         stdout.flush().await?;
         Ok(())
+    }
+}
+
+/// Apply one `session/set_config_option` change on the daemon. Failures are
+/// returned rather than propagated, so a dead daemon connection is reported to
+/// the client instead of ending the ACP process.
+async fn apply_config_option(session: &DaemonSession, config_id: &str, value: &str) -> Result<()> {
+    let request_id = session.next_id();
+    match config_id {
+        CONFIG_ID_MODEL => {
+            session
+                .send(&Request::SetModel {
+                    id: request_id,
+                    model: value.to_string(),
+                })
+                .await?;
+            wait_for_model_changed(session, request_id).await
+        }
+        CONFIG_ID_EFFORT => {
+            session
+                .send(&Request::SetReasoningEffort {
+                    id: request_id,
+                    effort: value.to_string(),
+                    target_session_id: None,
+                })
+                .await?;
+            wait_for_effort_changed(session, request_id).await
+        }
+        other => Err(anyhow::anyhow!("Unknown config option id: {other}")),
     }
 }
 
@@ -1924,7 +2106,7 @@ fn acp_skill_commands(skills: &crate::skill::SkillRegistry) -> Vec<Value> {
         .collect()
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum AcpSlashCommand {
     Model(Option<String>),
     Models,
