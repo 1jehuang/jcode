@@ -40,7 +40,11 @@ const REPORT_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_REPORT_LEN: usize = 40;
 const CSI_TAIL_HOLD_TIMEOUT: Duration = Duration::from_millis(50);
 const CSI_TAIL_INTER_BYTE: Duration = Duration::from_millis(50);
-const CSI_TAIL_MAX_LEN: usize = 16;
+/// Reports the app requests fit: `REPORT_ALTERNATE_KEYS` appends up to
+/// three extra fields to a CSI u report (`[1080:1048:98;3:3u` is 18 bytes),
+/// so the body buffer must hold the `[` introducer plus the longest tail
+/// crossterm would decode.
+const CSI_TAIL_MAX_LEN: usize = 32;
 
 static THEME_REDRAW_PENDING: AtomicBool = AtomicBool::new(false);
 
@@ -257,6 +261,12 @@ struct CsiTailGuard {
     started: Option<Instant>,
     last_at: Option<Instant>,
     phase: CsiTailPhase,
+    /// What the escape head that armed this watch actually delivered: the
+    /// held press once it replays, or the reconstructed press a completed
+    /// report emitted. A release report only synthesizes a fresh press if
+    /// nothing was delivered for the same key yet, so a split press
+    /// followed by a split release of the same key presses once.
+    esc_press_out: bool,
 }
 
 #[derive(Default, PartialEq, Eq, Clone, Copy, Debug)]
@@ -297,6 +307,9 @@ impl CsiTailGuard {
 
     fn replay(&mut self) -> Vec<Event> {
         self.disarm();
+        // The watch ends here: a later release is not the release of an
+        // already-delivered press.
+        self.esc_press_out = false;
         std::mem::take(&mut self.held)
     }
 
@@ -458,6 +471,9 @@ impl CsiTailGuard {
         }
         if (0x40..=0x7e).contains(&byte) {
             self.body.push(byte);
+            // Hold the final byte too: if the grammar turns out to be human
+            // typing rather than a report, the replay must include it.
+            self.hold(event, now);
             return self.complete(now);
         }
         self.pass(event)
@@ -466,11 +482,25 @@ impl CsiTailGuard {
     /// The grammar completed: reconstruct what the report carried.
     fn complete(&mut self, now: Instant) -> GuardOutcome {
         let body = std::mem::take(&mut self.body);
+        let held = std::mem::take(&mut self.held);
+        // A report shape ends in one of the finals jcode consumes. Anything
+        // else that matched the grammar is human typing (`[2x`) and must be
+        // replayed, not dropped with the report noise.
+        let report_final = matches!(body.last(), Some(b'I' | b'O' | b'M' | b'm' | b'u'));
         self.disarm();
-        self.held.clear();
-        let outcome = match Self::parse_report(&body) {
-            Some(event) => GuardOutcome::Pass(vec![event]),
-            None => GuardOutcome::Drop,
+        let outcome = match self.parse_report(&body) {
+            Some(event) => {
+                if matches!(
+                    &event,
+                    Event::Key(KeyEvent { code: KeyCode::Esc, modifiers, kind: KeyEventKind::Press, .. })
+                        if modifiers.is_empty()
+                ) {
+                    self.esc_press_out = true;
+                }
+                GuardOutcome::Pass(vec![event])
+            }
+            None if report_final => GuardOutcome::Drop,
+            None => GuardOutcome::Pass(held),
         };
         // Keep watching briefly: another report may follow with its head
         // consumed, leaking only grammar bytes.
@@ -492,7 +522,10 @@ impl CsiTailGuard {
             return self.pass(event);
         };
         // A report that lost its escape head leaks grammar bytes right after
-        // the previous report completed (`[O35;49;28M`).
+        // the previous report completed (`[O35;49;28M`). A second report in
+        // the same burst starts with its own `[`; anything else is human
+        // input that queued behind the report bytes and must be replayed,
+        // not swallowed (`2x` typed right after a report leaked).
         if Self::tail_param(ch as u8) && self.burst_paced(now) {
             self.phase = CsiTailPhase::Tail;
             self.body.push(ch as u8);
@@ -502,7 +535,7 @@ impl CsiTailGuard {
     }
 
     /// Reconstruct one report from its matched tail bytes.
-    fn parse_report(body: &[u8]) -> Option<Event> {
+    fn parse_report(&mut self, body: &[u8]) -> Option<Event> {
         let body = body.strip_prefix(b"[")?;
         let final_byte = *body.last()?;
         let params = std::str::from_utf8(&body[..body.len() - 1]).ok()?;
@@ -511,7 +544,7 @@ impl CsiTailGuard {
             b'O' if params.is_empty() => Some(Event::FocusLost),
             b'M' => Self::parse_sgr_mouse(params, false),
             b'm' => Self::parse_sgr_mouse(params, true),
-            b'u' => Self::parse_csi_u(params),
+            b'u' => self.parse_csi_u(params),
             // Other replies (device attributes, keyboard flags) and noise
             // from a split head: consumed with no reconstruction.
             _ => None,
@@ -575,7 +608,7 @@ impl CsiTailGuard {
     /// Kitty `CSI u` key report, mirroring crossterm's decoder for the keys
     /// that can arrive split. Functional-key codepoints (0xE000 and up) only
     /// ever arrive intact, so they are dropped rather than mis-decoded.
-    fn parse_csi_u(params: &str) -> Option<Event> {
+    fn parse_csi_u(&mut self, params: &str) -> Option<Event> {
         let mut parts = params.split(';');
         let codepoints = parts.next()?;
         // REPORT_ALTERNATE_KEYS appends `:alternates` after the key code.
@@ -594,9 +627,13 @@ impl CsiTailGuard {
         if kind == 3 {
             // A split release report: its press half was the bare escape
             // that armed this watch. Only an unmodified Esc press arrives
-            // that way; every other press was delivered intact already.
-            return (code == 27 && mods == 1)
-                .then(|| Self::key_event(KeyCode::Esc, KeyModifiers::NONE, KeyEventKind::Press));
+            // that way; every other press was delivered intact already. If
+            // the press half was itself a split report, it was already
+            // delivered and must not press again.
+            return (code == 27 && mods == 1 && !self.esc_press_out).then(|| {
+                self.esc_press_out = true;
+                Self::key_event(KeyCode::Esc, KeyModifiers::NONE, KeyEventKind::Press)
+            });
         }
         let kind = match kind {
             1 => KeyEventKind::Press,
@@ -615,6 +652,10 @@ impl CsiTailGuard {
                 }
             }
             '\x7f' => KeyCode::Backspace,
+            // Functional-key codepoints (kitty `CSI 1 ; p u` values) only
+            // ever arrive intact, so reconstruct only the keys crossterm
+            // maps; unknown functional codes drop rather than mis-decode.
+            _ if (57399..=57427).contains(&code) => Self::keypad_or_arrow(code),
             ch if code < 0xE000 && !ch.is_control() => KeyCode::Char(ch),
             _ => return None,
         };
@@ -643,6 +684,44 @@ impl CsiTailGuard {
             modifiers |= KeyModifiers::META;
         }
         modifiers
+    }
+
+    /// Kitty's functional-key codepoints, mirroring crossterm's decoder so a
+    /// split report still delivers the key. Keypad digits keep the keypad
+    /// semantics of arriving as their plain character.
+    fn keypad_or_arrow(code: u32) -> KeyCode {
+        match code {
+            57399 => KeyCode::Char('0'),
+            57400 => KeyCode::Char('1'),
+            57401 => KeyCode::Char('2'),
+            57402 => KeyCode::Char('3'),
+            57403 => KeyCode::Char('4'),
+            57404 => KeyCode::Char('5'),
+            57405 => KeyCode::Char('6'),
+            57406 => KeyCode::Char('7'),
+            57407 => KeyCode::Char('8'),
+            57408 => KeyCode::Char('9'),
+            57409 => KeyCode::Char('.'),
+            57410 => KeyCode::Char('/'),
+            57411 => KeyCode::Char('*'),
+            57412 => KeyCode::Char('-'),
+            57413 => KeyCode::Char('+'),
+            57414 => KeyCode::Enter,
+            57415 => KeyCode::Char('='),
+            57416 => KeyCode::Char(','),
+            57417 => KeyCode::Left,
+            57418 => KeyCode::Right,
+            57419 => KeyCode::Up,
+            57420 => KeyCode::Down,
+            57421 => KeyCode::PageUp,
+            57422 => KeyCode::PageDown,
+            57423 => KeyCode::Home,
+            57424 => KeyCode::End,
+            57425 => KeyCode::Insert,
+            57426 => KeyCode::Delete,
+            57427 => KeyCode::KeypadBegin,
+            _ => KeyCode::Null,
+        }
     }
 
     fn key_event(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> Event {
@@ -707,6 +786,9 @@ impl RuntimeTheme {
     fn next_wake(&self, now: Instant) -> Instant {
         let mut at = now + DISABLED_RECHECK_INTERVAL;
         if let Some(deadline) = self.reports.deadline() {
+            at = at.min(deadline);
+        }
+        if let Some(deadline) = self.csi_guard.pending_deadline() {
             at = at.min(deadline);
         }
         if let Some(cache_query_at) = self.cache_query_at {
@@ -861,6 +943,7 @@ fn push_raw_event(state: &mut RuntimeTheme, event: Event, now: Instant) {
     match state.csi_guard.push(event, now) {
         GuardOutcome::Pass(events) => {
             for event in events {
+                state.note_focus(&event);
                 if event == Event::FocusGained {
                     query_if_due(state, now, true);
                 }
@@ -925,12 +1008,13 @@ impl EventStream {
     }
 
     /// Arm the timer for the next instant it has work. `fired` re-arms
-    /// unconditionally. Otherwise the timer only moves earlier (a report just
-    /// started being held), so an armed deadline is not reset on every poll.
+    /// unconditionally. A pending guard hold always moves the deadline in:
+    /// it is shorter than the query cadence, so an armed timer that skipped
+    /// the guard deadline would release a held Escape seconds late.
     fn rearm(&mut self, state: &RuntimeTheme, fired: bool, cx: &mut Context<'_>) {
         let now = Instant::now();
         let want = state.next_wake(now);
-        if !fired && want >= self.armed {
+        if !fired && want >= self.armed && state.csi_guard.pending_deadline().is_none() {
             return;
         }
         self.armed = want;
@@ -1088,12 +1172,10 @@ mod tests {
         Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
     }
 
-    /// The guard reads the process-global kitty-push flag; guard tests flip
-    /// it, so only one may run at a time.
-    static GUARD_TEST_LOCK: Mutex<()> = Mutex::new(());
-
+    /// The guard and the ownership tests read the process-global kitty-push
+    /// flag, so only one may run at a time; they share the ownership lock.
     fn guard_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        GUARD_TEST_LOCK
+        super::super::TERMINAL_OWNERSHIP_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner())
     }
@@ -1145,6 +1227,116 @@ mod tests {
         let delivered = feed_guard_split_tail(&mut guard, escape(), b"[98;1:3u", now);
         assert!(delivered.is_empty());
         assert_eq!(guard.phase, CsiTailPhase::Post);
+    }
+
+    #[test]
+    fn long_release_report_with_alternate_keys_fits() {
+        let _lock = guard_test_lock();
+        // REPORT_ALTERNATE_KEYS: a release report can carry up to three
+        // alternate-key fields, exceeding the old 16-byte cap.
+        let mut guard = CsiTailGuard::default();
+        let now = Instant::now();
+        let delivered = feed_guard_split_tail(&mut guard, escape(), b"[1080:1048:98;3:3u", now);
+        assert!(delivered.is_empty());
+        assert_eq!(guard.phase, CsiTailPhase::Post);
+    }
+
+    #[test]
+    fn typing_right_after_a_completed_report_is_replayed() {
+        let _lock = guard_test_lock();
+        // `2x` queued behind a burst: the digit alone is not a report
+        // continuation (a second report starts with its own `[`), and the
+        // final `x` is not a report final, so both characters must reach
+        // the app instead of being swallowed with the report.
+        let mut guard = CsiTailGuard::default();
+        let now = Instant::now();
+        let delivered = feed_guard_split_tail(&mut guard, escape(), b"[O", now);
+        assert_eq!(delivered, vec![Event::FocusLost]);
+        super::super::KITTY_KEYBOARD_PUSH_ACTIVE.store(true, Ordering::Relaxed);
+        let outcome = guard.push(press('2'), now + Duration::from_millis(3));
+        assert!(matches!(outcome, GuardOutcome::Held));
+        let outcome = guard.push(press('x'), now + Duration::from_millis(4));
+        super::super::KITTY_KEYBOARD_PUSH_ACTIVE.store(false, Ordering::Relaxed);
+        let delivered = match outcome {
+            GuardOutcome::Pass(events) => events,
+            other => panic!("expected pass, got {other:?}"),
+        };
+        assert_eq!(delivered, vec![press('2'), press('x')]);
+    }
+
+    #[test]
+    fn split_arrow_press_report_reconstructs_the_arrow() {
+        let _lock = guard_test_lock();
+        // A split Up-arrow press (`CSI 57419;1u`): the functional keypoint
+        // must map back to the arrow, not drop.
+        let mut guard = CsiTailGuard::default();
+        let now = Instant::now();
+        let delivered = feed_guard_split_tail(&mut guard, escape(), b"[57419;1u", now);
+        assert_eq!(
+            delivered,
+            vec![Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))]
+        );
+    }
+
+    #[test]
+    fn split_escape_press_then_release_presses_once() {
+        let _lock = guard_test_lock();
+        // A split press (`[27u`) delivers Esc; its split release
+        // (`[27;1:3u`) must not deliver a second press.
+        let mut guard = CsiTailGuard::default();
+        let now = Instant::now();
+        let delivered = feed_guard_split_tail(&mut guard, escape(), b"[27u", now);
+        assert_eq!(delivered, vec![escape()]);
+        assert_eq!(guard.phase, CsiTailPhase::Post);
+        super::super::KITTY_KEYBOARD_PUSH_ACTIVE.store(true, Ordering::Relaxed);
+        let at = now + Duration::from_millis(9);
+        let outcome = guard.push(escape(), at);
+        assert!(matches!(outcome, GuardOutcome::Held));
+        let mut at = at + Duration::from_millis(1);
+        let mut outcome = guard.push(press('['), at);
+        for ch in "27;1:3u".chars() {
+            at += Duration::from_millis(1);
+            outcome = guard.push(press(ch), at);
+        }
+        super::super::KITTY_KEYBOARD_PUSH_ACTIVE.store(false, Ordering::Relaxed);
+        assert!(matches!(outcome, GuardOutcome::Drop));
+        assert!(guard.held.is_empty());
+    }
+
+    #[test]
+    fn guard_deadline_pulls_the_timer_in_even_when_armed() {
+        let _lock = guard_test_lock();
+        let now = Instant::now();
+        let mut state = RuntimeTheme {
+            queries_enabled: true,
+            last_query: Some(now),
+            last_input: Some(now),
+            ..RuntimeTheme::default()
+        };
+        super::super::KITTY_KEYBOARD_PUSH_ACTIVE.store(true, Ordering::Relaxed);
+        state.csi_guard.push(escape(), now);
+        super::super::KITTY_KEYBOARD_PUSH_ACTIVE.store(false, Ordering::Relaxed);
+        // The guard deadline, not the query cadence, must drive the wake.
+        assert_eq!(state.next_wake(now), now + CSI_TAIL_HOLD_TIMEOUT);
+    }
+
+    #[test]
+    fn guard_delivered_focus_updates_the_query_cadence() {
+        let _lock = guard_test_lock();
+        let mut guard = CsiTailGuard::default();
+        let now = Instant::now();
+        let delivered = feed_guard_split_tail(&mut guard, escape(), b"[O", now);
+        let mut state = RuntimeTheme {
+            queries_enabled: true,
+            last_query: Some(now),
+            last_input: Some(now),
+            ..RuntimeTheme::default()
+        };
+        for event in delivered {
+            push_raw_event(&mut state, event, now);
+        }
+        assert!(state.unfocused);
+        assert_eq!(state.next_wake(now), now + UNFOCUSED_QUERY_INTERVAL);
     }
 
     #[test]
