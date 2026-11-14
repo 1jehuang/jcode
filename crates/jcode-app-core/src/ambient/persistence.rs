@@ -147,12 +147,18 @@ impl ScheduledQueue {
         })
     }
 
-    fn take_ready(&mut self, direct_only: bool) -> Result<Vec<ScheduledItem>> {
+    fn take_ready(&mut self, direct_only: bool, pause_spawns: bool) -> Result<Vec<ScheduledItem>> {
         self.transact(|items| {
             let now = Utc::now();
             let (mut ready, remaining): (Vec<_>, Vec<_>) =
                 std::mem::take(items).into_iter().partition(|item| {
-                    item.scheduled_for <= now && (!direct_only || item.target.is_direct_delivery())
+                    // A paused direct spawn stays durably queued rather than
+                    // being dropped: the operator is active, so wake later.
+                    let spawn_paused = pause_spawns
+                        && matches!(item.target, super::ScheduleTarget::Spawn { .. });
+                    item.scheduled_for <= now
+                        && (!direct_only || item.target.is_direct_delivery())
+                        && !spawn_paused
                 });
             *items = remaining;
             ready.sort_by(|a, b| {
@@ -165,14 +171,14 @@ impl ScheduledQueue {
     }
 
     pub fn pop_ready(&mut self) -> Vec<ScheduledItem> {
-        self.take_ready(false).unwrap_or_else(|error| {
+        self.take_ready(false, false).unwrap_or_else(|error| {
             crate::logging::warn(&format!("Failed to claim scheduled items: {error:#}"));
             Vec::new()
         })
     }
 
-    pub fn take_ready_direct_items(&mut self) -> Vec<ScheduledItem> {
-        self.take_ready(true).unwrap_or_else(|error| {
+    pub fn take_ready_direct_items(&mut self, pause_spawns: bool) -> Vec<ScheduledItem> {
+        self.take_ready(true, pause_spawns).unwrap_or_else(|error| {
             crate::logging::warn(&format!(
                 "Failed to claim direct scheduled items: {error:#}"
             ));

@@ -24,7 +24,16 @@ use crate::tool::ambient as ambient_tools;
 use chrono::Utc;
 use jcode_agent_runtime::{SoftInterruptMessage, SoftInterruptQueue, SoftInterruptSource};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Notify, RwLock};
+
+struct RunningGuard<'a>(&'a AtomicBool);
+
+impl Drop for RunningGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
 
 const MAX_IDLE_POLL_SECS: u64 = 30;
 
@@ -50,7 +59,7 @@ struct AmbientRunnerInner {
     /// Wake notify (nudge the loop to re-check sooner)
     wake_notify: Notify,
     /// Whether the runner loop is active
-    running: RwLock<bool>,
+    running: AtomicBool,
     /// Safety system shared with ambient tools
     safety: Arc<SafetySystem>,
     /// Notification dispatcher for push/email/desktop alerts
@@ -71,7 +80,7 @@ impl AmbientRunnerHandle {
                 queue_count: RwLock::new(0),
                 next_queue_preview: RwLock::new(None),
                 wake_notify: Notify::new(),
-                running: RwLock::new(false),
+                running: AtomicBool::new(false),
                 safety,
                 notifier: NotificationDispatcher::new(),
                 active_user_sessions: RwLock::new(0),
@@ -87,7 +96,7 @@ impl AmbientRunnerHandle {
 
     /// Check if the runner loop is active.
     pub async fn is_running(&self) -> bool {
-        *self.inner.running.read().await
+        self.inner.running.load(Ordering::Acquire)
     }
 
     /// Get current ambient state snapshot.
@@ -161,7 +170,7 @@ impl AmbientRunnerHandle {
     /// Start (or restart) the ambient loop. If the loop exited due to Disabled
     /// status, this resets the state to Idle and spawns a new loop task.
     pub async fn start(&self, provider: Arc<dyn Provider>) -> bool {
-        let already_running = *self.inner.running.read().await;
+        let already_running = self.inner.running.load(Ordering::Acquire);
         if already_running {
             return false;
         }
@@ -553,10 +562,11 @@ impl AmbientRunnerHandle {
 
     /// Start the background ambient loop. Call from a tokio::spawn.
     pub async fn run_loop(self, provider: Arc<dyn Provider>) {
-        {
-            let mut running = self.inner.running.write().await;
-            *running = true;
+        if self.inner.running.swap(true, Ordering::AcqRel) {
+            return;
         }
+        // Owned by the future, so cancellation and panic also clear the flag.
+        let _running = RunningGuard(&self.inner.running);
         logging::info("Ambient runner: starting background loop");
 
         // Spawn reply pollers only when ambient mode is enabled at startup; scheduled
@@ -642,10 +652,15 @@ impl AmbientRunnerHandle {
                 }
             }
 
+            // Direct spawns must respect operator activity even with cycles disabled.
+            // Filter before dequeue so deferred records remain durably queued.
+            let pause_spawns = config().ambient.pause_on_active_session
+                && *self.inner.active_user_sessions.read().await > 0;
+
             // Load manager to check should_run and update queue info
             let (should_run, ready_direct_items, next_direct_due) = match AmbientManager::new() {
                 Ok(mut mgr) => {
-                    let ready_direct_items = mgr.take_ready_direct_items();
+                    let ready_direct_items = mgr.take_ready_direct_items(pause_spawns);
                     let next_direct_due = mgr
                         .queue()
                         .items()
