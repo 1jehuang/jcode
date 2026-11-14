@@ -75,20 +75,16 @@ This feature requires compatible API, mobile-app, and cloud-runner versions.
 - Hosted `justrust check -p jcode-app-core -p jcode-base --tests` passed.
 - Hosted `justrust test -p jcode-base mobile_runner::local --lib` passed all six
   loopback-HTTP runner tests.
-- Hosted daemon tests exercised idle turns, queued busy-session messages,
-  brief-lock recovery, refusal rather than stranding messages on idle locks,
-  and headless presence. Five passed. The remaining rejection test expected
-  empty initial history, but the agent starts with a bootstrap message. Its
-  assertion now compares against the initial count. Rerunning the correction
-  was blocked by repeated hosted transport failures, not a passing verdict.
-- `crates/jcode-base/tests/mobile_local_backend_acceptance.rs` and its Node
-  fixture exercise actual backend HTTP/SQLite plus the actual Rust local
-  runner, with a synthetic session host. The Node backend lifecycle was run
-  successfully. The complete Rust acceptance executable was not run: hosted
-  compilation repeatedly lost its connection after target-lock contention.
-- Full CLI check and opt-out persistence execution were also attempted but
-  blocked by that hosted outage. Local compilation was not used on battery.
+- Hosted daemon tests passed all six cases, including idle turns, busy-session
+  queueing, transient lock recovery, rejected delivery, and headless presence.
+- Hosted `justrust test -p jcode-base mobile_ --lib` passed 63 tests with five
+  ignored tests. Full CLI checking and opt-out persistence tests also passed.
+- The backend HTTP/SQLite plus Rust runner acceptance test passed using a
+  synthetic session host. Its executable was compiled on hosted and executed
+  locally for Node and sibling-checkout access. No local battery build was used.
+- Mobile hosted workspace checking, 15 core sync tests, and all nine live-chat
+  GPUI tests passed. Public TestFlight build 1794621085 contains the tested
+  application source, commit `6f91b68`.
 
-Do not interpret these results as a production deployment or as on-device iOS
-acceptance. The API migration and compatible binaries still need rollout, and
-the blocked checks must pass before declaring the complete workflow validated.
+These automated results are not physical-device iOS acceptance. Production
+API rollout and desktop activation are tracked separately from test results.
