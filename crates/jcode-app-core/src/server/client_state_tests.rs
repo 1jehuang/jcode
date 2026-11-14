@@ -1071,6 +1071,36 @@ fn history_reload_recovery_does_not_infer_pending_user_turn_without_reload_marke
 }
 
 #[test]
+fn history_reload_recovery_infers_pending_assistant_tool_during_reload() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::TempDir::new()?;
+    let runtime = tempfile::TempDir::new()?;
+    let _guard = ReloadHistoryEnvGuard::new(home.path(), runtime.path());
+    let session_id = "session_history_pending_bg";
+    let mut session = crate::session::Session::create_with_id(session_id.into(), None, None);
+    session.status = crate::session::SessionStatus::Active;
+    session.add_message(
+        crate::message::Role::Assistant,
+        vec![crate::message::ContentBlock::ToolUse {
+            id: "wait_1".into(),
+            name: "bg".into(),
+            input: serde_json::json!({"action": "wait", "max_wait_seconds": 400}),
+            thought_signature: None,
+        }],
+    );
+    session.save()?;
+    assert!(super::history_reload_recovery_snapshot(session_id, None).is_none());
+    crate::server::write_reload_state(
+        "reload-pending-bg",
+        "test-hash",
+        crate::server::ReloadPhase::SocketReady,
+        None,
+    );
+    assert!(super::history_reload_recovery_snapshot(session_id, None).is_some());
+    Ok(())
+}
+
+#[test]
 fn history_reload_recovery_does_not_mark_delivered_until_continuation_is_accepted() -> Result<()> {
     let _lock = crate::storage::lock_test_env();
     let home = tempfile::TempDir::new()?;
