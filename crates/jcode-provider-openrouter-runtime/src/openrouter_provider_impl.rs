@@ -547,6 +547,12 @@ impl Provider for OpenRouterProvider {
     }
 
     fn available_efforts(&self) -> Vec<&'static str> {
+        // `reasoning = false` force-disables effort switching even when a map
+        // is present: the runtime rejects every rung, so advertising a ladder
+        // would offer choices that always fail (greptile F11).
+        if self.model_reasoning_override_for_key(&self.model_key_snapshot()) == Some(false) {
+            return vec![];
+        }
         // A configured per-model reasoning map defines the ladder exactly:
         // only enabled rungs are selectable (opencode per-level mapping). The
         // swarm sentinels stay appended since they are Jcode UI modes resolved
@@ -692,7 +698,47 @@ impl Provider for OpenRouterProvider {
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {
-        self.available_models_display()
+        // The cycle handler compares entries against the raw current model
+        // id, so this list must stay raw: applying display-name aliases here
+        // would make every comparison miss and reset the cycle to index 0,
+        // reporting successful switches while staying on the same model.
+        let finalize = |models: Vec<String>| self.filter_profile_chat_supported_models(models);
+        let with_current_model = |mut models: Vec<String>| {
+            let current = self.model();
+            if !current.trim().is_empty() && !models.iter().any(|model| model == &current) {
+                models.insert(0, current);
+            }
+            models
+        };
+        if !self.supports_model_catalog {
+            if !self.static_models.is_empty() {
+                return finalize(with_current_model(self.static_models.clone()));
+            }
+            let model = self.model();
+            return finalize(if model.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![model]
+            });
+        }
+
+        if let Ok(cache) = self.models_cache.try_read()
+            && cache.fetched
+            && !cache.models.is_empty()
+        {
+            let ids: Vec<String> = cache.models.iter().map(|m| m.id.clone()).collect();
+            return finalize(with_current_model(ids));
+        }
+
+        if !self.static_models.is_empty() {
+            return finalize(with_current_model(self.static_models.clone()));
+        }
+        let model = self.model();
+        finalize(if model.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![model]
+        })
     }
 
     fn model_routes(&self) -> Vec<jcode_provider_core::ModelRoute> {

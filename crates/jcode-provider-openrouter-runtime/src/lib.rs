@@ -1033,8 +1033,23 @@ impl OpenRouterProvider {
     /// `models[].display_name`, and `set_model` receives whatever the picker
     /// sent. Without this reverse lookup the display name would leak to the
     /// upstream API and be rejected as an invalid model id.
+    ///
+    /// Raw model ids are the selection identity: when a caller passes a string
+    /// that is itself a configured raw id (case-insensitive), it must never be
+    /// reinterpreted as some other model's display-name alias, even if a
+    /// sibling model carries that string as its label.
     fn resolve_display_name_to_id(&self, model: &str) -> String {
         let key = model.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            return model.trim().to_string();
+        }
+        if self
+            .static_models
+            .iter()
+            .any(|id| id.to_ascii_lowercase() == key)
+        {
+            return model.trim().to_string();
+        }
         if let Some(raw_id) = self.static_display_name_to_id.get(&key) {
             return raw_id.clone();
         }
@@ -1204,6 +1219,13 @@ impl OpenRouterProvider {
             let rung = raw.trim().to_ascii_lowercase();
             if rung.is_empty() {
                 return None;
+            }
+            // Swarm sentinels are UI modes, not map rungs: preserve them
+            // before the map lookup so a `swarm` default (including one
+            // inherited from openai_reasoning_effort) is not silently
+            // dropped to None (greptile F9, PR 1879).
+            if jcode_provider_core::SWARM_EFFORTS.contains(&rung.as_str()) {
+                return Some(rung);
             }
             let map = model_reasoning_map?;
             // Only enabled rungs are valid defaults; `resolve` rejects disabled

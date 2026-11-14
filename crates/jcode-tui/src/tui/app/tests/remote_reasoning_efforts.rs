@@ -98,7 +98,6 @@ fn remote_reasoning_efforts_prefers_configured_map_over_family_inference() {
                 "high".to_string(),
                 "xhigh".to_string(),
                 "swarm".to_string(),
-                "swarm-deep".to_string(),
             ],
             "local remote client must resolve the map rungs (medium disabled) plus swarm sentinels"
         );
@@ -152,7 +151,6 @@ fn remote_reasoning_efforts_matches_profile_display_name() {
                 "high".to_string(),
                 "xhigh".to_string(),
                 "swarm".to_string(),
-                "swarm-deep".to_string(),
             ]
         );
     });

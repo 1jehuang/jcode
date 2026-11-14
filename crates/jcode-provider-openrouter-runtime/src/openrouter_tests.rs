@@ -1443,15 +1443,7 @@ fn direct_deepseek_profile_exposes_max_reasoning_effort() {
 
     assert_eq!(
         provider.available_efforts(),
-        vec![
-            "none",
-            "low",
-            "medium",
-            "high",
-            "max",
-            "swarm",
-            "swarm-deep"
-        ]
+        vec!["none", "low", "medium", "high", "max", "swarm"]
     );
     provider
         .set_reasoning_effort("max")
@@ -1470,15 +1462,7 @@ fn direct_zai_profile_exposes_openai_reasoning_effort_ladder() {
     assert_eq!(
         provider.available_efforts(),
         vec![
-            "none",
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "max",
-            "swarm",
-            "swarm-deep"
+            "none", "minimal", "low", "medium", "high", "xhigh", "max", "swarm"
         ]
     );
     provider
@@ -1515,16 +1499,7 @@ fn openrouter_profile_exposes_unified_reasoning_effort() {
 
     assert_eq!(
         provider.available_efforts(),
-        vec![
-            "none",
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "swarm",
-            "swarm-deep"
-        ]
+        vec!["none", "minimal", "low", "medium", "high", "xhigh", "swarm"]
     );
     provider
         .set_reasoning_effort("minimal")
@@ -1549,16 +1524,7 @@ fn openrouter_with_openrouter_profile_id_exposes_unified_reasoning_effort() {
 
     assert_eq!(
         provider.available_efforts(),
-        vec![
-            "none",
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "swarm",
-            "swarm-deep"
-        ]
+        vec!["none", "minimal", "low", "medium", "high", "xhigh", "swarm"]
     );
     provider
         .set_reasoning_effort("high")
@@ -3553,15 +3519,7 @@ fn compat_profile_serving_deepseek_model_supports_reasoning_effort() {
     provider.set_model("deepseek-v4-flash").unwrap();
     assert_eq!(
         provider.available_efforts(),
-        vec![
-            "none",
-            "low",
-            "medium",
-            "high",
-            "max",
-            "swarm",
-            "swarm-deep"
-        ]
+        vec!["none", "low", "medium", "high", "max", "swarm"]
     );
     provider
         .set_reasoning_effort("high")
@@ -3588,15 +3546,7 @@ fn compat_profile_serving_gpt_family_model_supports_reasoning_effort() {
         assert_eq!(
             provider.available_efforts(),
             vec![
-                "none",
-                "minimal",
-                "low",
-                "medium",
-                "high",
-                "xhigh",
-                "max",
-                "swarm",
-                "swarm-deep"
+                "none", "minimal", "low", "medium", "high", "xhigh", "max", "swarm"
             ],
             "{model} should expose OpenAI effort vocabulary"
         );
@@ -3643,15 +3593,7 @@ fn named_profile_supports_reasoning_effort_config_override() {
     force_on.set_model("not-a-deepseek-model").unwrap();
     assert_eq!(
         force_on.available_efforts(),
-        vec![
-            "none",
-            "low",
-            "medium",
-            "high",
-            "max",
-            "swarm",
-            "swarm-deep"
-        ]
+        vec!["none", "low", "medium", "high", "max", "swarm"]
     );
     force_on
         .set_reasoning_effort("medium")
@@ -4860,7 +4802,7 @@ fn reasoning_map_defines_the_selectable_ladder() {
     let provider = make_mapped_compatible_provider(opencode_style_reasoning_map());
     assert_eq!(
         provider.available_efforts(),
-        vec!["none", "high", "xhigh", "swarm", "swarm-deep"]
+        vec!["none", "high", "xhigh", "swarm"]
     );
     assert!(provider.supports_any_reasoning_effort());
 }
@@ -4993,19 +4935,21 @@ fn reasoning_map_clones_through_fork() {
     let forked = provider.fork();
     assert_eq!(
         forked.available_efforts(),
-        vec!["none", "high", "xhigh", "swarm", "swarm-deep"]
+        vec!["none", "high", "xhigh", "swarm"]
     );
 }
 
 #[test]
-fn selecting_swarm_deep_effort_keeps_the_sentinel_stored() {
-    // The ladder advertises both swarm sentinels, so selecting swarm-deep
-    // must store it as-is. Letting it fall through to the OpenAI family
-    // normalizer would silently clear the stored effort.
+fn selecting_swarm_effort_keeps_the_sentinel_stored() {
+    // The ladder advertises the swarm sentinel, so selecting it must store it
+    // as-is. Letting it fall through to the OpenAI family normalizer would
+    // silently clear the stored effort. The retired `swarm-deep` mode is
+    // neither advertised nor accepted.
     let provider = make_mapped_compatible_provider(opencode_style_reasoning_map());
     provider.set_reasoning_effort("high").unwrap();
-    provider.set_reasoning_effort("swarm-deep").unwrap();
-    assert_eq!(provider.reasoning_effort().as_deref(), Some("swarm-deep"));
+    provider.set_reasoning_effort("swarm").unwrap();
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("swarm"));
+    assert!(provider.set_reasoning_effort("swarm-deep").is_err());
 
     let mut bare = make_custom_compatible_provider();
     bare.reasoning_effort_support = Some(true);
@@ -5032,10 +4976,11 @@ fn swarm_root_clamps_to_the_highest_enabled_map_rung() {
         provider.resolve_request_reasoning_effort("swarm"),
         Some("xhigh".to_string())
     );
-    // `swarm-deep` follows the same root path.
+    // The retired deep sentinel is not a swarm mode anymore: it must resolve
+    // to itself (rejected by set_reasoning_effort) rather than a root rung.
     assert_eq!(
         provider.resolve_swarm_root_effort_for_request("swarm-deep"),
-        "xhigh"
+        "swarm-deep"
     );
 }
 
@@ -5104,23 +5049,26 @@ fn responses_resolution_translates_mapped_rungs_and_suppresses_none() {
 }
 
 #[test]
-fn no_map_ladders_accept_the_advertised_deep_sentinel() {
-    // The client ladder (configured_reasoning_efforts_in) appends both
-    // swarm sentinels for reasoning=true models; the runtime ladder must
-    // accept them or selecting the advertised rung bails (greptile F7b).
+fn no_map_ladders_accept_the_advertised_swarm_sentinel() {
+    // The client ladder (configured_reasoning_efforts_in) appends the swarm
+    // sentinel for reasoning=true models; the runtime ladder must accept it or
+    // selecting the advertised rung bails. The retired deep sentinel must be
+    // absent from every ladder and rejected by the setter.
     let mut provider = make_custom_compatible_provider();
     provider.reasoning_effort_support = Some(true);
     provider.set_model("gpt-5.5").unwrap();
     let ladder = provider.available_efforts();
-    assert!(ladder.contains(&"swarm-deep"), "ladder: {ladder:?}");
-    provider.set_reasoning_effort("swarm-deep").unwrap();
-    assert_eq!(provider.reasoning_effort().as_deref(), Some("swarm-deep"));
+    assert!(ladder.contains(&"swarm"), "ladder: {ladder:?}");
+    assert!(!ladder.contains(&"swarm-deep"), "ladder: {ladder:?}");
+    provider.set_reasoning_effort("swarm").unwrap();
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("swarm"));
 
     let deepseek = make_custom_compatible_provider();
     deepseek.set_model("deepseek-v4-flash").unwrap();
-    assert!(deepseek.available_efforts().contains(&"swarm-deep"));
-    deepseek.set_reasoning_effort("swarm-deep").unwrap();
-    assert_eq!(deepseek.reasoning_effort().as_deref(), Some("swarm-deep"));
+    assert!(deepseek.available_efforts().contains(&"swarm"));
+    assert!(!deepseek.available_efforts().contains(&"swarm-deep"));
+    deepseek.set_reasoning_effort("swarm").unwrap();
+    assert_eq!(deepseek.reasoning_effort().as_deref(), Some("swarm"));
 }
 
 #[test]
@@ -5136,7 +5084,7 @@ fn reasoning_map_overrides_deepseek_family_detection() {
 
     assert_eq!(
         provider.available_efforts(),
-        vec!["none", "high", "xhigh", "swarm", "swarm-deep"]
+        vec!["none", "high", "xhigh", "swarm"]
     );
     assert!(provider.set_reasoning_effort("max").is_err());
     provider.set_reasoning_effort("xhigh").unwrap();
@@ -5169,7 +5117,7 @@ fn reasoning_map_survives_model_switch_to_mapped_and_unmapped_models() {
     provider.set_model(DEFAULT_MODEL).unwrap();
     assert_eq!(
         provider.available_efforts(),
-        vec!["none", "high", "xhigh", "swarm", "swarm-deep"]
+        vec!["none", "high", "xhigh", "swarm"]
     );
 }
 

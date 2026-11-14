@@ -451,6 +451,18 @@ pub(super) fn configured_reasoning_efforts_in(
     }
     let provider_lower = provider.to_ascii_lowercase();
     let model_lower = model.to_ascii_lowercase();
+    // Prefer an exact profile-key match: when two profiles share the same
+    // `display_name`, the label-only match would pick the first one in map
+    // order, which may not be the profile serving the session (greptile F12).
+    for (profile_name, profile_config) in providers {
+        if profile_name.to_ascii_lowercase() != provider_lower {
+            continue;
+        }
+        if let Some(efforts) = profile_reasoning_efforts_for_model(profile_config, &model_lower) {
+            return Some(efforts);
+        }
+        return None;
+    }
     for (profile_name, profile_config) in providers {
         let profile_label = profile_config
             .display_name
@@ -458,55 +470,69 @@ pub(super) fn configured_reasoning_efforts_in(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .unwrap_or(profile_name);
-        if profile_name.to_ascii_lowercase() != provider_lower
-            && profile_label.to_ascii_lowercase() != provider_lower
-        {
+        if profile_label.to_ascii_lowercase() != provider_lower {
             continue;
         }
-        let model_config = profile_config
-            .models
-            .iter()
-            .find(|entry| entry.id.trim().to_ascii_lowercase() == model_lower)?;
-        let map = model_config.reasoning_map.as_ref();
-        if let Some(map) = map.filter(|map| !map.is_empty()) {
-            let mut efforts: Vec<String> = map
-                .rungs()
-                .filter(|(_, rung)| !rung.disabled)
-                .map(|(key, _)| key.to_string())
-                .collect();
-            if efforts.is_empty() {
-                return None;
-            }
-            efforts.extend(
-                jcode_provider_core::SWARM_EFFORTS
-                    .iter()
-                    .map(|s| s.to_string()),
-            );
-            return Some(efforts);
-        }
-        // No map: the per-model `reasoning` override still enables effort on
-        // the server. `reasoning = true` on a non-DeepSeek model gets the
-        // OpenAI ladder there (DeepSeek-family ids keep the DeepSeek ladder,
-        // matching `supports_deepseek_reasoning_effort`); mirror it so the
-        // client offers the same rungs and does not report the effort as
-        // fixed. The deep-swarm sentinel is only appended when the shared
-        // ladder still carries it.
-        if model_config.reasoning == Some(true) {
-            let deepseek_family = model_lower.contains("deepseek");
-            let base = if deepseek_family {
-                jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS
-            } else {
-                jcode_provider_core::OPENAI_SELECTABLE_EFFORTS
-            };
-            let mut efforts: Vec<String> = base.iter().map(|s| s.to_string()).collect();
-            for sentinel in jcode_provider_core::SWARM_EFFORTS {
-                if !efforts.iter().any(|effort| effort == *sentinel) {
-                    efforts.push(sentinel.to_string());
-                }
-            }
+        if let Some(efforts) = profile_reasoning_efforts_for_model(profile_config, &model_lower) {
             return Some(efforts);
         }
         return None;
+    }
+    None
+}
+
+fn profile_reasoning_efforts_for_model(
+    profile_config: &crate::config::NamedProviderConfig,
+    model_lower: &str,
+) -> Option<Vec<String>> {
+    let model_config = profile_config
+        .models
+        .iter()
+        .find(|entry| entry.id.trim().to_ascii_lowercase() == *model_lower)?;
+    // `reasoning = false` is the force-off switch even when a saved map
+    // remains in config: the runtime rejects every effort change, so the
+    // client must not advertise choices that always fail (greptile F11).
+    if model_config.reasoning == Some(false) {
+        return None;
+    }
+    let map = model_config.reasoning_map.as_ref();
+    if let Some(map) = map.filter(|map| !map.is_empty()) {
+        let mut efforts: Vec<String> = map
+            .rungs()
+            .filter(|(_, rung)| !rung.disabled)
+            .map(|(key, _)| key.to_string())
+            .collect();
+        if efforts.is_empty() {
+            return None;
+        }
+        efforts.extend(
+            jcode_provider_core::SWARM_EFFORTS
+                .iter()
+                .map(|s| s.to_string()),
+        );
+        return Some(efforts);
+    }
+    // No map: the per-model `reasoning` override still enables effort on
+    // the server. `reasoning = true` on a non-DeepSeek model gets the
+    // OpenAI ladder there (DeepSeek-family ids keep the DeepSeek ladder,
+    // matching `supports_deepseek_reasoning_effort`); mirror it so the
+    // client offers the same rungs and does not report the effort as
+    // fixed. The deep-swarm sentinel is only appended when the shared
+    // ladder still carries it.
+    if model_config.reasoning == Some(true) {
+        let deepseek_family = model_lower.contains("deepseek");
+        let base = if deepseek_family {
+            jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS
+        } else {
+            jcode_provider_core::OPENAI_SELECTABLE_EFFORTS
+        };
+        let mut efforts: Vec<String> = base.iter().map(|s| s.to_string()).collect();
+        for sentinel in jcode_provider_core::SWARM_EFFORTS {
+            if !efforts.iter().any(|effort| effort == *sentinel) {
+                efforts.push(sentinel.to_string());
+            }
+        }
+        return Some(efforts);
     }
     None
 }
