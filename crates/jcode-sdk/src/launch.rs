@@ -368,7 +368,7 @@ pub fn user_jcode_home() -> PathBuf {
         .unwrap_or_else(|| home_dir().join(".jcode"))
 }
 
-/// Share rotating login records with an instance and copy mutable config.
+/// Share rotating login records and copy mutable config and model catalogs.
 /// Returns the instance-relative paths which were inherited.
 pub fn inherit_credentials(from_home: &Path, to_home: &Path) -> Result<Vec<PathBuf>> {
     fs::create_dir_all(to_home).map_err(launch_io)?;
@@ -405,16 +405,33 @@ pub fn inherit_credentials(from_home: &Path, to_home: &Path) -> Result<Vec<PathB
         inherited.push(PathBuf::from(name));
     }
 
-    // Provider env files live in the platform config directory. Link exact
-    // files, never the directory, so cleanup cannot traverse into user data.
+    // Share provider env files, but snapshot model catalogs so a private
+    // instance can validate account models before its first live refresh.
     if let Ok(entries) = fs::read_dir(user_app_config_dir()) {
         for entry in entries.flatten() {
             let name = entry.file_name();
-            if !name.to_string_lossy().ends_with(".env") || !entry.path().is_file() {
+            let filename = name.to_string_lossy();
+            if !entry.path().is_file() {
                 continue;
             }
             let relative = PathBuf::from("config").join("jcode").join(&name);
-            link_credential_file(&entry.path(), to_home, &relative)?;
+            if filename.ends_with(".env") {
+                link_credential_file(&entry.path(), to_home, &relative)?;
+            } else if filename.ends_with("_model_catalog_cache.json")
+                || filename.ends_with("_models_cache.json")
+            {
+                let parent = ensure_instance_directory(to_home, Path::new("config/jcode"))?;
+                let mut snapshot = tempfile::NamedTempFile::new_in(parent).map_err(launch_io)?;
+                let mut source = fs::File::open(entry.path()).map_err(launch_io)?;
+                std::io::copy(&mut source, &mut snapshot).map_err(launch_io)?;
+                set_owner_only_file(snapshot.path())?;
+                // Atomic replacement never writes through an existing file link.
+                snapshot
+                    .persist(to_home.join(&relative))
+                    .map_err(|error| launch_io(error.error))?;
+            } else {
+                continue;
+            }
             inherited.push(relative);
         }
     }

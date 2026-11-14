@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { inheritCredentials, userJcodeHome } from "../dist/index.js";
+import { inheritCredentials, userAppConfigDir, userJcodeHome } from "../dist/index.js";
 
 test("platform runtime packages map to npm platform conventions", async () => {
   const { platformBinaryPackage } = await import("../dist/index.js");
@@ -171,6 +171,82 @@ test("login inheritance creates file links, never credential directory links", (
     else process.env.HOME = oldHome;
     if (oldXdg === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = oldXdg;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("model catalogs are inherited as private snapshots", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "jcode-catalog-test-"));
+  const keys = ["HOME", "USERPROFILE", "XDG_CONFIG_HOME", "APPDATA"] as const;
+  const previous = keys.map((key) => process.env[key]);
+  try {
+    for (const key of keys) process.env[key] = path.join(sandbox, key);
+    const from = path.join(sandbox, "user");
+    const to = path.join(sandbox, "instance");
+    assert.deepEqual(inheritCredentials(from, to), []);
+    const config = userAppConfigDir();
+    fs.mkdirSync(config, { recursive: true });
+    const catalogs = ["openai_model_catalog_cache.json", "copilot_models_cache.json"];
+    const contents = '{"scopes":{"test-account":{"models":["account-only-model"],"observed_at_unix_secs":123}}}';
+    for (const name of catalogs) fs.writeFileSync(path.join(config, name), contents);
+    const excluded = ["usage.json", "auth-validation.json", "other_cache.json"];
+    for (const name of excluded) fs.writeFileSync(path.join(config, name), "private state");
+    fs.mkdirSync(path.join(config, "directory_models_cache.json"));
+    fs.symlinkSync(path.join(config, "missing"), path.join(config, "missing_models_cache.json"));
+    fs.writeFileSync(path.join(config, "openai.env"), "TOKEN=synthetic");
+
+    const inherited = inheritCredentials(from, to);
+    const instanceConfig = path.join(to, "config", "jcode");
+    assert.ok(inherited.includes("config/jcode/openai.env"));
+    assert.ok(fs.lstatSync(path.join(instanceConfig, "openai.env")).isSymbolicLink());
+    for (const name of catalogs) {
+      assert.ok(inherited.includes(`config/jcode/${name}`), `missing copied model catalog: ${name}`);
+      const destination = path.join(instanceConfig, name);
+      const stats = fs.lstatSync(destination);
+      assert.ok(stats.isFile());
+      if (process.platform !== "win32") assert.equal(stats.mode & 0o777, 0o600);
+      assert.equal(fs.readFileSync(destination, "utf8"), contents);
+      fs.writeFileSync(destination, "instance refresh");
+      assert.equal(fs.readFileSync(path.join(config, name), "utf8"), contents);
+      fs.writeFileSync(path.join(config, name), "user refresh");
+      assert.equal(fs.readFileSync(destination, "utf8"), "instance refresh");
+    }
+    for (const name of [...excluded, "directory_models_cache.json", "missing_models_cache.json"]) {
+      assert.ok(!fs.existsSync(path.join(instanceConfig, name)));
+    }
+
+    // Cache copying must repair legacy directory and file links on its own.
+    fs.unlinkSync(path.join(config, "openai.env"));
+    for (const name of catalogs) {
+      fs.unlinkSync(path.join(instanceConfig, name));
+      fs.symlinkSync(path.join(config, name), path.join(instanceConfig, name));
+    }
+    fs.writeFileSync(path.join(instanceConfig, "keep.json"), "instance state");
+    inheritCredentials(from, to);
+    inheritCredentials(from, to);
+    assert.equal(fs.readFileSync(path.join(instanceConfig, "keep.json"), "utf8"), "instance state");
+    for (const name of catalogs) {
+      const destination = path.join(instanceConfig, name);
+      assert.ok(fs.lstatSync(destination).isFile());
+      assert.equal(fs.readFileSync(destination, "utf8"), "user refresh");
+      fs.writeFileSync(destination, "new instance refresh");
+      assert.equal(fs.readFileSync(path.join(config, name), "utf8"), "user refresh");
+    }
+    for (const relative of ["config", "config/jcode"]) {
+      const reused = path.join(sandbox, relative.replaceAll("/", "-"));
+      const link = path.join(reused, relative);
+      fs.mkdirSync(path.dirname(link), { recursive: true });
+      fs.symlinkSync(path.dirname(config), link, "dir");
+      inheritCredentials(from, reused);
+      assert.ok(fs.lstatSync(link).isDirectory());
+      assert.equal(fs.readFileSync(path.join(config, catalogs[0]), "utf8"), "user refresh");
+      assert.ok(!fs.existsSync(path.join(config, "jcode")));
+    }
+  } finally {
+    keys.forEach((key, index) => {
+      if (previous[index] === undefined) delete process.env[key];
+      else process.env[key] = previous[index];
+    });
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
 });
