@@ -63,14 +63,22 @@ mod ansi_tests {
 /// do so; callers that want fire-and-forget can use [`emit_osc9_status_ignored`].
 pub fn emit_osc9_status(state: &str) -> std::io::Result<()> {
     use std::io::Write as _;
+    let mut stdout = std::io::stdout().lock();
+    write_osc9_status(&mut stdout, state)?;
+    stdout.flush()
+}
+
+/// Write the `jcode:<state>` OSC 9 sequence to any writer.
+///
+/// Split out of [`emit_osc9_status`] so tests can assert the exact bytes the
+/// emitter produces instead of rebuilding the escape string themselves, which
+/// would keep passing even if the production selector changed.
+fn write_osc9_status(writer: &mut impl std::io::Write, state: &str) -> std::io::Result<()> {
     let payload = format!("jcode:{state}");
     // OSC 9 ;<payload> BEL. crossterm has no built-in OSC 9 command, so write
     // the escape sequence directly.
     let osc = format!("\x1b]9;{payload}\x07");
-    let mut stdout = std::io::stdout().lock();
-    stdout.write_all(osc.as_bytes())?;
-    stdout.flush()?;
-    Ok(())
+    writer.write_all(osc.as_bytes())
 }
 
 /// Emit an OSC 9 progress sequence and explicitly ignore any write error.
@@ -111,22 +119,31 @@ fn enable_stderr_vt_processing() -> bool {
 mod tests {
     use super::*;
 
+    /// Assert the exact bytes the emitter writes for a state, so a change to
+    /// the production escape sequence fails here instead of silently passing.
+    fn emitted_bytes(state: &str) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        write_osc9_status(&mut buffer, state).expect("write osc9 status");
+        buffer
+    }
+
     #[test]
     fn osc9_payload_format() {
         // The exact byte sequence is part of herdr's detection contract, so lock
         // it down: ESC ] 9 ; jcode:<state> BEL.
-        let payload = "working";
-        let osc = format!("\x1b]9;jcode:{payload}\x07");
-        assert_eq!(osc, "\x1b]9;jcode:working\x07");
-        assert!(osc.starts_with("\x1b]9;"));
-        assert!(osc.ends_with('\x07'));
+        assert_eq!(
+            emitted_bytes("working"),
+            b"\x1b]9;jcode:working\x07".to_vec()
+        );
     }
 
     #[test]
     fn osc9_state_variants_format() {
         for state in ["working", "idle", "blocked"] {
-            let osc = format!("\x1b]9;jcode:{state}\x07");
-            assert!(osc.contains(&format!("jcode:{state}")));
+            assert_eq!(
+                emitted_bytes(state),
+                format!("\x1b]9;jcode:{state}\x07").into_bytes()
+            );
         }
     }
 

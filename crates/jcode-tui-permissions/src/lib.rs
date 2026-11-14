@@ -521,6 +521,15 @@ impl PermissionsApp {
         if terminal_status_osc9 {
             emit_osc9_status_ignored("blocked");
         }
+        // Reset to idle on every exit path, including errors bubbling out of
+        // the loop via `?`, so the viewer never leaves "blocked" behind.
+        struct IdleOnExit;
+        impl Drop for IdleOnExit {
+            fn drop(&mut self) {
+                emit_osc9_status_ignored("idle");
+            }
+        }
+        let _idle_on_exit = terminal_status_osc9.then_some(IdleOnExit);
 
         let mut terminal = jcode_tui_style::init_terminal()
             .map_err(|error| anyhow::anyhow!("failed to initialize terminal: {error}"))?;
@@ -586,11 +595,6 @@ impl PermissionsApp {
         };
 
         jcode_tui_style::restore_terminal_quietly();
-        // Restore idle status when leaving the permissions viewer so herdr
-        // does not stay stuck in "blocked" after the user has acted.
-        if terminal_status_osc9 {
-            emit_osc9_status_ignored("idle");
-        }
         result
     }
 }
