@@ -169,6 +169,10 @@ diff_mode = "inline"
 # Center all content by default (default: false)
 centered = false
 
+# TUI color theme: "auto"/"system" (detect terminal background), "light", "dark",
+# or a custom theme file name from ~/.jcode/themes/<name>.toml.
+theme = "auto"
+
 # Pin read images to a side pane (default: true)
 pin_images = true
 
@@ -311,7 +315,9 @@ prompt_entry_animation = true
 # copy_badge_alt_label = ""
 
 # Color theme: "auto" (query the terminal background), "dark", or "light".
-# Auto follows light/dark changes during the session (refreshes every 5 seconds).
+# "auto"/"system" detect the terminal background, and auto follows light/dark
+# changes during the session (refreshes every 5 seconds). A custom theme file
+# name loads from ~/.jcode/themes/<name>.toml.
 # theme = "auto"
 
 # Per-role color overrides. Every color the TUI renders is configurable: the
