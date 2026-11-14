@@ -394,7 +394,6 @@ async fn attached_session_defers_spawn_until_detached() {
         relevant_files: vec![],
         git_branch: None,
         additional_context: None,
-        recurrence: Recurrence::Once,
     };
     let queue_path = crate::ambient::paths::queue_path().unwrap();
     crate::ambient::ScheduledQueue::load(queue_path.clone()).push(item);
