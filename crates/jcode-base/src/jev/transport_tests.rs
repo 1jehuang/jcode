@@ -422,3 +422,156 @@ async fn laya_local_and_private_requests_bypass_http_proxy_including_voice_hedge
         "capture proxy must never receive local Laya primary or hedge requests"
     );
 }
+
+#[tokio::test]
+async fn voice_later_batch_errors_never_return_partial_classification() {
+    use crate::voice_intent::{SessionCandidate, classify_with_client, describe_questions};
+    let offered: Vec<_> = (0..20)
+        .map(|index| SessionCandidate {
+            id: format!("session-{index}"),
+            title: format!("Conversation {index}"),
+            working_dir: None,
+        })
+        .collect();
+    let questions = describe_questions("next conversation", &offered).unwrap();
+    let first: Map<String, Value> = questions[..MAX_QUESTIONS]
+        .iter()
+        .map(|q| {
+            (
+                q.id.clone(),
+                json!({"type": "noul", "noul": if q.id == "coding_agent" { 0.99 } else { 0.01 }}),
+            )
+        })
+        .collect();
+    let last: Map<String, Value> = questions[MAX_QUESTIONS..]
+        .iter()
+        .map(|q| (q.id.clone(), json!({"type": "noul", "noul": 0.01})))
+        .collect();
+    let mut failures = vec![
+        (500, "{}".into(), vec![]),
+        (200, json!({"answers": {}}).to_string(), vec![]),
+    ];
+    for invalid in [
+        json!({"type": "noul", "noul": 1.1}),
+        json!({"type": "noul", "noul": "0.99"}),
+        json!({"type": "choice", "choice": "yes"}),
+    ] {
+        let mut bad = last.clone();
+        bad.insert(questions[MAX_QUESTIONS].id.clone(), invalid);
+        failures.push((200, json!({"answers": bad}).to_string(), vec![]));
+    }
+    let mut wrong_ids = last.clone();
+    wrong_ids.remove(&questions[MAX_QUESTIONS].id);
+    wrong_ids.insert("invented".into(), json!({"type": "noul", "noul": 0.99}));
+    failures.push((200, json!({"answers": wrong_ids}).to_string(), vec![]));
+    for failure in failures {
+        // Batches run concurrently, so reply by which batch was requested.
+        let later = questions[MAX_QUESTIONS].id.clone();
+        let good = json!({"answers": first}).to_string();
+        let mut failure = Some(failure);
+        let (base, worker) = mock_server_with(2, move |request| {
+            let body: Value =
+                serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+            if body["questions"].get(&later).is_some() {
+                failure.take().unwrap()
+            } else {
+                (200, good.clone(), vec![])
+            }
+        });
+        assert!(
+            classify_with_client(
+                "next conversation",
+                &offered,
+                &mock_client(&base, JevProvider::OpenRouter)
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(worker.join().unwrap().len(), 2);
+    }
+}
+
+#[test]
+fn suggestions_selector_and_openjev_route_are_isolated() {
+    assert_eq!(
+        JevPurpose::Suggestions
+            .selector_with(
+                |key| {
+                    assert_eq!(key, SUGGESTIONS_PROVIDER_ENV);
+                    Ok("   ".into())
+                },
+                || "laya".into(),
+            )
+            .unwrap(),
+        "laya"
+    );
+    assert_eq!(
+        JevPurpose::Suggestions
+            .selector_with(|_| Err(std::env::VarError::NotPresent), || "  ".into())
+            .unwrap(),
+        "auto"
+    );
+    assert!(
+        JevPurpose::Suggestions
+            .selector_with(
+                |_| Err(std::env::VarError::NotUnicode("invalid".into())),
+                || "auto".into(),
+            )
+            .is_err()
+    );
+    let (provider, key) = resolve_with("openjev", |env, file| {
+        assert_eq!((env, file), ("OPENJEV_API_KEY", "openjev.env"));
+        Some("oje_secret".into())
+    })
+    .unwrap();
+    assert_eq!(provider, JevProvider::OpenJev);
+    assert_eq!(key, "oje_secret");
+    assert_eq!(
+        provider.endpoint("").unwrap(),
+        "https://api.openjev.sh/v1/systemone"
+    );
+    assert_eq!(provider.model(), "openjev");
+}
+
+#[test]
+fn choice_answer_validation_checks_criteria_and_probabilities() {
+    let q = browser_questions();
+    assert!(
+        validate_answers(
+            &json!({
+                "answers": {
+                    "action": {
+                        "type": "choice",
+                        "choice": "click",
+                        "confidence": 0.85,
+                        "probabilities": {"click": 0.85, "stop": 0.15}
+                    }
+                }
+            }),
+            &q
+        )
+        .is_ok()
+    );
+    assert!(
+        validate_answers(
+            &json!({"answers": {"action": {"type": "choice", "choice": "unknown"}}}),
+            &q
+        )
+        .is_err()
+    );
+    assert!(
+        validate_answers(
+            &json!({
+                "answers": {
+                    "action": {
+                        "type": "choice",
+                        "choice": "click",
+                        "probabilities": {"invented": 0.5}
+                    }
+                }
+            }),
+            &q
+        )
+        .is_err()
+    );
+}
