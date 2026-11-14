@@ -28,8 +28,8 @@
 use crate::env::HerdrEnv;
 use crate::socket;
 use crate::state::AgentState;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::Mutex;
 
 /// Monotonic sequence counter shared across all reporter instances
@@ -51,12 +51,7 @@ fn next_seq() -> i64 {
     loop {
         let prev = GLOBAL_SEQ.load(Ordering::Relaxed);
         let next = std::cmp::max(prev + 1, ts);
-        match GLOBAL_SEQ.compare_exchange_weak(
-            prev,
-            next,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
+        match GLOBAL_SEQ.compare_exchange_weak(prev, next, Ordering::Relaxed, Ordering::Relaxed) {
             Ok(_) => return next,
             Err(_) => continue,
         }
@@ -111,11 +106,7 @@ impl HerdrReporter {
     }
 
     /// Report a state transition with an optional message.
-    pub async fn set_state_with_message(
-        &self,
-        state: AgentState,
-        message: Option<String>,
-    ) {
+    pub async fn set_state_with_message(&self, state: AgentState, message: Option<String>) {
         if !self.is_active() {
             return;
         }
@@ -229,11 +220,7 @@ impl HerdrReporter {
         self.send_state_report(AgentState::Idle, None).await;
     }
 
-    async fn send_state_report(
-        &self,
-        state: AgentState,
-        message: Option<String>,
-    ) {
+    async fn send_state_report(&self, state: AgentState, message: Option<String>) {
         let mut params = serde_json::json!({
             "pane_id": self.env.pane_id(),
             "source": self.source,
@@ -249,12 +236,10 @@ impl HerdrReporter {
         {
             let inner = self.state.lock().await;
             if let Some(sid) = &inner.session_id {
-                params["agent_session_id"] =
-                    serde_json::Value::String(sid.clone());
+                params["agent_session_id"] = serde_json::Value::String(sid.clone());
             }
             if let Some(spath) = &inner.session_path {
-                params["agent_session_path"] =
-                    serde_json::Value::String(spath.clone());
+                params["agent_session_path"] = serde_json::Value::String(spath.clone());
             }
         }
 

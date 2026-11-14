@@ -55,10 +55,7 @@ fn zsh_completions(commands: &[CommandDef]) -> String {
     out.push_str("    commands=(\n");
 
     for cmd in commands {
-        out.push_str(&format!(
-            "        '{}[{}]'\n",
-            cmd.name, cmd.description,
-        ));
+        out.push_str(&format!("        '{}[{}]'\n", cmd.name, cmd.description,));
     }
 
     out.push_str("    )\n\n");
@@ -102,10 +99,7 @@ fn bash_completions(commands: &[CommandDef]) -> String {
     out.push_str("    case $cur in\n");
 
     for cmd in commands {
-        out.push_str(&format!(
-            "        {}*) COMPREPLY=(); return ;;\n",
-            cmd.name,
-        ));
+        out.push_str(&format!("        {}*) COMPREPLY=(); return ;;\n", cmd.name,));
     }
 
     out.push_str("    esac\n\n");
@@ -163,13 +157,11 @@ mod tests {
             CommandDef {
                 name: "run".into(),
                 description: "Run a command".into(),
-                subcommands: vec![
-                    CommandDef {
-                        name: "--verbose".into(),
-                        description: "Verbose output".into(),
-                        subcommands: vec![],
-                    },
-                ],
+                subcommands: vec![CommandDef {
+                    name: "--verbose".into(),
+                    description: "Verbose output".into(),
+                    subcommands: vec![],
+                }],
             },
         ]
     }

@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jcode_micro_compact::{is_compactable, TimeBasedTrigger};
 use jcode_message_types::ContentBlock;
+use jcode_micro_compact::{TimeBasedTrigger, is_compactable};
 use jcode_session_types::StoredMessage;
 
 use crate::logging;

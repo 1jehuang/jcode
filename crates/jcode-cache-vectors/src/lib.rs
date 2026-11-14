@@ -30,6 +30,6 @@ pub mod diffable_content;
 pub mod prompt_state;
 
 pub use cache_break::{CacheBreak, CacheBreakKind};
-pub use cache_hash::{compute_hash, djb2_hash, hash_bytes, hash_str, VectorHash};
+pub use cache_hash::{VectorHash, compute_hash, djb2_hash, hash_bytes, hash_str};
 pub use diffable_content::DiffableContent;
-pub use prompt_state::{snapshot_current_state, PromptStateSnapshot};
+pub use prompt_state::{PromptStateSnapshot, snapshot_current_state};

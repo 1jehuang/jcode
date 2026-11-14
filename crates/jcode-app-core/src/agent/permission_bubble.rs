@@ -5,8 +5,8 @@
 //! the 10-rule child message template.
 
 use jcode_permission_bubble::{
-    ChildTemplate, ForkDepthGuard, ForkDepthResult, MAX_FORK_DEPTH,
-    build_child_message, build_forked_messages,
+    ChildTemplate, ForkDepthGuard, ForkDepthResult, MAX_FORK_DEPTH, build_child_message,
+    build_forked_messages,
 };
 use jcode_session_types::StoredMessage;
 
@@ -34,10 +34,15 @@ pub(crate) fn create_forked_child_messages(
     depth_guard: &mut ForkDepthGuard,
 ) -> PermissionBubbleResult {
     match depth_guard.can_fork() {
-        ForkDepthResult::Denied { current_depth, max_depth } => {
+        ForkDepthResult::Denied {
+            current_depth,
+            max_depth,
+        } => {
             logging::warn(&format!(
                 "FORK_DENIED: depth {} would exceed max {} (chain: {:?})",
-                current_depth, max_depth, depth_guard.fork_chain(),
+                current_depth,
+                max_depth,
+                depth_guard.fork_chain(),
             ));
             return PermissionBubbleResult {
                 messages: parent_messages.to_vec(),

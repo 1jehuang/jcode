@@ -9,6 +9,6 @@ mod completions;
 mod detect;
 mod hooks;
 
-pub use completions::{generate_completions, CommandDef};
+pub use completions::{CommandDef, generate_completions};
 pub use detect::Shell;
 pub use hooks::{FeatureFlags, HookConfig, generate_hooks};

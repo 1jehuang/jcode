@@ -152,10 +152,7 @@ pub fn forgecode_manifest() -> ScreenManifest {
 }
 
 /// Write a manifest TOML file to the given path.
-pub fn write_manifest(
-    manifest: &ScreenManifest,
-    path: &std::path::Path,
-) -> std::io::Result<()> {
+pub fn write_manifest(manifest: &ScreenManifest, path: &std::path::Path) -> std::io::Result<()> {
     std::fs::write(path, manifest.to_toml())
 }
 
@@ -173,12 +170,8 @@ mod tests {
         assert!(toml.contains("state = \"idle\""));
         assert!(toml.contains("state = \"blocked\""));
         // Verify it's valid TOML
-        let parsed: toml::Value = toml::from_str(&toml)
-            .expect("manifest should be valid TOML");
-        assert_eq!(
-            parsed.get("agent").and_then(|v| v.as_str()),
-            Some("jcode")
-        );
+        let parsed: toml::Value = toml::from_str(&toml).expect("manifest should be valid TOML");
+        assert_eq!(parsed.get("agent").and_then(|v| v.as_str()), Some("jcode"));
     }
 
     #[test]
@@ -186,8 +179,7 @@ mod tests {
         let manifest = forgecode_manifest();
         let toml = manifest.to_toml();
         assert!(toml.contains("agent = \"forgecode\""));
-        let parsed: toml::Value = toml::from_str(&toml)
-            .expect("manifest should be valid TOML");
+        let parsed: toml::Value = toml::from_str(&toml).expect("manifest should be valid TOML");
         assert_eq!(
             parsed.get("agent").and_then(|v| v.as_str()),
             Some("forgecode")

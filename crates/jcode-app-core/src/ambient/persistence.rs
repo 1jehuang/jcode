@@ -154,8 +154,8 @@ impl ScheduledQueue {
                 std::mem::take(items).into_iter().partition(|item| {
                     // A paused direct spawn stays durably queued rather than
                     // being dropped: the operator is active, so wake later.
-                    let spawn_paused = pause_spawns
-                        && matches!(item.target, super::ScheduleTarget::Spawn { .. });
+                    let spawn_paused =
+                        pause_spawns && matches!(item.target, super::ScheduleTarget::Spawn { .. });
                     item.scheduled_for <= now
                         && (!direct_only || item.target.is_direct_delivery())
                         && !spawn_paused

@@ -16,21 +16,15 @@ use tokio::net::UnixStream;
 /// parsed response. Each request is one newline-terminated JSON line;
 /// the response is the first line from HERDR.
 #[cfg(unix)]
-pub async fn send_request(
-    socket_path: &Path,
-    request: &Value,
-) -> Result<Value> {
-    let mut stream = UnixStream::connect(socket_path)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to connect to HERDR socket at {}",
-                socket_path.display()
-            )
-        })?;
+pub async fn send_request(socket_path: &Path, request: &Value) -> Result<Value> {
+    let mut stream = UnixStream::connect(socket_path).await.with_context(|| {
+        format!(
+            "failed to connect to HERDR socket at {}",
+            socket_path.display()
+        )
+    })?;
 
-    let mut line = serde_json::to_string(request)
-        .context("failed to serialize HERDR request")?;
+    let mut line = serde_json::to_string(request).context("failed to serialize HERDR request")?;
     line.push('\n');
     stream
         .write_all(line.as_bytes())
@@ -56,10 +50,7 @@ pub async fn send_request(
 /// does not provide. Callers treat the transport as best-effort, so a
 /// platform error is reported instead of a hard build failure.
 #[cfg(not(unix))]
-pub async fn send_request(
-    socket_path: &Path,
-    _request: &Value,
-) -> Result<Value> {
+pub async fn send_request(socket_path: &Path, _request: &Value) -> Result<Value> {
     anyhow::bail!(
         "HERDR socket transport is unavailable on this platform ({} is unix-only)",
         socket_path.display()
@@ -69,10 +60,7 @@ pub async fn send_request(
 /// Fire-and-forget: send a request and ignore the response.
 /// Used for non-critical state reports where latency matters more
 /// than confirmation.
-pub async fn send_fire_and_forget(
-    socket_path: &Path,
-    request: &Value,
-) {
+pub async fn send_fire_and_forget(socket_path: &Path, request: &Value) {
     if let Err(e) = send_request(socket_path, request).await {
         tracing::debug!("HERDR fire-and-forget failed: {e}");
     }
