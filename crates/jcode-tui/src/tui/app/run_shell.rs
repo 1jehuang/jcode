@@ -41,24 +41,6 @@ const STARTUP_TRANSCRIPT_POLL: std::time::Duration = std::time::Duration::from_m
 const EVENT_REDRAW_MIN_INTERVAL: Duration = Duration::from_millis(16);
 pub(super) const STATUS_SPINNER_ONLY_INTERVAL: Duration = Duration::from_millis(80);
 
-/// Use the existing frame-rate tick for a pending frame's exact deadline.
-/// Slower liveness ticks must keep the separate deadline, or a frame could be
-/// delayed until the next coarse tick. No deadline is rounded or extended.
-pub(super) fn coalesced_frame_timer(
-    interval: &mut tokio::time::Interval,
-    redraw_period: Duration,
-    deadline: Option<tokio::time::Instant>,
-) -> Option<tokio::time::Instant> {
-    if redraw_period <= EVENT_REDRAW_MIN_INTERVAL {
-        if let Some(at) = deadline {
-            interval.reset_at(at);
-        }
-        None
-    } else {
-        deadline
-    }
-}
-
 /// Keep the spinner/animation snapshot exact without cloning unchanged cells
 /// on sparse frames. Ratatui already counted flushed updates, so dense redraws
 /// retain the straight vector copy rather than paying another diff scan.
@@ -1087,14 +1069,8 @@ impl App {
                             .flatten()
                             .map(|at| at + EVENT_REDRAW_MIN_INTERVAL)
                             .filter(|deadline| *deadline > Instant::now());
-                    // A frame-rate tick can serve the exact coalescing deadline
-                    // instead of arming a second timer for the same frame.
-                    deferred_redraw_at = coalesced_frame_timer(
-                        &mut redraw_interval,
-                        redraw_period,
-                        coalesce_until.map(tokio::time::Instant::from_std),
-                    );
-                    if allow_redraw && coalesce_until.is_none() {
+                    deferred_redraw_at = coalesce_until.map(tokio::time::Instant::from_std);
+                    if allow_redraw && deferred_redraw_at.is_none() {
                         input_redraw = false;
                         // Idle animated screen: repaint only the animation rows
                         // when nothing else is due (see the local loop).
@@ -1106,15 +1082,6 @@ impl App {
                         } else {
                             status_spinner_renderer.draw_full(&mut self, &mut terminal)?;
                             reset_status_spinner_interval(&mut status_spinner_interval, &self);
-                            // Keep frame-rate ticks in phase with frames, so the
-                            // tick that follows lands on the coalesce deadline
-                            // instead of up to a frame after it.
-                            if redraw_period <= EVENT_REDRAW_MIN_INTERVAL
-                                && let Some(at) = status_spinner_renderer.last_full_frame_at
-                            {
-                                redraw_interval
-                                    .reset_at(tokio::time::Instant::from_std(at + redraw_period));
-                            }
                             if let Some(native) = handterm_native_scroll.as_mut() {
                                 native.sync_from_app(&self);
                             }
