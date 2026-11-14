@@ -1,6 +1,6 @@
 use super::*;
 use crate::bus::{BackgroundTaskProgressSource, BackgroundTaskStatus};
-use crate::tool::StdinInputRequest;
+use crate::tool::ClientInputRequest;
 use crate::tool::bash::{
     BashTool, ProgressLineUpdate, parse_heuristic_progress, parse_progress_line,
 };
@@ -158,7 +158,7 @@ async fn background_command_stdin_is_null() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "eof");
 }
 
-fn make_ctx(stdin_tx: Option<mpsc::UnboundedSender<StdinInputRequest>>) -> ToolContext {
+fn make_ctx(stdin_tx: Option<mpsc::UnboundedSender<ClientInputRequest>>) -> ToolContext {
     ToolContext {
         session_id: "test-session".to_string(),
         message_id: "test-msg".to_string(),
@@ -308,7 +308,7 @@ async fn test_basic_command_with_unused_stdin_channel() {
 
 #[tokio::test]
 async fn test_stdin_reader_gets_eof_immediately() {
-    let (tx, mut rx) = mpsc::unbounded_channel::<StdinInputRequest>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<ClientInputRequest>();
     let tool = BashTool::new();
 
     // Commands are non-interactive: a stdin reader sees EOF right away, and no
@@ -338,7 +338,7 @@ async fn test_command_has_no_controlling_tty_and_no_prompt_env() {
 
 #[tokio::test]
 async fn test_stdin_not_triggered_for_non_blocking_command() {
-    let (tx, mut rx) = mpsc::unbounded_channel::<StdinInputRequest>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<ClientInputRequest>();
     let tool = BashTool::new();
 
     // This command doesn't read stdin at all
@@ -357,7 +357,7 @@ async fn test_stdin_not_triggered_for_non_blocking_command() {
 
 #[tokio::test]
 async fn test_command_timeout_with_stdin_channel() {
-    let (tx, _rx) = mpsc::unbounded_channel::<StdinInputRequest>();
+    let (tx, _rx) = mpsc::unbounded_channel::<ClientInputRequest>();
     let tool = BashTool::new();
 
     // A long-running command with a stdin channel present should be promoted
@@ -582,7 +582,7 @@ async fn test_reload_persistable_bash_timeout_promotes_to_background() {
 
 #[tokio::test]
 async fn test_stderr_captured_with_stdin() {
-    let (tx, _rx) = mpsc::unbounded_channel::<StdinInputRequest>();
+    let (tx, _rx) = mpsc::unbounded_channel::<ClientInputRequest>();
     let tool = BashTool::new();
 
     let input = json!({"command": "echo stderr_msg >&2", "timeout": 5000});
@@ -599,7 +599,7 @@ async fn test_stderr_captured_with_stdin() {
 #[tokio::test]
 async fn unanswered_stdin_request_closes_stdin_instead_of_hanging() {
     // Client receives the request but never answers, like the TUI does.
-    let (tx, mut rx) = mpsc::unbounded_channel::<StdinInputRequest>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<ClientInputRequest>();
     let held = tokio::spawn(async move {
         let mut pending = Vec::new();
         while let Some(req) = rx.recv().await {

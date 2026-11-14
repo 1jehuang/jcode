@@ -62,6 +62,8 @@ pub(super) struct ClientConnectionInfo {
     /// terminal instead of the long-lived server's stale startup env (#405).
     pub(super) terminal_env: Vec<(String, String)>,
     pub(super) supports_user_response: bool,
+    /// Set when this client renders `ask_user` dialogs: its input forwarder.
+    pub(super) ask_user_tx: Option<mpsc::UnboundedSender<crate::tool::ClientInputRequest>>,
     pub(super) disconnect_tx: mpsc::UnboundedSender<()>,
 }
 

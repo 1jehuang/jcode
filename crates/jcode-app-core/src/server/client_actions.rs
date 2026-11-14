@@ -1273,6 +1273,28 @@ pub(super) async fn handle_stdin_response(
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }
 
+pub(super) type AskUserResponses = Arc<
+    Mutex<
+        HashMap<
+            String,
+            tokio::sync::oneshot::Sender<Option<Vec<jcode_message_types::ask_user::AskUserAnswer>>>,
+        >,
+    >,
+>;
+
+pub(super) async fn handle_ask_user_response(
+    id: u64,
+    request_id: String,
+    answers: Option<Vec<jcode_message_types::ask_user::AskUserAnswer>>,
+    ask_user_responses: &AskUserResponses,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    if let Some(tx) = ask_user_responses.lock().await.remove(&request_id) {
+        let _ = tx.send(answers);
+    }
+    let _ = client_event_tx.send(ServerEvent::Done { id });
+}
+
 pub(super) struct AgentTaskContext<'a> {
     pub(super) client_event_tx: &'a mpsc::UnboundedSender<ServerEvent>,
     pub(super) swarm_members: &'a Arc<RwLock<HashMap<String, SwarmMember>>>,

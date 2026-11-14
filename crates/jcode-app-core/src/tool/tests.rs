@@ -734,6 +734,9 @@ async fn tool_descriptions_stay_under_token_cap() {
         "applet",
         "codemode",
         "macos_computer_use",
+        // ask_user is registered only for an attached TUI; its usage rules
+        // (no Other option, recommended first) shape the dialog the user sees.
+        "ask_user",
         // Repository-search guidance (agentgrep/rg, hidden files) is tested
         // load-bearing text (#1804).
         "bash",

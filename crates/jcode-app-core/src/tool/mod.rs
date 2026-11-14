@@ -3,6 +3,7 @@ pub(crate) const BACKGROUND_WAIT_GUIDANCE: &str = "While this task runs, try to 
 mod agentgrep;
 pub mod ambient;
 mod apply_patch;
+mod ask_user;
 mod bash;
 mod batch;
 mod bg;
@@ -107,7 +108,10 @@ use std::sync::{LazyLock, RwLock as StdRwLock};
 use tokio::sync::RwLock;
 
 pub(crate) use jcode_tool_core::intent_schema_property;
-pub use jcode_tool_core::{StdinInputRequest, Tool, ToolContext, ToolExecutionMode};
+pub use jcode_tool_core::{
+    AskUserInputRequest, ClientInputRequest, StdinInputRequest, Tool, ToolContext,
+    ToolExecutionMode,
+};
 pub use jcode_tool_types::{ToolImage, ToolOutput};
 pub(crate) use session_search::spawn_recent_index_warmup;
 
@@ -427,6 +431,18 @@ impl Registry {
         } else {
             self.unregister("user_response").await;
             self.unregister("applet").await;
+        }
+    }
+
+    /// A TUI that renders `ask_user` dialogs opts in through Subscribe. Like
+    /// the Desktop tools, keep it out of the base map so headless sessions
+    /// never advertise a question nobody can answer.
+    pub(crate) async fn set_ask_user_enabled(&self, enabled: bool) {
+        if enabled {
+            self.register("ask_user".into(), Arc::new(ask_user::AskUserTool))
+                .await;
+        } else {
+            self.unregister("ask_user").await;
         }
     }
 
