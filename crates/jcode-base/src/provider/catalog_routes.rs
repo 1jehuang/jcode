@@ -1,5 +1,9 @@
 use crate::auth::{AuthState, AuthStatus};
 
+/// Sentinel in a route detail line marking the raw model id of a named
+/// provider profile route whose `model` field carries a display-name alias.
+pub(super) const NAMED_PROFILE_RAW_ID_MARKER: &str = "raw id: ";
+
 use super::pricing::cheapness_for_route;
 use super::{
     ALL_OPENAI_MODELS, AccountModelAvailabilityState, CHATGPT_WEB_MODEL, GROK_BUILD_PROFILE_ID,
@@ -464,7 +468,14 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
     // some providers (Bedrock, OpenAI-compatible profiles like NVIDIA NIM / FPT
     // / Chutes) dump wholesale into their catalogs. Without this the picker is
     // flooded with hundreds of unusable entries.
-    routes.retain(|route| is_listable_model_name(&route.model));
+    //
+    // Routes whose `model` field carries a user-configured display name must
+    // keep passing: `named_provider_profile_routes` already validated the raw
+    // id, and filtering the label instead would drop valid models whose alias
+    // contains a marker token like "vision" (greptile F10, PR 1879).
+    routes.retain(|route| {
+        route.detail.contains(NAMED_PROFILE_RAW_ID_MARKER) || is_listable_model_name(&route.model)
+    });
 
     let mut routes = dedupe_model_routes(routes);
 
@@ -777,6 +788,9 @@ fn named_provider_profile_routes(
 
     let mut routes: Vec<ModelRoute> = Vec::new();
     for model in models {
+        // The non-chat filter must run on the raw model id: a valid id like
+        // `custom-chat` labelled "Qwen Vision" would otherwise be dropped
+        // because the label contains the vision marker (greptile F10).
         if !is_listable_model_name(&model) || routes.iter().any(|route| route.model == model) {
             continue;
         }
@@ -789,7 +803,7 @@ fn named_provider_profile_routes(
         // in the detail line for disambiguation.
         let route_model = model_display.clone().unwrap_or_else(|| model.clone());
         let route_detail = if model_display.is_some() {
-            format!("{} · {}", detail, model)
+            format!("{} · {}{}", detail, NAMED_PROFILE_RAW_ID_MARKER, model)
         } else {
             detail.clone()
         };

@@ -419,23 +419,17 @@ async fn cycle_model_pushes_the_new_effective_reasoning_effort_to_clients() {
     let model_event = timeout(Duration::from_secs(1), client_event_rx.recv())
         .await
         .expect("model change event should arrive");
-    assert!(matches!(
-        model_event,
-        Some(ServerEvent::ModelChanged { id: 21, .. })
-    ));
-    let effort_event = timeout(Duration::from_secs(1), client_event_rx.recv())
-        .await
-        .expect("model cycling must push the new effective effort");
     assert!(
         matches!(
-            effort_event,
-            Some(ServerEvent::ReasoningEffortChanged {
+            model_event,
+            Some(ServerEvent::ModelChanged {
                 id: 21,
-                effort: None,
+                reasoning_effort: None,
                 error: None,
+                ..
             })
         ),
-        "cycling to a plain model must broadcast effort: None, got {effort_event:?}"
+        "cycling to a plain model must report effort: None on ModelChanged, got {model_event:?}"
     );
 
     // Cycle forward again wraps back to the reasoning model.
@@ -443,23 +437,17 @@ async fn cycle_model_pushes_the_new_effective_reasoning_effort_to_clients() {
     let model_event = timeout(Duration::from_secs(1), client_event_rx.recv())
         .await
         .expect("model change event should arrive");
-    assert!(matches!(
-        model_event,
-        Some(ServerEvent::ModelChanged { id: 22, .. })
-    ));
-    let effort_event = timeout(Duration::from_secs(1), client_event_rx.recv())
-        .await
-        .expect("cycling back must push the restored effort");
     assert!(
         matches!(
-            effort_event,
-            Some(ServerEvent::ReasoningEffortChanged {
+            model_event,
+            Some(ServerEvent::ModelChanged {
                 id: 22,
-                effort: Some(ref effort),
+                reasoning_effort: Some(ref effort),
                 error: None,
+                ..
             }) if effort == "high"
         ),
-        "cycling back to the reasoning model must broadcast its restored effort, got {effort_event:?}"
+        "cycling back to the reasoning model must report its restored effort on ModelChanged, got {model_event:?}"
     );
 }
 
@@ -486,23 +474,17 @@ async fn set_model_pushes_the_new_effective_reasoning_effort_to_clients() {
     let model_event = timeout(Duration::from_secs(1), client_event_rx.recv())
         .await
         .expect("model change event should arrive");
-    assert!(matches!(
-        model_event,
-        Some(ServerEvent::ModelChanged { id: 11, .. })
-    ));
-    let effort_event = timeout(Duration::from_secs(1), client_event_rx.recv())
-        .await
-        .expect("model switch must push the new effective effort");
     assert!(
         matches!(
-            effort_event,
-            Some(ServerEvent::ReasoningEffortChanged {
+            model_event,
+            Some(ServerEvent::ModelChanged {
                 id: 11,
-                effort: None,
+                reasoning_effort: None,
                 error: None,
+                ..
             })
         ),
-        "switching to a plain model must broadcast effort: None, got {effort_event:?}"
+        "switching to a plain model must report effort: None on ModelChanged, got {model_event:?}"
     );
 
     // The agent-side effort view must not keep the stale value either.
@@ -517,23 +499,17 @@ async fn set_model_pushes_the_new_effective_reasoning_effort_to_clients() {
     let model_event = timeout(Duration::from_secs(1), client_event_rx.recv())
         .await
         .expect("model change event should arrive");
-    assert!(matches!(
-        model_event,
-        Some(ServerEvent::ModelChanged { id: 12, .. })
-    ));
-    let effort_event = timeout(Duration::from_secs(1), client_event_rx.recv())
-        .await
-        .expect("switching back must push the restored effort");
     assert!(
         matches!(
-            effort_event,
-            Some(ServerEvent::ReasoningEffortChanged {
+            model_event,
+            Some(ServerEvent::ModelChanged {
                 id: 12,
-                effort: Some(ref effort),
+                reasoning_effort: Some(ref effort),
                 error: None,
+                ..
             }) if effort == "high"
         ),
-        "switching back to the reasoning model must broadcast its restored effort, got {effort_event:?}"
+        "switching back must report the restored effort on ModelChanged, got {model_event:?}"
     );
     assert_eq!(
         agent.lock().await.provider_reasoning_effort().as_deref(),

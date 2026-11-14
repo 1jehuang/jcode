@@ -596,7 +596,6 @@ fn configured_reasoning_efforts_resolves_map_by_profile_key_or_display_name() {
         "high".to_string(),
         "xhigh".to_string(),
         "swarm".to_string(),
-        "swarm-deep".to_string(),
     ];
     // Profile key matches.
     assert_eq!(
@@ -824,5 +823,38 @@ fn named_provider_profile_routes_use_display_name_and_cost() {
         cheapness.cache_write_price_per_mtok_micros,
         Some(750_000),
         "cache_write should be 0.75/Mtok = 750_000 micros"
+    );
+}
+
+#[test]
+fn named_provider_profile_display_name_survives_non_chat_filter() {
+    // The merged-catalog non-chat filter runs on `route.model`, which holds
+    // the display-name alias for named profiles. A label containing a marker
+    // token like "vision" must not drop the route: the raw id was already
+    // validated when the route was built (greptile F10, PR 1879).
+    let config = crate::config::NamedProviderConfig {
+        base_url: "http://localhost:8080/v1".to_string(),
+        models: vec![crate::config::NamedProviderModelConfig {
+            id: "custom-chat".to_string(),
+            display_name: Some("Qwen Vision".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let routes = named_provider_profile_routes("visiongw", &config);
+    assert_eq!(routes.len(), 1, "labelled route should exist");
+    assert!(routes[0].available);
+
+    let mut merged = Vec::new();
+    merged.extend(routes);
+    merged.retain(|route| {
+        route.detail.contains(super::NAMED_PROFILE_RAW_ID_MARKER)
+            || crate::provider::is_listable_model_name(&route.model)
+    });
+    assert_eq!(
+        merged.len(),
+        1,
+        "labelled route must survive the non-chat filter"
     );
 }

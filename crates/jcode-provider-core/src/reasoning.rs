@@ -4,9 +4,13 @@
 //! same ordered values. `swarm` is a Jcode UI sentinel rather than a
 //! wire-level provider value, but it belongs in the selectable ladder.
 
-/// Jcode UI swarm-mode sentinels, shared by every effort ladder. They are
+/// Jcode UI swarm-mode sentinel, shared by every effort ladder. It is
 /// resolved to the configured root effort before any provider map lookup.
-pub const SWARM_EFFORTS: &[&str] = &["swarm", "swarm-deep"];
+/// The retired `swarm-deep` mode is intentionally absent: nothing behind it
+/// was ever wired (the shared swarm code recognizes only `swarm`), so
+/// advertising it would let users select a mode that silently behaves like
+/// an ordinary request without the swarm prompt reminder.
+pub const SWARM_EFFORTS: &[&str] = &["swarm"];
 
 /// OpenAI Responses API effort levels, followed by Jcode's swarm modes.
 pub const OPENAI_SELECTABLE_EFFORTS: &[&str] = &[
