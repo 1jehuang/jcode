@@ -14,6 +14,7 @@ impl Drop for HomeGuard {
 
 fn request(name: &str, due: bool) -> ScheduleRequest {
     ScheduleRequest {
+        recurrence: Default::default(),
         wake_in_minutes: None,
         wake_at: Some(Utc::now() + chrono::Duration::seconds(if due { -1 } else { 3600 })),
         context: name.into(),
