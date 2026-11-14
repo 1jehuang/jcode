@@ -138,17 +138,29 @@ pub fn persist_toggle(
     let persistence = match crate::storage::jcode_dir() {
         Ok(jcode_dir) => {
             let mcp_path = jcode_dir.join("mcp.json");
-            let mut saved_config = config.clone();
             let lock_result = McpConfigLock::acquire(&jcode_dir)
                 .and_then(|_lock| {
-                    // Merge on top of the freshest on-disk state: `config`
-                    // may be older than what a concurrent process just wrote.
-                    if let Ok(disk) = McpConfig::load_from_file(&mcp_path) {
-                        saved_config = disk;
+                    let mut saved_config = McpConfig::default();
+                    match McpConfig::load_from_file(&mcp_path) {
+                        Ok(disk) => saved_config = disk,
+                        Err(e) if mcp_path.exists() => {
+                            return Err(anyhow::anyhow!(
+                                "could not read existing {}: {e}",
+                                mcp_path.display()
+                            ));
+                        }
+                        _ => {}
                     }
-                    saved_config
-                        .servers
-                        .insert(server_name.to_string(), server_config.clone());
+                    if let Some(disk_server) = saved_config.servers.get(server_name) {
+                        let mut fresh = disk_server.clone();
+                        fresh.enabled = Some(enable);
+                        fresh.disabled = Some(!enable);
+                        saved_config.servers.insert(server_name.to_string(), fresh);
+                    } else {
+                        saved_config
+                            .servers
+                            .insert(server_name.to_string(), server_config.clone());
+                    }
                     saved_config.save_to_file(&mcp_path)
                 })
                 .map_err(|e: anyhow::Error| e.to_string());
@@ -215,6 +227,41 @@ pub async fn connect_and_register(
 #[cfg(test)]
 #[path = "mcp_toggle_tests.rs"]
 mod mcp_toggle_tests;
+
+/// Register tool proxies for a server that is already connected (e.g. it was
+/// reached via `mcp_call` while disabled). Returns the server's tool count;
+/// registration is skipped when the server is no longer connected, which is
+/// reported as an error for the enable flow.
+pub async fn register_connected_tools(
+    manager: &Arc<RwLock<McpManager>>,
+    server_name: &str,
+    registrar: Option<&dyn ToolRegistrar>,
+) -> (usize, Option<String>) {
+    let mgr = manager.read().await;
+    if !mgr
+        .connected_servers()
+        .await
+        .iter()
+        .any(|name| name == server_name)
+    {
+        return (
+            0,
+            Some(format!("server '{server_name}' is no longer connected")),
+        );
+    }
+    let tools = mgr.tools_for_server(server_name).await;
+    let tool_count = tools.len();
+    drop(mgr);
+
+    if let Some(registrar) = registrar {
+        let mcp_tools = super::create_mcp_tools_for_server(Arc::clone(manager), server_name).await;
+        for (name, tool) in mcp_tools {
+            registrar.register_tool(name, tool).await;
+        }
+    }
+
+    (tool_count, None)
+}
 
 /// Disconnect the (just disabled) server and unregister its tool proxies from
 /// the optional registrar. Connection errors are logged, not returned: the

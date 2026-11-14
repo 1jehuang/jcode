@@ -480,6 +480,9 @@ async fn test_unknown_action() {
 
 #[tokio::test]
 async fn test_toggle_enable_missing_server() {
+    let _env = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp jcode home");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
     let tool = create_test_tool();
     let ctx = create_test_context();
     let input = json!({"action": "enable", "server": "nonexistent"});
@@ -496,6 +499,9 @@ async fn test_toggle_enable_missing_server() {
 
 #[tokio::test]
 async fn test_toggle_disable_missing_server() {
+    let _env = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp jcode home");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
     let tool = create_test_tool();
     let ctx = create_test_context();
     let input = json!({"action": "disable", "server": "nonexistent"});
@@ -697,6 +703,11 @@ async fn test_toggle_disable_persists_flags_to_disk() {
 #[allow(clippy::await_holding_lock)]
 async fn test_toggle_disable_reports_failure_and_keeps_state_on_save_error() {
     let _env = crate::storage::lock_test_env();
+    // Root ignores the directory write bit, so chmod 0o555 would not stop the
+    // save and the failure assertions below would fail spuriously.
+    if cfg!(unix) && unsafe { libc::geteuid() } == 0 {
+        return;
+    }
     let temp = tempfile::tempdir().expect("temp jcode home");
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 

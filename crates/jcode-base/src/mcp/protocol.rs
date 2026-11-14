@@ -432,13 +432,20 @@ impl McpConfig {
         Ok(serde_json::from_str(&content)?)
     }
 
-    /// Save config to a JSON file
+    /// Save config to a JSON file.
+    ///
+    /// Writes a sibling temp file and atomically replaces the target so a
+    /// concurrent reader never sees a truncated file.
     pub fn save_to_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, json)?;
+        let mut temp_path = path.as_os_str().to_owned();
+        temp_path.push(".tmp-save");
+        let temp_path = std::path::PathBuf::from(temp_path);
+        std::fs::write(&temp_path, json)?;
+        std::fs::rename(&temp_path, path)?;
         Ok(())
     }
 
