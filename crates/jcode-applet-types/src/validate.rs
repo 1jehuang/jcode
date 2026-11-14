@@ -247,6 +247,9 @@ impl Walk<'_> {
                 self.image(source)?;
             }
             NodeKind::Table { columns, rows } => {
+                for column in columns {
+                    self.text(column)?;
+                }
                 let cells = columns.len() * rows.len();
                 if cells > self.limits.max_table_cells {
                     return Err(ValidationError::TableTooLarge(cells));
@@ -263,6 +266,64 @@ impl Walk<'_> {
                     }
                 }
             }
+            NodeKind::Progress { label, .. } => {
+                if let Some(label) = label {
+                    self.text(label)?;
+                }
+            }
+            NodeKind::Empty { title, detail, .. } => {
+                self.text(title)?;
+                if let Some(detail) = detail {
+                    self.text(detail)?;
+                }
+            }
+            NodeKind::Error { message, .. } => self.text(message)?,
+            NodeKind::Button { label, .. }
+            | NodeKind::Chip { label, .. }
+            | NodeKind::Toggle { label, .. } => self.text(label)?,
+            NodeKind::Input { placeholder, .. } => self.text(placeholder)?,
+            NodeKind::Select { options, .. } => {
+                for option in options {
+                    self.text(option.value.as_str())?;
+                    self.text(option.label.as_str())?;
+                }
+            }
+            NodeKind::KeyValue { rows } => {
+                for row in rows {
+                    self.text(row.key.as_str())?;
+                    self.text(row.value.as_str())?;
+                }
+            }
+            NodeKind::Card { title, .. } => {
+                if let Some(title) = title {
+                    self.text(title)?;
+                }
+            }
+            NodeKind::Tabs { tabs, .. } => {
+                for tab in tabs {
+                    self.text(tab.id.as_str())?;
+                    self.text(tab.label.as_str())?;
+                }
+            }
+            NodeKind::Icon { name, .. } => self.text(name)?,
+            NodeKind::ListItem {
+                title,
+                subtitle,
+                meta,
+                badges,
+                ..
+            } => {
+                self.text(title)?;
+                if let Some(subtitle) = subtitle {
+                    self.text(subtitle)?;
+                }
+                if let Some(meta) = meta {
+                    self.text(meta)?;
+                }
+                for badge in badges {
+                    self.text(badge)?;
+                }
+            }
             NodeKind::Progress {
                 value: Some(value), ..
             } if !(0.0..=1.0).contains(value) => {
@@ -274,14 +335,6 @@ impl Walk<'_> {
                 self.require(Capability::Html)?;
                 if source.len() > self.limits.max_html_bytes {
                     return Err(ValidationError::HtmlTooLarge(source.len()));
-                }
-            }
-            NodeKind::ListItem {
-                title, subtitle, ..
-            } => {
-                self.text(title)?;
-                if let Some(subtitle) = subtitle {
-                    self.text(subtitle)?;
                 }
             }
             _ => {}
