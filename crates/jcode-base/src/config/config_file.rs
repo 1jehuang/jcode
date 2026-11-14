@@ -2,6 +2,8 @@ use super::*;
 use crate::storage::jcode_dir;
 use std::path::PathBuf;
 
+static CONFIG_FILE_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 type TrustedExternalAuthKey = (
     Option<PathBuf>,
     Option<std::time::SystemTime>,
@@ -84,8 +86,15 @@ impl Config {
         Ok(Some(config))
     }
 
-    /// Save config to file
+    /// Save config to file.
+    ///
+    /// Multiple sessions (client app plus the shared daemon) can persist
+    /// preferences concurrently. The lock serializes their whole
+    /// load-patch-save sequences inside this process, and the temp-file
+    /// rename means a racing writer outside this process can never leave a
+    /// truncated mix of two configs behind.
     pub fn save(&self) -> anyhow::Result<()> {
+        let _guard = Self::lock_file_writes();
         let path = Self::path().ok_or_else(|| anyhow::anyhow!("No config path"))?;
 
         // Ensure parent directory exists
@@ -94,9 +103,21 @@ impl Config {
         }
 
         let content = toml::to_string_pretty(self)?;
-        std::fs::write(&path, content)?;
+        let temp = tempfile::NamedTempFile::new_in(
+            path.parent()
+                .ok_or_else(|| anyhow::anyhow!("No config parent"))?,
+        )?;
+        std::fs::write(temp.path(), &content)?;
+        temp.persist(&path)
+            .map_err(|error| anyhow::anyhow!("Failed to replace config file: {error}"))?;
         Self::invalidate_cache();
         Ok(())
+    }
+
+    fn lock_file_writes() -> std::sync::MutexGuard<'static, ()> {
+        CONFIG_FILE_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Mark the process-cached config as stale and notify dependent caches.
@@ -150,7 +171,26 @@ impl Config {
     /// Update just the default model and provider in the config file.
     /// This reloads, patches, and saves so it doesn't clobber other fields.
     pub fn set_default_model(model: Option<&str>, provider: Option<&str>) -> anyhow::Result<()> {
+        Self::set_default_model_if_changed(model, provider).map(|_| ())
+    }
+
+    /// Update just the default model and provider in the config file, returning
+    /// whether the file was actually written.
+    pub fn set_default_model_if_changed(
+        model: Option<&str>,
+        provider: Option<&str>,
+    ) -> anyhow::Result<bool> {
         let mut cfg = Self::load_for_update()?;
+        if cfg.provider.default_model.as_deref() == model
+            && cfg.provider.default_provider.as_deref() == provider
+        {
+            crate::logging::info(&format!(
+                "Default model already saved: {}, provider: {}",
+                model.unwrap_or("(none)"),
+                provider.unwrap_or("(auto)")
+            ));
+            return Ok(false);
+        }
         cfg.provider.default_model = model.map(|s| s.to_string());
         cfg.provider.default_provider = provider.map(|s| s.to_string());
         cfg.save()?;
@@ -166,7 +206,7 @@ impl Config {
         {
             crate::logging::error(&format!("Could not sync account order: {error}"));
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Update just the default provider in the config file.
@@ -920,5 +960,35 @@ reasoning_effort = "max"
 
         assert!(error.to_string().contains("Failed to parse config file"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn concurrent_saves_never_leave_a_corrupt_config() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("JCODE_HOME", home.path());
+        let path = home.path().join("config.toml");
+        std::fs::write(&path, "[provider]\ndefault_model = \"m0\"\n").unwrap();
+
+        // Many threads doing load-patch-save on the same config.toml. Without
+        // serialization and atomic replace, interleaved writes used to leave
+        // truncated TOML that later loads failed to parse.
+        let writers: Vec<_> = (1..=12)
+            .map(|seed| {
+                std::thread::spawn(move || {
+                    for i in 0..20 {
+                        let model = format!("model-{seed}-{i}");
+                        Config::set_default_model_only(Some(&model)).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        toml::from_str::<Config>(&content)
+            .unwrap_or_else(|error| panic!("config corrupted: {error}\n{content}"));
     }
 }

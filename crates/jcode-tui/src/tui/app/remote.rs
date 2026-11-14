@@ -238,6 +238,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.prune_irrelevant_background_tasks();
     needs_redraw |= app.refresh_side_panel_linked_content_if_due();
     needs_redraw |= app.poll_model_picker_load();
+    needs_redraw |= app.maybe_flush_pending_model_config_persist();
     needs_redraw |= app.poll_session_picker_load();
     needs_redraw |= app.poll_session_picker_presence();
     needs_redraw |= app.poll_session_picker_search_submission();
@@ -627,7 +628,11 @@ async fn apply_terminal_event<B: Backend>(
                 if let Some(selection) = app.pending_route_selection.take() {
                     app.cancel_pending_provider_failover("Provider auto-switch canceled");
                     app.pending_model_switch = None;
-                    match remote.set_route_selection(selection.clone()).await {
+                    // Manual route selections persist the confirmed model as
+                    // the config default, but a fallback offer is a recovery
+                    // route, not a preference change: keep the saved default.
+                    let persist = app.pending_fallback_resend.is_none();
+                    match remote.set_route_selection(selection.clone(), persist).await {
                         Ok(id) => {
                             // Manual fallback offers use unrestricted SetRoute,
                             // but need the same exact acknowledgement fence as
@@ -642,6 +647,8 @@ async fn apply_terminal_event<B: Backend>(
                         }
                         Err(error) => {
                             app.pending_reasoning_effort = None;
+                            // A fallback-offer resend must not fire without its
+                            // route switch; drop it with the failed request.
                             if let Some(payload) = app.pending_fallback_resend.take() {
                                 app.restore_failover_payload(payload);
                             }
@@ -654,7 +661,7 @@ async fn apply_terminal_event<B: Backend>(
                     }
                 } else if let Some(spec) = app.pending_model_switch.take() {
                     app.cancel_pending_provider_failover("Provider auto-switch canceled");
-                    match remote.set_model(&spec).await {
+                    match remote.set_model(&spec, true).await {
                         Ok(_) => {
                             app.remote_model_switch_in_flight = true;
                             forward_pending_reasoning_effort(app, remote).await;
