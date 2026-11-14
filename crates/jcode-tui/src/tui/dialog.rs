@@ -124,6 +124,8 @@ struct View {
     numbered: bool,
     /// What Esc does instead of stepping back (the approval prompt's "no").
     on_escape: Option<ItemAction>,
+    /// Item whose label keeps its end visible when too wide (a text field).
+    tail_item: Option<usize>,
     filter: String,
     /// Index into the filtered items.
     selected: usize,
@@ -145,6 +147,7 @@ impl View {
             searchable: false,
             numbered: false,
             on_escape: None,
+            tail_item: None,
             filter: String::new(),
             selected: 0,
         }
@@ -1009,9 +1012,15 @@ impl Dialog {
                 label_used += number.width();
                 spans.push(Span::styled(number, dim));
             }
-            label_used += item.label.width();
+            let label = if view.tail_item == Some(index) {
+                let used = 2 + label_used + item.icon.map_or(0, |_| 2);
+                keep_tail(&item.label, width.saturating_sub(used))
+            } else {
+                item.label.clone()
+            };
+            label_used += label.width();
             spans.push(Span::styled(
-                item.label.clone(),
+                label,
                 if is_selected {
                     accent
                 } else {
@@ -1145,6 +1154,23 @@ fn format_tokens(tokens: usize) -> String {
     } else {
         format!("~{} tok", (tokens + 5) / 10 * 10)
     }
+}
+
+/// `…` plus the end of `text` when it is wider than `max` cells.
+fn keep_tail(text: &str, max: usize) -> String {
+    if text.width() <= max {
+        return text.to_string();
+    }
+    let mut tail = Vec::new();
+    let mut used = 1;
+    for ch in text.chars().rev() {
+        used += ch.width().unwrap_or(0);
+        if used > max {
+            break;
+        }
+        tail.push(ch);
+    }
+    std::iter::once('…').chain(tail.into_iter().rev()).collect()
 }
 
 fn truncate_chars(text: &str, max: usize) -> String {

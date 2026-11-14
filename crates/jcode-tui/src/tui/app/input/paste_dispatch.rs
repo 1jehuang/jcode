@@ -2,6 +2,11 @@ use super::*;
 
 pub(in crate::tui::app) fn handle_paste(app: &mut App, text: String) {
     app.rewind_ui.last_empty_escape = None;
+    // An open question dialog owns the keyboard, and so its paste.
+    if let Some(dialog) = app.dialog.as_mut().filter(|dialog| dialog.is_ask_user()) {
+        dialog.paste_ask_user(&text);
+        return;
+    }
     if app.paste_account_manager_prompt(&text) {
         return;
     }

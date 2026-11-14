@@ -23,10 +23,10 @@ pub(crate) mod route {
 
     type Tx = UnboundedSender<ClientInputRequest>;
     /// session id -> capable connections, least to most recently active.
-    static ROUTES: LazyLock<Mutex<HashMap<String, Vec<(String, Tx)>>>> =
-        LazyLock::new(Default::default);
+    type Routes = HashMap<String, Vec<(String, Tx)>>;
+    static ROUTES: LazyLock<Mutex<Routes>> = LazyLock::new(Default::default);
 
-    fn routes() -> std::sync::MutexGuard<'static, HashMap<String, Vec<(String, Tx)>>> {
+    fn routes() -> std::sync::MutexGuard<'static, Routes> {
         ROUTES.lock().unwrap_or_else(|poison| poison.into_inner())
     }
 

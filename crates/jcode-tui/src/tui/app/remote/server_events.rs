@@ -641,12 +641,7 @@ fn handle_server_event_inner(
             name,
             output,
             error,
-        } => {
-            if name == "ask_user" {
-                app.finish_ask_user_dialog(&id);
-            }
-            super::server_event_handlers::handle_tool_done(app, remote, id, name, output, error)
-        }
+        } => super::server_event_handlers::handle_tool_done(app, remote, id, name, output, error),
         ServerEvent::GeneratedImage {
             id,
             path,
@@ -3682,10 +3677,14 @@ fn handle_server_event_inner(
         }
         ServerEvent::AskUser {
             request_id,
-            tool_call_id,
             questions,
+            ..
         } => {
-            app.open_ask_user_dialog(request_id, tool_call_id, questions);
+            app.open_ask_user_dialog(request_id, questions);
+            true
+        }
+        ServerEvent::AskUserClosed { request_id, error } => {
+            app.close_ask_user_request(&request_id, error);
             true
         }
         ServerEvent::StdinRequest { .. } => {
