@@ -1,11 +1,10 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
-use super::client_lifecycle::process_reserved_message_streaming_mpsc;
 use super::{
     ClientConnectionInfo, SessionInterruptQueues, SwarmEvent, SwarmMember, SwarmState,
     VersionedPlan, broadcast_swarm_status, fanout_session_event, persist_swarm_state_for,
     queue_soft_interrupt_for_session, remove_session_channel_subscriptions,
-    remove_session_from_swarm, swarm_id_for_session, truncate_detail, update_member_status,
+    remove_session_from_swarm, swarm_id_for_session,
 };
 use crate::agent::Agent;
 use crate::protocol::{FeatureToggle, NotificationType, ServerEvent};
@@ -1307,113 +1306,4 @@ pub(super) async fn handle_ask_user_response(
         None => {}
     }
     let _ = client_event_tx.send(ServerEvent::Done { id });
-}
-
-pub(super) struct AgentTaskContext {
-    pub(super) client_event_tx: mpsc::UnboundedSender<ServerEvent>,
-    pub(super) swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
-    pub(super) swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
-    pub(super) event_history: Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
-    pub(super) event_counter: Arc<std::sync::atomic::AtomicU64>,
-    pub(super) swarm_event_tx: broadcast::Sender<SwarmEvent>,
-}
-
-/// Run an agent task off the request loop. Its turn can wait for an
-/// `ask_user` answer or a cancel that arrives on this same connection, so
-/// awaiting it in the loop would deadlock.
-pub(super) fn spawn_agent_task(
-    id: u64,
-    task: String,
-    client_session_id: String,
-    agent: Arc<Mutex<Agent>>,
-    ctx: AgentTaskContext,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move { handle_agent_task(id, task, &client_session_id, &agent, &ctx).await })
-}
-
-async fn handle_agent_task(
-    id: u64,
-    task: String,
-    client_session_id: &str,
-    agent: &Arc<Mutex<Agent>>,
-    ctx: &AgentTaskContext,
-) {
-    let mut agent = agent.lock().await;
-    let lease = match agent.claim_server_turn() {
-        Ok(lease) => lease,
-        Err(error) => {
-            let _ = ctx.client_event_tx.send(ServerEvent::Error {
-                server_resumes: false,
-                id,
-                message: error.to_string(),
-                retry_after_secs: None,
-            });
-            return;
-        }
-    };
-    let events = super::state::TurnEventChannel::new(
-        client_session_id.into(),
-        Arc::clone(&ctx.swarm_members),
-        ctx.client_event_tx.clone(),
-        &lease,
-    );
-    update_member_status(
-        client_session_id,
-        "running",
-        Some(truncate_detail(&task, 120)),
-        &ctx.swarm_members,
-        &ctx.swarms_by_id,
-        Some(&ctx.event_history),
-        Some(&ctx.event_counter),
-        Some(&ctx.swarm_event_tx),
-    )
-    .await;
-
-    let result = process_reserved_message_streaming_mpsc(
-        &mut agent,
-        &lease,
-        &task,
-        vec![],
-        None,
-        events.sender(),
-    )
-    .await;
-    match result {
-        Ok(()) => {
-            update_member_status(
-                client_session_id,
-                "completed",
-                None,
-                &ctx.swarm_members,
-                &ctx.swarms_by_id,
-                Some(&ctx.event_history),
-                Some(&ctx.event_counter),
-                Some(&ctx.swarm_event_tx),
-            )
-            .await;
-            let _ = events.sender().send(ServerEvent::Done { id });
-        }
-        Err(e) => {
-            update_member_status(
-                client_session_id,
-                "failed",
-                Some(truncate_detail(&e.to_string(), 120)),
-                &ctx.swarm_members,
-                &ctx.swarms_by_id,
-                Some(&ctx.event_history),
-                Some(&ctx.event_counter),
-                Some(&ctx.swarm_event_tx),
-            )
-            .await;
-            let retry_after_secs = super::usage_limit_resume::error_retry_after_secs(&e);
-            let _ = events.sender().send(ServerEvent::Error {
-                id,
-                message: crate::util::format_error_chain(&e),
-                retry_after_secs,
-                server_resumes: false,
-            });
-        }
-    }
-    drop(agent);
-    events.finish().await;
 }

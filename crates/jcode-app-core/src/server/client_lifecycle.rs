@@ -1,9 +1,8 @@
 use super::client_actions::{
-    AgentTaskContext, AskUserResponses, NotifySessionContext, handle_ask_user_response,
-    handle_compact, handle_input_shell, handle_notify_session, handle_rename_session,
-    handle_run_subagent, handle_set_feature, handle_set_session_saved, handle_set_subagent_model,
-    handle_split, handle_stdin_response, handle_transfer, handle_trigger_memory_extraction,
-    spawn_agent_task,
+    AskUserResponses, NotifySessionContext, handle_ask_user_response, handle_compact,
+    handle_input_shell, handle_notify_session, handle_rename_session, handle_run_subagent,
+    handle_set_feature, handle_set_session_saved, handle_set_subagent_model, handle_split,
+    handle_stdin_response, handle_transfer, handle_trigger_memory_extraction,
 };
 use super::client_comm::{
     handle_comm_channel_members, handle_comm_list, handle_comm_list_channels, handle_comm_message,
@@ -2493,20 +2492,47 @@ server_resumes: false,
             }
 
             Request::AgentTask { id, task, .. } => {
-                spawn_agent_task(
-                    id,
-                    task,
-                    client_session_id.clone(),
-                    Arc::clone(&agent),
-                    AgentTaskContext {
-                        client_event_tx: client_event_tx.clone(),
-                        swarm_members: Arc::clone(&swarm_members),
-                        swarms_by_id: Arc::clone(&swarms_by_id),
-                        event_history: Arc::clone(&event_history),
-                        event_counter: Arc::clone(&event_counter),
-                        swarm_event_tx: swarm_event_tx.clone(),
+                // Run it as this connection's turn: the request loop keeps
+                // reading ask_user answers and cancels, and disconnect cleanup
+                // owns the task like any other turn.
+                if !client_is_processing
+                    && let Some(info) = client_connections
+                        .write()
+                        .await
+                        .get_mut(&client_connection_id)
+                {
+                    info.is_processing = true;
+                    info.current_tool_name = None;
+                }
+                start_processing_message(
+                    ProcessingMessage {
+                        id,
+                        content: task,
+                        images: Vec::new(),
+                        system_reminder: None,
+                        active_skill: None,
+                        server_failover: false,
                     },
-                );
+                    &client_session_id,
+                    &mut ProcessingState {
+                        client_is_processing: &mut client_is_processing,
+                        message_id: &mut processing_message_id,
+                        session_id: &mut processing_session_id,
+                        task: &mut processing_task,
+                    },
+                    &agent,
+                    &client_event_tx,
+                    &processing_done_tx,
+                    active_terminal_env.clone(),
+                    &SwarmStatusRefs {
+                        members: &swarm_members,
+                        swarms_by_id: &swarms_by_id,
+                        event_history: &event_history,
+                        event_counter: &event_counter,
+                        event_tx: &swarm_event_tx,
+                    },
+                )
+                .await;
             }
 
             Request::AgentCapabilities { id } => {
