@@ -1044,6 +1044,11 @@ pub(in crate::tui) fn build_header_sections(
     app: &dyn TuiState,
     width: u16,
 ) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
+    // No historical startup/account-router snapshot was recorded. Do not
+    // manufacture one using today's version, authentication and update state.
+    if app.is_replay() {
+        return (Vec::new(), Vec::new());
+    }
     let start = std::time::Instant::now();
     let auth = app.auth_status();
     let auth_ms = start.elapsed().as_millis();

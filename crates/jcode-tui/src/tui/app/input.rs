@@ -1433,6 +1433,11 @@ impl App {
         &mut self,
         final_response_delivered: bool,
     ) -> bool {
+        // Playback observes recorded turns. It must never create new work from
+        // the current machine's todos, guardrails, or overnight configuration.
+        if self.is_replay {
+            return false;
+        }
         // SSH workflow state and todo reads belong to the remote daemon.
         // Even the guardrail/report checks below consult laptop session files.
         if crate::tui::is_ssh_remote() {
@@ -1471,6 +1476,9 @@ impl App {
         &mut self,
         final_response_delivered: bool,
     ) -> bool {
+        if self.is_replay {
+            return false;
+        }
         if crate::tui::is_ssh_remote() {
             return false;
         }

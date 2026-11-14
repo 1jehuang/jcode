@@ -61,6 +61,79 @@ fn frame_text(buffer: &Buffer) -> String {
     buffer.content.iter().map(|cell| cell.symbol()).collect()
 }
 
+#[tokio::test]
+async fn replay_has_no_live_startup_widgets_or_todo_completion_actions() {
+    use crate::tui::TuiState;
+    let mut session =
+        crate::session::Session::create_with_id("offline_replay_isolation".into(), None, None);
+    session.add_message(
+        crate::message::Role::User,
+        vec![crate::message::ContentBlock::Text {
+            text: "FUTURE_SAVED_MESSAGE".into(),
+            cache_control: None,
+        }],
+    );
+    let mut app = App::new_for_replay_silent(session);
+    assert!(app.session.messages.is_empty());
+    assert!(app.display_messages.is_empty());
+    assert!(!app.auto_poke_incomplete_todos);
+    let widget = app.info_widget_data();
+    assert!(widget.git_info.is_none());
+    assert!(widget.dual_git_info.is_none());
+    assert!(widget.usage_info.is_none());
+    assert!(widget.context_info.is_none());
+    assert!(widget.observed_context_tokens.is_none());
+    assert!(widget.ambient_info.is_none());
+    assert!(widget.cloud_info.is_none());
+    assert!(app.git_branch().is_none());
+    assert!(app.startup_oauth_account_label().is_none());
+    assert!(app.context_snapshot().info.is_none());
+    assert!(TuiState::suggestion_prompts(&app).is_empty());
+    let mut terminal = Terminal::new(TestBackend::new(120, 45)).unwrap();
+    let empty_frame = terminal
+        .draw(|frame| crate::tui::render_frame(frame, &app))
+        .unwrap()
+        .buffer
+        .clone();
+    let text = frame_text(&empty_frame);
+    assert!(!text.contains("FUTURE_SAVED_MESSAGE"));
+    assert!(!text.contains("v0."));
+    assert!(!text.contains("Account router"));
+
+    // Even enabling automatic continuations on a replay cannot enqueue work.
+    app.auto_poke_incomplete_todos = true;
+    let mut remote = crate::tui::backend::ReplayRemoteState::default();
+    let mut turn = 0;
+    let timeline = vec![
+        TimelineEvent { t:0, kind:TimelineEventKind::Thinking { duration:1 } },
+        TimelineEvent { t:1, kind:TimelineEventKind::ToolDone { name:"todo".into(),
+            output:json!([{"id":"finished", "content":"Recorded completed work", "status":"completed", "priority":"high"}]).to_string(), is_error:false } },
+        TimelineEvent { t:2, kind:TimelineEventKind::Done },
+    ];
+    for (_, event) in crate::replay::timeline_to_replay_events(&timeline) {
+        super::super::replay::apply_replay_event(
+            &mut app,
+            &mut remote,
+            &event,
+            &mut turn,
+            Some(0.0),
+        );
+    }
+    assert!(!app.schedule_turn_end_followups_after_response(false));
+    assert!(app.queued_messages.is_empty());
+    assert!(app.hidden_queued_system_messages.is_empty());
+    assert!(!matches!(
+        app.status,
+        super::super::ProcessingStatus::Sending
+    ));
+    assert!(
+        app.pinned_todos_payload
+            .as_ref()
+            .unwrap()
+            .contains("Recorded completed work")
+    );
+}
+
 #[test]
 fn historical_frames_use_production_draw_and_never_current_todo_files() {
     const CHILD: &str = "JCODE_TEST_HISTORICAL_EXPORT_CHILD";
