@@ -21,6 +21,39 @@ fn soft_interrupt_injected(content: &str, display_role: Option<&str>) -> ServerE
     }
 }
 
+#[test]
+fn agent_completion_wakes_never_become_user_prompts() {
+    use crate::tui::DisplayMessage;
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    let content = "Agent jaguar finished their work and is ready for more.\n\nRecent output (automatically captured):\nAll tests passed.\n\nUse assign_task to give them more work.";
+    app.push_display_message(DisplayMessage::swarm(
+        "Swarm · jaguar",
+        jcode_tui_messages::collapse_long_swarm_content(content),
+    ));
+    let before = app.display_messages().len();
+    for role in [None, Some("user"), Some("system")] {
+        handle_server_event(
+            &mut app,
+            soft_interrupt_injected(content, role),
+            &mut remote,
+        );
+        assert_eq!(app.display_messages().last().unwrap().role, "swarm");
+        assert_eq!(app.display_messages().len(), before);
+    }
+    app.replace_display_messages(vec![
+        DisplayMessage::user("actual user prompt"),
+        DisplayMessage::user(content),
+        DisplayMessage::system("Agent owl stopped.\n\nNo recent assistant output was captured. Use summary/read_context to inspect results or stop to remove them."),
+        DisplayMessage::user("Agent jaguar finished their work and is ready for more."),
+    ]);
+    let roles: Vec<_> = app.display_messages().iter().map(|m| m.role.as_str()).collect();
+    assert_eq!(roles, ["user", "swarm", "swarm", "user"]);
+}
+
 fn assert_no_long_rows(app: &crate::tui::app::App) {
     for message in app.display_messages() {
         if message.role == "swarm" {
