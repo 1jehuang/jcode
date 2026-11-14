@@ -259,4 +259,73 @@ mod auto_retry_config {
             );
         });
     }
+
+    /// A forced connectivity wait (a real provider attempt failed) schedules
+    /// its retry with the configured base delay, not the hardcoded 5s
+    /// offline-probe cadence (greptile 4449298934). The offline probe re-wait
+    /// (force == false) keeps the short fixed timing.
+    #[test]
+    fn forced_network_wait_uses_configured_base_delay() {
+        with_temp_jcode_home(|| {
+            write_test_config("[provider]\nauto_retry_base_delay_secs = 60\n");
+            crate::config::invalidate_config_cache();
+
+            let mut app = create_test_app();
+            app.rate_limit_pending_message = Some(PendingRemoteMessage {
+                content: "continue".to_string(),
+                images: vec![],
+                is_system: true,
+                system_reminder: None,
+                auto_retry: false,
+                retry_attempts: 0,
+                retry_at: None,
+            });
+
+            assert!(app.schedule_pending_remote_network_wait_with_force("dns", true));
+            let before = std::time::Instant::now();
+            let retry_at = app
+                .rate_limit_pending_message
+                .as_ref()
+                .and_then(|p| p.retry_at)
+                .expect("forced wait schedules a retry");
+            assert!(
+                retry_at.duration_since(before) >= std::time::Duration::from_secs(55),
+                "first forced retry must respect the 60s configured delay, not 5s"
+            );
+        });
+    }
+
+    /// The offline-probe re-wait keeps its short cadence regardless of a large
+    /// configured base delay: no provider attempt happened, so the configured
+    /// retry backoff must not slow down offline detection.
+    #[test]
+    fn probe_network_wait_keeps_fixed_cadence() {
+        with_temp_jcode_home(|| {
+            write_test_config("[provider]\nauto_retry_base_delay_secs = 60\n");
+            crate::config::invalidate_config_cache();
+
+            let mut app = create_test_app();
+            app.rate_limit_pending_message = Some(PendingRemoteMessage {
+                content: "continue".to_string(),
+                images: vec![],
+                is_system: true,
+                system_reminder: None,
+                auto_retry: true,
+                retry_attempts: 2,
+                retry_at: None,
+            });
+
+            assert!(app.schedule_pending_remote_network_wait("probe still failing"));
+            let before = std::time::Instant::now();
+            let retry_at = app
+                .rate_limit_pending_message
+                .as_ref()
+                .and_then(|p| p.retry_at)
+                .expect("probe wait schedules a retry");
+            assert!(
+                retry_at.duration_since(before) <= std::time::Duration::from_secs(20),
+                "probe re-wait must stay on the short fixed cadence"
+            );
+        });
+    }
 }

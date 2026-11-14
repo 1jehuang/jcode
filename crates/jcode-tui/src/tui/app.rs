@@ -1972,6 +1972,11 @@ impl Provider for InertRuntimeProvider {
 }
 
 impl App {
+    /// Default auto-retry attempt budget when no per-provider or global
+    /// override is configured. The effective budget is resolved at call time
+    /// by `effective_auto_retry_max_attempts`; this is the fallback baseline
+    /// (and the cap used by the automatic-failover target limiter).
+    pub(crate) const AUTO_RETRY_MAX_ATTEMPTS: u8 = 3;
     /// Budget for completion-confidence gate nudges per auto-poke cycle.
     /// Observed live: a session that stopped updating its todos was re-nudged
     /// with the same hidden continuation every ~5 seconds indefinitely, one
