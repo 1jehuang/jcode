@@ -552,33 +552,10 @@ pub(super) async fn handle_client(
     let client_connections_for_events = Arc::clone(&client_connections);
     let event_handle = tokio::spawn(async move {
         while let Some(event) = client_event_rx.recv().await {
-            {
+            if let Some(update) = ConnectionMetadataUpdate::from_event(&event) {
                 let mut connections = client_connections_for_events.write().await;
                 if let Some(info) = connections.get_mut(&client_connection_id_for_events) {
-                    let observed = match &event {
-                        ServerEvent::TurnEvent { event, .. } => event.as_ref(),
-                        event => event,
-                    };
-                    match observed {
-                        ServerEvent::TurnStarted { .. } => {
-                            info.is_processing = true;
-                            info.current_tool_name = None;
-                        }
-                        ServerEvent::ToolStart { name, .. } => {
-                            info.is_processing = true;
-                            info.current_tool_name = Some(name.clone());
-                        }
-                        ServerEvent::ToolDone { .. } => {
-                            info.current_tool_name = None;
-                        }
-                        ServerEvent::Done { .. }
-                        | ServerEvent::Error { .. }
-                        | ServerEvent::Interrupted => {
-                            info.is_processing = false;
-                            info.current_tool_name = None;
-                        }
-                        _ => {}
-                    }
+                    update.apply(&mut info.is_processing, &mut info.current_tool_name);
                 }
             }
             let Some(event) = event_for_transport(event, supports_turn_identity) else {
@@ -3558,6 +3535,57 @@ pub(super) async fn process_reserved_message_streaming_mpsc(
 #[cfg(test)]
 #[path = "client_lifecycle_tests.rs"]
 mod tests;
+
+/// Only metadata-changing events need the shared connection write lock.
+/// Borrow tool names until the lock is held, avoiding allocations for lookup misses.
+enum ConnectionMetadataUpdate<'a> {
+    TurnStarted,
+    ToolStarted(&'a str),
+    ToolDone,
+    TurnEnded,
+}
+
+impl<'a> ConnectionMetadataUpdate<'a> {
+    fn from_event(event: &'a ServerEvent) -> Option<Self> {
+        // Deliberately unwrap exactly one level, matching the forwarder's original
+        // behavior. Nested wrappers are not metadata transitions.
+        let observed = match event {
+            ServerEvent::TurnEvent { event, .. } => event.as_ref(),
+            event => event,
+        };
+        match observed {
+            ServerEvent::TurnStarted { .. } => Some(Self::TurnStarted),
+            ServerEvent::ToolStart { name, .. } => Some(Self::ToolStarted(name)),
+            ServerEvent::ToolDone { .. } => Some(Self::ToolDone),
+            ServerEvent::Done { .. } | ServerEvent::Error { .. } | ServerEvent::Interrupted => {
+                Some(Self::TurnEnded)
+            }
+            _ => None,
+        }
+    }
+
+    fn apply(self, is_processing: &mut bool, current_tool_name: &mut Option<String>) {
+        match self {
+            Self::TurnStarted => {
+                *is_processing = true;
+                *current_tool_name = None;
+            }
+            Self::ToolStarted(name) => {
+                *is_processing = true;
+                *current_tool_name = Some(name.to_owned());
+            }
+            Self::ToolDone => *current_tool_name = None,
+            Self::TurnEnded => {
+                *is_processing = false;
+                *current_tool_name = None;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "client_lifecycle_metadata_tests.rs"]
+mod metadata_tests;
 
 #[cfg(test)]
 #[path = "client_target_attach_tests.rs"]
