@@ -1367,6 +1367,32 @@ impl App {
         };
     }
 
+    /// Recover the complete user payload before a terminal retry path clears it.
+    /// Restoring only `last_submitted_input` loses consumed image attachments.
+    pub(super) fn restore_terminal_remote_retry_input(&mut self) {
+        if self
+            .rate_limit_pending_message
+            .as_ref()
+            .is_some_and(|pending| !pending.is_system)
+        {
+            let pending = self.rate_limit_pending_message.take().unwrap();
+            let raw_input = self.last_submitted_input.take();
+            self.restore_failover_payload(super::FallbackResendPayload {
+                content: pending.content,
+                images: pending.images,
+                is_system: pending.is_system,
+                system_reminder: pending.system_reminder,
+                auto_retry: pending.auto_retry,
+                retry_attempts: pending.retry_attempts,
+                raw_input,
+            });
+            self.reset_tab_completion();
+            self.sync_model_picker_preview_from_input();
+        } else {
+            self.restore_failed_input_to_box();
+        }
+    }
+
     /// Put the prompt that started the failed turn back into the input box so the
     /// user does not lose what they typed when a turn errors out (for example a
     /// "token refresh needed" / auth error). Only restores when the input box is
