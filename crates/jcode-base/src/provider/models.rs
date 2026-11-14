@@ -1197,12 +1197,10 @@ pub fn resolve_model_capabilities(model: &str, provider_hint: Option<&str>) -> M
     }
 }
 
-/// Automatic agent failover is narrower than manual model selection. A model
-/// appearing in an account's catalog is not evidence that it can run an agent
-/// turn: platform catalogs also advertise video, audio and embedding models.
-/// Accept curated/frontier agent models, plus versioned GPT variants so an
-/// explicitly configured new release need not wait for the bundled order.
-/// Unrecognized catalogs remain available for manual selection, not failover.
+/// Automatic agent failover is narrower than manual model selection: platform
+/// catalogs also advertise video, audio and embedding models. Accept curated
+/// frontier agent models plus versioned GPT variants; unrecognized catalogs
+/// remain available for manual selection, not automatic failover.
 pub(super) fn is_agent_model_for_failover(model: &str, provider: &str) -> bool {
     let normalized = normalize_model_id(model);
     if !super::is_listable_model_name(&normalized) || normalized.contains("[web]") {
@@ -1249,6 +1247,8 @@ pub fn provider_for_model_with_hint(
         Some("bedrock")
     } else if model.contains('/') {
         Some("openrouter")
+    } else if crate::provider::antigravity::is_antigravity_exclusive_model(model) {
+        Some("antigravity")
     } else if model.starts_with("claude-") {
         Some("claude")
     } else if model.starts_with("gpt-") {
@@ -1266,7 +1266,6 @@ pub fn provider_for_model_with_hint(
     }
 }
 
-/// Detect which provider a model belongs to
 pub fn provider_for_model(model: &str) -> Option<&'static str> {
     provider_for_model_with_hint(model, None)
 }

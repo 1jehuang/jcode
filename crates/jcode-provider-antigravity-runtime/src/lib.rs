@@ -32,6 +32,66 @@ use uuid::Uuid;
 
 const DEFAULT_MODEL: &str = "default";
 
+fn deduped_catalog_with_unavailable_canonical_ids(
+    catalog: Vec<CatalogModel>,
+) -> (Vec<CatalogModel>, std::collections::HashSet<String>) {
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped_catalog = Vec::with_capacity(catalog.len());
+    for mut model in catalog {
+        let id = model.id.trim().to_string();
+        if id.is_empty() || !seen.insert(id.clone()) {
+            continue;
+        }
+        model.id = id;
+        deduped_catalog.push(model);
+    }
+    let unavailable_canonical_ids = deduped_catalog
+        .iter()
+        .filter(|model| !model.available)
+        .map(|model| remap_unsupported_model(&model.id).to_string())
+        .collect();
+    (deduped_catalog, unavailable_canonical_ids)
+}
+
+#[derive(Debug, Clone)]
+struct CachedCatalogMeta {
+    fetched_at_rfc3339: String,
+    endpoint: Option<String>,
+    cli_version: Option<String>,
+}
+
+impl CachedCatalogMeta {
+    fn stamped_now() -> Self {
+        Self {
+            fetched_at_rfc3339: chrono::Utc::now().to_rfc3339(),
+            endpoint: Some(jcode_provider_antigravity::antigravity_endpoint()),
+            cli_version: Some(jcode_provider_antigravity::antigravity_version()),
+        }
+    }
+
+    fn from_persisted(catalog: &PersistedCatalog) -> Self {
+        Self {
+            fetched_at_rfc3339: catalog.fetched_at_rfc3339.clone(),
+            endpoint: catalog.endpoint.clone(),
+            cli_version: catalog.cli_version.clone(),
+        }
+    }
+
+    fn is_fresh_for_current_target(&self) -> bool {
+        let endpoint_matches = match self.endpoint.as_deref() {
+            Some(endpoint) => endpoint == jcode_provider_antigravity::antigravity_endpoint(),
+            None => true,
+        };
+        let version_matches = self
+            .cli_version
+            .as_deref()
+            .and_then(jcode_provider_antigravity::normalize_antigravity_version)
+            .as_deref()
+            == Some(jcode_provider_antigravity::antigravity_version().as_str());
+        endpoint_matches && version_matches && !catalog_is_stale(&self.fetched_at_rfc3339)
+    }
+}
+
 pub struct AntigravityProvider {
     client: reqwest::Client,
     model: Arc<RwLock<String>>,
@@ -39,6 +99,7 @@ pub struct AntigravityProvider {
     /// Backend-advertised default agent model id (from `fetchAvailableModels`).
     /// Used to resolve the `"default"` alias to a real model for inference.
     backend_default_model: Arc<RwLock<Option<String>>>,
+    catalog_meta: Arc<RwLock<Option<CachedCatalogMeta>>>,
 }
 
 impl Clone for AntigravityProvider {
@@ -48,6 +109,7 @@ impl Clone for AntigravityProvider {
             model: self.model.clone(),
             fetched_catalog: self.fetched_catalog.clone(),
             backend_default_model: self.backend_default_model.clone(),
+            catalog_meta: self.catalog_meta.clone(),
         }
     }
 }
@@ -61,6 +123,26 @@ impl AntigravityProvider {
         jcode_base::provider::antigravity::persist_catalog(snapshot);
     }
 
+    fn apply_catalog(
+        &self,
+        models: Vec<CatalogModel>,
+        default_model_id: Option<String>,
+        meta: CachedCatalogMeta,
+    ) {
+        *self
+            .backend_default_model
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = default_model_id;
+        *self
+            .fetched_catalog
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = models;
+        *self
+            .catalog_meta
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(meta);
+    }
+
     fn seed_cached_catalog(&self) {
         if let Some(catalog) = Self::load_persisted_catalog() {
             if catalog_is_stale(&catalog.fetched_at_rfc3339) {
@@ -68,15 +150,8 @@ impl AntigravityProvider {
                     "Loaded stale persisted Antigravity model catalog; a refresh will update it on next prefetch",
                 );
             }
-            if let Some(default_model_id) = catalog.default_model_id.clone() {
-                *self
-                    .backend_default_model
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(default_model_id);
-            }
-            if let Ok(mut models) = self.fetched_catalog.write() {
-                *models = catalog.models;
-            }
+            let meta = CachedCatalogMeta::from_persisted(&catalog);
+            self.apply_catalog(catalog.models, catalog.default_model_id, meta);
         }
     }
 
@@ -89,9 +164,21 @@ impl AntigravityProvider {
             model: Arc::new(RwLock::new(model)),
             fetched_catalog: Arc::new(RwLock::new(Vec::new())),
             backend_default_model: Arc::new(RwLock::new(None)),
+            catalog_meta: Arc::new(RwLock::new(None)),
         };
         provider.seed_cached_catalog();
         provider
+    }
+
+    #[cfg(test)]
+    pub(crate) fn empty_for_tests() -> Self {
+        Self {
+            client: jcode_provider_core::shared_http_client(),
+            model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
+            fetched_catalog: Arc::new(RwLock::new(Vec::new())),
+            backend_default_model: Arc::new(RwLock::new(None)),
+            catalog_meta: Arc::new(RwLock::new(None)),
+        }
     }
 
     fn fetched_catalog(&self) -> Vec<CatalogModel> {
@@ -141,22 +228,17 @@ impl AntigravityProvider {
             anyhow::bail!("Antigravity model catalog returned no models");
         }
         Self::persist_catalog(&snapshot);
-        if let Some(default_model_id) = snapshot.default_model_id.clone() {
-            *self
-                .backend_default_model
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(default_model_id);
-        }
         let model_ids: Vec<String> = snapshot
             .models
             .iter()
             .filter(|model| model.available)
             .map(|model| model.id.clone())
             .collect();
-        *self
-            .fetched_catalog
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = snapshot.models;
+        self.apply_catalog(
+            snapshot.models,
+            snapshot.default_model_id,
+            CachedCatalogMeta::stamped_now(),
+        );
         if model_ids.is_empty() {
             anyhow::bail!("Antigravity model catalog returned no available models");
         }
@@ -172,7 +254,66 @@ impl AntigravityProvider {
             anyhow::bail!("Antigravity model catalog returned no models");
         }
         Self::persist_catalog(&snapshot);
+        self.apply_catalog(
+            snapshot.models.clone(),
+            snapshot.default_model_id.clone(),
+            CachedCatalogMeta::stamped_now(),
+        );
         Ok(snapshot)
+    }
+
+    async fn refresh_catalog(&self, force: bool) -> Result<()> {
+        if !force {
+            if !self.model_capabilities_need_refresh() {
+                return Ok(());
+            }
+            if self.fetched_catalog().is_empty() {
+                self.seed_cached_catalog();
+                if !self.model_capabilities_need_refresh() {
+                    return Ok(());
+                }
+            }
+        }
+
+        let snapshot = match self.fetch_available_models().await {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                jcode_base::logging::warn(&format!(
+                    "Antigravity model catalog refresh failed; keeping fallback list: {}",
+                    err
+                ));
+                return Err(err);
+            }
+        };
+
+        if snapshot.models.is_empty() {
+            jcode_base::logging::warn(
+                "Antigravity model catalog returned no models; keeping last good catalog",
+            );
+            anyhow::bail!("Antigravity model catalog returned no models");
+        }
+
+        let default_note = match snapshot.default_model_id.as_deref() {
+            Some(id) => format!(" (default: {id})"),
+            None => String::new(),
+        };
+        jcode_base::logging::info(&format!(
+            "Discovered Antigravity models: {}{}",
+            snapshot
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            default_note
+        ));
+        Self::persist_catalog(&snapshot);
+        self.apply_catalog(
+            snapshot.models,
+            snapshot.default_model_id,
+            CachedCatalogMeta::stamped_now(),
+        );
+        Ok(())
     }
 
     /// Resolve a requested model id into a real backend model id. The literal
@@ -191,12 +332,18 @@ impl AntigravityProvider {
             return remap_unsupported_model(trimmed).to_string();
         }
 
+        let (catalog, unavailable_canonical_ids) =
+            deduped_catalog_with_unavailable_canonical_ids(self.fetched_catalog());
+
         if let Some(backend_default) = self
             .backend_default_model()
             .map(|id| id.trim().to_string())
             .filter(|id| !id.is_empty() && id != DEFAULT_MODEL)
         {
-            return backend_default;
+            let canonical = remap_unsupported_model(&backend_default);
+            if !unavailable_canonical_ids.contains(canonical) {
+                return canonical.to_string();
+            }
         }
 
         // No backend-advertised default: pick a usable catalog model. Prefer a
@@ -204,23 +351,22 @@ impl AntigravityProvider {
         // Claude models on the Cloud Code backend currently reject jcode's tool
         // schemas (they require JSON Schema draft 2020-12), so they are a poor
         // automatic default even when listed first in the catalog.
-        let catalog = self.fetched_catalog();
-        if let Some(gemini_model) = catalog
-            .iter()
-            .find(|model| {
-                model.available
-                    && model.id.trim() != DEFAULT_MODEL
-                    && model.id.starts_with("gemini-")
-            })
-            .map(|model| model.id.clone())
-        {
+        if let Some(gemini_model) = catalog.iter().find_map(|model| {
+            if !model.available || model.id == DEFAULT_MODEL || !model.id.starts_with("gemini-") {
+                return None;
+            }
+            let canonical = remap_unsupported_model(&model.id);
+            (!unavailable_canonical_ids.contains(canonical)).then(|| canonical.to_string())
+        }) {
             return gemini_model;
         }
-        if let Some(catalog_model) = catalog
-            .iter()
-            .find(|model| model.available && model.id.trim() != DEFAULT_MODEL)
-            .map(|model| model.id.clone())
-        {
+        if let Some(catalog_model) = catalog.iter().find_map(|model| {
+            if !model.available || model.id == DEFAULT_MODEL {
+                return None;
+            }
+            let canonical = remap_unsupported_model(&model.id);
+            (!unavailable_canonical_ids.contains(canonical)).then(|| canonical.to_string())
+        }) {
             return catalog_model;
         }
 
@@ -807,6 +953,7 @@ impl Provider for AntigravityProvider {
             catalog
                 .into_iter()
                 .map(|model| model.id)
+                .chain(AVAILABLE_MODELS.iter().map(|model| (*model).to_string()))
                 .chain(std::iter::once(self.model())),
         )
     }
@@ -818,18 +965,51 @@ impl Provider for AntigravityProvider {
     fn model_routes(&self) -> Vec<jcode_provider_core::ModelRoute> {
         let catalog = self.fetched_catalog();
         if !catalog.is_empty() {
-            return catalog
-                .into_iter()
-                .map(|model| jcode_provider_core::ModelRoute {
-                    model: model.id.clone(),
+            let (deduped_catalog, unavailable_canonical_ids) =
+                deduped_catalog_with_unavailable_canonical_ids(catalog);
+            let mut seen: std::collections::HashSet<String> = deduped_catalog
+                .iter()
+                .map(|model| model.id.clone())
+                .collect();
+            let mut routes: Vec<jcode_provider_core::ModelRoute> =
+                Vec::with_capacity(deduped_catalog.len() + AVAILABLE_MODELS.len());
+            for model in deduped_catalog {
+                let canonical_id = remap_unsupported_model(&model.id);
+                let available =
+                    model.available && !unavailable_canonical_ids.contains(canonical_id);
+                let mut detail = catalog_model_detail(&model);
+                if model.available && !available {
+                    let note = format!("canonical target '{canonical_id}' unavailable");
+                    if detail.is_empty() {
+                        detail = note;
+                    } else {
+                        detail = format!("{detail} · {note}");
+                    }
+                }
+                routes.push(jcode_provider_core::ModelRoute {
+                    model: model.id,
                     provider: "Antigravity".to_string(),
                     api_method: "https".to_string(),
-                    available: model.available,
-                    detail: catalog_model_detail(&model),
+                    available,
+                    detail,
                     usage: None,
                     cheapness: None,
-                })
-                .collect();
+                });
+            }
+            for fallback in AVAILABLE_MODELS {
+                if seen.insert((*fallback).to_string()) {
+                    routes.push(jcode_provider_core::ModelRoute {
+                        model: (*fallback).to_string(),
+                        provider: "Antigravity".to_string(),
+                        api_method: "https".to_string(),
+                        available: false,
+                        detail: "fallback catalog (unverified)".to_string(),
+                        usage: None,
+                        cheapness: None,
+                    });
+                }
+            }
+            return routes;
         }
 
         self.available_models_display()
@@ -850,55 +1030,40 @@ impl Provider for AntigravityProvider {
         let provider = self.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                if provider.prefetch_models().await.is_ok() {
+                if provider.refresh_model_catalog().await.is_ok() {
                     jcode_base::bus::Bus::global().publish_models_updated();
                 }
             });
         }
     }
 
-    async fn prefetch_models(&self) -> Result<()> {
-        match self.fetch_available_models().await {
-            Ok(snapshot) => {
-                if !snapshot.models.is_empty() {
-                    jcode_base::logging::info(&format!(
-                        "Discovered Antigravity models: {}{}",
-                        snapshot
-                            .models
-                            .iter()
-                            .map(|model| model.id.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        snapshot
-                            .default_model_id
-                            .as_deref()
-                            .map(|id| format!(" (default: {id})"))
-                            .unwrap_or_default()
-                    ));
-                    Self::persist_catalog(&snapshot);
-                    if let Some(default_model_id) = snapshot.default_model_id.clone() {
-                        *self
-                            .backend_default_model
-                            .write()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                            Some(default_model_id);
-                    }
-                    *self
-                        .fetched_catalog
-                        .write()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = snapshot.models;
-                }
-            }
-            Err(err) => {
-                jcode_base::logging::warn(&format!(
-                    "Antigravity model catalog refresh failed; keeping fallback list: {}",
-                    err
-                ));
-                return Err(err);
-            }
+    fn model_capabilities_need_refresh(&self) -> bool {
+        if self.fetched_catalog().is_empty() {
+            return true;
         }
+        self.catalog_meta
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .is_none_or(|meta| !meta.is_fresh_for_current_target())
+    }
 
-        Ok(())
+    async fn prefetch_models(&self) -> Result<()> {
+        self.refresh_catalog(false).await
+    }
+
+    async fn refresh_model_catalog(
+        &self,
+    ) -> Result<jcode_provider_core::ModelCatalogRefreshSummary> {
+        let before_models = self.available_models_display();
+        let before_routes = self.model_routes();
+        self.refresh_catalog(true).await?;
+        Ok(jcode_provider_core::summarize_model_catalog_refresh(
+            before_models,
+            self.available_models_display(),
+            before_routes,
+            self.model_routes(),
+        ))
     }
 
     fn context_window(&self) -> usize {
@@ -911,8 +1076,10 @@ impl Provider for AntigravityProvider {
                 .iter()
                 .find(|entry| entry.id == id)
                 .and_then(|entry| entry.max_tokens)
-                .and_then(|limit| usize::try_from(limit).ok())
-                .filter(|limit| *limit > 0)
+                .and_then(|limit| match usize::try_from(limit) {
+                    Ok(limit) if limit > 0 => Some(limit),
+                    _ => None,
+                })
         };
         limit_for(&resolved)
             .or_else(|| limit_for(&selected))
@@ -941,6 +1108,7 @@ impl Provider for AntigravityProvider {
             model: Arc::new(RwLock::new(self.model())),
             fetched_catalog: self.fetched_catalog.clone(),
             backend_default_model: self.backend_default_model.clone(),
+            catalog_meta: self.catalog_meta.clone(),
         })
     }
 }
@@ -948,3 +1116,6 @@ impl Provider for AntigravityProvider {
 #[cfg(test)]
 #[path = "antigravity_tests.rs"]
 mod antigravity_tests;
+#[cfg(test)]
+#[path = "catalog_tests.rs"]
+mod catalog_tests;

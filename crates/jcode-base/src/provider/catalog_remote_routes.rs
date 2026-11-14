@@ -419,6 +419,6 @@ pub fn remote_model_is_server_copilot_only(model: &str) -> bool {
         && remote_openai_compatible_route_for_model(model).is_none()
         && !matches!(
             provider_for_model(model),
-            Some("claude" | "openai" | "gemini" | "cursor")
+            Some("claude" | "openai" | "gemini" | "cursor" | "antigravity")
         )
 }

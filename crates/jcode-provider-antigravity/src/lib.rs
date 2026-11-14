@@ -3,6 +3,8 @@ use jcode_provider_gemini::CodeAssistGenerateResponse;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 /// Known-good model id used when the backend default is unknown. The literal
 /// alias `"default"` is rejected by `generateContent` with HTTP 404, so we must
@@ -11,6 +13,15 @@ pub const DEFAULT_FALLBACK_MODEL: &str = "gemini-3-flash";
 pub const AVAILABLE_MODELS: &[&str] = &[
     "claude-opus-4-6-thinking",
     "claude-sonnet-4-6",
+    "gemini-4-carbon-high",
+    "gemini-4-carbon-medium",
+    "gemini-4-carbon-low",
+    "gemini-4-argon-high",
+    "gemini-4-argon-medium",
+    "gemini-4-argon-low",
+    "gemini-3.8-flash-high",
+    "gemini-3.8-flash-medium",
+    "gemini-3.8-flash-low",
     "gemini-3.1-pro-high",
     "gemini-3.1-pro-low",
     "gemini-3-flash",
@@ -32,9 +43,18 @@ pub const DEFAULT_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
 /// environments that need a different Cloud Code host.
 pub const ENDPOINT_ENV: &str = "JCODE_ANTIGRAVITY_ENDPOINT";
 const VERSION_ENV: &str = "JCODE_ANTIGRAVITY_VERSION";
-pub const ANTIGRAVITY_VERSION: &str = "1.18.3";
+/// Fallback Antigravity CLI version used when neither [`VERSION_ENV`] nor an
+/// installed `agy` binary in `PATH` provides a valid semver string.
+pub const ANTIGRAVITY_VERSION: &str = "1.5.5";
+const AGY_BINARY_NAME: &str = "agy";
+const AGY_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
+const AGY_PROBE_INITIAL_POLL_INTERVAL: Duration = Duration::from_millis(1);
+const AGY_PROBE_MAX_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const AGY_PROBE_RECV_FLOOR: Duration = Duration::from_millis(25);
 pub const X_GOOG_API_CLIENT: &str = "google-cloud-sdk vscode_cloudshelleditor/0.1";
 const CATALOG_REFRESH_TTL_HOURS: i64 = 6;
+
+static DETECTED_AGY_VERSION: OnceLock<Option<String>> = OnceLock::new();
 
 /// Resolve the Cloud Code base endpoint, honoring [`ENDPOINT_ENV`] and
 /// otherwise defaulting to [`DEFAULT_ENDPOINT`].
@@ -100,6 +120,14 @@ pub struct PersistedCatalog {
     /// [`catalog_matches_current_endpoint`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+    /// Antigravity CLI version (see [`antigravity_version`]) used in the
+    /// `User-Agent` header when this catalog was fetched. Cloud Code gates newer
+    /// Gemini 4 tiers (`gemini-4-argon-*`, `gemini-4-carbon-*`, etc.) on the
+    /// reported `antigravity/cli/<version>`, so upgrading `agy` or changing
+    /// `JCODE_ANTIGRAVITY_VERSION` must invalidate caches fetched under an
+    /// older or unstamped version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_version: Option<String>,
 }
 
 /// Whether a persisted catalog was fetched from the endpoint currently
@@ -113,6 +141,35 @@ pub fn catalog_matches_current_endpoint(catalog: &PersistedCatalog) -> bool {
         Some(endpoint) => endpoint == antigravity_endpoint(),
         None => true,
     }
+}
+
+/// Whether a persisted catalog was fetched with the currently resolved
+/// [`antigravity_version`]. Unstamped caches (`cli_version: None`, written
+/// before CLI-version stamping) are treated as stale so upgrading Jcode or
+/// `agy` refreshes the catalog automatically without deleting the cache file.
+pub fn catalog_matches_current_cli_version(catalog: &PersistedCatalog) -> bool {
+    match catalog.cli_version.as_deref() {
+        Some(version) => {
+            normalize_antigravity_version(version).as_deref()
+                == Some(antigravity_version().as_str())
+        }
+        None => false,
+    }
+}
+
+/// Whether a persisted catalog omits legacy non-CLI markers or includes CLI
+/// Gemini 4 models. Legacy non-`cli/` User-Agent fetches return
+/// `gemini-3.8-flash-tiered` while omitting `gemini-4-argon*` and
+/// `gemini-4-carbon*`; such caches must never mask Gemini 4 availability.
+pub fn catalog_has_cli_models(catalog: &PersistedCatalog) -> bool {
+    let has_legacy_non_cli_marker = catalog
+        .models
+        .iter()
+        .any(|model| model.id == "gemini-3.8-flash-tiered");
+    let has_gemini_4_cli_models = catalog.models.iter().any(|model| {
+        model.id.starts_with("gemini-4-argon") || model.id.starts_with("gemini-4-carbon")
+    });
+    !has_legacy_non_cli_marker || has_gemini_4_cli_models
 }
 
 /// Result of parsing the backend `fetchAvailableModels` response: the ordered
@@ -196,22 +253,200 @@ pub fn metadata_platform() -> &'static str {
     "PLATFORM_UNSPECIFIED"
 }
 
+fn strip_ascii_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    if value.len() >= prefix.len()
+        && value.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+    {
+        Some(&value[prefix.len()..])
+    } else {
+        None
+    }
+}
+
+/// Validate `^\d+\.\d+(\.\d+)*(-[A-Za-z0-9._-]+)?$` so arbitrary stdout or env
+/// text can never produce a malformed or unsafe HTTP `User-Agent` header.
+pub fn is_valid_antigravity_semver(token: &str) -> bool {
+    let (core, prerelease) = match token.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (token, None),
+    };
+    let mut count = 0usize;
+    for segment in core.split('.') {
+        if segment.is_empty() || !segment.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        count += 1;
+    }
+    if count < 2 {
+        return false;
+    }
+    if let Some(pre) = prerelease
+        && (pre.is_empty()
+            || !pre
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')))
+    {
+        return false;
+    }
+    true
+}
+
+/// Normalize a raw version override (`1.5.5`, `cli/1.5.5`,
+/// `antigravity/cli/1.5.5`, `v1.5.5`) into a bare validated semver token.
+pub fn normalize_antigravity_version(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let without_prefix = strip_ascii_prefix(trimmed, "antigravity/cli/")
+        .or_else(|| strip_ascii_prefix(trimmed, "cli/"))
+        .unwrap_or(trimmed)
+        .trim();
+    let candidate = without_prefix
+        .strip_prefix('v')
+        .or_else(|| without_prefix.strip_prefix('V'))
+        .filter(|rest| rest.bytes().next().is_some_and(|b| b.is_ascii_digit()))
+        .unwrap_or(without_prefix);
+    is_valid_antigravity_semver(candidate).then(|| candidate.to_string())
+}
+
+/// Extract a clean semver token from `agy --version` stdout.
+pub fn parse_agy_version_output(stdout: &str) -> Option<String> {
+    let first_line = stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    first_line
+        .split_whitespace()
+        .find_map(normalize_antigravity_version)
+}
+
+/// Run a version command with a hard wall-clock timeout and extract a validated
+/// semver token from its first non-empty stdout line.
+pub fn probe_agy_version_command(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Option<String> {
+    use std::io::{BufRead, BufReader, Read};
+    use std::process::{Command, Stdio};
+
+    let start = Instant::now();
+    let mut child = match Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return None,
+    };
+
+    let stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout.take(256));
+        let mut first_line = String::new();
+        while first_line.trim().is_empty() {
+            first_line.clear();
+            match reader.read_line(&mut first_line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+        if tx.send(first_line).is_err() {}
+    });
+
+    let deadline = start + timeout;
+    let mut poll_interval = AGY_PROBE_INITIAL_POLL_INTERVAL;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    if child.kill().is_ok() {
+                        match child.wait() {
+                            Ok(_) | Err(_) => {}
+                        }
+                    }
+                    return None;
+                }
+                std::thread::sleep(poll_interval.min(deadline.saturating_duration_since(now)));
+                poll_interval = (poll_interval * 2).min(AGY_PROBE_MAX_POLL_INTERVAL);
+            }
+            Err(_) => return None,
+        }
+    };
+
+    if !status.success() {
+        return None;
+    }
+
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    match rx.recv_timeout(remaining.max(AGY_PROBE_RECV_FLOOR)) {
+        Ok(line) => parse_agy_version_output(&line),
+        Err(_) => None,
+    }
+}
+
+/// Cached once-per-process version of an installed `agy` CLI in `PATH`, if any.
+pub fn detected_agy_version() -> Option<&'static str> {
+    DETECTED_AGY_VERSION
+        .get_or_init(|| {
+            probe_agy_version_command(AGY_BINARY_NAME, &["--version"], AGY_PROBE_TIMEOUT)
+        })
+        .as_deref()
+}
+
+/// Pure priority resolver: `JCODE_ANTIGRAVITY_VERSION` -> `agy --version` ->
+/// [`ANTIGRAVITY_VERSION`].
+pub fn resolve_antigravity_version_with(
+    env_override: Option<&str>,
+    detected_cli_version: Option<&str>,
+) -> String {
+    if let Some(raw_env) = env_override
+        && let Some(normalized) = normalize_antigravity_version(raw_env)
+    {
+        return normalized;
+    }
+    if let Some(raw_detected) = detected_cli_version
+        && let Some(normalized) = normalize_antigravity_version(raw_detected)
+    {
+        return normalized;
+    }
+    ANTIGRAVITY_VERSION.to_string()
+}
+
 pub fn antigravity_version() -> String {
-    std::env::var(VERSION_ENV)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| ANTIGRAVITY_VERSION.to_string())
+    if let Ok(raw_env) = std::env::var(VERSION_ENV)
+        && let Some(normalized) = normalize_antigravity_version(&raw_env)
+    {
+        return normalized;
+    }
+    resolve_antigravity_version_with(None, detected_agy_version())
+}
+
+pub fn antigravity_platform_suffix() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows/amd64"
+    } else if cfg!(target_os = "linux") {
+        if cfg!(target_arch = "aarch64") {
+            "linux/arm64"
+        } else {
+            "linux/amd64"
+        }
+    } else if cfg!(target_arch = "aarch64") {
+        "darwin/arm64"
+    } else {
+        "darwin/amd64"
+    }
 }
 
 pub fn antigravity_user_agent() -> String {
-    if cfg!(target_os = "windows") {
-        format!("antigravity/{} windows/amd64", antigravity_version())
-    } else if cfg!(target_arch = "aarch64") {
-        format!("antigravity/{} darwin/arm64", antigravity_version())
-    } else {
-        format!("antigravity/{} darwin/amd64", antigravity_version())
-    }
+    format!(
+        "antigravity/cli/{} {}",
+        antigravity_version(),
+        antigravity_platform_suffix()
+    )
 }
 
 pub fn client_metadata_header() -> String {
@@ -257,7 +492,25 @@ pub fn merge_antigravity_model_ids(models: impl IntoIterator<Item = String>) -> 
 
 pub fn is_known_model(model: &str) -> bool {
     let normalized = model.trim();
-    !normalized.is_empty() && AVAILABLE_MODELS.contains(&normalized)
+    if normalized.is_empty() {
+        return false;
+    }
+    let remapped = remap_unsupported_model(normalized);
+    remapped == "gemini-pro-agent"
+        || AVAILABLE_MODELS.iter().any(|known| {
+            known.eq_ignore_ascii_case(normalized) || known.eq_ignore_ascii_case(remapped)
+        })
+}
+
+/// Whether `model` is an Antigravity-only model id (or alias) that is not
+/// served by the standalone Gemini or Anthropic providers.
+pub fn is_antigravity_exclusive_model(model: &str) -> bool {
+    let normalized = model.trim();
+    is_known_model(normalized)
+        && !matches!(
+            remap_unsupported_model(normalized),
+            "claude-sonnet-4-6" | "gemini-3-flash"
+        )
 }
 
 pub fn parse_fetch_available_models_response(
@@ -540,16 +793,45 @@ pub fn is_pseudo_tool_call_turn(response: &CodeAssistGenerateResponse) -> bool {
 /// the same requests, so it is the working route to the High Pro model. Map the
 /// broken id onto it so users who pick "Gemini 3.1 Pro (High)" get a working
 /// model instead of a hard 400.
+const MODEL_REMAPS: &[(&str, &str)] = &[
+    ("gemini-3.1-pro-high", "gemini-pro-agent"),
+    ("gemini-pro-agent", "gemini-pro-agent"),
+    ("gemini-4-carbon", "gemini-4-carbon-medium"),
+    ("carbon", "gemini-4-carbon-medium"),
+    ("carbon-medium", "gemini-4-carbon-medium"),
+    ("carbon-high", "gemini-4-carbon-high"),
+    ("carbon-low", "gemini-4-carbon-low"),
+    ("gemini-4-argon", "gemini-4-argon-medium"),
+    ("argon", "gemini-4-argon-medium"),
+    ("argon-medium", "gemini-4-argon-medium"),
+    ("argon-high", "gemini-4-argon-high"),
+    ("argon-low", "gemini-4-argon-low"),
+    ("gemini-3.8-flash", "gemini-3.8-flash-medium"),
+];
+
 pub fn remap_unsupported_model(model: &str) -> &str {
-    match model {
-        "gemini-3.1-pro-high" => "gemini-pro-agent",
-        other => other,
+    let trimmed = model.trim();
+    if let Some((_, canonical)) = MODEL_REMAPS
+        .iter()
+        .find(|(alias, _)| alias.eq_ignore_ascii_case(trimmed))
+    {
+        return canonical;
     }
+    if let Some(known) = AVAILABLE_MODELS
+        .iter()
+        .copied()
+        .find(|known| known.eq_ignore_ascii_case(trimmed))
+    {
+        return known;
+    }
+    trimmed
 }
 
 /// Whether a resolved Antigravity model id targets a Gemini model.
 pub fn model_is_gemini(model: &str) -> bool {
-    model.trim().to_ascii_lowercase().starts_with("gemini")
+    remap_unsupported_model(model)
+        .to_ascii_lowercase()
+        .starts_with("gemini")
 }
 
 /// The schema dialect the Antigravity backend will validate a request against,
@@ -660,162 +942,5 @@ pub fn flatten_schema_combiners(schema: &Value) -> Value {
 }
 
 #[cfg(test)]
-mod endpoint_tests {
-    use super::*;
-    use std::sync::Mutex;
-
-    // Serialize env-var mutation across tests in this module: `std::env` is
-    // process-global, and cargo runs tests in this crate on multiple threads.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    #[test]
-    fn antigravity_endpoint_defaults_to_daily_host() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::remove_var(ENDPOINT_ENV);
-        }
-        assert_eq!(antigravity_endpoint(), DEFAULT_ENDPOINT);
-        assert_eq!(
-            fetch_models_api_url(),
-            format!("{DEFAULT_ENDPOINT}/v1internal:fetchAvailableModels")
-        );
-        assert_eq!(
-            generate_content_api_url(),
-            format!("{DEFAULT_ENDPOINT}/v1internal:generateContent")
-        );
-    }
-
-    #[test]
-    fn antigravity_endpoint_honors_env_override_and_trims_trailing_slash() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::set_var(ENDPOINT_ENV, " https://example.googleapis.com/ ");
-        }
-        assert_eq!(antigravity_endpoint(), "https://example.googleapis.com");
-        assert_eq!(
-            fetch_models_api_url(),
-            "https://example.googleapis.com/v1internal:fetchAvailableModels"
-        );
-        unsafe {
-            std::env::remove_var(ENDPOINT_ENV);
-        }
-    }
-
-    #[test]
-    fn antigravity_endpoint_ignores_blank_env_override() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::set_var(ENDPOINT_ENV, "   ");
-        }
-        assert_eq!(antigravity_endpoint(), DEFAULT_ENDPOINT);
-        unsafe {
-            std::env::remove_var(ENDPOINT_ENV);
-        }
-    }
-
-    #[test]
-    fn antigravity_endpoint_falls_back_on_scheme_less_override() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::set_var(ENDPOINT_ENV, "example.googleapis.com");
-        }
-        assert_eq!(antigravity_endpoint(), DEFAULT_ENDPOINT);
-        unsafe {
-            std::env::remove_var(ENDPOINT_ENV);
-        }
-    }
-
-    #[test]
-    fn antigravity_endpoint_falls_back_on_override_with_query_string() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::set_var(
-                ENDPOINT_ENV,
-                "https://example.googleapis.com?not=a-base-url",
-            );
-        }
-        assert_eq!(antigravity_endpoint(), DEFAULT_ENDPOINT);
-        unsafe {
-            std::env::remove_var(ENDPOINT_ENV);
-        }
-    }
-
-    #[test]
-    fn antigravity_endpoint_falls_back_on_override_with_fragment() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::set_var(ENDPOINT_ENV, "https://example.googleapis.com#frag");
-        }
-        assert_eq!(antigravity_endpoint(), DEFAULT_ENDPOINT);
-        unsafe {
-            std::env::remove_var(ENDPOINT_ENV);
-        }
-    }
-
-    #[test]
-    fn antigravity_endpoint_accepts_valid_http_override() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::set_var(ENDPOINT_ENV, "http://localhost:8080");
-        }
-        assert_eq!(antigravity_endpoint(), "http://localhost:8080");
-        unsafe {
-            std::env::remove_var(ENDPOINT_ENV);
-        }
-    }
-
-    fn sample_catalog(endpoint: Option<&str>) -> PersistedCatalog {
-        PersistedCatalog {
-            models: vec![CatalogModel {
-                id: "gemini-3-flash".to_string(),
-                display_name: None,
-                reset_time: None,
-                tag_title: None,
-                model_provider: None,
-                max_tokens: None,
-                max_output_tokens: None,
-                recommended: false,
-                available: true,
-                remaining_fraction_milli: None,
-            }],
-            fetched_at_rfc3339: "2026-01-01T00:00:00Z".to_string(),
-            default_model_id: None,
-            endpoint: endpoint.map(str::to_string),
-        }
-    }
-
-    #[test]
-    fn catalog_with_no_recorded_endpoint_matches_any_current_endpoint() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::remove_var(ENDPOINT_ENV);
-        }
-        assert!(catalog_matches_current_endpoint(&sample_catalog(None)));
-    }
-
-    #[test]
-    fn catalog_stamped_with_current_endpoint_matches() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::remove_var(ENDPOINT_ENV);
-        }
-        assert!(catalog_matches_current_endpoint(&sample_catalog(Some(
-            DEFAULT_ENDPOINT
-        ))));
-    }
-
-    #[test]
-    fn catalog_stamped_with_stale_endpoint_does_not_match_after_override() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::set_var(ENDPOINT_ENV, "https://example.googleapis.com");
-        }
-        // Cached from the old default before the override was set.
-        assert!(!catalog_matches_current_endpoint(&sample_catalog(Some(
-            DEFAULT_ENDPOINT
-        ))));
-        unsafe {
-            std::env::remove_var(ENDPOINT_ENV);
-        }
-    }
-}
+#[path = "endpoint_tests.rs"]
+mod endpoint_tests;
