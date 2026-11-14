@@ -684,6 +684,59 @@ impl Drop for ProcessGroupKillGuard {
     }
 }
 
+/// Count running members of a Windows job, including children of an exited shell.
+#[cfg(windows)]
+fn windows_job_active_processes(job: &process_wrap::tokio::JobObjectHandle) -> Result<u32> {
+    use std::os::windows::io::{AsHandle, AsRawHandle};
+    use windows_sys::Win32::System::JobObjects::{
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation,
+        QueryInformationJobObject,
+    };
+    // SAFETY: the accounting structure contains only integer fields.
+    let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: the handle remains borrowed for the call and info is a valid output buffer.
+    let ok = unsafe {
+        QueryInformationJobObject(
+            job.as_handle().as_raw_handle(),
+            JobObjectBasicAccountingInformation,
+            &mut info as *mut _ as *mut _,
+            std::mem::size_of_val(&info) as u32,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(info.ActiveProcesses)
+}
+
+/// Stop the job, returning the shell's status if it had already finished.
+#[cfg(windows)]
+async fn cancel_windows_background_tree(
+    child: &mut tokio::process::Child,
+    job: &process_wrap::tokio::JobObjectHandle,
+) -> Result<Option<std::process::ExitStatus>> {
+    // This check orders a concurrent natural exit against cancellation.
+    let finished = child.try_wait()?;
+    let active = windows_job_active_processes(job)?;
+    if active == 0 {
+        return Ok(Some(child.wait().await?));
+    }
+    job.terminate(1)?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while windows_job_active_processes(job)? != 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("Timed out terminating background process tree"))??;
+    // Reap the root even if it was killed. A result observed before termination
+    // remains authoritative; otherwise cancellation won the race.
+    let status = child.wait().await?;
+    Ok(finished.map(|_| status))
+}
+
 fn build_shell_command(cmd_str: &str) -> TokioCommand {
     #[cfg(windows)]
     {
@@ -1246,13 +1299,16 @@ impl BashTool {
 
         let wake = params.wake;
         let notify = params.notify || wake;
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        let cancellation = if cfg!(windows) { Some(cancel_tx) } else { None };
         let info = crate::background::global()
-            .spawn_with_notify(
+            .spawn_with_notify_and_cancellation(
                 "bash",
                 Some(display_name.clone()),
                 &ctx.session_id,
                 notify,
                 wake,
+                cancellation,
 				move |output_path| async move {
                     #[cfg(all(test, not(windows)))]
                     tests::wait_for_session_env_launch_gate(&session_id_env).await;
@@ -1267,6 +1323,20 @@ impl BashTool {
                     if let Some(ref dir) = working_dir {
                         cmd.current_dir(dir);
                     }
+                    #[cfg(windows)]
+                    let (mut child, job) = {
+                        use process_wrap::tokio::{CommandWrap, JobObject, JobObjectChild};
+                        let mut wrapped = CommandWrap::from(cmd);
+                        // A normally completed command may intentionally leave a detached child.
+                        wrapped.wrap(JobObject);
+                        let child = wrapped.spawn()
+                            .map_err(|e| anyhow::anyhow!("Failed to spawn command: {}", e))?;
+                        let job = (child.as_ref() as &dyn std::any::Any).downcast_ref::<JobObjectChild>()
+                            .expect("JobObject wraps the background command")
+                            .job_handle();
+                        (child, job)
+                    };
+                    #[cfg(not(windows))]
                     let mut child = cmd
                         .spawn()
                         .map_err(|e| anyhow::anyhow!("Failed to spawn command: {}", e))?;
@@ -1280,7 +1350,13 @@ impl BashTool {
 
                     // Read stdout and stderr truly concurrently using select!
                     // Sequential reads can deadlock if the unread pipe fills up.
+                    #[cfg(windows)]
+                    let stdout = child.stdout().take();
+                    #[cfg(windows)]
+                    let stderr = child.stderr().take();
+                    #[cfg(not(windows))]
                     let stdout = child.stdout.take();
+                    #[cfg(not(windows))]
                     let stderr = child.stderr.take();
 
                     let mut stdout_lines = stdout.map(|s| BufReader::new(s).lines());
@@ -1290,15 +1366,32 @@ impl BashTool {
                     let timeout_sleep = timeout_duration.map(tokio::time::sleep);
                     tokio::pin!(timeout_sleep);
                     let mut timed_out = false;
+                    #[cfg(windows)]
+                    let mut cancellation_requested = false;
+                    #[cfg(not(windows))]
+                    let cancellation_requested = false;
 
 	                    while !stdout_done || !stderr_done {
 	                        tokio::select! {
+                                _ = &mut cancel_rx, if cfg!(windows) && !cancellation_requested => {
+                                    #[cfg(windows)]
+                                    {
+                                        // SAFETY: the wrapper's wait is never polled, and the
+                                        // job stays alive through cleanup and output draining.
+                                        let native = unsafe { child.try_inner_child_mut() }
+                                            .expect("native command child");
+                                        if cancel_windows_background_tree(native, &job).await?.is_none() {
+                                            return Ok(TaskResult::cancelled());
+                                        }
+                                        cancellation_requested = true;
+                                    }
+                                }
 	                            _ = async {
 	                                match timeout_sleep.as_mut().as_pin_mut() {
 	                                    Some(sleep) => sleep.await,
 	                                    None => std::future::pending().await,
 	                                }
-	                            }, if timeout_duration.is_some() => {
+	                            }, if timeout_duration.is_some() && !cancellation_requested => {
 	                                timed_out = true;
 	                                #[cfg(unix)]
 	                                {
@@ -1308,7 +1401,15 @@ impl BashTool {
 	                                        let _ = child.start_kill();
 	                                    }
 	                                }
-	                                #[cfg(not(unix))]
+	                                #[cfg(windows)]
+	                                {
+                                        // SAFETY: no wrapper wait has been polled, and the
+                                        // job remains alive until the whole tree is stopped.
+                                        let native = unsafe { child.try_inner_child_mut() }
+                                            .expect("native command child");
+                                        let _ = cancel_windows_background_tree(native, &job).await?;
+	                                }
+	                                #[cfg(not(any(unix, windows)))]
 	                                {
 	                                    let _ = child.start_kill();
 	                                }
@@ -1344,6 +1445,12 @@ impl BashTool {
                     }
 
                     if timed_out {
+                        #[cfg(windows)]
+                        // SAFETY: the wrapper wait has not been polled and the job
+                        // has already been stopped before accessing the native child.
+                        let _ = unsafe { child.try_inner_child_mut() }
+                            .expect("native command child").wait().await;
+                        #[cfg(not(windows))]
                         let _ = child.wait().await;
                         #[cfg(unix)]
                         process_group_guard.disarm();
@@ -1353,6 +1460,20 @@ impl BashTool {
                         return Ok(TaskResult::failed(Some(124), msg));
                     }
 
+                    #[cfg(windows)]
+                    // SAFETY: only the native wait is used below; the wrapper's wait is never
+                    // polled, and its job handle remains owned until cleanup has completed.
+                    let status = tokio::select! {
+                        result = unsafe { child.try_inner_child_mut() }.expect("native command child").wait() => result?,
+                        _ = &mut cancel_rx, if !cancellation_requested => {
+                            let native = unsafe { child.try_inner_child_mut() }.expect("native command child");
+                            match cancel_windows_background_tree(native, &job).await? {
+                                Some(status) => status,
+                                None => return Ok(TaskResult::cancelled()),
+                            }
+                        }
+                    };
+                    #[cfg(not(windows))]
                     let status = child.wait().await?;
                     #[cfg(unix)]
                     process_group_guard.disarm();
@@ -1432,3 +1553,7 @@ impl BashTool {
 #[cfg(all(test, not(windows)))]
 #[path = "bash_tests.rs"]
 mod tests;
+
+#[cfg(all(test, windows))]
+#[path = "bash_windows_tests.rs"]
+mod windows_tests;
