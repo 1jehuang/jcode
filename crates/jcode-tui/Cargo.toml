@@ -131,3 +131,14 @@ global-hotkey = "0.7"
 # need no ALSA development headers.
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 jcode-voice = { path = "../jcode-voice", features = ["voice-capture"] }
+
+# Win32 console API for the terminal-abandonment probe
+# (`tui::app::terminal_liveness`). Reuses the same windows-sys version and
+# feature set as jcode-core: `Win32_System_Console` for GetStdHandle /
+# GetConsoleMode / GetConsoleWindow, and `Win32_Foundation` for
+# INVALID_HANDLE_VALUE and HWND.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+] }

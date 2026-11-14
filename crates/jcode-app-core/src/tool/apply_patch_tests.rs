@@ -1,3 +1,4 @@
+#![allow(clippy::await_holding_lock)]
 use super::*;
 use std::io::Write;
 use tempfile::NamedTempFile;
