@@ -603,6 +603,46 @@ mod tests {
     }
 
     #[test]
+    fn ionet_profile_uses_official_openai_compatible_configuration() {
+        assert_eq!(IONET_PROFILE.id, "ionet");
+        assert_eq!(IONET_PROFILE.display_name, "IO Intelligence");
+        assert_eq!(
+            IONET_PROFILE.api_base,
+            "https://api.intelligence.io.solutions/api/v1"
+        );
+        assert_eq!(IONET_PROFILE.api_key_env, "IONET_API_KEY");
+        assert_eq!(IONET_PROFILE.env_file, "ionet.env");
+        assert_eq!(IONET_PROFILE.setup_url, "https://ai.io.net/ai/api-keys");
+        assert_eq!(
+            IONET_PROFILE.default_model,
+            Some("meta-llama/Llama-3.3-70B-Instruct")
+        );
+        const { assert!(IONET_PROFILE.requires_api_key) };
+        assert_eq!(
+            IONET_LOGIN_PROVIDER.auth_kind,
+            LoginProviderAuthKind::ApiKey
+        );
+        assert_eq!(
+            IONET_LOGIN_PROVIDER.auth_state_key,
+            LoginProviderAuthStateKey::OpenRouterLike
+        );
+        assert!(matches!(
+            IONET_LOGIN_PROVIDER.target,
+            LoginProviderTarget::OpenAiCompatible(profile) if profile.id == "ionet"
+        ));
+        assert!(
+            openai_compatible_profiles()
+                .iter()
+                .any(|profile| profile.id == "ionet")
+        );
+        assert!(
+            LOGIN_PROVIDERS
+                .iter()
+                .any(|provider| provider.id == "ionet")
+        );
+    }
+
+    #[test]
     fn belvedir_profile_uses_official_inference_router_configuration() {
         assert_eq!(BELVEDIR_PROFILE.id, "belvedir");
         assert_eq!(BELVEDIR_PROFILE.display_name, "Belvedir");
