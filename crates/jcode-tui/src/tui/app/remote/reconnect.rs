@@ -1009,15 +1009,19 @@ pub(in crate::tui::app) fn finalize_reload_reconnect(
     ));
     if should_queue_reload_continuation {
         app.pending_reload_reconnect_status = None;
-        let reload_ctx = session_to_resume.and_then(|sid| {
-            let result = ReloadContext::load_for_session(sid);
-            crate::logging::info(&format!(
-                "Reload load_for_session({}) = {:?}",
-                sid,
-                result.as_ref().map(|r| r.is_some())
-            ));
-            result.ok().flatten()
-        });
+        // Another reconnect consumer can remove the context after our peek.
+        // Keep that validated snapshot so recovery is not silently abandoned.
+        let reload_ctx = session_to_resume
+            .and_then(|sid| {
+                let result = ReloadContext::load_for_session(sid);
+                crate::logging::info(&format!(
+                    "Reload load_for_session({}) = {:?}",
+                    sid,
+                    result.as_ref().map(|r| r.is_some())
+                ));
+                result.ok().flatten()
+            })
+            .or(hints.reload_ctx_for_session);
 
         let background_task_note = session_to_resume
             .map(super::super::reload_persisted_background_tasks_note)
@@ -1094,5 +1098,40 @@ pub(in crate::tui::app) fn finalize_reload_reconnect(
                 .to_string(),
         ));
         app.reload_info.clear();
+    }
+}
+
+#[cfg(test)]
+mod reconnect_context_tests {
+    use super::*;
+    use crate::tui::app::tests::create_test_app;
+
+    #[test]
+    fn reconnect_preserves_peeked_context_after_file_is_consumed() {
+        let _env_guard = crate::storage::lock_test_env();
+        let mut app = create_test_app();
+        let session_id = crate::id::new_id("reload_context_race");
+        let ctx = ReloadContext {
+            task_context: None,
+            version_before: "before".to_string(),
+            version_after: "after".to_string(),
+            session_id: session_id.clone(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+        ctx.save().unwrap();
+        let hints = load_reload_reconnect_hints(&mut app, Some(&session_id));
+        assert!(hints.reload_ctx_for_session.is_some());
+        ReloadContext::load_for_session(&session_id)
+            .unwrap()
+            .unwrap();
+
+        finalize_reload_reconnect(&mut app, Some(&session_id), hints.clone(), true);
+        assert_eq!(app.hidden_queued_system_messages.len(), 1);
+        assert!(app.hidden_queued_system_messages[0].contains("before → after"));
+        assert!(app.reload_recovery_dispatch_pending);
+
+        // A delayed second bootstrap still must not duplicate the recovery.
+        finalize_reload_reconnect(&mut app, Some(&session_id), hints, true);
+        assert_eq!(app.hidden_queued_system_messages.len(), 1);
     }
 }
