@@ -67,7 +67,11 @@ pub fn spawn_command_in_new_terminal(command: &TerminalCommand, cwd: &Path) -> R
         return Ok(true);
     }
     jcode_terminal_launch::spawn_command_in_new_terminal_with(command, cwd, |cmd| {
-        crate::platform::spawn_detached(cmd).map(|_| ())
+        let child = crate::platform::spawn_detached(cmd)?;
+        // The terminal outlives this call, so collect its exit status rather
+        // than dropping the handle and leaking a zombie when it exits.
+        crate::platform::reap_detached(child);
+        Ok(())
     })
 }
 

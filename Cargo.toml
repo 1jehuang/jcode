@@ -27,6 +27,14 @@ members = [
     "crates/jcode-compaction-core",
     "crates/jcode-config-types",
     "crates/jcode-command-risk",
+    "crates/jcode-auto-dream",
+    "crates/jcode-cache-vectors",
+    "crates/jcode-micro-compact",
+    "crates/jcode-permission-bubble",
+    "crates/jcode-session-memory",
+    "crates/jcode-tool-search",
+    "crates/jcode-terminal-detect",
+    "crates/jcode-shell-integration",
     "crates/jcode-core",
     "crates/jcode-fuzzy",
     "crates/jcode-harness-api",
@@ -217,6 +225,7 @@ jcode-provider-anthropic-runtime = { path = "crates/jcode-provider-anthropic-run
 jcode-provider-openai-runtime = { path = "crates/jcode-provider-openai-runtime" }
 jcode-provider-grok-build-runtime = { path = "crates/jcode-provider-grok-build-runtime" }
 jcode-provider-forgecode-runtime = { path = "crates/jcode-provider-forgecode-runtime" }
+jcode-herdr = { path = "crates/jcode-herdr" }
 jcode-selfdev-types = { path = "crates/jcode-selfdev-types" }
 
 # Archive extraction (for auto-update)

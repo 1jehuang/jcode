@@ -398,7 +398,12 @@ pub fn focus_session_via_hook_with_env(
         cmd.env(format!("JCODE_CLIENT_{key}"), value);
     }
     match crate::platform::spawn_detached(&mut cmd) {
-        Ok(_) => true,
+        Ok(child) => {
+            // The hook outlives this call; reap it so its exit status is
+            // collected instead of leaving a zombie under the server.
+            crate::platform::reap_detached(child);
+            true
+        }
         Err(error) => {
             crate::logging::warn(&format!(
                 "Focus hook '{hook}' failed to start ({error}); falling back to built-in focus"

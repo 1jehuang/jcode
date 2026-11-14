@@ -27,6 +27,12 @@ pub async fn run() -> Result<()> {
     super::login::install_terminal_login_presenter();
     // Snapshot user-supplied provider env before provider init rewrites it.
     super::provider_init::capture_user_openrouter_model_env();
+
+    // Propagate agent mode to env so tool-gating and status bar can read it.
+    let resolved_mode = jcode_config_types::AgentMode::parse(&args.mode)
+        .unwrap_or(jcode_config_types::AgentMode::Execute);
+    crate::env::set_var("JCODE_AGENT_MODE", resolved_mode.as_str());
+
     // Credential import and explicit MCP management do not need normal agent
     // startup hardening, migrations, telemetry, or provider discovery.
     if args.ssh.is_none()
@@ -159,11 +165,18 @@ pub async fn run() -> Result<()> {
     let args = parse_and_prepare_args(args)?;
     spawn_background_update_check(&args);
 
+    // Initialize HERDR terminal runtime reporter. No-op when not inside
+    // a HERDR pane. Reports lifecycle state (working/idle/blocked) and
+    // session identity for restore.
+    crate::herdr::init("jcode");
+
     if let Err(e) = dispatch::run_main(args).await {
         report_main_error(&e);
+        crate::herdr::shutdown().await;
         return Err(e);
     }
 
+    crate::herdr::shutdown().await;
     Ok(())
 }
 

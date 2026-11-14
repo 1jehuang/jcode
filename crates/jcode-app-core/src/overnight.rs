@@ -28,6 +28,8 @@ pub use jcode_overnight_core::{
     task_card_validated, task_status_bucket,
 };
 
+use crate::agent::permission_bubble::{create_forked_child_messages, create_root_fork_guard};
+
 const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const LONG_TURN_NOTICE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
@@ -168,12 +170,29 @@ pub fn start_overnight_run(options: OvernightStartOptions) -> Result<OvernightLa
 }
 
 fn create_coordinator_session(parent: &Session, mission: &Option<String>) -> Result<Session> {
+    // Check fork depth before creating child session
+    let mut fork_guard = create_root_fork_guard();
+    let fork_id = format!("overnight-{}", parent.id);
+    let directive = mission.as_deref().unwrap_or("Run overnight tasks");
+    let fork_result = create_forked_child_messages(
+        &parent.messages,
+        &directive,
+        &fork_id,
+        &mut fork_guard,
+    );
+    if fork_result.denied {
+        anyhow::bail!(
+            "Fork depth exceeded: cannot create coordinator child for parent {}",
+            parent.id
+        );
+    }
+
     let title = Some(match mission {
         Some(mission) => format!("Overnight: {}", crate::util::truncate_str(mission, 48)),
         None => "Overnight coordinator".to_string(),
     });
     let mut child = Session::create(Some(parent.id.clone()), title);
-    child.replace_messages(parent.messages.clone());
+    child.replace_messages(fork_result.messages);
     child.compaction = parent.compaction.clone();
     child.provider_key = parent.provider_key.clone();
     child.route_api_method = parent.route_api_method.clone();

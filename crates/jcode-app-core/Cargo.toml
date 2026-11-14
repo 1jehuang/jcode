@@ -87,6 +87,14 @@ jcode-build-meta = { path = "../jcode-build-meta" }
 # this crate controls jcode-base's optional features (see [features] below).
 jcode-base = { path = "../jcode-base", default-features = false }
 jcode-command-risk = { path = "../jcode-command-risk" }
+jcode-micro-compact = { path = "../jcode-micro-compact" }
+jcode-auto-dream = { path = "../jcode-auto-dream" }
+jcode-cache-vectors = { path = "../jcode-cache-vectors" }
+jcode-permission-bubble = { path = "../jcode-permission-bubble" }
+jcode-tool-search = { path = "../jcode-tool-search" }
+jcode-session-memory = { path = "../jcode-session-memory" }
+jcode-terminal-detect = { path = "../jcode-terminal-detect" }
+jcode-shell-integration = { path = "../jcode-shell-integration" }
 jcode-core = { path = "../jcode-core" }
 jcode-message-types = { path = "../jcode-message-types" }
 jcode-overnight-core = { path = "../jcode-overnight-core" }

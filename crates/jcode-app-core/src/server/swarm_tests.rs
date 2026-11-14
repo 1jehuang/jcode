@@ -496,16 +496,10 @@ fn idle_spawned_worker_reap_selects_only_finished_idle_spawned_agents() {
 
 #[test]
 fn idle_worker_reap_window_env_zero_disables() {
-    // Note: mutating the process env in tests is racy in general, but this
-    // env var is read on every call (not cached), and no other test touches
-    // it.
-    unsafe {
-        std::env::set_var("JCODE_SWARM_IDLE_WORKER_REAP_SECS", "0");
-    }
+    let _env_lock = crate::storage::lock_test_env();
+    crate::env::set_var("JCODE_SWARM_IDLE_WORKER_REAP_SECS", "0");
     assert_eq!(super::swarm_idle_worker_reap_after(), None);
-    unsafe {
-        std::env::set_var("JCODE_SWARM_IDLE_WORKER_REAP_SECS", "90");
-    }
+    crate::env::set_var("JCODE_SWARM_IDLE_WORKER_REAP_SECS", "90");
     assert_eq!(
         super::swarm_idle_worker_reap_after(),
         Some(Duration::from_secs(90))

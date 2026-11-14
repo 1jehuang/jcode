@@ -50,6 +50,12 @@ impl JcodeDocsTool {
     }
 }
 
+impl Default for JcodeDocsTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Deserialize)]
 struct JcodeDocsInput {
     #[serde(default = "default_action")]

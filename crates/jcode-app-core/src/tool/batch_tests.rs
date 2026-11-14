@@ -258,6 +258,7 @@ fn test_schema_only_requires_tool() {
         compaction: std::sync::Arc::new(tokio::sync::RwLock::new(
             crate::compaction::CompactionManager::new(),
         )),
+        search_index: super::super::tool_search::ToolSearchIndex::new(),
     };
     let schema = BatchTool::new(registry.downgrade()).parameters_schema();
 

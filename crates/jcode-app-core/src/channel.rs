@@ -4,6 +4,8 @@ use crate::logging;
 use async_trait::async_trait;
 use std::sync::Arc;
 
+// async_trait generates redundant must_use attributes on boxed Future methods.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait MessageChannel: Send + Sync {
     fn name(&self) -> &str;

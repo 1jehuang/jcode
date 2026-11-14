@@ -58,6 +58,14 @@ pub mod turn_cancel_registry;
 pub mod update;
 pub mod wait_registry;
 
+/// Terminal emulator detection, escape-sequence helpers, and shell
+/// integration for jcode.  Delegates to `jcode-terminal-detect` and
+/// `jcode-shell-integration`.
+pub mod terminal {
+    pub use jcode_terminal_detect as detect;
+    pub use jcode_shell_integration as shell;
+}
+
 use std::sync::Mutex;
 
 static CURRENT_SESSION_ID: Mutex<Option<String>> = Mutex::new(None);

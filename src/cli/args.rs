@@ -77,6 +77,10 @@ pub(crate) struct Args {
     #[arg(long, global = true)]
     pub(crate) quiet: bool,
 
+    /// Agent operating mode: execute (default), manager (coordinate only), researcher (read-only)
+    #[arg(long, global = true, default_value = "execute")]
+    pub(crate) mode: String,
+
     /// Resume a session by ID, or list sessions if no ID provided
     #[arg(long, global = true, num_args = 0..=1, default_missing_value = "")]
     pub(crate) resume: Option<String>,

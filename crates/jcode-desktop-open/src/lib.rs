@@ -233,6 +233,31 @@ async fn try_unix_openers(arg_sets: Vec<Vec<OsString>>) -> Result<String> {
     )
 }
 
+/// Reap a detached child without blocking the caller.
+///
+/// This crate deliberately does not depend on `jcode-base`, so the small
+/// reaping helper is mirrored here (see `jcode_base::platform::reap_detached`).
+/// Without it, a detached opener that exits leaves a zombie on Unix, because
+/// dropping the `Child` handle does not reap the process.
+fn reap_detached(child: std::process::Child) {
+    #[cfg(unix)]
+    {
+        let mut child = child;
+        let _ = std::thread::Builder::new()
+            .name("jcode-detached-child".to_string())
+            .spawn(move || {
+                let _ = child.wait();
+            });
+    }
+
+    #[cfg(windows)]
+    {
+        // Closing the process handle is sufficient on Windows. Unlike Unix,
+        // the child does not need to be waited on to avoid a zombie process.
+        drop(child);
+    }
+}
+
 async fn spawn_with_grace(mut cmd: Command, backend: &str) -> Result<()> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -253,6 +278,7 @@ async fn spawn_with_grace(mut cmd: Command, backend: &str) -> Result<()> {
         }
     }
 
+    reap_detached(child);
     Ok(())
 }
 

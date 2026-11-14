@@ -25,6 +25,12 @@ impl WebFetchTool {
     }
 }
 
+impl Default for WebFetchTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Deserialize)]
 struct WebFetchInput {
     url: String,

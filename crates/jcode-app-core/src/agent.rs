@@ -27,6 +27,9 @@ pub(crate) use turn_ownership::{
     RuntimeMutationLease, TurnLease, TurnObserver, TurnPublicationPin,
 };
 mod turn_streaming_mpsc;
+mod cache_vectors;
+mod micro_compact;
+pub(crate) mod permission_bubble;
 mod utils;
 
 use self::streaming::{send_stream_keepalive_mpsc, stream_keepalive_ticker};
@@ -38,6 +41,7 @@ use self::utils::trace_enabled;
 use crate::build;
 use crate::bus::{Bus, BusEvent, SubagentStatus, ToolEvent, ToolStatus};
 use crate::cache_tracker::CacheTracker;
+use cache_vectors::CacheVectorsTracker;
 use crate::compaction::CompactionEvent;
 use crate::id;
 use crate::logging;
@@ -303,6 +307,8 @@ pub struct Agent {
     cache_tracker: CacheTracker,
     /// Classifies provider-reported KV cache misses for every client.
     kv_cache_monitor: crate::kv_cache_monitor::KvCacheMonitor,
+    /// Prompt-cache vector tracking for detecting which cache vectors changed
+    cache_vectors: CacheVectorsTracker,
     /// Last token usage from API request (for debug socket queries)
     last_usage: TokenUsage,
     /// Locked tool list: once the first API request is sent, freeze the tool list
@@ -374,6 +380,8 @@ pub struct Agent {
     /// One logical runtime session, independent of the process-global legacy
     /// telemetry slot and of any TUI clients viewing this agent.
     concurrency_session: Option<crate::telemetry::ConcurrencySession>,
+    /// Time-based trigger controlling when micro-compaction runs.
+    micro_compact_trigger: jcode_micro_compact::TimeBasedTrigger,
 }
 
 impl Agent {
@@ -482,6 +490,7 @@ impl Agent {
             graceful_shutdown: InterruptSignal::new(),
             cache_tracker: CacheTracker::new(),
             kv_cache_monitor: Default::default(),
+            cache_vectors: CacheVectorsTracker::new(),
             last_usage: TokenUsage::default(),
             locked_tools: None,
             mcp_late_register_resolved: false,
@@ -502,6 +511,7 @@ impl Agent {
             transcript_telemetry_sent: false,
             telemetry_session_deferred: false,
             concurrency_session: None,
+            micro_compact_trigger: micro_compact::new_trigger(),
         };
         let t = Instant::now();
         agent.refresh_prompt_skills_snapshot();
@@ -816,6 +826,7 @@ impl Agent {
         self.graceful_shutdown.reset();
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
+        self.cache_vectors.reset();
         self.last_usage = TokenUsage::default();
         self.locked_tools = None;
         self.mcp_late_register_resolved = false;
@@ -928,6 +939,7 @@ impl Agent {
 
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
+        self.cache_vectors.reset();
         self.locked_tools = None;
         self.mcp_late_register_resolved = false;
         self.provider_session_id = None;
@@ -1066,6 +1078,26 @@ impl Agent {
         }
     }
 
+    /// Snapshot prompt-cache vectors and detect breaks before a provider request.
+    pub(crate) fn record_prompt_cache_vectors(
+        &mut self,
+        system_prompt: &str,
+        tools: &[ToolDefinition],
+    ) {
+        self.cache_vectors.record_and_detect(
+            system_prompt,
+            tools,
+            &self.provider.model(),
+            self.provider.premium_mode() != crate::provider::copilot::PremiumMode::Normal,
+        );
+    }
+
+    /// Reset the cache vectors tracker (called on compaction, model switch, etc.).
+    #[allow(dead_code)]
+    fn reset_cache_vectors(&mut self) {
+        self.cache_vectors.reset();
+    }
+
     fn repair_missing_tool_outputs(&mut self) -> usize {
         if self.tool_output_scan_index > self.session.messages.len() {
             self.reset_tool_output_tracking();
@@ -1161,6 +1193,7 @@ impl Agent {
             self.persist_session_best_effort("missing tool-output repair");
             self.cache_tracker.reset();
             self.kv_cache_monitor.reset();
+            self.cache_vectors.reset();
             self.locked_tools = None;
             self.mcp_late_register_resolved = false;
         }
@@ -1240,7 +1273,21 @@ impl Agent {
         self.finish_concurrency_tracking();
         self.persist_soft_interrupt_snapshot();
         self.session.mark_closed();
-        if !self.session.messages.is_empty() {
+        // KCode fork: `Agent::new_with_session` always stamps `model`/
+        // `provider_key` and installs the hidden session-context header, so
+        // `messages` is never empty for an agent-held session and the upstream
+        // `!messages.is_empty()` guard never fires. Persisting on close is only
+        // correct when there is something on disk to update: real (model-visible)
+        // conversation content, or a session file that already exists (so the
+        // Closed status and any buffered env snapshots get flushed into it).
+        // A blank in-memory panel must stay invisible on close — materializing
+        // a transcript file here would break the "unsaved session never
+        // persists" contract that the disconnect-grace tests
+        // (`grace_tests::*unsaved_idle*`) rely on, mirroring the
+        // `log_env_snapshot` fix.
+        if self.visible_conversation_message_count() > 0
+            || crate::session::session_exists(self.session_id())
+        {
             self.persist_session_best_effort("session close state");
         }
         self.upload_transcript_telemetry(end_reason);
