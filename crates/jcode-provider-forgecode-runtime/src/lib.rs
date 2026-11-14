@@ -94,6 +94,9 @@ impl ForgeCodeProvider {
                     | ContentBlock::OpenAIReasoning { .. } => {}
                     ContentBlock::Image { .. } => {}
                     ContentBlock::OpenAICompaction { .. } => {}
+                    // References and provider-native blocks carry no
+                    // user-authored prompt text for the CLI transport.
+                    ContentBlock::ToolReference { .. } | ContentBlock::ProviderNative { .. } => {}
                 }
             }
             if !parts.is_empty() {

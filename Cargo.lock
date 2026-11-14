@@ -4378,6 +4378,7 @@ dependencies = [
  "jcode-message-types",
  "jcode-provider-core",
  "jcode-provider-openrouter-runtime",
+ "serde_json",
  "tokio",
 ]
 
