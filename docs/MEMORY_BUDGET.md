@@ -87,8 +87,9 @@ comparison rather than a one-patch benchmark. Ownership tests and payload
 counters independently verify the eliminated metadata copy.
 Process-private growth varied more, so this is not a fixed RSS savings claim.
 Both candidate runs retained 16,777,744 bytes of canonical payload capacity and
-zero additional persistence-metadata payload capacity. The independent compaction
-manager summary remains a separate owner.
+zero additional persistence-metadata payload capacity. The independent compaction manager summary was initially a separate owner.
+A subsequent narrower change shares only the immutable encrypted body between
+manager summaries and stored states, retaining independently mutable summary text.
 
 Borrowed exact comparison also avoids constructing an owned exported payload
 solely to detect unchanged state. An optional probe of 128 comparisons with a
@@ -104,8 +105,15 @@ a measurement of custom MCP catalogs. Immediately post-reload, locked tool
 snapshots are cold, so their zero count is not representative of warmed turns.
 The approximately 10.3 MiB search index already shares incremental Bloom-filter
 backing storage. No cache reduction was made to manufacture further savings.
-Reopen manager-summary sharing or custom tool-catalog ownership when a
-representative retained-allocation profile justifies the wider redesign.
+The encrypted-body follow-up (`fe1773bb6`, sharing regressions in `63bf3a240`)
+repeated the isolated sixteen-session workload with two runs per pinned binary.
+Live-allocator growth fell from **36.261–36.400 MiB to 20.163–20.309 MiB**.
+Private-page growth was also lower but noisier, so this is not a guaranteed
+production PSS reduction. The pinned builds contain concurrent changes, while
+pointer-sharing, copy-on-write and byte-identical JSON tests independently
+verify the removed encrypted-body allocation. No history or cache was discarded.
+Custom tool catalogs and transcript/provider-cache payload duplication remain
+separate candidates requiring their own ownership and mutation analysis.
 
 ## Hard caps
 
