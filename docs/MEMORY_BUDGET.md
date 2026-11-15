@@ -258,3 +258,42 @@ Any intentional change to those limits must update this document in the same PR.
   attribution or a wider serialization/ownership redesign, not arbitrary caps.
   The early-release change passed the full native OpenAI runtime suite:
   232 tests passed, three ignored, including wire, cancellation and recovery.
+
+## November 15, 2026 deeper attribution
+
+A read-only production pass at 13:03 UTC profiled 52 of 53 sessions without
+forcing busy-agent locks. Three subsequent samples reported allocator-live
+713,265,168–715,795,920 bytes and anonymous PSS 946,536,448–949,792,768 bytes.
+The existing resident-retention estimate was 230,740,528–236,527,600 bytes.
+This is not proof that those bytes are immediately reclaimable. GNU malloc's
+free-chunk counter includes address space whose physical pages may already have
+been returned. Concurrent activity and diagnostic allocations also prevent a
+controlled production savings claim. No production purge was performed.
+
+Two isolated, no-inference 16-session lifecycle runs used the installed binary,
+dedicated session storage and private sockets. After request completion, an
+explicit private-only allocator purge reduced private resident memory by
+18,169,856 and 18,489,344 bytes, with nearly unchanged live allocation counts.
+Active-request reductions were only 3,194,880 and 3,350,528 bytes. Existing
+completion trimming may already have run before the manual purge. These results
+do not justify increasing production trimming frequency without latency and
+power measurements.
+
+A separate copied-source request-compression probe ran 36 isolated processes:
+1/8/16 MiB payloads, repeated and deterministic-hex content, raw/gzip/zstd,
+twice each. Paired requested-allocation and capacity counters matched exactly.
+For a 16 MiB payload, raw JSON length 16,777,259 bytes occupied a Vec capacity
+of 33,554,482 bytes. Repeated-content gzip produced 76,586 wire bytes while
+retaining capacity 8,388,629 bytes. Compressed paths released the raw allocation
+before `json_body` returned, but the wire allocation persisted until request
+drop. Thus wire length substantially understates retained buffer capacity.
+These are Rust allocation counts, not RSS or real upload-completion measurements.
+Native codec allocations, malloc overhead and realloc transient overlap are
+excluded. Buffer compaction is a candidate, not an accepted latency-free gain.
+
+Reproduction artifacts are under `~/.jcode/scratch/ram-fork/` (production
+`deep-measure`, isolated `allocator-lifecycle-3` and `allocator-lifecycle-4`)
+and `~/.jcode/scratch/request-buffer-lifetimes/` (README, full measurements,
+validation and locked scratch build). Serialized content lengths still do not
+explain all production live heap. Capacity accounting must deduplicate shared
+payload backing and explicitly exclude unmeasured map-node/allocator overhead.
