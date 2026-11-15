@@ -900,6 +900,7 @@ async fn focus_is_reported_once_per_change_and_only_to_servers_that_accept_it() 
     );
 }
 
+#[tokio::test]
 async fn decision_response_done_is_filtered_as_control_ack() {
     let mut remote = RemoteConnection::dummy();
     let peer = remote.take_dummy_peer().unwrap();

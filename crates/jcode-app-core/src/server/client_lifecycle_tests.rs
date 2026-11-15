@@ -76,6 +76,9 @@ struct IsolatedReloadRecoveryEnv {
 #[path = "client_lifecycle_tests/control_requests.rs"]
 mod control_requests;
 
+#[path = "client_lifecycle_tests/decisions.rs"]
+mod decisions;
+
 impl IsolatedRuntimeDir {
     fn new() -> Self {
         let temp = tempfile::TempDir::new().expect("runtime dir");
