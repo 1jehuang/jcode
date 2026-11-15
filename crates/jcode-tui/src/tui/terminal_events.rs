@@ -163,6 +163,15 @@ impl ColorReports {
             && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
             && ch.is_ascii()
         {
+            // Once the report prefix is recognized, only hex digits and the
+            // component separator can still belong to the body. Any other
+            // printable key is user typing: drop the partial report (terminal
+            // noise is never replayed) and deliver the key as fresh input.
+            if self.recognized() && !ch.is_ascii_hexdigit() && ch != '/' {
+                self.reset(false);
+                self.ready.push_back(event);
+                return;
+            }
             self.body.push(ch);
             self.held.push(event);
             let prefix = "11;rgb:".starts_with(&self.body) || "11;rgba:".starts_with(&self.body);
@@ -726,6 +735,37 @@ mod tests {
         assert!(filter.ready.is_empty());
         filter.push(key('x', KeyModifiers::NONE), now + REPORT_TIMEOUT);
         assert_eq!(filter.ready.pop_front(), Some(key('x', KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn typing_after_a_recognized_report_prefix_is_not_swallowed() {
+        let now = Instant::now();
+        let mut filter = ColorReports::default();
+        filter.push(key(']', KeyModifiers::ALT), now);
+        for ch in "11;rgb:ff/".chars() {
+            filter.push(key(ch, KeyModifiers::NONE), now);
+        }
+        assert!(filter.ready.is_empty());
+        // A printable key that cannot belong to a color report is fresh input,
+        // and the half-built report is dropped rather than replayed.
+        let input = key('z', KeyModifiers::NONE);
+        filter.push(input.clone(), now);
+        assert_eq!(filter.ready.pop_front(), Some(input));
+        assert!(filter.ready.is_empty());
+        assert_eq!(filter.mode, None);
+        // A backspace mid-report is also delivered, while hex digits keep
+        // accumulating into the report body.
+        filter.push(key(']', KeyModifiers::ALT), now);
+        for ch in "11;rgb:".chars() {
+            filter.push(key(ch, KeyModifiers::NONE), now);
+        }
+        let backspace = Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        filter.push(backspace.clone(), now);
+        assert_eq!(filter.ready.pop_front(), Some(backspace));
+        // With the report dropped, even a hex digit is just typing again.
+        let digit = key('a', KeyModifiers::NONE);
+        filter.push(digit.clone(), now);
+        assert_eq!(filter.ready.pop_front(), Some(digit));
     }
 
     #[test]
