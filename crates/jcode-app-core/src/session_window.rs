@@ -309,7 +309,9 @@ fn bring_client_window_here(client_pids: &[u32]) -> bool {
     // Failing here leaves the window focused where it was, still a success.
     if let Some(column) = plan.column {
         if column.expel {
-            niri_action(&["expel-window-from-column".into()]);
+            // Not `expel-window-from-column`: that takes the bottom window of
+            // the column, whichever one is focused.
+            niri_action(&["consume-or-expel-window-right".into()]);
         }
         if let Some(index) = column.index {
             niri_action(&["move-column-to-index".into(), index.to_string()]);

@@ -2338,6 +2338,7 @@ impl Server {
                 // Compact todo names and progress are surfaced on the inline
                 // swarm strip so a coordinator can see each managed agent's work.
                 BusEvent::TodoUpdated(event) => {
+                    crate::agents_status::todos_updated(&event.session_id, &event.todos);
                     dispatch_swarm_todo_progress(&event, &swarm_members, &swarms_by_id).await;
                     // Worker-owned lanes whose dependencies are met get a
                     // worker automatically; no launch call is involved.
