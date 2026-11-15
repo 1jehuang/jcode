@@ -675,6 +675,56 @@ fn subscribe_forwards_hello_client_name() {
 }
 
 #[test]
+fn mobile_sessions_continue_after_transport_disconnect() {
+    for client in [
+        "jcode-ios",
+        "jcode-android",
+        "jcode-ios/0.3.0",
+        "jcode-android/1.0",
+    ] {
+        for req in ["create_session", "attach_session"] {
+            let mut state = BridgeState::default();
+            state.client_name = Some(client.into());
+            let out = state.api_request_to_legacy(&json!({
+                "req": req, "id": 1, "session_id": "mobile-session",
+            }));
+            let Outbound::Legacy(subscribe) = &out[0] else {
+                panic!("expected subscribe for {client} {req}");
+            };
+            assert_eq!(subscribe["continue_on_disconnect"], true, "{client} {req}");
+            assert!(subscribe.get("crash_on_disconnect").is_none());
+        }
+    }
+}
+
+#[test]
+fn non_mobile_sessions_keep_existing_disconnect_policy() {
+    for client in [
+        None,
+        Some("jcode-desktop-linux"),
+        Some("custom-sdk"),
+        Some("jcode-ios-other"),
+    ] {
+        for req in ["create_session", "attach_session"] {
+            let desktop = client == Some("jcode-desktop-linux");
+            let mut state = BridgeState::with_crash_on_disconnect(desktop);
+            state.client_name = client.map(str::to_owned);
+            let out = state.api_request_to_legacy(&json!({
+                "req": req, "id": 1, "session_id": "session",
+            }));
+            let Outbound::Legacy(subscribe) = &out[0] else {
+                panic!("expected subscribe");
+            };
+            assert!(subscribe.get("continue_on_disconnect").is_none());
+            assert_eq!(
+                subscribe["crash_on_disconnect"].as_bool().unwrap_or(false),
+                desktop
+            );
+        }
+    }
+}
+
+#[test]
 fn desktop_owned_session_requests_crash_on_disconnect() {
     let mut state = BridgeState::with_crash_on_disconnect(true);
     let out = state.api_request_to_legacy(&json!({"req": "create_session", "id": 1}));
