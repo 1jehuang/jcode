@@ -529,7 +529,7 @@ impl PermissionsApp {
                 emit_osc9_status_ignored("idle");
             }
         }
-        let _idle_on_exit = terminal_status_osc9.then_some(IdleOnExit);
+        let _idle_on_exit = terminal_status_osc9.then(|| IdleOnExit);
 
         let mut terminal = jcode_tui_style::init_terminal()
             .map_err(|error| anyhow::anyhow!("failed to initialize terminal: {error}"))?;

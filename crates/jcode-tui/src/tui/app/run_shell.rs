@@ -771,9 +771,12 @@ impl App {
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<RunResult> {
         // Skip the exit emission entirely when the OSC channel is disabled or
         // this is not a live session, mirroring `agent_osc_state`'s gating.
+        // Lazy construction: `then` defers building the guard until the
+        // condition holds, so Drop (the idle emission) cannot fire when the
+        // OSC channel is disabled or this is a replay session.
         let _exit_osc_idle: Option<ExitStatusOscIdle> =
             (crate::config::config().terminal_status_osc9 && !self.is_replay)
-                .then_some(ExitStatusOscIdle);
+                .then(|| ExitStatusOscIdle);
         super::terminal_liveness::capture_initial_tty();
         let mut event_stream = EventStream::new();
         let mut redraw_period = crate::tui::redraw_interval(&self);
@@ -922,7 +925,7 @@ impl App {
     ) -> Result<RunResult> {
         let _exit_osc_idle: Option<ExitStatusOscIdle> =
             (crate::config::config().terminal_status_osc9 && !self.is_replay)
-                .then_some(ExitStatusOscIdle);
+                .then(|| ExitStatusOscIdle);
         if crate::tui::is_ssh_remote() {
             self.session.working_dir = remote_working_dir.clone();
         }
