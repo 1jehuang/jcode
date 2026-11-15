@@ -76,21 +76,34 @@ impl StopLog {
         }
     }
 
+    fn needs_investigation(reason: &str) -> bool {
+        !matches!(reason, "normal" | "interrupted")
+    }
+
     fn log(&self, session: &str, identity: &TurnIdentity, request: Option<u64>, reason: &str) {
-        let line = format!(
-            "TURN_STOP session={session:?} runtime={:?} turn={} request={} reason={reason} abnormal={} provider_stop={}",
-            identity.runtime_generation,
-            identity.turn_id,
-            request
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| "unknown".into()),
-            reason != "normal",
-            self.provider.unwrap_or("unknown")
-        );
-        if reason == "normal" {
-            crate::logging::info(&line);
+        let needs_investigation = Self::needs_investigation(reason);
+        let fields = vec![
+            ("session", session.to_owned()),
+            ("runtime", identity.runtime_generation.clone()),
+            ("turn", identity.turn_id.to_string()),
+            (
+                "request",
+                request
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "unknown".into()),
+            ),
+            ("reason", reason.to_owned()),
+            ("abnormal", (reason != "normal").to_string()),
+            ("needs_investigation", needs_investigation.to_string()),
+            (
+                "provider_stop",
+                self.provider.unwrap_or("unknown").to_owned(),
+            ),
+        ];
+        if needs_investigation {
+            crate::logging::event_warn("TURN_STOP", fields);
         } else {
-            crate::logging::warn(&line);
+            crate::logging::event_info("TURN_STOP", fields);
         }
     }
 
@@ -106,6 +119,15 @@ impl StopLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expected_intentional_stops_do_not_need_investigation() {
+        assert!(!StopLog::needs_investigation("normal"));
+        assert!(!StopLog::needs_investigation("interrupted"));
+        for reason in ["failure", "crash", "limit", "guardrail", "unknown"] {
+            assert!(StopLog::needs_investigation(reason));
+        }
+    }
 
     #[test]
     fn structured_reasons_override_provider_completion_without_logging_messages() {
