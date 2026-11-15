@@ -1164,6 +1164,29 @@ fn handle_server_event_inner(
                     return true;
                 }
                 app.deferred_stream_done_id = None;
+                // A delivery acknowledgement is not proof that an AI turn ran.
+                // This catches hidden continuation dedup/no-op completions at
+                // the boundary that originally looked like a successful stop.
+                if app.remote_turn_fence.scoped()
+                    && app.remote_turn_fence.active.is_none()
+                    && app
+                        .rate_limit_pending_message
+                        .as_ref()
+                        .is_some_and(|pending| {
+                            pending.is_system && pending.system_reminder.is_some()
+                        })
+                {
+                    app.log_recovery_event(
+                        crate::logging::LogLevel::Warn,
+                        "RECOVERY_CONTINUATION_NOT_ACCEPTED",
+                        "done_without_turn_identity",
+                    );
+                }
+                app.log_recovery_event(
+                    crate::logging::LogLevel::Info,
+                    "RECOVERY_TURN_SETTLED",
+                    "done_received",
+                );
                 let turn_duration_secs = app.display_turn_duration_secs();
                 app.remember_terminal_title_work();
                 if completes_resumed_turn {
@@ -1232,6 +1255,10 @@ fn handle_server_event_inner(
                 auto_poked = app.schedule_turn_end_followups_after_response(
                     app.streaming.response_output.has_final_response(),
                 );
+                let mut stop_fields = app.recovery_log_fields("turn_end_policy");
+                stop_fields.push(("completed_request_id", id.to_string()));
+                stop_fields.push(("followup_scheduled", auto_poked.to_string()));
+                crate::logging::event_info("RECOVERY_TURN_FOLLOWUP_DECISION", stop_fields);
                 if !auto_poked {
                     app.clear_visible_turn_started();
                     if app.queued_messages.is_empty() {

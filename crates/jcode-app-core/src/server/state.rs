@@ -595,6 +595,16 @@ impl TurnEventChannel {
         let task = tokio::spawn(async move {
             let _publication = publication;
             let mut stop_log = turn_stop_log::StopLog::default();
+            // A hard process termination cannot emit TURN_STOP. This paired
+            // marker lets investigators detect a turn with no terminal record.
+            crate::logging::event_info(
+                "TURN_START",
+                [
+                    ("session", session_id.clone()),
+                    ("runtime", identity.runtime_generation.clone()),
+                    ("turn", identity.turn_id.to_string()),
+                ],
+            );
             let started = ServerEvent::TurnStarted {
                 identity: identity.clone(),
             };

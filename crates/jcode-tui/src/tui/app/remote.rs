@@ -492,14 +492,36 @@ pub(super) async fn dispatch_due_remote_retry(
     if !app
         .rate_limit_reset
         .is_some_and(|deadline| Instant::now() >= deadline)
-        || !remote.has_loaded_history()
-        || app.is_processing
-        || app.remote_model_switch_in_flight
-        || app.awaiting_remote_interrupt_ack()
     {
         return false;
     }
+    let blocker = if !remote.has_loaded_history() {
+        Some("history_not_loaded")
+    } else if app.is_processing {
+        Some("active_turn")
+    } else if app.remote_model_switch_in_flight {
+        Some("model_switch_unconfirmed")
+    } else if app.awaiting_remote_interrupt_ack() {
+        Some("interrupt_ack_pending")
+    } else {
+        None
+    };
+    if let Some(reason) = blocker {
+        crate::logging::event_rate_limited(
+            crate::logging::LogLevel::Info,
+            &format!("retry_blocked:{}:{reason}", app.session.id),
+            Duration::from_secs(30),
+            "RECOVERY_RETRY_BLOCKED",
+            app.recovery_log_fields(reason),
+        );
+        return false;
+    }
     let Some(pending) = app.rate_limit_pending_message.clone() else {
+        app.log_recovery_event(
+            crate::logging::LogLevel::Warn,
+            "RECOVERY_RETRY_DISARMED",
+            "deadline_without_pending_turn",
+        );
         app.rate_limit_reset = None;
         return false;
     };
@@ -525,6 +547,11 @@ pub(super) async fn dispatch_due_remote_retry(
         ""
     };
     app.push_display_message(DisplayMessage::system(format!("{status}{suffix}")));
+    app.log_recovery_event(
+        crate::logging::LogLevel::Info,
+        "RECOVERY_RETRY_DISPATCH",
+        "deadline_elapsed",
+    );
     if let Err(error) = begin_remote_send(
         app,
         remote,
@@ -537,6 +564,11 @@ pub(super) async fn dispatch_due_remote_retry(
     )
     .await
     {
+        app.log_recovery_event(
+            crate::logging::LogLevel::Warn,
+            "RECOVERY_RETRY_SEND_FAILED",
+            "transport_write_failed",
+        );
         // User turns held by a rate limit were explicitly scheduled for retry
         // even if their initial send was not auto-retry.
         if let Some(pending) = app.rate_limit_pending_message.as_mut() {
@@ -551,6 +583,12 @@ pub(super) async fn dispatch_due_remote_retry(
                 "Retry send failed",
             );
         }
+    } else {
+        app.log_recovery_event(
+            crate::logging::LogLevel::Info,
+            "RECOVERY_RETRY_SENT",
+            "transport_write_succeeded",
+        );
     }
     true
 }
@@ -1191,6 +1229,11 @@ fn restore_unconfirmed_model_switch_prompts(app: &mut App) {
 }
 
 fn fail_pending_automatic_failover(app: &mut App, reason: &str) {
+    app.log_recovery_event(
+        crate::logging::LogLevel::Warn,
+        "RECOVERY_FALLBACK_STOPPED",
+        "route_confirmation_failed",
+    );
     app.automatic_failover_stopped = true;
     app.pending_automatic_failover_request_id = None;
     app.pending_automatic_failover_started = None;
@@ -1214,6 +1257,11 @@ pub(super) fn handle_disconnect(
     if app.pending_automatic_failover_request_id.is_some() {
         fail_pending_automatic_failover(app, "Connection lost before route confirmation");
     } else if app.remote_model_switch_in_flight {
+        app.log_recovery_event(
+            crate::logging::LogLevel::Warn,
+            "RECOVERY_MODEL_SWITCH_STOPPED",
+            "disconnected_before_confirmation",
+        );
         // Manual switches have no automatic-failover request ID. Their
         // acknowledgement is just as connection-scoped: keeping this flag
         // would park every later prompt forever after reconnect. Do not send
@@ -1587,6 +1635,11 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         }
         app.last_submitted_input = payload.raw_input.clone();
         crate::logging::info("Resending failed turn after accepted fallback route switch");
+        app.log_recovery_event(
+            crate::logging::LogLevel::Info,
+            "RECOVERY_FALLBACK_DISPATCH",
+            "route_confirmed",
+        );
         let recovery_payload = payload.clone();
         if let Err(error) = begin_remote_send(
             app,
@@ -1600,6 +1653,11 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         )
         .await
         {
+            app.log_recovery_event(
+                crate::logging::LogLevel::Warn,
+                "RECOVERY_FALLBACK_SEND_FAILED",
+                "transport_write_failed",
+            );
             app.restore_failover_payload(recovery_payload);
             app.push_display_message(DisplayMessage::error(format!(
                 "Failed to resend after fallback switch: {}",

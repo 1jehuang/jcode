@@ -11,11 +11,14 @@ pub(super) struct StopLog {
 impl StopLog {
     fn provider_reason(reason: &str) -> &'static str {
         // Never copy arbitrary provider strings into logs.
-        match reason {
-            "end_turn" | "stop" | "completed" => "normal",
-            "max_tokens" | "length" | "max_output_tokens" => "limit",
+        match reason.trim().to_ascii_lowercase().as_str() {
+            "end_turn" | "stop" | "completed" | "stop_sequence" => "normal",
+            "max_tokens" | "length" | "max_output_tokens" | "model_context_window_exceeded" => {
+                "limit"
+            }
             "tool_use" | "tool_calls" => "tool",
-            "refusal" | "content_filter" => "guardrail",
+            "refusal" | "content_filter" | "safety" | "blocklist" | "prohibited_content"
+            | "spii" | "recitation" => "guardrail",
             _ => "unknown",
         }
     }
@@ -47,7 +50,10 @@ impl StopLog {
             ServerEvent::MessageEnd { stop_reason } => {
                 self.provider = stop_reason.as_deref().map(Self::provider_reason);
             }
-            ServerEvent::RetryRollback { .. } => self.provider = None,
+            ServerEvent::RetryRollback { .. } => {
+                self.provider = None;
+                self.reason = None;
+            }
             ServerEvent::ProviderGuardrail { .. } => self.reason = Some("guardrail"),
             ServerEvent::Done { id } | ServerEvent::Error { id, .. } => {
                 let reason = self.reason.unwrap_or_else(|| {
@@ -119,6 +125,54 @@ impl StopLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_aliases_are_known_without_copying_untrusted_strings() {
+        assert_eq!(StopLog::provider_reason(" STOP "), "normal");
+        assert_eq!(StopLog::provider_reason("stop_sequence"), "normal");
+        assert_eq!(
+            StopLog::provider_reason("model_context_window_exceeded"),
+            "limit"
+        );
+        assert_eq!(StopLog::provider_reason("SAFETY"), "guardrail");
+        assert_eq!(StopLog::provider_reason("private provider text"), "unknown");
+    }
+
+    #[test]
+    fn recovered_stop_reason_does_not_taint_later_success() {
+        let mut log = StopLog::default();
+        log.outcome(&ServerEvent::TurnStopped {
+            reason: crate::protocol::TurnStopReason::LimitReached,
+            message: "private".into(),
+            provider_stop_reason: Some("max_tokens".into()),
+        });
+        log.outcome(&ServerEvent::RetryRollback { attempt: 1, max: 2 });
+        log.outcome(&ServerEvent::MessageEnd {
+            stop_reason: Some("end_turn".into()),
+        });
+        assert_eq!(
+            log.outcome(&ServerEvent::Done { id: 3 }),
+            Some((3, "normal"))
+        );
+    }
+
+    #[test]
+    fn missing_terminal_is_reported_once_and_is_not_assumed_normal() {
+        let mut log = StopLog::default();
+        let identity = TurnIdentity {
+            runtime_generation: "test-runtime".into(),
+            turn_id: 1,
+        };
+        log.outcome(&ServerEvent::MessageEnd {
+            stop_reason: Some("end_turn".into()),
+        });
+        log.finish("test-session", &identity);
+        assert!(log.emitted);
+        assert_eq!(log.outcome(&ServerEvent::Done { id: 1 }), None);
+        assert!(StopLog::needs_investigation(
+            log.reason.unwrap_or("unknown")
+        ));
+    }
 
     #[test]
     fn expected_intentional_stops_do_not_need_investigation() {

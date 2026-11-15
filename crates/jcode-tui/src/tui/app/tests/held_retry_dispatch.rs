@@ -1,4 +1,49 @@
 // Held retries must remain dispatchable across reconnect and local send failures.
+#[test]
+fn recovery_log_snapshot_correlates_state_without_payloads() {
+    let mut app = create_test_app();
+    app.remote_session_id = Some("remote-diagnostic-session".into());
+    app.current_message_id = Some(42);
+    app.input = "private draft never log".into();
+    app.queued_messages.push("private queued text".into());
+    app.hidden_queued_system_messages
+        .push("private hidden context".into());
+    app.pending_images
+        .push(("image/png".into(), "private draft image".into()));
+    let mut pending = held_retry_message(2, true);
+    pending.content = "private sent text".into();
+    pending.system_reminder = Some("private reminder".into());
+    pending.images[0].1 = "private sent image".into();
+    app.rate_limit_pending_message = Some(pending);
+    app.rate_limit_reset = Some(Instant::now());
+    let fields = app.recovery_log_fields("test_reason");
+    let get = |key| {
+        fields
+            .iter()
+            .find(|(name, _)| *name == key)
+            .unwrap()
+            .1
+            .as_str()
+    };
+    assert_eq!(get("session_id"), "remote-diagnostic-session");
+    assert_eq!(get("request_id"), "42");
+    assert_eq!(get("attempt"), "2");
+    assert_eq!(get("image_count"), "1");
+    assert_eq!(get("draft_image_count"), "1");
+    assert_eq!(get("queued_count"), "1");
+    assert_eq!(get("hidden_queue_count"), "1");
+    assert_eq!(get("retry_armed"), "true");
+    assert!(!format!("{fields:?}").contains("private"));
+
+    app.remote_session_id = None;
+    app.rate_limit_pending_message = None;
+    app.current_message_id = None;
+    let fallback = app.recovery_log_fields("no_pending");
+    assert!(fallback.contains(&("session_id", app.session.id.clone())));
+    assert!(fallback.contains(&("request_id", "none".into())));
+    assert!(fallback.contains(&("pending", "false".into())));
+}
+
 fn held_retry_message(attempts: u8, auto_retry: bool) -> PendingRemoteMessage {
     PendingRemoteMessage {
         content: "finish the interrupted task [image 1]".into(),

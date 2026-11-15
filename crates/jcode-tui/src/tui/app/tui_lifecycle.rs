@@ -145,10 +145,20 @@ impl App {
         force: bool,
     ) -> bool {
         let Some(pending) = self.rate_limit_pending_message.as_mut() else {
+            self.log_recovery_event(
+                crate::logging::LogLevel::Warn,
+                "RECOVERY_NETWORK_WAIT_SKIPPED",
+                "no_pending_turn",
+            );
             return false;
         };
         if force {
             if pending.retry_attempts >= Self::AUTO_RETRY_MAX_ATTEMPTS {
+                self.log_recovery_event(
+                    crate::logging::LogLevel::Warn,
+                    "RECOVERY_NETWORK_WAIT_STOPPED",
+                    "retry_budget_exhausted",
+                );
                 return false;
             }
             pending.retry_attempts = pending.retry_attempts.saturating_add(1);
@@ -157,6 +167,11 @@ impl App {
             if force {
                 pending.auto_retry = true;
             } else {
+                self.log_recovery_event(
+                    crate::logging::LogLevel::Info,
+                    "RECOVERY_NETWORK_WAIT_SKIPPED",
+                    "auto_retry_disabled",
+                );
                 return false;
             }
         }
@@ -170,6 +185,15 @@ impl App {
             listener: plan.listener_summary.clone(),
         };
         self.status_detail = Some("offline; waiting for network before retry".to_string());
+        self.log_recovery_event(
+            crate::logging::LogLevel::Info,
+            "RECOVERY_NETWORK_WAIT_ARMED",
+            if force {
+                "provider_network_failure"
+            } else {
+                "offline_probe"
+            },
+        );
 
         let content = format!(
             "📡 Network appears offline - waiting to retry automatically. {} - {}",
@@ -205,9 +229,19 @@ impl App {
         max_attempts: u8,
     ) -> bool {
         let Some(pending) = self.rate_limit_pending_message.as_mut() else {
+            self.log_recovery_event(
+                crate::logging::LogLevel::Warn,
+                "RECOVERY_RETRY_SKIPPED",
+                "no_pending_turn",
+            );
             return false;
         };
         if !pending.auto_retry {
+            self.log_recovery_event(
+                crate::logging::LogLevel::Info,
+                "RECOVERY_RETRY_SKIPPED",
+                "auto_retry_disabled",
+            );
             return false;
         }
         let outcome = {
@@ -226,6 +260,11 @@ impl App {
 
         match outcome {
             Err(current_attempts) => {
+                self.log_recovery_event(
+                    crate::logging::LogLevel::Warn,
+                    "RECOVERY_RETRY_STOPPED",
+                    "retry_budget_exhausted",
+                );
                 self.restore_terminal_remote_retry_input();
                 self.rate_limit_pending_message = None;
                 self.rate_limit_reset = None;
@@ -239,6 +278,11 @@ impl App {
             }
             Ok((retry_attempts, backoff_secs, retry_at)) => {
                 self.rate_limit_reset = Some(retry_at);
+                self.log_recovery_event(
+                    crate::logging::LogLevel::Info,
+                    "RECOVERY_RETRY_ARMED",
+                    "transient_failure",
+                );
                 let content = format!(
                     "⚡ Connection lost - retrying (attempt {}/{}, in {}s) - {}",
                     retry_attempts,
@@ -291,6 +335,11 @@ impl App {
     /// the same loop again at turn end), puts the user's prompt back in the
     /// input box, and explains why the turn paused.
     pub(super) fn pause_exhausted_auto_resume(&mut self, message: String, notice: &str) {
+        self.log_recovery_event(
+            crate::logging::LogLevel::Warn,
+            "RECOVERY_AUTO_RESUME_STOPPED",
+            "retry_budget_exhausted",
+        );
         self.restore_terminal_remote_retry_input();
         self.clear_pending_remote_retry();
         super::commands::disable_auto_poke(self);
@@ -330,6 +379,11 @@ impl App {
     /// auto-poke/queued-retry loops logged thousands of 401s in a single
     /// session (one failed turn per resend) until the user noticed.
     pub(super) fn trip_credential_failure_breaker(&mut self, message: &str) {
+        self.log_recovery_event(
+            crate::logging::LogLevel::Warn,
+            "RECOVERY_CREDENTIAL_BREAKER_STOPPED",
+            "repeated_auth_failure",
+        );
         let failures = self.consecutive_credential_failures;
         self.restore_terminal_remote_retry_input();
         self.clear_pending_remote_retry();

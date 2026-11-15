@@ -255,13 +255,19 @@ fn queue_prepared_remote_input(app: &mut App, prepared: input::PreparedInput) {
         app.queued_messages.push(prepared.expanded);
         crate::logging::info(&format!(
             "RECOVERY_QUEUE_STAGED session_id={:?} request_id={:?} queued={}",
-            app.remote_session_id, app.current_message_id, app.queued_messages.len()
+            app.remote_session_id,
+            app.current_message_id,
+            app.queued_messages.len()
         ));
         return;
     }
     crate::logging::info(&format!(
         "RECOVERY_QUEUE_GUARD session_id={:?} request_id={:?} reason=images content_bytes={} images={} queued={} action=restore_draft",
-        app.remote_session_id, app.current_message_id, prepared.expanded.len(), prepared.images.len(), app.queued_messages.len()
+        app.remote_session_id,
+        app.current_message_id,
+        prepared.expanded.len(),
+        prepared.images.len(),
+        app.queued_messages.len()
     ));
     // Preparation consumed pasted text storage. Restore its expanded contents,
     // not now-unresolvable [pasted ...] placeholders.
