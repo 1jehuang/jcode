@@ -266,7 +266,14 @@ impl Walk<'_> {
                     }
                 }
             }
-            NodeKind::Progress { label, .. } => {
+            NodeKind::Progress { label, value, .. } => {
+                if let Some(value) = value
+                    && !(0.0..=1.0).contains(value)
+                {
+                    return Err(ValidationError::InvalidValue(
+                        "progress must be within 0..=1".into(),
+                    ));
+                }
                 if let Some(label) = label {
                     self.text(label)?;
                 }
@@ -323,13 +330,6 @@ impl Walk<'_> {
                 for badge in badges {
                     self.text(badge)?;
                 }
-            }
-            NodeKind::Progress {
-                value: Some(value), ..
-            } if !(0.0..=1.0).contains(value) => {
-                return Err(ValidationError::InvalidValue(
-                    "progress must be within 0..=1".into(),
-                ));
             }
             NodeKind::Html { source, .. } => {
                 self.require(Capability::Html)?;

@@ -340,3 +340,27 @@ fn manifest_schema_and_tool_card_claims() {
     future.schema = "jcode.applet/2".into();
     assert!(validate::validate_manifest(&future).is_err());
 }
+
+#[test]
+fn progress_values_outside_unit_interval_are_rejected() {
+    let valid = document(json!({"type": "progress", "value": 0.5, "label": "Half"}));
+    validate_document(&valid, &manifest(&[]), &Limits::default()).unwrap();
+
+    let too_large = document(json!({"type": "progress", "value": 2.0, "label": "Over"}));
+    assert!(
+        validate_document(&too_large, &manifest(&[]), &Limits::default()).is_err(),
+        "progress value 2.0 must be rejected"
+    );
+
+    let negative = document(json!({"type": "progress", "value": -0.1, "label": "Under"}));
+    assert!(
+        validate_document(&negative, &manifest(&[]), &Limits::default()).is_err(),
+        "negative progress value must be rejected"
+    );
+
+    let unlabelled = document(json!({"type": "progress", "value": 1.5}));
+    assert!(
+        validate_document(&unlabelled, &manifest(&[]), &Limits::default()).is_err(),
+        "out-of-range progress value must be rejected even without a label"
+    );
+}
