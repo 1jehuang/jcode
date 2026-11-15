@@ -655,7 +655,7 @@ impl Tool for CommunicateTool {
                 },
                 "to_session": {
                     "type": "string",
-                    "description": "Agent ID/unique name; alias of target_session."
+                    "description": "Agent ID/unique name."
                 },
                 "to_swarm": {
                     "type": "string",
@@ -664,10 +664,6 @@ impl Tool for CommunicateTool {
                 "channel": {
                     "type": "string",
                     "description": "Prefer DMs."
-                },
-                "target_session": {
-                    "type": "string",
-                    "description": "Alias of to_session."
                 },
                 "label": {
                     "type": "string",
@@ -685,10 +681,6 @@ impl Tool for CommunicateTool {
                 "prompt": {
                     "type": "string",
                     "description": "Extra spawn context, not lane tasks."
-                },
-                "initial_message": {
-                    "type": "string",
-                    "description": "Overrides prompt for spawn."
                 },
                 "limit": {
                     "type": "integer",
@@ -742,40 +734,10 @@ impl Tool for CommunicateTool {
             }
         });
 
-        // `swarm` is a multi-action tool, so putting `label` in the top-level
-        // `required` array would incorrectly require it for read/list/message and
-        // every other action. Use mutually exclusive action branches instead:
-        // the spawn branch requires label, while the non-spawn branch does not.
-        // `anyOf` object branches are supported by our provider schema adapters
-        // and avoid the less-portable JSON Schema `if`/`then` keywords.
-        let non_spawn_actions: Vec<Value> = schema["properties"]["action"]["enum"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|action| action.as_str() != Some("spawn"))
-            .cloned()
-            .collect();
-        schema["anyOf"] = json!([
-            {
-                "type": "object",
-                "required": ["action", "label"],
-                "properties": {
-                    "action": { "type": "string", "enum": ["spawn"] },
-                    // Gemini validates that every `required` name is defined in
-                    // the same object's `properties` and rejects the whole
-                    // request otherwise (issue #655), so declare `label` here
-                    // instead of relying on the parent schema's declaration.
-                    "label": { "type": "string", "minLength": 1 }
-                }
-            },
-            {
-                "type": "object",
-                "required": ["action"],
-                "properties": {
-                    "action": { "type": "string", "enum": non_spawn_actions }
-                }
-            }
-        ]);
+        // Advertise one spelling per capability. target_session and
+        // initial_message remain accepted by execute for older callers.
+        // required_spawn_label checks spawn's conditional requirement locally,
+        // before dispatch, without repeating the action enum in schema branches.
 
         apply_swarm_model_policy(&mut schema, &crate::config::config().agents);
         schema

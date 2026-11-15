@@ -21,7 +21,7 @@
     "crates/jcode-app-core/src/server/util.rs": 1273,
     "crates/jcode-app-core/src/tool/bash.rs": 1434,
     "crates/jcode-app-core/src/tool/browser.rs": 1385,
-    "crates/jcode-app-core/src/tool/communicate.rs": 1829,
+    "crates/jcode-app-core/src/tool/communicate.rs": 1791,
     "crates/jcode-app-core/src/tool/discover.rs": 2982,
     "crates/jcode-app-core/src/tool/mcp.rs": 1213,
     "crates/jcode-app-core/src/tool/mod.rs": 2063,

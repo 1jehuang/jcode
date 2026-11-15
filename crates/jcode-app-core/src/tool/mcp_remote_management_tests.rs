@@ -27,6 +27,10 @@ fn remote_management_schema_exposes_remote_fields_but_not_interactive_login() {
     assert!(actions.contains(&json!("status")));
     assert!(actions.contains(&json!("logout")));
     assert!(!actions.contains(&json!("login")));
+    assert_eq!(
+        schema["properties"]["transport"]["enum"],
+        json!(["stdio", "http", "sse"])
+    );
 }
 
 #[test]
