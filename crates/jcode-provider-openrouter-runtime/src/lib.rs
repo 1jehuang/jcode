@@ -29,6 +29,7 @@ use jcode_base::provider_catalog::{
     openai_compatible_profile_static_models, openai_compatible_profiles,
     resolve_openai_compatible_profile,
 };
+use jcode_provider_metadata::api_base_port_path_matches;
 use jcode_message_types::{CacheControl, ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use jcode_provider_core::{EventStream, Provider};
 pub use jcode_provider_openrouter::{
@@ -1889,7 +1890,16 @@ impl OpenRouterProvider {
             return self.supports_provider_features;
         };
 
-        source_api_base == self.api_base
+        // Exact match is the fast path. When hostnames differ (e.g.
+        // `localhost` vs `127.0.0.1` or a Docker bridge IP such as
+        // `10.0.2.10`), fall back to comparing port + path so a cache
+        // written under one spelling of the same endpoint is still usable
+        // (issue #2180). The namespace already scopes the cache to this
+        // provider profile, so the remaining risk is low.
+        if source_api_base == self.api_base {
+            return true;
+        }
+        api_base_port_path_matches(&source_api_base, &self.api_base)
     }
 
     fn begin_background_model_catalog_refresh(&self) -> bool {

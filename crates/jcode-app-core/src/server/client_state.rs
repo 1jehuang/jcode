@@ -1044,12 +1044,17 @@ async fn send_history_with_guard(
         let tool_names = agent_guard.visible_mcp_tool_names().await;
         let tool_names_ms = tool_names_start.elapsed().as_millis();
 
-        // Model-route expansion can be relatively expensive (provider/account routing,
-        // endpoint cache reads, etc.). The TUI already supports later
-        // AvailableModelsUpdated events, so keep the initial History payload fast and
-        // let the background refresh populate detailed routes asynchronously.
-        let available_model_routes = Vec::new();
-        let model_routes_ms = 0;
+        // Populate model routes from the provider cache. This is a cheap,
+        // lock-free read (no network I/O) that gives the TUI the correct
+        // picker rows immediately on resume. Previously this was always
+        // Vec::new(), which left the TUI with names-only from
+        // available_models_display() and relied on a background
+        // AvailableModelsUpdated event that could be debounced or
+        // throttled away, leaving the picker stuck on static fallback
+        // models (issue #2180).
+        let routes_start = Instant::now();
+        let available_model_routes = agent_guard.model_routes();
+        let model_routes_ms = routes_start.elapsed().as_millis();
 
         let skills_start = Instant::now();
         let skills = agent_guard.available_skill_names();

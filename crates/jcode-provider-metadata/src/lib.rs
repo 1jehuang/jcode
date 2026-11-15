@@ -318,6 +318,49 @@ fn normalize_provider_input(input: &str) -> Option<String> {
     Some(trimmed.to_ascii_lowercase())
 }
 
+/// Parsed components of an API base URL used for endpoint identity comparison.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UrlParts {
+    pub scheme: String,
+    pub port: u16,
+    pub path: String,
+}
+
+/// Parse an API base URL into scheme, port, and path.
+///
+/// Returns `None` for unparseable URLs. The port defaults to 80 for `http`
+/// and 443 for `https` when not explicitly specified.
+pub fn parse_url_parts(raw: &str) -> Option<UrlParts> {
+    let parsed = url::Url::parse(raw.trim()).ok()?;
+    let scheme = parsed.scheme().to_string();
+    let port = parsed
+        .port()
+        .unwrap_or(match scheme.as_str() {
+            "https" => 443,
+            _ => 80,
+        });
+    let path = parsed.path().trim_end_matches('/').to_string();
+    Some(UrlParts {
+        scheme,
+        port,
+        path,
+    })
+}
+
+/// Compare two API base URLs by scheme, port, and path (ignoring hostname).
+///
+/// Used to relax the exact-host cache-key requirement for OpenAI-compatible
+/// endpoints where the user may reach the same server via different host
+/// spellings (`localhost` vs `127.0.0.1` vs a Docker bridge IP). The disk-cache
+/// namespace already scopes the cache to a specific provider profile, so a
+/// port+path match is safe (issue #2180).
+pub fn api_base_port_path_matches(a: &str, b: &str) -> bool {
+    let (Some(pa), Some(pb)) = (parse_url_parts(a), parse_url_parts(b)) else {
+        return false;
+    };
+    pa.scheme == pb.scheme && pa.port == pb.port && pa.path == pb.path
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
