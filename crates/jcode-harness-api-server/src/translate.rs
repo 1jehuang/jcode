@@ -1105,13 +1105,44 @@ impl BridgeState {
             "get_todo_state" => {
                 let session_id = request["session_id"].as_str().unwrap_or("");
                 match Self::todo_home(session_id) {
-                    Ok(home) => vec![Outbound::Reply(ServerFrame::reply(
-                        api_id,
-                        ApiEvent::TodoState {
-                            session_id: session_id.to_string(),
-                            state: jcode_todo_policy::store::load_snapshot(&home, session_id),
-                        },
-                    ))],
+                    Ok(home) => {
+                        let snapshot = jcode_todo_policy::store::load_snapshot(&home, session_id);
+                        let mut metadata =
+                            Self::resolve_session_metadata(session_id).unwrap_or_default();
+                        // The freshly loaded plan is authoritative, including a
+                        // cleared title. An older index row must not resurrect it.
+                        metadata.todo_title = snapshot.plan.title.clone();
+                        let display_title = metadata.display_title().unwrap_or_else(|| {
+                            let name = session_id
+                                .strip_prefix("session_")
+                                .and_then(|rest| rest.split('_').next())
+                                .filter(|name| !name.is_empty());
+                            name.map(|name| {
+                                let mut chars = name.chars();
+                                chars.next().unwrap().to_uppercase().collect::<String>()
+                                    + chars.as_str()
+                            })
+                            .unwrap_or_else(|| session_id.to_string())
+                        });
+                        let mut outbound = vec![Outbound::Reply(ServerFrame::reply(
+                            api_id,
+                            ApiEvent::TodoState {
+                                session_id: session_id.to_string(),
+                                state: snapshot,
+                            },
+                        ))];
+                        // Clients already refresh todo state after todo tools
+                        // and completed turns. Publish the canonical name at
+                        // that boundary, never on token/argument deltas.
+                        outbound.push(Outbound::Reply(ServerFrame::event(
+                            ApiEvent::SessionRenamed {
+                                session_id: session_id.to_string(),
+                                title: metadata.custom_title,
+                                display_title,
+                            },
+                        )));
+                        outbound
+                    }
                     Err((code, message)) => Self::error_reply(api_id, code, &message),
                 }
             }

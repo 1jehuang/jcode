@@ -4120,6 +4120,108 @@ fn untitled_indexed_sessions_are_named_after_their_first_prompt_once() {
 }
 
 #[test]
+fn todo_refresh_publishes_live_canonical_names_including_clears() {
+    let home = ScopedJcodeHome::new("live-canonical-names");
+    let id = "session_owl_1_aa";
+    let record = write_session_record(&home.path, id, &home.path);
+    std::fs::create_dir_all(home.path.join("todos")).unwrap();
+    assert!(BridgeState::recent_session_index_entries().is_empty());
+    Connection::open(home.path.join("session-metadata-v1.sqlite3"))
+        .unwrap()
+        .execute(
+            "INSERT INTO recent_sessions (session_id, todo_title, updated_at_ms)
+         VALUES (?1, 'Stale indexed plan', 1)",
+            params![id],
+        )
+        .unwrap();
+    let mut state = state_with_session();
+    for (custom, saved, label, plan, prompt, expected) in [
+        (
+            Some("Manual"),
+            false,
+            None,
+            Some("Plan one"),
+            Some("First prompt"),
+            "Manual",
+        ),
+        (
+            None,
+            true,
+            Some("Bookmark"),
+            Some("Plan one"),
+            Some("First prompt"),
+            "Bookmark",
+        ),
+        (
+            None,
+            false,
+            None,
+            Some("Plan one"),
+            Some("First prompt"),
+            "Plan one",
+        ),
+        (
+            None,
+            false,
+            None,
+            Some("Plan two"),
+            Some("First prompt"),
+            "Plan two",
+        ),
+        (
+            None,
+            false,
+            None,
+            None,
+            Some("First prompt"),
+            "First prompt",
+        ),
+        (None, false, None, None, None, "Owl"),
+    ] {
+        let messages = prompt
+            .map(|prompt| {
+                vec![json!({"role":"user","content":[
+                    {"type":"text","text":prompt}
+                ]})]
+            })
+            .unwrap_or_default();
+        std::fs::write(
+            &record,
+            json!({"custom_title":custom,"saved":saved,
+            "save_label":label,"messages":messages})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            home.path.join(format!("todos/{id}-plan.json")),
+            json!({"title":plan}).to_string(),
+        )
+        .unwrap();
+        let output = state.api_request_to_legacy(&json!({
+            "req":"get_todo_state","session_id":id,"id":90
+        }));
+        assert_eq!(output.len(), 2);
+        let Outbound::Reply(reply) = &output[0] else {
+            panic!("todo reply")
+        };
+        assert_eq!(reply.reply_to, Some(90));
+        assert!(matches!(reply.event, ApiEvent::TodoState { .. }));
+        let Outbound::Reply(event) = &output[1] else {
+            panic!("title event")
+        };
+        assert_eq!(event.reply_to, None);
+        assert_eq!(
+            event.event,
+            ApiEvent::SessionRenamed {
+                session_id: id.into(),
+                title: custom.map(str::to_string),
+                display_title: expected.into()
+            }
+        );
+    }
+}
+
+#[test]
 fn todo_state_is_served_from_the_session_home_and_acked() {
     let _lock = crate::translate::jcode_home_test_lock();
     let home = std::env::temp_dir().join(format!("bridge-todo-state-{}", std::process::id()));
@@ -4139,9 +4241,12 @@ fn todo_state_is_served_from_the_session_home_and_acked() {
     unsafe { std::env::set_var("JCODE_HOME", &home) };
 
     let mut state = state_with_session();
-    let event = only_reply_event(state.api_request_to_legacy(&json!({
+    let mut output = state.api_request_to_legacy(&json!({
         "req": "get_todo_state", "id": 90, "session_id": "s1"
-    })));
+    }));
+    assert_eq!(output.len(), 2);
+    output.pop(); // Unsolicited canonical SessionRenamed follows the reply.
+    let event = only_reply_event(output);
     let ApiEvent::TodoState {
         state: snapshot, ..
     } = event
