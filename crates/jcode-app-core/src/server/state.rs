@@ -570,6 +570,9 @@ pub(super) async fn fanout_peer_client_event(
     send_event_to_targets(targets.as_slice(), event)
 }
 
+#[path = "turn_stop_log.rs"]
+mod turn_stop_log;
+
 /// Owns one turn's event queue. Closing or aborting the producer drains all
 /// accepted events before releasing the runtime's publication reservation.
 pub(super) struct TurnEventChannel {
@@ -591,6 +594,7 @@ impl TurnEventChannel {
         let identity = lease.identity().clone();
         let task = tokio::spawn(async move {
             let _publication = publication;
+            let mut stop_log = turn_stop_log::StopLog::default();
             let started = ServerEvent::TurnStarted {
                 identity: identity.clone(),
             };
@@ -605,8 +609,9 @@ impl TurnEventChannel {
                     event = rx.recv() => event,
                 };
                 let Some(event) = event else {
-                    return;
+                    break;
                 };
+                stop_log.observe(&session_id, &identity, &event);
                 match &event {
                     ServerEvent::ToolExec { name, .. } => {
                         crate::agents_status::tool_started(&session_id, name)
@@ -624,6 +629,7 @@ impl TurnEventChannel {
                 }
             }
             while let Some(event) = rx.recv().await {
+                stop_log.observe(&session_id, &identity, &event);
                 let event = ServerEvent::TurnEvent {
                     identity: identity.clone(),
                     event: Box::new(event),
@@ -633,6 +639,7 @@ impl TurnEventChannel {
                     let _ = fallback.send(event);
                 }
             }
+            stop_log.finish(&session_id, &identity);
         });
         Self {
             tx,

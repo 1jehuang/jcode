@@ -1,0 +1,212 @@
+//! One privacy-preserving outcome per real runtime turn, not per provider response.
+use crate::protocol::{ServerEvent, TurnIdentity};
+
+#[derive(Default)]
+pub(super) struct StopLog {
+    reason: Option<&'static str>,
+    provider: Option<&'static str>,
+    emitted: bool,
+}
+
+impl StopLog {
+    fn provider_reason(reason: &str) -> &'static str {
+        // Never copy arbitrary provider strings into logs.
+        match reason {
+            "end_turn" | "stop" | "completed" => "normal",
+            "max_tokens" | "length" | "max_output_tokens" => "limit",
+            "tool_use" | "tool_calls" => "tool",
+            "refusal" | "content_filter" => "guardrail",
+            _ => "unknown",
+        }
+    }
+
+    fn outcome(&mut self, event: &ServerEvent) -> Option<(u64, &'static str)> {
+        if self.emitted {
+            return None;
+        }
+        match event {
+            ServerEvent::TurnStopped {
+                reason,
+                provider_stop_reason,
+                ..
+            } => {
+                use crate::protocol::TurnStopReason;
+                self.reason = Some(match reason {
+                    TurnStopReason::Interrupted => "interrupted",
+                    TurnStopReason::Failure => "failure",
+                    TurnStopReason::Crash => "crash",
+                    TurnStopReason::LimitReached => "limit",
+                    TurnStopReason::ProviderGuardrail => "guardrail",
+                    TurnStopReason::Unknown => "unknown",
+                });
+                if let Some(reason) = provider_stop_reason {
+                    self.provider = Some(Self::provider_reason(reason));
+                }
+            }
+            ServerEvent::Interrupted => self.reason = Some("interrupted"),
+            ServerEvent::MessageEnd { stop_reason } => {
+                self.provider = stop_reason.as_deref().map(Self::provider_reason);
+            }
+            ServerEvent::RetryRollback { .. } => self.provider = None,
+            ServerEvent::ProviderGuardrail { .. } => self.reason = Some("guardrail"),
+            ServerEvent::Done { id } | ServerEvent::Error { id, .. } => {
+                let reason = self.reason.unwrap_or_else(|| {
+                    if matches!(event, ServerEvent::Error { .. }) {
+                        "failure"
+                    } else {
+                        match self.provider {
+                            Some("normal") => "normal",
+                            Some("limit") => "limit",
+                            Some("guardrail") => "guardrail",
+                            _ => "unknown",
+                        }
+                    }
+                });
+                self.emitted = true;
+                return Some((*id, reason));
+            }
+            _ => {}
+        }
+        None
+    }
+
+    pub(super) fn observe(&mut self, session: &str, identity: &TurnIdentity, event: &ServerEvent) {
+        if let Some((request, reason)) = self.outcome(event) {
+            self.log(session, identity, Some(request), reason);
+        }
+    }
+
+    fn log(&self, session: &str, identity: &TurnIdentity, request: Option<u64>, reason: &str) {
+        let line = format!(
+            "TURN_STOP session={session:?} runtime={:?} turn={} request={} reason={reason} abnormal={} provider_stop={}",
+            identity.runtime_generation,
+            identity.turn_id,
+            request
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "unknown".into()),
+            reason != "normal",
+            self.provider.unwrap_or("unknown")
+        );
+        if reason == "normal" {
+            crate::logging::info(&line);
+        } else {
+            crate::logging::warn(&line);
+        }
+    }
+
+    pub(super) fn finish(&mut self, session: &str, identity: &TurnIdentity) {
+        if !self.emitted {
+            // A missing terminal event is not evidence of a crash.
+            self.log(session, identity, None, self.reason.unwrap_or("unknown"));
+            self.emitted = true;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structured_reasons_override_provider_completion_without_logging_messages() {
+        use crate::protocol::TurnStopReason;
+        for (reason, expected) in [
+            (TurnStopReason::Interrupted, "interrupted"),
+            (TurnStopReason::Failure, "failure"),
+            (TurnStopReason::Crash, "crash"),
+            (TurnStopReason::LimitReached, "limit"),
+            (TurnStopReason::Unknown, "unknown"),
+        ] {
+            let mut log = StopLog::default();
+            assert_eq!(
+                log.outcome(&ServerEvent::TurnStopped {
+                    reason,
+                    message: "private message must not be logged".into(),
+                    provider_stop_reason: Some("end_turn".into()),
+                }),
+                None
+            );
+            assert_eq!(
+                log.outcome(&ServerEvent::Done { id: 4 }),
+                Some((4, expected))
+            );
+        }
+    }
+
+    #[test]
+    fn retry_does_not_reuse_previous_provider_completion() {
+        let mut log = StopLog::default();
+        log.outcome(&ServerEvent::MessageEnd {
+            stop_reason: Some("end_turn".into()),
+        });
+        log.outcome(&ServerEvent::RetryRollback { attempt: 1, max: 2 });
+        assert_eq!(
+            log.outcome(&ServerEvent::Done { id: 3 }),
+            Some((3, "unknown"))
+        );
+    }
+
+    #[test]
+    fn provider_subturns_do_not_log_and_final_reason_wins() {
+        let mut log = StopLog::default();
+        assert_eq!(
+            log.outcome(&ServerEvent::MessageEnd {
+                stop_reason: Some("tool_use".into())
+            }),
+            None
+        );
+        assert_eq!(
+            log.outcome(&ServerEvent::MessageEnd {
+                stop_reason: Some("end_turn".into())
+            }),
+            None
+        );
+        assert_eq!(
+            log.outcome(&ServerEvent::Done { id: 9 }),
+            Some((9, "normal"))
+        );
+        assert_eq!(log.outcome(&ServerEvent::Done { id: 9 }), None);
+    }
+
+    #[test]
+    fn unknown_success_is_not_normal_and_errors_are_failures() {
+        assert_eq!(
+            StopLog::default().outcome(&ServerEvent::Done { id: 1 }),
+            Some((1, "unknown"))
+        );
+        assert_eq!(
+            StopLog::default().outcome(&ServerEvent::Error {
+                id: 2,
+                message: "private".into(),
+                retry_after_secs: None
+            }),
+            Some((2, "failure"))
+        );
+    }
+
+    #[test]
+    fn interruption_and_output_limits_are_abnormal() {
+        let mut log = StopLog::default();
+        log.outcome(&ServerEvent::Interrupted);
+        assert_eq!(
+            log.outcome(&ServerEvent::Done { id: 1 }),
+            Some((1, "interrupted"))
+        );
+        let mut log = StopLog::default();
+        log.outcome(&ServerEvent::MessageEnd {
+            stop_reason: Some("max_tokens".into()),
+        });
+        assert_eq!(
+            log.outcome(&ServerEvent::Done { id: 2 }),
+            Some((2, "limit"))
+        );
+    }
+
+    #[test]
+    fn provider_metadata_is_allowlisted() {
+        assert_eq!(
+            StopLog::provider_reason("private untrusted text"),
+            "unknown"
+        );
+    }
+}
