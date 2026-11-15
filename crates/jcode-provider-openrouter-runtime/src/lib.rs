@@ -29,7 +29,6 @@ use jcode_base::provider_catalog::{
     openai_compatible_profile_static_models, openai_compatible_profiles,
     resolve_openai_compatible_profile,
 };
-use jcode_provider_metadata::api_base_port_path_matches;
 use jcode_message_types::{CacheControl, ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use jcode_provider_core::{EventStream, Provider};
 pub use jcode_provider_openrouter::{
@@ -60,6 +59,36 @@ mod openai_compatible_runtime;
 
 mod request_headers;
 use request_headers::*;
+
+#[derive(PartialEq)]
+struct ApiBaseEndpointKey {
+    scheme: String,
+    port: u16,
+    path: String,
+}
+
+fn api_base_port_path_matches(a: &str, b: &str) -> bool {
+    match (api_base_endpoint_key(a), api_base_endpoint_key(b)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn api_base_endpoint_key(raw: &str) -> Option<ApiBaseEndpointKey> {
+    let parsed = reqwest::Url::parse(raw.trim()).ok()?;
+    let scheme = parsed.scheme().to_string();
+    let port = parsed
+        .port()
+        .unwrap_or(match scheme.as_str() {
+            "https" => 443,
+            _ => 80,
+        });
+    Some(ApiBaseEndpointKey {
+        scheme,
+        port,
+        path: parsed.path().trim_end_matches('/').to_string(),
+    })
+}
 
 /// Base delay for exponential backoff (in milliseconds)
 const RETRY_BASE_DELAY_MS: u64 = 1000;
