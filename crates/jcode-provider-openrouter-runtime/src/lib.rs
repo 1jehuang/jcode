@@ -60,36 +60,6 @@ mod openai_compatible_runtime;
 mod request_headers;
 use request_headers::*;
 
-#[derive(PartialEq)]
-struct ApiBaseEndpointKey {
-    scheme: String,
-    port: u16,
-    path: String,
-}
-
-fn api_base_port_path_matches(a: &str, b: &str) -> bool {
-    match (api_base_endpoint_key(a), api_base_endpoint_key(b)) {
-        (Some(left), Some(right)) => left == right,
-        _ => false,
-    }
-}
-
-fn api_base_endpoint_key(raw: &str) -> Option<ApiBaseEndpointKey> {
-    let parsed = reqwest::Url::parse(raw.trim()).ok()?;
-    let scheme = parsed.scheme().to_string();
-    let port = parsed
-        .port()
-        .unwrap_or(match scheme.as_str() {
-            "https" => 443,
-            _ => 80,
-        });
-    Some(ApiBaseEndpointKey {
-        scheme,
-        port,
-        path: parsed.path().trim_end_matches('/').to_string(),
-    })
-}
-
 /// Base delay for exponential backoff (in milliseconds)
 const RETRY_BASE_DELAY_MS: u64 = 1000;
 
@@ -1919,16 +1889,7 @@ impl OpenRouterProvider {
             return self.supports_provider_features;
         };
 
-        // Exact match is the fast path. When hostnames differ (e.g.
-        // `localhost` vs `127.0.0.1` or a Docker bridge IP such as
-        // `10.0.2.10`), fall back to comparing port + path so a cache
-        // written under one spelling of the same endpoint is still usable
-        // (issue #2180). The namespace already scopes the cache to this
-        // provider profile, so the remaining risk is low.
-        if source_api_base == self.api_base {
-            return true;
-        }
-        api_base_port_path_matches(&source_api_base, &self.api_base)
+        source_api_base == self.api_base
     }
 
     fn begin_background_model_catalog_refresh(&self) -> bool {

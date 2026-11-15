@@ -1044,17 +1044,12 @@ async fn send_history_with_guard(
         let tool_names = agent_guard.visible_mcp_tool_names().await;
         let tool_names_ms = tool_names_start.elapsed().as_millis();
 
-        // Populate model routes from the provider cache. This is a cheap,
-        // lock-free read (no network I/O) that gives the TUI the correct
-        // picker rows immediately on resume. Previously this was always
-        // Vec::new(), which left the TUI with names-only from
-        // available_models_display() and relied on a background
-        // AvailableModelsUpdated event that could be debounced or
-        // throttled away, leaving the picker stuck on static fallback
-        // models (issue #2180).
-        let routes_start = Instant::now();
-        let available_model_routes = agent_guard.model_routes();
-        let model_routes_ms = routes_start.elapsed().as_millis();
+        // Model-route expansion can be relatively expensive (provider/account routing,
+        // endpoint cache reads, etc.). The TUI already supports later
+        // AvailableModelsUpdated events, so keep the initial History payload fast and
+        // let the background refresh populate detailed routes asynchronously.
+        let available_model_routes = Vec::new();
+        let model_routes_ms = 0;
 
         let skills_start = Instant::now();
         let skills = agent_guard.available_skill_names();
@@ -1389,7 +1384,9 @@ pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Ar
         // Let each provider apply its own freshness policy rather than making
         // static defaults permanently suppress discovery for the whole picker.
 
-        if should_debounce_attach_model_prefetch(&provider_name) {
+        let routes_hydrated = !agent.lock().await.model_routes().is_empty();
+
+        if routes_hydrated && should_debounce_attach_model_prefetch(&provider_name) {
             crate::logging::info(&format!(
                 "Skipping attach-time model prefetch for {} because a recent refresh already ran",
                 provider_name
@@ -1397,12 +1394,25 @@ pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Ar
             return;
         }
 
-        if let Err(error) = provider.prefetch_models().await {
+        // When the debounce suppressed a normal attach but no routes are
+        // hydrated, fall back to a forced catalog refresh so the picker can
+        // receive live routes. A plain prefetch is enough when the debounce
+        // did not trigger.
+        let force_refresh = !routes_hydrated && should_debounce_attach_model_prefetch(&provider_name);
+        if force_refresh {
+            crate::logging::info(&format!(
+                "Forcing attach-time model catalog refresh for {} because routes are not hydrated",
+                provider_name
+            ));
+            if let Err(error) = provider.refresh_model_catalog().await {
+                crate::logging::debug(&format!(
+                    "Attach-time model catalog refresh failed for {provider_name}: {error}"
+                ));
+            }
+        } else if let Err(error) = provider.prefetch_models().await {
             crate::logging::debug(&format!(
                 "Attach-time model prefetch failed for {provider_name}: {error}"
             ));
-            // A unified provider can fail after other runtimes refreshed.
-            // Publish those successful discoveries rather than hiding them.
         }
 
         let refreshed = {
