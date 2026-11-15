@@ -129,6 +129,38 @@ web tests passing, including large nested payloads and missing-versus-null
 behavior. These are copy-elimination guarantees, not measured production RSS
 savings or changes to history, retry, cache, or delivery policies.
 
+### Isolated allocation-stack follow-up (2026-11-15)
+
+Two private jemalloc-prof workloads were run after activating the ownership
+fixes. This instrumented allocator was never installed in production. Each
+workload used a private home/socket, `JCODE_TEST_SESSION=1`, fake credentials,
+and a route-asserted localhost Responses server with sixteen 1 MiB transcripts.
+The first zero-session heap-dump attempt failed because allocator commands
+require a session. It was discarded and both corrected runs completed.
+
+Sampled live-heap reports were **62.6/62.7 MiB active** and **24.9/24.7 MiB**
+five seconds after local responses completed. Allocation-origin stacks showed
+about **20.0 MiB** in wire JSON serialization, **16.2/16.6 MiB** in persisted
+message parsing, and roughly **16 MiB** in request JSON construction. Cumulative
+frames overlap and must not be summed indiscriminately. These figures are
+sampled heap estimates, not exact allocator counters, production RSS, or a
+comparison between allocators. History and retry payloads remain necessary;
+wire shrinking and bounded hashing have already failed no-tradeoff acceptance.
+
+A smaller **1.2–1.6 MiB** sampled pricing-cache publication origin exposed
+another avoidable transient deep clone: the fresh cache was cloned into an Arc
+before the original was dropped. The cache is now consumed and published in an
+Arc without cloning its backing storage. Ten serial pricing tests passed,
+including allocation identity, byte-identical disk JSON, lookup/reload, and
+failed-write publication. Retention, refresh frequency, and pricing are
+unchanged. This avoids a transient copy, not two permanently retained caches.
+
+Artifacts and reproduction notes are in `~/.jcode/scratch/ram-fork/HEAP_STACKS.md`,
+`heap-stack-probe.py`, and `heap-stacks-2` / `heap-stacks-3`. Both private daemons
+and fixture sockets were cleaned up. The production allocator, history, and
+API bridge were unchanged. This synthetic workload does not explain the entire
+production heap or prove that all theoretical optimization is exhausted.
+
 ### Export and redaction ownership acceptance (2026-11-15)
 
 Unchanged export redaction now retains shared message payloads. Changed fields
