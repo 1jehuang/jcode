@@ -981,6 +981,84 @@ fn test_persisted_state_round_trip_preserves_compacted_view() {
     }
 }
 
+#[test]
+fn test_persisted_state_matches_is_exact_for_every_field_and_absence() {
+    let mut manager = CompactionManager::new();
+    assert!(manager.persisted_state_matches(None));
+    let state = crate::session::StoredCompactionState {
+        summary_text: "summary".into(),
+        openai_encrypted_content: Some("encrypted".repeat(128 * 1024)),
+        covers_up_to_turn: 3,
+        original_turn_count: 7,
+        compacted_count: 2,
+    };
+    assert!(!manager.persisted_state_matches(Some(&state)));
+    manager.restore_persisted_state(&state, 10);
+    assert!(!manager.persisted_state_matches(None));
+    assert!(manager.persisted_state_matches(Some(&state)));
+    let mut variants = vec![state.clone(); 6];
+    variants[0].summary_text.push('!');
+    variants[1]
+        .openai_encrypted_content
+        .as_mut()
+        .unwrap()
+        .push('!');
+    variants[2].openai_encrypted_content = None;
+    variants[3].covers_up_to_turn += 1;
+    variants[4].original_turn_count += 1;
+    variants[5].compacted_count += 1;
+    for candidate in variants.iter().chain(std::iter::once(&state)) {
+        assert_eq!(
+            manager.persisted_state_matches(Some(candidate)),
+            manager.persisted_state().as_ref() == Some(candidate),
+        );
+    }
+    // Restoration may clamp the compacted count. Compare the exported view,
+    // not the original input or just the summary text.
+    manager.restore_persisted_state(&state, 1);
+    assert!(!manager.persisted_state_matches(Some(&state)));
+    assert!(manager.persisted_state_matches(manager.persisted_state().as_ref()));
+    let mut text_only = state;
+    text_only.openai_encrypted_content = None;
+    manager.restore_persisted_state(&text_only, 10);
+    assert!(manager.persisted_state_matches(Some(&text_only)));
+}
+
+#[test]
+#[ignore = "optional large-payload comparison timing probe, not RSS"]
+fn persisted_state_comparison_probe() {
+    let state = crate::session::StoredCompactionState {
+        summary_text: "summary".into(),
+        openai_encrypted_content: Some("encrypted".repeat(1024 * 1024)),
+        covers_up_to_turn: 3,
+        original_turn_count: 7,
+        compacted_count: 2,
+    };
+    let mut manager = CompactionManager::new();
+    manager.restore_persisted_state(&state, 10);
+    let iterations = 128;
+    let start = std::time::Instant::now();
+    for _ in 0..iterations {
+        assert_eq!(
+            std::hint::black_box(manager.persisted_state()).as_ref(),
+            Some(&state)
+        );
+    }
+    let owned_us = start.elapsed().as_micros();
+    let start = std::time::Instant::now();
+    for _ in 0..iterations {
+        assert!(manager.persisted_state_matches(Some(std::hint::black_box(&state))));
+    }
+    let borrowed_us = start.elapsed().as_micros();
+    eprintln!(
+        "payload_bytes={} comparisons={} owned_export_us={} borrowed_exact_us={}",
+        state.openai_encrypted_content.as_ref().unwrap().len(),
+        iterations,
+        owned_us,
+        borrowed_us
+    );
+}
+
 // ── context_usage accuracy ──────────────────────────────────────
 
 #[test]

@@ -199,9 +199,8 @@ impl App {
         &mut self,
         manager: &crate::compaction::CompactionManager,
     ) {
-        let new_state = manager.persisted_state();
-        if self.session.compaction.as_deref() != new_state.as_ref() {
-            self.session.compaction = new_state.map(Arc::new);
+        if !manager.persisted_state_matches(self.session.compaction.as_deref()) {
+            self.session.compaction = manager.persisted_state().map(Arc::new);
             if let Err(err) = self.session.save() {
                 crate::logging::error(&format!(
                     "Failed to persist compaction state for session {}: {}",
