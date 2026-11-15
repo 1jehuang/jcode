@@ -460,6 +460,35 @@ fn classify_memory_incident(metrics: MemoryIncidentMetrics) -> MemoryIncidentDec
     }
 }
 
+struct MemoryIncidentTrend<'a> {
+    current_timestamp_ms: u128,
+    baseline: Option<&'a crate::process_memory::ProcessMemoryHistoryEntry>,
+    sample_count: usize,
+}
+
+fn memory_incident_trend(
+    history: &[crate::process_memory::ProcessMemoryHistoryEntry],
+) -> MemoryIncidentTrend<'_> {
+    // History is currently newest-first. Select by timestamps rather than
+    // relying on its storage order, including when a caller reverses it.
+    let current_timestamp_ms = history
+        .iter()
+        .map(|entry| entry.timestamp_ms)
+        .max()
+        .unwrap_or_default();
+    let window_start_ms = current_timestamp_ms.saturating_sub(MEMORY_INCIDENT_WINDOW_MS);
+    let mut window = history
+        .iter()
+        .filter(|entry| entry.timestamp_ms >= window_start_ms);
+    let baseline = window.clone().min_by_key(|entry| entry.timestamp_ms);
+    let sample_count = window.by_ref().count();
+    MemoryIncidentTrend {
+        current_timestamp_ms,
+        baseline,
+        sample_count,
+    }
+}
+
 async fn build_server_memory_incident_payload(
     sessions: &SessionAgents,
     client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
@@ -473,15 +502,8 @@ async fn build_server_memory_incident_payload(
     let process = crate::process_memory::snapshot_with_source("server:memory-incident");
     let diagnostics = crate::runtime_memory_log::build_process_diagnostics(&process);
     let history = crate::process_memory::history(512);
-    let latest_timestamp_ms = history
-        .last()
-        .map(|entry| entry.timestamp_ms)
-        .unwrap_or_default();
-    let window_start_ms = latest_timestamp_ms.saturating_sub(MEMORY_INCIDENT_WINDOW_MS);
-    let baseline = history
-        .iter()
-        .find(|entry| entry.timestamp_ms >= window_start_ms)
-        .or_else(|| history.first());
+    let trend = memory_incident_trend(&history);
+    let baseline = trend.baseline;
     let current_pss_bytes = process
         .os
         .as_ref()
@@ -685,10 +707,10 @@ async fn build_server_memory_incident_payload(
         "trend_15m": {
             "baseline_timestamp_ms": baseline.map(|entry| entry.timestamp_ms),
             "baseline_pss_bytes": baseline_pss_bytes,
-            "current_timestamp_ms": latest_timestamp_ms,
+            "current_timestamp_ms": trend.current_timestamp_ms,
             "current_pss_bytes": current_pss_bytes,
             "pss_growth_bytes": pss_growth_bytes,
-            "sample_count": history.iter().filter(|entry| entry.timestamp_ms >= window_start_ms).count(),
+            "sample_count": trend.sample_count,
         },
         "population": {
             "live_sessions": live_session_ids.len(),
@@ -1341,6 +1363,85 @@ mod tests {
             count_live_spawned_swarm_agents(&live_session_ids, spawned_session_ids.iter()),
             2
         );
+    }
+
+    #[test]
+    fn memory_incident_trend_handles_newest_first_and_reversed_history() {
+        let mut history: Vec<_> = [(1_200_000, 900), (600_000, 500), (300_000, 200), (0, 100)]
+            .into_iter()
+            .map(
+                |(timestamp_ms, pss_bytes)| crate::process_memory::ProcessMemoryHistoryEntry {
+                    timestamp_ms,
+                    source: "synthetic".to_string(),
+                    snapshot: crate::process_memory::ProcessMemorySnapshot {
+                        os: Some(crate::process_memory::OsProcessMemoryInfo {
+                            pss_bytes: Some(pss_bytes),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                },
+            )
+            .collect();
+        for _ in 0..2 {
+            let trend = memory_incident_trend(&history);
+            assert_eq!(trend.current_timestamp_ms, 1_200_000);
+            let baseline = trend.baseline.unwrap();
+            assert_eq!(baseline.timestamp_ms, 300_000);
+            let baseline_pss = baseline.snapshot.os.as_ref().unwrap().pss_bytes.unwrap();
+            assert_eq!(900u64.saturating_sub(baseline_pss), 700);
+            assert_eq!(trend.sample_count, 3);
+            history.reverse();
+        }
+        // Arbitrary ordering must not change the baseline either.
+        history.swap(0, 2);
+        assert_eq!(
+            memory_incident_trend(&history)
+                .baseline
+                .unwrap()
+                .timestamp_ms,
+            300_000
+        );
+    }
+
+    #[test]
+    fn memory_incident_trend_uses_first_sample_inside_fifteen_minute_window() {
+        let history: Vec<_> = [1_200_000, 299_999, 300_001, 900_000]
+            .into_iter()
+            .map(
+                |timestamp_ms| crate::process_memory::ProcessMemoryHistoryEntry {
+                    timestamp_ms,
+                    source: "synthetic".to_string(),
+                    snapshot: Default::default(),
+                },
+            )
+            .collect();
+        let trend = memory_incident_trend(&history);
+        assert_eq!(trend.baseline.unwrap().timestamp_ms, 300_001);
+        assert_eq!(trend.sample_count, 3);
+    }
+
+    #[test]
+    fn memory_incident_trend_handles_empty_and_short_history() {
+        let empty = memory_incident_trend(&[]);
+        assert_eq!(empty.current_timestamp_ms, 0);
+        assert!(empty.baseline.is_none());
+        assert_eq!(empty.sample_count, 0);
+
+        let history: Vec<_> = [60_000, 1_000]
+            .into_iter()
+            .map(
+                |timestamp_ms| crate::process_memory::ProcessMemoryHistoryEntry {
+                    timestamp_ms,
+                    source: "synthetic".to_string(),
+                    snapshot: Default::default(),
+                },
+            )
+            .collect();
+        let trend = memory_incident_trend(&history);
+        assert_eq!(trend.current_timestamp_ms, 60_000);
+        assert_eq!(trend.baseline.unwrap().timestamp_ms, 1_000);
+        assert_eq!(trend.sample_count, 2);
     }
 
     #[test]
