@@ -221,3 +221,25 @@ These are the concrete enforced limits today:
 - Mermaid on-disk PNG cache: 50 MiB, max age 3 days
 
 Any intentional change to those limits must update this document in the same PR.
+
+## November 15, 2026 ownership follow-up
+
+- Message and stored-message payloads now share immutable backing storage and
+  detach on mutation. Legacy JSON arrays and independent snapshot mutation are
+  preserved. An isolated 32-snapshot allocator probe over a 720,896-byte body
+  measured 23,080,144 bytes of growth for owned-vector copies versus 3,440 bytes
+  for shared snapshots. This is an ownership probe, not production RSS savings.
+- Pinned 16-session local-provider workloads did not establish a steady-state
+  streaming RAM reduction from transcript sharing alone. Provider transports
+  already release request-preparation transcript snapshots before network waits.
+- The OpenAI-compatible/OpenRouter retry transport separately retained a full
+  JSON request and a deep per-attempt clone. The attempt now borrows the retry
+  owner's immutable request, preserving serialization and retry behavior.
+  Two private 16-session runs with 1 MiB of tool results per session measured
+  allocator-live growth of 74,415,664 and 74,265,760 bytes before, versus
+  57,186,656 and 57,134,672 bytes after. The second pair reversed run order.
+  These are isolated real transport measurements, not a claim about current
+  production totals or a fixed RSS reduction.
+- The retry-body change passed 12 wire tests, 11 retry-filter tests and four
+  Azure retry tests on hosted builds. No cache limits, history retention,
+  batching, timers or output quality were reduced.

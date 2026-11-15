@@ -125,7 +125,7 @@ pub(super) async fn run_stream_with_retries(
             auth.clone(),
             send_openrouter_headers,
             &conversation_id,
-            request.clone(),
+            &request,
             azure_responses,
             attempt_tx,
             Arc::clone(&provider_pin),
@@ -195,7 +195,7 @@ async fn stream_response(
     auth: ProviderAuth,
     send_openrouter_headers: bool,
     conversation_id: &str,
-    request: Value,
+    request: &Value,
     azure_responses: bool,
     tx: mpsc::Sender<Result<StreamEvent>>,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
@@ -243,7 +243,7 @@ async fn stream_response(
     req = apply_grok_cli_turn_headers(req, &auth, &model, conversation_id);
 
     let response = jcode_provider_core::transport::send_with_initial_response_timeout(
-        req.json(&request),
+        req.json(request),
         stream_idle_timeout,
     )
     .await
