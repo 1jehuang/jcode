@@ -133,6 +133,31 @@ async fn failed_checkpointed_delete_preserves_contents_and_rewind() {
     assert_eq!(restore("failed-delete", &cp.id).unwrap(), 0);
 }
 
+#[cfg(unix)]
+#[test]
+fn unreadable_writable_file_is_written_but_not_restorable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let _env = crate::storage::lock_test_env();
+    let (_home, work) = fixture();
+    let path = work.path().join("write-only");
+    fs::write(&path, b"secret before").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o200)).unwrap();
+    let cp = checkpoint("write-only", 0, "before write").unwrap();
+
+    let result = mutate("write-only", &path, Some(b"after"));
+
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    result.unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"after");
+    assert!(!checkpoints("write-only").unwrap()[0].can_restore_files);
+    assert!(restore("write-only", &cp.id).is_err());
+    assert_eq!(fs::read(&path).unwrap(), b"after");
+}
+
 #[cfg(target_os = "macos")]
 fn set_macos_test_xattr(path: &Path, name: &str, value: &[u8]) {
     let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();

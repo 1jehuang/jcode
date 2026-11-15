@@ -1178,19 +1178,17 @@ fn mutate(session_id: &str, path: &Path, content: Option<&[u8]>) -> Result<()> {
         };
     }
     if aliased_target(path) {
-        // Existing tools deliberately permit links. Preserve that behavior,
-        // but never advertise an incomplete checkpoint as safely restorable.
-        for checkpoint in &mut history.checkpoints {
-            checkpoint.blocked.insert(path.to_owned());
-        }
-        save(&dir, &history)?;
-        return match content {
-            Some(bytes) => fs::write(path, bytes).map_err(Into::into),
-            None => fs::remove_file(path).map_err(Into::into),
-        };
+        return unrestorable(&dir, &mut history, path, content);
     }
     let path = safe_path(path)?;
-    let before = state(&dir, &path)?;
+    let before = match state(&dir, &path) {
+        Ok(before) => before,
+        // A writable but unreadable file (mode 0200) has no capturable before-image.
+        Err(error) if permission_denied(&error) => {
+            return unrestorable(&dir, &mut history, &path, content);
+        }
+        Err(error) => return Err(error),
+    };
     // Atomic rename must not grant editing rights that an ordinary write-open
     // would deny (read-only mode, ACLs). This open never truncates or writes.
     if content.is_some() && before.blob.is_some() {
@@ -1224,22 +1222,15 @@ fn mutate(session_id: &str, path: &Path, content: Option<&[u8]>) -> Result<()> {
     // rewind staging sibling is forbidden. Preserve the ordinary write
     // contract and make this path unavailable for future file restoration.
     let result = match (result, content) {
-        (Err(error), Some(bytes))
-            if error
-                .root_cause()
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied) =>
-        {
-            match fs::write(&path, bytes) {
-                Ok(()) => {
-                    for checkpoint in &mut history.checkpoints {
-                        checkpoint.blocked.insert(path.clone());
-                    }
-                    Ok(())
+        (Err(error), Some(bytes)) if permission_denied(&error) => match fs::write(&path, bytes) {
+            Ok(()) => {
+                for checkpoint in &mut history.checkpoints {
+                    checkpoint.blocked.insert(path.clone());
                 }
-                Err(write_error) => Err(write_error.into()),
+                Ok(())
             }
-        }
+            Err(write_error) => Err(write_error.into()),
+        },
         (result, _) => result,
     };
     let actual = state(&dir, &path)?;
@@ -1255,6 +1246,31 @@ fn mutate(session_id: &str, path: &Path, content: Option<&[u8]>) -> Result<()> {
     save(&dir, &history)?;
     collect_blobs_best_effort(&dir, &history);
     result.map_err(Into::into)
+}
+
+fn permission_denied(error: &anyhow::Error) -> bool {
+    error
+        .root_cause()
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
+}
+
+/// Existing tools deliberately permit links and uncapturable files. Preserve
+/// that behavior, but never advertise an incomplete checkpoint as restorable.
+fn unrestorable(
+    dir: &Path,
+    history: &mut History,
+    path: &Path,
+    content: Option<&[u8]>,
+) -> Result<()> {
+    for checkpoint in &mut history.checkpoints {
+        checkpoint.blocked.insert(path.to_owned());
+    }
+    save(dir, history)?;
+    match content {
+        Some(bytes) => fs::write(path, bytes).map_err(Into::into),
+        None => fs::remove_file(path).map_err(Into::into),
+    }
 }
 
 fn collect_blobs_best_effort(dir: &Path, history: &History) {
