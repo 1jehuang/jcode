@@ -422,7 +422,9 @@ fn test_compacted_history_event_applies_expanded_window() {
     assert_eq!(app.display_messages().len(), 3);
     assert_eq!(app.display_messages()[1].content, "older response");
     assert_eq!(app.display_messages()[2].content, "current prompt");
-    assert!(app.auto_scroll_paused);
+    // The reader was following the tail, so the Alt+E backfill load must not
+    // yank them up to the old history (ed07aca70).
+    assert!(!app.auto_scroll_paused);
     assert_eq!(app.scroll_offset, 0);
     let state = app.compacted_history_lazy_state();
     assert_eq!(state.total_messages, 128);

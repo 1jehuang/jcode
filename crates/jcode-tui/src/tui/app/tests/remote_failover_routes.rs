@@ -1000,7 +1000,9 @@ fn test_cancel_image_only_failover_restores_attachments() {
         payload.raw_input = Some(String::new());
         payload.images = vec![("image/png".into(), "image-data".into())];
         app.cancel_pending_provider_failover("Canceled");
-        assert!(app.input.is_empty());
+        // Attachment recovery keeps the image attached to a draft marker even
+        // when the canceled request had no text (8603db9cc).
+        assert_eq!(app.input, "[image 1]");
         assert_eq!(
             app.pending_images,
             vec![("image/png".into(), "image-data".into())]
