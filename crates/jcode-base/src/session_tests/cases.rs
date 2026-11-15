@@ -339,7 +339,8 @@ fn load_startup_stub_preserves_metadata_but_skips_heavy_vectors() -> Result<()> 
         content: vec![ContentBlock::Text {
             text: "hello world".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: Some(Utc::now()),
         tool_duration_ms: None,
@@ -413,7 +414,8 @@ fn load_for_remote_startup_preserves_messages_and_replay_but_skips_heavy_vectors
         content: vec![ContentBlock::Text {
             text: "hello remote startup".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: Some(Utc::now()),
         tool_duration_ms: None,
@@ -2230,7 +2232,8 @@ fn reasoning_trace_survives_session_save_and_load() -> Result<()> {
                 text: "Here is my answer.".to_string(),
                 cache_control: None,
             },
-        ],
+        ]
+        .into(),
         display_role: None,
         timestamp: Some(Utc::now()),
         tool_duration_ms: None,
@@ -2922,7 +2925,8 @@ fn env_snapshot_past_cap_appends_instead_of_rewriting_snapshot() -> Result<()> {
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: Some(Utc::now()),
         tool_duration_ms: None,
@@ -2996,7 +3000,8 @@ fn metadata_change_on_large_session_is_journaled_not_rewritten() -> Result<()> {
             content: vec![ContentBlock::Text {
                 text: big.clone(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: Some(Utc::now()),
             tool_duration_ms: None,
@@ -3061,7 +3066,8 @@ fn route_journal_roundtrip(large: bool) -> Result<()> {
         content: vec![ContentBlock::Text {
             text: "x".repeat(if large { 2 * 1024 * 1024 } else { 10 }),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: Some(Utc::now()),
         tool_duration_ms: None,
@@ -3166,7 +3172,8 @@ fn journal_entries_elide_unchanged_compaction_but_loads_keep_it() -> Result<()> 
         content: vec![ContentBlock::Text {
             text: format!("hello {i}"),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: Some(Utc::now()),
         tool_duration_ms: None,
@@ -3235,7 +3242,8 @@ fn legacy_journal_entries_with_inline_compaction_still_load() -> Result<()> {
         content: vec![ContentBlock::Text {
             text: "hi".into(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: Some(Utc::now()),
         tool_duration_ms: None,
@@ -3282,7 +3290,8 @@ fn write_compaction_elision_compat_fixture() -> Result<()> {
             content: vec![ContentBlock::Text {
                 text: format!("compat {i}"),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: Some(Utc::now()),
             tool_duration_ms: None,

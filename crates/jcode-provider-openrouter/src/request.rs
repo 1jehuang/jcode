@@ -589,7 +589,8 @@ mod request_tests {
                     name: "read".to_string(),
                     input: json!({"path": output}),
                     thought_signature: None,
-                }],
+                }]
+                .into(),
                 timestamp: None,
                 tool_duration_ms: None,
             },
@@ -638,7 +639,8 @@ mod request_tests {
                 name: "read".to_string(),
                 input: json!({"path": format!("{id}.txt")}),
                 thought_signature: Some(signature.to_string()),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         };

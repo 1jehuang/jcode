@@ -48,13 +48,16 @@ async fn resume_session_restores_persisted_compaction_for_provider_context() -> 
                 cache_control: None,
             }],
         );
-        session.compaction = Some(StoredCompactionState {
-            summary_text: "Worked on Gemini OAuth reload fixes.".to_string(),
-            openai_encrypted_content: None,
-            covers_up_to_turn: 2,
-            original_turn_count: 2,
-            compacted_count: 2,
-        });
+        session.compaction = Some(
+            StoredCompactionState {
+                summary_text: "Worked on Gemini OAuth reload fixes.".to_string(),
+                openai_encrypted_content: None,
+                covers_up_to_turn: 2,
+                original_turn_count: 2,
+                compacted_count: 2,
+            }
+            .into(),
+        );
         session.save()?;
 
         wait_for_server_ready(&socket_path, &debug_socket_path).await?;

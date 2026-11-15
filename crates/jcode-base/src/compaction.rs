@@ -1382,7 +1382,7 @@ impl CompactionManager {
 
                 result.push(Message {
                     role: Role::User,
-                    content: vec![summary_block],
+                    content: vec![summary_block].into(),
                     timestamp: None,
                     tool_duration_ms: None,
                 });

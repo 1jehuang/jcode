@@ -47,7 +47,8 @@ fn make_text_message(role: Role, text: &str) -> Message {
         content: vec![ContentBlock::Text {
             text: text.to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }
@@ -559,7 +560,8 @@ fn test_safe_cutoff_preserves_tool_pairs() {
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -569,7 +571,8 @@ fn test_safe_cutoff_preserves_tool_pairs() {
                 tool_use_id: "tool_1".to_string(),
                 content: "file1.txt\nfile2.txt".to_string(),
                 is_error: Some(false),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -610,7 +613,8 @@ fn test_safe_cutoff_handles_chained_tool_dependencies_without_rescan() {
                 name: "read".to_string(),
                 input: serde_json::json!({"file": "a.txt"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -629,7 +633,8 @@ fn test_safe_cutoff_handles_chained_tool_dependencies_without_rescan() {
                     input: serde_json::json!({"pattern": "foo"}),
                     thought_signature: None,
                 },
-            ],
+            ]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -639,7 +644,8 @@ fn test_safe_cutoff_handles_chained_tool_dependencies_without_rescan() {
                 tool_use_id: "tool_b".to_string(),
                 content: "foo".to_string(),
                 is_error: Some(false),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -668,7 +674,8 @@ fn test_emergency_truncate_large_tool_results() {
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "cat bigfile"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -678,7 +685,8 @@ fn test_emergency_truncate_large_tool_results() {
                 tool_use_id: "tool_1".to_string(),
                 content: big_result.clone(),
                 is_error: Some(false),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -715,7 +723,8 @@ fn test_emergency_truncate_skips_small_results() {
             tool_use_id: "tool_1".to_string(),
             content: "small output".to_string(),
             is_error: Some(false),
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1223,7 +1232,8 @@ fn test_recover_within_budget_truncates_when_tail_still_too_large() {
                 name: "bash".to_string(),
                 input: serde_json::json!({ "command": "cat big.log" }),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         });
@@ -1234,7 +1244,8 @@ fn test_recover_within_budget_truncates_when_tail_still_too_large() {
                 tool_use_id: id,
                 content: format!("huge {} {}", i, "y".repeat(20_000)),
                 is_error: Some(false),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         });

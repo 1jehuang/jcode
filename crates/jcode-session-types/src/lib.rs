@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use jcode_message_types::{ContentBlock, Message, Role, ToolCall};
+use jcode_message_types::{ContentBlock, Message, Role, SharedContent, ToolCall};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -271,7 +271,7 @@ pub struct StoredMemoryInjection {
 pub struct StoredMessage {
     pub id: String,
     pub role: Role,
-    pub content: Vec<ContentBlock>,
+    pub content: SharedContent,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_role: Option<StoredDisplayRole>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

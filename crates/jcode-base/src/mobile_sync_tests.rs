@@ -936,7 +936,7 @@ fn msg(role: Role, content: Vec<ContentBlock>) -> StoredMessage {
     StoredMessage {
         id: "m".into(),
         role,
-        content,
+        content: content.into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -1067,7 +1067,8 @@ fn structured_wire_matches_mobile_cloud_card_fixture_and_hides_reasoning() {
         tool_use_id: "a".into(),
         content: "failed".into(),
         is_error: Some(true),
-    }];
+    }]
+    .into();
     assert!(wire_messages(&session, 3)[0].tool_results[0].is_error);
 }
 
@@ -1105,7 +1106,7 @@ fn structured_wire_bounds_inputs_counts_ids_and_total_bytes() {
             })
             .collect(),
     ] {
-        session.messages[0].content = blocks;
+        session.messages[0].content = blocks.into();
         let wire = wire_messages(&session, 0);
         assert_eq!(
             wire[0].display_text, None,
@@ -1118,7 +1119,8 @@ fn structured_wire_bounds_inputs_counts_ids_and_total_bytes() {
         tool_use_id: "a".into(),
         content: "🦀".repeat(MAX_TOOL_RESULT_CHARS + 10),
         is_error: Some(true),
-    }];
+    }]
+    .into();
     let wire = wire_messages(&session, 0);
     assert!(wire[0].tool_results[0].content.ends_with("(truncated)"));
     assert!(wire[0].tool_results[0].content.chars().count() < MAX_TOOL_RESULT_CHARS + 32);
@@ -1155,7 +1157,7 @@ fn structured_input_changes_invalidate_synced_fingerprint_without_changing_legac
     };
     session.messages = vec![msg(Role::Assistant, vec![call(10)])];
     let before = wire_messages(&session, 0);
-    session.messages[0].content = vec![call(20)];
+    session.messages[0].content = vec![call(20)].into();
     let after = wire_messages(&session, 0);
     assert_eq!(before[0].text, after[0].text);
     assert_ne!(wire_fingerprint(&before, 1), wire_fingerprint(&after, 1));
@@ -1471,7 +1473,8 @@ fn incremental_updates_replay_rewritten_and_shrunk_prefixes() {
     session.messages[0].content = vec![ContentBlock::Text {
         text: "rewritten".into(),
         cache_control: None,
-    }];
+    }]
+    .into();
     let rewritten = incremental_messages(&session, &progress).0;
     assert_eq!(rewritten.len(), 3);
     assert_eq!(rewritten[0].text, "rewritten");

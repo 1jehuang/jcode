@@ -1,4 +1,6 @@
 pub mod provider_native;
+mod shared_content;
+pub use shared_content::SharedContent;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolCall {
@@ -118,7 +120,7 @@ pub enum Role {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Message {
     pub role: Role,
-    pub content: Vec<ContentBlock>,
+    pub content: SharedContent,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -239,7 +241,8 @@ impl Message {
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         }
@@ -256,7 +259,7 @@ impl Message {
         });
         Self {
             role: Role::User,
-            content,
+            content: content.into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         }
@@ -268,7 +271,8 @@ impl Message {
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         }
@@ -290,7 +294,8 @@ impl Message {
                 tool_use_id: tool_use_id.to_string(),
                 content: content.to_string(),
                 is_error: if is_error { Some(true) } else { None },
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms,
         }
@@ -981,7 +986,8 @@ mod tests {
                 role: Role::User,
                 content: vec![ContentBlock::OpenAICompaction {
                     encrypted_content: "compact".into(),
-                }],
+                }]
+                .into(),
                 timestamp: None,
                 tool_duration_ms: None,
             },
@@ -1021,7 +1027,8 @@ mod tests {
             content: vec![ContentBlock::Text {
                 text: "<system-reminder>\n# Memory\n</system-reminder>".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         };
@@ -1035,7 +1042,7 @@ mod tests {
                 ContentBlock::ReasoningTrace {
                     text: "history-only scratch".to_string(),
                 },
-            ],
+            ].into(),
             timestamp: Some(chrono::Utc::now() + chrono::Duration::seconds(7)),
             tool_duration_ms: Some(42),
         };
