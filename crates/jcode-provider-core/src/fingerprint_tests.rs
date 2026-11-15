@@ -270,3 +270,33 @@ fn benchmark_complete_provider_fingerprint_computation() {
         );
     }
 }
+
+#[test]
+fn fingerprint_matches_legacy_across_buffer_boundaries() {
+    for length in [4093, 4094, 4095, 4096, 4097, 8191, 8192, 8193] {
+        for text in ["a".repeat(length), "\n日本語🦀\"".repeat(length)] {
+            assert_eq!(stable_json_fingerprint(&text), legacy_fingerprint(&text));
+        }
+    }
+}
+
+#[test]
+fn serialization_failure_after_large_prefix_discards_all_partial_bytes() {
+    struct FailsAfterLargePrefix;
+    impl Serialize for FailsAfterLargePrefix {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeSeq;
+            let mut sequence = serializer.serialize_seq(Some(2))?;
+            sequence.serialize_element(&"日本語\n".repeat(8192))?;
+            Err(serde::ser::Error::custom("failure after a large prefix"))
+        }
+    }
+    assert_eq!(
+        stable_json_fingerprint(&FailsAfterLargePrefix),
+        (stable_hash_str(""), 0)
+    );
+    assert_eq!(
+        stable_json_fingerprint(&FailsAfterLargePrefix),
+        legacy_fingerprint(&FailsAfterLargePrefix)
+    );
+}
