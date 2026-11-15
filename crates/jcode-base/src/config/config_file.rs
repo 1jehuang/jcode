@@ -108,7 +108,12 @@ impl Config {
                 .ok_or_else(|| anyhow::anyhow!("No config parent"))?,
         )?;
         std::fs::write(temp.path(), &content)?;
-        temp.persist(&path)
+        // `NamedTempFile::persist` renames over the destination path itself,
+        // which replaces a symlink instead of writing through it. Resolve the
+        // stored path so a config.toml symlinked into a dotfiles checkout keeps
+        // pointing at the real file after saves.
+        let persist_path = std::fs::canonicalize(&path).unwrap_or(path);
+        temp.persist(&persist_path)
             .map_err(|error| anyhow::anyhow!("Failed to replace config file: {error}"))?;
         Self::invalidate_cache();
         Ok(())
@@ -904,6 +909,31 @@ mod issue_1056_tests {
         std::fs::write(&path, "[broken").unwrap();
         assert!(Config::set_update_channel(super::UpdateChannel::Preview).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "[broken");
+    }
+
+    #[test]
+    fn save_follows_config_symlink_instead_of_replacing_it() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("JCODE_HOME", home.path());
+        let real_dir = tempfile::tempdir().unwrap();
+        let real_path = real_dir.path().join("config.toml");
+        std::fs::write(&real_path, "[features]\nmemory = false\n").unwrap();
+        let link_path = home.path().join("config.toml");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_path, &link_path).unwrap();
+        Config::set_update_channel(super::UpdateChannel::Preview).unwrap();
+        // The symlink must survive the save and now expose the new content.
+        assert!(
+            link_path
+                .symlink_metadata()
+                .expect("config symlink stat")
+                .file_type()
+                .is_symlink()
+        );
+        let saved: Config = toml::from_str(&std::fs::read_to_string(&real_path).unwrap()).unwrap();
+        assert_eq!(saved.features.update_channel, super::UpdateChannel::Preview);
+        assert!(!saved.features.memory);
     }
 
     #[test]
