@@ -1908,7 +1908,7 @@ async fn run_stream_with_retries(
             attempt_client,
             token.clone(),
             is_oauth,
-            request.clone(),
+            &request,
             attempt_tx,
             &model_name,
             &oauth_session_id,
@@ -2267,7 +2267,7 @@ async fn stream_response(
     client: Client,
     token: String,
     is_oauth: bool,
-    request: ApiRequest,
+    request: &ApiRequest,
     tx: mpsc::Sender<Result<StreamEvent>>,
     model_name: &str,
     oauth_session_id: &str,
@@ -2280,7 +2280,7 @@ async fn stream_response(
     if std::env::var("JCODE_ANTHROPIC_DEBUG")
         .map(|v| v == "1")
         .unwrap_or(false)
-        && let Ok(json) = serde_json::to_string_pretty(&request)
+        && let Ok(json) = serde_json::to_string_pretty(request)
     {
         jcode_base::logging::info(&format!("Anthropic request payload:\n{}", json));
     }
@@ -2372,7 +2372,7 @@ async fn stream_response(
     let req = jcode_provider_core::request_compression::json_body(
         req,
         url,
-        &request,
+        request,
         jcode_base::provider::request_compression_mode(),
     )?;
     let response = jcode_provider_core::transport::send_with_initial_response_timeout(
