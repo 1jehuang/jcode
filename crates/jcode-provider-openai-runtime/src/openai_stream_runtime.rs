@@ -113,7 +113,7 @@ fn opaque_rejection_requires_exact_shape_and_no_response_activity() {
 pub(super) async fn recover_opaque_ws_rejection(
     credentials: Arc<RwLock<CodexCredentials>>,
     account_label: Option<String>,
-    request: Value,
+    request: &Value,
     tx: &mpsc::Sender<Result<StreamEvent>>,
 ) {
     emit_status_detail(tx, "opaque websocket rejection: trying HTTPS once").await;
