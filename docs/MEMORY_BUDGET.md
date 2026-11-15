@@ -118,6 +118,17 @@ serialization allocation does not qualify as a no-tradeoff gain when it adds
 that CPU cost. Reproduction artifacts are retained separately from ordinary
 tests, without installing a test-wide allocation interceptor.
 
+The next ownership pass removed duplicate Cursor prompt/system diagnostic
+values (54 runtime tests passed) and moved Copilot input/messages/tools into
+the actual request tree, borrowing diagnostics from it (38 tests passed).
+Four Responses stream dequeue paths now move queued events instead of cloning
+and discarding the original. Nine parser tests passed, including a large
+payload allocation-identity and ordering check. Browser result and parsed tool
+input extraction similarly move JSON out of discarded envelopes, with fourteen
+web tests passing, including large nested payloads and missing-versus-null
+behavior. These are copy-elimination guarantees, not measured production RSS
+savings or changes to history, retry, cache, or delivery policies.
+
 ### Export and redaction ownership acceptance (2026-11-15)
 
 Unchanged export redaction now retains shared message payloads. Changed fields
