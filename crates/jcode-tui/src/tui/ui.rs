@@ -3578,6 +3578,46 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // packed chunk sized to the raw count would cut the tail. Size the
     // chunk to the band's own display accounting; in scroll mode the
     // bottom-anchor fixpoint owns the same guarantee.
+    //
+    // The band narrows transcript rows only when the render pass can
+    // actually place the panel inside the packed messages area. Placement
+    // runs against chunks[0], whose packed height is `content_height`: a
+    // short conversation sizes the messages area to a few rows, placement
+    // rejects the panel below MIN_WIDGET_HEIGHT, and a reserved band would
+    // narrow rows around a panel that is never drawn. In packed mode only
+    // keep the band when the packed messages area can host the panel; in
+    // scroll mode the messages area is the remaining rows and keeps the
+    // band, matching the placement pass.
+    let packed_content_height = {
+        let start = clear_start.unwrap_or(0);
+        let total_lines = prepared.total_wrapped_lines();
+        total_lines
+            .saturating_sub(start)
+            .saturating_add(pinned_band_height)
+            .max(1)
+            .min(u16::MAX as usize) as u16
+    };
+    let terminal_clear_collapsed_early = !swarm_page_active && app.terminal_clear_collapsed();
+    let use_packed = terminal_clear_collapsed_early
+        || (!swarm_page_active
+            && !side_panel_fullscreen
+            && u64::from(packed_content_height.saturating_add(cloud_card_height))
+                + u64::from(fixed_height)
+                <= u64::from(available_height));
+    let pinned_overview_band = if !use_packed || terminal_clear_collapsed_early {
+        pinned_overview_band
+    } else {
+        // Packed: only reserve when the messages chunk can host the panel.
+        match pinned_overview_band {
+            Some(band)
+                if packed_content_height.max(cloud_card_height)
+                    >= super::info_widget_layout::MIN_WIDGET_HEIGHT =>
+            {
+                Some(band)
+            }
+            _ => None,
+        }
+    };
     let content_height = {
         let start = clear_start.unwrap_or(0);
         let total_lines = prepared.total_wrapped_lines();

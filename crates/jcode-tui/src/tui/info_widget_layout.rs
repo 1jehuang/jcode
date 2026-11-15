@@ -12,7 +12,7 @@ const MIN_WIDGET_WIDTH: u16 = 24;
 /// Maximum width the widget can take.
 const MAX_WIDGET_WIDTH: u16 = 40;
 /// Minimum height needed to show the widget.
-const MIN_WIDGET_HEIGHT: u16 = 5;
+pub(crate) const MIN_WIDGET_HEIGHT: u16 = 5;
 /// Minimum transcript columns that must survive the pin's reserve.
 ///
 /// A pin that starves the transcript is worse than no pin: at 60 columns a
