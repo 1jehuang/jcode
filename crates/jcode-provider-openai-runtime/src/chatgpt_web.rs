@@ -587,7 +587,7 @@ fn parse_tool_call(response: &str) -> Result<Option<ParsedToolCall>> {
         );
     }
     let payload_text = &trimmed[TOOL_CALL_START.len()..trimmed.len() - TOOL_CALL_END.len()];
-    let payload: Value = serde_json::from_str(payload_text.trim())
+    let mut payload: Value = serde_json::from_str(payload_text.trim())
         .context("GPT-5.6 Pro emitted invalid JSON in a jcode tool-call envelope")?;
     let name = payload
         .get("name")
@@ -596,7 +596,10 @@ fn parse_tool_call(response: &str) -> Result<Option<ParsedToolCall>> {
         .filter(|name| !name.is_empty())
         .ok_or_else(|| anyhow::anyhow!("jcode tool-call envelope is missing a non-empty name"))?
         .to_string();
-    let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+    let input = payload
+        .get_mut("input")
+        .map(Value::take)
+        .unwrap_or_else(|| json!({}));
     if !input.is_object() {
         anyhow::bail!("jcode tool-call envelope input must be a JSON object");
     }
@@ -740,9 +743,13 @@ fn utf16_fingerprint(value: &str) -> (usize, u32) {
 
 async fn evaluate(tab_id: u64, script: &str) -> Result<Value> {
     let output = bridge_command("evaluate", json!({ "tabId": tab_id, "script": script })).await?;
+    take_evaluation_result(output)
+}
+
+fn take_evaluation_result(mut output: Value) -> Result<Value> {
     output
-        .get("result")
-        .cloned()
+        .get_mut("result")
+        .map(Value::take)
         .ok_or_else(|| anyhow::anyhow!("Browser evaluate response did not contain a result"))
 }
 
@@ -799,6 +806,56 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.name, "bash");
         assert_eq!(parsed.input["command"], "pwd");
+    }
+
+    #[test]
+    fn evaluation_result_moves_backing_and_preserves_missing_vs_null() {
+        let text = "browser result 日本語".repeat(65536);
+        let pointer = text.as_ptr();
+        let output = Value::Object(serde_json::Map::from_iter([(
+            "result".to_owned(),
+            Value::String(text),
+        )]));
+        let result = take_evaluation_result(output).unwrap();
+        assert_eq!(result.as_str().unwrap().as_ptr(), pointer);
+        assert_eq!(
+            result.as_str().unwrap().len(),
+            "browser result 日本語".len() * 65536
+        );
+        assert_eq!(
+            take_evaluation_result(json!({"result": null})).unwrap(),
+            Value::Null
+        );
+        for value in [json!({}), Value::Null, json!([])] {
+            assert!(
+                take_evaluation_result(value)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("did not contain a result")
+            );
+        }
+    }
+
+    #[test]
+    fn tool_call_parser_preserves_large_nested_and_optional_input() {
+        let input = json!({"nested": [{"text": "tool input 日本語".repeat(65536)}]});
+        let envelope = format!(
+            "{TOOL_CALL_START}{}{TOOL_CALL_END}",
+            json!({"name": " bash ", "input": input})
+        );
+        let parsed = parse_tool_call(&envelope).unwrap().unwrap();
+        assert_eq!(parsed.name, "bash");
+        assert_eq!(parsed.input, input);
+        let parsed = parse_tool_call("<jcode_tool_call>{\"name\":\"bash\"}</jcode_tool_call>")
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.input, json!({}));
+        assert!(
+            parse_tool_call(
+                "<jcode_tool_call>{\"name\":\"bash\",\"input\":null}</jcode_tool_call>"
+            )
+            .is_err()
+        );
     }
 
     #[test]
