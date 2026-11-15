@@ -9,8 +9,9 @@
 //! reconciliation also catches saves made by other processes and retries.
 //!
 //! Only user-visible text is uploaded: user/assistant text, tool calls as a
-//! one-line summary, and tool results truncated. Hidden reasoning, images and
-//! provider-native blobs are never sent.
+//! one-line summary, and tool results truncated. Assistant markdown images in
+//! the generated-image store become bounded thumbnails. Hidden reasoning,
+//! arbitrary local files and provider-native blobs are never sent.
 
 use crate::session::Session;
 use crate::storage;
@@ -142,8 +143,16 @@ pub struct WireMessage {
     pub seq: usize,
     pub role: &'static str,
     pub text: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<WireImage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Hash)]
+pub struct WireImage {
+    pub media_type: String,
+    pub data: String,
 }
 
 /// Session metadata returned by the account's mobile transcript API.
@@ -518,11 +527,122 @@ pub fn wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
             Some(WireMessage {
                 seq,
                 role,
+                images: if role == "assistant" {
+                    generated_images(&text.text)
+                } else {
+                    Vec::new()
+                },
                 text: text.text,
                 created_at: message.timestamp.map(|t| t.to_rfc3339()),
             })
         })
         .collect()
+}
+
+fn message_chunks(messages: &[WireMessage]) -> Vec<&[WireMessage]> {
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut bytes = 0;
+    for (index, message) in messages.iter().enumerate() {
+        let size = serde_json::to_vec(message).map_or(0, |v| v.len());
+        if index > start
+            && (bytes + size > 3 * 1024 * 1024 || index - start >= MAX_MESSAGES_PER_UPLOAD)
+        {
+            chunks.push(&messages[start..index]);
+            start = index;
+            bytes = 0;
+        }
+        bytes += size;
+    }
+    if start < messages.len() {
+        chunks.push(&messages[start..]);
+    }
+    chunks
+}
+
+// Only explicit markdown image destinations under the generated-image store
+// are eligible. Canonicalization rejects traversal and symlink escapes.
+fn generated_images(text: &str) -> Vec<WireImage> {
+    use base64::Engine;
+    let Ok(root) =
+        storage::jcode_dir().and_then(|p| Ok(p.join("generated-images").canonicalize()?))
+    else {
+        return Vec::new();
+    };
+    let mut seen = BTreeSet::new();
+    let mut images = Vec::new();
+    for fragment in text.split("![").skip(1).take(64) {
+        let Some((_, destination)) = fragment.split_once("](") else {
+            continue;
+        };
+        let Some((destination, _)) = destination.split_once(')') else {
+            continue;
+        };
+        let path = Path::new(destination.trim().trim_start_matches("file://"));
+        let Ok(path) = path.canonicalize() else {
+            continue;
+        };
+        if !path.starts_with(&root) || !seen.insert(path.clone()) {
+            continue;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Do not follow a file swapped to a symlink after canonicalization,
+            // and never let a special file block the transcript sync worker.
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let Ok(file) = options.open(&path) else {
+            continue;
+        };
+        let Ok(meta) = file.metadata() else {
+            continue;
+        };
+        if !meta.is_file() || meta.len() > 16 * 1024 * 1024 {
+            continue;
+        }
+        let Ok(mut reader) =
+            image::ImageReader::new(std::io::BufReader::new(file)).with_guessed_format()
+        else {
+            continue;
+        };
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(8192);
+        limits.max_image_height = Some(8192);
+        limits.max_alloc = Some(128 * 1024 * 1024);
+        reader.limits(limits);
+        let Ok(image) = reader.decode() else {
+            continue;
+        };
+        let mut thumbnail = image.thumbnail(1024, 1024).to_rgb8();
+        loop {
+            let mut bytes = Vec::new();
+            if image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 75)
+                .encode_image(&thumbnail)
+                .is_err()
+            {
+                break;
+            }
+            if bytes.len() <= 256 * 1024 {
+                images.push(WireImage {
+                    media_type: "image/jpeg".into(),
+                    data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                });
+                break;
+            }
+            thumbnail = image::imageops::thumbnail(
+                &thumbnail,
+                thumbnail.width() / 2,
+                thumbnail.height() / 2,
+            );
+        }
+        if images.len() == 4 {
+            break;
+        }
+    }
+    images
 }
 
 fn wire_fingerprint(messages: &[WireMessage], end: usize) -> u64 {
@@ -584,7 +704,14 @@ fn session_revision(snapshot: &Path) -> [u64; 4] {
     let (journal_time, journal_len) = stamp(&crate::session::session_journal_path_from_snapshot(
         snapshot,
     ));
-    [snapshot_time, snapshot_len, journal_time, journal_len]
+    // Version the visible wire representation without changing mtime ordering.
+    // This forces one reconciliation of already-synced generated images.
+    [
+        snapshot_time,
+        snapshot_len ^ (1_u64 << 63),
+        journal_time,
+        journal_len,
+    ]
 }
 
 /// Candidate sessions: real (non-debug) snapshots modified since the window.
@@ -803,7 +930,7 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
         let chunks: Vec<&[WireMessage]> = if messages.is_empty() {
             vec![&[]]
         } else {
-            messages.chunks(MAX_MESSAGES_PER_UPLOAD).collect()
+            message_chunks(&messages)
         };
         for chunk in chunks {
             if !sync_still_enabled(state.generation) {

@@ -12,6 +12,72 @@ fn uncached_mobile_state() -> MobileSyncState {
 }
 
 #[test]
+fn generated_images_are_bounded_private_thumbnails() {
+    use base64::Engine;
+    let _lock = storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _env = TestEnv::set(&[("JCODE_HOME", home.path().as_os_str())]);
+    let root = home.path().join("generated-images");
+    std::fs::create_dir(&root).unwrap();
+    let image_path = root.join("generated.png");
+    image::RgbImage::from_pixel(1500, 1200, image::Rgb([30, 80, 200]))
+        .save(&image_path)
+        .unwrap();
+    let markdown = format!("![Generated image]({})", image_path.display());
+    let images = generated_images(&format!("{markdown}\n{markdown}"));
+    assert_eq!(
+        images.len(),
+        1,
+        "duplicate references must not duplicate bytes"
+    );
+    assert_eq!(images[0].media_type, "image/jpeg");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&images[0].data)
+        .unwrap();
+    assert!(bytes.len() <= 256 * 1024);
+    let decoded = image::load_from_memory(&bytes).unwrap();
+    assert!(decoded.width() <= 1024 && decoded.height() <= 1024);
+    let outside = home.path().join("private.png");
+    std::fs::copy(&image_path, &outside).unwrap();
+    assert!(generated_images(&format!("![private]({})", outside.display())).is_empty());
+    assert!(generated_images(&format!("![private]({}/../private.png)", root.display())).is_empty());
+    #[cfg(unix)]
+    {
+        let link = root.join("escape.png");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert!(generated_images(&format!("![escape]({})", link.display())).is_empty());
+    }
+    assert!(generated_images(&format!("[not an image]({})", image_path.display())).is_empty());
+    let mut session = Session::create_with_id("generated-test".into(), None, None);
+    session.add_message(Role::User, vec![text_block(markdown.clone())]);
+    session.add_message(Role::Assistant, vec![text_block(markdown)]);
+    let messages = wire_messages(&session, 0);
+    assert!(messages[0].images.is_empty());
+    assert_eq!(messages[1].images.len(), 1);
+}
+
+#[test]
+fn image_upload_chunks_obey_byte_budget() {
+    let message = WireMessage {
+        seq: 0,
+        role: "assistant",
+        text: "x".repeat(100_000),
+        images: vec![WireImage {
+            media_type: "image/jpeg".into(),
+            data: "A".repeat(1_398_104),
+        }],
+        created_at: None,
+    };
+    let messages = vec![message; 10];
+    let chunks = message_chunks(&messages);
+    assert!(chunks.len() > 1);
+    assert_eq!(chunks.iter().map(|c| c.len()).sum::<usize>(), 10);
+    for chunk in chunks {
+        assert!(serde_json::to_vec(chunk).unwrap().len() < 4 * 1024 * 1024);
+    }
+}
+
+#[test]
 fn parsed_state_reuse_matches_old_output_and_reads_current_bytes() {
     let _lock = storage::lock_test_env();
     let home = tempfile::tempdir().unwrap();
@@ -1000,6 +1066,7 @@ fn old_wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
             Some(WireMessage {
                 seq,
                 role,
+                images: Vec::new(),
                 text: old_truncate(&parts.join("\n\n"), MAX_TEXT_CHARS),
                 created_at: message.timestamp.map(|t| t.to_rfc3339()),
             })
