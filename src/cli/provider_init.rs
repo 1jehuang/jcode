@@ -75,6 +75,7 @@ pub enum ProviderChoice {
     Nebius,
     Scaleway,
     Stackit,
+    Runcrate,
     Groq,
     #[value(alias = "mistralai")]
     Mistral,
@@ -180,6 +181,7 @@ impl ProviderChoice {
             Self::Nebius => "nebius",
             Self::Scaleway => "scaleway",
             Self::Stackit => "stackit",
+            Self::Runcrate => "runcrate",
             Self::Groq => "groq",
             Self::Mistral => "mistral",
             Self::Perplexity => "perplexity",
@@ -317,6 +319,10 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
     (
         ProviderChoice::Stackit,
         crate::provider_catalog::STACKIT_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Runcrate,
+        crate::provider_catalog::RUNCRATE_LOGIN_PROVIDER,
     ),
     (
         ProviderChoice::Groq,
@@ -1676,6 +1682,7 @@ async fn init_provider_with_model_policy(
         | ProviderChoice::Nebius
         | ProviderChoice::Scaleway
         | ProviderChoice::Stackit
+        | ProviderChoice::Runcrate
         | ProviderChoice::Groq
         | ProviderChoice::Mistral
         | ProviderChoice::Perplexity
