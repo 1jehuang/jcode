@@ -110,6 +110,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.update_pinned_images_auto_hide();
     // Dissolve stale (off-screen) reasoning traces with zero visible motion.
     needs_redraw |= app.gc_offscreen_reasoning_traces();
+    needs_redraw |= app.maybe_backfill_expanded_prompt_history();
     // Adopt the resolved scroll position once a frame containing newly loaded
     // older history has rendered, so manual scrolling resumes seamlessly.
     needs_redraw |= app.reconcile_history_anchor();

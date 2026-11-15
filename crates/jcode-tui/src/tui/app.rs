@@ -1240,6 +1240,12 @@ pub struct App {
     pasted_contents: Vec<String>,
     // Pending pasted images (media_type, base64_data) attached to next message
     pending_images: Vec<(String, String)>,
+    // Payloads of images whose `[image N]` marker left the composer, keyed by
+    // slot index, so restoring the marker (Ctrl+Z after Esc) reattaches them.
+    detached_images: std::collections::HashMap<usize, (String, String)>,
+    // Expanded prompt history (Alt+E) backfill: (transcript rows when the last
+    // older-history load was requested, loads requested since the toggle).
+    prompt_history_backfill: (Option<usize>, u8),
     // One-shot flag: the next submitted prompt is routed to a new headed session.
     route_next_prompt_to_new_session: bool,
     // Restore-time flag: auto-submit restored input after startup.

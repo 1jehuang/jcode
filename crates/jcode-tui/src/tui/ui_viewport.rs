@@ -1594,7 +1594,7 @@ pub(crate) fn pinned_todo_more_area() -> Option<Rect> {
 #[path = "ui_viewport/prompt_preview.rs"]
 mod prompt_preview;
 #[cfg(test)]
-use prompt_preview::EXPANDED_PROMPT_PREVIEW_COUNT;
+pub(crate) use prompt_preview::EXPANDED_PROMPT_PREVIEW_COUNT;
 use prompt_preview::compute_max_scroll_with_prompt_preview;
 use prompt_preview::compute_prompt_preview_line_count;
 use prompt_preview::expanded_prompt_preview_items;

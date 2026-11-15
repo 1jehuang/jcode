@@ -88,12 +88,34 @@ fn test_image_attachment_backspace_detaches_payload_and_reports_status() {
         Some("Detached 1 image · 0 attached".to_string())
     );
     assert!(!crate::tui::TuiState::input_image_attached(&app, 1));
-    // Undoing the text cannot falsely claim that the released payload exists.
+    // Submitting without the marker sends no image.
+    let mut detached = create_test_app();
+    attach_test_image(&mut detached);
+    detached.set_input_for_test("no marker");
+    detached.sync_model_picker_preview_from_input();
+    let prepared = crate::tui::app::input::take_prepared_input(&mut detached);
+    assert!(prepared.images.is_empty());
+    // Undoing the text restores the marker together with its payload.
     app.undo_input_change();
     assert_eq!(app.input(), "[image 1]");
-    assert!(!crate::tui::TuiState::input_image_attached(&app, 1));
+    assert!(crate::tui::TuiState::input_image_attached(&app, 1));
     let prepared = crate::tui::app::input::take_prepared_input(&mut app);
-    assert!(prepared.images.is_empty());
+    assert_eq!(prepared.images.len(), 1);
+}
+
+#[test]
+fn test_escape_then_undo_keeps_pasted_image_attached() {
+    let mut app = create_test_app();
+    attach_test_image(&mut app);
+    app.handle_key(KeyCode::Esc, KeyModifiers::NONE).unwrap();
+    assert_eq!(app.input(), "");
+    assert!(!crate::tui::TuiState::input_image_attached(&app, 1));
+    app.undo_input_change();
+    assert_eq!(app.input(), "[image 1]");
+    assert!(crate::tui::TuiState::input_image_attached(&app, 1));
+    let prepared = crate::tui::app::input::take_prepared_input(&mut app);
+    assert_eq!(prepared.images.len(), 1);
+    assert!(app.detached_images.is_empty());
 }
 
 #[test]

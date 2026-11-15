@@ -2187,6 +2187,8 @@ pub(super) fn handle_alt_key(app: &mut App, code: KeyCode) -> bool {
         }
         KeyCode::Char('e') => {
             let expanded = crate::tui::ui::viewport::toggle_prompt_history_expanded();
+            app.prompt_history_backfill = (None, 0);
+            app.maybe_backfill_expanded_prompt_history();
             app.set_status_notice(if expanded {
                 "Prompt history: showing more previous prompts (Alt+E to collapse)"
             } else {
@@ -3015,11 +3017,21 @@ impl App {
     /// refer to a different image.
     pub(super) fn sync_input_image_attachments(&mut self) {
         let mut removed = 0;
-        for (index, (media_type, data)) in self.pending_images.iter_mut().enumerate() {
-            if !data.is_empty() && !self.input.contains(&format!("[image {}]", index + 1)) {
-                media_type.clear();
-                data.clear();
+        if self.pending_images.is_empty() {
+            self.detached_images.clear();
+        }
+        for (index, slot) in self.pending_images.iter_mut().enumerate() {
+            let marked = self.input.contains(&format!("[image {}]", index + 1));
+            if !slot.1.is_empty() && !marked {
+                // Keep the payload: Esc and Ctrl+U promise "Ctrl+Z to restore",
+                // and a restored marker must still carry its image.
+                self.detached_images.insert(index, std::mem::take(slot));
                 removed += 1;
+            } else if slot.1.is_empty()
+                && marked
+                && let Some(payload) = self.detached_images.remove(&index)
+            {
+                *slot = payload;
             }
         }
         if removed > 0 {
@@ -3036,6 +3048,7 @@ impl App {
     }
 
     pub(super) fn take_pending_image_payloads(&mut self) -> Vec<(String, String)> {
+        self.detached_images.clear();
         std::mem::take(&mut self.pending_images)
             .into_iter()
             .filter(|(media_type, data)| !media_type.is_empty() && !data.is_empty())
