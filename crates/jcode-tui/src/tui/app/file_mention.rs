@@ -390,7 +390,37 @@ impl Frecency {
 
     /// Compact the in-memory map and rewrite the log file with only the most
     /// recent `MAX_FRECENCY_ENTRIES` records.
+    ///
+    /// The log file is shared across terminals, so the rewrite cannot just
+    /// dump this instance's in-memory copy: another terminal may hold counts
+    /// this instance never loaded. Merge-on-write: reload the current file,
+    /// sum per-path frequencies (keep the newer `last_open`), overlay this
+    /// instance's data on top, then write the merged result.
     fn compact(&mut self) {
+        // Pull in any entries other terminals appended since our load.
+        if let Some(file) = &self.file {
+            if let Ok(lines) = std::fs::read_to_string(file) {
+                for line in lines.lines() {
+                    let Ok(entry) = serde_json::from_str::<FrecencyEntry>(line) else {
+                        continue;
+                    };
+                    match self.data.get_mut(&entry.path) {
+                        // Sum: two terminals opening the same file both count.
+                        Some((freq, last_open)) => {
+                            *freq = freq.saturating_add(entry.frequency);
+                            if entry.last_open > *last_open {
+                                *last_open = entry.last_open;
+                            }
+                        }
+                        None => {
+                            self.data
+                                .insert(entry.path, (entry.frequency, entry.last_open));
+                        }
+                    }
+                }
+            }
+        }
+
         let mut entries: Vec<(String, (u32, u64))> = self.data.drain().collect();
         entries.sort_by(|a, b| b.1.1.cmp(&a.1.1)); // by last_open desc
         entries.truncate(MAX_FRECENCY_ENTRIES);
