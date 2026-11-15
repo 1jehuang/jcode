@@ -142,6 +142,17 @@ pub fn set_active_provider(provider: Arc<dyn Provider>) {
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(provider);
 }
 
+/// Deep-fork a runtime whose `Provider::fork` already isolates model state
+/// (Gemini, Copilot API). Both keep their model in an internal
+/// `Arc<RwLock<String>>`; their `fork` implementations construct a fresh
+/// lock seeded from the current model, so `set_model` on the fork cannot leak
+/// back into the main agent's selection. Sidecar completions rely on this:
+/// `complete_via_provider` calls `set_model(memory_model)` on a forked handle,
+/// and the main conversation model must stay untouched.
+fn fork_shared_model_runtime(runtime: Arc<dyn Provider>) -> Arc<dyn Provider> {
+    runtime.fork()
+}
+
 /// Fetch the registered active provider, if any. Returns a forked handle so the
 /// caller gets an independent provider instance (per the [`Provider::fork`]
 /// contract) that will not interfere with the main agent's model selection.
@@ -2928,7 +2939,8 @@ impl Provider for MultiProvider {
             .copilot_api
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
+            .clone()
+            .map(fork_shared_model_runtime);
         let antigravity_provider = self
             .antigravity
             .read()
@@ -2938,7 +2950,8 @@ impl Provider for MultiProvider {
             .gemini
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
+            .clone()
+            .map(fork_shared_model_runtime);
         mark("copy", &mut laps);
         let cursor_provider = if self
             .cursor
