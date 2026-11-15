@@ -1392,7 +1392,8 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
             content: vec![ContentBlock::Text {
                 text: "full transcript should not be copied".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,

@@ -878,7 +878,8 @@ fn test_loading_preview_refreshes_search_index_for_picker_filtering() {
         content: vec![crate::message::ContentBlock::Text {
             text: "needle hidden outside the initial picker summary".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,

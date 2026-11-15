@@ -733,14 +733,14 @@ impl App {
                 };
                 let inserted_message = Message {
                     role: Role::User,
-                    content: vec![tool_block.clone()],
+                    content: vec![tool_block.clone()].into(),
                     timestamp: None,
                     tool_duration_ms: None,
                 };
                 let stored_message = crate::session::StoredMessage {
                     id: id::new_id("message"),
                     role: Role::User,
-                    content: vec![tool_block],
+                    content: vec![tool_block].into(),
                     display_role: None,
                     timestamp: Some(chrono::Utc::now()),
                     tool_duration_ms: None,
@@ -819,7 +819,7 @@ impl App {
             }
             self.add_provider_message(Message {
                 role: role.clone(),
-                content: kept_blocks.clone(),
+                content: kept_blocks.clone().into(),
                 timestamp: None,
                 tool_duration_ms: None,
             });

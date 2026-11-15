@@ -84,6 +84,33 @@ include!("tests/prompt_history_cross_session.rs");
 include!("tests/ssh_remote.rs");
 include!("tests/skill_startup.rs");
 #[test]
+fn materialized_provider_messages_share_payload_and_detach_on_edit() {
+    let mut app = create_test_app();
+    app.messages = vec![Message::assistant_text("retained provider payload")];
+
+    let mut materialized = app.materialized_provider_messages();
+    assert!(
+        materialized[0]
+            .content
+            .shares_storage_with(&app.messages[0].content)
+    );
+
+    let original = serde_json::to_string(&app.messages[0]).unwrap();
+    if let ContentBlock::Text { text, .. } = &mut materialized[0].content[0] {
+        text.push_str(" independently edited");
+    } else {
+        panic!("expected text payload");
+    }
+    assert!(
+        !materialized[0]
+            .content
+            .shares_storage_with(&app.messages[0].content)
+    );
+    assert_eq!(serde_json::to_string(&app.messages[0]).unwrap(), original);
+    assert_ne!(serde_json::to_string(&materialized[0]).unwrap(), original);
+}
+
+#[test]
 fn kv_cache_signature_prefix_match_allows_appended_messages() {
     let baseline_messages = vec![
         crate::message::Message::user("first prompt"),
@@ -137,7 +164,8 @@ fn kv_cache_signature_ignores_non_transmitted_message_metadata() {
             content: vec![ContentBlock::Text {
                 text: "boundary answer".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         },
@@ -161,7 +189,8 @@ fn kv_cache_signature_ignores_non_transmitted_message_metadata() {
                 ContentBlock::ReasoningTrace {
                     text: "internal scratch thinking".to_string(),
                 },
-            ],
+            ]
+            .into(),
             // Backfilled after the tool ran / a newer turn was committed.
             timestamp: Some(chrono::Utc::now() + chrono::Duration::seconds(5)),
             tool_duration_ms: Some(1234),

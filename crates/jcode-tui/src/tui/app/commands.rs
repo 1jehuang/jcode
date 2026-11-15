@@ -709,7 +709,7 @@ fn launch_manual_subagent(app: &mut App, spec: ManualSubagentSpec) {
     }];
     app.add_provider_message(Message {
         role: Role::Assistant,
-        content: content_blocks.clone(),
+        content: content_blocks.clone().into(),
         timestamp: Some(chrono::Utc::now()),
         tool_duration_ms: None,
     });

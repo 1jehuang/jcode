@@ -520,7 +520,8 @@ fn test_new_for_remote_fresh_spawn_restores_local_transcript() {
             content: vec![crate::message::ContentBlock::Text {
                 text: "persisted transcript should be restored locally".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,
@@ -587,7 +588,8 @@ fn test_new_for_remote_restores_display_history_without_retaining_session_transc
             content: vec![crate::message::ContentBlock::Text {
                 text: "persisted transcript should render once".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,
@@ -621,7 +623,8 @@ fn test_remote_startup_restores_swarm_delivery_as_compact_card() {
             content: vec![crate::message::ContentBlock::Text {
                 text: format!("DM from hatchling: {body}"),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: Some(crate::session::StoredDisplayRole::System),
             timestamp: None,
             tool_duration_ms: None,
