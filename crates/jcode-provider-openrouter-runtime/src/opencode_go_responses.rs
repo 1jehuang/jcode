@@ -379,9 +379,8 @@ impl ResponsesStream {
     }
 
     fn next_event(&mut self) -> Option<StreamEvent> {
-        if let Some(event) = self.pending.first().cloned() {
-            self.pending.remove(0);
-            return Some(event);
+        if !self.pending.is_empty() {
+            return Some(self.pending.remove(0));
         }
         while let Some((pos, separator_len)) = [
             self.buffer
@@ -409,9 +408,8 @@ impl ResponsesStream {
                 continue;
             }
             self.parse_event(&data);
-            if let Some(event) = self.pending.first().cloned() {
-                self.pending.remove(0);
-                return Some(event);
+            if !self.pending.is_empty() {
+                return Some(self.pending.remove(0));
             }
         }
         None
@@ -480,18 +478,16 @@ impl Stream for ResponsesStream {
                     if !self.buffer.is_empty() {
                         let tail = std::mem::take(&mut self.buffer);
                         self.parse_event(String::from_utf8_lossy(&tail).trim());
-                        if let Some(event) = self.pending.first().cloned() {
-                            self.pending.remove(0);
-                            return Poll::Ready(Some(Ok(event)));
+                        if !self.pending.is_empty() {
+                            return Poll::Ready(Some(Ok(self.pending.remove(0))));
                         }
                     }
                     if !self.ended {
                         if self.thinking {
                             self.pending.push(StreamEvent::ThinkingEnd);
                             self.thinking = false;
-                            if let Some(event) = self.pending.first().cloned() {
-                                self.pending.remove(0);
-                                return Poll::Ready(Some(Ok(event)));
+                            if !self.pending.is_empty() {
+                                return Poll::Ready(Some(Ok(self.pending.remove(0))));
                             }
                         }
                         self.ended = true;
@@ -511,6 +507,26 @@ impl Stream for ResponsesStream {
 mod tests {
     use super::*;
     use futures::StreamExt;
+
+    #[test]
+    fn queued_payload_is_moved_without_reallocating_and_preserves_order() {
+        let mut stream = ResponsesStream::new(futures::stream::empty());
+        let text = "large queued tool input".repeat(65536);
+        let pointer = text.as_ptr();
+        let capacity = text.capacity();
+        stream.pending.push(StreamEvent::ToolInputDelta(text));
+        stream.pending.push(StreamEvent::ToolUseEnd);
+        match stream.next_event().expect("queued payload") {
+            StreamEvent::ToolInputDelta(text) => {
+                assert_eq!(text.as_ptr(), pointer);
+                assert_eq!(text.capacity(), capacity);
+                assert_eq!(text, "large queued tool input".repeat(65536));
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
+        assert!(matches!(stream.next_event(), Some(StreamEvent::ToolUseEnd)));
+        assert!(stream.next_event().is_none());
+    }
 
     #[test]
     fn only_open_code_go_responses_models_use_responses() {
