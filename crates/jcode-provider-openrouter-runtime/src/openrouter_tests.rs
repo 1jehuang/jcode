@@ -3628,26 +3628,78 @@ mod catalog_auth;
 /// rejected with a 400 "does not support image input" error; the retry request
 /// (which must no longer carry `image_url` parts) gets a clean SSE completion.
 /// Both raw request bodies are captured for assertions.
+///
+/// Reads each request through the headers and the full `Content-Length` body
+/// before capturing it: a single `read()` can return just the headers or a
+/// partial body, which would flake the image_url/marker assertions even when
+/// the recovery is correct.
+fn read_request(stream: &mut std::net::TcpStream) -> String {
+    use std::io::Read;
+    let mut buf = vec![0u8; 65536];
+    let mut raw = Vec::new();
+    // Read until the end of the headers.
+    loop {
+        let n = stream.read(&mut buf).unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        raw.extend_from_slice(&buf[..n]);
+        if let Some(header_end) = find_header_end(&raw) {
+            let content_length = content_length_of(&raw[..header_end]);
+            let total = header_end + content_length;
+            while raw.len() < total {
+                let n = stream.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&buf[..n]);
+            }
+            break;
+        }
+    }
+    String::from_utf8_lossy(&raw).to_string()
+}
+
+fn find_header_end(raw: &[u8]) -> Option<usize> {
+    raw.windows(b"\r\n\r\n".len())
+        .position(|w| w == b"\r\n\r\n")
+        .map(|p| p + b"\r\n\r\n".len())
+}
+
+fn content_length_of(headers: &[u8]) -> usize {
+    let headers = String::from_utf8_lossy(headers);
+    for line in headers.split("\r\n") {
+        if let Some(value) = line
+            .to_ascii_lowercase()
+            .strip_prefix("content-length:")
+            .map(str::trim)
+        {
+            if let Ok(len) = value.parse::<usize>() {
+                return len;
+            }
+        }
+    }
+    0
+}
+
 fn spawn_image_rejecting_then_clean_server() -> (
     String,
     std::sync::mpsc::Receiver<String>,
     std::sync::mpsc::Receiver<String>,
 ) {
-    use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");
     let (tx_first, rx_first) = std::sync::mpsc::channel::<String>();
     let (tx_retry, rx_retry) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
+        use std::io::Write;
         // Connection 1: modality rejection.
         {
             let (mut stream, _) = listener.accept().expect("accept first");
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("timeout");
-            let mut buf = vec![0u8; 65536];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            let _ = tx_first.send(String::from_utf8_lossy(&buf[..n]).to_string());
+            let _ = tx_first.send(read_request(&mut stream));
             let body = r#"{"error": {"message": "This model does not support image input. The image_url content part is not supported: text-only model.", "type": "invalid_request_error", "code": "unsupported_modality"}}"#;
             let response = format!(
                 "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -3662,9 +3714,7 @@ fn spawn_image_rejecting_then_clean_server() -> (
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("timeout");
-            let mut buf = vec![0u8; 65536];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            let _ = tx_retry.send(String::from_utf8_lossy(&buf[..n]).to_string());
+            let _ = tx_retry.send(read_request(&mut stream));
             let body = "data: {\"choices\":[{\"delta\":{\"content\":\"described marker only\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -3856,21 +3906,19 @@ fn spawn_sse_image_rejecting_then_clean_server() -> (
     std::sync::mpsc::Receiver<String>,
     std::sync::mpsc::Receiver<String>,
 ) {
-    use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");
     let (tx_first, rx_first) = std::sync::mpsc::channel::<String>();
     let (tx_retry, rx_retry) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
+        use std::io::Write;
         // Connection 1: 200 OK, then the rejection as an SSE error event.
         {
             let (mut stream, _) = listener.accept().expect("accept first");
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("timeout");
-            let mut buf = vec![0u8; 65536];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            let _ = tx_first.send(String::from_utf8_lossy(&buf[..n]).to_string());
+            let _ = tx_first.send(read_request(&mut stream));
             let body = "data: {\"error\": {\"message\": \"This model does not support image input. The image_url content part is not supported: text-only model.\", \"type\": \"invalid_request_error\", \"code\": \"unsupported_modality\"}}\n\n\n";
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -3885,9 +3933,7 @@ fn spawn_sse_image_rejecting_then_clean_server() -> (
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("timeout");
-            let mut buf = vec![0u8; 65536];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            let _ = tx_retry.send(String::from_utf8_lossy(&buf[..n]).to_string());
+            let _ = tx_retry.send(read_request(&mut stream));
             let body = "data: {\"choices\":[{\"delta\":{\"content\":\"described marker only\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -4109,7 +4155,8 @@ fn image_modality_rejection_records_under_stripped_model_key() {
                 media_type: "image/png".to_string(),
                 data: "aVZC".to_string(),
             },
-        ],
+        ]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
