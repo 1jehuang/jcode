@@ -3,7 +3,7 @@ use std::process::{Command, Output};
 
 fn invoke(args: &[&str]) -> Output {
     let root = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_jcode"))
+    let output = Command::new(env!("CARGO_BIN_EXE_kcode"))
         .current_dir(root.path())
         .env_clear()
         .env("HOME", root.path())
@@ -58,6 +58,6 @@ fn version_exits_successfully_on_stdout() {
     assert!(
         String::from_utf8(output.stdout)
             .unwrap()
-            .starts_with("jcode ")
+            .starts_with("kcode ")
     );
 }
