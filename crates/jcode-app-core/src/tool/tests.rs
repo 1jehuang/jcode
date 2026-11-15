@@ -466,6 +466,55 @@ fn test_resolve_tool_name_oauth_aliases() {
 }
 
 #[tokio::test]
+async fn model_facing_definitions_advertise_canonical_names_only() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    let definitions = registry.definitions(None).await;
+    assert!(!definitions.is_empty());
+    for definition in &definitions {
+        assert_eq!(
+            Registry::resolve_tool_name(&definition.name),
+            definition.name,
+            "advertised tool-name alias {}",
+            definition.name
+        );
+        let props = &definition.input_schema["properties"];
+        let hidden_fields: &[&str] = match definition.name.as_str() {
+            "swarm" => &["target_session", "initial_message"],
+            "edit" => &["old_string", "new_string", "replace_all"],
+            "bg" => &["lines"],
+            "agentgrep" => &["pattern", "file_path", "include"],
+            "codemode" => &["script", "source", "js"],
+            "load_tools" => &["tools", "name"],
+            _ => &[],
+        };
+        for field in hidden_fields {
+            assert!(
+                props.get(*field).is_none(),
+                "{} exposes alias {field}",
+                definition.name
+            );
+        }
+        let forbidden_enum_values: &[(&str, &str)] = match definition.name.as_str() {
+            "bg" => &[("action", "watch"), ("action", "subscribe")],
+            "gmail" => &[("action", "list")],
+            "mcp" => &[("transport", "streamable-http")],
+            "desktop_selfdev" => &[("action", "build-reload")],
+            _ => &[],
+        };
+        for (field, alias) in forbidden_enum_values {
+            if let Some(values) = props[*field]["enum"].as_array() {
+                assert!(
+                    !values.contains(&serde_json::json!(alias)),
+                    "{} exposes {field} alias {alias}",
+                    definition.name
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_batch_resolves_function_namespaced_tools() {
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;

@@ -116,7 +116,7 @@ impl Tool for GmailTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "enum": ["connect", "search", "read", "list", "draft", "update_draft", "list_drafts", "delete_draft", "send", "send_draft", "threads", "thread", "labels", "trash", "modify_labels"],
+                    "enum": ["connect", "search", "read", "draft", "update_draft", "list_drafts", "delete_draft", "send", "send_draft", "threads", "thread", "labels", "trash", "modify_labels"],
                     "description": "Action. 'connect' runs browser OAuth. Revise drafts with 'update_draft' + draft_id, not a new draft."
                 },
                 "query": { "type": "string" },
@@ -197,6 +197,7 @@ impl Tool for GmailTool {
         }
 
         match params.action.as_str() {
+            // Keep the old spelling callable for replayed transcripts, but expose only search.
             "search" | "list" => {
                 let query = params.query.as_deref();
                 let label_refs: Vec<&str> = params
@@ -823,6 +824,24 @@ fn merge_draft_fields(current: Option<&gmail::Message>, input: DraftFieldInput<'
 #[cfg(test)]
 mod draft_merge_tests {
     use super::*;
+
+    #[test]
+    fn schema_advertises_search_without_legacy_list_alias() {
+        let schema = GmailTool::new().parameters_schema();
+        let actions = schema["properties"]["action"]["enum"].as_array().unwrap();
+        assert!(actions.contains(&json!("search")));
+        assert!(!actions.contains(&json!("list")));
+        // The runtime deserializer still accepts old transcripts. Execution
+        // continues to route both spellings through the same list_messages arm.
+        let legacy: GmailInput = serde_json::from_value(json!({
+            "action": "list", "query": "is:unread", "label_ids": ["INBOX"], "max_results": 5
+        }))
+        .unwrap();
+        assert_eq!(legacy.action, "list");
+        assert_eq!(legacy.query.as_deref(), Some("is:unread"));
+        assert_eq!(legacy.label_ids.unwrap(), vec!["INBOX"]);
+        assert_eq!(legacy.max_results, Some(5));
+    }
 
     fn draft_message() -> gmail::Message {
         serde_json::from_value(json!({

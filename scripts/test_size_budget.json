@@ -11,7 +11,7 @@
     "crates/jcode-app-core/src/tool/browser_tests.rs": 1273,
     "crates/jcode-app-core/src/tool/selfdev/tests.rs": 1442,
     "crates/jcode-app-core/src/tool/session_search_tests.rs": 1281,
-    "crates/jcode-app-core/src/tool/tests.rs": 2057,
+    "crates/jcode-app-core/src/tool/tests.rs": 2106,
     "crates/jcode-base/src/auth/tests.rs": 1206,
     "crates/jcode-base/src/browser_tests.rs": 1478,
     "crates/jcode-base/src/compaction_tests.rs": 1489,
