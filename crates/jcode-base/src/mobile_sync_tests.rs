@@ -62,9 +62,6 @@ fn image_upload_chunks_obey_byte_budget() {
         seq: 0,
         role: "assistant",
         text: "x".repeat(100_000),
-        display_text: None,
-        tool_calls: Vec::new(),
-        tool_results: Vec::new(),
         images: vec![WireImage {
             media_type: "image/jpeg".into(),
             data: "A".repeat(1_398_104),
@@ -1005,142 +1002,6 @@ fn session_ids_are_validated() {
     assert!(!valid_session_id(""));
 }
 
-#[test]
-fn structured_wire_matches_mobile_cloud_card_fixture_and_hides_reasoning() {
-    let mut session = Session::create_with_id("tool-fixture".into(), None, None);
-    let call = |id: &str| ContentBlock::ToolUse {
-        id: id.into(),
-        name: "bash".into(),
-        input: serde_json::json!({"command":"ls"}),
-        thought_signature: Some("private signature".into()),
-    };
-    session.messages = vec![
-        msg(Role::User, vec![text_block("go".into())]),
-        msg(
-            Role::Assistant,
-            vec![ContentBlock::Reasoning {
-                text: "private thinking".into(),
-            }],
-        ),
-        msg(
-            Role::Assistant,
-            vec![
-                text_block("on it".into()),
-                call("a"),
-                call("b"),
-                text_block("<system-reminder>private reminder</system-reminder>".into()),
-            ],
-        ),
-        msg(
-            Role::User,
-            vec![
-                ContentBlock::ToolResult {
-                    tool_use_id: "a".into(),
-                    content: "x".into(),
-                    is_error: None,
-                },
-                ContentBlock::ToolResult {
-                    tool_use_id: "b".into(),
-                    content: "y".into(),
-                    is_error: Some(false),
-                },
-            ],
-        ),
-        msg(Role::Assistant, vec![text_block("**done**".into())]),
-    ];
-    let actual = serde_json::to_value(wire_messages(&session, 0)).unwrap();
-    // Same fixture as mobile's structured_sync_matches_cloud_history_tool_phases.
-    let expected = serde_json::json!([
-        {"seq":0,"role":"user","text":"go"},
-        {"seq":2,"role":"assistant","text":"on it\n\n🔧 bash: ls\n\n🔧 bash: ls",
-         "display_text":"on it","tool_calls":[
-             {"id":"a","name":"bash","input":{"command":"ls"}},
-             {"id":"b","name":"bash","input":{"command":"ls"}}]},
-        {"seq":3,"role":"tool","text":"x\n\ny","display_text":"","tool_results":[
-            {"tool_use_id":"a","content":"x","is_error":false},
-            {"tool_use_id":"b","content":"y","is_error":false}]},
-        {"seq":4,"role":"assistant","text":"**done**"}
-    ]);
-    assert_eq!(actual, expected);
-    assert!(!actual.to_string().contains("private"));
-    session.messages[3].content = vec![ContentBlock::ToolResult {
-        tool_use_id: "a".into(),
-        content: "failed".into(),
-        is_error: Some(true),
-    }];
-    assert!(wire_messages(&session, 3)[0].tool_results[0].is_error);
-}
-
-#[test]
-fn structured_wire_bounds_inputs_counts_ids_and_total_bytes() {
-    let ordinary = serde_json::json!({"path":"界🦀/file","limit":7});
-    assert_eq!(bounded_tool_input(&ordinary), ordinary);
-    let huge = serde_json::json!({"command":"界🦀".repeat(MAX_TOOL_INPUT_BYTES)});
-    let preview = bounded_tool_input(&huge);
-    assert!(preview.as_str().unwrap().ends_with("(truncated)"));
-    assert!(serde_json::to_vec(&preview).unwrap().len() < 2 * MAX_TOOL_INPUT_BYTES + 128);
-    let call = |id: String, input: serde_json::Value| ContentBlock::ToolUse {
-        id,
-        name: "bash".into(),
-        input,
-        thought_signature: None,
-    };
-    let mut session = Session::create_with_id("tool-bounds".into(), None, None);
-    session.messages = vec![msg(Role::Assistant, vec![call("a".into(), huge)])];
-    let wire = wire_messages(&session, 0);
-    assert_eq!(wire[0].tool_calls[0].input, preview);
-    for blocks in [
-        vec![call(
-            "x".repeat(MAX_TOOL_ID_BYTES + 1),
-            serde_json::Value::Null,
-        )],
-        (0..=MAX_STRUCTURED_TOOLS)
-            .map(|i| call(i.to_string(), serde_json::Value::Null))
-            .collect(),
-        (0..MAX_STRUCTURED_TOOLS)
-            .map(|i| ContentBlock::ToolResult {
-                tool_use_id: i.to_string(),
-                content: "🦀".repeat(MAX_TOOL_RESULT_CHARS + 10),
-                is_error: None,
-            })
-            .collect(),
-    ] {
-        session.messages[0].content = blocks;
-        let wire = wire_messages(&session, 0);
-        assert_eq!(
-            wire[0].display_text, None,
-            "oversized metadata must retain legacy summaries"
-        );
-        assert!(wire[0].tool_calls.is_empty() && wire[0].tool_results.is_empty());
-        assert!(!wire[0].text.is_empty());
-    }
-    session.messages[0].content = vec![ContentBlock::ToolResult {
-        tool_use_id: "a".into(),
-        content: "🦀".repeat(MAX_TOOL_RESULT_CHARS + 10),
-        is_error: Some(true),
-    }];
-    let wire = wire_messages(&session, 0);
-    assert!(wire[0].tool_results[0].content.ends_with("(truncated)"));
-    assert!(wire[0].tool_results[0].content.chars().count() < MAX_TOOL_RESULT_CHARS + 32);
-}
-
-#[test]
-fn structured_input_changes_invalidate_synced_fingerprint_without_changing_legacy_summary() {
-    let mut session = Session::create_with_id("tool-hash".into(), None, None);
-    let call = |limit: usize| ContentBlock::ToolUse {
-        id: "a".into(),
-        name: "read".into(),
-        input: serde_json::json!({"intent":"inspect file","limit":limit}),
-        thought_signature: None,
-    };
-    session.messages = vec![msg(Role::Assistant, vec![call(10)])];
-    let before = wire_messages(&session, 0);
-    session.messages[0].content = vec![call(20)];
-    let after = wire_messages(&session, 0);
-    assert_eq!(before[0].text, after[0].text);
-    assert_ne!(wire_fingerprint(&before, 1), wire_fingerprint(&after, 1));
-}
-
 // Deliberately retain the original full-copy conversion as an independent
 // semantic oracle and a baseline for the ignored representative benchmark.
 fn old_wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
@@ -1206,9 +1067,6 @@ fn old_wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
                 seq,
                 role,
                 images: Vec::new(),
-                display_text: None,
-                tool_calls: Vec::new(),
-                tool_results: Vec::new(),
                 text: old_truncate(&parts.join("\n\n"), MAX_TEXT_CHARS),
                 created_at: message.timestamp.map(|t| t.to_rfc3339()),
             })
@@ -1315,14 +1173,7 @@ fn bounded_wire_conversion_matches_original_unicode_and_boundaries() {
     session.messages[1].timestamp = Some(chrono::Utc::now());
     for start in [0, 1, 3, session.messages.len(), session.messages.len() + 1] {
         let expected = old_wire_messages(&session, start);
-        let mut actual = wire_messages(&session, start);
-        // New metadata is additive. The independent oracle still verifies every
-        // legacy text byte, role, stored sequence and timestamp unchanged.
-        for message in &mut actual {
-            message.display_text = None;
-            message.tool_calls.clear();
-            message.tool_results.clear();
-        }
+        let actual = wire_messages(&session, start);
         assert_eq!(actual, expected, "start={start}");
         for end in [0, 1, session.messages.len() / 2, session.messages.len()] {
             assert_eq!(

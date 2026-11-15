@@ -63,10 +63,6 @@ pub const SYNC_INTERVAL: Duration = Duration::from_secs(20);
 const MAX_MESSAGES_PER_UPLOAD: usize = 200;
 const MAX_TOOL_RESULT_CHARS: usize = 4_000;
 const MAX_TEXT_CHARS: usize = 100_000;
-const MAX_STRUCTURED_TOOLS: usize = 32;
-const MAX_TOOL_INPUT_BYTES: usize = 8 * 1024;
-const MAX_TOOL_ID_BYTES: usize = 256;
-const MAX_STRUCTURED_BYTES: usize = 240 * 1024;
 /// Only sessions touched within this window are synced on enable.
 const BACKFILL_WINDOW: Duration = Duration::from_secs(14 * 24 * 3600);
 const SYNC_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -147,30 +143,10 @@ pub struct WireMessage {
     pub seq: usize,
     pub role: &'static str,
     pub text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub display_text: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tool_calls: Vec<WireToolCall>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tool_results: Vec<WireToolResult>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<WireImage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Hash)]
-pub struct WireToolCall {
-    pub id: String,
-    pub name: String,
-    pub input: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Hash)]
-pub struct WireToolResult {
-    pub tool_use_id: String,
-    pub content: String,
-    pub is_error: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Hash)]
@@ -488,107 +464,6 @@ fn append_tool_summary(out: &mut BoundedText, name: &str, input: &serde_json::Va
     }
 }
 
-/// Bound serialization work as well as the retained input. Large inputs become
-/// a valid JSON string preview, never an invalid/truncated JSON object.
-fn bounded_tool_input(input: &serde_json::Value) -> serde_json::Value {
-    struct Preview(Vec<u8>);
-    impl std::io::Write for Preview {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            let available = MAX_TOOL_INPUT_BYTES.saturating_sub(self.0.len());
-            self.0
-                .extend_from_slice(&bytes[..bytes.len().min(available)]);
-            if bytes.len() > available {
-                Err(std::io::Error::other("tool input preview full"))
-            } else {
-                Ok(bytes.len())
-            }
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut preview = Preview(Vec::new());
-    if serde_json::to_writer(&mut preview, input).is_ok() {
-        serde_json::from_slice(&preview.0).unwrap_or_default()
-    } else {
-        serde_json::Value::String(format!(
-            "{}\n… (truncated)",
-            String::from_utf8_lossy(&preview.0)
-        ))
-    }
-}
-
-fn structured_tools(
-    blocks: &[ContentBlock],
-) -> Option<(String, Vec<WireToolCall>, Vec<WireToolResult>)> {
-    let mut prose = BoundedText::new(MAX_TEXT_CHARS);
-    let mut has_prose = false;
-    let mut calls = Vec::new();
-    let mut results = Vec::new();
-    for block in blocks {
-        match block {
-            ContentBlock::Text { text, .. }
-                if !text.trim_start().is_empty()
-                    && !text.trim_start().starts_with("<system-reminder>") =>
-            {
-                if has_prose {
-                    prose.push("\n\n");
-                }
-                prose.push(text);
-                has_prose = true;
-            }
-            ContentBlock::ToolUse {
-                id, name, input, ..
-            } => {
-                // Fall back to the existing summaries as a whole if identities
-                // cannot be represented safely. Never truncate IDs into aliases.
-                if calls.len() == MAX_STRUCTURED_TOOLS
-                    || id.is_empty()
-                    || id.len() > MAX_TOOL_ID_BYTES
-                    || name.is_empty()
-                {
-                    return None;
-                }
-                calls.push(WireToolCall {
-                    id: id.clone(),
-                    name: name.chars().take(128).collect(),
-                    input: bounded_tool_input(input),
-                });
-            }
-            ContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
-            } => {
-                if results.len() == MAX_STRUCTURED_TOOLS
-                    || tool_use_id.is_empty()
-                    || tool_use_id.len() > MAX_TOOL_ID_BYTES
-                {
-                    return None;
-                }
-                results.push(WireToolResult {
-                    tool_use_id: tool_use_id.clone(),
-                    content: truncate(content, MAX_TOOL_RESULT_CHARS),
-                    is_error: is_error.unwrap_or(false),
-                });
-            }
-            // Reasoning, signatures, images and hidden reminders are not wire prose.
-            _ => {}
-        }
-    }
-    if calls.is_empty() && results.is_empty() {
-        return None;
-    }
-    // Backend limits are UTF-16 code units for prose and 256 KiB serialized
-    // metadata. Reserve room for the JSON property names/envelope.
-    if prose.text.encode_utf16().count() > 200_000
-        || serde_json::to_vec(&(&calls, &results)).ok()?.len() > MAX_STRUCTURED_BYTES
-    {
-        return None;
-    }
-    Some((prose.text, calls, results))
-}
-
 /// Convert stored messages into the mobile wire format. One stored message
 /// becomes at most one wire message; `seq` is the stored index so uploads are
 /// stable and idempotent.
@@ -649,17 +524,9 @@ pub fn wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
                     Role::Assistant => "assistant",
                 }
             };
-            let structured = structured_tools(&message.content);
-            let (display_text, tool_calls, tool_results) = match structured {
-                Some((prose, calls, results)) => (Some(prose), calls, results),
-                None => (None, Vec::new(), Vec::new()),
-            };
             Some(WireMessage {
                 seq,
                 role,
-                display_text,
-                tool_calls,
-                tool_results,
                 images: if role == "assistant" {
                     generated_images(&text.text)
                 } else {
