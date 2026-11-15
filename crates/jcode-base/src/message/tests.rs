@@ -3,6 +3,90 @@ use anyhow::{Result, anyhow};
 use chrono::Utc;
 
 #[test]
+fn redaction_replacement_matches_legacy_for_borrowed_owned_and_capture_cases() {
+    for pattern in [
+        r"token-[A-Za-z0-9]+",
+        r"(?m)^(API_KEY=)[^\r\n]+",
+        r"不存在",
+        r"^$",
+    ] {
+        let pattern = Regex::new(pattern).unwrap();
+        for text in [
+            "plain 🦀 output",
+            "token-one token-two",
+            "API_KEY=private\nnext line",
+            "",
+        ] {
+            for replacement in ["[REDACTED_SECRET]", "${1}[REDACTED_SECRET]", "$$"] {
+                let expected = pattern.replace_all(text, replacement).into_owned();
+                let mut actual = text.to_owned();
+                replace_redaction_matches(&mut actual, &pattern, replacement);
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn redaction_replacement_reuses_large_unmatched_buffer() {
+    let pattern = Regex::new(r"(?m)^(API_KEY=)[^\r\n]+").unwrap();
+    let mut text = "ordinary diagnostic output\n".repeat(40_000);
+    let pointer = text.as_ptr();
+    let capacity = text.capacity();
+    for _ in 0..50 {
+        replace_redaction_matches(&mut text, &pattern, "${1}[REDACTED_SECRET]");
+        assert_eq!(text.as_ptr(), pointer);
+        assert_eq!(text.capacity(), capacity);
+    }
+    assert!(text.starts_with("ordinary diagnostic output\n"));
+}
+
+#[test]
+#[ignore = "manual allocation-ownership and timing probe"]
+fn redaction_no_match_copy_probe() {
+    let pattern = Regex::new(r"(?m)^(API_KEY=)[^\r\n]+").unwrap();
+    let source = "diagnostic token count, not a credential\n".repeat(27_000);
+    let mut legacy = source.clone();
+    let mut reused = source.clone();
+    let mut legacy_replacements = 0;
+    let mut reused_replacements = 0;
+    let mut legacy_ns = 0;
+    let mut reused_ns = 0;
+    // Alternate order to avoid attributing all cache warming to one path.
+    for iteration in 0..50 {
+        for old in if iteration % 2 == 0 {
+            [true, false]
+        } else {
+            [false, true]
+        } {
+            if old {
+                let pointer = legacy.as_ptr();
+                let at = std::time::Instant::now();
+                legacy = pattern
+                    .replace_all(&legacy, "${1}[REDACTED_SECRET]")
+                    .into_owned();
+                legacy_ns += at.elapsed().as_nanos();
+                legacy_replacements += usize::from(pointer != legacy.as_ptr());
+            } else {
+                let pointer = reused.as_ptr();
+                let at = std::time::Instant::now();
+                replace_redaction_matches(&mut reused, &pattern, "${1}[REDACTED_SECRET]");
+                reused_ns += at.elapsed().as_nanos();
+                reused_replacements += usize::from(pointer != reused.as_ptr());
+            }
+        }
+    }
+    assert_eq!(legacy, source);
+    assert_eq!(reused, source);
+    assert_eq!(legacy_replacements, 50);
+    assert_eq!(reused_replacements, 0);
+    eprintln!(
+        "redaction_no_match bytes={} iterations=50 legacy_storage_replacements={legacy_replacements} reused_storage_replacements={reused_replacements} legacy_ns={legacy_ns} reused_ns={reused_ns}",
+        source.len()
+    );
+}
+
+#[test]
 fn sanitize_tool_id_alphanumeric_passthrough() {
     assert_eq!(
         sanitize_tool_id("toolu_01XFDUDYJgAACzvnptvVer6u"),
