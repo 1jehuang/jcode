@@ -338,6 +338,7 @@ fn reload_recovery_prepared_send_failure_restores_draft_without_exiting() {
         input::PreparedInput {
             raw_input: "Continue the interrupted work".to_string(),
             expanded: "Expanded instructions for the interrupted work".to_string(),
+            file_chips: Vec::new(),
             images: images.clone(),
         },
     ));
@@ -409,6 +410,7 @@ fn reload_recovery_deferred_send_failure_preserves_newer_draft() {
             input::PreparedInput {
                 raw_input: "Held prompt [image 1]".to_string(),
                 expanded: "Expanded held prompt".to_string(),
+                file_chips: Vec::new(),
                 images: vec![held_image.clone()],
             },
         ))
