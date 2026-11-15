@@ -528,42 +528,7 @@ impl GeminiProvider {
             },
         };
 
-        let contents_value = serde_json::to_value(&request.request.contents).unwrap_or(Value::Null);
-        let content_items = contents_value.as_array().cloned().unwrap_or_default();
-        let system_value = request
-            .request
-            .system_instruction
-            .as_ref()
-            .and_then(|system| serde_json::to_value(system).ok());
-        let tools_value = request
-            .request
-            .tools
-            .as_ref()
-            .and_then(|tools| serde_json::to_value(tools).ok());
-        let payload = json!({
-            "model": &request.model,
-            "contents": contents_value,
-            "system_instruction": system_value.as_ref(),
-            "tools": tools_value.as_ref(),
-            "tool_config": &request.request.tool_config,
-        });
-        jcode_provider_core::fingerprint::log_provider_canonical_input(
-            "gemini",
-            model,
-            "gemini_generate_content",
-            &payload,
-            &content_items,
-            system_value.as_ref(),
-            tools_value.as_ref(),
-            request.request.tools.as_ref().map(|tools| tools.len()),
-            &[
-                (
-                    "session_id_present",
-                    request.request.session_id.is_some().to_string(),
-                ),
-                ("project_present", (!request.project.is_empty()).to_string()),
-            ],
-        );
+        log_canonical_input(model, &request);
 
         match Self::auth_mode() {
             GeminiAuthMode::ApiKey(api_key) => {
@@ -590,6 +555,160 @@ impl GeminiProvider {
                 .post_json("generateContent", &request)
                 .await
                 .context("Gemini generateContent failed"),
+        }
+    }
+}
+
+fn canonical_payload(request: &CodeAssistGenerateRequest) -> Value {
+    let mut payload = json!({
+        "model": &request.model,
+        "tool_config": &request.request.tool_config,
+    });
+    let object = payload
+        .as_object_mut()
+        .expect("canonical payload is an object");
+    object.insert(
+        "contents".into(),
+        serde_json::to_value(&request.request.contents).unwrap_or(Value::Null),
+    );
+    object.insert(
+        "system_instruction".into(),
+        request
+            .request
+            .system_instruction
+            .as_ref()
+            .and_then(|value| serde_json::to_value(value).ok())
+            .unwrap_or(Value::Null),
+    );
+    object.insert(
+        "tools".into(),
+        request
+            .request
+            .tools
+            .as_ref()
+            .and_then(|value| serde_json::to_value(value).ok())
+            .unwrap_or(Value::Null),
+    );
+    payload
+}
+
+// Keep diagnostic JSON trees in this synchronous frame, never across HTTP awaits.
+fn log_canonical_input(model: &str, request: &CodeAssistGenerateRequest) {
+    let payload = canonical_payload(request);
+    let items = payload["contents"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    jcode_provider_core::fingerprint::log_provider_canonical_input(
+        "gemini",
+        model,
+        "gemini_generate_content",
+        &payload,
+        items,
+        payload
+            .get("system_instruction")
+            .filter(|value| !value.is_null()),
+        payload.get("tools").filter(|value| !value.is_null()),
+        request.request.tools.as_ref().map(Vec::len),
+        &[
+            (
+                "session_id_present",
+                request.request.session_id.is_some().to_string(),
+            ),
+            ("project_present", (!request.project.is_empty()).to_string()),
+        ],
+    );
+}
+
+#[cfg(test)]
+mod canonical_input_tests {
+    use super::*;
+    use jcode_provider_gemini::{GeminiContent, GeminiFunctionDeclaration, GeminiPart, GeminiTool};
+
+    #[test]
+    fn canonical_payload_preserves_exact_schema_hashes_nulls_and_counts() {
+        for variant in 0..3 {
+            let content = GeminiContent {
+                role: "user".into(),
+                parts: vec![GeminiPart {
+                    text: Some("hello 雪".into()),
+                    ..Default::default()
+                }],
+            };
+            let request = CodeAssistGenerateRequest {
+                model: "fixture-model".into(),
+                project: "project".into(),
+                user_prompt_id: "volatile".into(),
+                request: VertexGenerateContentRequest {
+                    contents: vec![content.clone()],
+                    system_instruction: (variant > 0).then(|| content.clone()),
+                    tools: match variant {
+                        0 => None,
+                        1 => Some(vec![]),
+                        _ => Some(vec![GeminiTool {
+                            function_declarations: vec![GeminiFunctionDeclaration {
+                                name: "lookup".into(),
+                                description: "find".into(),
+                                parameters: json!({"type": "object", "properties": {"q": {"type": "string"}}}),
+                            }],
+                        }]),
+                    },
+                    tool_config: (variant > 0).then_some(GeminiToolConfig {
+                        function_calling_config: GeminiFunctionCallingConfig { mode: "AUTO" },
+                    }),
+                    session_id: Some("session".into()),
+                },
+            };
+            let original_wire = serde_json::to_vec(&request).unwrap();
+            let contents = serde_json::to_value(&request.request.contents).unwrap();
+            let system = request
+                .request
+                .system_instruction
+                .as_ref()
+                .map(|value| serde_json::to_value(value).unwrap());
+            let tools = request
+                .request
+                .tools
+                .as_ref()
+                .map(|value| serde_json::to_value(value).unwrap());
+            let legacy = json!({"model": request.model, "contents": contents, "system_instruction": system.as_ref(), "tools": tools.as_ref(), "tool_config": request.request.tool_config});
+            let payload = canonical_payload(&request);
+            assert_eq!(
+                serde_json::to_vec(&payload).unwrap(),
+                serde_json::to_vec(&legacy).unwrap()
+            );
+            assert_eq!(payload.as_object().unwrap().len(), 5);
+            assert!(!payload.to_string().contains("volatile"));
+            assert_eq!(payload["contents"].as_array().unwrap().len(), 1);
+            assert_eq!(payload["system_instruction"].is_null(), variant == 0);
+            assert_eq!(payload["tools"].is_null(), variant == 0);
+            assert_eq!(
+                request.request.tools.as_ref().map(Vec::len),
+                match variant {
+                    0 => None,
+                    1 => Some(0),
+                    _ => Some(1),
+                }
+            );
+            let hash = jcode_provider_core::fingerprint::stable_hash_json;
+            assert_eq!(hash(&payload), hash(&legacy));
+            assert_eq!(hash(&payload["contents"]), hash(&contents));
+            assert_eq!(
+                payload
+                    .get("system_instruction")
+                    .filter(|value| !value.is_null())
+                    .map(hash),
+                system.as_ref().map(hash)
+            );
+            assert_eq!(
+                payload
+                    .get("tools")
+                    .filter(|value| !value.is_null())
+                    .map(hash),
+                tools.as_ref().map(hash)
+            );
+            log_canonical_input("fixture-model", &request);
+            assert_eq!(serde_json::to_vec(&request).unwrap(), original_wire);
         }
     }
 }
