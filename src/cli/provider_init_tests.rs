@@ -285,13 +285,48 @@ fn test_auto_init_login_selection_preserves_order() {
 
 #[test]
 fn test_init_provider_jcode_delegates_runtime_profile_to_wrapper() {
+    use std::ffi::OsString;
+
+    // Drop guards restore the scrubbed vars even if an assertion panics,
+    // so a failed test cannot leave later tests in this process with a
+    // half-cleared provider environment.
+    struct EnvRestoreGuard(Vec<(&'static str, Option<OsString>)>);
+
+    impl EnvRestoreGuard {
+        fn capture(keys: &[&'static str]) -> Self {
+            Self(
+                keys.iter()
+                    .map(|key| (*key, std::env::var_os(key)))
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for EnvRestoreGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.0.drain(..) {
+                if let Some(value) = value {
+                    crate::env::set_var(key, value);
+                } else {
+                    crate::env::remove_var(key);
+                }
+            }
+        }
+    }
+
     let _guard = lock_env();
     let _env_guard = crate::storage::lock_test_env();
     // Sandbox JCODE_HOME: with the real home, persisted auth/credential state
     // (e.g. a pinned anthropic api-key route) re-pins JCODE_RUNTIME_PROVIDER
     // during MultiProvider construction and breaks the assertions below.
     let dir = TempDir::new().expect("temp dir");
-    let saved_home = std::env::var("JCODE_HOME").ok();
+    let _restore = EnvRestoreGuard::capture(&[
+        "JCODE_HOME",
+        "JCODE_OPENROUTER_MODEL",
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+    ]);
     crate::env::set_var("JCODE_HOME", dir.path());
     crate::subscription_catalog::clear_runtime_env();
     crate::env::remove_var("JCODE_OPENROUTER_MODEL");
@@ -328,16 +363,6 @@ fn test_init_provider_jcode_delegates_runtime_profile_to_wrapper() {
             .as_deref(),
         Some("1")
     );
-
-    crate::subscription_catalog::clear_runtime_env();
-    crate::env::remove_var("JCODE_OPENROUTER_MODEL");
-    crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
-    crate::env::remove_var("JCODE_ACTIVE_PROVIDER");
-    crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
-    match saved_home {
-        Some(home) => crate::env::set_var("JCODE_HOME", home),
-        None => crate::env::remove_var("JCODE_HOME"),
-    }
 }
 
 #[test]
