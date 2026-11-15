@@ -2782,6 +2782,15 @@ impl Provider for MultiProvider {
     }
 
     fn native_compaction_mode(&self) -> Option<String> {
+        // External runtimes (Cursor ACP) are not in the `ActiveProvider` enum;
+        // route compaction capability through the external runtime when it is
+        // the effective active provider, so compaction does not fall back to
+        // the previously selected provider.
+        if self.active_external_provider().is_some() {
+            return self
+                .cursor_acp_provider()
+                .and_then(|p| p.native_compaction_mode());
+        }
         match self.active_provider() {
             ActiveProvider::OpenAI => self
                 .openai_provider()
@@ -2791,6 +2800,11 @@ impl Provider for MultiProvider {
     }
 
     fn native_compaction_threshold_tokens(&self) -> Option<usize> {
+        if self.active_external_provider().is_some() {
+            return self
+                .cursor_acp_provider()
+                .and_then(|p| p.native_compaction_threshold_tokens());
+        }
         match self.active_provider() {
             ActiveProvider::OpenAI => self
                 .openai_provider()
@@ -2800,6 +2814,9 @@ impl Provider for MultiProvider {
     }
 
     fn transport(&self) -> Option<String> {
+        if self.active_external_provider().is_some() {
+            return self.cursor_acp_provider().and_then(|p| p.transport());
+        }
         match self.active_provider() {
             ActiveProvider::OpenAI => self.openai_provider().and_then(|o| o.transport()),
             _ => None,
@@ -2831,6 +2848,12 @@ impl Provider for MultiProvider {
     }
 
     fn supports_compaction(&self) -> bool {
+        if self.active_external_provider().is_some() {
+            return self
+                .cursor_acp_provider()
+                .map(|p| p.supports_compaction())
+                .unwrap_or(false);
+        }
         match self.active_provider() {
             ActiveProvider::Claude => self.anthropic_provider().is_some(),
             ActiveProvider::OpenAI => self
@@ -2865,6 +2888,12 @@ impl Provider for MultiProvider {
     }
 
     fn uses_jcode_compaction(&self) -> bool {
+        if self.active_external_provider().is_some() {
+            return self
+                .cursor_acp_provider()
+                .map(|p| p.uses_jcode_compaction())
+                .unwrap_or(false);
+        }
         match self.active_provider() {
             ActiveProvider::Claude => self.anthropic_provider().is_some(),
             ActiveProvider::OpenAI => self
@@ -2901,6 +2930,19 @@ impl Provider for MultiProvider {
         existing_summary_text: Option<&str>,
         existing_openai_encrypted_content: Option<&str>,
     ) -> Result<NativeCompactionResult> {
+        if self.active_external_provider().is_some() {
+            let provider = self.cursor_acp_provider();
+            if let Some(cursor_acp) = provider {
+                return cursor_acp
+                    .native_compact(
+                        messages,
+                        existing_summary_text,
+                        existing_openai_encrypted_content,
+                    )
+                    .await;
+            }
+            return Err(anyhow::anyhow!("Cursor ACP provider unavailable"));
+        }
         match self.active_provider() {
             ActiveProvider::Claude => {
                 if let Some(anthropic) = self.anthropic_provider() {

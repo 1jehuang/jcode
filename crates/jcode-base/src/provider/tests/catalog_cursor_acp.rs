@@ -291,3 +291,30 @@ fn default_model_selection_from_route_preserves_cursor_acp_route() {
         "the ACP runtime consumes bare advertised ids; no prefix is needed"
     );
 }
+
+/// When a Cursor ACP external runtime is the effective active provider, the
+/// compaction capability must follow it: `supports_compaction` routes through
+/// `cursor_acp_provider()` instead of falling back to the previous
+/// `ActiveProvider` (default OpenAI in the fixture, whose slot is empty here).
+/// Regression guard: before the fix, selecting the external provider left all
+/// compaction decisions on the previously selected provider.
+#[test]
+fn compaction_capability_follows_active_external_provider() {
+    let provider = test_multi_provider_with_cursor_acp();
+    // Without the external selection, the fixture's ActiveProvider::OpenAI
+    // slot is empty, so compaction must be unsupported.
+    assert!(
+        !Provider::supports_compaction(&provider),
+        "empty OpenAI slot must not claim compaction"
+    );
+
+    provider.set_active_provider_external("cursor-acp");
+    assert!(
+        Provider::supports_compaction(&provider),
+        "selecting the Cursor ACP external runtime must route compaction capability through it"
+    );
+    assert!(
+        Provider::uses_jcode_compaction(&provider),
+        "uses_jcode_compaction must also follow the external runtime"
+    );
+}

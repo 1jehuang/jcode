@@ -954,6 +954,12 @@ impl Provider for StubExternalRuntime {
     fn oauth_account_label(&self) -> Option<String> {
         self.oauth_account.read().unwrap().clone()
     }
+
+    fn supports_compaction(&self) -> bool {
+        // Only the Cursor ACP stub claims compaction support; the routing test
+        // asserts MultiProvider forwards this through the external path.
+        self.name == "cursor-acp"
+    }
 }
 
 fn test_cursor_runtime() -> Arc<dyn Provider> {
