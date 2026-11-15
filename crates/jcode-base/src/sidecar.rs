@@ -2483,4 +2483,101 @@ mod tests {
             *calls
         );
     }
+
+    /// A sidecar holding a fork of the main provider must not be able to move
+    /// the main provider's model: `complete_via_provider` applies the
+    /// `memory_model` override via `set_model` on its forked handle, and a
+    /// runtime that keeps its model behind a shared `Arc<RwLock<String>>`
+    /// (Gemini, Copilot) would otherwise drag the main conversation onto the
+    /// sidecar model. The fork contract must isolate model state.
+    #[test]
+    fn sidecar_set_model_does_not_change_main_provider_model() {
+        use crate::provider::Provider as _;
+        /// Runtime whose `fork` either shares the model lock with its parent
+        /// (pre-fix behavior) or isolates it (post-fix), controlled by a flag.
+        struct SharedLockRuntime {
+            model: std::sync::Arc<std::sync::RwLock<String>>,
+            isolate_on_fork: bool,
+        }
+        #[async_trait::async_trait]
+        impl crate::provider::Provider for SharedLockRuntime {
+            async fn complete(
+                &self,
+                _messages: &[crate::message::Message],
+                _tools: &[crate::message::ToolDefinition],
+                _system: &str,
+                _resume_session_id: Option<&str>,
+            ) -> Result<crate::provider::EventStream> {
+                anyhow::bail!("no network in tests")
+            }
+
+            async fn complete_simple_with_usage(
+                &self,
+                _prompt: &str,
+                _system: &str,
+            ) -> Result<(String, jcode_provider_core::SimpleCompletionUsage)> {
+                Ok((
+                    "ok".to_string(),
+                    jcode_provider_core::SimpleCompletionUsage::default(),
+                ))
+            }
+
+            fn name(&self) -> &str {
+                "shared-lock"
+            }
+
+            fn model(&self) -> String {
+                self.model
+                    .read()
+                    .unwrap()
+                    .clone()
+            }
+
+            fn set_model(&self, model: &str) -> Result<()> {
+                *self.model.write().unwrap() = model.to_string();
+                Ok(())
+            }
+
+            fn fork(&self) -> std::sync::Arc<dyn crate::provider::Provider> {
+                std::sync::Arc::new(SharedLockRuntime {
+                    model: if self.isolate_on_fork {
+                        std::sync::Arc::new(std::sync::RwLock::new(self.model()))
+                    } else {
+                        std::sync::Arc::clone(&self.model)
+                    },
+                    isolate_on_fork: self.isolate_on_fork,
+                })
+            }
+        }
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+        let main = std::sync::Arc::new(SharedLockRuntime {
+            model: std::sync::Arc::new(std::sync::RwLock::new("main-model".to_string())),
+            isolate_on_fork: true,
+        });
+        crate::provider::set_active_provider(main.clone());
+
+        let sidecar = Sidecar::with_configured_model(
+            Some("sidecar-memory-model".to_string()),
+            Some("provider".to_string()),
+        );
+        assert_eq!(sidecar.backend, SidecarBackend::Provider);
+        assert_eq!(sidecar.provider_model_override.as_deref(), Some("sidecar-memory-model"));
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _ = rt
+            .block_on(sidecar.complete("sys", "user"))
+            .expect("provider-backed completion should succeed");
+
+        assert_eq!(
+            main.model(),
+            "main-model",
+            "sidecar set_model must not change the main provider's model"
+        );
+    }
 }
