@@ -982,12 +982,59 @@ fn test_persisted_state_round_trip_preserves_compacted_view() {
 }
 
 #[test]
+fn persisted_state_restore_and_exports_share_encrypted_body() {
+    let body: Arc<str> = "encrypted-body-".repeat(128 * 1024).into();
+    let state = crate::session::StoredCompactionState {
+        summary_text: "summary".into(),
+        openai_encrypted_content: Some(body.clone()),
+        covers_up_to_turn: 3,
+        original_turn_count: 7,
+        compacted_count: 2,
+    };
+    let before = serde_json::to_vec(&state).unwrap();
+    let mut manager = CompactionManager::new();
+    manager.restore_persisted_state(&state, 10);
+    assert!(Arc::ptr_eq(
+        &body,
+        manager
+            .active_summary
+            .as_ref()
+            .unwrap()
+            .openai_encrypted_content
+            .as_ref()
+            .unwrap()
+    ));
+    let mut exported = manager.persisted_state().unwrap();
+    let second_export = manager.persisted_state().unwrap();
+    assert!(Arc::ptr_eq(
+        &body,
+        exported.openai_encrypted_content.as_ref().unwrap()
+    ));
+    assert!(Arc::ptr_eq(
+        &body,
+        second_export.openai_encrypted_content.as_ref().unwrap()
+    ));
+    assert_eq!(serde_json::to_vec(&exported).unwrap(), before);
+    exported.summary_text.push_str(" changed");
+    assert!(Arc::ptr_eq(
+        &body,
+        exported.openai_encrypted_content.as_ref().unwrap()
+    ));
+    exported.openai_encrypted_content = None;
+    assert!(manager.persisted_state_matches(Some(&state)));
+    assert_eq!(
+        serde_json::to_vec(&manager.persisted_state().unwrap()).unwrap(),
+        before
+    );
+}
+
+#[test]
 fn test_persisted_state_matches_is_exact_for_every_field_and_absence() {
     let mut manager = CompactionManager::new();
     assert!(manager.persisted_state_matches(None));
     let state = crate::session::StoredCompactionState {
         summary_text: "summary".into(),
-        openai_encrypted_content: Some("encrypted".repeat(128 * 1024)),
+        openai_encrypted_content: Some("encrypted".repeat(128 * 1024).into()),
         covers_up_to_turn: 3,
         original_turn_count: 7,
         compacted_count: 2,
@@ -998,11 +1045,13 @@ fn test_persisted_state_matches_is_exact_for_every_field_and_absence() {
     assert!(manager.persisted_state_matches(Some(&state)));
     let mut variants = vec![state.clone(); 6];
     variants[0].summary_text.push('!');
-    variants[1]
-        .openai_encrypted_content
-        .as_mut()
-        .unwrap()
-        .push('!');
+    variants[1].openai_encrypted_content = Some(
+        format!(
+            "{}!",
+            variants[1].openai_encrypted_content.as_ref().unwrap()
+        )
+        .into(),
+    );
     variants[2].openai_encrypted_content = None;
     variants[3].covers_up_to_turn += 1;
     variants[4].original_turn_count += 1;
@@ -1029,7 +1078,7 @@ fn test_persisted_state_matches_is_exact_for_every_field_and_absence() {
 fn persisted_state_comparison_probe() {
     let state = crate::session::StoredCompactionState {
         summary_text: "summary".into(),
-        openai_encrypted_content: Some("encrypted".repeat(1024 * 1024)),
+        openai_encrypted_content: Some("encrypted".repeat(1024 * 1024).into()),
         covers_up_to_turn: 3,
         original_turn_count: 7,
         compacted_count: 2,

@@ -215,13 +215,36 @@ fn image_token_cost_is_bounded_not_base64_length() {
 }
 
 #[test]
+fn summary_clone_shares_encrypted_body_when_text_changes() {
+    let body: std::sync::Arc<str> = "encrypted-body-".repeat(128 * 1024).into();
+    let summary = Summary {
+        text: "original summary".into(),
+        openai_encrypted_content: Some(body.clone()),
+        covers_up_to_turn: 3,
+        original_turn_count: 7,
+    };
+    let mut cloned = summary.clone();
+    cloned.text.push_str(" changed");
+    assert!(std::sync::Arc::ptr_eq(
+        &body,
+        cloned.openai_encrypted_content.as_ref().unwrap()
+    ));
+    assert_eq!(summary.text, "original summary");
+    cloned.openai_encrypted_content = None;
+    assert!(std::sync::Arc::ptr_eq(
+        &body,
+        summary.openai_encrypted_content.as_ref().unwrap()
+    ));
+}
+
+#[test]
 fn openai_native_compaction_cost_is_bounded_not_ciphertext_length() {
     // Regression: a 1.1M-char encrypted payload was estimated at ~285k
     // tokens, so compaction reported 294k -> 303k while the provider saw
     // 219k -> 34k.
     let summary = Summary {
         text: String::new(),
-        openai_encrypted_content: Some("x".repeat(1_141_900)),
+        openai_encrypted_content: Some("x".repeat(1_141_900).into()),
         covers_up_to_turn: 229,
         original_turn_count: 229,
     };

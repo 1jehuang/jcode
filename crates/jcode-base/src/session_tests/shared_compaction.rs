@@ -6,7 +6,9 @@ use std::sync::Arc;
 fn large_state(tag: &str) -> StoredCompactionState {
     StoredCompactionState {
         summary_text: format!("summary {tag}"),
-        openai_encrypted_content: Some(format!("{tag}{}", "encrypted-body-".repeat(32 * 1024))),
+        openai_encrypted_content: Some(
+            format!("{tag}{}", "encrypted-body-".repeat(32 * 1024)).into(),
+        ),
         covers_up_to_turn: 3,
         original_turn_count: 7,
         compacted_count: 2,
@@ -52,7 +54,7 @@ fn reset_and_clone_retain_one_unique_encrypted_payload_until_mutation() {
         cloned.compaction.as_ref().unwrap()
     ));
 
-    // Count distinct retained String backing allocations, not process RSS.
+    // Count distinct retained encrypted-body allocations, not process RSS.
     let retained = [
         session.compaction.as_ref().unwrap(),
         session
@@ -90,7 +92,7 @@ fn reset_and_clone_retain_one_unique_encrypted_payload_until_mutation() {
         session.compaction.as_ref().unwrap(),
         cloned.compaction.as_ref().unwrap()
     ));
-    assert_ne!(
+    assert_eq!(
         session
             .compaction
             .as_ref()
@@ -107,7 +109,7 @@ fn reset_and_clone_retain_one_unique_encrypted_payload_until_mutation() {
             .as_ref()
             .unwrap()
             .as_ptr(),
-        "copy-on-write creates a distinct payload allocation only for the mutated snapshot"
+        "copy-on-write of summary metadata must retain the shared encrypted body"
     );
     assert_eq!(
         session
@@ -174,6 +176,13 @@ fn redacted_export_cannot_mutate_original_or_persisted_snapshot() {
 #[test]
 fn arc_compaction_json_is_byte_identical_and_reads_owned_snapshot() -> anyhow::Result<()> {
     let owned = large_state("wire-format");
+    let legacy_json = format!(
+        "{{\"summary_text\":\"summary wire-format\",\"openai_encrypted_content\":{},\"covers_up_to_turn\":3,\"original_turn_count\":7,\"compacted_count\":2}}",
+        serde_json::to_string(owned.openai_encrypted_content.as_deref().unwrap())?
+    );
+    assert_eq!(serde_json::to_vec(&owned)?, legacy_json.as_bytes());
+    let legacy_state: StoredCompactionState = serde_json::from_str(&legacy_json)?;
+    assert_eq!(legacy_state, owned);
     let shared = Arc::new(owned.clone());
     assert_eq!(serde_json::to_vec(&owned)?, serde_json::to_vec(&shared)?);
     assert_eq!(
@@ -259,7 +268,7 @@ impl Drop for HomeGuard {
 fn shared_compaction_retention_microprobe() {
     let mut session = fixture();
     Arc::make_mut(session.compaction.as_mut().unwrap()).openai_encrypted_content =
-        Some("encrypted".repeat(1024 * 1024));
+        Some("encrypted".repeat(1024 * 1024).into());
     session.reset_persist_state(false);
     let started = std::time::Instant::now();
     let clones: Vec<_> = (0..128).map(|_| session.clone()).collect();
@@ -282,21 +291,21 @@ fn shared_compaction_retention_microprobe() {
         })
         .map(|state| state.openai_encrypted_content.as_ref().unwrap().as_ptr())
         .collect();
-    let capacity = session
+    let payload_bytes = session
         .compaction
         .as_ref()
         .unwrap()
         .openai_encrypted_content
         .as_ref()
         .unwrap()
-        .capacity();
+        .len();
     assert_eq!(unique.len(), 1);
     eprintln!(
-        "sessions={} retained_references={} unique_payload_allocations={} unique_payload_capacity_bytes={} clone_elapsed_us={}",
+        "sessions={} retained_references={} unique_payload_allocations={} unique_payload_bytes={} clone_elapsed_us={}",
         clones.len() + 1,
         2 * (clones.len() + 1),
         unique.len(),
-        capacity * unique.len(),
+        payload_bytes * unique.len(),
         elapsed.as_micros()
     );
 }

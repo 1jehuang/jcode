@@ -3138,7 +3138,7 @@ fn route_journal_legacy_entries_preserve_snapshot_and_prior_journal_route() -> R
 fn big_compaction(tag: &str) -> std::sync::Arc<crate::session::StoredCompactionState> {
     crate::session::StoredCompactionState {
         summary_text: String::new(),
-        openai_encrypted_content: Some(format!("{tag}{}", "e".repeat(300 * 1024))),
+        openai_encrypted_content: Some(format!("{tag}{}", "e".repeat(300 * 1024)).into()),
         covers_up_to_turn: 3,
         original_turn_count: 3,
         compacted_count: 3,
