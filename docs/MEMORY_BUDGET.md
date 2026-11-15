@@ -1,7 +1,7 @@
 # Memory Regression Budget
 
 Status: active guardrail
-Updated: 2026-04-18
+Updated: 2026-11-15
 
 This document defines the current memory regression budget for jcode.
 
@@ -50,6 +50,62 @@ We use two kinds of budgets:
 2. Ratchet expectations
 - These are expected relationships between memory counters.
 - Regressions here are allowed only with explanation and updated docs/tests.
+
+## Efficiency investigations and stopping criteria
+
+Prefer eliminating redundant ownership over reducing useful retained state.
+Preserve conversation history, exact persistence/replay, snapshot isolation,
+rendered output, responsiveness, and cache utility. Cache eviction, compression
+with extra decoding work, and delayed delivery are tradeoffs, not automatic wins.
+
+For an optimization round:
+
+1. Rank attributed owners before editing. Prefer an expected retained gain of
+   at least 10 MiB per server or 1 MiB per typical client. These are investigation
+   priorities, not runtime caps. Smaller obvious low-complexity waste may qualify.
+2. Pin and identify both binaries. Repeat the same workload against isolated
+   sockets and homes, with settled samples at equal session/turn counts. Do not
+   infer savings from restarting the production server.
+3. Distinguish live allocator bytes, process PSS/private pages, unique backing
+   allocations, string capacities, and serialized JSON sizes. JSON size is an
+   attribution proxy, not a guaranteed heap bound. Exclude busy profiles explicitly.
+4. Test exact equality, legacy serialization, replay, and mutation isolation.
+   Verify the installed binary and live diagnostic schema after activation.
+5. Stop the round after two ranked follow-up passes find no further safe material
+   candidate, or when remaining candidates require wider redesign, unavailable
+   attribution, or behavior/latency tradeoffs. Record deferred owners and the
+   evidence that would justify reopening them. This is not proof that all future
+   optimization potential is exhausted.
+
+### Shared compaction acceptance example (2026-11-15)
+
+Sixteen resumed sessions, each with a 1 MiB encrypted compaction payload, grew
+live allocator usage by **52.358–52.729 MiB before** and **36.578–36.702 MiB after**
+sharing immutable session/persistence snapshots, over two pinned runs per binary.
+The pinned revisions also include concurrent changes, so this is a workload
+comparison rather than a one-patch benchmark. Ownership tests and payload
+counters independently verify the eliminated metadata copy.
+Process-private growth varied more, so this is not a fixed RSS savings claim.
+Both candidate runs retained 16,777,744 bytes of canonical payload capacity and
+zero additional persistence-metadata payload capacity. The independent compaction
+manager summary remains a separate owner.
+
+Borrowed exact comparison also avoids constructing an owned exported payload
+solely to detect unchanged state. An optional probe of 128 comparisons with a
+9 MiB payload took 67,228 microseconds for export-and-compare and 21,172 for the
+borrowed comparison in one hosted test run. This measures that operation, not
+application-wide latency or retained RSS. Run the focused probe with
+`justrust test -p jcode-base --lib persisted_state_comparison_probe -- --ignored --nocapture`.
+
+The follow-up owner pass found about 0.57 MiB combined AGENTS/skill snapshot
+string capacity across 41 ready live sessions. A local completed-turn fixture
+retained 26 default tools with 32,697 serialized JSON bytes, not a heap bound or
+a measurement of custom MCP catalogs. Immediately post-reload, locked tool
+snapshots are cold, so their zero count is not representative of warmed turns.
+The approximately 10.3 MiB search index already shares incremental Bloom-filter
+backing storage. No cache reduction was made to manufacture further savings.
+Reopen manager-summary sharing or custom tool-catalog ownership when a
+representative retained-allocation profile justifies the wider redesign.
 
 ## Hard caps
 
