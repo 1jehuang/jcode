@@ -32,9 +32,32 @@ pub fn test_env_lock() -> &'static Mutex<()> {
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn lock_test_env() -> MutexGuard<'static, ()> {
-    test_env_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    // Bounded acquisition, on purpose. Tests take this lock and then hold it
+    // across async work, so one slow or blocked holder parks every other test
+    // that needs it - and libtest reports the parked ones as "running for over
+    // 60 seconds" with no hint about who holds it. Blocking forever turns a
+    // diagnosable problem into an invisible one, so give up loudly instead.
+    const ACQUIRE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(180);
+    const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+
+    let deadline = std::time::Instant::now() + ACQUIRE_DEADLINE;
+    loop {
+        match test_env_lock().try_lock() {
+            Ok(guard) => return guard,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => return poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    panic!(
+                        "lock_test_env: another test has held the process env lock for over {}s. \
+                         Scope the guard to the env mutation (set_var/remove_var) instead of \
+                         holding it across awaits or blocking I/O; see #1636.",
+                        ACQUIRE_DEADLINE.as_secs()
+                    );
+                }
+                std::thread::sleep(RETRY_INTERVAL);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
