@@ -167,6 +167,7 @@ fn save_test_openrouter_model_cache(namespace: &str, source_api_base: &str, mode
     let cache = jcode_provider_openrouter::DiskCache {
         cached_at: jcode_provider_openrouter::current_unix_secs().expect("current unix time"),
         source_api_base: Some(source_api_base.to_string()),
+        source_headers_fingerprint: None,
         models: model_ids
             .iter()
             .map(|id| jcode_provider_openrouter::ModelInfo {

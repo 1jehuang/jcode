@@ -190,6 +190,7 @@ impl EnvGuard {
         let cache = jcode_provider_openrouter::DiskCache {
             cached_at: jcode_provider_openrouter::current_unix_secs().expect("current unix time"),
             source_api_base: Some(source_api_base.to_string()),
+            source_headers_fingerprint: None,
             models: model_ids
                 .iter()
                 .map(|id| jcode_provider_openrouter::ModelInfo {
@@ -521,6 +522,7 @@ fn save_openrouter_catalog_cache(model_ids: &[&str]) {
     let cache = jcode_provider_openrouter::DiskCache {
         cached_at: jcode_provider_openrouter::current_unix_secs().expect("current unix time"),
         source_api_base: None,
+        source_headers_fingerprint: None,
         models: model_ids
             .iter()
             .map(|id| jcode_provider_openrouter::ModelInfo {
