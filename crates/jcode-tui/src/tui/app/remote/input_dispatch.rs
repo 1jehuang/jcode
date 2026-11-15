@@ -16,7 +16,13 @@ pub(in crate::tui::app) async fn begin_remote_send(
     auto_retry: bool,
     retry_attempts: u8,
 ) -> Result<u64> {
-    app.prepare_cloud_environment(remote).await?;
+    if let Err(error) = app.prepare_cloud_environment(remote).await {
+        crate::logging::info(&format!(
+            "RECOVERY_SEND_FAILED session_id={:?} previous_request_id={:?} request_id=unassigned phase=prepare content_bytes={} images={} retry_attempts={}",
+            app.remote_session_id, app.current_message_id, content.len(), images.len(), retry_attempts
+        ));
+        return Err(error);
+    }
     // Reload delivery is idempotent on the server: an exact repeat of its
     // hidden reminder is acknowledged with Done without running the agent.
     // Delivery does not imply successful execution, though. A provider failure
@@ -52,7 +58,22 @@ pub(in crate::tui::app) async fn begin_remote_send(
             system_reminder.clone(),
             app.active_skill.clone(),
         )
-        .await?;
+        .await;
+    let msg_id = match msg_id {
+        Ok(id) => id,
+        Err(error) => {
+            // Errors can contain wire data, so keep diagnostics metadata-only.
+            crate::logging::info(&format!(
+                "RECOVERY_SEND_FAILED session_id={:?} request_id=unassigned previous_request_id={:?} phase=write content_bytes={} images={} retry_attempts={}",
+                app.remote_session_id, app.current_message_id, content.len(), images.len(), retry_attempts
+            ));
+            return Err(error);
+        }
+    };
+    crate::logging::info(&format!(
+        "RECOVERY_SEND_SUBMITTED session_id={:?} request_id={} content_bytes={} images={} retry_attempts={} is_system={}",
+        app.remote_session_id, msg_id, content.len(), images.len(), retry_attempts, is_system
+    ));
     if !is_system {
         app.publish_user_image_previews(&images);
     }
@@ -102,6 +123,10 @@ pub(in crate::tui::app) fn restore_prepared_remote_input(
     app: &mut App,
     prepared: input::PreparedInput,
 ) {
+    crate::logging::info(&format!(
+        "RECOVERY_DRAFT_RESTORED session_id={:?} request_id={:?} content_bytes={} images={}",
+        app.remote_session_id, app.current_message_id, prepared.raw_input.len(), prepared.images.len()
+    ));
     app.input = prepared.raw_input;
     app.cursor_pos = app.input.len();
     app.pending_images = prepared.images;
@@ -144,6 +169,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
     prepared: input::PreparedInput,
 ) -> Result<()> {
     if app.remote_model_switch_in_flight || app.auth_catalog_refresh_pending {
+        crate::logging::info(&format!(
+            "RECOVERY_SUBMISSION_DEFERRED session_id={:?} request_id={:?} reason=model_setup content_bytes={} images={} replacing_pending={}",
+            app.remote_session_id, app.current_message_id, prepared.expanded.len(), prepared.images.len(), app.pending_prompt_after_model_switch.is_some()
+        ));
         app.pending_prompt_after_model_switch = Some(prepared);
         app.set_status_notice(if app.auth_catalog_refresh_pending {
             "Prompt queued until model setup completes"
@@ -161,9 +190,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
     // `process_remote_followups` dispatch it once history is loaded - the same
     // gating that startup auto-submit already relies on.
     if !remote.has_loaded_history() {
-        crate::logging::info(
-            "Deferring manually submitted prompt until remote history loads (avoids first-prompt clobber)",
-        );
+        crate::logging::info(&format!(
+            "RECOVERY_SUBMISSION_DEFERRED session_id={:?} request_id={:?} reason=history content_bytes={} images={} replacing_pending={}",
+            app.remote_session_id, app.current_message_id, prepared.expanded.len(), prepared.images.len(), app.pending_prompt_before_history.is_some()
+        ));
         app.pending_prompt_before_history = Some(prepared);
         app.set_status_notice("Loading session...");
         return Ok(());
@@ -197,6 +227,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
         )
         .await
     {
+        crate::logging::info(&format!(
+            "RECOVERY_SUBMISSION_RESTORED session_id={:?} request_id={:?} content_bytes={} images={} queued={}",
+            app.remote_session_id, app.current_message_id, prepared.expanded.len(), prepared.images.len(), app.queued_messages.len()
+        ));
         app.remove_display_message(echo_index);
         app.restore_failover_payload(super::super::FallbackResendPayload {
             content: prepared.expanded,

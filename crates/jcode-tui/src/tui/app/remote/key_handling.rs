@@ -253,8 +253,16 @@ use key_events::handle_remote_key_internal;
 fn queue_prepared_remote_input(app: &mut App, prepared: input::PreparedInput) {
     if prepared.images.is_empty() {
         app.queued_messages.push(prepared.expanded);
+        crate::logging::info(&format!(
+            "RECOVERY_QUEUE_STAGED session_id={:?} request_id={:?} queued={}",
+            app.remote_session_id, app.current_message_id, app.queued_messages.len()
+        ));
         return;
     }
+    crate::logging::info(&format!(
+        "RECOVERY_QUEUE_GUARD session_id={:?} request_id={:?} reason=images content_bytes={} images={} queued={} action=restore_draft",
+        app.remote_session_id, app.current_message_id, prepared.expanded.len(), prepared.images.len(), app.queued_messages.len()
+    ));
     // Preparation consumed pasted text storage. Restore its expanded contents,
     // not now-unresolvable [pasted ...] placeholders.
     app.restore_failover_payload(app_mod::FallbackResendPayload {
@@ -270,6 +278,44 @@ fn queue_prepared_remote_input(app: &mut App, prepared: input::PreparedInput) {
         "Message not queued: queued messages cannot carry images. Your text and images are still in the input. Send now or wait until the current turn finishes.",
     ));
     app.set_status_notice("Images cannot be queued; draft preserved");
+}
+
+#[cfg(test)]
+mod recovery_queue_guard_tests {
+    use super::*;
+
+    #[test]
+    fn image_queue_guard_restores_expanded_draft_and_preserves_queue() {
+        let mut app = app_mod::tests::create_test_app();
+        app.queued_messages.push("already queued".to_string());
+        let images = vec![("image/png".to_string(), "private image payload".to_string())];
+        queue_prepared_remote_input(
+            &mut app,
+            input::PreparedInput {
+                raw_input: "[pasted text]".to_string(),
+                expanded: "expanded private prompt".to_string(),
+                images: images.clone(),
+            },
+        );
+        assert_eq!(app.input, "expanded private prompt [image 1]");
+        assert_eq!(app.pending_images, images);
+        assert_eq!(app.queued_messages, vec!["already queued"]);
+    }
+
+    #[test]
+    fn text_queue_staging_preserves_submission_order() {
+        let mut app = app_mod::tests::create_test_app();
+        app.queued_messages.push("first".to_string());
+        queue_prepared_remote_input(
+            &mut app,
+            input::PreparedInput {
+                raw_input: "second".to_string(),
+                expanded: "expanded second".to_string(),
+                images: Vec::new(),
+            },
+        );
+        assert_eq!(app.queued_messages, vec!["first", "expanded second"]);
+    }
 }
 
 /// Everything a plain Enter does with the composer contents in a remote
