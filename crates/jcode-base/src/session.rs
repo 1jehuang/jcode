@@ -1303,32 +1303,7 @@ request in this new forked session, using the inherited conversation only as con
             compaction.summary_text = crate::message::redact_secrets(&compaction.summary_text);
         }
         for msg in &mut redacted.messages {
-            for block in &mut msg.content {
-                match block {
-                    ContentBlock::Text { text, .. }
-                    | ContentBlock::Reasoning { text }
-                    | ContentBlock::ReasoningTrace { text } => {
-                        *text = crate::message::redact_secrets(text);
-                    }
-                    ContentBlock::AnthropicThinking { thinking, .. } => {
-                        *thinking = crate::message::redact_secrets(thinking);
-                    }
-                    ContentBlock::OpenAIReasoning { summary, .. } => {
-                        for item in summary {
-                            *item = crate::message::redact_secrets(item);
-                        }
-                    }
-                    ContentBlock::ToolResult { content, .. } => {
-                        *content = crate::message::redact_secrets(content);
-                    }
-                    ContentBlock::ToolUse { input, .. } => redact_json_value(input),
-                    // Export copy only: the stored item stays verbatim for
-                    // replay, but queries can carry pasted credentials.
-                    ContentBlock::ProviderNative { item, .. } => redact_json_value(item),
-                    ContentBlock::Image { .. } => {}
-                    ContentBlock::OpenAICompaction { .. } | ContentBlock::ToolReference { .. } => {}
-                }
-            }
+            redaction::redact_shared_content(&mut msg.content);
         }
         for event in &mut redacted.replay_events {
             match &mut event.kind {
@@ -1799,6 +1774,7 @@ request in this new forked session, using the inherited conversation only as con
 
 #[path = "session_redaction.rs"]
 mod redaction;
+#[cfg(test)]
 use redaction::redact_json_value;
 
 #[derive(Debug, Deserialize)]
