@@ -77,6 +77,48 @@ For an optimization round:
    evidence that would justify reopening them. This is not proof that all future
    optimization potential is exhausted.
 
+### Export and redaction ownership acceptance (2026-11-15)
+
+Unchanged export redaction now retains shared message payloads. Changed fields
+are computed once before a single copy-on-write detach, preserving the previous
+redaction output, opaque fields, and original-session isolation. An independent
+eager-redaction oracle covers every content variant and nested JSON values.
+
+An isolated allocator probe retained eight export snapshots of sixteen
+106,496-byte text messages and one 2 MiB opaque image. Live allocated-byte growth
+was **30,505,008 before versus 39,104 after** for safe content, and
+**30,480,416 versus 13,701,392** when every text message needed redaction.
+These are retained allocator measurements for this fixture, not production RSS.
+Single-run elapsed times were 176,158/166,226 microseconds for safe exports and
+693,024/687,604 for changed exports. They do not establish a general speedup.
+Reproduce serially with
+`justrust test -p jcode-base --lib export_sharing_cpu_allocator_probe -- --ignored --nocapture --test-threads=1`.
+
+Separately, regex no-match replacements now reuse the existing string instead
+of converting a borrowed `Cow` into another full copy. A 1,107,000-byte helper
+probe performed fifty no-match replacements with **50 allocation replacements
+before and zero after**, preserving exact output. Existing cache breakpoints
+also no longer detach shared message payloads just to retain the same marker.
+These are allocation/copy reductions, not measured process-RSS reductions.
+
+### Rejected wire shrinking candidate (2026-11-15)
+
+The tested candidate shrank wire buffers only when spare capacity was at least
+1 MiB and at least half their length. Real localhost uploads covered off/gzip/
+zstd, repeated and varied input, 1/8/16 MiB fixtures, slow readers, cancellation,
+and response waits. All 216 transport runs and 36 exact receiver-byte checks
+passed. Fifteen of eighteen fixtures saved 1–16 MiB of allocation capacity, but
+there was **no meaningful peak-memory or consistent RSS benefit demonstrated**.
+Timing noise also left latency neutrality unproven. The shrinking policy was
+therefore rejected rather than deployed to improve capacity counters alone.
+
+Only the simpler early release of the no-longer-needed raw serialization buffer
+after compression was retained, with off/gzip/zstd HTTP byte/header equivalence
+coverage. This shortens a local allocation lifetime, not a demonstrated
+steady-state or peak-RSS gain. No compression, retry, cache, or history policy
+was changed. The remaining live-heap attribution gap still requires allocation
+stack evidence before it can be classified as redundant ownership.
+
 ### Shared compaction acceptance example (2026-11-15)
 
 Sixteen resumed sessions, each with a 1 MiB encrypted compaction payload, grew
