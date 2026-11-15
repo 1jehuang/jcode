@@ -502,8 +502,33 @@ impl Session {
             })
             .unwrap_or(0);
 
+        // Diagnostic-only traversal of both retained roots. One accounting pass
+        // avoids charging shared canonical/provider payload allocations twice.
+        let mut capacity = jcode_message_types::content_capacity::ContentCapacityAccounting::new();
+        capacity.record_vec_allocation(&self.messages);
+        capacity.record_vec_allocation(&self.provider_messages_cache);
+        for message in &self.messages {
+            capacity.record_shared(&message.content);
+        }
+        for message in &self.provider_messages_cache {
+            capacity.record_shared(&message.content);
+        }
+        let capacity = capacity.finish();
+
         serde_json::json!({
             "session_id": self.id,
+            "retained_transcript_capacity": {
+                "scope": "canonical messages and provider message cache, shared backing counted once",
+                "known_heap_bytes": capacity.known_heap_bytes(),
+                "string_len_bytes": capacity.string_len_bytes,
+                "string_capacity_bytes": capacity.string_capacity_bytes,
+                "vec_capacity_bytes": capacity.vec_capacity_bytes,
+                "shared_backings": capacity.shared_backings,
+                "shared_references": capacity.shared_references,
+                "json_object_entries": capacity.json_object_entries,
+                "is_lower_bound": true,
+                "excluded_overhead": "JSON map nodes/buckets, Arc headers, allocator metadata/rounding/fragmentation, and non-content message fields",
+            },
             "messages": {
                 "count": self.messages.len(),
                 "json_bytes": session_message_json_bytes,
