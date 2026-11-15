@@ -424,7 +424,7 @@ impl NariSession {
             .await
             .map_err(handshake_error)?;
             super::timing::mark("nari websocket connected");
-            send(&mut socket, json!({"type":"session.configure", "session":{"model":"qwen3-asr-fast", "turn_detection":null, "language":"en", "prompt":prompt}})).await?;
+            send(&mut socket, json!({"type":"session.configure", "session":{"model":"qwen3-asr-fast", "turn_detection":{"type":"server_vad", "threshold":0.5, "silence_duration_ms":500, "prefix_padding_ms":300}, "language":"en", "prompt":prompt}})).await?;
             loop {
                 let event = receive(&mut socket).await?;
                 match event["type"].as_str() {
@@ -504,6 +504,9 @@ impl NariSession {
         let mut sent = false;
         let mut first_text = false;
         let mut state = TranscriptState::default();
+        // Prompt bias is not speech evidence. Manual and duration commits can
+        // still guess text from silence, so require a server VAD speech event.
+        let mut speech_detected = false;
         // Capture owns its normal five-minute stop. Allow queued PCM and filter
         // tail to drain rather than racing that stop with a network timeout.
         let mut deadline = Instant::now() + MAX_RECORDING_DURATION + IO_TIMEOUT;
@@ -520,11 +523,24 @@ impl NariSession {
                     if stopping.load(Ordering::SeqCst) {
                         super::timing::mark(incoming["type"].as_str().unwrap_or("?"));
                     }
-                    if state.apply(&incoming, stopping.load(Ordering::SeqCst))? {
+                    if incoming["type"] == "input_audio_buffer.speech_started" {
+                        speech_detected = true;
+                    }
+                    let revised = state.apply(&incoming, stopping.load(Ordering::SeqCst))?;
+                    if revised && !speech_detected {
+                        // Validate and track pending items normally, but never
+                        // resurrect pre-speech guesses in a later aggregate.
+                        for (_, text) in &mut state.items {
+                            text.clear();
+                        }
+                    }
+                    if revised && speech_detected {
                         if !first_text { first_text = true; super::timing::mark("first transcript revision"); }
                         event(NariEvent::Transcript(state.text()));
                     }
-                    if stopping.load(Ordering::SeqCst) && state.end_ack && state.pending.is_empty() { return Ok(state.text()); }
+                    if stopping.load(Ordering::SeqCst) && state.end_ack && state.pending.is_empty() {
+                        return Ok(if speech_detected { state.text() } else { String::new() });
+                    }
                 }
             }
         }
@@ -792,7 +808,7 @@ mod tests {
             let config = receive(&mut ws).await.unwrap();
             assert_eq!(
                 config,
-                json!({"type":"session.configure", "session":{"model":"qwen3-asr-fast", "turn_detection":null, "language":"en", "prompt":recognition_prompt()}})
+                json!({"type":"session.configure", "session":{"model":"qwen3-asr-fast", "turn_detection":{"type":"server_vad", "threshold":0.5, "silence_duration_ms":500, "prefix_padding_ms":300}, "language":"en", "prompt":recognition_prompt()}})
             );
             send(&mut ws, json!({"type":"session.configured"}))
                 .await
@@ -810,6 +826,7 @@ mod tests {
             let commit = receive(&mut ws).await.unwrap();
             assert_eq!(commit["event_id"], END);
             for value in [
+                json!({"type":"input_audio_buffer.speech_started", "audio_start_ms":0}),
                 json!({"type":"transcript.partial", "item_id":"a", "transcript":"Hel"}),
                 json!({"type":"input_audio_buffer.committed", "item_id":"a", "client_event_id":END}),
                 json!({"type":"transcript.completed", "item_id":"a", "transcript":"Hello"}),
@@ -1051,6 +1068,13 @@ mod tests {
         );
     }
     async fn server(events: Vec<Value>) -> (String, tokio::task::JoinHandle<()>) {
+        let mut speech_events =
+            vec![json!({"type":"input_audio_buffer.speech_started", "audio_start_ms":0})];
+        speech_events.extend(events);
+        server_events(speech_events).await
+    }
+
+    async fn server_events(events: Vec<Value>) -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
@@ -1060,6 +1084,13 @@ mod tests {
                 serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
             assert_eq!(config["type"], "session.configure");
             assert_eq!(config["session"]["model"], "qwen3-asr-fast");
+            assert_eq!(
+                config["session"]["turn_detection"],
+                json!({
+                    "type":"server_vad", "threshold":0.5,
+                    "silence_duration_ms":500, "prefix_padding_ms":300
+                })
+            );
             assert!(
                 config["session"]["prompt"]
                     .as_str()
@@ -1130,8 +1161,81 @@ mod tests {
         task.await.unwrap();
     }
     #[tokio::test]
-    async fn empty_recording_can_finalize() {
+    async fn silence_cannot_emit_prompt_biased_partial_or_final() {
+        for raw in ["Jev.", "Jeff", "Hey Jev", "some unrelated invented words"] {
+            let (url, task) = server_events(vec![
+                json!({"type":"transcript.partial", "item_id":"a", "transcript":raw}),
+                json!({"type":"input_audio_buffer.committed", "item_id":"a", "client_event_id":END}),
+                json!({"type":"transcript.completed", "item_id":"a", "transcript":raw}),
+            ]).await;
+            let session = NariSession::connect_to(&url, "test", Arc::new(AtomicBool::new(false)))
+                .await
+                .unwrap();
+            let (tx, rx) = nari_pcm_channel();
+            tx.send(vec![1, -1]).await.unwrap();
+            drop(tx);
+            let mut events = Vec::new();
+            assert_eq!(
+                session.run(rx, |event| events.push(event)).await.unwrap(),
+                ""
+            );
+            assert!(!events.iter().any(|e| matches!(e, NariEvent::Transcript(_))));
+            assert!(
+                matches!(events.last(), Some(NariEvent::Finished(Ok(text))) if text.is_empty())
+            );
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_speech_guesses_do_not_reappear_when_speech_starts() {
+        let (url, task) = server_events(vec![
+            json!({"type":"input_audio_buffer.committed", "item_id":"silent", "commit_reason":"max_duration"}),
+            json!({"type":"transcript.partial", "item_id":"silent", "transcript":"Jev."}),
+            json!({"type":"transcript.completed", "item_id":"silent", "transcript":"Jev."}),
+            json!({"type":"input_audio_buffer.speech_started", "audio_start_ms":36000}),
+            json!({"type":"transcript.partial", "item_id":"speech", "transcript":"Fix it"}),
+            json!({"type":"input_audio_buffer.committed", "item_id":"speech", "client_event_id":END}),
+            json!({"type":"transcript.completed", "item_id":"speech", "transcript":"Fix it."}),
+        ]).await;
+        let session = NariSession::connect_to(&url, "test", Arc::new(AtomicBool::new(false)))
+            .await
+            .unwrap();
+        let (tx, rx) = nari_pcm_channel();
+        tx.send(vec![1, -1]).await.unwrap();
+        drop(tx);
+        let mut updates = Vec::new();
+        assert_eq!(
+            session.run(rx, |event| updates.push(event)).await.unwrap(),
+            "Fix it."
+        );
+        assert!(updates.iter().all(|event| match event {
+            NariEvent::Transcript(text) => !text.contains("Jev"),
+            _ => true,
+        }));
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn detected_short_address_is_not_blacklisted() {
         let (url, task) = server(vec![
+            json!({"type":"input_audio_buffer.committed", "item_id":"a", "client_event_id":END}),
+            json!({"type":"transcript.completed", "item_id":"a", "transcript":"Jev."}),
+        ])
+        .await;
+        let session = NariSession::connect_to(&url, "test", Arc::new(AtomicBool::new(false)))
+            .await
+            .unwrap();
+        let (tx, rx) = nari_pcm_channel();
+        tx.send(vec![1, -1]).await.unwrap();
+        drop(tx);
+        assert_eq!(session.run(rx, |_| {}).await.unwrap(), "Jev.");
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_recording_can_finalize() {
+        let (url, task) = server_events(vec![
             json!({"type":"input_audio_buffer.commit_empty","client_event_id":END}),
         ])
         .await;
