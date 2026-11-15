@@ -183,18 +183,6 @@ impl Tool for EditTool {
                             "replace_all": {"type": "boolean", "description": "Replace every match."}
                         }
                     }
-                },
-                "old_string": {
-                    "type": "string",
-                    "description": "Single-edit shorthand: exact text to replace. Omit when using edits."
-                },
-                "new_string": {
-                    "type": "string",
-                    "description": "Single-edit shorthand: replacement text."
-                },
-                "replace_all": {
-                    "type": "boolean",
-                    "description": "Single-edit shorthand: replace every match."
                 }
             }
         })
@@ -477,6 +465,9 @@ mod tests {
     fn schema_requires_canonical_nonempty_edits() {
         let schema = EditTool::new().parameters_schema();
         assert_eq!(schema["required"], json!(["file_path", "edits"]));
+        for legacy_field in ["old_string", "new_string", "replace_all"] {
+            assert!(schema["properties"].get(legacy_field).is_none());
+        }
         let edits = &schema["properties"]["edits"];
         assert_eq!(edits["type"], "array");
         assert_eq!(edits["minItems"], 1);
@@ -488,6 +479,18 @@ mod tests {
         for field in ["old_string", "new_string"] {
             assert_eq!(edits["items"]["properties"][field]["type"], "string");
         }
+    }
+
+    #[test]
+    fn legacy_single_edit_remains_executable_without_advertising_it() {
+        let input: EditInput = serde_json::from_value(json!({
+            "file_path": "f", "old_string": "a", "new_string": "b", "replace_all": true
+        }))
+        .unwrap();
+        let operations = input.operations().unwrap();
+        let (updated, applied) = apply_edits("a a", &operations, "f").unwrap();
+        assert_eq!(updated, "b b");
+        assert_eq!(applied[0].occurrences, 2);
     }
 
     #[test]
