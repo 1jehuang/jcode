@@ -57,14 +57,19 @@ async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: boo
     drop(busy_guard);
     drop(writer);
 
-    let mut bytes = Vec::new();
-    stream_b
-        .read_to_end(&mut bytes)
-        .await
-        .expect("read model catalog event bytes");
-    let mut cursor = std::io::Cursor::new(bytes);
+    // Read exactly one event instead of waiting for stream EOF. The handler may
+    // legitimately keep its own writer clone alive (event queue, bus subscriber,
+    // spawned task), and `read_to_end` would then never return - which is how
+    // this test hung for minutes instead of asserting (#1636).
+    let mut reader = tokio::io::BufReader::new(&mut stream_b);
     let mut line = String::new();
-    cursor.read_line(&mut line).expect("read first line");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut line),
+    )
+    .await
+    .expect("model catalog event must arrive within 5s")
+    .expect("read model catalog event line");
     let event: crate::protocol::ServerEvent =
         serde_json::from_str(line.trim()).expect("decode model catalog event");
 
