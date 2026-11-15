@@ -2119,7 +2119,10 @@ fn render_sections(
     lines
 }
 
-fn render_mcp_servers_line(servers: &[(String, usize)], width: u16) -> Vec<Line<'static>> {
+pub(crate) fn render_mcp_servers_line(
+    servers: &[(String, usize)],
+    width: u16,
+) -> Vec<Line<'static>> {
     let w = width as usize;
     let full_parts: Vec<String> = servers
         .iter()
