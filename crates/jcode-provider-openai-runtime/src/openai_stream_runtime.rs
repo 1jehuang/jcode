@@ -1085,6 +1085,12 @@ async fn continue_persistent_ws_locked(
     let mut logged_first_server_event = false;
     let mut response_started = false;
     let ws_completion_timeout_secs = effective_ws_completion_timeout_secs(&continuation_request);
+    // The frame has been sent and timeout policy is now owned. Keep the retry
+    // owner's original request, not these transformed wire-only copies, while
+    // waiting for a potentially long response.
+    drop(continuation_request);
+    drop(continuation_tools);
+    drop(continuation_instructions);
 
     loop {
         // Only inactivity ends the stream. A wall-clock cap here used to kill
@@ -1603,6 +1609,9 @@ async fn stream_response_websocket_authenticated(
     let mut logged_first_server_event = false;
     let mut response_started = false;
     let ws_completion_timeout_secs = effective_ws_completion_timeout_secs(&request_event);
+    // Retry ownership lives in the caller. This transformed wire payload is no
+    // longer needed once the frame is sent and its timeout policy is captured.
+    drop(request_event);
 
     loop {
         // Only inactivity ends the stream (see the persistent path above):

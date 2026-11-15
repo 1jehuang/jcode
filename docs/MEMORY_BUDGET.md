@@ -243,3 +243,18 @@ Any intentional change to those limits must update this document in the same PR.
 - The retry-body change passed 12 wire tests, 11 retry-filter tests and four
   Azure retry tests on hosted builds. No cache limits, history retention,
   batching, timers or output quality were reduced.
+- The same borrowing rule now applies to Anthropic attempts and native OpenAI
+  HTTPS/opaque-recovery attempts. Hosted validation passed 118 Anthropic runtime
+  tests (one ignored), four native HTTP idle tests and ten opaque recovery tests.
+  These provider equivalents have structural copy-removal evidence, not their
+  own measured production RAM delta. The integrated session suite additionally
+  passed 143 tests (six ignored).
+- Follow-up ownership review found that transformed websocket wire trees have
+  no uses after send and timeout-policy derivation. Releasing these temporary
+  values before response reception preserves the caller's retry request and
+  persistent response state. This is a lifetime improvement, not a measured RSS
+  claim. The original retry request, canonical transcript and useful caches
+  remain deliberately retained. Eliminating those owners requires additional
+  attribution or a wider serialization/ownership redesign, not arbitrary caps.
+  The early-release change passed the full native OpenAI runtime suite:
+  232 tests passed, three ignored, including wire, cancellation and recovery.
