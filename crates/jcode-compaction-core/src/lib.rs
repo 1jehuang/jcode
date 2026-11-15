@@ -96,7 +96,7 @@ Be concise but preserve important details. You can search the full conversation 
 #[derive(Debug, Clone)]
 pub struct Summary {
     pub text: String,
-    pub openai_encrypted_content: Option<String>,
+    pub openai_encrypted_content: Option<std::sync::Arc<str>>,
     pub covers_up_to_turn: usize,
     pub original_turn_count: usize,
 }

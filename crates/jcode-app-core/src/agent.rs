@@ -910,7 +910,7 @@ impl Agent {
             };
         let state = crate::session::StoredCompactionState {
             summary_text,
-            openai_encrypted_content,
+            openai_encrypted_content: openai_encrypted_content.map(Into::into),
             covers_up_to_turn: compacted_count,
             original_turn_count: compacted_count,
             compacted_count,

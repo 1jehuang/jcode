@@ -469,6 +469,32 @@ impl Session {
             .and_then(|c| c.openai_encrypted_content.as_ref())
             .map(|text| text.len())
             .unwrap_or(0);
+        let metadata_payload_capacity = self
+            .persist_state
+            .last_meta
+            .as_ref()
+            .and_then(|meta| meta.compaction.as_ref())
+            .filter(|stored| {
+                !self
+                    .compaction
+                    .as_ref()
+                    .is_some_and(|canonical| std::sync::Arc::ptr_eq(canonical, stored))
+            })
+            .map(|stored| {
+                let encrypted_bytes = stored
+                    .openai_encrypted_content
+                    .as_ref()
+                    .filter(|body| {
+                        !self
+                            .compaction
+                            .as_ref()
+                            .and_then(|canonical| canonical.openai_encrypted_content.as_ref())
+                            .is_some_and(|canonical| std::sync::Arc::ptr_eq(canonical, body))
+                    })
+                    .map_or(0, |body| body.len());
+                stored.summary_text.capacity() + encrypted_bytes
+            })
+            .unwrap_or(0);
 
         serde_json::json!({
             "session_id": self.id,
@@ -497,11 +523,9 @@ impl Session {
                 "json_bytes": compaction_json_bytes,
                 "summary_text_bytes": compaction_summary_bytes,
                 "retained_payload_capacity_bytes": self.compaction.as_ref().map(|c| {
-                    c.summary_text.capacity() + c.openai_encrypted_content.as_ref().map(String::capacity).unwrap_or(0)
+                    c.summary_text.capacity() + c.openai_encrypted_content.as_ref().map_or(0, |body| body.len())
                 }).unwrap_or(0),
-                "persisted_metadata_payload_capacity_bytes": self.persist_state.last_meta.as_ref().and_then(|meta| meta.compaction.as_ref()).filter(|stored| !self.compaction.as_ref().is_some_and(|canonical| std::sync::Arc::ptr_eq(canonical, stored))).map(|c| {
-                    c.summary_text.capacity() + c.openai_encrypted_content.as_ref().map(String::capacity).unwrap_or(0)
-                }).unwrap_or(0),
+                "persisted_metadata_payload_capacity_bytes": metadata_payload_capacity,
                 "encrypted_content_bytes": compaction_encrypted_bytes,
             },
             "env_snapshots": {

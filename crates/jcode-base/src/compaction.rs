@@ -1265,7 +1265,7 @@ impl CompactionManager {
                     .sum();
                 let summary = Summary {
                     text: result.summary_text,
-                    openai_encrypted_content: result.openai_encrypted_content,
+                    openai_encrypted_content: result.openai_encrypted_content.map(Into::into),
                     covers_up_to_turn: result.covers_up_to_turn,
                     original_turn_count: self.pending_cutoff,
                 };
@@ -1371,7 +1371,7 @@ impl CompactionManager {
                     .openai_encrypted_content
                     .as_ref()
                     .map(|encrypted_content| ContentBlock::OpenAICompaction {
-                        encrypted_content: encrypted_content.clone(),
+                        encrypted_content: encrypted_content.to_string(),
                     })
                     .unwrap_or_else(|| ContentBlock::Text {
                         text: compacted_summary_text_block(&summary.text),
