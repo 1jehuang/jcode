@@ -1877,7 +1877,8 @@ async fn build_memory_prompt_nonblocking_defers_pending_memory_during_tool_loop(
                 name: "bash".to_string(),
                 input: serde_json::json!({}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         },
@@ -2037,7 +2038,8 @@ async fn env_snapshot_detail_is_minimal_for_empty_sessions_and_full_after_histor
             content: vec![ContentBlock::Text {
                 text: "hello".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,
@@ -3192,13 +3194,16 @@ fn active_skill_is_injected_into_transcript_once() {
 
     // Once compaction hides that copy from the provider, the next turn
     // injects the skill again so the model keeps it.
-    agent.session.compaction = Some(crate::session::StoredCompactionState {
-        summary_text: "summary".into(),
-        openai_encrypted_content: None,
-        covers_up_to_turn: 1,
-        original_turn_count: 1,
-        compacted_count: agent.session.messages.len(),
-    });
+    agent.session.compaction = Some(
+        crate::session::StoredCompactionState {
+            summary_text: "summary".into(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: 1,
+            original_turn_count: 1,
+            compacted_count: agent.session.messages.len(),
+        }
+        .into(),
+    );
     agent.inject_active_skill("after compaction");
     let injected = transcript_texts(&agent)
         .into_iter()

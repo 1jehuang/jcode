@@ -417,7 +417,7 @@ pub(super) fn create_transfer_session_from_parent(
     }
     let mut child = crate::session::Session::create(Some(parent_session_id.to_string()), None);
     child.messages.clear();
-    child.compaction = compaction;
+    child.compaction = compaction.map(std::sync::Arc::new);
     child.system_prompt = parent.system_prompt.clone();
     child.agent_profile = parent.agent_profile.clone();
     child.working_dir = parent.working_dir.clone();
@@ -443,7 +443,7 @@ async fn prepare_transfer_session_local(
     let compaction = crate::compaction::build_transfer_compaction_state(
         provider,
         transfer_active_messages(&parent),
-        parent.compaction.clone(),
+        parent.compaction.as_deref().cloned(),
     )
     .await?;
     let (session_id, session_name) =
@@ -727,7 +727,7 @@ fn launch_manual_subagent(app: &mut App, spec: ManualSubagentSpec) {
     }];
     app.add_provider_message(Message {
         role: Role::Assistant,
-        content: content_blocks.clone(),
+        content: content_blocks.clone().into(),
         timestamp: Some(chrono::Utc::now()),
         tool_duration_ms: None,
     });

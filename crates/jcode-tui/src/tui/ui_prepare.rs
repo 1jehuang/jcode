@@ -50,6 +50,23 @@ fn assistant_aux_cache() -> &'static std::sync::Mutex<AssistantAuxCacheState> {
     CACHE.get_or_init(|| std::sync::Mutex::new(AssistantAuxCacheState::default()))
 }
 
+/// Diagnostic-only snapshot of unique auxiliary payload allocations.
+pub(super) fn debug_assistant_aux_memory_profile() -> serde_json::Value {
+    let cache = assistant_aux_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    super::memory_estimates::diagnostic_aux_profile(
+        cache.entries.values().map(|value| {
+            (
+                Arc::as_ptr(value) as usize,
+                std::mem::size_of::<AssistantAuxData>(),
+                &value.logical_plain_lines,
+            )
+        }),
+        cache.order.len(),
+    )
+}
+
 fn content_prefers_display_as_logical_lines(content: &str) -> bool {
     content.lines().any(|line| {
         let trimmed = line.trim();
@@ -388,7 +405,7 @@ pub(super) fn prepare_messages(
         mermaid_aspect_bucket: crate::tui::mermaid::current_preferred_aspect_ratio_bucket(),
         is_processing: app.is_processing(),
         streaming_text_len: app.streaming_text().len(),
-        streaming_text_hash: super::hash_text_for_cache(app.streaming_text()),
+        streaming_text_hash: app.streaming_text_hash(),
         batch_progress_hash: active_batch_progress_hash(app),
         // An unpinned transcript must not reuse a previously prepared frame
         // containing anchored images. With no images, both modes are visually

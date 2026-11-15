@@ -111,6 +111,22 @@ pub(in super::super) fn handle_disconnect(
     // lost. Never wait on an old connection's request ID or blindly resend.
     if app.pending_automatic_failover_request_id.is_some() {
         fail_pending_automatic_failover(app, "Connection lost before route confirmation");
+    } else if app.remote_model_switch_in_flight {
+        app.log_recovery_event(
+            crate::logging::LogLevel::Warn,
+            "RECOVERY_MODEL_SWITCH_STOPPED",
+            "disconnected_before_confirmation",
+        );
+        // Manual switches have no automatic-failover request ID. Their
+        // acknowledgement is just as connection-scoped: keeping this flag
+        // would park every later prompt forever after reconnect. Do not send
+        // a prompt intended for a route whose switch was never confirmed.
+        app.remote_model_switch_in_flight = false;
+        restore_unconfirmed_model_switch_prompts(app);
+        app.push_display_message(DisplayMessage::error(
+            "Connection lost before model switch confirmation. Any waiting prompt was restored instead of sent on an unconfirmed route. Check /model after reconnecting.".to_string(),
+        ));
+        app.set_status_notice("Model switch unconfirmed; check /model");
     }
     app.revoke_cloud_environment();
     let detail = if state.server_reload_in_progress {

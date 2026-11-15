@@ -220,7 +220,8 @@ mod tests {
             content: vec![ContentBlock::Text {
                 text: text.into(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         }
@@ -233,7 +234,8 @@ mod tests {
                 tool_use_id: "t".into(),
                 content: "out".into(),
                 is_error: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         }

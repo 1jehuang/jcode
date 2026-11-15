@@ -61,7 +61,7 @@ impl SkillRegistry {
             self.command_origins
                 .insert(key.clone(), (plugin.to_owned(), root.to_owned()));
             self.plugin_keys.insert(key.clone());
-            self.skills.insert(key, skill);
+            self.skills.insert(key, std::sync::Arc::new(skill));
         }
     }
 }

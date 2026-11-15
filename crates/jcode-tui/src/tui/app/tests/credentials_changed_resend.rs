@@ -36,6 +36,7 @@ fn test_credentials_changed_resends_turn_held_on_rate_limit() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
 
     app.handle_server_event(
         crate::protocol::ServerEvent::CredentialsChanged {

@@ -12,6 +12,111 @@ pub(super) use super::tui_lifecycle_runtime::remote_auto_server_reload;
 #[path = "tui_lifecycle_reload_policy_tests.rs"]
 mod reload_policy_tests;
 
+#[cfg(test)]
+mod terminal_retry_tests {
+    use super::*;
+
+    #[test]
+    fn recovered_images_keep_stable_markers_with_existing_attachments() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let old = ("image/png".to_string(), "old-image".to_string());
+        let newer = ("image/png".to_string(), "newer-image".to_string());
+        for has_newer_draft in [true, false] {
+            let mut app = super::super::tests::create_test_app();
+            app.pending_images = vec![newer.clone(), old.clone()];
+            if has_newer_draft {
+                app.input = "New draft".to_string();
+                app.ensure_input_image_markers();
+            }
+            // Transport text excludes owned attachment markers.
+            let payload = super::super::FallbackResendPayload {
+                content: "Old".to_string(),
+                images: vec![old.clone(), newer.clone()],
+                is_system: false,
+                system_reminder: None,
+                auto_retry: true,
+                retry_attempts: 1,
+                raw_input: None,
+            };
+            app.restore_failover_payload(payload.clone());
+            app.sync_model_picker_preview_from_input();
+            let expected = if has_newer_draft {
+                "New draft [image 1] [image 2]"
+            } else {
+                "Old [image 1] [image 2]"
+            };
+            assert_eq!(app.input, expected);
+            assert_eq!(app.pending_images, vec![newer.clone(), old.clone()]);
+            app.restore_failover_payload(payload);
+            app.sync_model_picker_preview_from_input();
+            assert_eq!(app.input, expected, "repeated restoration is idempotent");
+            assert_eq!(app.pending_images, vec![newer.clone(), old.clone()]);
+        }
+    }
+
+    #[test]
+    fn terminal_remote_retry_stops_preserve_user_attachments() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        for stop in ["budget", "pause", "credential"] {
+            let mut app = super::super::tests::create_test_app();
+            let image = ("image/png".to_string(), "original-image".to_string());
+            app.last_submitted_input = Some("Inspect this screenshot".to_string());
+            app.rate_limit_pending_message = Some(PendingRemoteMessage {
+                content: "Expanded screenshot instructions".to_string(),
+                images: vec![image.clone()],
+                is_system: false,
+                system_reminder: None,
+                auto_retry: true,
+                retry_attempts: App::AUTO_RETRY_MAX_ATTEMPTS,
+                retry_at: Some(Instant::now()),
+                overload_attempts: 0,
+            });
+            app.rate_limit_reset = Some(Instant::now());
+            match stop {
+                "budget" => assert!(!app.schedule_pending_remote_retry("interrupted")),
+                "pause" => app.pause_exhausted_auto_resume("Paused".to_string(), "Paused"),
+                "credential" => app.trip_credential_failure_breaker("401 unauthorized"),
+                _ => unreachable!(),
+            }
+            assert_eq!(app.input, "Inspect this screenshot [image 1]", "{stop}");
+            assert_eq!(app.pending_images, vec![image], "{stop}");
+            assert!(app.rate_limit_pending_message.is_none(), "{stop}");
+            assert!(app.rate_limit_reset.is_none(), "{stop}");
+        }
+    }
+
+    #[test]
+    fn terminal_remote_retry_preserves_draft_and_deduplicates_images() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = super::super::tests::create_test_app();
+        let image = ("image/png".to_string(), "original-image".to_string());
+        app.input = "Keep my new draft".to_string();
+        app.last_submitted_input = Some("Failed prompt".to_string());
+        app.pending_images.push(image.clone());
+        app.ensure_input_image_markers();
+        app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            content: "Expanded failed prompt".to_string(),
+            images: vec![image.clone()],
+            is_system: false,
+            system_reminder: None,
+            auto_retry: true,
+            retry_attempts: App::AUTO_RETRY_MAX_ATTEMPTS,
+            retry_at: None,
+            overload_attempts: 0,
+        });
+        app.pause_exhausted_auto_resume("Paused".to_string(), "Paused");
+        assert_eq!(app.input, "Keep my new draft [image 1]");
+        assert_eq!(app.pending_images, vec![image]);
+        assert!(app.display_messages().iter().any(|message| {
+            message.content.contains("Failed prompt")
+                && message.content.contains("draft text is preserved")
+        }));
+    }
+}
+
 impl App {
     pub(super) async fn begin_remote_send(
         &mut self,
@@ -109,10 +214,20 @@ impl App {
         force: bool,
     ) -> bool {
         let Some(pending) = self.rate_limit_pending_message.as_mut() else {
+            self.log_recovery_event(
+                crate::logging::LogLevel::Warn,
+                "RECOVERY_NETWORK_WAIT_SKIPPED",
+                "no_pending_turn",
+            );
             return false;
         };
         if force {
             if pending.retry_attempts >= Self::AUTO_RETRY_MAX_ATTEMPTS {
+                self.log_recovery_event(
+                    crate::logging::LogLevel::Warn,
+                    "RECOVERY_NETWORK_WAIT_STOPPED",
+                    "retry_budget_exhausted",
+                );
                 return false;
             }
             pending.retry_attempts = pending.retry_attempts.saturating_add(1);
@@ -121,6 +236,11 @@ impl App {
             if force {
                 pending.auto_retry = true;
             } else {
+                self.log_recovery_event(
+                    crate::logging::LogLevel::Info,
+                    "RECOVERY_NETWORK_WAIT_SKIPPED",
+                    "auto_retry_disabled",
+                );
                 return false;
             }
         }
@@ -134,6 +254,15 @@ impl App {
             listener: plan.listener_summary.clone(),
         };
         self.status_detail = Some("connection failed; waiting before retry".to_string());
+        self.log_recovery_event(
+            crate::logging::LogLevel::Info,
+            "RECOVERY_NETWORK_WAIT_ARMED",
+            if force {
+                "provider_network_failure"
+            } else {
+                "offline_probe"
+            },
+        );
 
         let content = format!(
             "📡 Network appears offline or the provider is unreachable - waiting to retry automatically. {} - {}",
@@ -169,9 +298,19 @@ impl App {
         max_attempts: u8,
     ) -> bool {
         let Some(pending) = self.rate_limit_pending_message.as_mut() else {
+            self.log_recovery_event(
+                crate::logging::LogLevel::Warn,
+                "RECOVERY_RETRY_SKIPPED",
+                "no_pending_turn",
+            );
             return false;
         };
         if !pending.auto_retry {
+            self.log_recovery_event(
+                crate::logging::LogLevel::Info,
+                "RECOVERY_RETRY_SKIPPED",
+                "auto_retry_disabled",
+            );
             return false;
         }
         let outcome = {
@@ -190,6 +329,12 @@ impl App {
 
         match outcome {
             Err(current_attempts) => {
+                self.log_recovery_event(
+                    crate::logging::LogLevel::Warn,
+                    "RECOVERY_RETRY_STOPPED",
+                    "retry_budget_exhausted",
+                );
+                self.restore_terminal_remote_retry_input();
                 self.rate_limit_pending_message = None;
                 self.rate_limit_reset = None;
                 self.push_display_message(DisplayMessage::error(format!(
@@ -202,6 +347,11 @@ impl App {
             }
             Ok((retry_attempts, backoff_secs, retry_at)) => {
                 self.rate_limit_reset = Some(retry_at);
+                self.log_recovery_event(
+                    crate::logging::LogLevel::Info,
+                    "RECOVERY_RETRY_ARMED",
+                    "transient_failure",
+                );
                 let content = format!(
                     "⚡ Connection lost - retrying (attempt {}/{}, in {}s) - {}",
                     retry_attempts,
@@ -337,10 +487,15 @@ impl App {
     /// the same loop again at turn end), puts the user's prompt back in the
     /// input box, and explains why the turn paused.
     pub(super) fn pause_exhausted_auto_resume(&mut self, message: String, notice: &str) {
+        self.log_recovery_event(
+            crate::logging::LogLevel::Warn,
+            "RECOVERY_AUTO_RESUME_STOPPED",
+            "retry_budget_exhausted",
+        );
+        self.restore_terminal_remote_retry_input();
         self.clear_pending_remote_retry();
         super::commands::disable_auto_poke(self);
         self.overnight_auto_poke = None;
-        self.restore_failed_input_to_box();
         self.push_display_message(DisplayMessage::system(format!("🛑 {message}")));
         self.set_status_notice(notice);
     }
@@ -376,7 +531,13 @@ impl App {
     /// auto-poke/queued-retry loops logged thousands of 401s in a single
     /// session (one failed turn per resend) until the user noticed.
     pub(super) fn trip_credential_failure_breaker(&mut self, message: &str) {
+        self.log_recovery_event(
+            crate::logging::LogLevel::Warn,
+            "RECOVERY_CREDENTIAL_BREAKER_STOPPED",
+            "repeated_auth_failure",
+        );
         let failures = self.consecutive_credential_failures;
+        self.restore_terminal_remote_retry_input();
         self.clear_pending_remote_retry();
         let cleared_pokes = if self.auto_poke_incomplete_todos {
             super::commands::disable_auto_poke(self)
@@ -403,7 +564,6 @@ impl App {
             }
         )));
         self.set_status_notice("Stopped: repeated auth failures");
-        self.restore_failed_input_to_box();
         self.consecutive_credential_failures = 0;
     }
 

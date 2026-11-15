@@ -185,13 +185,16 @@ fn test_debug_memory_profile_reports_messages_and_provider_cache() {
         ],
     );
 
-    session.compaction = Some(StoredCompactionState {
-        summary_text: "summary".to_string(),
-        openai_encrypted_content: None,
-        covers_up_to_turn: 7,
-        original_turn_count: 9,
-        compacted_count: 7,
-    });
+    session.compaction = Some(
+        StoredCompactionState {
+            summary_text: "summary".to_string(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: 7,
+            original_turn_count: 9,
+            compacted_count: 7,
+        }
+        .into(),
+    );
 
     let _ = session.provider_messages();
     let profile = session.debug_memory_profile();
@@ -524,7 +527,8 @@ fn load_startup_stub_preserves_metadata_but_skips_heavy_vectors() -> Result<()> 
         content: vec![ContentBlock::Text {
             text: "hello world".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: Some(Utc::now()),
         tool_duration_ms: None,
@@ -598,7 +602,8 @@ fn load_for_remote_startup_preserves_messages_and_replay_but_skips_heavy_vectors
         content: vec![ContentBlock::Text {
             text: "hello remote startup".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: Some(Utc::now()),
         tool_duration_ms: None,
@@ -887,13 +892,16 @@ fn test_save_persists_compaction_state() -> Result<()> {
         None,
         Some("compaction persistence test".to_string()),
     );
-    session.compaction = Some(StoredCompactionState {
-        summary_text: "saved summary".to_string(),
-        openai_encrypted_content: None,
-        covers_up_to_turn: 8,
-        original_turn_count: 8,
-        compacted_count: 8,
-    });
+    session.compaction = Some(
+        StoredCompactionState {
+            summary_text: "saved summary".to_string(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: 8,
+            original_turn_count: 8,
+            compacted_count: 8,
+        }
+        .into(),
+    );
 
     session.save()?;
 
@@ -927,13 +935,16 @@ fn test_startup_stub_save_preserves_compaction_state() -> Result<()> {
     }
     owner.save()?;
     // Compaction lands in the journal, as it does for a live large session.
-    owner.compaction = Some(StoredCompactionState {
-        summary_text: "owner summary".to_string(),
-        openai_encrypted_content: None,
-        covers_up_to_turn: 3,
-        original_turn_count: 3,
-        compacted_count: 3,
-    });
+    owner.compaction = Some(
+        StoredCompactionState {
+            summary_text: "owner summary".to_string(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: 3,
+            original_turn_count: 3,
+            compacted_count: 3,
+        }
+        .into(),
+    );
     owner.add_message(
         Role::User,
         vec![ContentBlock::Text {
@@ -1782,13 +1793,16 @@ fn failed_wake_errors_follow_compacted_history_window() {
     session.messages[100].timestamp = Some(start + chrono::Duration::seconds(100));
     session.record_replay_display_message("error", None, "current failure");
     session.replay_events.last_mut().unwrap().timestamp = start + chrono::Duration::seconds(101);
-    session.compaction = Some(StoredCompactionState {
-        summary_text: "older context".into(),
-        openai_encrypted_content: None,
-        covers_up_to_turn: 20,
-        original_turn_count: 20,
-        compacted_count: 100,
-    });
+    session.compaction = Some(
+        StoredCompactionState {
+            summary_text: "older context".into(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: 20,
+            original_turn_count: 20,
+            compacted_count: 100,
+        }
+        .into(),
+    );
     let (limited, _, info) = render_messages_and_images_with_compacted_history(&session, 10);
     assert!(info.unwrap().remaining_messages > 0);
     assert!(!limited.iter().any(|message| message.content == "failure 0"));
@@ -2017,13 +2031,16 @@ fn test_render_messages_shows_recent_compacted_history_by_default() {
             cache_control: None,
         }],
     );
-    session.compaction = Some(StoredCompactionState {
-        summary_text: "old prompt and response".to_string(),
-        openai_encrypted_content: None,
-        covers_up_to_turn: 2,
-        original_turn_count: 2,
-        compacted_count: 2,
-    });
+    session.compaction = Some(
+        StoredCompactionState {
+            summary_text: "old prompt and response".to_string(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: 2,
+            original_turn_count: 2,
+            compacted_count: 2,
+        }
+        .into(),
+    );
 
     let rendered = render_messages(&session);
     assert_eq!(rendered.len(), 4);
@@ -2066,13 +2083,16 @@ fn test_render_messages_can_expand_compacted_history_window() {
             cache_control: None,
         }],
     );
-    session.compaction = Some(StoredCompactionState {
-        summary_text: "old prompt and response".to_string(),
-        openai_encrypted_content: None,
-        covers_up_to_turn: 2,
-        original_turn_count: 2,
-        compacted_count: 2,
-    });
+    session.compaction = Some(
+        StoredCompactionState {
+            summary_text: "old prompt and response".to_string(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: 2,
+            original_turn_count: 2,
+            compacted_count: 2,
+        }
+        .into(),
+    );
 
     // A small compacted prefix (few renderable messages, a single turn) must
     // never be truncated, even when a tiny visible window is requested. A single
@@ -2142,13 +2162,16 @@ fn test_compacted_history_truncates_only_when_long_and_many_turns() {
     );
 
     let compacted_count = prefix_turns * 5; // every prefix message is compacted
-    session.compaction = Some(StoredCompactionState {
-        summary_text: "older compacted context".to_string(),
-        openai_encrypted_content: None,
-        covers_up_to_turn: prefix_turns,
-        original_turn_count: prefix_turns,
-        compacted_count,
-    });
+    session.compaction = Some(
+        StoredCompactionState {
+            summary_text: "older compacted context".to_string(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: prefix_turns,
+            original_turn_count: prefix_turns,
+            compacted_count,
+        }
+        .into(),
+    );
 
     let total_renderable = prefix_turns * 5; // 100
 
@@ -2211,13 +2234,16 @@ fn test_compacted_history_never_truncates_single_long_turn() {
     );
 
     let compacted_count = 151; // prompt + 150 responses
-    session.compaction = Some(StoredCompactionState {
-        summary_text: "older compacted context".to_string(),
-        openai_encrypted_content: None,
-        covers_up_to_turn: 1,
-        original_turn_count: 1,
-        compacted_count,
-    });
+    session.compaction = Some(
+        StoredCompactionState {
+            summary_text: "older compacted context".to_string(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: 1,
+            original_turn_count: 1,
+            compacted_count,
+        }
+        .into(),
+    );
 
     // Even with a tiny requested window, a single long turn is never truncated.
     let (_rendered, _images, info) = render_messages_and_images_with_compacted_history(&session, 5);
@@ -2271,13 +2297,16 @@ fn test_compacted_history_window_counts_renderable_messages_not_hidden_reminders
             cache_control: None,
         }],
     );
-    session.compaction = Some(StoredCompactionState {
-        summary_text: "older compacted context".to_string(),
-        openai_encrypted_content: None,
-        covers_up_to_turn: 4,
-        original_turn_count: 4,
-        compacted_count: 4,
-    });
+    session.compaction = Some(
+        StoredCompactionState {
+            summary_text: "older compacted context".to_string(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: 4,
+            original_turn_count: 4,
+            compacted_count: 4,
+        }
+        .into(),
+    );
 
     let (rendered, _images, info) = render_messages_and_images_with_compacted_history(&session, 1);
     let info = info.expect("compacted info");
@@ -2391,7 +2420,8 @@ fn reasoning_trace_survives_session_save_and_load() -> Result<()> {
                 text: "Here is my answer.".to_string(),
                 cache_control: None,
             },
-        ],
+        ]
+        .into(),
         display_role: None,
         timestamp: Some(Utc::now()),
         tool_duration_ms: None,
@@ -2880,13 +2910,16 @@ fn restored_tool_image_boundaries_follow_returned_history_rows() {
 
     // Compaction adds a synthetic notice. Boundaries count returned rows, not
     // stored message indices or user-prompt ordinals.
-    session.compaction = Some(StoredCompactionState {
-        summary_text: "summary".into(),
-        openai_encrypted_content: None,
-        covers_up_to_turn: 1,
-        original_turn_count: 1,
-        compacted_count: 1,
-    });
+    session.compaction = Some(
+        StoredCompactionState {
+            summary_text: "summary".into(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: 1,
+            original_turn_count: 1,
+            compacted_count: 1,
+        }
+        .into(),
+    );
     let (messages, images, _) =
         render_messages_and_images_with_compacted_history(&session, usize::MAX);
     assert_eq!(messages[0].role, "system");
@@ -3184,7 +3217,8 @@ fn env_snapshot_past_cap_appends_instead_of_rewriting_snapshot() -> Result<()> {
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: Some(Utc::now()),
         tool_duration_ms: None,
@@ -3258,7 +3292,8 @@ fn metadata_change_on_large_session_is_journaled_not_rewritten() -> Result<()> {
             content: vec![ContentBlock::Text {
                 text: big.clone(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: Some(Utc::now()),
             tool_duration_ms: None,
@@ -3323,7 +3358,8 @@ fn route_journal_roundtrip(large: bool) -> Result<()> {
         content: vec![ContentBlock::Text {
             text: "x".repeat(if large { 2 * 1024 * 1024 } else { 10 }),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: Some(Utc::now()),
         tool_duration_ms: None,
@@ -3397,14 +3433,15 @@ fn route_journal_legacy_entries_preserve_snapshot_and_prior_journal_route() -> R
     Ok(())
 }
 
-fn big_compaction(tag: &str) -> crate::session::StoredCompactionState {
+fn big_compaction(tag: &str) -> std::sync::Arc<crate::session::StoredCompactionState> {
     crate::session::StoredCompactionState {
         summary_text: String::new(),
-        openai_encrypted_content: Some(format!("{tag}{}", "e".repeat(300 * 1024))),
+        openai_encrypted_content: Some(format!("{tag}{}", "e".repeat(300 * 1024)).into()),
         covers_up_to_turn: 3,
         original_turn_count: 3,
         compacted_count: 3,
     }
+    .into()
 }
 
 /// Multi-MB compaction state must not be repeated in every journal entry
@@ -3427,7 +3464,8 @@ fn journal_entries_elide_unchanged_compaction_but_loads_keep_it() -> Result<()> 
         content: vec![ContentBlock::Text {
             text: format!("hello {i}"),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: Some(Utc::now()),
         tool_duration_ms: None,
@@ -3496,7 +3534,8 @@ fn legacy_journal_entries_with_inline_compaction_still_load() -> Result<()> {
         content: vec![ContentBlock::Text {
             text: "hi".into(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: Some(Utc::now()),
         tool_duration_ms: None,
@@ -3543,7 +3582,8 @@ fn write_compaction_elision_compat_fixture() -> Result<()> {
             content: vec![ContentBlock::Text {
                 text: format!("compat {i}"),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: Some(Utc::now()),
             tool_duration_ms: None,

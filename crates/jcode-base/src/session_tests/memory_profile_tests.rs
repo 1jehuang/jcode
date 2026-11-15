@@ -31,13 +31,16 @@ fn test_debug_memory_profile_reports_messages_and_provider_cache() {
         ],
     );
 
-    session.compaction = Some(StoredCompactionState {
-        summary_text: "summary".to_string(),
-        openai_encrypted_content: None,
-        covers_up_to_turn: 7,
-        original_turn_count: 9,
-        compacted_count: 7,
-    });
+    session.compaction = Some(
+        StoredCompactionState {
+            summary_text: "summary".to_string(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: 7,
+            original_turn_count: 9,
+            compacted_count: 7,
+        }
+        .into(),
+    );
 
     let _ = session.provider_messages();
     let profile = session.debug_memory_profile();

@@ -771,7 +771,8 @@ pub async fn run_live_claude_native_smoke(
         content: vec![ContentBlock::Text {
             text: "Reply with exactly AUTH_TEST_OK and nothing else.".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -831,7 +832,8 @@ pub async fn run_live_claude_native_stream_smoke(
                    only and do not call any tool."
                 .to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -954,7 +956,8 @@ pub async fn run_live_claude_native_tool_smoke(
                    Call the tool now; do not answer in text."
                 .to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1004,7 +1007,8 @@ pub async fn run_live_claude_native_tool_smoke(
             name: tool_call.name.clone(),
             input: parsed_arguments.clone(),
             thought_signature: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     });
@@ -1015,7 +1019,8 @@ pub async fn run_live_claude_native_tool_smoke(
             content: "TOOL_RESULT_TOKEN=42. Report this token back to confirm you read it."
                 .to_string(),
             is_error: Some(false),
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     });
@@ -1099,7 +1104,8 @@ pub async fn run_live_antigravity_native_smoke(
         content: vec![ContentBlock::Text {
             text: "Reply with exactly AUTH_TEST_OK and nothing else.".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1159,7 +1165,8 @@ pub async fn run_live_antigravity_native_stream_smoke(
                    only and do not call any tool."
                 .to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1290,7 +1297,8 @@ pub async fn run_live_native_provider_smoke(
         content: vec![ContentBlock::Text {
             text: "Reply with exactly AUTH_TEST_OK and nothing else.".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1351,7 +1359,8 @@ pub async fn run_live_native_provider_stream_smoke(
                    only and do not call any tool."
                 .to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1460,7 +1469,8 @@ pub async fn run_live_native_provider_reasoning_smoke(
                    its own final line."
                 .to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1585,7 +1595,8 @@ pub async fn run_live_native_provider_tool_smoke(
                    Call the tool now; do not answer in text."
                 .to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1672,7 +1683,8 @@ pub async fn run_live_native_provider_tool_smoke(
                    in text first."
                 .to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1761,7 +1773,8 @@ pub async fn run_live_native_provider_tool_smoke(
                        text and do not wait for the first result before making the second call."
                     .to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         }],
@@ -1788,7 +1801,8 @@ pub async fn run_live_native_provider_tool_smoke(
                            /tmp/auth_tool_probe_2.txt."
                         .to_string(),
                     cache_control: None,
-                }],
+                }]
+                .into(),
                 timestamp: None,
                 tool_duration_ms: None,
             },
@@ -1873,7 +1887,8 @@ fn assistant_tool_use(call: &NativeClaudeToolCall, arguments: &serde_json::Value
             name: call.name.clone(),
             input: arguments.clone(),
             thought_signature: call.thought_signature.clone(),
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }
@@ -1888,7 +1903,8 @@ fn tool_result_then_text(tool_use_id: &str, result: &str) -> Message {
             tool_use_id: tool_use_id.to_string(),
             content: result.to_string(),
             is_error: Some(false),
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }

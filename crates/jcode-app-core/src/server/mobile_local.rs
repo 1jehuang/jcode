@@ -6,8 +6,10 @@
 //! prompt typed in the session's own window: it starts a turn when the
 //! session is idle and is queued behind the current turn when it is busy.
 
-use super::live_turn::{LiveTurnSwarmContext, run_live_turn_if_idle};
-use super::state::{fanout_live_client_event, queue_soft_interrupt_for_session};
+use super::live_turn::{
+    LiveTurnSwarmContext, idle_live_agent, spawn_tracked_live_turn_with_images,
+};
+use super::state::{fanout_live_client_event, queue_soft_interrupt_with_images_for_session};
 use super::{SessionAgents, SessionInterruptQueues};
 use crate::mobile_runner::{LiveSession, LocalSessionHost};
 use crate::protocol::ServerEvent;
@@ -65,15 +67,35 @@ impl DaemonSessions {
         live
     }
 
-    async fn deliver_message(&self, session_id: &str, text: &str) -> Result<()> {
+    async fn deliver_message(
+        &self,
+        session_id: &str,
+        text: &str,
+        images: Vec<(String, String)>,
+    ) -> Result<()> {
         if !self.sessions.read().await.contains_key(session_id) {
             anyhow::bail!("that session is no longer running on this computer");
         }
         let deadline = tokio::time::Instant::now() + IDLE_START_WAIT;
         loop {
-            if run_live_turn_if_idle(session_id, text, None, &self.sessions, self.swarm.clone())
-                .await
+            let started = if let Some(agent) =
+                idle_live_agent(session_id, &self.sessions, &self.swarm.members).await
             {
+                spawn_tracked_live_turn_with_images(
+                    session_id,
+                    agent,
+                    text.to_string(),
+                    images.clone(),
+                    None,
+                    None,
+                    None,
+                    self.swarm.clone(),
+                )
+                .await
+            } else {
+                false
+            };
+            if started {
                 // Windows attached to the session only receive the turn's
                 // stream, so show them the prompt that started it.
                 fanout_live_client_event(
@@ -99,9 +121,10 @@ impl DaemonSessions {
         if self.member_state(session_id).await != Some(true) {
             anyhow::bail!("that session cannot take a message right now; try again in a moment");
         }
-        if queue_soft_interrupt_for_session(
+        if queue_soft_interrupt_with_images_for_session(
             session_id,
             text.to_string(),
+            images,
             false,
             SoftInterruptSource::User,
             &self.soft_interrupt_queues,
@@ -124,7 +147,16 @@ impl LocalSessionHost for DaemonSessions {
     }
 
     fn deliver<'a>(&'a self, session_id: &'a str, text: &'a str) -> BoxFuture<'a, Result<()>> {
-        Box::pin(self.deliver_message(session_id, text))
+        Box::pin(self.deliver_message(session_id, text, Vec::new()))
+    }
+
+    fn deliver_images<'a>(
+        &'a self,
+        session_id: &'a str,
+        text: &'a str,
+        images: Vec<(String, String)>,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(self.deliver_message(session_id, text, images))
     }
 }
 

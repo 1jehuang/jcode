@@ -14,7 +14,8 @@ async fn response(provider: &OpenAIProvider, model: &str, effort: &str) -> anyho
         content: vec![ContentBlock::Text {
             text: "Reply exactly JCODE_BRIDGE_OK.".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -158,7 +159,8 @@ async fn chatgpt_web_live_agentic_turn_returns_a_tool_call() -> anyhow::Result<(
             text: "What does the file notes/JCODE_LIVE.txt say? You have not read it yet."
                 .to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];

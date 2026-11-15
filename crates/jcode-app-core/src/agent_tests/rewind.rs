@@ -397,7 +397,7 @@ async fn rewind_waits_for_compaction_lock_and_discards_future_summary() {
         .write()
         .await
         .restore_persisted_stored_state_with(&state, &agent.session.messages);
-    agent.session.compaction = Some(state);
+    agent.session.compaction = Some(state.into());
     let reader = compaction.read().await;
     assert!(reader.persisted_state().is_some());
     let mut rewind = Box::pin(agent.rewind_checkpoint(

@@ -231,6 +231,7 @@ pub(super) async fn recover(server: &Server) {
                 &session_id,
                 held,
                 String::new(),
+                Vec::new(),
                 Some(reminder),
                 None,
                 Some("resuming after reload".into()),

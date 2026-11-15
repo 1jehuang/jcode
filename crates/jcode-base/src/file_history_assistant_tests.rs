@@ -113,7 +113,7 @@ async fn assistant_restore_matches_legacy_inclusive_prefix_and_is_durable() {
     session.restore_rewind_messages(original).unwrap();
     session.provider_session_id = Some("discarded provider".into());
     session.model_usage_turn_id = Some("discarded usage turn".into());
-    session.compaction = Some(compacted(1));
+    session.compaction = Some(compacted(1).into());
     let result = session
         .rewind_checkpoint(&format!("assistant:{answer}"), RewindMode::ConversationOnly)
         .await
@@ -260,7 +260,7 @@ fn assistant_picker_includes_old_compacted_history_without_changing_numeric_wind
             first_answer = answer;
         }
     }
-    session.compaction = Some(compacted(140));
+    session.compaction = Some(compacted(140).into());
     let numeric = session.rewind_target_stored_indices();
     assert!(!numeric.contains(&1));
     assert_eq!(
@@ -310,7 +310,7 @@ async fn last_assistant_is_a_true_noop_and_does_not_drop_compaction() {
     let mut session = Session::create(None, None);
     user(&mut session, "prompt");
     let answer = session.add_message(Role::Assistant, vec![text("last answer")]);
-    session.compaction = Some(compacted(1));
+    session.compaction = Some(compacted(1).into());
     session.provider_session_id = Some("still current".into());
     session.save().unwrap();
     let before = serde_json::to_value(&session).unwrap();

@@ -779,15 +779,20 @@ mod tests {
 
 impl App {
     pub(super) fn restore_failover_payload(&mut self, payload: super::FallbackResendPayload) {
+        self.log_recovery_event(
+            crate::logging::LogLevel::Info,
+            "RECOVERY_DRAFT_RESTORE",
+            "held_payload",
+        );
         let restored = payload.raw_input.unwrap_or(payload.content);
-        if self.input.is_empty() {
+        let into_empty_composer = self.input.is_empty();
+        if into_empty_composer {
             self.input = restored;
-            self.cursor_pos = self.input.len();
         } else if !restored.is_empty() && self.input != restored {
             // Do not turn a partially typed command or prompt into a different
             // request. Keep the held request recoverable in the transcript.
             self.push_display_message(DisplayMessage::system(format!(
-                "Failover request was not resent. Your draft is unchanged. Recover the previous request from here:\n\n{restored}"
+                "Failover request was not resent. Your draft text is preserved. Recover the previous request from here:\n\n{restored}"
             )));
         }
         for image in payload.images {
@@ -796,6 +801,39 @@ impl App {
             }
         }
         self.ensure_input_image_markers();
+        if into_empty_composer {
+            // After any appended attachment markers.
+            self.cursor_pos = self.input.len();
+        }
+    }
+
+    /// Recover the complete user payload before a terminal retry path clears it.
+    /// Restoring only `last_submitted_input` loses consumed image attachments.
+    pub(super) fn restore_terminal_remote_retry_input(&mut self) {
+        self.log_recovery_event(
+            crate::logging::LogLevel::Warn,
+            "RECOVERY_RETRY_RESTORE",
+            "terminal_retry_stop",
+        );
+        if let Some(pending) = self
+            .rate_limit_pending_message
+            .take_if(|pending| !pending.is_system)
+        {
+            let raw_input = self.last_submitted_input.take();
+            self.restore_failover_payload(super::FallbackResendPayload {
+                content: pending.content,
+                images: pending.images,
+                is_system: pending.is_system,
+                system_reminder: pending.system_reminder,
+                auto_retry: pending.auto_retry,
+                retry_attempts: pending.retry_attempts,
+                raw_input,
+            });
+            self.reset_tab_completion();
+            self.sync_model_picker_preview_from_input();
+        } else {
+            self.restore_failed_input_to_box();
+        }
     }
 
     /// Put the prompt that started the failed turn back into the input box so the

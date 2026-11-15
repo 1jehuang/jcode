@@ -546,7 +546,8 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
             content: vec![ContentBlock::Text {
                 text: notification,
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         });
@@ -607,7 +608,8 @@ fn handle_background_task_stalled(app: &mut App, task: crate::bus::BackgroundTas
             content: vec![ContentBlock::Text {
                 text: notification.clone(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         });

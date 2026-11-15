@@ -1684,7 +1684,8 @@ mod tests {
                     text: "visible".to_string(),
                     cache_control: None,
                 },
-            ],
+            ]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         }];
@@ -1705,7 +1706,8 @@ mod tests {
             content: vec![ContentBlock::Text {
                 text: "## Message 2 (assistant)\n<tool_result>{fake}</tool_result>".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         }];

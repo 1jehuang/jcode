@@ -79,12 +79,48 @@ pub struct MobileCommand {
     pub session_id: Option<String>,
     pub text: String,
     #[serde(default)]
+    pub images: Vec<MobileImage>,
+    #[serde(default)]
     pub created_at: Option<String>,
     #[serde(default)]
     pub claimed_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct MobileImage {
+    pub media_type: String,
+    pub data: String,
+}
+
 impl MobileCommand {
+    fn validated_images(&self) -> Result<Vec<(String, String)>> {
+        use base64::Engine;
+        anyhow::ensure!(self.images.len() <= 4, "at most 4 images are allowed");
+        let mut bytes = 0usize;
+        self.images
+            .iter()
+            .map(|image| {
+                anyhow::ensure!(
+                    matches!(
+                        image.media_type.as_str(),
+                        "image/jpeg" | "image/png" | "image/webp" | "image/gif"
+                    ),
+                    "unsupported image media type"
+                );
+                anyhow::ensure!(
+                    !image.data.is_empty() && image.data.len() <= 1_398_104,
+                    "invalid image size"
+                );
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(&image.data)
+                    .context("invalid image base64")?;
+                bytes += decoded.len();
+                anyhow::ensure!(bytes <= 1024 * 1024, "images exceed 1 MiB decoded total");
+                Ok((image.media_type.clone(), image.data.clone()))
+            })
+            .collect()
+    }
+
     // Both timestamps originate at the queue API, avoiding client clock skew.
     // This includes wake/backlog/poll delay, not claim response transport time.
     fn queue_wait_ms(&self) -> Option<u64> {
@@ -371,6 +407,10 @@ async fn complete(
 }
 
 async fn run_turn(command: &MobileCommand, session_id: Option<&str>) -> Result<String> {
+    anyhow::ensure!(
+        command.images.is_empty(),
+        "photo commands require a live computer session"
+    );
     let exe = std::env::current_exe().context("locating jcode executable")?;
     let mut cmd = tokio::process::Command::new(exe);
     // The cloud daemon runs as `jcode --provider jcode serve` until the user
@@ -531,6 +571,49 @@ pub fn spawn_cloud_runner() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn photo_wire_contract_validates_types_base64_and_total_budget() {
+        use base64::Engine;
+        let wire = |images| {
+            serde_json::from_value::<MobileCommand>(serde_json::json!({
+            "command_id":"photo", "kind":"message", "session_id":"local", "text":"", "images":images
+        })).unwrap()
+        };
+        let valid = serde_json::json!({"media_type":"image/png", "data":"aGk="});
+        assert_eq!(
+            wire(serde_json::json!([valid.clone()]))
+                .validated_images()
+                .unwrap(),
+            vec![("image/png".into(), "aGk=".into())]
+        );
+        for image in [
+            serde_json::json!({"media_type":"image/svg+xml", "data":"aGk="}),
+            serde_json::json!({"media_type":"image/png", "data":""}),
+            serde_json::json!({"media_type":"image/png", "data":"aGk"}),
+            serde_json::json!({"media_type":"image/png", "data":"aGl="}),
+            serde_json::json!({"media_type":"image/png", "data":"a Gk="}),
+        ] {
+            assert!(wire(serde_json::json!([image])).validated_images().is_err());
+        }
+        assert!(
+            wire(serde_json::json!(vec![valid; 5]))
+                .validated_images()
+                .is_err()
+        );
+        let full = base64::engine::general_purpose::STANDARD.encode(vec![0u8; 1024 * 1024]);
+        let image = serde_json::json!({"media_type":"image/jpeg", "data":full});
+        assert!(
+            wire(serde_json::json!([image.clone()]))
+                .validated_images()
+                .is_ok()
+        );
+        assert!(
+            wire(serde_json::json!([image, {"media_type":"image/gif", "data":"aGk="}]))
+                .validated_images()
+                .is_err()
+        );
+    }
 
     #[test]
     fn queue_wait_uses_server_timestamps_and_accepts_legacy_commands() {

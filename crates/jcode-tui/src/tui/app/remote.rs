@@ -392,69 +392,8 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         }
     }
 
-    if let Some(reset_time) = app.rate_limit_reset
-        && Instant::now() >= reset_time
-    {
-        app.rate_limit_reset = None;
-        let account_change_resend = app.account_change_resend_at.take() == Some(reset_time);
-        if !app.is_processing
-            && let Some(pending) = app.rate_limit_pending_message.clone()
-        {
-            if matches!(app.status, ProcessingStatus::WaitingForNetwork { .. })
-                && !crate::network_retry::is_probably_online().await
-            {
-                app.schedule_pending_remote_network_wait("network probe still failing");
-                return true;
-            }
-            if matches!(app.status, ProcessingStatus::WaitingForNetwork { .. }) {
-                app.status = ProcessingStatus::Idle;
-                app.status_detail = None;
-            }
-            // An account change already announced this resend; do not also
-            // claim the old account's limit reset.
-            if !account_change_resend {
-                let status = if let Some(notice) = held_user_turn_resend_notice(&pending) {
-                    notice
-                } else if pending.auto_retry {
-                    format!(
-                        "✓ Retrying continuation...{}",
-                        if pending.is_system {
-                            " (system message)"
-                        } else {
-                            ""
-                        }
-                    )
-                } else {
-                    format!(
-                        "✓ Rate limit reset. Retrying...{}",
-                        if pending.is_system {
-                            " (system message)"
-                        } else {
-                            ""
-                        }
-                    )
-                };
-                app.push_display_message(DisplayMessage::system(status));
-            }
-            let overload_attempts = pending.overload_attempts;
-            let _ = begin_remote_send(
-                app,
-                remote,
-                pending.content,
-                pending.images,
-                pending.is_system,
-                pending.system_reminder,
-                pending.auto_retry,
-                pending.retry_attempts,
-            )
-            .await;
-            // The overload budget belongs to this turn: carry it across the
-            // resend so it stops after OVERLOAD_RETRY_MAX_ATTEMPTS resends.
-            if let Some(resent) = app.rate_limit_pending_message.as_mut() {
-                resent.overload_attempts = overload_attempts;
-            }
-            return true;
-        }
+    if dispatch_due_remote_retry(app, remote).await {
+        return true;
     }
 
     if app
@@ -589,6 +528,129 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.maybe_finish_background_client_reload();
     needs_redraw |= app.maybe_hot_reload_onto_new_binary();
     needs_redraw
+}
+
+/// Dispatch a held turn only after bootstrap and any competing turn settle.
+/// Keep its deadline armed while blocked, and re-arm on a failed socket write.
+pub(super) async fn dispatch_due_remote_retry(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+) -> bool {
+    if !app
+        .rate_limit_reset
+        .is_some_and(|deadline| Instant::now() >= deadline)
+    {
+        return false;
+    }
+    let blocker = if !remote.has_loaded_history() {
+        Some("history_not_loaded")
+    } else if app.is_processing {
+        Some("active_turn")
+    } else if app.remote_model_switch_in_flight {
+        Some("model_switch_unconfirmed")
+    } else if app.awaiting_remote_interrupt_ack() {
+        Some("interrupt_ack_pending")
+    } else {
+        None
+    };
+    if let Some(reason) = blocker {
+        crate::logging::event_rate_limited(
+            crate::logging::LogLevel::Info,
+            &format!("retry_blocked:{}:{reason}", app.session.id),
+            Duration::from_secs(30),
+            "RECOVERY_RETRY_BLOCKED",
+            app.recovery_log_fields(reason),
+        );
+        return false;
+    }
+    let reset_time = app.rate_limit_reset.take();
+    let account_change_resend = app.account_change_resend_at.take() == reset_time;
+    let Some(pending) = app.rate_limit_pending_message.clone() else {
+        app.log_recovery_event(
+            crate::logging::LogLevel::Warn,
+            "RECOVERY_RETRY_DISARMED",
+            "deadline_without_pending_turn",
+        );
+        return false;
+    };
+    if matches!(app.status, ProcessingStatus::WaitingForNetwork { .. })
+        && !crate::network_retry::is_probably_online().await
+    {
+        app.schedule_pending_remote_network_wait("network probe still failing");
+        return true;
+    }
+    if matches!(app.status, ProcessingStatus::WaitingForNetwork { .. }) {
+        app.status = ProcessingStatus::Idle;
+        app.status_detail = None;
+    }
+    // An account change already announced this resend; do not also claim the
+    // old account's limit reset.
+    if !account_change_resend {
+        let status = held_user_turn_resend_notice(&pending).unwrap_or_else(|| {
+            let status = if pending.auto_retry {
+                "✓ Retrying continuation..."
+            } else {
+                "✓ Rate limit reset. Retrying..."
+            };
+            let suffix = if pending.is_system {
+                " (system message)"
+            } else {
+                ""
+            };
+            format!("{status}{suffix}")
+        });
+        app.push_display_message(DisplayMessage::system(status));
+    }
+    app.log_recovery_event(
+        crate::logging::LogLevel::Info,
+        "RECOVERY_RETRY_DISPATCH",
+        "deadline_elapsed",
+    );
+    let overload_attempts = pending.overload_attempts;
+    let sent = begin_remote_send(
+        app,
+        remote,
+        pending.content,
+        pending.images,
+        pending.is_system,
+        pending.system_reminder,
+        pending.auto_retry,
+        pending.retry_attempts,
+    )
+    .await;
+    // The overload budget belongs to this turn: carry it across the resend so
+    // it stops after OVERLOAD_RETRY_MAX_ATTEMPTS resends.
+    if let Some(resent) = app.rate_limit_pending_message.as_mut() {
+        resent.overload_attempts = overload_attempts;
+    }
+    if let Err(error) = sent {
+        app.log_recovery_event(
+            crate::logging::LogLevel::Warn,
+            "RECOVERY_RETRY_SEND_FAILED",
+            "transport_write_failed",
+        );
+        // User turns held by a rate limit were explicitly scheduled for retry
+        // even if their initial send was not auto-retry.
+        if let Some(pending) = app.rate_limit_pending_message.as_mut() {
+            pending.auto_retry = true;
+        }
+        let reason = format!("Failed to resend held turn: {error}");
+        if !app.schedule_pending_remote_retry(&reason) {
+            app.pause_exhausted_auto_resume(
+                format!(
+                    "{reason}. Automatic retry limit reached. Reconnect and resend your message."
+                ),
+                "Retry send failed",
+            );
+        }
+    } else {
+        app.log_recovery_event(
+            crate::logging::LogLevel::Info,
+            "RECOVERY_RETRY_SENT",
+            "transport_write_succeeded",
+        );
+    }
+    true
 }
 
 /// Forward the reasoning level staged by a model-picker selection (e.g.
@@ -1180,15 +1242,27 @@ pub(super) fn debug_command_needs_current_frame(command: &str) -> bool {
     )
 }
 
+fn restore_unconfirmed_model_switch_prompts(app: &mut App) {
+    if let Some(payload) = app.pending_fallback_resend.take() {
+        app.restore_failover_payload(payload);
+    }
+    if let Some(prepared) = app.pending_prompt_after_model_switch.take() {
+        input_dispatch::restore_undelivered_prepared_input(app, prepared);
+    }
+}
+
 fn fail_pending_automatic_failover(app: &mut App, reason: &str) {
+    app.log_recovery_event(
+        crate::logging::LogLevel::Warn,
+        "RECOVERY_FALLBACK_STOPPED",
+        "route_confirmation_failed",
+    );
     app.automatic_failover_stopped = true;
     app.pending_automatic_failover_request_id = None;
     app.pending_automatic_failover_started = None;
     app.pending_automatic_failover_route = None;
     app.remote_model_switch_in_flight = false;
-    if let Some(payload) = app.pending_fallback_resend.take() {
-        app.restore_failover_payload(payload);
-    }
+    restore_unconfirmed_model_switch_prompts(app);
     app.push_display_message(DisplayMessage::error(format!(
         "Fallback switch stopped: {}",
         App::compact_provider_failure(reason)
@@ -1474,6 +1548,11 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         }
         app.last_submitted_input = payload.raw_input.clone();
         crate::logging::info("Resending failed turn after accepted fallback route switch");
+        app.log_recovery_event(
+            crate::logging::LogLevel::Info,
+            "RECOVERY_FALLBACK_DISPATCH",
+            "route_confirmed",
+        );
         let recovery_payload = payload.clone();
         if let Err(error) = begin_remote_send(
             app,
@@ -1487,6 +1566,11 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         )
         .await
         {
+            app.log_recovery_event(
+                crate::logging::LogLevel::Warn,
+                "RECOVERY_FALLBACK_SEND_FAILED",
+                "transport_write_failed",
+            );
             app.restore_failover_payload(recovery_payload);
             app.push_display_message(DisplayMessage::error(format!(
                 "Failed to resend after fallback switch: {}",

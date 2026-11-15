@@ -54,7 +54,8 @@ enum AllowedTools {
 /// Registry of available skills
 #[derive(Debug, Default, Clone)]
 pub struct SkillRegistry {
-    skills: HashMap<String, Skill>,
+    // Snapshots keep independent maps but share immutable skill definitions.
+    skills: HashMap<String, Arc<Skill>>,
     /// Keys inserted by plugin discovery, refreshed per workspace access.
     plugin_keys: std::collections::HashSet<String>,
     command_origins: HashMap<String, (String, PathBuf)>,
@@ -318,7 +319,7 @@ impl SkillRegistry {
     /// (project dirs loaded last).
     pub fn merge_overlay(&mut self, overlay: Self) {
         for skill in overlay.skills.into_values() {
-            self.insert_loaded_skill(skill);
+            self.insert_shared_skill(skill);
         }
     }
 
@@ -735,7 +736,7 @@ impl SkillRegistry {
     /// next to Claude Code's `/ponytail:ponytail`.
     pub fn get(&self, name: &str) -> Option<&Skill> {
         if let Some(skill) = self.skills.get(name) {
-            return Some(skill);
+            return Some(skill.as_ref());
         }
         if name.contains(':') {
             return None;
@@ -743,7 +744,7 @@ impl SkillRegistry {
         let mut matches = self.skills.iter().filter_map(|(key, skill)| {
             key.split_once(':')
                 .is_some_and(|(_, short)| short == name)
-                .then_some(skill)
+                .then_some(skill.as_ref())
         });
         let first = matches.next()?;
         matches.next().is_none().then_some(first)
@@ -759,7 +760,7 @@ impl SkillRegistry {
     /// system prompt with identical length but different bytes, silently busting
     /// the Anthropic strict-prefix KV cache mid-conversation.
     pub fn list(&self) -> Vec<&Skill> {
-        let mut skills: Vec<&Skill> = self.skills.values().collect();
+        let mut skills: Vec<&Skill> = self.skills.values().map(Arc::as_ref).collect();
         skills.sort_by(|a, b| a.name.cmp(&b.name));
         skills
     }
@@ -885,6 +886,10 @@ impl SkillRegistry {
     }
 
     fn insert_loaded_skill(&mut self, skill: Skill) {
+        self.insert_shared_skill(Arc::new(skill));
+    }
+
+    fn insert_shared_skill(&mut self, skill: Arc<Skill>) {
         if let Some(shadowed) = self.skills.get(&skill.name)
             && shadowed.path != skill.path
         {
