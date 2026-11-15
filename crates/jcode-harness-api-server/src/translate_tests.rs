@@ -700,6 +700,102 @@ fn detach_disarms_crash_on_disconnect() {
 }
 
 #[test]
+fn attach_and_list_share_canonical_title_sources() {
+    let home = ScopedJcodeHome::new("canonical-title-sources");
+    assert!(BridgeState::recent_session_index_entries().is_empty());
+    let connection = Connection::open(home.path.join("session-metadata-v1.sqlite3")).unwrap();
+    connection
+        .execute(
+            "INSERT INTO recent_sessions (session_id, generated_title, todo_title, updated_at_ms)
+         VALUES ('canonical', 'Generated title', 'Indexed plan', 1)",
+            [],
+        )
+        .unwrap();
+    let record = write_session_record_with_titles(&home.path, "canonical", &home.path, None, None);
+    for (custom, saved, label, plan, expected) in [
+        (
+            Some("Rename"),
+            true,
+            Some("Bookmark"),
+            Some("Plan"),
+            "Rename",
+        ),
+        (None, true, Some("Bookmark"), Some("Plan"), "Bookmark"),
+        (None, false, Some("Bookmark"), Some("Plan"), "Plan"),
+        (None, false, None, None, "Indexed plan"),
+    ] {
+        std::fs::write(
+            &record,
+            json!({
+                "custom_title":custom, "saved":saved, "save_label":label,
+                "messages":[{"role":"user","content":[{"type":"text","text":"First prompt"}]}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let plan_path = home.path.join("todos/canonical-plan.json");
+        std::fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
+        if let Some(plan) = plan {
+            std::fs::write(&plan_path, json!({"title":plan}).to_string()).unwrap();
+        } else {
+            let _ = std::fs::remove_file(&plan_path);
+        }
+        // The attach state response resolves persisted metadata itself.
+        let mut state = BridgeState::default();
+        let outbound = state.api_request_to_legacy(&json!({"req":"create_session","id":1}));
+        let Outbound::Legacy(request) = &outbound[1] else {
+            panic!("state request")
+        };
+        let frames = state.legacy_event_to_api(&json!({
+            "type":"state","id":request["id"],"session_id":"canonical",
+            "message_count":1,"is_processing":false
+        }));
+        let ApiEvent::Attached { session } = &frames[0].event else {
+            panic!("attach")
+        };
+        assert_eq!(session.title.as_deref(), Some(expected));
+    }
+}
+
+#[test]
+fn unindexed_sessions_resolve_first_prompt_on_list_and_attach() {
+    let home = ScopedJcodeHome::new("unindexed-prompt-title");
+    // Keep an existing index so discovery cannot bootstrap this new record.
+    assert!(BridgeState::recent_session_index_entries().is_empty());
+    let record = write_session_record(&home.path, "unindexed", &home.path);
+    std::fs::write(
+        record,
+        json!({"messages":[
+            {"role":"user","content":[{"type":"text","text":"<system-reminder>skip"}]},
+            {"role":"user","content":[{"type":"text","text":"Fix the sidebar titles"}]}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let metadata = BridgeState::resolve_session_metadata("unindexed").unwrap();
+    assert_eq!(
+        metadata.display_title().as_deref(),
+        Some("Fix the sidebar titles")
+    );
+    let mut state = BridgeState::default();
+    state.known_sessions.insert("unindexed".into());
+    let ApiEvent::Sessions { sessions } =
+        only_reply_event(state.api_request_to_legacy(&json!({"req":"list_sessions","id":1})))
+    else {
+        panic!("sessions")
+    };
+    assert_eq!(
+        sessions
+            .iter()
+            .find(|s| s.session_id == "unindexed")
+            .unwrap()
+            .title
+            .as_deref(),
+        Some("Fix the sidebar titles")
+    );
+}
+
+#[test]
 fn state_event_answers_pending_attach() {
     let home = ScopedJcodeHome::new("attach-title");
     let project = home.path.join("project");

@@ -240,7 +240,7 @@ struct ArchiveState {
 /// The small, canonical subset of a persisted `Session` needed by list and
 /// attach responses. Serde skips the heavyweight transcript fields without
 /// materializing them.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 struct PersistedSessionMetadata {
     #[serde(default)]
     working_dir: Option<String>,
@@ -2940,6 +2940,82 @@ impl BridgeState {
     /// need are written in the small header and trailer. Reading bounded windows
     /// avoids parsing every transcript message just to populate the sidebar.
     fn resolve_session_metadata(session_id: &str) -> Option<PersistedSessionMetadata> {
+        Self::session_record_path(session_id)?;
+        // Attach must consult the index too, including sessions outside the
+        // recent page. Keep record renames authoritative when both exist.
+        let indexed = Self::recent_session_index_path()
+            .and_then(|path| Connection::open(path).ok())
+            .and_then(|connection| {
+                connection
+                    .query_row(
+                        "SELECT working_dir, generated_title, custom_title, todo_title,
+                            saved, save_label, updated_at_ms, last_active_at_ms
+                     FROM recent_sessions WHERE session_id = ?1",
+                        params![session_id],
+                        |row| {
+                            Ok(PersistedSessionMetadata {
+                                working_dir: row.get(0)?,
+                                title: row.get(1)?,
+                                custom_title: row.get(2)?,
+                                todo_title: row.get(3)?,
+                                saved: row.get(4)?,
+                                save_label: row.get(5)?,
+                                updated_at_ms: row.get(6)?,
+                                last_active_at_ms: row.get(7)?,
+                            })
+                        },
+                    )
+                    .ok()
+            });
+        let record = Self::read_session_metadata(session_id);
+        if record.is_none() && indexed.is_none() {
+            let title = Self::first_prompt_title(session_id)?;
+            return Some(PersistedSessionMetadata {
+                title: Some(title),
+                ..Default::default()
+            });
+        }
+        let mut metadata = record.or_else(|| indexed.clone()).unwrap_or_default();
+        if let Some(indexed) = indexed {
+            metadata.todo_title = indexed.todo_title;
+            metadata.updated_at_ms = indexed.updated_at_ms;
+            metadata.last_active_at_ms = indexed.last_active_at_ms;
+            if metadata
+                .title
+                .as_deref()
+                .and_then(PersistedSessionMetadata::normalized_title)
+                .is_none()
+            {
+                metadata.title = indexed.title;
+            }
+        }
+        if let Some(home) = Self::jcode_home() {
+            let path = jcode_todo_policy::store::todo_file_path(
+                &home,
+                session_id,
+                jcode_todo_policy::store::TodoFile::Plan,
+            );
+            if let Some(plan) = std::fs::read(path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            {
+                metadata.todo_title = plan["title"]
+                    .as_str()
+                    .and_then(PersistedSessionMetadata::normalized_title);
+            }
+        }
+        if metadata
+            .title
+            .as_deref()
+            .and_then(PersistedSessionMetadata::normalized_title)
+            .is_none()
+        {
+            metadata.title = Self::first_prompt_title(session_id);
+        }
+        Some(metadata)
+    }
+
+    fn read_session_metadata(session_id: &str) -> Option<PersistedSessionMetadata> {
         let path = Self::session_record_path(session_id)?;
         // A missing or malformed record is expected (a session may predate the
         // fields, or be mid-write), and the only cost is missing metadata, so
@@ -3294,7 +3370,7 @@ impl BridgeState {
                 "INSERT INTO recent_sessions (
                      session_id, working_dir, generated_title, custom_title,
                      todo_title, updated_at_ms, last_active_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?5)
+                 ) VALUES (?1, ?2, ?3, ?4, ?6, ?5, ?5)
                  ON CONFLICT(session_id) DO NOTHING",
                 params![
                     session_id,
@@ -3302,6 +3378,7 @@ impl BridgeState {
                     metadata.title,
                     metadata.custom_title,
                     updated_at_ms,
+                    metadata.todo_title,
                 ],
             );
         }
