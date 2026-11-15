@@ -71,3 +71,6 @@ pub fn set_current_session(session_id: &str) {
 pub fn get_current_session() -> Option<String> {
     CURRENT_SESSION_ID.lock().ok()?.clone()
 }
+
+#[cfg(test)]
+mod builtin_tool_schema_tests;

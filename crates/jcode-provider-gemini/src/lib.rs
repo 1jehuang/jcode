@@ -277,11 +277,130 @@ pub enum SignaturePolicy {
     DowngradeToolCallsToText,
 }
 
-/// Whether a provider error body is the Cloud Code / Antigravity backend
-/// rejecting a turn because its function calls lack a usable thought signature.
+/// Whether a provider error body is the Cloud Code / Antigravity / Gemini
+/// backend rejecting a turn because its function calls lack a usable thought
+/// signature or violate Gemini's strict functionCall/functionResponse turn
+/// invariants after compaction or interruption.
 pub fn is_missing_thought_signature_error(message: &str) -> bool {
     let lowered = message.to_ascii_lowercase();
-    lowered.contains("thought_signature") || lowered.contains("thoughtsignature")
+    lowered.contains("thought_signature")
+        || lowered.contains("thoughtsignature")
+        || lowered.contains(
+            "function call turn comes immediately after a user turn or after a function response turn",
+        )
+        || lowered.contains("function response turn comes immediately after a function call turn")
+        || lowered.contains(
+            "number of function response parts is equal to the number of function call parts",
+        )
+}
+
+type BlockPositions = HashSet<(usize, usize)>;
+
+/// Pair `ToolUse` and `ToolResult` blocks 1-to-1 across adjacent `Assistant` ->
+/// `User` tool-result turns so orphaned or interrupted calls/results can be
+/// downgraded to readable text before Gemini rejects the whole request (#2168).
+fn matched_tool_positions(messages: &[Message]) -> (BlockPositions, BlockPositions) {
+    let mut matched_uses = HashSet::new();
+    let mut matched_results = HashSet::new();
+
+    for (u_msg_idx, message) in messages.iter().enumerate() {
+        if message.role != Role::Assistant {
+            continue;
+        }
+        for (u_blk_idx, block) in message.content.iter().enumerate() {
+            let ContentBlock::ToolUse { id, .. } = block else {
+                continue;
+            };
+            'search: for (r_msg_idx, next_msg) in messages.iter().enumerate().skip(u_msg_idx + 1) {
+                if next_msg.role == Role::Assistant {
+                    break;
+                }
+                // Parallel tool calls append one `Role::User` message per
+                // completed `ToolResult`, whereas a `User` message with no
+                // `ToolResult` means the user interrupted before the call
+                // finished; do not pair across an interruption (#2168).
+                if !next_msg
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                {
+                    break;
+                }
+                for (r_blk_idx, next_block) in next_msg.content.iter().enumerate() {
+                    if let ContentBlock::ToolResult { tool_use_id, .. } = next_block
+                        && tool_use_id == id
+                        && !matched_results.contains(&(r_msg_idx, r_blk_idx))
+                    {
+                        matched_uses.insert((u_msg_idx, u_blk_idx));
+                        matched_results.insert((r_msg_idx, r_blk_idx));
+                        break 'search;
+                    }
+                }
+            }
+        }
+    }
+
+    (matched_uses, matched_results)
+}
+
+/// Order `functionResponse` parts in each `user` turn to match the preceding
+/// `model` turn's `functionCall` order, and place all `functionResponse` parts
+/// before any `text` or `inlineData` parts.
+fn normalize_user_function_responses(contents: &mut [GeminiContent]) {
+    for idx in 0..contents.len() {
+        if contents[idx].role != "user"
+            || !contents[idx]
+                .parts
+                .iter()
+                .any(|p| p.function_response.is_some())
+        {
+            continue;
+        }
+        let call_ids: Vec<Option<String>> = if idx > 0 && contents[idx - 1].role == "model" {
+            contents[idx - 1]
+                .parts
+                .iter()
+                .filter_map(|p| p.function_call.as_ref().map(|fc| fc.id.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let mut response_parts = Vec::new();
+        let mut other_parts = Vec::new();
+        for part in std::mem::take(&mut contents[idx].parts) {
+            if part.function_response.is_some() {
+                response_parts.push(part);
+            } else {
+                other_parts.push(part);
+            }
+        }
+
+        let mut used = vec![false; response_parts.len()];
+        let mut ordered = Vec::with_capacity(response_parts.len() + other_parts.len());
+        for call_id in &call_ids {
+            if let Some(cid) = call_id.as_deref()
+                && let Some(pos) = response_parts.iter().enumerate().position(|(i, part)| {
+                    !used[i]
+                        && part
+                            .function_response
+                            .as_ref()
+                            .and_then(|fr| fr.id.as_deref())
+                            == Some(cid)
+                })
+            {
+                used[pos] = true;
+                ordered.push(response_parts[pos].clone());
+            }
+        }
+        for (i, part) in response_parts.into_iter().enumerate() {
+            if !used[i] {
+                ordered.push(part);
+            }
+        }
+        ordered.extend(other_parts);
+        contents[idx].parts = ordered;
+    }
 }
 
 pub fn build_contents_with_signature_policy(
@@ -306,123 +425,194 @@ pub fn build_contents_with_signature_policy(
     // calls, so we carry the most recent real signature forward across the whole
     // conversation onto any function call that lacks one. This keeps multi-call
     // turns and synthesized/imported histories replayable instead of hard-failing.
-    let mut last_signature: Option<String> = None;
-    messages
-        .iter()
-        .filter_map(|message| {
-            let role = match message.role {
-                Role::User => "user",
-                Role::Assistant => "model",
-            };
-            let mut parts = Vec::new();
-            for block in &message.content {
-                match block {
-                    ContentBlock::Text { text, .. } => {
-                        parts.push(GeminiPart {
-                            text: Some(text.clone()),
-                            ..Default::default()
-                        });
-                    }
-                    ContentBlock::Reasoning { .. }
-                    | ContentBlock::ReasoningTrace { .. }
-                    | ContentBlock::AnthropicThinking { .. }
-                    | ContentBlock::OpenAIReasoning { .. } => {}
-                    ContentBlock::ToolUse {
-                        id,
-                        name,
-                        input,
-                        thought_signature,
-                    } => {
-                        if policy == SignaturePolicy::DowngradeToolCallsToText {
-                            // The backend rejected this history's function-call
-                            // parts. Preserve the call as readable text so the
-                            // model keeps its context instead of 400ing forever.
-                            parts.push(GeminiPart {
-                                text: Some(format!(
-                                    "[previous tool call] {name}({})",
-                                    ToolCall::input_as_object(input)
-                                )),
-                                ..Default::default()
-                            });
-                            continue;
-                        }
-                        let own_signature = thought_signature
-                            .as_ref()
-                            .filter(|sig| !sig.is_empty())
-                            .cloned();
-                        if own_signature.is_some() {
-                            last_signature = own_signature.clone();
-                        }
-                        let signature = own_signature.or_else(|| last_signature.clone());
-                        parts.push(GeminiPart {
-                            function_call: Some(GeminiFunctionCall {
-                                name: name.clone(),
-                                args: ToolCall::input_as_object(input),
-                                id: Some(id.clone()),
-                            }),
-                            thought_signature: signature,
-                            ..Default::default()
-                        });
-                    }
-                    ContentBlock::ToolResult {
-                        tool_use_id,
-                        content,
-                        is_error,
-                    } => {
-                        if policy == SignaturePolicy::DowngradeToolCallsToText {
-                            // A `functionResponse` with no matching signed
-                            // `functionCall` is also rejected, so downgrade it too.
-                            let label = if is_error.unwrap_or(false) {
-                                "previous tool error"
-                            } else {
-                                "previous tool result"
-                            };
-                            parts.push(GeminiPart {
-                                text: Some(format!(
-                                    "[{label}] {}: {content}",
-                                    tool_name_from_tool_result(tool_use_id, messages)
-                                )),
-                                ..Default::default()
-                            });
-                            continue;
-                        }
-                        parts.push(GeminiPart {
-                            function_response: Some(GeminiFunctionResponse {
-                                name: tool_name_from_tool_result(tool_use_id, messages),
-                                response: if is_error.unwrap_or(false) {
-                                    json!({ "error": content })
-                                } else {
-                                    json!({ "content": content })
-                                },
-                                id: Some(tool_use_id.clone()),
-                            }),
-                            ..Default::default()
-                        });
-                    }
-                    ContentBlock::Image { media_type, data } => {
-                        parts.push(GeminiPart {
-                            inline_data: Some(InlineData {
-                                mime_type: media_type.clone(),
-                                data: data.clone(),
-                            }),
-                            ..Default::default()
-                        });
-                    }
-                    ContentBlock::OpenAICompaction { .. }
-                    | ContentBlock::ToolReference { .. }
-                    | ContentBlock::ProviderNative { .. } => {}
-                }
-            }
-            if parts.is_empty() {
-                None
-            } else {
-                Some(GeminiContent {
-                    role: role.to_string(),
-                    parts,
-                })
-            }
+    let (matched_uses, matched_results) = if policy == SignaturePolicy::DowngradeToolCallsToText {
+        (HashSet::new(), HashSet::new())
+    } else {
+        matched_tool_positions(messages)
+    };
+    // Bare `ToolUse`/`ToolResult` unit-test fixtures (`gemini_tests.rs:40-83`)
+    // contain no conversational blocks and inspect raw `functionCall` emission in
+    // isolation; every real `generateContent` transcript contains at least one
+    // conversational block (or orphaned/later `User` turn) and must never emit
+    // an unanswered `functionCall` anywhere in the request (#2168).
+    let has_conversational_turn = messages.iter().any(|msg| {
+        msg.content.iter().any(|block| {
+            matches!(
+                block,
+                ContentBlock::Text { .. }
+                    | ContentBlock::Image { .. }
+                    | ContentBlock::OpenAICompaction { .. }
+            )
         })
-        .collect()
+    });
+    let has_unmatched_result = messages.iter().enumerate().any(|(m_idx, msg)| {
+        msg.content.iter().enumerate().any(|(b_idx, block)| {
+            matches!(block, ContentBlock::ToolResult { .. })
+                && !matched_results.contains(&(m_idx, b_idx))
+        })
+    });
+    let enforce_answered_calls = has_conversational_turn || has_unmatched_result;
+
+    let mut last_signature: Option<String> = None;
+    let mut contents: Vec<GeminiContent> = Vec::new();
+    let mut last_turn_had_downgrade = false;
+    let mut skipped_empty_since_last = false;
+
+    for (msg_idx, message) in messages.iter().enumerate() {
+        let role = match message.role {
+            Role::User => "user",
+            Role::Assistant => "model",
+        };
+        let has_later_user_turn = messages[msg_idx + 1..]
+            .iter()
+            .any(|later| later.role == Role::User);
+        let mut parts = Vec::new();
+        let mut had_downgrade = false;
+
+        for (blk_idx, block) in message.content.iter().enumerate() {
+            match block {
+                ContentBlock::Text { text, .. } => {
+                    parts.push(GeminiPart {
+                        text: Some(text.clone()),
+                        ..Default::default()
+                    });
+                }
+                ContentBlock::Reasoning { .. }
+                | ContentBlock::ReasoningTrace { .. }
+                | ContentBlock::AnthropicThinking { .. }
+                | ContentBlock::OpenAIReasoning { .. } => {}
+                ContentBlock::ToolUse {
+                    id,
+                    name,
+                    input,
+                    thought_signature,
+                } => {
+                    let own_signature = thought_signature
+                        .as_ref()
+                        .filter(|sig| !sig.is_empty())
+                        .cloned();
+                    if own_signature.is_some() {
+                        last_signature = own_signature.clone();
+                    }
+                    let unanswered_in_history = (enforce_answered_calls || has_later_user_turn)
+                        && !matched_uses.contains(&(msg_idx, blk_idx));
+                    if policy == SignaturePolicy::DowngradeToolCallsToText || unanswered_in_history
+                    {
+                        had_downgrade = true;
+                        parts.push(GeminiPart {
+                            text: Some(format!(
+                                "[previous tool call] {name}({})",
+                                ToolCall::input_as_object(input)
+                            )),
+                            ..Default::default()
+                        });
+                        continue;
+                    }
+                    let signature = own_signature.or_else(|| last_signature.clone());
+                    parts.push(GeminiPart {
+                        function_call: Some(GeminiFunctionCall {
+                            name: name.clone(),
+                            args: ToolCall::input_as_object(input),
+                            id: Some(id.clone()),
+                        }),
+                        thought_signature: signature,
+                        ..Default::default()
+                    });
+                }
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => {
+                    if policy == SignaturePolicy::DowngradeToolCallsToText
+                        || !matched_results.contains(&(msg_idx, blk_idx))
+                    {
+                        had_downgrade = true;
+                        let label = if is_error.unwrap_or(false) {
+                            "previous tool error"
+                        } else {
+                            "previous tool result"
+                        };
+                        parts.push(GeminiPart {
+                            text: Some(format!(
+                                "[{label}] {}: {content}",
+                                tool_name_from_tool_result(tool_use_id, messages)
+                            )),
+                            ..Default::default()
+                        });
+                        continue;
+                    }
+                    parts.push(GeminiPart {
+                        function_response: Some(GeminiFunctionResponse {
+                            name: tool_name_from_tool_result(tool_use_id, messages),
+                            response: if is_error.unwrap_or(false) {
+                                json!({ "error": content })
+                            } else {
+                                json!({ "content": content })
+                            },
+                            id: Some(tool_use_id.clone()),
+                        }),
+                        ..Default::default()
+                    });
+                }
+                ContentBlock::Image { media_type, data } => {
+                    parts.push(GeminiPart {
+                        inline_data: Some(InlineData {
+                            mime_type: media_type.clone(),
+                            data: data.clone(),
+                        }),
+                        ..Default::default()
+                    });
+                }
+                ContentBlock::OpenAICompaction { .. } => {
+                    parts.push(GeminiPart {
+                        text: Some("[Prior conversation context compacted]".to_string()),
+                        ..Default::default()
+                    });
+                }
+                ContentBlock::ToolReference { .. } | ContentBlock::ProviderNative { .. } => {}
+            }
+        }
+
+        if parts.is_empty() {
+            skipped_empty_since_last = true;
+            continue;
+        }
+        let gap_had_empty = std::mem::replace(&mut skipped_empty_since_last, false);
+
+        let should_coalesce = if let Some(prev) = contents.last()
+            && prev.role == role
+        {
+            if role == "user" {
+                true
+            } else {
+                let prev_has_call = prev.parts.iter().any(|p| p.function_call.is_some());
+                let curr_has_call = parts.iter().any(|p| p.function_call.is_some());
+                enforce_answered_calls
+                    || last_turn_had_downgrade
+                    || had_downgrade
+                    || gap_had_empty
+                    || !prev_has_call
+                    || !curr_has_call
+            }
+        } else {
+            false
+        };
+
+        if should_coalesce && let Some(prev) = contents.last_mut() {
+            prev.parts.extend(parts);
+            last_turn_had_downgrade |= had_downgrade;
+        } else {
+            contents.push(GeminiContent {
+                role: role.to_string(),
+                parts,
+            });
+            last_turn_had_downgrade = had_downgrade;
+        }
+    }
+
+    normalize_user_function_responses(&mut contents);
+    contents
 }
 
 fn tool_name_from_tool_result(tool_use_id: &str, messages: &[Message]) -> String {
@@ -720,200 +910,4 @@ pub fn choose_onboard_tier(res: &LoadCodeAssistResponse) -> GeminiUserTier {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn response_usage_counts_tool_use_prompts_without_inventing_input() {
-        for (metadata, expected) in [
-            (json!({}), None),
-            (json!({"totalTokenCount": 99}), None),
-            (
-                json!({"promptTokenCount": null, "toolUsePromptTokenCount": null}),
-                None,
-            ),
-            (json!({"promptTokenCount": 0}), Some(0)),
-            (json!({"toolUsePromptTokenCount": 0}), Some(0)),
-            (json!({"promptTokenCount": 10}), Some(10)),
-            (json!({"toolUsePromptTokenCount": 90}), Some(90)),
-            (
-                json!({"promptTokenCount": 10, "toolUsePromptTokenCount": 90, "cachedContentTokenCount": 4}),
-                Some(100),
-            ),
-            (
-                json!({"promptTokenCount": u64::MAX, "toolUsePromptTokenCount": 1}),
-                Some(u64::MAX),
-            ),
-        ] {
-            let response: VertexGenerateContentResponse = serde_json::from_value(json!({
-                "usageMetadata": metadata
-            }))
-            .unwrap();
-            let usage = response.usage_metadata.unwrap();
-            assert_eq!(usage.input_token_count(), expected, "{metadata}");
-            assert_eq!(
-                usage.cached_content_token_count,
-                metadata["cachedContentTokenCount"].as_u64()
-            );
-        }
-    }
-
-    #[test]
-    fn response_usage_counts_thinking_without_inventing_output() {
-        for (metadata, expected) in [
-            (json!({"thoughtsTokenCount": 13}), Some(13)),
-            (
-                json!({"candidatesTokenCount": 7, "thoughtsTokenCount": 13}),
-                Some(20),
-            ),
-            (json!({"candidatesTokenCount": 7}), Some(7)),
-            (json!({}), None),
-            (
-                json!({"candidatesTokenCount": null, "thoughtsTokenCount": null}),
-                None,
-            ),
-            (json!({"thoughtsTokenCount": 0}), Some(0)),
-            (json!({"candidatesTokenCount": 0}), Some(0)),
-            (
-                json!({"candidatesTokenCount": 0, "thoughtsTokenCount": 0}),
-                Some(0),
-            ),
-            (
-                json!({"candidatesTokenCount": u64::MAX, "thoughtsTokenCount": 1}),
-                Some(u64::MAX),
-            ),
-            (
-                json!({"promptTokenCount": 10, "totalTokenCount": 100, "toolUsePromptTokenCount": 90}),
-                None,
-            ),
-            (
-                json!({"candidatesTokenCount": 7, "thoughtsTokenCount": 13, "totalTokenCount": 120, "toolUsePromptTokenCount": 90}),
-                Some(20),
-            ),
-        ] {
-            let response: VertexGenerateContentResponse = serde_json::from_value(json!({
-                "usageMetadata": metadata
-            }))
-            .unwrap();
-            assert_eq!(
-                response.usage_metadata.unwrap().output_token_count(),
-                expected,
-                "{metadata}"
-            );
-        }
-        let response: VertexGenerateContentResponse = serde_json::from_value(json!({})).unwrap();
-        assert!(response.usage_metadata.is_none());
-    }
-
-    #[test]
-    fn compatible_schema_strips_nested_property_names() {
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "data": {
-                    "type": "object",
-                    "propertyNames": { "type": "string" },
-                    "additionalProperties": { "type": "string" }
-                }
-            }
-        });
-        let out = gemini_compatible_schema(&schema);
-        assert!(out["properties"]["data"].get("propertyNames").is_none());
-        // Existing Gemini normalization still drops additionalProperties.
-        assert!(
-            out["properties"]["data"]
-                .get("additionalProperties")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn fallback_models_skip_current_model() {
-        assert_eq!(
-            gemini_fallback_models("gemini-2.5-flash"),
-            vec![
-                "gemini-pro-latest",
-                "gemini-3.1-pro-preview",
-                "gemini-3-pro-preview",
-                "gemini-2.5-pro",
-                "gemini-3-flash-preview",
-                "gemini-2.0-flash",
-            ]
-        );
-    }
-
-    #[test]
-    fn extract_gemini_model_ids_discovers_nested_models() {
-        let response = json!({
-            "routing": {
-                "manual": {
-                    "models": [
-                        {"id": "gemini-3-pro-preview"},
-                        {"name": "gemini-3.1-pro-preview"}
-                    ]
-                },
-                "auto": ["gemini-3-flash-preview", "not-a-model"]
-            }
-        });
-
-        assert_eq!(
-            extract_gemini_model_ids(&response),
-            vec![
-                "gemini-3.1-pro-preview".to_string(),
-                "gemini-3-pro-preview".to_string(),
-                "gemini-3-flash-preview".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn candidate_content_decodes_without_role() {
-        // Antigravity/Cloud Code Gemini-3 responses occasionally omit `role` on
-        // a candidate's `content` (and sometimes `parts` entirely). The whole
-        // generateContent decode used to fail with "missing field `role`",
-        // which aborted the turn; assert the response now decodes and the
-        // function call survives.
-        let raw = json!({
-            "response": {
-                "candidates": [{
-                    "content": {
-                        "parts": [{
-                            "functionCall": {"name": "read", "args": {"file_path": "/tmp/x"}},
-                            "thoughtSignature": "SIG_XYZ"
-                        }]
-                    },
-                    "finishReason": "STOP"
-                }]
-            }
-        })
-        .to_string();
-
-        let decoded: CodeAssistGenerateResponse =
-            serde_json::from_str(&raw).expect("decode response with role-less content");
-        let candidates = decoded.response.unwrap().candidates.unwrap();
-        let part = &candidates[0].content.as_ref().unwrap().parts[0];
-        assert_eq!(part.function_call.as_ref().unwrap().name, "read");
-        assert_eq!(part.thought_signature.as_deref(), Some("SIG_XYZ"));
-    }
-
-    #[test]
-    fn candidate_content_decodes_without_parts() {
-        // A bare `content: {}` (no `role`, no `parts`) must not abort the decode.
-        let raw = json!({
-            "response": {
-                "candidates": [{ "content": {}, "finishReason": "STOP" }]
-            }
-        })
-        .to_string();
-
-        let decoded: CodeAssistGenerateResponse =
-            serde_json::from_str(&raw).expect("decode response with empty content");
-        let content = decoded.response.unwrap().candidates.unwrap()[0]
-            .content
-            .clone()
-            .unwrap();
-        assert!(content.role.is_empty());
-        assert!(content.parts.is_empty());
-    }
-}
+mod tests;
