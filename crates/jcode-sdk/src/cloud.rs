@@ -26,6 +26,8 @@ use std::time::{Duration, Instant};
 mod timing;
 #[cfg(test)]
 mod timing_tests;
+#[cfg(test)]
+mod transport_tests;
 
 /// Production control plane.
 pub const DEFAULT_API_BASE: &str = "https://api.jcode.sh/v1";
@@ -535,7 +537,26 @@ impl CloudClient {
     }
 
     fn agent(&self) -> ureq::Agent {
-        ureq::Agent::config_builder()
+        // Mobile creates short-lived CloudClients while polling a waking host.
+        // Keep the transport, not account state, across those calls so every
+        // poll does not repeat TCP/TLS setup. ureq pools sockets by origin.
+        // Neither credentials nor response bodies enter this bounded cache.
+        type Agents = std::collections::VecDeque<(String, Duration, ureq::Agent)>;
+        static AGENTS: std::sync::Mutex<Agents> =
+            std::sync::Mutex::new(std::collections::VecDeque::new());
+        let mut agents = AGENTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(index) = agents
+            .iter()
+            .position(|(name, timeout, _)| name == &self.client_name && *timeout == self.timeout)
+        {
+            let entry = agents.remove(index).unwrap();
+            let agent = entry.2.clone();
+            agents.push_back(entry);
+            return agent;
+        }
+        let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(self.timeout))
             .http_status_as_error(false)
             .user_agent(format!(
@@ -544,7 +565,12 @@ impl CloudClient {
                 env!("CARGO_PKG_VERSION")
             ))
             .build()
-            .into()
+            .into();
+        if agents.len() >= 8 {
+            agents.pop_front();
+        }
+        agents.push_back((self.client_name.clone(), self.timeout, agent.clone()));
+        agent
     }
 
     fn post_raw(
