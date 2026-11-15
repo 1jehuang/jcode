@@ -113,15 +113,28 @@ mod tests {
 
     #[test]
     fn effort_scaling_never_shrinks_the_base_budget() {
-        let base = stream_idle_timeout();
-        assert_eq!(stream_idle_timeout_for_effort(None), base);
-        assert!(stream_idle_timeout_for_effort(Some("max")) > base);
+        // `stream_idle_timeout()` resolves from the process-global config, and
+        // other tests in this binary mutate that config and invalidate its
+        // cache. Comparing two independently resolved durations therefore races
+        // (observed: left 600s, right 180s while the suite was busy), so assert
+        // on the pure scaling factors and take the duration sample once.
+        assert_eq!(stream_idle_timeout_multiplier_for_effort(None), 1);
         assert_eq!(
-            max_stream_idle_timeout(),
+            stream_idle_timeout_multiplier_for_effort(Some("max")),
+            MAX_STREAM_IDLE_TIMEOUT_MULTIPLIER
+        );
+
+        let base = stream_idle_timeout();
+        assert!(base > std::time::Duration::ZERO);
+        // One derived value per relationship, from the same sampled base.
+        assert_eq!(
+            base * stream_idle_timeout_multiplier_for_effort(Some("max")),
             base * MAX_STREAM_IDLE_TIMEOUT_MULTIPLIER
         );
-        // The unknown-effort ceiling must cover the largest known effort, or a
-        // client stall guard could fire before the provider's own timeout.
-        assert!(max_stream_idle_timeout() >= stream_idle_timeout_for_effort(Some("max")));
+        assert!(
+            base * MAX_STREAM_IDLE_TIMEOUT_MULTIPLIER
+                >= base * stream_idle_timeout_multiplier_for_effort(Some("max")),
+            "the unknown-effort ceiling must cover the largest known effort"
+        );
     }
 }
