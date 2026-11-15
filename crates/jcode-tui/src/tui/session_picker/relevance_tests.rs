@@ -385,7 +385,7 @@ fn mxabox_literal_transcript_hit_beats_recent_fuzzy_metadata_and_transcripts() {
 }
 
 #[test]
-fn fuzzy_transcript_ranking_uses_matched_words_not_only_recency() {
+fn fuzzy_transcript_search_rejects_distant_spellings_regardless_of_recency() {
     let temp = tempfile::tempdir().unwrap();
     let close = temp.path().join("close.json");
     let loose = temp.path().join("loose.json");
@@ -394,8 +394,8 @@ fn fuzzy_transcript_ranking_uses_matched_words_not_only_recency() {
     let tokens = search_query_tokens("mxabox");
     let cancel = AtomicBool::new(false);
     let close_score = paths_match_scored(&[close.clone()], &tokens, &cancel).unwrap();
-    let loose_score = paths_match_scored(&[loose.clone()], &tokens, &cancel).unwrap();
-    assert!(close_score > loose_score, "{close_score} <= {loose_score}");
+    assert!(close_score > 0);
+    assert!(paths_match_scored(&[loose.clone()], &tokens, &cancel).is_none());
     let mut picker = SessionPicker::new(vec![
         session("loose", "unrelated", 0, &loose),
         session("close", "unrelated", 1000, &close),
@@ -403,7 +403,46 @@ fn fuzzy_transcript_ranking_uses_matched_words_not_only_recency() {
     picker.search_query = "mxabox".into();
     picker.rebuild_items();
     wait(&mut picker);
-    assert_eq!(ids(&picker), ["close", "loose"]);
+    assert_eq!(ids(&picker), ["close"]);
+}
+
+#[test]
+fn fork_basten_does_not_find_an_incidental_tuning_fork_essay() {
+    let temp = tempfile::tempdir().unwrap();
+    let essay = temp.path().join("essay.json");
+    let target = temp.path().join("target.json");
+    std::fs::write(&essay, r#"{"messages":[{"role":"user","content":"Write a 4000 word essay on the history of timekeeping. Use no tools."},{"role":"assistant","content":"The tuning fork vibrates. A clock based on atoms. Laser cooling slowed atoms almost to a standstill. The basement laboratory kept time."}]}"#).unwrap();
+    std::fs::write(
+        &target,
+        r#"{"messages":[{"role":"user","content":"fork basten and fix the integration"}]}"#,
+    )
+    .unwrap();
+    let cancel = AtomicBool::new(false);
+    let tokens = search_query_tokens("fork basten");
+    let mut scores = WordScores::default();
+    let mut streaming = Scan::new(&tokens, &[], &cancel, ScanMode::Fuzzy, &mut scores);
+    scan_file_streaming(&essay, &mut streaming);
+    assert!(streaming.evidence().is_none());
+    scan_file_streaming(&target, &mut streaming);
+    assert!(streaming.evidence().is_some());
+    let mut picker = SessionPicker::new(vec![
+        session(
+            "essay",
+            "Write a 4000 word essay on the history of timekeeping",
+            0,
+            &essay,
+        ),
+        session("target", "Integration", 1000, &target),
+    ]);
+    picker.search_query = "fork basten".into();
+    picker.rebuild_items();
+    wait(&mut picker);
+    assert_eq!(ids(&picker), ["target"]);
+    // Repeat against resident token and decoded-text caches as well.
+    picker.search_query = "fork bastem".into();
+    picker.rebuild_items();
+    wait(&mut picker);
+    assert_eq!(ids(&picker), ["target"]);
 }
 
 #[test]

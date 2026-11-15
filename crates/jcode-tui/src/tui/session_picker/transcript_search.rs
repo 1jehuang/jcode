@@ -1168,7 +1168,7 @@ impl<'a> Scan<'a> {
                 // metadata. Bound DP work for URLs and minified output.
                 // Transcript evidence prefers the closest word length
                 // over an incidental longer prefix or suffix match.
-                if let Some(score) = self.scores.best_score(token, lower, true) {
+                if let Some(score) = self.scores.best_search_score(token, lower) {
                     *found = true;
                     *best = Some(source);
                     self.score += i64::from(score);
