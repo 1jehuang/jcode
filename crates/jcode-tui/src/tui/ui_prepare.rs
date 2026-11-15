@@ -579,7 +579,7 @@ pub(super) fn prepare_messages(
         mermaid_aspect_bucket: crate::tui::mermaid::current_preferred_aspect_ratio_bucket(),
         is_processing: app.is_processing(),
         streaming_text_len: app.streaming_text().len(),
-        streaming_text_hash: super::hash_text_for_cache(app.streaming_text()),
+        streaming_text_hash: app.streaming_text_hash(),
         batch_progress_hash: active_batch_progress_hash(app),
         // An unpinned transcript must not reuse a previously prepared frame
         // containing anchored images. With no images, both modes are visually

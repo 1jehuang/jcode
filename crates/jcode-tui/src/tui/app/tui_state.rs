@@ -815,6 +815,10 @@ impl crate::tui::TuiState for App {
         &self.streaming.streaming_text
     }
 
+    fn streaming_text_hash(&self) -> u64 {
+        self.streaming.text_hash()
+    }
+
     fn pinned_todos_payload(&self) -> Option<&str> {
         self.pinned_todos_payload_ref()
     }

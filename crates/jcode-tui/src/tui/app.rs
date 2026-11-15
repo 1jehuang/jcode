@@ -850,14 +850,38 @@ enum ColdCacheWarningTrigger {
     RequestStart,
 }
 
-/// Live streaming/turn progress: streamed text, per-turn token counts, and the
-/// tokens-per-second tracking state.
-///
-/// Grouped out of [`App`]. These fields are reset/updated as a unit each turn,
-/// so keeping them together clarifies the streaming lifecycle.
+impl StreamingProgress {
+    fn text_hash(&self) -> u64 {
+        if let Some(hash) = self.streaming_text_hash.get() {
+            return hash;
+        }
+        let hash = super::ui::hash_text_for_cache(&self.streaming_text);
+        self.streaming_text_hash.set(Some(hash));
+        #[cfg(test)]
+        {
+            let (calls, bytes) = self.streaming_hash_work.get();
+            self.streaming_hash_work
+                .set((calls + 1, bytes + self.streaming_text.len()));
+        }
+        hash
+    }
+
+    /// Invalidate before mutable access, including take, split_off and replacement.
+    fn streaming_text_mut(&mut self) -> &mut String {
+        self.streaming_text_hash.set(None);
+        &mut self.streaming_text
+    }
+}
+
+/// Live streaming/turn progress, grouped because these fields reset together.
 #[derive(Clone, Debug, Default)]
 struct StreamingProgress {
     streaming_text: String,
+    /// Content hash reused between frames. All production writes to the text
+    /// must go through `streaming_text_mut`, including reasoning tail edits.
+    streaming_text_hash: std::cell::Cell<Option<u64>>,
+    #[cfg(test)]
+    streaming_hash_work: std::cell::Cell<(usize, usize)>,
     response_output: response_output::ResponseOutput,
     // Live token usage (per turn)
     streaming_input_tokens: u64,
