@@ -160,6 +160,31 @@ pub(super) fn apply(dir: &Path, change: &Change, reverse: bool) -> Result<()> {
     result
 }
 
+pub(super) fn permission_denied(error: &anyhow::Error) -> bool {
+    error
+        .root_cause()
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
+}
+
+/// Existing tools deliberately permit links and uncapturable files. Preserve
+/// that behavior, but never advertise an incomplete checkpoint as restorable.
+pub(super) fn unrestorable(
+    dir: &Path,
+    history: &mut History,
+    path: &Path,
+    content: Option<&[u8]>,
+) -> Result<()> {
+    for checkpoint in &mut history.checkpoints {
+        checkpoint.blocked.insert(path.to_owned());
+    }
+    save(dir, history)?;
+    match content {
+        Some(bytes) => fs::write(path, bytes).map_err(Into::into),
+        None => fs::remove_file(path).map_err(Into::into),
+    }
+}
+
 #[cfg(all(test, unix))]
 #[path = "file_history_acl_tests.rs"]
 mod tests;

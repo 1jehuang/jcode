@@ -149,3 +149,25 @@ fn denied_staging_edits_original_inode_and_blocks_rewind() {
     assert!(restore("denied-staging", &checkpoint.id).is_err());
     assert_eq!(fs::read(&path).unwrap(), b"after");
 }
+
+#[test]
+fn unreadable_writable_file_is_written_but_not_restorable() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let _env = crate::storage::lock_test_env();
+    let (_home, work) = fixture();
+    let path = work.path().join("write-only");
+    fs::write(&path, b"secret before").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o200)).unwrap();
+    let cp = checkpoint("write-only", 0, "before write").unwrap();
+
+    let result = mutate("write-only", &path, Some(b"after"));
+
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    result.unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"after");
+    assert!(!checkpoints("write-only").unwrap()[0].can_restore_files);
+    assert!(restore("write-only", &cp.id).is_err());
+    assert_eq!(fs::read(&path).unwrap(), b"after");
+}
