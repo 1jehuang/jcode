@@ -39,7 +39,11 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     ]);
 
     crate::env::set_var("JCODE_HOME", temp.path());
-    for (key, _) in _restore.0.iter() {
+    // JCODE_HOME was just pinned to the temp dir: scrubbing it here would
+    // leave the test body writing credentials to the user's real home. Skip
+    // it in the loop; the restore-on-drop guard still puts the ambient value
+    // back when the test finishes.
+    for (key, _) in _restore.0.iter().skip(1) {
         crate::env::remove_var(key);
     }
 
