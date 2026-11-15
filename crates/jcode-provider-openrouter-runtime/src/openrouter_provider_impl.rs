@@ -765,6 +765,20 @@ impl Provider for OpenRouterProvider {
             }
             models
         };
+        // Same merge rule as `available_models_display`: configured static
+        // models stay switchable next to the live/disk catalog.
+        let should_merge_static_models = self.should_merge_static_models_with_live_catalog();
+        let merge_static_models = |mut models: Vec<String>| {
+            if !should_merge_static_models {
+                return with_current_model(models);
+            }
+            for model in &self.static_models {
+                if !model.trim().is_empty() && !models.iter().any(|existing| existing == model) {
+                    models.push(model.clone());
+                }
+            }
+            with_current_model(models)
+        };
         if !self.supports_model_catalog {
             if !self.static_models.is_empty() {
                 return finalize(with_current_model(self.static_models.clone()));
@@ -782,7 +796,17 @@ impl Provider for OpenRouterProvider {
             && !cache.models.is_empty()
         {
             let ids: Vec<String> = cache.models.iter().map(|m| m.id.clone()).collect();
-            return finalize(with_current_model(ids));
+            return finalize(merge_static_models(ids));
+        }
+
+        // No live memory catalog. Mirror `available_models_display`: fall
+        // back to the saved on-disk catalog first (a named provider /models
+        // fetch may have populated it), so configured models do not disappear
+        // from the switching list after a restart.
+        if let Some(cache_entry) = self.load_usable_model_disk_cache_entry() {
+            return finalize(merge_static_models(
+                cache_entry.models.into_iter().map(|m| m.id).collect(),
+            ));
         }
 
         if !self.static_models.is_empty() {
