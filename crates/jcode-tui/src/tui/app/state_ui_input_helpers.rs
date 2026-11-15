@@ -37,6 +37,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/help", "Show help and keyboard shortcuts"),
     RegisteredCommand::public("/?", "Show help and keyboard shortcuts"),
     RegisteredCommand::public("/commands", "Alias for /help"),
+    RegisteredCommand::public(
+        "/overview",
+        "Toggle the consolidated info panel vs separate widgets",
+    ),
     RegisteredCommand::public("/model", "List or switch models"),
     RegisteredCommand::public("/models", "Alias for /model"),
     RegisteredCommand::public(
@@ -776,6 +780,26 @@ impl App {
                 .map(|(cmd, help)| (format!("{} {}", base, cmd.trim_start_matches('/')), help))
                 .collect();
             return self.rank_suggestions(input, topics);
+        }
+
+        if prefix.starts_with("/overview ") {
+            return self.rank_suggestions(
+                input,
+                vec![
+                    (
+                        "/overview status".into(),
+                        "Show the current info panel style",
+                    ),
+                    (
+                        "/overview on".into(),
+                        "One consolidated Overview panel in the margins",
+                    ),
+                    (
+                        "/overview off".into(),
+                        "Separate widgets each dock on their own",
+                    ),
+                ],
+            );
         }
 
         if prefix.starts_with("/colors ") || prefix.starts_with("/color ") {

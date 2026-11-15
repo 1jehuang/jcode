@@ -146,6 +146,18 @@ pub struct DisplayConfig {
     pub resume_open_elsewhere: ResumeOpenElsewhere,
     /// Usage percentage wording: "left" (default) or "used".
     pub usage_display: String,
+    /// Show the consolidated single Overview panel in the transcript margins
+    /// instead of the separate per-section info widgets (default: true).
+    /// Set false for the classic layout: Swarm, Background, Compaction,
+    /// Runtime, Usage, KV cache, Git and Commits each dock on their own.
+    #[serde(default = "default_true")]
+    pub single_overview: bool,
+    /// Pin the Overview panel to the top-right corner of the transcript as a
+    /// HUD that never moves with scroll, and wrap transcript lines so no text
+    /// renders underneath it (default: true). Set false to let the Overview
+    /// float in the transcript margins like the other info widgets.
+    #[serde(default = "default_true")]
+    pub overview_pinned: bool,
 }
 
 /// Resume behavior for a session another local client window already shows.
@@ -249,6 +261,8 @@ impl Default for DisplayConfig {
             resume_time: ResumeTimeMode::default(),
             resume_open_elsewhere: ResumeOpenElsewhere::default(),
             usage_display: "left".to_string(),
+            single_overview: true,
+            overview_pinned: true,
         }
     }
 }

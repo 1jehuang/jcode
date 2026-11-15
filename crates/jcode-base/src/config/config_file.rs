@@ -271,6 +271,30 @@ impl Config {
         Ok(())
     }
 
+    /// Update the persisted single-overview preference.
+    pub fn set_single_overview(single: bool) -> anyhow::Result<()> {
+        let mut cfg = Self::load_for_update()?;
+        cfg.display.single_overview = single;
+        cfg.save()?;
+        crate::logging::info(&format!(
+            "Saved display.single_overview to config: {}",
+            single
+        ));
+        Ok(())
+    }
+
+    /// Update the persisted overview-pinned preference.
+    pub fn set_overview_pinned(pinned: bool) -> anyhow::Result<()> {
+        let mut cfg = Self::load_for_update()?;
+        cfg.display.overview_pinned = pinned;
+        cfg.save()?;
+        crate::logging::info(&format!(
+            "Saved display.overview_pinned to config: {}",
+            pinned
+        ));
+        Ok(())
+    }
+
     /// Update the persisted show-agentgrep-output preference.
     pub fn set_show_agentgrep_output(show: bool) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;
