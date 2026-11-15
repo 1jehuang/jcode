@@ -47,11 +47,18 @@ async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: boo
     let writer = Arc::new(Mutex::new(writer_a));
 
     tokio::time::timeout(
-        std::time::Duration::from_millis(100),
+        // The intent is "the handler must not block on the busy agent mutex".
+        // `try_for_agent` uses `try_lock` and falls back, but the fallback is a
+        // `spawn_blocking` round trip that loads the session from disk, which can
+        // exceed 100ms on a slow or cold filesystem. The semantic proof that the
+        // handler did not wait is the persisted-model assertion below; this
+        // bound only has to be far shorter than a mutex wait (which is
+        // unbounded), not tight enough to time the I/O.
+        std::time::Duration::from_secs(2),
         handle_get_model_catalog(43, session_id, &agent, &provider, &writer),
     )
     .await
-    .expect("model catalog must not wait for busy agent mutex")
+    .expect("model catalog must answer while the agent mutex is held")
     .expect("model catalog fallback should write history event");
 
     drop(busy_guard);
