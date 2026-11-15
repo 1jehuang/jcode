@@ -1140,7 +1140,7 @@ impl Agent {
                 let stored_message = StoredMessage {
                     id: id::new_id("message"),
                     role: Role::User,
-                    content: vec![tool_block],
+                    content: vec![tool_block].into(),
                     display_role: None,
                     timestamp: Some(chrono::Utc::now()),
                     tool_duration_ms: None,

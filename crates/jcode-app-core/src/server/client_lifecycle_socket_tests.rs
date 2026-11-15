@@ -758,7 +758,8 @@ async fn sdk_socket_cancel_workflow(
             content: vec![ContentBlock::Text {
                 text: format!("history {index}"),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,

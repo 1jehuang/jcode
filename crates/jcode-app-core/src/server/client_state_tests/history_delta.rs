@@ -257,7 +257,8 @@ async fn recent_history_live_and_busy_bootstrap_and_expansion() {
             content: vec![crate::message::ContentBlock::Text {
                 text: format!("message {index}"),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,

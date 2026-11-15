@@ -757,7 +757,8 @@ async fn assert_history_service_tier_and_pdf_capability(
         content: vec![crate::message::ContentBlock::Text {
             text: "persisted fallback history".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -778,7 +779,8 @@ async fn assert_history_service_tier_and_pdf_capability(
     live_session.messages[0].content = vec![crate::message::ContentBlock::Text {
         text: "live unsaved history".to_string(),
         cache_control: None,
-    }];
+    }]
+    .into();
     let agent = Arc::new(Mutex::new(Agent::new_with_session(
         provider.clone(),
         registry,
