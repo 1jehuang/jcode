@@ -681,6 +681,7 @@ pub fn is_image_rejection_error(error: &str) -> bool {
         || lower.contains("image.source")
         || lower.contains("could not process image")
         || lower.contains("invalid image")
+        || lower.contains("does not represent a valid image")
         || lower.contains("unsupported image")
         || lower.contains("image_parse_error")
         || lower.contains("invalid_image");
