@@ -303,13 +303,16 @@ fn test_local_compacted_history_marker_scroll_expands_from_session() {
             cache_control: None,
         }],
     );
-    app.session.compaction = Some(crate::session::StoredCompactionState {
-        summary_text: "old prompts and responses".to_string(),
-        openai_encrypted_content: None,
-        covers_up_to_turn: TURNS,
-        original_turn_count: TURNS,
-        compacted_count,
-    });
+    app.session.compaction = Some(
+        crate::session::StoredCompactionState {
+            summary_text: "old prompts and responses".to_string(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: TURNS,
+            original_turn_count: TURNS,
+            compacted_count,
+        }
+        .into(),
+    );
 
     let (rendered_messages, _images, _compacted_info) =
         crate::session::render_messages_and_images_with_compacted_history(&app.session, 0);

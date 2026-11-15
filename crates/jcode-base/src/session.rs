@@ -119,7 +119,9 @@ pub struct Session {
     /// Persisted compacted-view state so reload/resume can continue using the
     /// active summary + recent tail instead of re-sending the full transcript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compaction: Option<StoredCompactionState>,
+    /// Shared with persistence metadata and session clones. Mutation must use
+    /// Arc::make_mut so exported/redacted or forked views remain isolated.
+    pub compaction: Option<std::sync::Arc<StoredCompactionState>>,
     /// Provider-specific session ID (e.g., Claude Code CLI session for resume)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_session_id: Option<String>,
@@ -231,7 +233,7 @@ struct SessionStartupStub {
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     #[serde(default)]
-    compaction: Option<StoredCompactionState>,
+    compaction: Option<std::sync::Arc<StoredCompactionState>>,
     #[serde(default)]
     provider_session_id: Option<String>,
     #[serde(default)]
@@ -494,6 +496,12 @@ impl Session {
                     .unwrap_or(0),
                 "json_bytes": compaction_json_bytes,
                 "summary_text_bytes": compaction_summary_bytes,
+                "retained_payload_capacity_bytes": self.compaction.as_ref().map(|c| {
+                    c.summary_text.capacity() + c.openai_encrypted_content.as_ref().map(String::capacity).unwrap_or(0)
+                }).unwrap_or(0),
+                "persisted_metadata_payload_capacity_bytes": self.persist_state.last_meta.as_ref().and_then(|meta| meta.compaction.as_ref()).filter(|stored| !self.compaction.as_ref().is_some_and(|canonical| std::sync::Arc::ptr_eq(canonical, stored))).map(|c| {
+                    c.summary_text.capacity() + c.openai_encrypted_content.as_ref().map(String::capacity).unwrap_or(0)
+                }).unwrap_or(0),
                 "encrypted_content_bytes": compaction_encrypted_bytes,
             },
             "env_snapshots": {
@@ -1235,6 +1243,7 @@ request in this new forked session, using the inherited conversation only as con
             *title = crate::message::redact_secrets(title);
         }
         if let Some(compaction) = redacted.compaction.as_mut() {
+            let compaction = std::sync::Arc::make_mut(compaction);
             compaction.summary_text = crate::message::redact_secrets(&compaction.summary_text);
         }
         for msg in &mut redacted.messages {
@@ -1750,7 +1759,7 @@ struct RemoteStartupSessionSnapshot {
     #[serde(default, deserialize_with = "parallel_messages::deserialize")]
     messages: Vec<StoredMessage>,
     #[serde(default)]
-    compaction: Option<StoredCompactionState>,
+    compaction: Option<std::sync::Arc<StoredCompactionState>>,
     #[serde(default)]
     provider_session_id: Option<String>,
     #[serde(default)]
@@ -1800,3 +1809,7 @@ struct RemoteStartupSessionSnapshot {
 #[cfg(test)]
 #[path = "session_tests/mod.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "session_tests/shared_compaction.rs"]
+mod shared_compaction_tests;

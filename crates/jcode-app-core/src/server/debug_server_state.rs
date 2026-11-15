@@ -21,6 +21,65 @@ const MEMORY_CRITICAL_GROWTH_BYTES: u64 = 1024 * 1024 * 1024;
 const MEMORY_WARNING_LIVE_SESSIONS: usize = 128;
 const MEMORY_CRITICAL_LIVE_SESSIONS: usize = 512;
 
+#[derive(Default)]
+struct CompactionMemoryTotals {
+    summary_text_bytes: u64,
+    encrypted_content_bytes: u64,
+    retained_payload_capacity_bytes: u64,
+    persisted_metadata_payload_capacity_bytes: u64,
+    sessions: Vec<serde_json::Value>,
+}
+
+impl CompactionMemoryTotals {
+    fn observe(&mut self, session_id: &str, profile: &serde_json::Value) {
+        let compaction = &profile["compaction"];
+        let bytes = |field: &str| compaction[field].as_u64().unwrap_or(0);
+        let summary = bytes("summary_text_bytes");
+        let encrypted = bytes("encrypted_content_bytes");
+        let retained = bytes("retained_payload_capacity_bytes");
+        let metadata = bytes("persisted_metadata_payload_capacity_bytes");
+        self.summary_text_bytes = self.summary_text_bytes.saturating_add(summary);
+        self.encrypted_content_bytes = self.encrypted_content_bytes.saturating_add(encrypted);
+        self.retained_payload_capacity_bytes = self
+            .retained_payload_capacity_bytes
+            .saturating_add(retained);
+        self.persisted_metadata_payload_capacity_bytes = self
+            .persisted_metadata_payload_capacity_bytes
+            .saturating_add(metadata);
+        self.sessions.push(serde_json::json!({
+            "session_id": session_id,
+            "summary_text_bytes": summary,
+            "encrypted_content_bytes": encrypted,
+            "retained_payload_capacity_bytes": retained,
+            "persisted_metadata_payload_capacity_bytes": metadata,
+            "total_retained_payload_capacity_bytes": retained.saturating_add(metadata),
+        }));
+    }
+
+    fn into_json(mut self) -> serde_json::Value {
+        self.sessions.sort_by(|left, right| {
+            right["total_retained_payload_capacity_bytes"]
+                .as_u64()
+                .cmp(&left["total_retained_payload_capacity_bytes"].as_u64())
+                .then_with(|| {
+                    left["session_id"]
+                        .as_str()
+                        .cmp(&right["session_id"].as_str())
+                })
+        });
+        self.sessions.truncate(12);
+        serde_json::json!({
+            "summary_text_bytes": self.summary_text_bytes,
+            "encrypted_content_bytes": self.encrypted_content_bytes,
+            "retained_payload_capacity_bytes": self.retained_payload_capacity_bytes,
+            "persisted_metadata_payload_capacity_bytes": self.persisted_metadata_payload_capacity_bytes,
+            "total_retained_payload_capacity_bytes": self.retained_payload_capacity_bytes
+                .saturating_add(self.persisted_metadata_payload_capacity_bytes),
+            "top_by_retained_payload_capacity_bytes": self.sessions,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MemoryIncidentDecision {
     severity: &'static str,
@@ -700,11 +759,15 @@ async fn build_server_memory_payload(
     let mut session_provider_cache_large_blob_bytes = 0u64;
     let mut locked_session_count = 0usize;
     let mut contended_session_count = 0usize;
+    let mut compaction_memory = CompactionMemoryTotals::default();
     for (session_id, agent_arc) in sessions_guard.iter() {
         if let Ok(agent) = agent_arc.try_lock() {
             locked_session_count += 1;
             let profile = agent.debug_memory_profile();
             let session_profile = profile.get("session").cloned().unwrap_or_default();
+            // Only profiles obtained through try_lock contribute. Capacity is
+            // attribution, not serialized length or an estimate of RSS savings.
+            compaction_memory.observe(session_id, &session_profile);
             let totals = session_profile.get("totals").cloned().unwrap_or_default();
             let messages = session_profile.get("messages").cloned().unwrap_or_default();
             let provider_cache = session_profile
@@ -1004,6 +1067,7 @@ async fn build_server_memory_payload(
             "total_provider_cache_tool_result_bytes": session_provider_cache_tool_result_bytes,
             "total_large_blob_bytes": session_large_blob_bytes,
             "total_provider_cache_large_blob_bytes": session_provider_cache_large_blob_bytes,
+            "compaction": compaction_memory.into_json(),
             "top_by_json_bytes": top_sessions,
         },
         "swarm": {
@@ -1168,6 +1232,68 @@ fn path_len(path: &std::path::Path) -> usize {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn compaction_memory_totals_keep_lengths_separate_from_unique_capacities() {
+        let mut totals = CompactionMemoryTotals::default();
+        totals.observe(
+            "canonical",
+            &serde_json::json!({"compaction": {
+                "summary_text_bytes": 10, "encrypted_content_bytes": 20,
+                "retained_payload_capacity_bytes": 64,
+                "persisted_metadata_payload_capacity_bytes": 0
+            }}),
+        );
+        totals.observe(
+            "metadata",
+            &serde_json::json!({"compaction": {
+                "summary_text_bytes": 3, "encrypted_content_bytes": 4,
+                "retained_payload_capacity_bytes": 16,
+                "persisted_metadata_payload_capacity_bytes": 128
+            }}),
+        );
+        let result = totals.into_json();
+        assert_eq!(result["summary_text_bytes"], 13);
+        assert_eq!(result["encrypted_content_bytes"], 24);
+        assert_eq!(result["retained_payload_capacity_bytes"], 80);
+        assert_eq!(result["persisted_metadata_payload_capacity_bytes"], 128);
+        assert_eq!(result["total_retained_payload_capacity_bytes"], 208);
+        assert_eq!(
+            result["top_by_retained_payload_capacity_bytes"][0]["session_id"],
+            "metadata"
+        );
+    }
+
+    #[test]
+    fn compaction_memory_totals_missing_fields_are_zero_and_top_is_bounded() {
+        let mut totals = CompactionMemoryTotals::default();
+        totals.observe("missing", &serde_json::json!({}));
+        totals.observe(
+            "old",
+            &serde_json::json!({"compaction": {
+                "summary_text_bytes": 5, "encrypted_content_bytes": 7
+            }}),
+        );
+        for i in 1..=15u64 {
+            totals.observe(
+                &format!("session-{i}"),
+                &serde_json::json!({"compaction": {
+                    "retained_payload_capacity_bytes": i
+                }}),
+            );
+        }
+        let result = totals.into_json();
+        assert_eq!(result["summary_text_bytes"], 5);
+        assert_eq!(result["encrypted_content_bytes"], 7);
+        assert_eq!(result["total_retained_payload_capacity_bytes"], 120);
+        assert_eq!(result["persisted_metadata_payload_capacity_bytes"], 0);
+        let top = result["top_by_retained_payload_capacity_bytes"]
+            .as_array()
+            .unwrap();
+        assert_eq!(top.len(), 12);
+        assert_eq!(top[0]["retained_payload_capacity_bytes"], 15);
+        assert_eq!(top[11]["retained_payload_capacity_bytes"], 4);
+    }
 
     #[tokio::test]
     async fn connected_session_snapshot_releases_connections_before_waiting_for_sessions() {

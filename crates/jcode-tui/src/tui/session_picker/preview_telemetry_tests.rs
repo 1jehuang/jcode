@@ -82,13 +82,16 @@ fn foreign_or_changed_route_snapshots_are_rejected() {
             "provider" => changed.provider_key = Some("different".into()),
             "account" => changed.route_api_method = Some("openai:other".into()),
             _ => {
-                changed.compaction = Some(jcode_session_types::StoredCompactionState {
-                    summary_text: "new summary".into(),
-                    openai_encrypted_content: None,
-                    covers_up_to_turn: 2,
-                    original_turn_count: 3,
-                    compacted_count: 2,
-                })
+                changed.compaction = Some(
+                    jcode_session_types::StoredCompactionState {
+                        summary_text: "new summary".into(),
+                        openai_encrypted_content: None,
+                        covers_up_to_turn: 2,
+                        original_turn_count: 3,
+                        compacted_count: 2,
+                    }
+                    .into(),
+                )
             }
         }
         let data = persisted_info_from_snapshot(&changed, Some(snapshot.clone()));

@@ -152,7 +152,7 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] 
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["raw_value"] }
 uuid = { version = "1", features = ["v4"] }
 toml = "0.8"

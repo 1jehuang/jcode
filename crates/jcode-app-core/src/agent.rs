@@ -726,7 +726,7 @@ impl Agent {
         ));
         drop(manager);
         if let Some(state) = sanitized_state {
-            self.session.compaction = state;
+            self.session.compaction = state.map(Arc::new);
             self.persist_session_best_effort("sanitized oversized OpenAI native compaction");
         }
     }
@@ -867,8 +867,8 @@ impl Agent {
         manager: &crate::compaction::CompactionManager,
     ) {
         let new_state = manager.persisted_state();
-        if self.session.compaction != new_state {
-            self.session.compaction = new_state;
+        if self.session.compaction.as_deref() != new_state.as_ref() {
+            self.session.compaction = new_state.map(Arc::new);
             if let Err(err) = self.session.save() {
                 logging::error(&format!(
                     "Failed to persist compaction state for session {}: {}",
@@ -917,7 +917,7 @@ impl Agent {
             compacted_count,
         };
 
-        self.session.compaction = Some(state.clone());
+        self.session.compaction = Some(Arc::new(state.clone()));
         let mut post_tokens = None;
         if let Ok(mut manager) = compaction.try_write() {
             manager.set_budget(self.provider.context_window());

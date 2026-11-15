@@ -200,8 +200,8 @@ impl App {
         manager: &crate::compaction::CompactionManager,
     ) {
         let new_state = manager.persisted_state();
-        if self.session.compaction != new_state {
-            self.session.compaction = new_state;
+        if self.session.compaction.as_deref() != new_state.as_ref() {
+            self.session.compaction = new_state.map(Arc::new);
             if let Err(err) = self.session.save() {
                 crate::logging::error(&format!(
                     "Failed to persist compaction state for session {}: {}",
@@ -242,7 +242,7 @@ impl App {
             compacted_count,
         };
 
-        self.session.compaction = Some(state.clone());
+        self.session.compaction = Some(Arc::new(state.clone()));
         let provider_messages = self.materialized_provider_messages();
         let context_budget = self.context_limit as usize;
         let compaction = self.registry.compaction();
