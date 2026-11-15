@@ -163,25 +163,44 @@ fn ensure_private_runtime_dir(path: &Path) {
     }
 }
 
-pub fn jcode_dir() -> Result<PathBuf> {
-    if let Ok(path) = std::env::var("JCODE_HOME") {
-        return Ok(PathBuf::from(path));
-    }
+/// Name of the directory that holds this product's state under `$HOME`.
+const PRODUCT_HOME_DIR_NAME: &str = ".kcode";
 
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("No home directory"))?;
-    Ok(home.join(".jcode"))
+/// Environment override for the product home, highest precedence first.
+///
+/// `KCODE_HOME` is this product's own name; `JCODE_HOME` stays accepted so the
+/// existing test suite, sandboxed runs and any deployed scripts keep working.
+/// One helper, used by every resolver below, so precedence cannot drift between
+/// the home directory, the config directory and external auth paths.
+pub fn home_override() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("KCODE_HOME") {
+        return Some(PathBuf::from(path));
+    }
+    std::env::var_os("JCODE_HOME").map(PathBuf::from)
 }
 
-/// Whether `JCODE_HOME` redirects this process away from the user's real
-/// `~/.jcode` directory.
+fn default_product_home() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(PRODUCT_HOME_DIR_NAME))
+}
+
+pub fn jcode_dir() -> Result<PathBuf> {
+    if let Some(path) = home_override() {
+        return Ok(path);
+    }
+
+    default_product_home().ok_or_else(|| anyhow::anyhow!("No home directory"))
+}
+
+/// Whether `KCODE_HOME`/`JCODE_HOME` redirects this process away from the
+/// user's real `~/.kcode` directory.
 ///
 /// Sandboxed runs must not consult machine-global resources, such as the macOS
-/// Keychain, that cannot be redirected beneath `JCODE_HOME`.
+/// Keychain, that cannot be redirected beneath the override.
 pub fn running_with_sandboxed_home() -> bool {
-    let Some(configured) = std::env::var_os("JCODE_HOME").map(PathBuf::from) else {
+    let Some(configured) = home_override() else {
         return false;
     };
-    let Some(default) = dirs::home_dir().map(|home| home.join(".jcode")) else {
+    let Some(default) = default_product_home() else {
         return true;
     };
 
@@ -217,22 +236,22 @@ pub fn durable_state_dir() -> PathBuf {
 
 /// Resolve jcode's app-owned config directory.
 ///
-/// Default location is the platform config dir + `jcode` (for example
-/// `~/.config/jcode` on Linux). When `JCODE_HOME` is set, sandbox this under
-/// `$JCODE_HOME/config/jcode` so self-dev/tests do not leak into the user's
-/// real config directory.
+/// Default location is the platform config dir + `kcode` (for example
+/// `~/.config/kcode` on Linux). When `KCODE_HOME`/`JCODE_HOME` is set, sandbox
+/// this under `$KCODE_HOME/config/kcode` so self-dev/tests do not leak into the
+/// user's real config directory.
 pub fn app_config_dir() -> Result<PathBuf> {
-    if let Ok(path) = std::env::var("JCODE_HOME") {
-        return Ok(PathBuf::from(path).join("config").join("jcode"));
+    if let Some(path) = home_override() {
+        return Ok(path.join("config").join("kcode"));
     }
 
     let config_dir =
         dirs::config_dir().ok_or_else(|| anyhow::anyhow!("No config directory found"))?;
-    Ok(config_dir.join("jcode"))
+    Ok(config_dir.join("kcode"))
 }
 
 /// Resolve a path under the user's home directory, but sandbox it under
-/// `$JCODE_HOME/external/` when `JCODE_HOME` is set.
+/// `$KCODE_HOME/external/` when an override is set.
 ///
 /// This keeps external provider auth files isolated during tests and sandboxed
 /// runs without changing default on-disk locations for normal users.
@@ -245,8 +264,8 @@ pub fn user_home_path(relative: impl AsRef<Path>) -> Result<PathBuf> {
         );
     }
 
-    if let Ok(path) = std::env::var("JCODE_HOME") {
-        return Ok(PathBuf::from(path).join("external").join(relative));
+    if let Some(path) = home_override() {
+        return Ok(path.join("external").join(relative));
     }
 
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("No home directory"))?;
