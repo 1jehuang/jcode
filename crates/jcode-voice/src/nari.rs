@@ -43,13 +43,11 @@ pub enum NariEvent {
     Finished(Result<String, VoiceError>),
 }
 
-/// Describes the assistant name in context. Qwen3-ASR uses the prompt as
-/// biasing context, and a descriptive sentence with example addresses beats a
-/// bare term list: on noisy synthetic speech it doubled exact "Jev" (12/18 vs
-/// 6/18, repeatable), recovering "Jen", "Gem", "Kim" and dropped names.
+/// Name biasing context, deliberately without example utterances. On silence,
+/// ASR can recite those examples, including garbled variants that cannot safely
+/// be distinguished from real commands by transcript-only filtering.
 const NAME_CONTEXT: &str = "The user often addresses Jev, a voice assistant. \
 Jev is spelled J-E-V and sounds like Jeff. Write it as Jev. \
-Examples: \"Hey Jev, open settings.\" \"Okay Jev.\" \"Thanks Jev.\" \"Ask Jev.\" \
 The user also talks about Jcode, a coding app pronounced jay-code, and Jcode Desktop. \
 Jcode and Jev are different names: write \"Jcode Desktop\", never \"Jev Desktop\". \
 Other names: ";
@@ -139,7 +137,7 @@ fn corrections() -> &'static [(regex::Regex, &'static str)] {
 }
 
 /// Apply product-name corrections to a transcript. A transcript that only
-/// repeats the recognition prompt's example addresses is a prompt leak, which
+/// repeats the old recognition prompt's example addresses is a prompt leak, which
 /// Qwen3-ASR produces on silence, so it becomes empty.
 pub fn correct_transcript(text: &str) -> String {
     let text = corrections()
@@ -154,7 +152,7 @@ pub fn correct_transcript(text: &str) -> String {
     }
 }
 
-/// Example addresses from `NAME_CONTEXT`, as lowercase words.
+/// Legacy examples, retained only as defensive fingerprints, never sent to ASR.
 const PROMPT_EXAMPLES: &[&[&str]] = &[
     &["hey", "jev", "open", "settings"],
     &["okay", "jev"],
@@ -165,19 +163,17 @@ const PROMPT_EXAMPLES: &[&[&str]] = &[
 ];
 
 /// True when the transcript is two or more prompt examples and nothing else.
-/// One genuine "Okay Jev" is kept. A garbled tail word is tolerated after
-/// three examples ("Thanks Jev, asked up").
+/// One genuine "Okay Jev" is kept. Never discard unexplained trailing speech.
 fn is_prompt_leak(text: &str) -> bool {
-    let words: Vec<String> = text
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .map(str::to_lowercase)
-        .collect();
+    let words = words(text);
     let (mut at, mut matched) = (0, 0);
     'outer: while at < words.len() {
+        // Observed legacy echo inserts a stray "J" between complete examples.
+        // Do not generalize this to arbitrary words or edit-distance matching.
+        let start = at + usize::from(matched >= 2 && words[at] == "j");
         for example in PROMPT_EXAMPLES {
-            let end = at + example.len();
-            if end <= words.len() && words[at..end].iter().zip(*example).all(|(w, e)| w == e) {
+            let end = start + example.len();
+            if end <= words.len() && words[start..end].iter().zip(*example).all(|(w, e)| w == e) {
                 at = end;
                 matched += 1;
                 continue 'outer;
@@ -185,8 +181,7 @@ fn is_prompt_leak(text: &str) -> bool {
         }
         break;
     }
-    let rest = words.len() - at;
-    matched >= 2 && (rest == 0 || (matched >= 3 && rest <= 2))
+    matched >= 2 && at == words.len()
 }
 
 fn words(text: &str) -> Vec<String> {
@@ -197,26 +192,37 @@ fn words(text: &str) -> Vec<String> {
 }
 
 /// Run length that counts as copied prompt text. Five words avoids flagging a
-/// genuine "Hey Jev, open settings" while catching any real echo.
+/// genuine "Hey Jev, open settings" while detecting longer context recitals.
 const ECHO_NGRAM: usize = 5;
 
 fn prompt_ngrams() -> &'static HashSet<Vec<String>> {
     static NGRAMS: std::sync::OnceLock<HashSet<Vec<String>>> = std::sync::OnceLock::new();
     NGRAMS.get_or_init(|| {
-        // Compare in corrected form, since transcripts are corrected first.
-        let prompt = corrections()
+        // Legacy context is a fingerprint only, never recognition input. Keep
+        // raw and corrected forms for spacing variants such as "jay- code".
+        let prompt = build_prompt(&[]).replace(
+            "The user also",
+            "Examples: Hey Jev, open settings. Okay Jev. Thanks Jev. Ask Jev. The user also",
+        );
+        let corrected = corrections()
             .iter()
-            .fold(build_prompt(&[]), |text, (pattern, fixed)| {
+            .fold(prompt.clone(), |text, (pattern, fixed)| {
                 pattern.replace_all(&text, *fixed).into_owned()
             });
-        words(&prompt)
-            .windows(ECHO_NGRAM)
-            .map(<[String]>::to_vec)
+        let legacy = corrected.replace("Claude, Claude Code, Codex", "Claude, Codex");
+        [prompt, corrected, legacy, build_prompt(&[])]
+            .iter()
+            .flat_map(|prompt| {
+                words(prompt)
+                    .windows(ECHO_NGRAM)
+                    .map(<[String]>::to_vec)
+                    .collect::<Vec<_>>()
+            })
             .collect()
     })
 }
 
-/// True when most of the transcript is copied from the recognition prompt.
+/// True when all of the transcript is copied from the recognition prompt.
 /// Qwen3-ASR recites its whole context on silent audio ("The user often
 /// addresses Jev, a voice assistant..."), which the example check misses.
 fn is_prompt_echo(text: &str) -> bool {
@@ -231,8 +237,9 @@ fn is_prompt_echo(text: &str) -> bool {
             covered[start..start + ECHO_NGRAM].fill(true);
         }
     }
-    let covered = covered.iter().filter(|c| **c).count();
-    covered * 5 >= words.len() * 3
+    // A majority match deletes mixed real speech, even when the additional
+    // words also appear elsewhere in the vocabulary. Require complete coverage.
+    covered.iter().all(|covered| *covered)
 }
 
 /// Conservative bound on the recognition context sent per session.
@@ -879,7 +886,8 @@ mod tests {
     fn silent_prompt_leaks_are_dropped_but_real_speech_is_kept() {
         for leak in [
             "Hey Jev, open settings. Okay Jev. Thanks Jev. Ask Jev.",
-            "Hey, Jeff, open settings. Okay, Jeff, thanks, Jeff, asked up.",
+            "Hey Jev, open settings. Okay Jev. J thanks Jev, ask Jev.",
+            "HEY, JEFF, OPEN SETTINGS! OKAY JEFF. J THANKS JEFF, ASK JEFF.",
             "Okay Jev. Thanks Jev.",
             // Full prompt recital on silence, as observed.
             "The user often addresses Jev, a voice assistant. Jev is spelled J- E- V and \
@@ -898,11 +906,77 @@ mod tests {
             "Okay Jev.",
             "Hey Jev, open settings.",
             "Okay Jev, thanks Jev, now fix the build.",
+            "Okay Jev. Thanks Jev. J",
+            "Hey Jev, open settings. Okay Jev. Thanks Jev. Fix it.",
+            "Hey Jev, open settings. Okay Jev. Thanks Jev. Ask up.",
+            "The user often addresses Jev, a voice assistant. Fix the build.",
+            "Fix the build. The user often addresses Jev, a voice assistant.",
+            "The user often addresses Jev, a voice assistant. Open Jcode.",
             "Hey Jev, open settings and switch the theme.",
             "Tell the user about Jcode Desktop and Handterm today.",
             "Can you ask Codex, Claude and OpenAI models to review the swarm hot reload code?",
         ] {
             assert_eq!(correct_transcript(real), real, "{real}");
+        }
+    }
+
+    #[test]
+    fn recognition_context_has_names_but_no_example_commands() {
+        let prompt = build_prompt(&[]);
+        for name in ["Jev", "Jcode", "Jcode Desktop", "Claude", "Codex"] {
+            assert!(prompt.contains(name), "missing {name}");
+        }
+        for example in [
+            "Examples:",
+            "Hey Jev",
+            "open settings",
+            "Okay Jev",
+            "Thanks Jev",
+            "Ask Jev",
+        ] {
+            assert!(
+                !prompt.contains(example),
+                "recognition prompt seeds {example}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_partial_and_final_cleanup_agree_and_preserve_mixed_speech() {
+        let leak = "Hey Jev, open settings. Okay Jev. J thanks Jev, ask Jev.";
+        for raw in [leak.to_owned(), format!("{leak} Fix the build, Jeff.")] {
+            let (url, server) = server(vec![
+                json!({"type":"transcript.partial", "item_id":"a", "transcript":raw}),
+                json!({"type":"input_audio_buffer.committed", "item_id":"a", "client_event_id":END}),
+                json!({"type":"transcript.completed", "item_id":"a", "transcript":raw}),
+            ]).await;
+            let session = NariSession::connect_to(&url, "test", Arc::new(AtomicBool::new(false)))
+                .await
+                .unwrap();
+            let (tx, rx) = nari_pcm_channel();
+            tx.send(vec![1, -1]).await.unwrap();
+            drop(tx);
+            let mut events = Vec::new();
+            let result = session.run(rx, |event| events.push(event)).await.unwrap();
+            let expected = correct_transcript(&raw);
+            assert_eq!(result, expected);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, NariEvent::Transcript(_)))
+                    .count(),
+                2
+            );
+            for event in events {
+                match event {
+                    NariEvent::Transcript(text) | NariEvent::Finished(Ok(text)) => {
+                        assert_eq!(text, expected)
+                    }
+                    NariEvent::Finished(Err(_)) => panic!("unexpected failure"),
+                    NariEvent::Started => {}
+                }
+            }
+            server.await.unwrap();
         }
     }
     #[test]
