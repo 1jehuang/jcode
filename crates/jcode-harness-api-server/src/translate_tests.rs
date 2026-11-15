@@ -700,7 +700,7 @@ fn detach_disarms_crash_on_disconnect() {
 }
 
 #[test]
-fn attach_and_list_share_canonical_title_sources() {
+fn attach_resolves_canonical_title_sources() {
     let home = ScopedJcodeHome::new("canonical-title-sources");
     assert!(BridgeState::recent_session_index_entries().is_empty());
     let connection = Connection::open(home.path.join("session-metadata-v1.sqlite3")).unwrap();
@@ -778,7 +778,7 @@ fn unindexed_sessions_resolve_first_prompt_on_list_and_attach() {
         Some("Fix the sidebar titles")
     );
     let mut state = BridgeState::default();
-    state.known_sessions.insert("unindexed".into());
+    state.known_sessions.push("unindexed".into());
     let ApiEvent::Sessions { sessions } =
         only_reply_event(state.api_request_to_legacy(&json!({"req":"list_sessions","id":1})))
     else {
@@ -792,6 +792,61 @@ fn unindexed_sessions_resolve_first_prompt_on_list_and_attach() {
             .title
             .as_deref(),
         Some("Fix the sidebar titles")
+    );
+}
+
+#[test]
+fn legacy_index_rows_fall_back_to_persisted_plan_titles() {
+    let home = ScopedJcodeHome::new("legacy-index-plan");
+    assert!(BridgeState::recent_session_index_entries().is_empty());
+    let connection = Connection::open(home.path.join("session-metadata-v1.sqlite3")).unwrap();
+    connection
+        .execute(
+            "INSERT INTO recent_sessions (session_id, generated_title, updated_at_ms)
+         VALUES ('legacy_plan', 'First prompt', 1)",
+            [],
+        )
+        .unwrap();
+    std::fs::create_dir_all(home.path.join("todos")).unwrap();
+    std::fs::write(
+        home.path.join("todos/legacy_plan-plan.json"),
+        json!({"title":"Persisted plan"}).to_string(),
+    )
+    .unwrap();
+    let ApiEvent::Sessions { sessions } = only_reply_event(
+        BridgeState::default()
+            .api_request_to_legacy(&json!({"req":"list_sessions","id":1,"limit":1})),
+    ) else {
+        panic!("sessions")
+    };
+    assert_eq!(sessions[0].title.as_deref(), Some("Persisted plan"));
+    assert_eq!(
+        BridgeState::resolve_session_metadata("legacy_plan")
+            .unwrap()
+            .display_title()
+            .as_deref(),
+        Some("Persisted plan")
+    );
+}
+
+#[test]
+fn journal_only_sessions_resolve_first_prompt_metadata() {
+    let home = ScopedJcodeHome::new("journal-only-title");
+    std::fs::create_dir_all(home.path.join("sessions")).unwrap();
+    std::fs::write(
+        home.path.join("sessions/journal_only.journal.jsonl"),
+        json!({"append_messages":[{"role":"user","content":[
+            {"type":"text","text":"Recover the journal title"}
+        ]}]})
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        BridgeState::resolve_session_metadata("journal_only")
+            .unwrap()
+            .display_title()
+            .as_deref(),
+        Some("Recover the journal title")
     );
 }
 

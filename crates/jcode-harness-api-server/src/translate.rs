@@ -806,6 +806,9 @@ impl BridgeState {
                             .get(id)
                             .map(|entry| {
                                 let mut metadata = PersistedSessionMetadata::from(entry);
+                                if metadata.todo_title.is_none() {
+                                    metadata.todo_title = Self::persisted_todo_title(id);
+                                }
                                 // Rows indexed before labels were tracked have
                                 // no label. Only saved sessions can carry one,
                                 // so the record read stays rare.
@@ -2989,20 +2992,8 @@ impl BridgeState {
                 metadata.title = indexed.title;
             }
         }
-        if let Some(home) = Self::jcode_home() {
-            let path = jcode_todo_policy::store::todo_file_path(
-                &home,
-                session_id,
-                jcode_todo_policy::store::TodoFile::Plan,
-            );
-            if let Some(plan) = std::fs::read(path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-            {
-                metadata.todo_title = plan["title"]
-                    .as_str()
-                    .and_then(PersistedSessionMetadata::normalized_title);
-            }
+        if let Some(title) = Self::persisted_todo_title(session_id) {
+            metadata.todo_title = Some(title);
         }
         if metadata
             .title
@@ -3013,6 +3004,19 @@ impl BridgeState {
             metadata.title = Self::first_prompt_title(session_id);
         }
         Some(metadata)
+    }
+
+    fn persisted_todo_title(session_id: &str) -> Option<String> {
+        Self::session_record_path(session_id)?;
+        let path = jcode_todo_policy::store::todo_file_path(
+            &Self::jcode_home()?,
+            session_id,
+            jcode_todo_policy::store::TodoFile::Plan,
+        );
+        let plan: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+        plan["title"]
+            .as_str()
+            .and_then(PersistedSessionMetadata::normalized_title)
     }
 
     fn read_session_metadata(session_id: &str) -> Option<PersistedSessionMetadata> {
@@ -3258,10 +3262,11 @@ impl BridgeState {
         }
 
         let path = Self::session_record_path(session_id)?;
-        let file = std::fs::File::open(&path).ok()?;
-        let mut de = serde_json::Deserializer::from_reader(std::io::BufReader::new(file));
-        if let Some(title) = Record::deserialize(&mut de).ok().and_then(|r| r.messages.0) {
-            return Some(title);
+        if let Ok(file) = std::fs::File::open(&path) {
+            let mut de = serde_json::Deserializer::from_reader(std::io::BufReader::new(file));
+            if let Some(title) = Record::deserialize(&mut de).ok().and_then(|r| r.messages.0) {
+                return Some(title);
+            }
         }
         let journal = path.with_file_name(format!("{session_id}.journal.jsonl"));
         let reader = std::io::BufReader::new(std::fs::File::open(journal).ok()?);
@@ -3361,7 +3366,10 @@ impl BridgeState {
             return;
         };
         for (modified, session_id) in ids.iter().take(500) {
-            let metadata = Self::resolve_session_metadata(session_id).unwrap_or_default();
+            // Prompt derivation belongs to the time-boxed backfill below,
+            // not this potentially 500-record bootstrap transaction.
+            let mut metadata = Self::read_session_metadata(session_id).unwrap_or_default();
+            metadata.todo_title = Self::persisted_todo_title(session_id);
             let updated_at_ms = modified
                 .duration_since(UNIX_EPOCH)
                 .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
