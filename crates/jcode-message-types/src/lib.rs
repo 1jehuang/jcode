@@ -1043,7 +1043,8 @@ mod tests {
                 ContentBlock::ReasoningTrace {
                     text: "history-only scratch".to_string(),
                 },
-            ].into(),
+            ]
+            .into(),
             timestamp: Some(chrono::Utc::now() + chrono::Duration::seconds(7)),
             tool_duration_ms: Some(42),
         };
