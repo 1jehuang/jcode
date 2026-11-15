@@ -118,7 +118,10 @@ fn direct_api_key_login_does_not_advertise_a_static_model_default() {
 #[test]
 fn onboarding_strongest_model_only_runs_without_explicit_defaults() {
     with_temp_jcode_home(|| {
-        let previous_explicit = std::env::var_os("JCODE_INITIAL_PROVIDER_EXPLICIT");
+        // Drop guard: a failed assertion must restore the ambient explicit
+        // flag; the tail-only restore below would leak the removal into later
+        // tests in this process if this test panics mid-body.
+        let _explicit_restore = EnvRestoreGuard::capture(["JCODE_INITIAL_PROVIDER_EXPLICIT"]);
         crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
 
         let mut app = onboarding_test_app();
@@ -147,12 +150,6 @@ fn onboarding_strongest_model_only_runs_without_explicit_defaults() {
                 .load(std::sync::atomic::Ordering::Acquire),
             "finishing onboarding must cancel a delayed catalog selection"
         );
-
-        if let Some(value) = previous_explicit {
-            crate::env::set_var("JCODE_INITIAL_PROVIDER_EXPLICIT", value);
-        } else {
-            crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
-        }
     });
 }
 
