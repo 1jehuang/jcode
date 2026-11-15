@@ -1,0 +1,69 @@
+name: App-core library suite
+
+# Canary for the class of failure tracked in #1636: the full `jcode-app-core --lib`
+# suite could hang indefinitely (a test awaiting stream EOF, or many tests queued
+# behind a global test-env lock) and no job noticed, because every CI invocation
+# either compiles the suite without running it or filters to a handful of tests.
+#
+# This workflow is deliberately NOT a pull-request gate yet. The suite currently
+# has known failures on some platforms, so gating PRs on it would block unrelated
+# work; a scheduled run that fails loudly is the honest first step. Once the
+# failures are fixed, move it into ci.yml and make it blocking.
+on:
+  workflow_dispatch:
+  schedule:
+    # Nightly, off the hour to avoid the busiest GitHub runner window.
+    - cron: '17 5 * * *'
+
+concurrency:
+  group: app-core-suite-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lib-suite:
+    name: app-core --lib (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # A hang must fail the job, not hold a runner for hours. The step timeout
+    # below is the real bound; this is the outer backstop.
+    timeout-minutes: 60
+    env:
+      # See ci.yml: published crates ship stray rust-toolchain.toml files that
+      # would otherwise pin cargo to an ancient toolchain inside their own dirs.
+      RUSTUP_TOOLCHAIN: stable
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}-app-core-suite
+
+      # Serial on purpose: several tests hold the global test-env lock across
+      # awaits, so a parallel run parks unrelated tests behind them and reports
+      # "running for over 60 seconds" for cases that pass in seconds alone.
+      - name: Full jcode-app-core library suite (serial, wall-clock bounded)
+        timeout-minutes: 45
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p jcode-app-core --lib -- --test-threads=1 2>&1 | tee app-core-suite.log
+
+      - name: Upload the suite log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-core-suite-${{ matrix.os }}
+          path: app-core-suite.log
+          if-no-files-found: warn
