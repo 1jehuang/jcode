@@ -1015,27 +1015,6 @@ fn is_closing_fence(line: &str, fence_char: char, min_len: usize) -> bool {
     trimmed[fence_len..].trim().is_empty()
 }
 
-fn count_unescaped_double_dollar(line: &str) -> usize {
-    let bytes = line.as_bytes();
-    let mut count = 0usize;
-    let mut ix = 0usize;
-
-    while ix + 1 < bytes.len() {
-        if bytes[ix] == b'\\' {
-            ix += 2;
-            continue;
-        }
-        if bytes[ix] == b'$' && bytes[ix + 1] == b'$' {
-            count += 1;
-            ix += 2;
-            continue;
-        }
-        ix += 1;
-    }
-
-    count
-}
-
 fn math_inline_span(math: &str) -> Span<'static> {
     let rendered = jcode_render_core::render_inline_latex(math);
     math_copy::register_inline_math(&rendered, math);

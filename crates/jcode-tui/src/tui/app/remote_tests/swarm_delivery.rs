@@ -140,6 +140,7 @@ fn lane_aware_completion_handoff_is_a_swarm_row() {
     );
 }
 
+#[cfg(test)]
 fn assert_no_long_rows(app: &crate::tui::app::App) {
     for message in app.display_messages() {
         if message.role == "swarm" {
