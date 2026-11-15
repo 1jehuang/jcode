@@ -654,12 +654,22 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
                     "group",
                     "wave",
                     "lane_after",
+                    "lane_dependencies",
                     "lane_owner",
                 ]
                 .iter()
                 .any(|key| item.contains_key(*key))
                 {
                     bail!("hierarchical items must not own phase/lane/stage/group membership");
+                }
+                for key in item.keys() {
+                    // Pause normalization below still handles legacy null
+                    // blocker keys and supplies their migration guidance.
+                    if !UPDATE_FIELDS.contains(&key.as_str())
+                        && !["external_blocker", "completely_blocked"].contains(&key.as_str())
+                    {
+                        bail!("unexpected phase item field {key:?}");
+                    }
                 }
                 let id = item
                     .get("id")
@@ -1337,20 +1347,6 @@ fn coerce_empty_string_to_null(value: &mut Value) {
     }
 }
 
-/// Drop the `description` of every property of an item schema except `keep`.
-fn strip_property_descriptions(item: &mut Value, keep: &[&str]) {
-    let Some(properties) = item["properties"].as_object_mut() else {
-        return;
-    };
-    for (name, property) in properties {
-        if !keep.contains(&name.as_str())
-            && let Some(property) = property.as_object_mut()
-        {
-            property.remove("description");
-        }
-    }
-}
-
 #[async_trait]
 impl Tool for TodoTool {
     fn name(&self) -> &str {
@@ -1562,19 +1558,22 @@ impl Tool for TodoTool {
         });
         schema["properties"]["add"]["items"]["properties"] = add_properties;
         schema["properties"]["add"]["items"]["additionalProperties"] = json!(false);
-        // The item schema is built locally above. Remove flat aliases from the
-        // hierarchical representation without assuming the JSON object shape.
-        let mut item = schema["properties"]["todos"]["items"].clone();
+        // Like update, phase items refer to add rather than repeating its
+        // fields. Runtime validation rejects unknown fields and membership.
+        let item = json!({
+            "type": "object",
+            "required": ["name", "status", "priority", "confidence"],
+            "properties": {
+                "name": {"type": "string", "minLength": 1},
+                "status": {"type": "string"},
+                "priority": {"type": "string"},
+                "confidence": {"type": "string"}
+            },
+            "additionalProperties": true
+        });
         if let Some(properties) = schema["properties"].as_object_mut() {
             properties.remove("todos");
         }
-        if let Some(properties) = item["properties"].as_object_mut() {
-            properties.remove("phase");
-            properties.remove("lane");
-            properties.remove("lane_dependencies");
-            properties.remove("lane_owner");
-        }
-        item["additionalProperties"] = json!(false);
         schema["properties"]["phases"] = json!({
             "type": "array",
             "description": "Creates or replaces the whole plan; [] clears. Use once, then change items with update/add/remove. Phases are sequential, lanes parallel, items ordered.",
@@ -1599,8 +1598,9 @@ impl Tool for TodoTool {
         // and point the other two routes at it.
         let phase_items = &mut schema["properties"]["phases"]["items"]["properties"]["lanes"]["items"]
             ["properties"]["items"];
-        strip_property_descriptions(&mut phase_items["items"], &[]);
-        phase_items["description"] = json!("Item fields as in add.");
+        phase_items["description"] = json!(
+            "Item fields as in add, except after and phase/lane membership (set on containers)."
+        );
         schema
     }
 

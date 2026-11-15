@@ -82,7 +82,7 @@ mod tests {
         StoredMessage {
             id: "input".into(),
             role: Role::User,
-            content,
+            content: content.into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,

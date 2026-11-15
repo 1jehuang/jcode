@@ -379,7 +379,8 @@ fn with_timestamps_prepends_utc_prefix_to_user_text() -> Result<()> {
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: Some(ts),
         tool_duration_ms: None,
     }]);
@@ -402,7 +403,8 @@ fn with_timestamps_adds_tool_timing_header_with_duration() -> Result<()> {
             tool_use_id: "call_1".to_string(),
             content: "ok".to_string(),
             is_error: None,
-        }],
+        }]
+        .into(),
         timestamp: Some(ts),
         tool_duration_ms: Some(3_200),
     }]);
@@ -427,7 +429,8 @@ fn with_timestamps_skips_internal_system_reminders() -> Result<()> {
         content: vec![ContentBlock::Text {
             text: "<system-reminder>\ninternal\n</system-reminder>".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: Some(ts),
         tool_duration_ms: None,
     };
@@ -459,7 +462,8 @@ fn ends_with_fresh_user_turn_rejects_trailing_tool_result() {
                 name: "bash".to_string(),
                 input: serde_json::json!({}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(Utc::now()),
             tool_duration_ms: None,
         },

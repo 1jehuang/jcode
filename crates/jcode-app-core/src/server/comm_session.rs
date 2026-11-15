@@ -632,6 +632,7 @@ pub(super) async fn spawn_swarm_agent(
                 &new_session_id,
                 held,
                 initial_msg,
+                Vec::new(),
                 None,
                 None,
                 detail,

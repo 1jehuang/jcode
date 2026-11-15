@@ -372,13 +372,13 @@ async fn native_tool_result_continuation_sends_only_continue() {
         Message::user("tool"),
         Message {
             role: Role::Assistant,
-            content: blocks,
+            content: blocks.into(),
             timestamp: None,
             tool_duration_ms: None,
         },
         Message {
             role: Role::User,
-            content: result_blocks,
+            content: result_blocks.into(),
             timestamp: None,
             tool_duration_ms: None,
         },

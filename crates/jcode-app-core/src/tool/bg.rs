@@ -153,7 +153,7 @@ fn resolve_action(params: &BgInput) -> Result<String> {
     }
 
     Err(anyhow::anyhow!(
-        "Missing required bg action. Use one of: list, status, output, tail, cancel, cleanup, delivery, subscribe, wait. For example: bg action=\"wait\"."
+        "Missing required bg action. Use one of: list, status, output, tail, cancel, cleanup, delivery, wait. For example: bg action=\"wait\"."
     ))
 }
 
@@ -516,6 +516,11 @@ impl Tool for BgTool {
     }
 
     fn parameters_schema(&self) -> Value {
+        // Advertise one spelling per capability. `execute` still accepts the
+        // unadvertised aliases (watch, subscribe, lines), an array
+        // status_filter, and the rarely needed dry_run and graceful_timeout_ms,
+        // so older transcripts and prompts keep working without every request
+        // paying for them.
         let mut intent_schema = super::intent_schema_property();
         intent_schema["minLength"] = json!(1);
         intent_schema["pattern"] = json!("\\S");
@@ -526,32 +531,26 @@ impl Tool for BgTool {
                 "intent": intent_schema,
                 "action": {
                     "type": "string",
-                    "enum": ["list", "status", "output", "tail", "cancel", "cleanup", "watch", "delivery", "subscribe", "wait"],
-                    "description": "watch and subscribe are aliases for delivery."
+                    "enum": ["list", "status", "output", "tail", "cancel", "cleanup", "delivery", "wait"],
+                    "description": "delivery sets notify/wake on a running task."
                 },
                 "task_id": { "type": "string", "description": "Omit with latest." },
-                "task_ids": { "type": "array", "items": {"type":"string"}, "description": "For multi-task wait/status." },
+                "task_ids": { "type": "array", "items": {"type":"string"}, "description": "Multi-task wait/status." },
                 "latest": { "type": "boolean", "description": "Use the latest matching task." },
                 "session_only": { "type": "boolean", "description": "Only this session's tasks." },
                 "status_filter": {
-                    "anyOf": [
-                        { "type": "string" },
-                        { "type": "array", "items": { "type": "string" } }
-                    ],
-                    "description": "running, completed, failed, superseded, terminal, or all."
+                    "type": "string",
+                    "enum": ["running", "completed", "failed", "superseded", "terminal"]
                 },
-                "max_age_hours": { "type": "integer", "description": "Cleanup age in hours." },
-                "dry_run": { "type": "boolean", "description": "cleanup: report without deleting." },
-                "notify": { "type": "boolean", "description": "delivery: notify on completion. Default true." },
-                "wake": { "type": "boolean", "description": "delivery: wake on completion. Default true." },
-                "stall_wake_seconds": { "type": "integer", "description": "delivery: also wake after N seconds without output (min 30), for jobs that may hang." },
+                "max_age_hours": { "type": "integer", "description": "cleanup: default 24." },
+                "notify": { "type": "boolean", "description": "delivery: default true." },
+                "wake": { "type": "boolean", "description": "delivery: default true." },
+                "stall_wake_seconds": { "type": "integer", "description": "delivery: also wake after N seconds without output (min 30)." },
                 "max_wait_seconds": { "type": "integer", "description": "wait: default 60, cap 3600, 0 checks without blocking." },
-                "return_on_progress": { "type": "boolean", "description": "wait: also return on the first progress event. Default true." },
+                "return_on_progress": { "type": "boolean", "description": "wait: also return on first progress event. Default true." },
                 "wait_mode": { "type": "string", "enum": ["any", "all", "first_failure"], "description": "Multi-task wait. Default any." },
                 "tail_lines": { "type": "integer", "description": "Last N lines for output/tail/wait preview." },
-                "lines": { "type": "integer", "description": "Alias for tail_lines." },
-                "include_output_preview": { "type": "boolean", "description": "wait: include recent output. Failed tasks always do." },
-                "graceful_timeout_ms": { "type": "integer", "description": "cancel: grace period before force kill." }
+                "include_output_preview": { "type": "boolean", "description": "wait: include recent output. Failed tasks always do." }
             }
         })
     }
@@ -913,7 +912,7 @@ impl Tool for BgTool {
             }
 
             _ => Err(anyhow::anyhow!(
-                "Unknown action: {}. Valid actions: list, status, output, tail, cancel, cleanup, watch, delivery, subscribe, wait",
+                "Unknown action: {}. Valid actions: list, status, output, tail, cancel, cleanup, delivery, wait",
                 action
             )),
         }
@@ -972,15 +971,73 @@ mod tests {
     }
 
     #[test]
-    fn status_filter_schema_any_of_branches_have_types() -> Result<()> {
+    fn status_filter_schema_is_a_typed_enum_and_arrays_still_parse() -> Result<()> {
         let schema = BgTool::new().parameters_schema();
-        let branches = schema["properties"]["status_filter"]["anyOf"]
+        let filter = &schema["properties"]["status_filter"];
+        assert_eq!(filter["type"], json!("string"));
+        let advertised = filter["enum"]
             .as_array()
-            .ok_or_else(|| anyhow!("status_filter should define anyOf branches"))?;
+            .ok_or_else(|| anyhow!("status_filter should define an enum"))?;
+        for value in advertised {
+            assert!(
+                !parse_status_filter(Some(value)).is_empty(),
+                "advertised status_filter {value} selects nothing"
+            );
+        }
 
-        assert_eq!(branches[0]["type"], json!("string"));
-        assert_eq!(branches[1]["type"], json!("array"));
-        assert_eq!(branches[1]["items"]["type"], json!("string"));
+        // Unadvertised forms stay accepted at runtime.
+        let both = parse_status_filter(Some(&json!(["running", "failed"])));
+        assert_eq!(both, HashSet::from(["running", "failed"]));
+        assert!(parse_status_filter(Some(&json!("all"))).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn schema_advertises_only_parameters_the_input_accepts() -> Result<()> {
+        let schema = BgTool::new().parameters_schema();
+        let properties = schema["properties"]
+            .as_object()
+            .ok_or_else(|| anyhow!("bg schema should define properties"))?;
+
+        // Every advertised parameter must deserialize into BgInput.
+        for (name, property) in properties {
+            let sample = match property["type"].as_str() {
+                Some("boolean") => json!(true),
+                Some("integer") => json!(1),
+                Some("array") => json!(["a"]),
+                _ => property["enum"][0]
+                    .as_str()
+                    .map_or(json!("x"), |value| json!(value)),
+            };
+            let mut input = json!({"action": "list", "intent": "Check schema"});
+            input[name.as_str()] = sample;
+            assert!(
+                serde_json::from_value::<BgInput>(input).is_ok(),
+                "advertised parameter {name} is rejected"
+            );
+        }
+
+        // Aliases and rarely used knobs are accepted but not paid for per request.
+        for hidden in ["lines", "dry_run", "graceful_timeout_ms"] {
+            assert!(!properties.contains_key(hidden), "{hidden} is advertised");
+        }
+        let actions = schema["properties"]["action"]["enum"]
+            .as_array()
+            .ok_or_else(|| anyhow!("action should define an enum"))?;
+        assert!(!actions.contains(&json!("watch")));
+        assert!(!actions.contains(&json!("subscribe")));
+        let hidden: BgInput = serde_json::from_value(json!({
+            "action": "subscribe",
+            "intent": "Check hidden aliases",
+            "lines": 5,
+            "dry_run": true,
+            "graceful_timeout_ms": 1000,
+            "status_filter": ["running"]
+        }))?;
+        assert_eq!(resolve_action(&hidden)?, "subscribe");
+        assert_eq!(hidden.lines, Some(5));
+        assert_eq!(hidden.dry_run, Some(true));
+        assert_eq!(hidden.graceful_timeout_ms, Some(1000));
         Ok(())
     }
 

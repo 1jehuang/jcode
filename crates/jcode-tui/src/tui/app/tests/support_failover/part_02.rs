@@ -92,7 +92,7 @@ fn test_restore_failover_payload_keeps_existing_draft_and_raw_request() {
     assert_eq!(app.input, "next request");
     assert_eq!(app.cursor_pos, 3);
     let recovery = &app.display_messages.last().unwrap().content;
-    assert!(recovery.contains("Your draft is unchanged"));
+    assert!(recovery.contains("Your draft text is preserved"));
     assert!(recovery.contains("original @file request"));
 }
 

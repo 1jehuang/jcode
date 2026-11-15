@@ -8,6 +8,7 @@ mod rewind_checkpoint;
 #[path = "tests/rewind_recovery.rs"]
 mod rewind_recovery;
 mod tool_duration;
+include!("tests/streaming_hash.rs");
 include!("tests/provider_env.rs");
 include!("tests/cache_diagnostics.rs");
 include!("tests/support_failover/part_01.rs");
@@ -88,6 +89,7 @@ include!("tests/issue_832_remote_ctrl_k.rs");
 include!("tests/voice_input.rs");
 include!("tests/issue_998_model_status_overlay.rs");
 include!("tests/issue_1685_bounded_auto_resume.rs");
+include!("tests/held_retry_dispatch.rs");
 include!("tests/spinner_slash_commands.rs");
 include!("tests/command_suggestions_cache.rs");
 include!("tests/merge_command.rs");
@@ -102,6 +104,33 @@ include!("tests/resume_search_first.rs");
 include!("tests/usage_limit_resume.rs");
 include!("tests/credentials_changed_resend.rs");
 include!("tests/window_accounts_local.rs");
+#[test]
+fn materialized_provider_messages_share_payload_and_detach_on_edit() {
+    let mut app = create_test_app();
+    app.messages = vec![Message::assistant_text("retained provider payload")];
+
+    let mut materialized = app.materialized_provider_messages();
+    assert!(
+        materialized[0]
+            .content
+            .shares_storage_with(&app.messages[0].content)
+    );
+
+    let original = serde_json::to_string(&app.messages[0]).unwrap();
+    if let ContentBlock::Text { text, .. } = &mut materialized[0].content[0] {
+        text.push_str(" independently edited");
+    } else {
+        panic!("expected text payload");
+    }
+    assert!(
+        !materialized[0]
+            .content
+            .shares_storage_with(&app.messages[0].content)
+    );
+    assert_eq!(serde_json::to_string(&app.messages[0]).unwrap(), original);
+    assert_ne!(serde_json::to_string(&materialized[0]).unwrap(), original);
+}
+
 #[test]
 fn kv_cache_signature_prefix_match_allows_appended_messages() {
     let baseline_messages = vec![
@@ -156,7 +185,8 @@ fn kv_cache_signature_ignores_non_transmitted_message_metadata() {
             content: vec![ContentBlock::Text {
                 text: "boundary answer".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         },
@@ -180,7 +210,8 @@ fn kv_cache_signature_ignores_non_transmitted_message_metadata() {
                 ContentBlock::ReasoningTrace {
                     text: "internal scratch thinking".to_string(),
                 },
-            ],
+            ]
+            .into(),
             // Backfilled after the tool ran / a newer turn was committed.
             timestamp: Some(chrono::Utc::now() + chrono::Duration::seconds(5)),
             tool_duration_ms: Some(1234),

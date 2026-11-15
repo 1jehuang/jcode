@@ -124,7 +124,9 @@ pub struct Session {
     /// Persisted compacted-view state so reload/resume can continue using the
     /// active summary + recent tail instead of re-sending the full transcript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compaction: Option<StoredCompactionState>,
+    /// Shared with persistence metadata and session clones. Mutation must use
+    /// Arc::make_mut so exported/redacted or forked views remain isolated.
+    pub compaction: Option<std::sync::Arc<StoredCompactionState>>,
     /// Provider-specific session ID (e.g., Claude Code CLI session for resume)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_session_id: Option<String>,
@@ -248,7 +250,7 @@ struct SessionStartupStub {
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     #[serde(default)]
-    compaction: Option<StoredCompactionState>,
+    compaction: Option<std::sync::Arc<StoredCompactionState>>,
     #[serde(default)]
     provider_session_id: Option<String>,
     #[serde(default)]
@@ -465,19 +467,25 @@ impl Session {
 
     pub fn debug_memory_profile(&self) -> serde_json::Value {
         let message_stats =
-            summarize_message_content(self.messages.iter().map(|message| &message.content));
+            summarize_message_content(self.messages.iter().map(|message| &*message.content));
 
         let session_message_json_bytes: usize = self.messages.iter().map(estimate_json_bytes).sum();
         let provider_cache_stats = summarize_message_content(
             self.provider_messages_cache
                 .iter()
-                .map(|message| &message.content),
+                .map(|message| &*message.content),
         );
         let provider_messages_cache_json_bytes: usize = self
             .provider_messages_cache
             .iter()
             .map(estimate_json_bytes)
             .sum();
+        let provider_cache_shared_content_count = self
+            .provider_messages_cache
+            .iter()
+            .zip(&self.messages)
+            .filter(|(cached, source)| cached.content.shares_storage_with(&source.content))
+            .count();
         let env_snapshots_json_bytes: usize =
             self.env_snapshots.iter().map(estimate_json_bytes).sum();
         let memory_injections_json_bytes: usize =
@@ -499,6 +507,32 @@ impl Session {
             .as_ref()
             .and_then(|c| c.openai_encrypted_content.as_ref())
             .map(|text| text.len())
+            .unwrap_or(0);
+        let metadata_payload_capacity = self
+            .persist_state
+            .last_meta
+            .as_ref()
+            .and_then(|meta| meta.compaction.as_ref())
+            .filter(|stored| {
+                !self
+                    .compaction
+                    .as_ref()
+                    .is_some_and(|canonical| std::sync::Arc::ptr_eq(canonical, stored))
+            })
+            .map(|stored| {
+                let encrypted_bytes = stored
+                    .openai_encrypted_content
+                    .as_ref()
+                    .filter(|body| {
+                        !self
+                            .compaction
+                            .as_ref()
+                            .and_then(|canonical| canonical.openai_encrypted_content.as_ref())
+                            .is_some_and(|canonical| std::sync::Arc::ptr_eq(canonical, body))
+                    })
+                    .map_or(0, |body| body.len());
+                stored.summary_text.capacity() + encrypted_bytes
+            })
             .unwrap_or(0);
 
         serde_json::json!({
@@ -527,6 +561,10 @@ impl Session {
                     .unwrap_or(0),
                 "json_bytes": compaction_json_bytes,
                 "summary_text_bytes": compaction_summary_bytes,
+                "retained_payload_capacity_bytes": self.compaction.as_ref().map(|c| {
+                    c.summary_text.capacity() + c.openai_encrypted_content.as_ref().map_or(0, |body| body.len())
+                }).unwrap_or(0),
+                "persisted_metadata_payload_capacity_bytes": metadata_payload_capacity,
                 "encrypted_content_bytes": compaction_encrypted_bytes,
             },
             "env_snapshots": {
@@ -546,6 +584,7 @@ impl Session {
                 "source_len": self.provider_messages_cache_len,
                 "mode": persist_vector_mode_label(self.provider_messages_cache_mode),
                 "json_bytes": provider_messages_cache_json_bytes,
+                "content_shared_with_source_count": provider_cache_shared_content_count,
                 "memory": provider_cache_stats.to_json(),
             },
             "totals": {
@@ -672,11 +711,11 @@ impl Session {
 
     fn rebuild_memory_profile_cache(&mut self) {
         let message_stats =
-            summarize_message_content(self.messages.iter().map(|message| &message.content));
+            summarize_message_content(self.messages.iter().map(|message| &*message.content));
         let provider_cache_stats = summarize_message_content(
             self.provider_messages_cache
                 .iter()
-                .map(|message| &message.content),
+                .map(|message| &*message.content),
         );
 
         self.memory_profile_cache = SessionMemoryProfileCache {
@@ -1284,6 +1323,7 @@ request in this new forked session, using the inherited conversation only as con
             *title = crate::message::redact_secrets(title);
         }
         if let Some(compaction) = redacted.compaction.as_mut() {
+            let compaction = std::sync::Arc::make_mut(compaction);
             compaction.summary_text = crate::message::redact_secrets(&compaction.summary_text);
         }
         for msg in &mut redacted.messages {
@@ -1375,14 +1415,18 @@ request in this new forked session, using the inherited conversation only as con
         totals
     }
 
-    pub fn add_message(&mut self, role: Role, content: Vec<ContentBlock>) -> String {
+    pub fn add_message(
+        &mut self,
+        role: Role,
+        content: impl Into<crate::message::SharedContent>,
+    ) -> String {
         self.add_message_ext_with_display_role(role, content, None, None, None)
     }
 
     pub fn add_message_with_duration(
         &mut self,
         role: Role,
-        content: Vec<ContentBlock>,
+        content: impl Into<crate::message::SharedContent>,
         tool_duration_ms: Option<u64>,
     ) -> String {
         self.add_message_ext_with_display_role(role, content, tool_duration_ms, None, None)
@@ -1391,7 +1435,7 @@ request in this new forked session, using the inherited conversation only as con
     pub fn add_message_with_display_role(
         &mut self,
         role: Role,
-        content: Vec<ContentBlock>,
+        content: impl Into<crate::message::SharedContent>,
         display_role: Option<StoredDisplayRole>,
     ) -> String {
         self.add_message_ext_with_display_role(role, content, None, None, display_role)
@@ -1400,7 +1444,7 @@ request in this new forked session, using the inherited conversation only as con
     pub fn add_message_ext(
         &mut self,
         role: Role,
-        content: Vec<ContentBlock>,
+        content: impl Into<crate::message::SharedContent>,
         tool_duration_ms: Option<u64>,
         token_usage: Option<StoredTokenUsage>,
     ) -> String {
@@ -1410,7 +1454,7 @@ request in this new forked session, using the inherited conversation only as con
     pub fn add_message_ext_with_display_role(
         &mut self,
         role: Role,
-        content: Vec<ContentBlock>,
+        content: impl Into<crate::message::SharedContent>,
         tool_duration_ms: Option<u64>,
         token_usage: Option<StoredTokenUsage>,
         display_role: Option<StoredDisplayRole>,
@@ -1419,7 +1463,7 @@ request in this new forked session, using the inherited conversation only as con
         self.append_stored_message(StoredMessage {
             id: id.clone(),
             role,
-            content,
+            content: content.into(),
             display_role,
             timestamp: Some(Utc::now()),
             tool_duration_ms,
@@ -1449,8 +1493,7 @@ request in this new forked session, using the inherited conversation only as con
     /// newest screenshots keep their data and are still sent to the provider.
     /// Returns the number of images replaced.
     pub fn decay_old_tool_images(&mut self) -> usize {
-        let mut contents: Vec<&mut Vec<ContentBlock>> =
-            self.messages.iter_mut().map(|m| &mut m.content).collect();
+        let mut contents: Vec<_> = self.messages.iter_mut().map(|m| &mut m.content).collect();
         let stripped = jcode_compaction_core::decay_old_tool_images_in_contents(&mut contents);
         if stripped > 0 {
             self.mark_memory_profile_dirty();
@@ -1521,8 +1564,7 @@ request in this new forked session, using the inherited conversation only as con
     /// cache so the next API call reflects the reduced payload. Returns the
     /// number of images that were stripped.
     pub fn strip_oversized_images(&mut self, target_total_chars: usize) -> usize {
-        let mut contents: Vec<&mut Vec<ContentBlock>> =
-            self.messages.iter_mut().map(|m| &mut m.content).collect();
+        let mut contents: Vec<_> = self.messages.iter_mut().map(|m| &mut m.content).collect();
         let stripped = jcode_compaction_core::strip_large_images_in_contents(
             &mut contents,
             target_total_chars,
@@ -1774,7 +1816,7 @@ struct RemoteStartupSessionSnapshot {
     #[serde(default, deserialize_with = "parallel_messages::deserialize")]
     messages: Vec<StoredMessage>,
     #[serde(default)]
-    compaction: Option<StoredCompactionState>,
+    compaction: Option<std::sync::Arc<StoredCompactionState>>,
     #[serde(default)]
     provider_session_id: Option<String>,
     #[serde(default)]
@@ -1829,3 +1871,11 @@ struct RemoteStartupSessionSnapshot {
 #[cfg(test)]
 #[path = "session_tests/mod.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "session_tests/shared_compaction.rs"]
+mod shared_compaction_tests;
+
+#[cfg(test)]
+#[path = "session_tests/shared_payload.rs"]
+mod shared_payload_tests;

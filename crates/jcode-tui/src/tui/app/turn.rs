@@ -433,7 +433,7 @@ impl App {
                                                 let content_clone = content_blocks.clone();
                                                 self.add_provider_message(Message {
                                                     role: Role::Assistant,
-                                                    content: content_blocks,
+                                                    content: content_blocks.into(),
                                                     timestamp: Some(chrono::Utc::now()),
                                                     tool_duration_ms: None,
                                                 });
@@ -496,7 +496,7 @@ impl App {
                                             if !content_blocks.is_empty() {
                                                 self.add_provider_message(Message {
                                                     role: Role::Assistant,
-                                                    content: content_blocks,
+                                                    content: content_blocks.into(),
                                                     timestamp: Some(chrono::Utc::now()),
                                                     tool_duration_ms: None,
                                                 });
@@ -1293,7 +1293,7 @@ impl App {
                 let content_clone = content_blocks.clone();
                 self.add_provider_message(Message {
                     role: Role::Assistant,
-                    content: content_blocks,
+                    content: content_blocks.into(),
                     timestamp: Some(chrono::Utc::now()),
                     tool_duration_ms: None,
                 });
@@ -1370,7 +1370,7 @@ impl App {
                     for blocks in generated_image_contexts.drain(..) {
                         self.add_provider_message(Message {
                             role: Role::User,
-                            content: blocks.clone(),
+                            content: blocks.clone().into(),
                             timestamp: Some(chrono::Utc::now()),
                             tool_duration_ms: None,
                         });
@@ -1441,7 +1441,8 @@ impl App {
                             tool_use_id: tc.id.clone(),
                             content: sdk_content,
                             is_error: if sdk_is_error { Some(true) } else { None },
-                        }],
+                        }]
+                        .into(),
                         timestamp: Some(chrono::Utc::now()),
                         tool_duration_ms: None,
                     });
@@ -1698,7 +1699,7 @@ impl App {
                 for blocks in generated_image_contexts.drain(..) {
                     self.add_provider_message(Message {
                         role: Role::User,
-                        content: blocks.clone(),
+                        content: blocks.clone().into(),
                         timestamp: Some(chrono::Utc::now()),
                         tool_duration_ms: None,
                     });

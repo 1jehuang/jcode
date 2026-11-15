@@ -9,8 +9,9 @@
 //! reconciliation also catches saves made by other processes and retries.
 //!
 //! Only user-visible text is uploaded: user/assistant text, tool calls as a
-//! one-line summary, and tool results truncated. Hidden reasoning, images and
-//! provider-native blobs are never sent.
+//! one-line summary, and tool results truncated. Assistant markdown images in
+//! the generated-image store become bounded thumbnails. Hidden reasoning,
+//! arbitrary local files and provider-native blobs are never sent.
 
 use crate::session::Session;
 use crate::storage;
@@ -62,6 +63,10 @@ pub const SYNC_INTERVAL: Duration = Duration::from_secs(20);
 const MAX_MESSAGES_PER_UPLOAD: usize = 200;
 const MAX_TOOL_RESULT_CHARS: usize = 4_000;
 const MAX_TEXT_CHARS: usize = 100_000;
+const MAX_STRUCTURED_TOOLS: usize = 32;
+const MAX_TOOL_INPUT_BYTES: usize = 8 * 1024;
+const MAX_TOOL_ID_BYTES: usize = 256;
+const MAX_STRUCTURED_BYTES: usize = 240 * 1024;
 /// Only sessions touched within this window are synced on enable.
 const BACKFILL_WINDOW: Duration = Duration::from_secs(14 * 24 * 3600);
 const SYNC_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -143,7 +148,35 @@ pub struct WireMessage {
     pub role: &'static str,
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_text: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<WireToolCall>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tool_results: Vec<WireToolResult>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<WireImage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Hash)]
+pub struct WireToolCall {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Hash)]
+pub struct WireToolResult {
+    pub tool_use_id: String,
+    pub content: String,
+    pub is_error: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Hash)]
+pub struct WireImage {
+    pub media_type: String,
+    pub data: String,
 }
 
 /// Session metadata returned by the account's mobile transcript API.
@@ -455,6 +488,115 @@ fn append_tool_summary(out: &mut BoundedText, name: &str, input: &serde_json::Va
     }
 }
 
+/// Bound serialization work as well as the retained input. Large inputs become
+/// a valid JSON string preview, never an invalid/truncated JSON object.
+fn bounded_tool_input(input: &serde_json::Value) -> serde_json::Value {
+    struct Preview(Vec<u8>);
+    impl std::io::Write for Preview {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let available = MAX_TOOL_INPUT_BYTES.saturating_sub(self.0.len());
+            self.0
+                .extend_from_slice(&bytes[..bytes.len().min(available)]);
+            if bytes.len() > available {
+                Err(std::io::Error::other("tool input preview full"))
+            } else {
+                Ok(bytes.len())
+            }
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut preview = Preview(Vec::new());
+    if serde_json::to_writer(&mut preview, input).is_ok() {
+        serde_json::from_slice(&preview.0).unwrap_or_default()
+    } else {
+        serde_json::Value::String(format!(
+            "{}\n… (truncated)",
+            String::from_utf8_lossy(&preview.0)
+        ))
+    }
+}
+
+fn structured_tools(
+    blocks: &[ContentBlock],
+) -> Option<(String, Vec<WireToolCall>, Vec<WireToolResult>)> {
+    if !blocks.iter().any(|block| {
+        matches!(
+            block,
+            ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. }
+        )
+    }) {
+        return None;
+    }
+    let mut prose = BoundedText::new(MAX_TEXT_CHARS);
+    let mut has_prose = false;
+    let mut calls = Vec::new();
+    let mut results = Vec::new();
+    for block in blocks {
+        match block {
+            ContentBlock::Text { text, .. }
+                if !text.trim_start().is_empty()
+                    && !text.trim_start().starts_with("<system-reminder>") =>
+            {
+                if has_prose {
+                    prose.push("\n\n");
+                }
+                prose.push(text);
+                has_prose = true;
+            }
+            ContentBlock::ToolUse {
+                id, name, input, ..
+            } => {
+                // Fall back to the existing summaries as a whole if identities
+                // cannot be represented safely. Never truncate IDs into aliases.
+                if calls.len() == MAX_STRUCTURED_TOOLS
+                    || id.is_empty()
+                    || id.len() > MAX_TOOL_ID_BYTES
+                    || name.is_empty()
+                {
+                    return None;
+                }
+                calls.push(WireToolCall {
+                    id: id.clone(),
+                    name: name.chars().take(128).collect(),
+                    input: bounded_tool_input(input),
+                });
+            }
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                if results.len() == MAX_STRUCTURED_TOOLS
+                    || tool_use_id.is_empty()
+                    || tool_use_id.len() > MAX_TOOL_ID_BYTES
+                {
+                    return None;
+                }
+                results.push(WireToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    content: truncate(content, MAX_TOOL_RESULT_CHARS),
+                    is_error: is_error.unwrap_or(false),
+                });
+            }
+            // Reasoning, signatures, images and hidden reminders are not wire prose.
+            _ => {}
+        }
+    }
+    if calls.is_empty() && results.is_empty() {
+        return None;
+    }
+    // Backend limits are UTF-16 code units for prose and 256 KiB serialized
+    // metadata. Reserve room for the JSON property names/envelope.
+    if prose.text.encode_utf16().count() > 200_000
+        || serde_json::to_vec(&(&calls, &results)).ok()?.len() > MAX_STRUCTURED_BYTES
+    {
+        return None;
+    }
+    Some((prose.text, calls, results))
+}
+
 /// Convert stored messages into the mobile wire format. One stored message
 /// becomes at most one wire message; `seq` is the stored index so uploads are
 /// stable and idempotent.
@@ -515,14 +657,133 @@ pub fn wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
                     Role::Assistant => "assistant",
                 }
             };
+            let structured = structured_tools(&message.content);
+            let (display_text, tool_calls, tool_results) = match structured {
+                Some((prose, calls, results)) => (Some(prose), calls, results),
+                None => (None, Vec::new(), Vec::new()),
+            };
             Some(WireMessage {
                 seq,
                 role,
+                display_text,
+                tool_calls,
+                tool_results,
+                images: if role == "assistant" {
+                    generated_images(&text.text)
+                } else {
+                    Vec::new()
+                },
                 text: text.text,
                 created_at: message.timestamp.map(|t| t.to_rfc3339()),
             })
         })
         .collect()
+}
+
+fn message_chunks(messages: &[WireMessage]) -> Vec<&[WireMessage]> {
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut bytes = 0;
+    for (index, message) in messages.iter().enumerate() {
+        let size = serde_json::to_vec(message).map_or(0, |v| v.len());
+        if index > start
+            && (bytes + size > 3 * 1024 * 1024 || index - start >= MAX_MESSAGES_PER_UPLOAD)
+        {
+            chunks.push(&messages[start..index]);
+            start = index;
+            bytes = 0;
+        }
+        bytes += size;
+    }
+    if start < messages.len() {
+        chunks.push(&messages[start..]);
+    }
+    chunks
+}
+
+// Only explicit markdown image destinations under the generated-image store
+// are eligible. Canonicalization rejects traversal and symlink escapes.
+fn generated_images(text: &str) -> Vec<WireImage> {
+    use base64::Engine;
+    let Ok(root) =
+        storage::jcode_dir().and_then(|p| Ok(p.join("generated-images").canonicalize()?))
+    else {
+        return Vec::new();
+    };
+    let mut seen = BTreeSet::new();
+    let mut images = Vec::new();
+    for fragment in text.split("![").skip(1).take(64) {
+        let Some((_, destination)) = fragment.split_once("](") else {
+            continue;
+        };
+        let Some((destination, _)) = destination.split_once(')') else {
+            continue;
+        };
+        let path = Path::new(destination.trim().trim_start_matches("file://"));
+        let Ok(path) = path.canonicalize() else {
+            continue;
+        };
+        if !path.starts_with(&root) || !seen.insert(path.clone()) {
+            continue;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Do not follow a file swapped to a symlink after canonicalization,
+            // and never let a special file block the transcript sync worker.
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let Ok(file) = options.open(&path) else {
+            continue;
+        };
+        let Ok(meta) = file.metadata() else {
+            continue;
+        };
+        if !meta.is_file() || meta.len() > 16 * 1024 * 1024 {
+            continue;
+        }
+        let Ok(mut reader) =
+            image::ImageReader::new(std::io::BufReader::new(file)).with_guessed_format()
+        else {
+            continue;
+        };
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(8192);
+        limits.max_image_height = Some(8192);
+        limits.max_alloc = Some(128 * 1024 * 1024);
+        reader.limits(limits);
+        let Ok(image) = reader.decode() else {
+            continue;
+        };
+        let mut thumbnail = image.thumbnail(1024, 1024).to_rgb8();
+        loop {
+            let mut bytes = Vec::new();
+            if image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 75)
+                .encode_image(&thumbnail)
+                .is_err()
+            {
+                break;
+            }
+            if bytes.len() <= 256 * 1024 {
+                images.push(WireImage {
+                    media_type: "image/jpeg".into(),
+                    data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                });
+                break;
+            }
+            thumbnail = image::imageops::thumbnail(
+                &thumbnail,
+                thumbnail.width() / 2,
+                thumbnail.height() / 2,
+            );
+        }
+        if images.len() == 4 {
+            break;
+        }
+    }
+    images
 }
 
 fn wire_fingerprint(messages: &[WireMessage], end: usize) -> u64 {
@@ -584,7 +845,15 @@ fn session_revision(snapshot: &Path) -> [u64; 4] {
     let (journal_time, journal_len) = stamp(&crate::session::session_journal_path_from_snapshot(
         snapshot,
     ));
-    [snapshot_time, snapshot_len, journal_time, journal_len]
+    // Version the visible wire representation without changing mtime ordering.
+    // Epoch 1 (bit 63) added generated images. Epoch 2 (bits 63+62) also
+    // reconciles unchanged stored sessions with structured tool metadata.
+    [
+        snapshot_time,
+        snapshot_len ^ (3_u64 << 62),
+        journal_time,
+        journal_len,
+    ]
 }
 
 /// Candidate sessions: real (non-debug) snapshots modified since the window.
@@ -803,7 +1072,7 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
         let chunks: Vec<&[WireMessage]> = if messages.is_empty() {
             vec![&[]]
         } else {
-            messages.chunks(MAX_MESSAGES_PER_UPLOAD).collect()
+            message_chunks(&messages)
         };
         for chunk in chunks {
             if !sync_still_enabled(state.generation) {

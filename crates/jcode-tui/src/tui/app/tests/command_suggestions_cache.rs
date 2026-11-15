@@ -12,7 +12,16 @@ fn cached_suggestions_match_uncached_across_input_mutations() {
     let mut app = create_test_app();
 
     for input in [
-        "", "/", "/m", "/mod", "/model", "/help", "/conifg", "/goals ", "/rewind ", "not a command",
+        "",
+        "/",
+        "/m",
+        "/mod",
+        "/model",
+        "/help",
+        "/conifg",
+        "/goals ",
+        "/rewind ",
+        "not a command",
         "/",
     ] {
         app.input = input.to_string();
@@ -78,7 +87,8 @@ fn advancing_the_epoch_forces_recomputation_for_identical_input() {
         content: vec![ContentBlock::Text {
             text: "a new rewind target".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,

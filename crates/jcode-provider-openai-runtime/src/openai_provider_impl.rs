@@ -465,7 +465,7 @@ impl Provider for OpenAIProvider {
                             recover_opaque_ws_rejection(
                                 Arc::clone(&credentials),
                                 account_pin.clone(),
-                                request.clone(),
+                                &request,
                                 &tx,
                             )
                             .await;
@@ -669,7 +669,7 @@ impl Provider for OpenAIProvider {
                             attempt_client,
                             Arc::clone(&credentials),
                             account_pin.clone(),
-                            request.clone(),
+                            &request,
                             if force_https_for_request {
                                 let reason = last_error
                                     .as_ref()
@@ -702,7 +702,7 @@ impl Provider for OpenAIProvider {
                             recover_opaque_ws_rejection(
                                 Arc::clone(&credentials),
                                 account_pin.clone(),
-                                request.clone(),
+                                &request,
                                 &tx,
                             )
                             .await;

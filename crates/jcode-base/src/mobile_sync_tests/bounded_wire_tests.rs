@@ -64,26 +64,15 @@ fn old_wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
             Some(WireMessage {
                 seq,
                 role,
+                images: Vec::new(),
+                display_text: None,
+                tool_calls: Vec::new(),
+                tool_results: Vec::new(),
                 text: old_truncate(&parts.join("\n\n"), MAX_TEXT_CHARS),
                 created_at: message.timestamp.map(|t| t.to_rfc3339()),
             })
         })
         .collect()
-}
-
-fn text_block(text: String) -> ContentBlock {
-    ContentBlock::Text {
-        text,
-        cache_control: None,
-    }
-}
-
-fn result_block(content: String) -> ContentBlock {
-    ContentBlock::ToolResult {
-        tool_use_id: "t".into(),
-        content,
-        is_error: None,
-    }
 }
 
 #[test]
@@ -170,7 +159,14 @@ fn bounded_wire_conversion_matches_original_unicode_and_boundaries() {
     session.messages[1].timestamp = Some(chrono::Utc::now());
     for start in [0, 1, 3, session.messages.len(), session.messages.len() + 1] {
         let expected = old_wire_messages(&session, start);
-        let actual = wire_messages(&session, start);
+        let mut actual = wire_messages(&session, start);
+        // New metadata is additive. The independent oracle still verifies every
+        // legacy text byte, role, stored sequence and timestamp unchanged.
+        for message in &mut actual {
+            message.display_text = None;
+            message.tool_calls.clear();
+            message.tool_results.clear();
+        }
         assert_eq!(actual, expected, "start={start}");
         for end in [0, 1, session.messages.len() / 2, session.messages.len()] {
             assert_eq!(
@@ -299,7 +295,8 @@ fn incremental_updates_replay_rewritten_and_shrunk_prefixes() {
     session.messages[0].content = vec![ContentBlock::Text {
         text: "rewritten".into(),
         cache_control: None,
-    }];
+    }]
+    .into();
     let rewritten = incremental_messages(&session, &progress).0;
     assert_eq!(rewritten.len(), 3);
     assert_eq!(rewritten[0].text, "rewritten");

@@ -38,6 +38,21 @@ pub trait LocalSessionHost: Send + Sync + 'static {
     /// Hand `text` to a live session as a user message. Returns once the
     /// message was accepted (turn started or queued), not when the turn ends.
     fn deliver<'a>(&'a self, session_id: &'a str, text: &'a str) -> BoxFuture<'a, Result<()>>;
+    /// Deliver validated SDK image tuples without silently discarding attachments.
+    fn deliver_images<'a>(
+        &'a self,
+        session_id: &'a str,
+        text: &'a str,
+        images: Vec<(String, String)>,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            anyhow::ensure!(
+                images.is_empty(),
+                "this computer does not support photo messages"
+            );
+            self.deliver(session_id, text).await
+        })
+    }
 }
 
 /// Whether this daemon should accept messages from the phone.
@@ -90,7 +105,7 @@ async fn claim_local(
     let response = client
         .post(format!("{base}/mobile/commands/claim-local"))
         .bearer_auth(key)
-        .json(&serde_json::json!({ "machine": machine, "sessions": sessions }))
+        .json(&serde_json::json!({ "machine": machine, "sessions": sessions, "supports_images": true }))
         .timeout(Duration::from_secs(30))
         .send()
         .await?;
@@ -126,10 +141,12 @@ pub async fn run_local_once(
             .as_deref()
             .filter(|id| sessions.iter().any(|session| session.session_id == *id))
             .ok_or_else(|| anyhow::anyhow!("that session is not running on this computer"))?;
-        if command.text.trim().is_empty() {
+        let images = command.validated_images()?;
+        if command.text.trim().is_empty() && images.is_empty() {
             anyhow::bail!("empty message");
         }
-        host.deliver(session_id, &command.text).await?;
+        host.deliver_images(session_id, &command.text, images)
+            .await?;
         Ok(session_id.to_string())
     }
     .await;

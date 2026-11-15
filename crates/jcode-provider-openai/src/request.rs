@@ -685,7 +685,8 @@ mod tests {
                 name: "read".into(),
                 input: json!({}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         }
@@ -801,7 +802,8 @@ mod tests {
             role: Role::User,
             content: vec![ContentBlock::OpenAICompaction {
                 encrypted_content: oversized,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         }];
@@ -830,7 +832,8 @@ mod tests {
                 summary: vec!["Checked constraints.".to_string()],
                 encrypted_content: Some("enc_reasoning".to_string()),
                 status: Some("completed".to_string()),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         }];
@@ -867,7 +870,7 @@ mod tests {
                         {"type": "web_search_result", "url": "https://a.example", "title": "A", "encrypted_content": "ENC"}
                     ]}),
                 },
-            ],
+            ].into(),
             timestamp: None,
             tool_duration_ms: None,
         }];
@@ -945,7 +948,7 @@ mod tests {
     fn msg(role: Role, content: Vec<ContentBlock>) -> ChatMessage {
         ChatMessage {
             role,
-            content,
+            content: content.into(),
             timestamp: None,
             tool_duration_ms: None,
         }

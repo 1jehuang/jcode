@@ -22,7 +22,8 @@ fn invalidated_in_flight_load_does_not_repopulate_session_list_cache() {
             content: vec![crate::message::ContentBlock::Text {
                 text: format!("race session {idx}"),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,
@@ -118,7 +119,8 @@ fn onboarding_scoped_loader_returns_only_codex_sessions() {
         content: vec![crate::message::ContentBlock::Text {
             text: "should not show in codex onboarding view".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -160,7 +162,8 @@ fn parallel_fill_skips_many_recent_empty_sessions_to_reach_scan_limit() {
             content: vec![crate::message::ContentBlock::Text {
                 text: text.to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,
@@ -222,7 +225,8 @@ fn hidden_debug_sessions_do_not_consume_default_resume_budget() {
             content: vec![crate::message::ContentBlock::Text {
                 text: text.to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,
@@ -290,7 +294,8 @@ fn session_matches_picker_query_requires_all_tokens_order_independent() {
         content: vec![crate::message::ContentBlock::Text {
             text: "please deploy the production api gateway now".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,

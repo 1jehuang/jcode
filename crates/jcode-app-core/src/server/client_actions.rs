@@ -879,7 +879,7 @@ fn transfer_active_messages(session: &Session) -> Vec<crate::message::Message> {
 fn create_transfer_child_session(
     parent_session_id: &str,
     parent: &Session,
-    compaction: Option<crate::session::StoredCompactionState>,
+    compaction: Option<Arc<crate::session::StoredCompactionState>>,
 ) -> anyhow::Result<(String, String)> {
     let mut todos = crate::todo::load_todos(parent_session_id)?;
     // Background tasks belong to the source session. A fresh session must
@@ -1024,7 +1024,7 @@ pub(super) async fn handle_transfer(
     let transfer_compaction = match crate::compaction::build_transfer_compaction_state(
         provider,
         transfer_active_messages(&parent),
-        parent.compaction.clone(),
+        parent.compaction.as_deref().cloned(),
     )
     .await
     {
@@ -1050,29 +1050,32 @@ pub(super) async fn handle_transfer(
         }
     };
 
-    let (new_session_id, new_session_name) =
-        match create_transfer_child_session(client_session_id, &parent, transfer_compaction) {
-            Ok(result) => result,
-            Err(error) => {
-                crate::logging::event_warn(
-                    "SESSION_LIFECYCLE",
-                    vec![
-                        ("phase", "transfer_create_error".to_string()),
-                        ("request_id", id.to_string()),
-                        ("session_id", client_session_id.to_string()),
-                        ("error", crate::util::format_error_chain(&error)),
-                        ("elapsed_ms", started.elapsed().as_millis().to_string()),
-                    ],
-                );
-                let _ = client_event_tx.send(ServerEvent::Error {
-                    id,
-                    message: format!("Failed to create transfer session: {error}"),
-                    retry_after_secs: None,
-                    server_resumes: false,
-                });
-                return;
-            }
-        };
+    let (new_session_id, new_session_name) = match create_transfer_child_session(
+        client_session_id,
+        &parent,
+        transfer_compaction.map(Arc::new),
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            crate::logging::event_warn(
+                "SESSION_LIFECYCLE",
+                vec![
+                    ("phase", "transfer_create_error".to_string()),
+                    ("request_id", id.to_string()),
+                    ("session_id", client_session_id.to_string()),
+                    ("error", crate::util::format_error_chain(&error)),
+                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: format!("Failed to create transfer session: {error}"),
+                retry_after_secs: None,
+                server_resumes: false,
+            });
+            return;
+        }
+    };
     crate::logging::event_info(
         "SESSION_LIFECYCLE",
         vec![
@@ -1177,6 +1180,7 @@ pub(super) async fn handle_resume_all_sessions(
             &session_id,
             agent_guard,
             String::new(),
+            Vec::new(),
             Some(reminder.clone()),
             None,
             Some("resuming interrupted session".to_string()),

@@ -361,13 +361,16 @@ async fn profile_instruction_reset_preserves_compacted_view_on_mutation_and_rest
     );
     session.agent_profile = Some(profile());
     session.provider_session_id = Some("old-compacted-native-prompt".into());
-    session.compaction = Some(crate::session::StoredCompactionState {
-        summary_text: "ACTIVE_PROFILE_SUMMARY_92713".into(),
-        openai_encrypted_content: None,
-        covers_up_to_turn: 1,
-        original_turn_count: 1,
-        compacted_count: 1,
-    });
+    session.compaction = Some(
+        crate::session::StoredCompactionState {
+            summary_text: "ACTIVE_PROFILE_SUMMARY_92713".into(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: 1,
+            original_turn_count: 1,
+            compacted_count: 1,
+        }
+        .into(),
+    );
     session.save().unwrap();
     let session_id = session.id.clone();
     let mut agent = Agent::new_with_session(provider.clone(), Registry::empty(), session, None);

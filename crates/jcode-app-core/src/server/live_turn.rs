@@ -179,6 +179,33 @@ pub(super) async fn spawn_tracked_live_turn(
     status_detail: Option<String>,
     swarm: LiveTurnSwarmContext,
 ) -> bool {
+    spawn_tracked_live_turn_with_images(
+        session_id,
+        agent,
+        message,
+        Vec::new(),
+        system_reminder,
+        display_role,
+        status_detail,
+        swarm,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a live turn carries its prompt, images, display, and swarm context"
+)]
+pub(super) async fn spawn_tracked_live_turn_with_images(
+    session_id: &str,
+    agent: OwnedMutexGuard<Agent>,
+    message: String,
+    images: Vec<(String, String)>,
+    system_reminder: Option<String>,
+    display_role: Option<crate::session::StoredDisplayRole>,
+    status_detail: Option<String>,
+    swarm: LiveTurnSwarmContext,
+) -> bool {
     // Direct callers can explicitly replace a waiting turn. Automatic wake
     // callers have already refused sessions whose provider wait still owns it.
     super::usage_limit_resume::cancel_pending_resume(session_id);
@@ -187,6 +214,7 @@ pub(super) async fn spawn_tracked_live_turn(
         session_id,
         agent,
         message,
+        images,
         system_reminder,
         display_role,
         status_detail,
@@ -204,6 +232,7 @@ pub(super) async fn spawn_tracked_live_turn_with_publication(
     session_id: &str,
     mut agent: OwnedMutexGuard<Agent>,
     message: String,
+    images: Vec<(String, String)>,
     system_reminder: Option<String>,
     display_role: Option<crate::session::StoredDisplayRole>,
     status_detail: Option<String>,
@@ -277,8 +306,18 @@ pub(super) async fn spawn_tracked_live_turn_with_publication(
         let signal = agent.graceful_shutdown_signal();
         let (result, stop_reason) = catch_live_turn_panic(async {
             publication
-                .run(
-                    signal,
+                .run(signal, async {
+                    if !images.is_empty() {
+                        return super::turn_failover::process_reserved_locked_message_with_server_failover(
+                            &mut agent,
+                            &turn_lease,
+                            &message,
+                            images,
+                            system_reminder,
+                            event_tx.clone(),
+                        )
+                        .await;
+                    }
                     process_reserved_locked_context_with_server_failover(
                         &mut agent,
                         &turn_lease,
@@ -286,8 +325,9 @@ pub(super) async fn spawn_tracked_live_turn_with_publication(
                         system_reminder,
                         display_role.unwrap_or(crate::session::StoredDisplayRole::System),
                         event_tx.clone(),
-                    ),
-                )
+                    )
+                    .await
+                })
                 .await
                 .unwrap_or(Ok(()))
         })

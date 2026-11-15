@@ -1,9 +1,9 @@
 {
   "total": 4205,
   "totals_by_pattern": {
-    "dot_ok": 1663,
-    "let_underscore": 1510,
-    "unwrap_or_default": 1032
+    "dot_ok": 1664,
+    "let_underscore": 1508,
+    "unwrap_or_default": 1033
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {
@@ -1142,9 +1142,9 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-base/src/mobile_sync.rs": {
-      "dot_ok": 2,
+      "dot_ok": 3,
       "let_underscore": 0,
-      "unwrap_or_default": 0
+      "unwrap_or_default": 1
     },
     "crates/jcode-base/src/model_pricing.rs": {
       "dot_ok": 2,
@@ -2533,12 +2533,7 @@
     },
     "crates/jcode-tui/src/tui/app/remote.rs": {
       "dot_ok": 0,
-      "let_underscore": 9,
-      "unwrap_or_default": 0
-    },
-    "crates/jcode-tui/src/tui/app/remote/input_dispatch.rs": {
-      "dot_ok": 0,
-      "let_underscore": 1,
+      "let_underscore": 8,
       "unwrap_or_default": 0
     },
     "crates/jcode-tui/src/tui/app/remote/key_handling.rs": {

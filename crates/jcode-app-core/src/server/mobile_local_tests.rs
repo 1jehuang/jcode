@@ -218,3 +218,53 @@ async fn headless_sessions_are_live() {
     }
     assert_eq!(f.host.live_sessions().await.len(), 1);
 }
+
+#[tokio::test]
+async fn phone_photo_starts_same_session_turn_with_image_content() {
+    let mut f = fixture().await;
+    f.provider.queue_response(vec![
+        StreamEvent::TextDelta("photo received".into()),
+        StreamEvent::MessageEnd { stop_reason: None },
+    ]);
+    let images = vec![("image/png".to_string(), "aGk=".to_string())];
+    f.host
+        .deliver_images(&f.session_id, "", images)
+        .await
+        .unwrap();
+    until_done(&mut f.events).await;
+    let agent = f.agent.lock().await;
+    assert_eq!(agent.session_id(), f.session_id);
+    let transcript = format!("{:?}", agent.messages());
+    assert!(transcript.contains("image/png"), "{transcript}");
+    assert!(transcript.contains("aGk="), "{transcript}");
+    assert!(transcript.contains("photo received"), "{transcript}");
+}
+
+#[tokio::test]
+async fn phone_photo_is_preserved_in_busy_session_queue() {
+    let f = fixture().await;
+    let queue = f.agent.lock().await.soft_interrupt_queue();
+    f.host
+        .swarm
+        .members
+        .write()
+        .await
+        .get_mut(&f.session_id)
+        .unwrap()
+        .status = "running".into();
+    f.host
+        .soft_interrupt_queues
+        .write()
+        .await
+        .insert(f.session_id.clone(), queue.clone());
+    let _running = f.agent.lock().await;
+    let images = vec![("image/jpeg".to_string(), "aGk=".to_string())];
+    f.host
+        .deliver_images(&f.session_id, "look", images.clone())
+        .await
+        .unwrap();
+    let queued = queue.lock().unwrap();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].images, images);
+    assert_eq!(queued[0].content, "look");
+}

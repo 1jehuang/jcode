@@ -599,13 +599,16 @@ async fn session_modes_resume_empty_first_prompt_and_consumed_ids() {
     mutate(&resumed.id, &path, Some(b"keep files")).unwrap();
     resumed.provider_session_id = Some("old provider".into());
     resumed.model_usage_turn_id = Some("old turn".into());
-    resumed.compaction = Some(jcode_session_types::StoredCompactionState {
-        summary_text: "discarded future".into(),
-        openai_encrypted_content: None,
-        covers_up_to_turn: 1,
-        original_turn_count: 1,
-        compacted_count: 1,
-    });
+    resumed.compaction = Some(
+        jcode_session_types::StoredCompactionState {
+            summary_text: "discarded future".into(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: 1,
+            original_turn_count: 1,
+            compacted_count: 1,
+        }
+        .into(),
+    );
     resumed
         .rewind_checkpoint(&cp.id, ConversationOnly)
         .await

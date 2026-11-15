@@ -18,6 +18,7 @@ struct Host {
     busy: AtomicBool,
     fail: AtomicBool,
     delivered: Mutex<Vec<(String, String)>>,
+    images: Mutex<Vec<(String, String)>>,
 }
 impl LocalSessionHost for Host {
     fn live_sessions(&self) -> Pin<Box<dyn Future<Output = Vec<LiveSession>> + Send + '_>> {
@@ -26,6 +27,18 @@ impl LocalSessionHost for Host {
                 session_id: "acceptance-local".into(),
                 busy: self.busy.load(Ordering::SeqCst),
             }]
+        })
+    }
+    fn deliver_images<'a>(
+        &'a self,
+        session: &'a str,
+        text: &'a str,
+        images: Vec<(String, String)>,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            self.deliver(session, text).await?;
+            self.images.lock().unwrap().extend(images);
+            Ok(())
         })
     }
     fn deliver<'a>(
@@ -114,10 +127,10 @@ async fn phone_message_crosses_real_backend_sqlite_and_desktop_runner() {
         busy: AtomicBool::new(false),
         fail: AtomicBool::new(false),
         delivered: Mutex::new(vec![]),
+        images: Mutex::new(vec![]),
     };
     api(&client, &base, &key, POST, "/mobile/sessions/acceptance-local", Some(json!({"source":"local", "host":"acceptance-laptop", "messages":[{"seq":0,"role":"user","text":"initial"}]})), 200).await;
-    let message =
-        json!({"kind":"message", "session_id":"acceptance-local", "text":"phone continuation 🦀"});
+    let message = json!({"kind":"message", "session_id":"acceptance-local", "text":"phone continuation 🦀", "images":[{"media_type":"image/png", "data":"aGk="}]});
     // Synced is not live: reject rather than accidentally waking a cloud VM.
     api(
         &client,
@@ -191,6 +204,11 @@ async fn phone_message_crosses_real_backend_sqlite_and_desktop_runner() {
         200,
     )
     .await;
+    assert_eq!(
+        *host.images.lock().unwrap(),
+        vec![("image/png".to_string(), "aGk=".to_string())]
+    );
+    assert_eq!(completed["command"]["images"], message["images"]);
     assert_eq!(completed["command"]["status"], "done");
     assert_eq!(
         completed["command"]["result_session_id"],
