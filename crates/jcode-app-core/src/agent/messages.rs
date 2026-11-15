@@ -223,11 +223,19 @@ mod durable_error_tests {
     #[test]
     fn message_insertion_retains_shared_payload_storage() {
         let _lock = crate::storage::lock_test_env();
-        let mut agent = Agent::new(Arc::new(NoNetworkProvider), Registry::empty());
+        let mut agent = Agent::new_provisional_with_initial_working_dir(
+            Arc::new(NoNetworkProvider),
+            Registry::empty(),
+            None,
+        );
         let message = Message::user("shared payload");
         agent.add_message(Role::User, message.content.clone());
         assert!(
-            agent.session.messages[0]
+            agent
+                .session
+                .messages
+                .last()
+                .unwrap()
                 .content
                 .shares_storage_with(&message.content)
         );
