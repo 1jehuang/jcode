@@ -297,3 +297,26 @@ and `~/.jcode/scratch/request-buffer-lifetimes/` (README, full measurements,
 validation and locked scratch build). Serialized content lengths still do not
 explain all production live heap. Capacity accounting must deduplicate shared
 payload backing and explicitly exclude unmeasured map-node/allocator overhead.
+
+Additive retained-capacity diagnostics passed 31 message-type tests and three
+session profile tests, then were activated as `7d05ba673`. A subsequent read-only
+pass profiled 46 of 50 sessions. The sum of known transcript backing capacity
+was 82,889,738 bytes: 70,010,226 string bytes plus 12,879,512 Vec bytes. This
+sum deduplicates within each session, not across sessions, and excludes four
+busy/unavailable sessions, JSON map nodes, Arc/allocator overhead and other
+owners. The sampled strings had no spare capacity after reload. Production
+allocator-live remained 553,280,576–567,569,856 bytes. These unmatched scopes
+cannot explain the entire heap or establish that the difference is waste.
+Do not attribute the lower post-reload process totals to the diagnostics.
+The API bridge retained PID 310062 throughout activation.
+
+A scratch-only wire-buffer `shrink_to_fit` comparison checked 18 case pairs and
+matched wire checksums, lengths and requested-allocation reductions. For a
+16 MiB payload it removed 16,777,223 spare raw-buffer bytes, or 8,312,043 bytes
+for repeated-content gzip. Ten alternating timing pairs per case measured
+shrink-call medians ranging from 105 ns to 32,058 ns, with noisy overall timing
+deltas, including positive paired deltas. This demonstrates allocation savings,
+not a universally free optimization, physical-page savings, or unchanged real
+upload latency. No wire-buffer compaction or allocator policy change was
+installed in this measurement round. Raw result matrices are retained in the
+scratch `compaction-results.json` and `compaction-summary.txt`.
