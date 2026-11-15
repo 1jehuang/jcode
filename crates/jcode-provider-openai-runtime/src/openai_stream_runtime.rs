@@ -1020,6 +1020,11 @@ async fn continue_persistent_ws_locked(
         ],
     );
 
+    // These duplicate JSON trees exist only for synchronous fingerprinting.
+    // The actual continuation request owns the input needed for serialization.
+    drop(continuation_payload);
+    drop(incremental_items);
+
     let request_text = match serde_json::to_string(&continuation_request) {
         Ok(t) => t,
         Err(e) => return PersistentWsResult::Failed(format!("serialize error: {}", e)),

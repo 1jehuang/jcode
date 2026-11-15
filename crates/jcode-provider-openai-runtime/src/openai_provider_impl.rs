@@ -430,6 +430,11 @@ impl Provider for OpenAIProvider {
                     }
                 }
 
+                // The retry request already owns the full input. The separate
+                // array is needed only for the continuation attempt above, not
+                // throughout a fresh HTTPS/WS response or its retries.
+                drop(input);
+
                 // Normal path: fresh connection with full input (with retry logic)
                 let mut last_error = None;
                 let mut force_https_for_request = false;
