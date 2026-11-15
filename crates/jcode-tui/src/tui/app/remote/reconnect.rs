@@ -972,6 +972,13 @@ pub(in crate::tui::app) fn queue_reload_continuation_once(
         .scheduled_reload_recoveries
         .insert((session_id.to_string(), identity))
     {
+        crate::logging::info(&format!(
+            "RECOVERY_BOOTSTRAP_SUPPRESSED source=tui_reconnect session_id={:?} request_id={:?} reason=already_scheduled scheduled_count={} queued_count={}",
+            session_id,
+            app.current_message_id,
+            app.scheduled_reload_recoveries.len(),
+            app.hidden_queued_system_messages.len(),
+        ));
         return false;
     }
     let continuation = directive.continuation_message;
@@ -985,11 +992,25 @@ pub(in crate::tui::app) fn queue_reload_continuation_once(
             .and_then(|pending| pending.system_reminder.as_ref())
             .is_some_and(|queued| queued == &continuation);
     if already_queued {
+        crate::logging::info(&format!(
+            "RECOVERY_BOOTSTRAP_SUPPRESSED source=tui_reconnect session_id={:?} request_id={:?} reason=already_queued scheduled_count={} queued_count={}",
+            session_id,
+            app.current_message_id,
+            app.scheduled_reload_recoveries.len(),
+            app.hidden_queued_system_messages.len(),
+        ));
         return false;
     }
     app.push_display_message(DisplayMessage::system(notice));
     app.hidden_queued_system_messages.push(continuation);
     app.reload_recovery_dispatch_pending = true;
+    crate::logging::info(&format!(
+        "RECOVERY_CONTINUATION_QUEUED source=tui_reconnect session_id={:?} request_id={:?} scheduled_count={} queued_count={}",
+        session_id,
+        app.current_message_id,
+        app.scheduled_reload_recoveries.len(),
+        app.hidden_queued_system_messages.len(),
+    ));
     true
 }
 
@@ -1021,7 +1042,17 @@ pub(in crate::tui::app) fn finalize_reload_reconnect(
                 ));
                 result.ok().flatten()
             })
-            .or(hints.reload_ctx_for_session);
+            .or_else(|| {
+                if hints.reload_ctx_for_session.is_some() {
+                    crate::logging::info(&format!(
+                        "RECOVERY_CONTEXT_FALLBACK source=tui_reconnect session_id={:?} request_id={:?} reason=load_unavailable fallback=peeked_context queued_count={}",
+                        session_to_resume,
+                        app.current_message_id,
+                        app.hidden_queued_system_messages.len(),
+                    ));
+                }
+                hints.reload_ctx_for_session
+            });
 
         let background_task_note = session_to_resume
             .map(super::super::reload_persisted_background_tasks_note)
@@ -1045,6 +1076,12 @@ pub(in crate::tui::app) fn finalize_reload_reconnect(
                 && app.current_message_id.is_none()
                 && (app.remote_resume_activity.is_some() || app.is_processing)
             {
+                crate::logging::info(&format!(
+                    "RECOVERY_PROCESSING_RESET source=tui_reconnect session_id={:?} request_id={:?} reason=stale_resumed_processing queued_count={}",
+                    session_id,
+                    app.current_message_id,
+                    app.hidden_queued_system_messages.len(),
+                ));
                 crate::logging::info(
                     "Reload reconnect: clearing stale resumed-processing state before dispatching continuation",
                 );
