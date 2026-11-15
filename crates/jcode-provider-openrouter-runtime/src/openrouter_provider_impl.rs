@@ -3,6 +3,74 @@ use super::openrouter_sse_stream::run_stream_with_retries;
 use super::*;
 use jcode_base::provider::{ModelCatalogRefreshSummary, summarize_model_catalog_refresh};
 
+fn canonical_input_parts(request: &Value) -> (&[Value], Option<&Value>, Option<&Value>, usize) {
+    let items = request
+        .get("messages")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let system = items
+        .first()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("system"));
+    let tools = request.get("tools");
+    let count = tools.and_then(Value::as_array).map(Vec::len).unwrap_or(0);
+    (items, system, tools, count)
+}
+
+#[cfg(test)]
+mod canonical_input_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn borrowed_canonical_parts_match_owned_fingerprints_and_nulls() {
+        for request in [
+            json!({}),
+            json!({"messages": null, "tools": null}),
+            json!({"messages": {}, "tools": {"unexpected": true}}),
+            json!({"messages": [], "tools": []}),
+            json!({"input": [{"role": "user", "content": "responses"}], "tools": []}),
+            json!({"messages": [{"role": "system", "content": "雪"}, {"role": "user", "content": "hi"}], "tools": [{"type": "function"}]}),
+            json!({"messages": [{"role": "user"}, {"role": "system"}]}),
+        ] {
+            let before = serde_json::to_vec(&request).unwrap();
+            let owned_items = request
+                .get("messages")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let owned_system = owned_items
+                .first()
+                .filter(|item| item.get("role").and_then(Value::as_str) == Some("system"))
+                .cloned();
+            let owned_tools = request.get("tools").cloned();
+            let (items, system, tools, count) = canonical_input_parts(&request);
+            assert_eq!(items, owned_items);
+            assert_eq!(system, owned_system.as_ref());
+            assert_eq!(tools, owned_tools.as_ref());
+            assert_eq!(
+                count,
+                owned_tools
+                    .as_ref()
+                    .and_then(Value::as_array)
+                    .map(Vec::len)
+                    .unwrap_or(0)
+            );
+            assert_eq!(
+                jcode_provider_core::fingerprint::stable_hash_json(items),
+                jcode_provider_core::fingerprint::stable_hash_json(&owned_items)
+            );
+            assert_eq!(before, serde_json::to_vec(&request).unwrap());
+            if let Some(tool_value) = tools {
+                assert!(std::ptr::eq(tool_value, &request["tools"]));
+            }
+            if let Some(first) = items.first() {
+                assert!(std::ptr::eq(first, &request["messages"][0]));
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl Provider for OpenRouterProvider {
     fn runtime_display_name(&self) -> String {
@@ -251,21 +319,8 @@ impl Provider for OpenRouterProvider {
             }
         }
 
-        let message_items = request
-            .get("messages")
-            .and_then(|value| value.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let tools_value = request.get("tools").cloned();
-        let system_value = message_items
-            .first()
-            .filter(|message| message.get("role").and_then(|role| role.as_str()) == Some("system"))
-            .cloned();
-        let tool_count = tools_value
-            .as_ref()
-            .and_then(|value| value.as_array())
-            .map(|tools| tools.len())
-            .unwrap_or(0);
+        let (message_items, system_value, tools_value, tool_count) =
+            canonical_input_parts(&request);
         jcode_provider_core::fingerprint::log_provider_canonical_input(
             if self.supports_provider_features {
                 "openrouter"
@@ -279,9 +334,9 @@ impl Provider for OpenRouterProvider {
                 "chat_completions"
             },
             &request,
-            &message_items,
-            system_value.as_ref(),
-            tools_value.as_ref(),
+            message_items,
+            system_value,
+            tools_value,
             Some(tool_count),
             &[
                 ("cache_supported", cache_supported.to_string()),

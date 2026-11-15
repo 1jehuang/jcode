@@ -1234,8 +1234,32 @@ fn log_anthropic_canonical_input(
     is_oauth: bool,
     split_prompt: bool,
 ) {
+    let payload = anthropic_canonical_payload(request);
+    let message_items = payload["messages"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let system_value = payload.get("system").filter(|value| !value.is_null());
+    let tools_value = payload.get("tools").filter(|value| !value.is_null());
+
+    jcode_provider_core::fingerprint::log_provider_canonical_input(
+        "anthropic",
+        model,
+        format,
+        &payload,
+        message_items,
+        system_value,
+        tools_value,
+        request.tools.as_ref().map(|tools| tools.len()),
+        &[
+            ("oauth", is_oauth.to_string()),
+            ("split_prompt", split_prompt.to_string()),
+        ],
+    );
+}
+
+fn anthropic_canonical_payload(request: &ApiRequest) -> Value {
     let messages_value = serde_json::to_value(&request.messages).unwrap_or(Value::Null);
-    let message_items = messages_value.as_array().cloned().unwrap_or_default();
     let system_value = request
         .system
         .as_ref()
@@ -1244,31 +1268,79 @@ fn log_anthropic_canonical_input(
         .tools
         .as_ref()
         .and_then(|tools| serde_json::to_value(tools).ok());
-    let payload = json!({
+    let mut payload = json!({
         "model": &request.model,
         "max_tokens": request.max_tokens,
-        "system": system_value.as_ref(),
-        "messages": messages_value,
-        "tools": tools_value.as_ref(),
         "thinking": &request.thinking,
         "output_config": &request.output_config,
         "temperature": request.temperature,
     });
 
-    jcode_provider_core::fingerprint::log_provider_canonical_input(
-        "anthropic",
-        model,
-        format,
-        &payload,
-        &message_items,
-        system_value.as_ref(),
-        tools_value.as_ref(),
-        request.tools.as_ref().map(|tools| tools.len()),
-        &[
-            ("oauth", is_oauth.to_string()),
-            ("split_prompt", split_prompt.to_string()),
-        ],
-    );
+    let object = payload
+        .as_object_mut()
+        .expect("canonical payload is an object");
+    object.insert("messages".into(), messages_value);
+    object.insert("system".into(), system_value.unwrap_or(Value::Null));
+    object.insert("tools".into(), tools_value.unwrap_or(Value::Null));
+    payload
+}
+
+#[cfg(test)]
+mod canonical_input_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_payload_preserves_schema_hash_and_nulls() {
+        for present in [false, true] {
+            let request = ApiRequest {
+                model: "fixture-model".into(),
+                max_tokens: 100,
+                system: present.then(|| jcode_provider_anthropic::ApiSystem::Blocks(vec![])),
+                messages: vec![ApiMessage {
+                    role: "user".into(),
+                    content: vec![ApiContentBlock::Text {
+                        text: "hello 雪".into(),
+                        cache_control: None,
+                    }],
+                }],
+                tools: present.then(Vec::new),
+                metadata: None,
+                thinking: None,
+                output_config: None,
+                temperature: Some(0.5),
+                service_tier: None,
+                stream: true,
+            };
+            let messages = serde_json::to_value(&request.messages).unwrap();
+            let system = request
+                .system
+                .as_ref()
+                .map(|v| serde_json::to_value(v).unwrap());
+            let tools = request
+                .tools
+                .as_ref()
+                .map(|v| serde_json::to_value(v).unwrap());
+            let legacy = json!({"model": request.model, "max_tokens": request.max_tokens,
+                "system": system, "messages": messages, "tools": tools,
+                "thinking": request.thinking, "output_config": request.output_config,
+                "temperature": request.temperature});
+            let payload = anthropic_canonical_payload(&request);
+            assert_eq!(payload, legacy);
+            assert_eq!(
+                serde_json::to_vec(&payload).unwrap(),
+                serde_json::to_vec(&legacy).unwrap()
+            );
+            assert_eq!(
+                jcode_provider_core::fingerprint::stable_hash_json(&payload),
+                jcode_provider_core::fingerprint::stable_hash_json(&legacy)
+            );
+            assert_eq!(payload["messages"].as_array().unwrap().len(), 1);
+            assert_eq!(payload["system"].is_null(), !present);
+            assert_eq!(payload["tools"].is_null(), !present);
+            assert_eq!(request.tools.as_ref().map(Vec::len), present.then_some(0));
+            assert_eq!(payload.as_object().unwrap().len(), 8);
+        }
+    }
 }
 
 #[async_trait]
