@@ -60,9 +60,10 @@ with extra decoding work, and delayed delivery are tradeoffs, not automatic wins
 
 For an optimization round:
 
-1. Rank attributed owners before editing. Prefer an expected retained gain of
-   at least 10 MiB per server or 1 MiB per typical client. These are investigation
-   priorities, not runtime caps. Smaller obvious low-complexity waste may qualify.
+1. Rank attributed owners before editing, but do not use a minimum size cutoff
+   to dismiss identifiable redundant ownership. Pursue small obvious waste as
+   well as material owners when exact behavior and acceptable CPU/latency can
+   be preserved. An unattributed heap gap is not itself evidence of waste.
 2. Pin and identify both binaries. Repeat the same workload against isolated
    sockets and homes, with settled samples at equal session/turn counts. Do not
    infer savings from restarting the production server.
@@ -71,11 +72,51 @@ For an optimization round:
    attribution proxy, not a guaranteed heap bound. Exclude busy profiles explicitly.
 4. Test exact equality, legacy serialization, replay, and mutation isolation.
    Verify the installed binary and live diagnostic schema after activation.
-5. Stop the round after two ranked follow-up passes find no further safe material
-   candidate, or when remaining candidates require wider redesign, unavailable
-   attribution, or behavior/latency tradeoffs. Record deferred owners and the
-   evidence that would justify reopening them. This is not proof that all future
-   optimization potential is exhausted.
+5. Continue automatically through concrete safe candidates, including small
+   ones, without requiring repeated user prompts. Two ranked follow-up passes
+   finding no further actionable candidate establish a practical stopping point,
+   not a theorem that no optimization can exist. Record each remaining owner's
+   disposition and any missing attribution or behavior/latency tradeoff. A wider
+   redesign alone is not evidence that an opportunity is impossible. Do not
+   reopen an unchanged inventory merely because theoretical potential exists.
+
+### Native response-wait ownership acceptance (2026-11-15)
+
+The native OpenAI runtime previously held its separately built input array after
+the persistent-continuation attempt, even though the complete retry request
+already owned the input. It now releases that redundant array before fresh
+HTTPS/WebSocket attempts. Continuation-only diagnostic payload and incremental
+input copies are also released after fingerprinting, before response waits.
+
+Two matched, pinned, local-only native HTTPS workloads resumed sixteen sessions
+with 1 MiB of tool output each. Each receiver asserted the `/v1/responses` path,
+native input shape, and fixture model. Live allocator growth was
+**73.3776/73.3663 MiB before versus 57.2281/57.1410 MiB after**, a paired reduction
+of **16.1495/16.2254 MiB**. This is not a fixed process-RSS or production-workload
+savings claim. Earlier attempts accidentally restored an OpenAI-compatible
+route, and a subsequent attempt exposed a fixture catalog mismatch. Those runs
+were discarded rather than used as native evidence.
+
+The full native runtime suite passed **232 tests, 3 ignored**, serially. Parallel
+execution exposed an environment-sensitive catalog endpoint test failure, so
+that run is not reported as passing. Four retry regressions then passed,
+including a new real HTTP test asserting the complete 1 MiB prompt on every
+attempt after a provider overload. Retry, cancellation, fallback, and delivery
+policies remain unchanged. Anthropic/OpenRouter diagnostic borrowing separately
+passed 317 tests, 2 ignored, with exact schema/hash/null/count checks.
+
+Gemini and Antigravity diagnostic JSON now lives entirely in a synchronous
+logging helper, with serialized fields moved into one payload and borrowed for
+fingerprinting. The helper returns before HTTP response waits. All 74 runtime
+tests passed, including exact legacy JSON/hash/optional-field equivalence.
+This establishes shorter ownership lifetimes, not a measured RSS reduction.
+
+A 4 KiB bounded hashing writer was rejected: optimized paired measurements
+increased CPU by 26% for small requests, 31% for many tiny fields, and 16% for
+large escaped Unicode. Production hashing remains unchanged. Removing a
+serialization allocation does not qualify as a no-tradeoff gain when it adds
+that CPU cost. Reproduction artifacts are retained separately from ordinary
+tests, without installing a test-wide allocation interceptor.
 
 ### Export and redaction ownership acceptance (2026-11-15)
 
