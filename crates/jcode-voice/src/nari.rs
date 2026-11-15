@@ -43,17 +43,14 @@ pub enum NariEvent {
     Finished(Result<String, VoiceError>),
 }
 
-/// Name biasing context, deliberately without example utterances. On silence,
-/// ASR can recite those examples, including garbled variants that cannot safely
-/// be distinguished from real commands by transcript-only filtering.
-const NAME_CONTEXT: &str = "The user often addresses Jev, a voice assistant. \
+/// Historical prompt fingerprint only. Never sent as recognition context.
+const LEGACY_NAME_CONTEXT: &str = "The user often addresses Jev, a voice assistant. \
 Jev is spelled J-E-V and sounds like Jeff. Write it as Jev. \
 The user also talks about Jcode, a coding app pronounced jay-code, and Jcode Desktop. \
 Jcode and Jev are different names: write \"Jcode Desktop\", never \"Jev Desktop\". \
 Other names: ";
 
-/// Names Qwen3-ASR otherwise mishears. Keep proper casing: it is copied as-is.
-/// "Jev" is covered by `NAME_CONTEXT`, so it is deduplicated from this list.
+/// Plain vocabulary hints. No pronunciation instructions or example utterances.
 const BUILTIN_VOCABULARY: &[&str] = &[
     "Jev",
     "Jcode",
@@ -102,25 +99,23 @@ const BUILTIN_VOCABULARY: &[&str] = &[
     "tmux",
     "Neovim",
 ];
-/// Mishearings the recognition prompt cannot fix, because the audio is
-/// genuinely ambiguous ("Jev" is pronounced like "Jeff"). Applied to every
-/// transcript revision as whole-word, case-insensitive replacements.
-/// Order matters: "Jeff Desktop" becomes "Jev Desktop", then "Jcode Desktop".
-const BUILTIN_CORRECTIONS: &[(&str, &str)] = &[
+/// Historical normalization rules used only to recognize legacy prompt echoes.
+/// These never rewrite the transcript returned to callers.
+const LEGACY_ECHO_CORRECTIONS: &[(&str, &str)] = &[
     (r"jeff", "Jev"),
     (r"j[\s.-]?code", "Jcode"),
     (r"jay[\s-]?code", "Jcode"),
     (r"(?:jade|jake)[\s-]?code", "Jcode"),
-    // No product is called "Jev Desktop". The speaker meant Jcode Desktop.
+    // Match normalized variants of the historical context.
     (r"jev[\s-]?desktop", "Jcode Desktop"),
     (r"jcode[\s-]?desktop", "Jcode Desktop"),
 ];
 
-fn corrections() -> &'static [(regex::Regex, &'static str)] {
+fn legacy_echo_corrections() -> &'static [(regex::Regex, &'static str)] {
     static CORRECTIONS: std::sync::OnceLock<Vec<(regex::Regex, &'static str)>> =
         std::sync::OnceLock::new();
     CORRECTIONS.get_or_init(|| {
-        BUILTIN_CORRECTIONS
+        LEGACY_ECHO_CORRECTIONS
             .iter()
             .filter_map(|(pattern, fixed)| {
                 let pattern = format!(r"(?i)\b{pattern}\b");
@@ -136,19 +131,17 @@ fn corrections() -> &'static [(regex::Regex, &'static str)] {
     })
 }
 
-/// Apply product-name corrections to a transcript. A transcript that only
-/// repeats the old recognition prompt's example addresses is a prompt leak, which
-/// Qwen3-ASR produces on silence, so it becomes empty.
+/// Preserve recognition verbatim, except for defensive legacy prompt-echo filtering.
 pub fn correct_transcript(text: &str) -> String {
-    let text = corrections()
+    let fingerprint = legacy_echo_corrections()
         .iter()
         .fold(text.to_owned(), |text, (pattern, fixed)| {
             pattern.replace_all(&text, *fixed).into_owned()
         });
-    if is_prompt_leak(&text) || is_prompt_echo(&text) {
+    if is_prompt_leak(&fingerprint) || is_prompt_echo(&fingerprint) {
         String::new()
     } else {
-        text
+        text.to_owned()
     }
 }
 
@@ -200,17 +193,26 @@ fn prompt_ngrams() -> &'static HashSet<Vec<String>> {
     NGRAMS.get_or_init(|| {
         // Legacy context is a fingerprint only, never recognition input. Keep
         // raw and corrected forms for spacing variants such as "jay- code".
-        let prompt = build_prompt(&[]).replace(
+        let legacy_prompt = format!(
+            "{LEGACY_NAME_CONTEXT}{}.",
+            BUILTIN_VOCABULARY
+                .iter()
+                .copied()
+                .filter(|term| *term != "Jev")
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let prompt = legacy_prompt.replace(
             "The user also",
             "Examples: Hey Jev, open settings. Okay Jev. Thanks Jev. Ask Jev. The user also",
         );
-        let corrected = corrections()
+        let corrected = legacy_echo_corrections()
             .iter()
             .fold(prompt.clone(), |text, (pattern, fixed)| {
                 pattern.replace_all(&text, *fixed).into_owned()
             });
         let legacy = corrected.replace("Claude, Claude Code, Codex", "Claude, Codex");
-        [prompt, corrected, legacy, build_prompt(&[])]
+        [prompt, corrected, legacy, legacy_prompt]
             .iter()
             .flat_map(|prompt| {
                 words(prompt)
@@ -259,7 +261,7 @@ pub fn recognition_prompt() -> String {
 }
 
 fn build_prompt(extra: &[String]) -> String {
-    let mut seen = HashSet::from(["jev".to_string()]);
+    let mut seen = HashSet::new();
     let mut prompt = String::new();
     let terms = BUILTIN_VOCABULARY
         .iter()
@@ -278,14 +280,14 @@ fn build_prompt(extra: &[String]) -> String {
             continue;
         }
         let sep = if prompt.is_empty() { "" } else { ", " };
-        let used = NAME_CONTEXT.chars().count() + prompt.chars().count() + 1;
+        let used = prompt.chars().count();
         if used + sep.len() + term.chars().count() > MAX_PROMPT_CHARS {
             break;
         }
         prompt.push_str(sep);
         prompt.push_str(term);
     }
-    format!("{NAME_CONTEXT}{prompt}.")
+    prompt
 }
 
 pub fn nari_api_key() -> Option<String> {
@@ -938,13 +940,20 @@ mod tests {
     }
 
     #[test]
-    fn recognition_context_has_names_but_no_example_commands() {
+    fn recognition_context_is_only_a_vocabulary_list() {
         let prompt = build_prompt(&[]);
+        assert_eq!(prompt, BUILTIN_VOCABULARY.join(", "));
+        assert_eq!(build_prompt(&["jev".into(), "JEV".into()]), prompt);
         for name in ["Jev", "Jcode", "Jcode Desktop", "Claude", "Codex"] {
             assert!(prompt.contains(name), "missing {name}");
         }
         for example in [
             "Examples:",
+            "The user",
+            "sounds like",
+            "Write it as",
+            "J-E-V",
+            "never",
             "Hey Jev",
             "open settings",
             "Okay Jev",
@@ -997,28 +1006,28 @@ mod tests {
         }
     }
     #[test]
-    fn product_name_mishearings_are_corrected() {
+    fn recognized_names_are_not_forcibly_rewritten() {
         assert_eq!(
             correct_transcript("Hey, Jeff. Open the JCode desktop and ask jeff's route."),
-            "Hey, Jev. Open the Jcode Desktop and ask Jev's route."
+            "Hey, Jeff. Open the JCode desktop and ask jeff's route."
         );
         assert_eq!(
             correct_transcript("J code, j-code, Jay code"),
-            "Jcode, Jcode, Jcode"
+            "J code, j-code, Jay code"
         );
         // Whole words only.
         assert_eq!(correct_transcript("Jefferson jcoder"), "Jefferson jcoder");
         assert_eq!(correct_transcript("Jev and Jcode"), "Jev and Jcode");
-        // Jev Desktop is always a mishearing of Jcode Desktop.
+        // Vocabulary hints must not force the user's words into product names.
         assert_eq!(
             correct_transcript(
                 "Can you fix the resume menu of Jev Desktop? jeff desktop, jcode desktop"
             ),
-            "Can you fix the resume menu of Jcode Desktop? Jcode Desktop, Jcode Desktop"
+            "Can you fix the resume menu of Jev Desktop? jeff desktop, jcode desktop"
         );
         assert_eq!(
             correct_transcript("Jade code and jake-code"),
-            "Jcode and Jcode"
+            "Jade code and jake-code"
         );
         // Jev alone stays Jev.
         assert_eq!(
@@ -1049,21 +1058,16 @@ mod tests {
             "bad\nterm".into(),
             ",Kubernetes,".into(),
         ]);
-        assert!(prompt.starts_with(NAME_CONTEXT));
-        assert!(prompt.contains("sounds like Jeff. Write it as Jev."));
-        let terms = prompt.strip_prefix(NAME_CONTEXT).unwrap();
-        assert!(terms.starts_with("Jcode, Jcode Desktop, Handterm"));
-        assert!(terms.ends_with(", Alice Zhang, Kubernetes."));
-        assert!(!terms.contains("Jev"), "Jev lives in the context: {terms}");
+        let terms = prompt.as_str();
+        assert!(terms.starts_with("Jev, Jcode, Jcode Desktop, Handterm"));
+        assert!(terms.ends_with(", Alice Zhang, Kubernetes"));
+        assert_eq!(terms.split(", ").filter(|term| *term == "Jev").count(), 1);
         assert_eq!(terms.matches("code").count(), 2, "jcode deduped: {prompt}");
         assert!(!prompt.contains("bad"));
         let long = build_prompt(&(0..500).map(|i| format!("term{i}")).collect::<Vec<_>>());
         assert!(long.chars().count() <= MAX_PROMPT_CHARS);
         assert!(
-            long.strip_prefix(NAME_CONTEXT)
-                .unwrap()
-                .trim_end_matches('.')
-                .split(", ")
+            long.split(", ")
                 .all(|t| t.starts_with("term") || BUILTIN_VOCABULARY.contains(&t))
         );
     }
@@ -1091,12 +1095,7 @@ mod tests {
                     "silence_duration_ms":500, "prefix_padding_ms":300
                 })
             );
-            assert!(
-                config["session"]["prompt"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with(NAME_CONTEXT)
-            );
+            assert_eq!(config["session"]["prompt"], recognition_prompt());
             ws.send(Message::Text(
                 json!({"type":"session.configured"}).to_string(),
             ))

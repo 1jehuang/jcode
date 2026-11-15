@@ -25,6 +25,15 @@ but discards their text, including from the final aggregate. A recording with no
 detected speech succeeds with an empty string. Genuine spoken `Jev.` is retained.
 This is not a guarantee against all ASR errors or noise classified as speech.
 
+## Vocabulary-only recognition context
+
+Recognition context is now only the deduplicated, comma-separated vocabulary
+list, with Jev included once like any other entry. No assistant-address context,
+pronunciation guidance, example commands or forced product-name output rewrites
+are applied. Historical context and normalization rules remain solely as local
+legacy-echo fingerprints and are never sent to the recognizer. Speech detection
+and silence suppression remain enabled.
+
 ## Validation and rollout
 
 Run `cargo test -p jcode-voice --no-default-features --lib` for local WebSocket
