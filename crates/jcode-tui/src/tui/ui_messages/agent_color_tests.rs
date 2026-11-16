@@ -1,6 +1,47 @@
 use super::*;
 
 #[test]
+fn completion_lanes_use_pinned_todo_palette_and_dots() {
+    let body = "Worker summary\nAgent daisy finished their work and is ready for more.\n\nLane plan:\nPhase 2 · 界-release: 1/3 completed\n- [in_progress] Verify\n- [pending] Publish\nPhase 3 · docs: 2/2 completed\n\nFinal response:\n**Report remains accented.**";
+    let accent = swarm_agent_color("daisy");
+    for width in [1, 4, 12, 80] {
+        let rows = render_completion_lane_body(body, width, accent).unwrap();
+        let text = rows
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!text.contains("Lane plan:"));
+        assert!(!text.contains("Phase 2"));
+        assert!(!text.contains("Final response:"));
+        for row in &rows {
+            if row
+                .spans
+                .iter()
+                .any(|span| span.style.fg == Some(todo_group_color()))
+            {
+                assert!(row.width() <= width, "{row:?}");
+            }
+        }
+        if width == 80 {
+            assert!(text.contains("界-release  ●●○"), "{text}");
+            assert!(text.contains("docs  ●●"), "{text}");
+            assert!(rows.iter().flat_map(|row| &row.spans).any(|span| {
+                span.content.contains("界-release") && span.style.fg == Some(todo_group_color())
+            }));
+            let report = rows
+                .iter()
+                .flat_map(|row| &row.spans)
+                .find(|span| span.content.contains("Report remains accented"))
+                .unwrap();
+            assert_eq!(report.style.fg, Some(accent));
+            assert!(report.style.add_modifier.contains(Modifier::BOLD));
+        }
+    }
+    assert!(render_completion_lane_body("Agent note without envelope", 80, accent).is_none());
+}
+
+#[test]
 fn swarm_agent_color_tracks_identity_not_delivery_kind_or_restart() {
     let daisy = swarm_agent_color("daisy");
     assert_ne!(daisy, swarm_agent_color("tulip"));

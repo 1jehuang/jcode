@@ -1519,6 +1519,17 @@ fn push_todo_status_pips<'a>(
                 counts.2 + 1,
             )
         });
+    push_todo_count_pips(spans, completed, in_progress, self_active, total, max_pips);
+}
+
+fn push_todo_count_pips(
+    spans: &mut Vec<Span<'static>>,
+    completed: usize,
+    in_progress: usize,
+    self_active: usize,
+    total: usize,
+    max_pips: usize,
+) {
     if total == 0 || max_pips == 0 {
         return;
     }
@@ -3422,6 +3433,100 @@ fn compact_swarm_notification(title: &str) -> Option<CompactSwarmNotification<'_
     })
 }
 
+/// Interpret only the structured completion envelope, leaving agent-authored
+/// markdown (including code blocks and report prose) on the normal path.
+fn render_completion_lane_body(
+    body: &str,
+    width: usize,
+    prose_color: Color,
+) -> Option<Vec<Line<'static>>> {
+    let (intro, rest) = body.split_once("Lane plan:")?;
+    let (plan, report) = rest.split_once("Final response:")?;
+    if !intro.lines().any(|line| line.starts_with("Agent ")) {
+        return None;
+    }
+    let render = |text: &str| {
+        markdown::render_markdown_with_width_and_prose_color(text.trim(), Some(width), prose_color)
+    };
+    let mut lines = render(intro);
+    let plan_lines: Vec<_> = plan.lines().collect();
+    let mut found_lane = false;
+    for (index, raw) in plan_lines.iter().enumerate() {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let header = raw
+            .strip_prefix("Phase ")
+            .and_then(|line| line.split_once(" · ").map(|(_, lane)| lane))
+            .unwrap_or(raw);
+        if let Some((label, counts)) = header.rsplit_once(": ")
+            && let Some(counts) = counts.strip_suffix(" completed")
+            && let Some((done, total)) = counts.split_once('/')
+            && let (Ok(done), Ok(total)) = (done.parse::<usize>(), total.parse::<usize>())
+        {
+            found_lane = true;
+            let active = plan_lines[index + 1..]
+                .iter()
+                .take_while(|line| line.trim().is_empty() || line.trim().starts_with("- ["))
+                .filter(|line| line.trim().starts_with("- [in_progress]"))
+                .count();
+            let label_width = width.saturating_sub(total.min(12).saturating_add(2));
+            let mut spans = super::truncate_line_with_ellipsis_to_width(
+                &Line::from(Span::styled(
+                    label.to_string(),
+                    Style::default().fg(todo_group_color()).bold(),
+                )),
+                label_width,
+            )
+            .spans;
+            spans.push(Span::raw("  "));
+            let used: usize = spans.iter().map(|span| span.content.width()).sum();
+            push_todo_count_pips(
+                &mut spans,
+                done.min(total),
+                active.min(total.saturating_sub(done)),
+                0,
+                total,
+                width.saturating_sub(used),
+            );
+            lines.push(super::truncate_line_with_ellipsis_to_width(
+                &Line::from(spans),
+                width,
+            ));
+        } else if let Some(task) = raw
+            .strip_prefix("- [")
+            .and_then(|line| line.split_once("] "))
+        {
+            let (status, text) = task;
+            let mut spans = Vec::new();
+            push_todo_count_pips(
+                &mut spans,
+                usize::from(status == "completed"),
+                usize::from(status == "in_progress"),
+                0,
+                1,
+                1,
+            );
+            spans.push(Span::styled(
+                format!(" {text}"),
+                Style::default().fg(prose_color),
+            ));
+            lines.push(super::truncate_line_with_ellipsis_to_width(
+                &Line::from(spans),
+                width,
+            ));
+        } else {
+            lines.extend(render(raw));
+        }
+    }
+    if !found_lane {
+        return None;
+    }
+    lines.extend(render(report));
+    Some(lines)
+}
+
 fn render_compact_agent_notification(
     title: &str,
     content: &str,
@@ -3541,7 +3646,13 @@ fn render_compact_agent_notification(
     } else if notification.file_activity {
         markdown::render_markdown_with_width(&body, Some(body_width))
     } else {
-        markdown::render_markdown_with_width_and_prose_color(&body, Some(body_width), text_color)
+        render_completion_lane_body(&body, body_width, text_color).unwrap_or_else(|| {
+            markdown::render_markdown_with_width_and_prose_color(
+                &body,
+                Some(body_width),
+                text_color,
+            )
+        })
     };
     if rendered_body.is_empty() {
         rendered_body.push(Line::from(Span::styled(body, body_style)));
