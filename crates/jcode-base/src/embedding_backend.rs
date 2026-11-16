@@ -170,8 +170,8 @@ impl OpenAiEmbeddingBackend {
             return Ok(Vec::new());
         }
         let url = format!("{}/embeddings", self.base_url);
-        let api_key = self.api_key.clone();
-        let model = self.model.clone();
+        let api_key = &self.api_key;
+        let model = self.model.as_str();
         let want = inputs.len();
         let expected_dim = self.dim;
 
@@ -181,16 +181,21 @@ impl OpenAiEmbeddingBackend {
                     let client = reqwest::blocking::Client::builder()
                         .timeout(std::time::Duration::from_secs(60))
                         .build()?;
-                    let body = serde_json::json!({
-                        "model": model,
-                        "input": inputs,
-                    });
-                    let resp = client
-                        .post(&url)
-                        .header("Authorization", format!("Bearer {api_key}"))
-                        .header("Content-Type", "application/json")
-                        .json(&body)
-                        .send()?;
+                    let request = {
+                        let body = EmbeddingsRequest {
+                            input: &inputs,
+                            model,
+                        };
+                        client
+                            .post(&url)
+                            .header("Authorization", format!("Bearer {api_key}"))
+                            .header("Content-Type", "application/json")
+                            .json(&body)
+                    };
+                    // RequestBuilder owns the serialized bytes. Release the source
+                    // strings before waiting on the network and response body.
+                    drop(inputs);
+                    let resp = request.send()?;
                     let status = resp.status();
                     let text = resp.text()?;
                     if !status.is_success() {
@@ -231,6 +236,13 @@ impl OpenAiEmbeddingBackend {
         }
         Ok(vectors)
     }
+}
+
+// Match the legacy serde_json::Value map's sorted key order on the wire.
+#[derive(serde::Serialize)]
+struct EmbeddingsRequest<'a> {
+    input: &'a [String],
+    model: &'a str,
 }
 
 #[derive(serde::Deserialize)]
@@ -338,6 +350,144 @@ pub fn embed_passage_active(text: &str) -> anyhow::Result<(Vec<f32>, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    /// One local HTTP exchange, with no credentials, model loading, or API access.
+    fn loopback_backend(
+        status: &str,
+        response: &str,
+    ) -> (OpenAiEmbeddingBackend, std::thread::JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let reply = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+            response.len()
+        );
+        let server = std::thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(std::time::Instant::now() < deadline, "no loopback request");
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(e) => panic!("loopback accept: {e}"),
+                }
+            };
+            // BSD/macOS can inherit the listener's nonblocking flag.
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 4096];
+            loop {
+                let n = stream.read(&mut buffer).unwrap();
+                assert_ne!(n, 0, "incomplete request");
+                request.extend_from_slice(&buffer[..n]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = std::str::from_utf8(&request[..end]).unwrap();
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            stream.write_all(reply.as_bytes()).unwrap();
+            request
+        });
+        (
+            OpenAiEmbeddingBackend::new(
+                "test-model",
+                "dummy-loopback-key",
+                Some(format!("http://{address}/v1")),
+                Some(2),
+            ),
+            server,
+        )
+    }
+
+    #[test]
+    fn openai_loopback_preserves_legacy_bytes_headers_and_index_order() {
+        let (backend, server) = loopback_backend(
+            "200 OK",
+            r#"{"data":[{"index":1,"embedding":[3.0,4.0]},{"index":0,"embedding":[1.0,2.0]}]}"#,
+        );
+        let inputs = vec!["quotes \" newline\n雪".to_string(), "".to_string()];
+        let legacy = serde_json::to_vec(&serde_json::json!({
+            "model": "test-model",
+            "input": inputs,
+        }))
+        .unwrap();
+        let vectors = backend.embed_inputs(inputs).unwrap();
+        assert_eq!(vectors, vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
+        let request = server.join().unwrap();
+        let end = request.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let headers = std::str::from_utf8(&request[..end]).unwrap();
+        assert!(headers.starts_with("POST /v1/embeddings HTTP/1.1\r\n"));
+        let headers = headers.to_ascii_lowercase();
+        assert!(
+            headers
+                .lines()
+                .any(|h| h == "authorization: bearer dummy-loopback-key")
+        );
+        assert!(
+            headers
+                .lines()
+                .any(|h| h == "content-type: application/json")
+        );
+        assert_eq!(&request[end + 4..], legacy);
+        assert!(legacy.starts_with(b"{\"input\":"));
+    }
+
+    #[test]
+    fn openai_loopback_errors_and_empty_response() {
+        for (status, response, expected) in [
+            (
+                "429 Too Many Requests",
+                "slow down",
+                "OpenAI embeddings request failed (429 Too Many Requests): slow down",
+            ),
+            ("200 OK", "not json", "parse embeddings response:"),
+            (
+                "200 OK",
+                r#"{"data":[]}"#,
+                "OpenAI embeddings returned 0 vectors for 1 inputs",
+            ),
+        ] {
+            let (backend, server) = loopback_backend(status, response);
+            let error = backend.embed_raw("hello").unwrap_err().to_string();
+            server.join().unwrap();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn openai_empty_inputs_do_not_connect() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let backend = OpenAiEmbeddingBackend::new(
+            "test-model",
+            "dummy-loopback-key",
+            Some(format!("http://{}/v1", listener.local_addr().unwrap())),
+            Some(2),
+        );
+        assert!(backend.embed_passages(&[]).unwrap().is_empty());
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 
     #[test]
     fn local_backend_model_id_matches_legacy_tag() {
