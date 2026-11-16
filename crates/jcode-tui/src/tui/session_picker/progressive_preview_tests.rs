@@ -9,6 +9,8 @@ fn preview() -> LoadedSessionPreview {
     LoadedSessionPreview {
         messages: Vec::new(),
         search: None,
+        model: None,
+        provider_key: None,
         extras: PreviewExtras {
             hidden_prompts: 7,
             todos_payload: Some("selected todos".into()),
