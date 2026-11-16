@@ -118,6 +118,31 @@ fn desktop_root(cwd: Option<&Path>) -> Result<PathBuf> {
         .context("desktop_selfdev is available only inside a Jcode Desktop source checkout (ctx.working_dir). It is distinct from CLI selfdev.")
 }
 
+/// Package names to build in the Desktop checkout.
+///
+/// These names belong to the Desktop repository, which ships as
+/// `jcode-desktop`/`jcode-desktop-ui`. A checkout renamed to the kcode spelling
+/// with the same crate directory layout is picked up without editing this code,
+/// and the shipped names stay the fallback.
+fn desktop_package_names(root: &Path) -> (String, String) {
+    let resolve = |candidates: &[&str], fallback: &str| {
+        candidates
+            .iter()
+            .find(|name| root.join("crates").join(name).join("Cargo.toml").is_file())
+            .map_or_else(
+                || fallback.to_string(),
+                |name| (*name).to_string(),
+            )
+    };
+    (
+        resolve(&["kcode-desktop", "jcode-desktop"], "jcode-desktop"),
+        resolve(
+            &["kcode-desktop-ui", "jcode-desktop-ui"],
+            "jcode-desktop-ui",
+        ),
+    )
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct CommandSpec {
     program: String,
@@ -133,10 +158,14 @@ fn command_spec(
 ) -> Result<CommandSpec> {
     let (program, args, note) = match input.action.as_str() {
         "build" => {
-            let mut args = vec!["build", "-p", "jcode-desktop", "-p", "jcode-desktop-ui"]
-                .into_iter()
-                .map(String::from)
-                .collect::<Vec<_>>();
+            let (host, ui) = desktop_package_names(root);
+            let mut args = vec![
+                "build".to_string(),
+                "-p".to_string(),
+                host,
+                "-p".to_string(),
+                ui,
+            ];
             if profile == "release" {
                 args.push("--release".into());
             } else if profile != "debug" {
@@ -209,11 +238,23 @@ fn reject_symlink_components(path: &Path) -> Result<()> {
 /// Desktop hosts reachable through a fixed per-user socket name.
 const INSTANCES: &[&str] = &["main", "no-sidebar", "single-panel"];
 
-fn instance_socket_name(name: &str) -> &'static str {
+/// Socket file names per instance, in priority order.
+///
+/// The name is chosen by the running Desktop app, not by this CLI, so both the
+/// kcode spelling and the shipped jcode spelling are probed. The first match per
+/// instance wins, which keeps the "multiple instances" check about instances
+/// rather than about names.
+fn instance_socket_names(name: &str) -> &'static [&'static str] {
     match name {
-        "no-sidebar" => "jcode-desktop-no-sidebar.sock",
-        "single-panel" => "jcode-desktop-single-panel.sock",
-        _ => "jcode-desktop.sock",
+        "no-sidebar" => &[
+            "kcode-desktop-no-sidebar.sock",
+            "jcode-desktop-no-sidebar.sock",
+        ],
+        "single-panel" => &[
+            "kcode-desktop-single-panel.sock",
+            "jcode-desktop-single-panel.sock",
+        ],
+        _ => &["kcode-desktop.sock", "jcode-desktop.sock"],
     }
 }
 
@@ -228,28 +269,36 @@ fn select_instance(name: Option<&str>) -> Result<Option<PathBuf>> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR");
     let mut paths = Vec::new();
     for name in names {
-        let filename = instance_socket_name(name);
-        let path = if let Some(runtime) = &runtime {
-            PathBuf::from(runtime).join(filename)
-        } else {
-            let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
-            if user.is_empty() || user.contains('/') || user.contains('\\') {
-                bail!("Unsafe USER value for Desktop instance discovery");
+        let mut found = None;
+        for filename in instance_socket_names(name) {
+            let path = if let Some(runtime) = &runtime {
+                PathBuf::from(runtime).join(filename)
+            } else {
+                let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
+                if user.is_empty() || user.contains('/') || user.contains('\\') {
+                    bail!("Unsafe USER value for Desktop instance discovery");
+                }
+                std::env::temp_dir().join(format!("{user}-{filename}"))
+            };
+            // macOS commonly aliases /tmp and /var. Resolve the directory, never the socket.
+            let parent = path.parent().context("Desktop socket has no parent")?;
+            let parent = match parent.canonicalize() {
+                Ok(parent) => parent,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
+            let path = parent.join(path.file_name().context("Desktop socket has no filename")?);
+            match std::fs::symlink_metadata(&path) {
+                Ok(_) => {
+                    found = Some((name, path));
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
             }
-            std::env::temp_dir().join(format!("{user}-{filename}"))
-        };
-        // macOS commonly aliases /tmp and /var. Resolve the directory, never the socket.
-        let parent = path.parent().context("Desktop socket has no parent")?;
-        let parent = match parent.canonicalize() {
-            Ok(parent) => parent,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e.into()),
-        };
-        let path = parent.join(path.file_name().context("Desktop socket has no filename")?);
-        match std::fs::symlink_metadata(&path) {
-            Ok(_) => paths.push((name, path)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-            Err(e) => return Err(e.into()),
+        }
+        if let Some(entry) = found {
+            paths.push(entry);
         }
     }
     choose_instance(paths)
@@ -363,7 +412,13 @@ fn host_profile(root: &Path, exe: &Path) -> Result<String> {
         .strip_prefix(root.join("target"))
         .context("Desktop instance is not a build from this checkout's target directory")?;
     let parts = relative.components().collect::<Vec<_>>();
-    if parts.len() != 2 || parts[1].as_os_str() != "jcode-desktop" {
+    // The host binary is named by the Desktop repo; both spellings are accepted.
+    const DESKTOP_BINARY_NAMES: &[&str] = &["kcode-desktop", "jcode-desktop"];
+    if parts.len() != 2
+        || !DESKTOP_BINARY_NAMES
+            .iter()
+            .any(|name| parts[1].as_os_str() == *name)
+    {
         bail!(
             "Cannot safely determine the Desktop instance build profile: {}",
             exe.display()

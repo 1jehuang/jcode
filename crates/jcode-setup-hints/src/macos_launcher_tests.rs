@@ -24,7 +24,7 @@ fn legacy_cli_launchers_and_old_broker_location_are_found() {
     let apps = temp.path();
     write_bundle(&apps.join("Jcode.app"), "com.jcode.launcher");
     write_bundle(
-        &apps.join(MACOS_NOTIFICATION_APP_NAME),
+        &apps.join("Jcode Notifications.app"),
         "com.jcode.notifications",
     );
 
@@ -32,6 +32,46 @@ fn legacy_cli_launchers_and_old_broker_location_are_found() {
     assert_eq!(
         found,
         vec![apps.join("Jcode Notifications.app"), apps.join("Jcode.app")]
+    );
+}
+
+/// A broker from an earlier build is cleaned out of `~/Applications` whether it
+/// carries the old or the new name, because neither is where this build puts it.
+#[test]
+fn broker_placements_in_applications_are_legacy_under_either_name() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let apps = temp.path();
+    for (name, bundle_id) in [
+        ("Jcode Notifications.app", "com.jcode.notifications"),
+        ("KCode Notifications.app", "com.jcode.notifications"),
+        ("KCode Notifications.app", "com.kcode.notifications"),
+    ] {
+        write_bundle(&apps.join(name), bundle_id);
+    }
+
+    let found = legacy_macos_bundles(apps);
+    assert_eq!(
+        found,
+        vec![
+            apps.join("Jcode Notifications.app"),
+            apps.join("KCode Notifications.app"),
+        ]
+    );
+}
+
+/// Brokers live under this product's own home, and the pre-rename broker is
+/// reported as legacy there so a refresh replaces it.
+#[test]
+fn legacy_broker_under_the_product_home_is_reported() {
+    let home = tempfile::tempdir().expect("home");
+    let macos = home.path().join("notifications").join("macos");
+    std::fs::create_dir_all(macos.join(MACOS_NOTIFICATION_APP_NAME)).expect("current broker");
+    assert!(legacy_macos_broker_bundles(home.path()).is_empty());
+
+    std::fs::create_dir_all(macos.join("Jcode Notifications.app")).expect("legacy broker");
+    assert_eq!(
+        legacy_macos_broker_bundles(home.path()),
+        vec![macos.join("Jcode Notifications.app")]
     );
 }
 
@@ -84,21 +124,22 @@ fn missing_applications_directory_has_no_legacy_bundles() {
 
 #[test]
 fn broker_lives_in_a_hidden_directory_outside_applications() {
-    let home = Path::new("/Users/test");
-    let dir = macos_notification_broker_dir_in(home);
+    let product_home = Path::new("/Users/test/.kcode");
+    let dir = macos_notification_broker_dir_in(product_home);
     assert_eq!(
         dir,
-        Path::new("/Users/test/.jcode/notifications/macos/Jcode Notifications.app")
+        Path::new("/Users/test/.kcode/notifications/macos/KCode Notifications.app")
     );
-    assert!(!dir.starts_with(home.join("Applications")));
+    assert!(!dir.starts_with(product_home.join("Applications")));
 }
 
 #[test]
 fn macos_notification_bundle_is_faceless_and_uses_multicall_binary() {
     let plist = macos_notification_info_plist();
     assert!(plist.contains("<key>LSUIElement</key>\n    <true/>"));
-    assert!(plist.contains("<string>com.jcode.notifications</string>"));
-    assert!(plist.contains("<string>jcode-notification-broker</string>"));
+    assert!(plist.contains("<string>com.kcode.notifications</string>"));
+    assert!(plist.contains("<string>kcode-notification-broker</string>"));
+    assert!(plist.contains("<string>KCode Notifications</string>"));
     assert!(plist.contains(jcode_build_meta::version()));
 }
 

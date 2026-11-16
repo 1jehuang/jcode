@@ -68,6 +68,43 @@ fn builds_both_desktop_packages_with_matching_profile() {
     }
 }
 
+/// A checkout renamed to the kcode spelling builds with its own package names.
+#[test]
+fn kcode_layout_selects_kcode_package_names() {
+    let root = tempfile::tempdir().unwrap();
+    for package in ["kcode-desktop", "kcode-desktop-ui"] {
+        std::fs::create_dir_all(root.path().join("crates").join(package)).unwrap();
+        std::fs::write(
+            root.path()
+                .join("crates")
+                .join(package)
+                .join("Cargo.toml"),
+            format!("[package]\nname='{package}'\nversion='0.1.0'\n"),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        desktop_package_names(root.path()),
+        ("kcode-desktop".to_string(), "kcode-desktop-ui".to_string())
+    );
+    let spec = command_spec(root.path(), &input("build"), "debug", None).unwrap();
+    assert_eq!(
+        spec.args,
+        ["build", "-p", "kcode-desktop", "-p", "kcode-desktop-ui"]
+    );
+}
+
+/// The shipped layout keeps the names the Desktop repository actually publishes.
+#[test]
+fn shipped_layout_keeps_jcode_package_names() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("crates/jcode-desktop-ui")).unwrap();
+    assert_eq!(
+        desktop_package_names(root.path()),
+        ("jcode-desktop".to_string(), "jcode-desktop-ui".to_string())
+    );
+}
+
 #[test]
 fn reload_actions_never_route_to_cli_or_subprocess() {
     for action in ["reload", "build-reload"] {
@@ -141,21 +178,32 @@ fn ambiguous_instances_and_foreign_executables_are_rejected() {
     );
     assert!(select_instance(Some("../../arbitrary")).is_err());
     assert!(select_instance(Some("single-panel-123")).is_err());
-    // The shared single-panel host is reachable by its fixed socket name.
-    assert_eq!(
-        instance_socket_name("single-panel"),
-        "jcode-desktop-single-panel.sock"
-    );
-    assert_eq!(instance_socket_name("main"), "jcode-desktop.sock");
-    assert_eq!(
-        instance_socket_name("no-sidebar"),
-        "jcode-desktop-no-sidebar.sock"
-    );
+    // Every instance is reachable by this product's socket name and by the name
+    // the shipped Desktop app uses, in that priority order.
+    for (instance, names) in [
+        ("main", ["kcode-desktop.sock", "jcode-desktop.sock"]),
+        (
+            "no-sidebar",
+            [
+                "kcode-desktop-no-sidebar.sock",
+                "jcode-desktop-no-sidebar.sock",
+            ],
+        ),
+        (
+            "single-panel",
+            [
+                "kcode-desktop-single-panel.sock",
+                "jcode-desktop-single-panel.sock",
+            ],
+        ),
+    ] {
+        assert_eq!(instance_socket_names(instance), names, "{instance}");
+    }
     let root = Path::new("/desktop");
-    assert_eq!(
-        host_profile(root, Path::new("/desktop/target/release/jcode-desktop")).unwrap(),
-        "release"
-    );
+    for binary in ["kcode-desktop", "jcode-desktop"] {
+        let exe = format!("/desktop/target/release/{binary}");
+        assert_eq!(host_profile(root, Path::new(&exe)).unwrap(), "release");
+    }
     for exe in [
         "/other/target/debug/jcode-desktop",
         "/desktop/target/debug/jcode",

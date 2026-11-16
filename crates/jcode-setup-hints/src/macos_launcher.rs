@@ -19,31 +19,41 @@ const MACOS_APP_ICON_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../assets/app-icons/Jcode.icns"
 ));
-const MACOS_NOTIFICATION_APP_NAME: &str = "Jcode Notifications.app";
-const MACOS_NOTIFICATION_EXECUTABLE: &str = "jcode-notification-broker";
-const MACOS_NOTIFICATION_VERSION_MARKER: &str = "jcode-broker-version";
-const MACOS_NOTIFICATION_BUNDLE_ID: &str = "com.jcode.notifications";
+const MACOS_NOTIFICATION_APP_NAME: &str = "KCode Notifications.app";
+const MACOS_NOTIFICATION_EXECUTABLE: &str = "kcode-notification-broker";
+const MACOS_NOTIFICATION_VERSION_MARKER: &str = "kcode-broker-version";
+const MACOS_NOTIFICATION_BUNDLE_ID: &str = "com.kcode.notifications";
+
+/// Broker bundle names and identifiers written by earlier builds. They can only
+/// appear inside this product's own home directory, so removing them is safe
+/// and never touches a separate jcode installation.
+const LEGACY_BROKER_APP_NAMES: &[&str] = &["Jcode Notifications.app"];
+const LEGACY_BROKER_BUNDLE_IDS: &[&str] = &["com.jcode.notifications"];
 
 /// Bundle identifiers of CLI-generated launchers that must be removed.
 /// `com.jcode.app` is the original `jcode.app`, `com.jcode.launcher` the later
-/// `Jcode.app` Terminal launcher.
+/// `Jcode.app` Terminal launcher. These identifiers are historical on purpose:
+/// they name bundles the CLI created in previous releases, so renaming them
+/// would stop the cleanup from ever matching.
 const LEGACY_LAUNCHER_BUNDLE_IDS: &[&str] = &["com.jcode.app", "com.jcode.launcher"];
 
 pub(super) fn should_refresh_macos_app_launcher(state: &SetupHintsState) -> bool {
-    let (Ok(broker_dir), Ok(applications)) =
-        (macos_notification_broker_dir(), user_applications_dir())
+    let (Ok(home), Ok(applications)) = (jcode_storage::jcode_dir(), user_applications_dir())
     else {
         return !state.desktop_shortcut_created;
     };
+    let broker_dir = macos_notification_broker_dir_in(&home);
     !state.desktop_shortcut_created
         || !macos_notification_broker_is_valid(&broker_dir)
         || !legacy_macos_bundles(&applications).is_empty()
+        || !legacy_macos_broker_bundles(&home).is_empty()
 }
 
 /// Install the notification broker and remove legacy CLI-generated bundles.
 /// Returns the broker bundle path.
 pub(super) fn install_macos_app_launcher() -> Result<PathBuf> {
     remove_legacy_macos_bundles()?;
+    remove_legacy_macos_broker_bundles()?;
     let exe = std::env::current_exe()?;
     install_macos_notification_broker(&exe)
 }
@@ -60,6 +70,17 @@ pub(super) fn remove_legacy_macos_bundles() -> Result<Vec<PathBuf>> {
     Ok(legacy)
 }
 
+/// Remove broker bundles this build wrote under an earlier name.
+fn remove_legacy_macos_broker_bundles() -> Result<Vec<PathBuf>> {
+    let home = jcode_storage::jcode_dir()?;
+    let legacy = legacy_macos_broker_bundles(&home);
+    for path in &legacy {
+        unregister_macos_bundle(path);
+        remove_path_if_exists(path)?;
+    }
+    Ok(legacy)
+}
+
 fn user_applications_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("Could not find home directory")?;
     Ok(home.join("Applications"))
@@ -69,15 +90,28 @@ fn user_applications_dir() -> Result<PathBuf> {
 /// by Spotlight and Launchpad, yet LaunchServices can still open the bundle by
 /// path. It sits beside the durable inbox the broker drains.
 pub(super) fn macos_notification_broker_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("Could not find home directory")?;
+    let home = jcode_storage::jcode_dir()?;
     Ok(macos_notification_broker_dir_in(&home))
 }
 
 fn macos_notification_broker_dir_in(home: &Path) -> PathBuf {
-    home.join(".jcode")
-        .join("notifications")
+    home.join("notifications")
         .join("macos")
         .join(MACOS_NOTIFICATION_APP_NAME)
+}
+
+/// Broker bundles this build wrote under an earlier name. They are inside our
+/// own home directory, so they can be removed without touching another
+/// installation's data.
+fn legacy_macos_broker_bundles(home: &Path) -> Vec<PathBuf> {
+    let macos = home.join("notifications").join("macos");
+    let mut legacy: Vec<PathBuf> = LEGACY_BROKER_APP_NAMES
+        .iter()
+        .map(|name| macos.join(name))
+        .filter(|path| path.exists())
+        .collect();
+    legacy.sort();
+    legacy
 }
 
 /// Legacy bundles in `applications`: CLI-generated launchers (any letter case
@@ -95,10 +129,19 @@ fn legacy_macos_bundles(applications: &Path) -> Vec<PathBuf> {
             continue;
         };
         let path = entry.path();
-        let wanted: &[&str] = if name.eq_ignore_ascii_case("jcode.app") {
-            LEGACY_LAUNCHER_BUNDLE_IDS
-        } else if name == MACOS_NOTIFICATION_APP_NAME {
-            &[MACOS_NOTIFICATION_BUNDLE_ID]
+        // Launcher shims are matched on their historical identifiers. A broker
+        // in `~/Applications` is not where this build installs one, so any
+        // broker name or identifier from this or an earlier build counts.
+        let is_launcher_shim =
+            name.eq_ignore_ascii_case("jcode.app") || name.eq_ignore_ascii_case("kcode.app");
+        let is_broker_placement =
+            name == MACOS_NOTIFICATION_APP_NAME || LEGACY_BROKER_APP_NAMES.contains(&name);
+        let wanted: Vec<&str> = if is_launcher_shim {
+            LEGACY_LAUNCHER_BUNDLE_IDS.to_vec()
+        } else if is_broker_placement {
+            std::iter::once(MACOS_NOTIFICATION_BUNDLE_ID)
+                .chain(LEGACY_BROKER_BUNDLE_IDS.iter().copied())
+                .collect()
         } else {
             continue;
         };
@@ -165,7 +208,7 @@ fn install_macos_notification_broker(jcode_executable: &Path) -> Result<PathBuf>
     std::fs::create_dir_all(parent)?;
 
     let staging = parent.join(format!(
-        ".Jcode Notifications.app.installing-{}",
+        ".KCode Notifications.app.installing-{}",
         std::process::id()
     ));
     remove_path_if_exists(&staging)?;
@@ -225,9 +268,9 @@ fn macos_notification_info_plist() -> String {
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>Jcode Notifications</string>
+    <string>KCode Notifications</string>
     <key>CFBundleDisplayName</key>
-    <string>Jcode Notifications</string>
+    <string>KCode Notifications</string>
     <key>CFBundleIdentifier</key>
     <string>{bundle_id}</string>
     <key>CFBundleVersion</key>

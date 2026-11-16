@@ -9,14 +9,30 @@ use std::path::{Path, PathBuf};
 
 use super::{App, DisplayMessage};
 
-const DESKTOP_BIN_ENV: &str = "JCODE_DESKTOP_BIN";
+/// Environment override for the Desktop executable. The kcode spelling wins;
+/// the jcode spelling stays accepted so existing scripts and shell profiles
+/// keep working.
+const DESKTOP_BIN_ENV: &str = "KCODE_DESKTOP_BIN";
+const LEGACY_DESKTOP_BIN_ENV: &str = "JCODE_DESKTOP_BIN";
 
-fn desktop_binary_name() -> &'static str {
+/// Working directory handed to the Desktop app.
+const DESKTOP_WORKING_DIR_ENV: &str = "KCODE_DESKTOP_WORKING_DIR";
+const LEGACY_DESKTOP_WORKING_DIR_ENV: &str = "JCODE_DESKTOP_WORKING_DIR";
+
+/// Desktop executable names, in priority order. `kcode-desktop` is this build's
+/// own name; `jcode-desktop` is what the shipped Desktop packages are called, so
+/// a kcode CLI can still drive an installed Jcode Desktop.
+fn desktop_binary_names() -> &'static [&'static str] {
     if cfg!(windows) {
-        "jcode-desktop.exe"
+        &["kcode-desktop.exe", "jcode-desktop.exe"]
     } else {
-        "jcode-desktop"
+        &["kcode-desktop", "jcode-desktop"]
     }
+}
+
+/// The name to mention in user-facing messages.
+fn desktop_binary_name() -> &'static str {
+    desktop_binary_names()[0]
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -30,33 +46,41 @@ fn desktop_binary_candidates(
     path_var: Option<std::ffi::OsString>,
     home: Option<PathBuf>,
 ) -> Vec<PathBuf> {
-    let name = desktop_binary_name();
     let mut out = Vec::new();
     if let Some(path) = env_override {
         out.push(path);
     }
-    // Desktop packages ship the `jcode` CLI next to `jcode-desktop`.
+    // Desktop packages ship the CLI next to the desktop executable.
     if let Some(dir) = current_exe.as_deref().and_then(Path::parent) {
-        out.push(dir.join(name));
+        out.extend(desktop_binary_names().iter().map(|name| dir.join(name)));
     }
     if let Some(path_var) = path_var {
-        out.extend(std::env::split_paths(&path_var).map(|dir| dir.join(name)));
+        for dir in std::env::split_paths(&path_var) {
+            out.extend(desktop_binary_names().iter().map(|name| dir.join(name)));
+        }
     }
     if cfg!(target_os = "macos") {
-        out.push(PathBuf::from("/Applications/Jcode.app/Contents/MacOS").join(name));
+        let app_dirs = ["KCode.app", "Jcode.app"];
+        for app in app_dirs {
+            let macos = PathBuf::from("/Applications").join(app).join("Contents/MacOS");
+            out.extend(desktop_binary_names().iter().map(|name| macos.join(name)));
+        }
         if let Some(home) = &home {
-            out.push(
-                home.join("Applications/Jcode.app/Contents/MacOS")
-                    .join(name),
-            );
+            for app in app_dirs {
+                let macos = home.join("Applications").join(app).join("Contents/MacOS");
+                out.extend(desktop_binary_names().iter().map(|name| macos.join(name)));
+            }
         }
     }
     out
 }
 
 pub(super) fn find_desktop_binary() -> Option<PathBuf> {
+    let env_override = std::env::var_os(DESKTOP_BIN_ENV)
+        .or_else(|| std::env::var_os(LEGACY_DESKTOP_BIN_ENV))
+        .map(PathBuf::from);
     desktop_binary_candidates(
-        std::env::var_os(DESKTOP_BIN_ENV).map(PathBuf::from),
+        env_override,
         std::env::current_exe().ok(),
         std::env::var_os("PATH"),
         dirs::home_dir(),
@@ -84,7 +108,9 @@ fn spawn_detached(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     if let Some(dir) = working_dir {
-        command.env("JCODE_DESKTOP_WORKING_DIR", dir);
+        command
+            .env(DESKTOP_WORKING_DIR_ENV, dir)
+            .env(LEGACY_DESKTOP_WORKING_DIR_ENV, dir);
     }
     #[cfg(unix)]
     {
@@ -171,10 +197,31 @@ mod tests {
             Some(path),
             None,
         );
-        let name = desktop_binary_name();
+        let names = desktop_binary_names();
         assert_eq!(candidates[0], PathBuf::from("/override/jd"));
-        assert_eq!(candidates[1], Path::new("/bundle").join(name));
-        assert_eq!(candidates[2], Path::new("/p1").join(name));
-        assert_eq!(candidates[3], Path::new("/p2").join(name));
+        assert_eq!(candidates[1], Path::new("/bundle").join(names[0]));
+        assert_eq!(candidates[2], Path::new("/bundle").join(names[1]));
+        assert_eq!(candidates[3], Path::new("/p1").join(names[0]));
+        assert_eq!(candidates[4], Path::new("/p1").join(names[1]));
+        assert_eq!(candidates[5], Path::new("/p2").join(names[0]));
+        assert_eq!(candidates[6], Path::new("/p2").join(names[1]));
+        assert_eq!(candidates.len(), 7);
+    }
+
+    /// Location still ranks above name: every name in one directory is tried
+    /// before the next directory, and `kcode-desktop` is tried first.
+    #[test]
+    fn kcode_desktop_name_is_tried_before_the_jcode_one() {
+        let names = desktop_binary_names();
+        assert!(names[0].starts_with("kcode-desktop"));
+        assert!(names[1].starts_with("jcode-desktop"));
+        let candidates = desktop_binary_candidates(
+            None,
+            Some(PathBuf::from("/bundle/kcode")),
+            None,
+            None,
+        );
+        assert_eq!(candidates[0], Path::new("/bundle").join(names[0]));
+        assert_eq!(candidates[1], Path::new("/bundle").join(names[1]));
     }
 }

@@ -6,6 +6,11 @@ struct TestEnvironment(Vec<(&'static str, Option<std::ffi::OsString>)>);
 impl TestEnvironment {
     fn new(home: &std::path::Path) -> Self {
         let keys = [
+            "KCODE_HOME",
+            "KCODE_TOOLS",
+            "KCODE_DISABLED_TOOLS",
+            "KCODE_TOOL_PROFILE",
+            "KCODE_DISABLE_BASE_TOOLS",
             "JCODE_HOME",
             "JCODE_TOOLS",
             "JCODE_DISABLED_TOOLS",
@@ -19,7 +24,7 @@ impl TestEnvironment {
         for key in keys {
             crate::env::remove_var(key);
         }
-        crate::env::set_var("JCODE_HOME", home);
+        crate::env::set_var("KCODE_HOME", home);
         crate::config::Config::invalidate_cache();
         Self(saved)
     }
