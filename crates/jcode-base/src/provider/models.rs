@@ -474,8 +474,8 @@ fn hydrate_catalog_cache_from_disk(
     scope: &str,
     service: &ModelCatalogService,
 ) -> Option<Vec<String>> {
-    let store = load_persisted_model_catalog_store(file_name)?;
-    let persisted = store.scopes.get(scope)?.clone();
+    let mut store = load_persisted_model_catalog_store(file_name)?;
+    let persisted = store.scopes.remove(scope)?;
     if persisted.models.is_empty() {
         return None;
     }
@@ -494,7 +494,7 @@ fn hydrate_catalog_cache_from_disk(
     let observed_at = system_time_from_unix_secs(persisted.observed_at_unix_secs);
     service.hydrate_scope_models_from_snapshot(scope, normalized, observed_at);
     if !persisted.context_limits.is_empty() {
-        populate_context_limits(persisted.context_limits.clone());
+        populate_context_limits(persisted.context_limits);
     }
 
     Some(model_ids_with_context_aliases(persisted.models))
@@ -599,13 +599,13 @@ pub fn cached_context_limit_for_model(model: &str) -> Option<usize> {
 /// Called once at startup when OpenAI OAuth credentials are available.
 pub fn populate_context_limits(models: HashMap<String, usize>) {
     if let Ok(mut cache) = CONTEXT_LIMIT_CACHE.write() {
-        for (model, limit) in &models {
+        for (model, limit) in models {
             crate::logging::info(&format!(
                 "Context limit cache: {} = {}k",
                 model,
                 limit / 1000
             ));
-            cache.insert(model.clone(), *limit);
+            cache.insert(model, limit);
         }
     }
 }
@@ -1269,6 +1269,141 @@ pub fn provider_for_model_with_hint(
 /// Detect which provider a model belongs to
 pub fn provider_for_model(model: &str) -> Option<&'static str> {
     provider_for_model_with_hint(model, None)
+}
+
+#[cfg(test)]
+mod catalog_ownership_tests {
+    use super::*;
+
+    fn service() -> ModelCatalogService {
+        ModelCatalogService::new(
+            ACCOUNT_MODEL_CACHE_TTL,
+            ACCOUNT_MODEL_REFRESH_RETRY_INTERVAL,
+            RUNTIME_UNAVAILABLE_TTL,
+        )
+    }
+
+    fn snapshot(
+        models: Vec<String>,
+        context_limits: HashMap<String, usize>,
+    ) -> PersistedModelCatalogScope {
+        PersistedModelCatalogScope {
+            models,
+            context_limits,
+            reasoning_efforts: HashMap::new(),
+            service_tiers: HashMap::new(),
+            observed_at_unix_secs: observed_at_unix_secs(SystemTime::now()) - 5,
+        }
+    }
+
+    #[test]
+    fn populate_context_limits_moves_keys_and_preserves_unrelated_entries() {
+        let model = "catalog-ownership-moved-key".to_string();
+        let allocation = model.as_ptr() as usize;
+        let unrelated = "catalog-ownership-unrelated-key".to_string();
+        populate_context_limits(HashMap::from([(unrelated.clone(), 42), (model.clone(), 1)]));
+        populate_context_limits(HashMap::from([(model, 987_654)]));
+        populate_context_limits(HashMap::new());
+        let mut cache = CONTEXT_LIMIT_CACHE.write().unwrap();
+        let (key, value) = cache.get_key_value("catalog-ownership-moved-key").unwrap();
+        // HashMap retains an existing equal key when replacing its value.
+        assert_eq!(*value, 987_654);
+        assert_eq!(cache.get(&unrelated), Some(&42));
+        assert_ne!(key.as_ptr() as usize, allocation);
+        cache.remove("catalog-ownership-moved-key");
+        cache.remove(&unrelated);
+
+        let fresh = "catalog-ownership-fresh-key".to_string();
+        let allocation = fresh.as_ptr() as usize;
+        drop(cache);
+        populate_context_limits(HashMap::from([(fresh, 123_456)]));
+        let mut cache = CONTEXT_LIMIT_CACHE.write().unwrap();
+        let (key, value) = cache.get_key_value("catalog-ownership-fresh-key").unwrap();
+        assert_eq!(
+            key.as_ptr() as usize,
+            allocation,
+            "new keys must be moved, not cloned"
+        );
+        assert_eq!(*value, 123_456);
+        cache.remove("catalog-ownership-fresh-key");
+    }
+
+    #[test]
+    fn hydration_moves_only_selected_scope_without_mutating_disk() {
+        let _env = crate::storage::lock_test_env();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let file_name = path.to_str().unwrap();
+        let selected = "catalog-ownership-selected".to_string();
+        let other = "catalog-ownership-other".to_string();
+        let selected_snapshot = snapshot(
+            vec![selected.clone(), selected.clone()],
+            HashMap::from([(selected.clone(), 1_000_000)]),
+        );
+        let observed_at = system_time_from_unix_secs(selected_snapshot.observed_at_unix_secs);
+        let store = PersistedModelCatalogStore {
+            scopes: HashMap::from([
+                ("account::selected".to_string(), selected_snapshot),
+                (
+                    "endpoint::other".to_string(),
+                    snapshot(vec![other.clone()], HashMap::from([(other.clone(), 9)])),
+                ),
+                (
+                    "empty".to_string(),
+                    snapshot(
+                        Vec::new(),
+                        HashMap::from([("catalog-ownership-empty".to_string(), 9)]),
+                    ),
+                ),
+                (
+                    "invalid".to_string(),
+                    snapshot(
+                        vec![String::new()],
+                        HashMap::from([("catalog-ownership-invalid".to_string(), 9)]),
+                    ),
+                ),
+            ]),
+        };
+        crate::storage::write_json(&path, &store).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let service = service();
+        assert_eq!(
+            hydrate_catalog_cache_from_disk(file_name, "account::selected", &service),
+            Some(vec![selected.clone(), format!("{selected}[1m]")])
+        );
+        assert_eq!(
+            service.model_ids("account::selected"),
+            Some(vec![selected.clone()])
+        );
+        assert_eq!(service.observed_at("account::selected"), Some(observed_at));
+        assert_eq!(service.model_ids("endpoint::other"), None);
+        assert_eq!(cached_context_limit_for_model(&selected), Some(1_000_000));
+        assert_eq!(cached_context_limit_for_model(&other), None);
+        for scope in ["missing", "empty", "invalid"] {
+            assert_eq!(
+                hydrate_catalog_cache_from_disk(file_name, scope, &service),
+                None
+            );
+            assert_eq!(service.model_ids(scope), None);
+        }
+        assert_eq!(
+            cached_context_limit_for_model("catalog-ownership-empty"),
+            None
+        );
+        assert_eq!(
+            cached_context_limit_for_model("catalog-ownership-invalid"),
+            None
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            load_persisted_model_catalog_store(file_name)
+                .unwrap()
+                .scopes
+                .len(),
+            4
+        );
+        CONTEXT_LIMIT_CACHE.write().unwrap().remove(&selected);
+    }
 }
 
 #[cfg(test)]
