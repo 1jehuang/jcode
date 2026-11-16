@@ -504,10 +504,14 @@ async fn post_token(
             .clone()
             .unwrap_or_else(|| canonical_resource(resource)),
     ));
-    let response = http_for(&endpoint)?
+    let request = http_for(&endpoint)?
         .post(endpoint)
         .header(reqwest::header::ACCEPT, "application/json")
-        .form(&form)
+        .form(&form);
+    // The builder owns the encoded body. Do not retain a second copy of the
+    // token form (including secrets) while waiting for the endpoint.
+    drop(form);
+    let response = request
         .send()
         .await
         .map_err(|_| anyhow::anyhow!("OAuth token request failed"))?;

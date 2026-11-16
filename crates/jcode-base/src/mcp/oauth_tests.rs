@@ -4,6 +4,26 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[test]
+fn serialized_token_form_does_not_borrow_secret_storage() {
+    let form = vec![
+        ("grant_type", "refresh_token".to_owned()),
+        ("refresh_token", "dummy +&=界".to_owned()),
+        ("client_id", "public-client".to_owned()),
+        ("client_secret", "dummy-secret".to_owned()),
+        ("resource", "https://example.invalid/mcp".to_owned()),
+    ];
+    let request = reqwest::Client::new()
+        .post("https://example.invalid/token")
+        .form(&form);
+    drop(form);
+    let request = request.build().unwrap();
+    assert_eq!(
+        request.body().unwrap().as_bytes().unwrap(),
+        b"grant_type=refresh_token&refresh_token=dummy+%2B%26%3D%E7%95%8C&client_id=public-client&client_secret=dummy-secret&resource=https%3A%2F%2Fexample.invalid%2Fmcp"
+    );
+}
+
+#[test]
 fn borrowed_registration_preserves_legacy_bytes_and_owns_serialized_body() {
     for uri in [
         "",
