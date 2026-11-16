@@ -105,7 +105,7 @@ async fn simple_completion_failure_preserves_partial_usage_and_source() {
     assert_eq!(failure.usage.input_tokens, Some(42));
     assert_eq!(failure.usage.output_tokens, None);
     assert_eq!(failure.usage.cache_read_input_tokens, Some(12));
-    assert_eq!(failure.provider, "upstream");
+    assert_eq!(failure.provider, "route");
     assert_eq!(failure.model, "requested-alias");
     assert_eq!(
         failure.usage.requested_model.as_deref(),

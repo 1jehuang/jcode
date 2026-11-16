@@ -581,7 +581,9 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
         tool_duration_ms: None,
     }];
 
-    let mut provider_name = provider.name().to_string();
+    // Cache counter semantics belong to the API transport, not the reseller
+    // or compute backend named by an UpstreamProvider event.
+    let provider_name = provider.name().to_string();
     let model = provider.model();
     let response = provider.complete(&messages, &[], system, None).await?;
     let mut result = String::new();
@@ -621,9 +623,8 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
                     requested_model: Some(model.clone()),
                     ..Default::default()
                 };
-                provider_name = provider.name().to_string();
             }
-            Ok(StreamEvent::UpstreamProvider { provider }) => provider_name = provider,
+            Ok(StreamEvent::UpstreamProvider { .. }) => {}
             Ok(StreamEvent::MessageEnd { stop_reason })
                 if is_guardrail_stop_reason(stop_reason.as_deref()) =>
             {
@@ -684,6 +685,8 @@ pub fn is_guardrail_stop_reason(stop_reason: Option<&str>) -> bool {
 #[derive(Debug)]
 pub struct SimpleCompletionError {
     pub usage: SimpleCompletionUsage,
+    /// Request API transport, retained for correct usage/cache normalization.
+    /// This is not the upstream compute vendor returned by a gateway.
     pub provider: String,
     pub model: String,
     source: anyhow::Error,
