@@ -925,7 +925,7 @@ mod tests {
         );
 
         assert_eq!(presentation.title, "🐝 Swarm await");
-        assert_eq!(presentation.message, "✓ 2/2");
+        assert_eq!(presentation.message, "2/2 matched · 2 completed");
         assert!(!presentation.message.contains("fox"));
         assert!(!presentation.message.contains("Parser tests"));
         assert_eq!(presentation.status_notice, "🐝 Swarm await finished");

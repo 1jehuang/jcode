@@ -3250,6 +3250,8 @@ pub(crate) fn compact_swarm_await_summary(message: &str) -> String {
     let mut done = 0usize;
     let mut total = 0usize;
     let mut in_statuses = false;
+    // A checkmark means the await target matched, not that the worker succeeded.
+    let mut outcomes = std::collections::BTreeMap::<&str, usize>::new();
 
     for line in body.lines() {
         let line = line.trim();
@@ -3267,22 +3269,31 @@ pub(crate) fn compact_swarm_await_summary(message: &str) -> String {
         if !in_statuses || line.is_empty() {
             continue;
         }
-        if line.starts_with('✓') {
-            done += 1;
+        if line.starts_with('✓') || line.starts_with('✗') {
             total += 1;
-        } else if line.starts_with('✗') {
-            total += 1;
+            done += usize::from(line.starts_with('✓'));
+            let status = line
+                .rsplit_once(" (")
+                .and_then(|(_, status)| status.strip_suffix(')'))
+                .unwrap_or("unknown");
+            let status = match status {
+                "completed" | "ready" | "failed" | "stopped" | "running" | "busy" | "pending"
+                | "blocked" | "cancelled" => status,
+                _ => "unknown",
+            };
+            *outcomes.entry(status).or_default() += 1;
         }
     }
 
     if total > 0 {
-        if done == total {
-            format!("✓ {done}/{total}")
-        } else {
-            format!("{done}/{total} finished")
-        }
+        let outcomes = outcomes
+            .into_iter()
+            .map(|(status, count)| format!("{count} {status}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{done}/{total} matched · {outcomes}")
     } else {
-        "finished".to_string()
+        "outcome unknown".to_string()
     }
 }
 
@@ -3539,13 +3550,24 @@ fn render_compact_swarm_await(
     if title != "🐝 Swarm await" {
         return None;
     }
-    let mut lines = vec![Line::from(vec![
-        Span::styled("🐝 ", Style::default().fg(rgb(255, 200, 100))),
-        Span::styled(
-            content.trim().to_string(),
-            Style::default().fg(rgb(225, 225, 235)),
-        ),
-    ])];
+    if width == 0 {
+        return Some(Vec::new());
+    }
+    // Older persisted notifications may contain only a checkmark and a count.
+    let content = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let content = if content.starts_with('✓') || content == "finished" {
+        "outcome unknown".to_string()
+    } else {
+        content
+    };
+    let line = Line::from(vec![
+        Span::styled("🐝 Swarm await · ", Style::default().fg(rgb(255, 200, 100))),
+        Span::styled(content, Style::default().fg(rgb(225, 225, 235))),
+    ]);
+    let mut lines = vec![super::truncate_line_with_ellipsis_to_width(
+        &line,
+        width as usize,
+    )];
     if markdown::center_code_blocks() {
         left_pad_lines_for_centered_mode(&mut lines, width);
     }

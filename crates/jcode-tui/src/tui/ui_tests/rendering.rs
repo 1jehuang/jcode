@@ -122,8 +122,66 @@ fn test_render_swarm_await_as_compact_rail_free_summary() {
     let lines = render_swarm_message(&msg, 80, crate::config::DiffDisplayMode::Off);
     let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
 
-    assert_eq!(rendered, vec!["🐝 ✓ 2/2"]);
+    assert_eq!(rendered, vec!["🐝 Swarm await · outcome unknown"]);
     assert!(rendered.iter().all(|line| !line.contains('│')));
+}
+
+#[test]
+fn test_swarm_await_summary_reports_outcomes_not_just_target_matches() {
+    for (statuses, expected) in [
+        (
+            "✓ fox (completed)\n✓ wolf (completed)",
+            "2/2 matched · 2 completed",
+        ),
+        (
+            "✓ fox (failed)\n✓ wolf (stopped)",
+            "2/2 matched · 1 failed, 1 stopped",
+        ),
+        (
+            "✓ fox (ready)\n✗ wolf (running)",
+            "1/2 matched · 1 ready, 1 running",
+        ),
+        (
+            "✓ fox (unknown)\n✓ wolf (future-status)",
+            "2/2 matched · 2 unknown",
+        ),
+        ("✓ fox", "1/1 matched · 1 unknown"),
+        ("", "outcome unknown"),
+    ] {
+        let report = format!(
+            "🐝 **Swarm await finished**\n\nMember statuses:\n{statuses}\n\nRecent outputs:\n✓ transcript (completed)"
+        );
+        assert_eq!(compact_swarm_await_summary(&report), expected);
+    }
+    assert_eq!(
+        compact_swarm_await_summary("All members done."),
+        "outcome unknown"
+    );
+}
+
+#[test]
+fn test_swarm_await_row_is_single_line_and_display_width_safe() {
+    crate::tui::markdown::set_center_code_blocks(false);
+    for content in [
+        "3/3 matched · 3 unknown",
+        "✓ 3/3",
+        "finished",
+        "1/1 matched\n界界界 completed",
+    ] {
+        let msg = DisplayMessage::swarm("🐝 Swarm await", content);
+        for width in [0, 1, 2, 3, 8, 16, 24, 40, 80] {
+            let lines = render_swarm_message(&msg, width, crate::config::DiffDisplayMode::Off);
+            assert_eq!(lines.len(), usize::from(width > 0));
+            for line in lines {
+                let text = extract_line_text(&line);
+                assert!(!text.contains('\n'));
+                assert!(
+                    unicode_width::UnicodeWidthStr::width(text.as_str()) <= width as usize,
+                    "{width}: {text}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -137,7 +195,7 @@ fn test_render_swarm_await_wake_message_as_compact_rail_free_summary() {
     let lines = render_background_task_message(&msg, 80, crate::config::DiffDisplayMode::Off);
     let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
 
-    assert_eq!(rendered, vec!["🐝 ✓ 1/1"]);
+    assert_eq!(rendered, vec!["🐝 Swarm await · 1/1 matched · 1 completed"]);
     assert!(rendered.iter().all(|line| !line.contains('│')));
     assert!(!rendered.join("\n").contains("sabertooth"));
 }
