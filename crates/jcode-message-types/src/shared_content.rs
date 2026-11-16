@@ -1,5 +1,5 @@
 use crate::ContentBlock;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Shared immutable message payload, detached on the first mutation.
 ///
@@ -9,9 +9,80 @@ use std::sync::Arc;
 /// plain JSON array, including legacy persisted sessions.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
-pub struct SharedContent(Arc<Vec<ContentBlock>>);
+pub struct SharedContent(Arc<Vec<ContentBlock>>, #[serde(skip)] Arc<ContentMetrics>);
+
+#[derive(Debug, Default)]
+struct ContentMetrics {
+    json_bytes: OnceLock<usize>,
+    message_hash: Mutex<Option<(Vec<u8>, u64)>>,
+}
 
 impl SharedContent {
+    /// Exact serialized array length, shared by immutable snapshots. Keeping a
+    /// count rather than JSON bytes avoids retaining a second transcript copy.
+    pub fn serialized_json_bytes(&self) -> usize {
+        *self.1.json_bytes.get_or_init(|| {
+            #[derive(Default)]
+            struct Counter(usize);
+            impl std::io::Write for Counter {
+                fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                    self.0 = self.0.saturating_add(bytes.len());
+                    Ok(bytes.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            let mut counter = Counter::default();
+            serde_json::to_writer(&mut counter, &self.0)
+                .map(|()| counter.0)
+                .unwrap_or(0)
+        })
+    }
+
+    pub(crate) fn record_serialized_json_bytes(&self, bytes: usize) {
+        let _ = self.1.json_bytes.set(bytes);
+    }
+
+    pub(crate) fn cached_message_hash(
+        &self,
+        metadata: &[u8],
+        compute: impl FnOnce() -> u64,
+    ) -> u64 {
+        if let Some((key, hash)) = &*self
+            .1
+            .message_hash
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            && key == metadata
+        {
+            return *hash;
+        }
+        // Serialization can be expensive. Do not hold the cache mutex while
+        // reading a large payload or computing its hash.
+        let hash = compute();
+        *self
+            .1
+            .message_hash
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some((metadata.to_vec(), hash));
+        hash
+    }
+
+    fn invalidate_metrics(&mut self) {
+        // A clone may still reference the old immutable payload and its cache.
+        // Detach only this snapshot's metrics before any mutable access.
+        if let Some(metrics) = Arc::get_mut(&mut self.1) {
+            metrics.json_bytes.take();
+            *metrics
+                .message_hash
+                .get_mut()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+        } else {
+            self.1 = Arc::new(ContentMetrics::default());
+        }
+    }
+
     pub fn into_vec(self) -> Vec<ContentBlock> {
         Arc::unwrap_or_clone(self.0)
     }
@@ -24,7 +95,7 @@ impl SharedContent {
 
 impl From<Vec<ContentBlock>> for SharedContent {
     fn from(value: Vec<ContentBlock>) -> Self {
-        Self(Arc::new(value))
+        Self(Arc::new(value), Arc::default())
     }
 }
 
@@ -43,6 +114,7 @@ impl std::ops::Deref for SharedContent {
 
 impl std::ops::DerefMut for SharedContent {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        self.invalidate_metrics();
         Arc::make_mut(&mut self.0)
     }
 }
@@ -67,6 +139,7 @@ impl FromIterator<ContentBlock> for SharedContent {
 
 impl Extend<ContentBlock> for SharedContent {
     fn extend<T: IntoIterator<Item = ContentBlock>>(&mut self, iter: T) {
+        self.invalidate_metrics();
         Arc::make_mut(&mut self.0).extend(iter);
     }
 }
@@ -106,6 +179,117 @@ mod tests {
             is_error: Some(false),
         }]
         .into()
+    }
+
+    #[test]
+    fn cached_sizes_and_hashes_detach_on_all_mutation_paths() {
+        let original = payload();
+        let expected = serde_json::to_vec(&original).unwrap().len();
+        assert_eq!(original.serialized_json_bytes(), expected);
+        let mut clone = original.clone();
+        assert!(Arc::ptr_eq(&original.1, &clone.1));
+        assert_eq!(clone.cached_message_hash(b"meta", || 7), 7);
+        assert_eq!(
+            original.cached_message_hash(b"meta", || panic!("cache miss")),
+            7
+        );
+        assert_eq!(original.cached_message_hash(b"changed", || 9), 9);
+        if let ContentBlock::ToolResult { content, .. } = &mut clone[0] {
+            content.push_str("changed");
+        }
+        assert!(!Arc::ptr_eq(&original.1, &clone.1));
+        assert_eq!(original.serialized_json_bytes(), expected);
+        assert_eq!(
+            clone.serialized_json_bytes(),
+            serde_json::to_vec(&clone).unwrap().len()
+        );
+        assert_eq!(clone.cached_message_hash(b"changed", || 11), 11);
+
+        clone.extend(Vec::<ContentBlock>::new());
+        assert!(clone.1.json_bytes.get().is_none());
+        let _ = clone.serialized_json_bytes();
+        let _ = clone.as_mut();
+        assert!(clone.1.json_bytes.get().is_none());
+        let _ = clone.serialized_json_bytes();
+        for block in &mut clone {
+            if let ContentBlock::ToolResult { content, .. } = block {
+                content.clear();
+            }
+        }
+        assert_eq!(
+            clone.serialized_json_bytes(),
+            serde_json::to_vec(&clone).unwrap().len()
+        );
+    }
+
+    #[test]
+    fn message_hash_and_size_match_legacy_bytes_across_metadata_and_edits() {
+        use crate::{Message, Role, stable_hash_bytes, stable_message_hash};
+        let mut message = Message {
+            role: Role::Assistant,
+            content: payload(),
+            timestamp: None,
+            tool_duration_ms: None,
+        };
+        for step in 0..5 {
+            let reference = serde_json::to_vec(&message).unwrap();
+            assert_eq!(stable_message_hash(&message), stable_hash_bytes(&reference));
+            assert_eq!(message.serialized_json_bytes(), reference.len());
+            assert_eq!(
+                stable_message_hash(&message.clone()),
+                stable_hash_bytes(&reference)
+            );
+            match step {
+                0 => message.role = Role::User,
+                1 => message.timestamp = Some(chrono::DateTime::from_timestamp(1234, 0).unwrap()),
+                2 => message.tool_duration_ms = Some(999),
+                3 => message.content.clear(),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            crate::extend_stable_hash(12, 34),
+            stable_hash_bytes(&[12_u64.to_le_bytes(), 34_u64.to_le_bytes()].concat())
+        );
+    }
+
+    #[test]
+    #[ignore = "comparative immutable-content benchmark, run with --ignored --nocapture"]
+    fn benchmark_repeated_message_hash_and_size() {
+        use crate::{Message, Role, stable_hash_bytes, stable_message_hash};
+        use std::hint::black_box;
+        use std::time::Instant;
+        let message = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "benchmark".into(),
+                content: "escaped\n\"界".repeat(32_768),
+                is_error: Some(false),
+            }]
+            .into(),
+            timestamp: None,
+            tool_duration_ms: None,
+        };
+        let expected = stable_hash_bytes(&serde_json::to_vec(&message).unwrap());
+        assert_eq!(stable_message_hash(&message), expected);
+        let iterations = 20;
+        let start = Instant::now();
+        for _ in 0..iterations {
+            let bytes = serde_json::to_vec(black_box(&message)).unwrap();
+            black_box(stable_hash_bytes(&bytes));
+            black_box(serde_json::to_vec(black_box(&message)).unwrap().len());
+        }
+        let uncached = start.elapsed();
+        let start = Instant::now();
+        for _ in 0..iterations {
+            black_box(stable_message_hash(black_box(&message)));
+            black_box(message.serialized_json_bytes());
+        }
+        let cached = start.elapsed();
+        eprintln!(
+            "immutable message metrics: iterations={iterations} uncached={uncached:?} cached={cached:?} ratio={:.2}x",
+            uncached.as_secs_f64() / cached.as_secs_f64()
+        );
     }
 
     #[test]

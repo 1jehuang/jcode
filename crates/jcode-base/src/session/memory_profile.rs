@@ -4,6 +4,50 @@ use serde::Serialize;
 
 const LARGE_MEMORY_BLOB_THRESHOLD_BYTES: usize = 16 * 1024;
 
+pub(super) fn stored_message_json_bytes(message: &super::StoredMessage) -> usize {
+    let mut metadata = message.clone();
+    metadata.content = Default::default();
+    estimate_json_bytes(&metadata).saturating_sub(2) + message.content.serialized_json_bytes()
+}
+
+#[cfg(test)]
+mod cached_size_tests {
+    use super::*;
+
+    #[test]
+    fn stored_sizes_match_full_serialization_after_metadata_and_content_changes() {
+        let mut message = super::super::StoredMessage {
+            id: "escaped\"id".into(),
+            role: crate::message::Role::User,
+            content: vec![ContentBlock::Text {
+                text: "long\n\"界🦀".repeat(1024),
+                cache_control: None,
+            }]
+            .into(),
+            display_role: None,
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        };
+        for step in 0..4 {
+            assert_eq!(
+                stored_message_json_bytes(&message),
+                estimate_json_bytes(&message)
+            );
+            assert_eq!(
+                stored_message_json_bytes(&message.clone()),
+                estimate_json_bytes(&message)
+            );
+            match step {
+                0 => message.tool_duration_ms = Some(123),
+                1 => message.timestamp = Some(chrono::DateTime::from_timestamp(99, 0).unwrap()),
+                2 => message.content.clear(),
+                _ => {}
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(super) struct ContentBlockMemoryStats {
     pub(super) block_count: usize,

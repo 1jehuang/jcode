@@ -409,14 +409,49 @@ fn stable_hash_bytes(bytes: &[u8]) -> u64 {
 }
 
 pub fn extend_stable_hash(acc: u64, next: u64) -> u64 {
-    stable_hash_bytes(&[acc.to_le_bytes().as_slice(), next.to_le_bytes().as_slice()].concat())
+    let mut bytes = [0; 16];
+    bytes[..8].copy_from_slice(&acc.to_le_bytes());
+    bytes[8..].copy_from_slice(&next.to_le_bytes());
+    stable_hash_bytes(&bytes)
+}
+
+impl Message {
+    fn metadata_only(&self) -> Self {
+        Self {
+            role: self.role.clone(),
+            content: SharedContent::default(),
+            timestamp: self.timestamp,
+            tool_duration_ms: self.tool_duration_ms,
+        }
+    }
+
+    /// Exact JSON length without rescanning a shared immutable payload.
+    pub fn serialized_json_bytes(&self) -> usize {
+        serde_json::to_vec(&self.metadata_only())
+            .map(|metadata| metadata.len().saturating_sub(2) + self.content.serialized_json_bytes())
+            .unwrap_or(0)
+    }
 }
 
 pub fn stable_message_hash(message: &Message) -> u64 {
-    match serde_json::to_vec(message) {
-        Ok(bytes) => stable_hash_bytes(&bytes),
-        Err(_) => stable_hash_bytes(format!("{:?}", message).as_bytes()),
-    }
+    let metadata = match serde_json::to_vec(&message.metadata_only()) {
+        Ok(metadata) => metadata,
+        Err(_) => return stable_hash_bytes(format!("{:?}", message).as_bytes()),
+    };
+    message.content.cached_message_hash(&metadata, || {
+        match serde_json::to_vec(message) {
+            Ok(bytes) => {
+                // Metadata contains the same envelope with an empty [] array.
+                // Populate the length cache from work already needed for the
+                // first hash, rather than scanning the content a second time.
+                message
+                    .content
+                    .record_serialized_json_bytes(bytes.len().saturating_sub(metadata.len()) + 2);
+                stable_hash_bytes(&bytes)
+            }
+            Err(_) => stable_hash_bytes(format!("{:?}", message).as_bytes()),
+        }
+    })
 }
 
 /// Project a message down to the fields that actually influence a provider's

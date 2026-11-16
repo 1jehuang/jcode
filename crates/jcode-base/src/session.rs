@@ -41,7 +41,8 @@ use journal::{PersistVectorMode, SessionJournalMeta, SessionPersistState};
 pub use maintenance::prune_old_session_backups;
 pub use memory_profile::SessionMemoryProfileSnapshot;
 use memory_profile::{
-    ContentBlockMemoryStats, SessionMemoryProfileCache, summarize_blocks, summarize_message_content,
+    ContentBlockMemoryStats, SessionMemoryProfileCache, stored_message_json_bytes,
+    summarize_blocks, summarize_message_content,
 };
 use model::SESSION_CONTEXT_PREFIX;
 pub use model::{StoredReplayEvent, StoredReplayEventKind};
@@ -436,7 +437,8 @@ impl Session {
         let message_stats =
             summarize_message_content(self.messages.iter().map(|message| &*message.content));
 
-        let session_message_json_bytes: usize = self.messages.iter().map(estimate_json_bytes).sum();
+        let session_message_json_bytes: usize =
+            self.messages.iter().map(stored_message_json_bytes).sum();
         let provider_cache_stats = summarize_message_content(
             self.provider_messages_cache
                 .iter()
@@ -445,7 +447,7 @@ impl Session {
         let provider_messages_cache_json_bytes: usize = self
             .provider_messages_cache
             .iter()
-            .map(estimate_json_bytes)
+            .map(Message::serialized_json_bytes)
             .sum();
         let provider_cache_shared_content_count = self
             .provider_messages_cache
@@ -685,7 +687,7 @@ impl Session {
             .map(|prev| crate::message::extend_stable_hash(prev, message_hash))
             .unwrap_or(message_hash);
         self.memory_profile_cache.provider_cache_count += 1;
-        self.memory_profile_cache.provider_cache_json_bytes += estimate_json_bytes(&message);
+        self.memory_profile_cache.provider_cache_json_bytes += message.serialized_json_bytes();
         self.memory_profile_cache
             .provider_cache_stats
             .merge_from(&summarize_blocks(&message.content));
@@ -708,7 +710,7 @@ impl Session {
 
         self.memory_profile_cache = SessionMemoryProfileCache {
             messages_count: self.messages.len(),
-            messages_json_bytes: self.messages.iter().map(estimate_json_bytes).sum(),
+            messages_json_bytes: self.messages.iter().map(stored_message_json_bytes).sum(),
             message_stats,
             env_snapshots_count: self.env_snapshots.len(),
             env_snapshots_json_bytes: self.env_snapshots.iter().map(estimate_json_bytes).sum(),
@@ -724,7 +726,7 @@ impl Session {
             provider_cache_json_bytes: self
                 .provider_messages_cache
                 .iter()
-                .map(estimate_json_bytes)
+                .map(Message::serialized_json_bytes)
                 .sum(),
             provider_cache_stats,
         };
@@ -1425,7 +1427,7 @@ request in this new forked session, using the inherited conversation only as con
 
     pub fn append_stored_message(&mut self, message: StoredMessage) {
         self.memory_profile_cache.messages_count += 1;
-        self.memory_profile_cache.messages_json_bytes += estimate_json_bytes(&message);
+        self.memory_profile_cache.messages_json_bytes += stored_message_json_bytes(&message);
         self.memory_profile_cache
             .message_stats
             .merge_from(&summarize_blocks(&message.content));
