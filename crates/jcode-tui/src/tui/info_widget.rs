@@ -6,7 +6,10 @@
 //! In left-aligned mode, widgets only appear on the right margin.
 
 pub use super::cloud_git::{DualGitInfo, RepoState};
-pub use super::cloud_status::{CloudMachineStats, CloudProbeState, CloudStatusInfo};
+pub use super::cloud_status::{
+    CloudDirectoryEntry, CloudDirectorySnapshot, CloudMachineStats, CloudProbeState,
+    CloudStatusInfo,
+};
 use super::color_support::rgb;
 #[path = "info_widget_commits.rs"]
 mod commits;
@@ -62,11 +65,12 @@ pub(crate) use git::{edited_paths_from_tool_call, resolve_edited_path};
 pub use graph::{GraphEdge, GraphNode, build_graph_topology, graph_node_score};
 pub(crate) use memory_utils::is_traceworthy_memory_event;
 use memory_utils::{memory_active_summary, memory_last_trace_summary, memory_state_detail};
-use model::{render_model_info, render_model_widget, runtime_has_data, runtime_height};
+use model::{overview_runtime_height, render_model_info, render_model_widget, runtime_has_data};
 use swarm_background::{render_background_compact, render_background_widget, render_swarm_widget};
 use text::{truncate_smart, truncate_with_ellipsis};
 pub(crate) use tips::occasional_status_tip;
 use tips::render_tips_widget;
+pub(crate) use usage_render::render_inline_limit_bar;
 pub(crate) use usage_render::render_labeled_bar as render_usage_limit_bar;
 use usage_render::{render_usage_compact, render_usage_widget};
 
@@ -80,7 +84,7 @@ pub(super) fn changes_section_height(data: &InfoWidgetData) -> u16 {
 
 /// Overview rows used by the Runtime section, mirroring [`render_sections`].
 pub(super) fn model_info_height(data: &InfoWidgetData) -> u16 {
-    runtime_height(data)
+    overview_runtime_height(data)
 }
 
 /// Types of info widgets that can be displayed
@@ -115,6 +119,8 @@ pub enum WidgetKind {
     GitStatus,
     /// Native SSH cloud machine and workspace details.
     CloudVm,
+    /// Directories known to the attached cloud VM.
+    CloudDirectories,
     /// Commits: recent history on the current branch
     Commits,
 }
@@ -134,6 +140,7 @@ impl WidgetKind {
             WidgetKind::BackgroundTasks => 10,
             WidgetKind::GitStatus => 11,
             WidgetKind::CloudVm => 12,
+            WidgetKind::CloudDirectories => 12,
             WidgetKind::Commits => 12,
             WidgetKind::SwarmStatus => 12, // Session list - lower priority
             WidgetKind::AmbientMode => 13, // Scheduled agent - lower priority
@@ -158,6 +165,7 @@ impl WidgetKind {
             WidgetKind::Tips => Side::Left,
             WidgetKind::GitStatus => Side::Left,
             WidgetKind::CloudVm => Side::Left,
+            WidgetKind::CloudDirectories => Side::Left,
             WidgetKind::Commits => Side::Left,
         }
     }
@@ -179,6 +187,7 @@ impl WidgetKind {
             WidgetKind::Tips => 3,
             WidgetKind::GitStatus => 1,
             WidgetKind::CloudVm => 16,
+            WidgetKind::CloudDirectories => 3,
             WidgetKind::Commits => 1,
         }
     }
@@ -190,13 +199,13 @@ impl WidgetKind {
             WidgetKind::WorkspaceMap,
             WidgetKind::Overview,
             WidgetKind::UsageLimits,
-            WidgetKind::KvCache,
             WidgetKind::MemoryActivity,
             WidgetKind::ModelInfo,
             WidgetKind::Compaction,
             WidgetKind::BackgroundTasks,
             WidgetKind::GitStatus,
             WidgetKind::CloudVm,
+            WidgetKind::CloudDirectories,
             WidgetKind::Commits,
             WidgetKind::SwarmStatus,
             WidgetKind::AmbientMode,
@@ -220,6 +229,7 @@ impl WidgetKind {
             WidgetKind::Tips => "tips",
             WidgetKind::GitStatus => "git",
             WidgetKind::CloudVm => "cloud",
+            WidgetKind::CloudDirectories => "cloud-directories",
             WidgetKind::Commits => "commits",
         }
     }
@@ -669,6 +679,8 @@ pub struct InfoWidgetData {
     pub context_info: Option<ContextInfo>,
     /// True when context state is being updated and no authoritative snapshot is available.
     pub context_info_stale: bool,
+    /// Resume previews show a measured past request, not the active prompt.
+    pub historical_context: bool,
     pub queue_mode: Option<bool>,
     pub context_limit: Option<usize>,
     pub model: Option<String>,
@@ -686,6 +698,8 @@ pub struct InfoWidgetData {
     pub session_name: Option<String>,
     /// Current working directory for this session.
     pub working_dir: Option<String>,
+    /// Session origin, if its working directory has changed.
+    pub original_working_dir: Option<String>,
     pub client_count: Option<usize>,
     /// Memory system statistics
     pub memory_info: Option<MemoryInfo>,
@@ -826,11 +840,9 @@ impl InfoWidgetData {
                 .as_ref()
                 .map(MemoryInfo::should_render)
                 .unwrap_or(false),
-            WidgetKind::SwarmStatus => self
-                .swarm_info
-                .as_ref()
-                .map(|s| !s.managed_members.is_empty())
-                .unwrap_or(false),
+            // The pinned progress view already presents managed agents.
+            // Do not duplicate that information in the margin HUD.
+            WidgetKind::SwarmStatus => false,
             WidgetKind::BackgroundTasks => self
                 .background_info
                 .as_ref()
@@ -858,6 +870,7 @@ impl InfoWidgetData {
                         .unwrap_or(false)
             }
             WidgetKind::CloudVm => self.cloud_info.is_some(),
+            WidgetKind::CloudDirectories => self.cloud_info.is_some(),
             WidgetKind::Commits => self
                 .git_info
                 .as_ref()
@@ -1118,7 +1131,8 @@ pub fn calculate_placements(
 
 /// Repack cloud details only when asynchronously loaded Overview rows cannot
 /// grow inside their original anchor. Keep the resident layout unless a fresh
-/// priority pass fits the full Overview without losing any visible widget.
+/// priority pass fits the full Overview without losing primary visible widgets.
+/// The supplemental directory inventory may yield when the viewport is short.
 pub(super) fn calculate_placements_with_cloud_reflow(
     area: Rect,
     margins: &Margins,
@@ -1149,10 +1163,10 @@ pub(super) fn calculate_placements_with_cloud_reflow(
             && p.rect.height
                 >= calculate_widget_height(WidgetKind::Overview, data, p.rect.width, area.height)
     });
-    let preserves = resident
-        .visible
-        .iter()
-        .all(|old| fresh.visible.iter().any(|new| new.kind == old.kind));
+    let preserves = resident.visible.iter().all(|old| {
+        old.kind == WidgetKind::CloudDirectories
+            || fresh.visible.iter().any(|new| new.kind == old.kind)
+    });
     if fits && preserves { fresh } else { resident }
 }
 
@@ -1376,10 +1390,9 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
 
     // Diagrams need special handling - render image instead of text
     if placement.kind == WidgetKind::Diagrams {
-        let mut chrome = Framed::default().title(frame::label("◇ Diagram"));
-        if data.diagrams.len() > 1 {
-            chrome = chrome.title_right(frame::dim(format!("1/{}", data.diagrams.len())));
-        }
+        let chrome = Framed::default()
+            .title(frame::label("◇ Diagram"))
+            .footer(frame::dim(diagram_footer(data)));
         frame.render_widget(chrome.apply(block, rect.width), rect);
         render_diagrams_widget(frame, inner, data);
         return;
@@ -1397,7 +1410,9 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
         if data.workspace_rows.is_empty() || inner.width == 0 || inner.height == 0 {
             return;
         }
-        let chrome = Framed::default().title(frame::label("Workspace"));
+        let chrome = Framed::default()
+            .title(frame::label("Workspace"))
+            .footer(frame::dim(workspace_footer(data)));
         frame.render_widget(chrome.apply(block, rect.width), rect);
         super::workspace_map_widget::render_workspace_map(
             frame.buffer_mut(),
@@ -1414,6 +1429,72 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
     let (rect, inner) = tight_rects(rect, inner, framed.lines.len());
     frame.render_widget(framed.apply(block, rect.width), rect);
     frame.render_widget(Paragraph::new(framed.lines), inner);
+}
+
+fn diagram_footer(data: &InfoWidgetData) -> String {
+    let Some(diagram) = data.diagrams.first() else {
+        return "image pending".into();
+    };
+    let dimensions = format!("{}×{}", diagram.width, diagram.height);
+    if data.diagrams.len() > 1 {
+        format!("{dimensions} · 1/{}", data.diagrams.len())
+    } else {
+        dimensions
+    }
+}
+
+fn workspace_footer(data: &InfoWidgetData) -> String {
+    use super::workspace_map::WorkspaceSessionVisualState;
+    let (count, running) = data
+        .workspace_rows
+        .iter()
+        .flat_map(|row| &row.sessions)
+        .fold((0, 0), |(count, running), session| {
+            (
+                count + 1,
+                running + usize::from(session.state == WorkspaceSessionVisualState::Running),
+            )
+        });
+    let noun = if count == 1 { "session" } else { "sessions" };
+    if running > 0 {
+        format!("{count} {noun} · {running} running")
+    } else {
+        format!("{count} {noun}")
+    }
+}
+
+/// Token headroom complements the status line's context percentage rather
+/// than relabeling the Overview or repeating one of its detail rows.
+fn overview_footer(data: &InfoWidgetData) -> String {
+    if data.context_info_stale {
+        return "context syncing".into();
+    }
+    let used = data.observed_context_tokens.or_else(|| {
+        data.context_info
+            .as_ref()
+            .filter(|info| info.total_chars > 0)
+            .map(|info| info.estimated_tokens() as u64)
+    });
+    match (used, data.context_limit) {
+        (Some(used), Some(limit)) => {
+            let left = (limit as u64).saturating_sub(used);
+            let estimate = if data.observed_context_tokens.is_none() {
+                "~"
+            } else {
+                ""
+            };
+            format!(
+                "{}{estimate}{} ctx left",
+                if data.historical_context {
+                    "saved "
+                } else {
+                    ""
+                },
+                crate::kv_cache_monitor::format_token_count(left)
+            )
+        }
+        _ => "context not reported".into(),
+    }
 }
 
 /// Render mermaid diagrams widget (renders images, not text)
@@ -1520,7 +1601,7 @@ fn render_overview_framed(data: &InfoWidgetData, inner: Rect) -> Option<Framed> 
         }
         framed = framed.footer_right(Line::from(dots));
     }
-    Some(framed)
+    Some(framed.footer_if_empty(frame::dim(overview_footer(data))))
 }
 #[cfg(test)]
 #[derive(Debug, Clone)]
@@ -1701,6 +1782,7 @@ fn render_widget_content(kind: WidgetKind, data: &InfoWidgetData, inner: Rect) -
                     .collect(),
             )
             .title(frame::label("OpenAI limits"))
+            .footer(frame::dim("first snapshot"))
         }
         WidgetKind::UsageLimits => render_usage_widget(data, inner),
         WidgetKind::KvCache => render_kv_cache_widget(data, inner),
@@ -1708,6 +1790,9 @@ fn render_widget_content(kind: WidgetKind, data: &InfoWidgetData, inner: Rect) -
         WidgetKind::Tips => render_tips_widget(inner),
         WidgetKind::GitStatus => render_changes_framed(data, inner),
         WidgetKind::CloudVm => super::info_widget_cloud::render_cloud_widget(data, inner),
+        WidgetKind::CloudDirectories => {
+            super::info_widget_cloud_directories::render_cloud_directories(data, inner)
+        }
         WidgetKind::Commits => render_commits_widget(data, inner),
     };
     framed.settle()
@@ -1730,9 +1815,18 @@ fn render_compaction_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
     let summary_tokens = (info.summary_chars / crate::compaction::CHARS_PER_TOKEN)
         .max(usize::from(info.summary_chars > 0));
     let detail = format!(
-        "{} old · {} active · ~{} summary tok",
-        info.compacted_messages, info.active_messages, summary_tokens
+        "{} old · {} active",
+        info.compacted_messages, info.active_messages
     );
+    let summary = format!(
+        "~{} tok",
+        crate::kv_cache_monitor::format_token_count(summary_tokens as u64)
+    );
+    let footer = if info.mode.trim().is_empty() {
+        summary
+    } else {
+        format!("{summary} · {}", info.mode.trim())
+    };
     Framed::body(vec![Line::from(Span::styled(
         truncate_smart(&detail, inner.width as usize),
         Style::default().fg(rgb(180, 180, 190)),
@@ -1741,231 +1835,14 @@ fn render_compaction_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
         frame::label("Compaction "),
         Span::styled(status, Style::default().fg(title_color).bold()),
     ]))
-    .title_right(frame::dim(info.mode.to_string()))
+    .footer(frame::dim(footer))
 }
 
-fn render_kv_cache_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
-    let Some(cache) = data.cache_hit_info.as_ref() else {
-        return Framed::default();
-    };
-    // Top border: the headline yield. Body: the per-rate breakdown, then the
-    // misses themselves. Bottom border: the miss total and overflow.
-    let mut framed =
-        Framed::body(vec![render_kv_cache_rates_line(cache)]).title(render_kv_cache_title(cache));
-
-    if cache.miss_attributions.is_empty() {
-        return framed.footer_right(Span::styled(
-            "no misses",
-            Style::default().fg(rgb(110, 210, 140)),
-        ));
-    }
-
-    let total_missed: u64 = cache
-        .miss_attributions
-        .iter()
-        .map(|sample| sample.missed_tokens)
-        .sum();
-    framed = framed.footer_right(Line::from(vec![
-        Span::styled(
-            compact_token_count(total_missed),
-            Style::default().fg(rgb(255, 200, 100)),
-        ),
-        frame::dim(" missed"),
-    ]));
-
-    let max_w = inner.width as usize;
-    for sample in cache.miss_attributions.iter().take(5) {
-        let head = format!(
-            "{} {} miss ",
-            format_cache_turn_label(sample.turn_number, sample.call_index),
-            compact_token_count(sample.missed_tokens)
-        );
-        let reason_w = max_w.saturating_sub(UnicodeWidthStr::width(head.as_str()) + 2);
-        framed.lines.push(Line::from(vec![
-            Span::styled(
-                format_cache_turn_label(sample.turn_number, sample.call_index),
-                Style::default().fg(rgb(140, 180, 255)).bold(),
-            ),
-            Span::styled(
-                format!(" {} miss ", compact_token_count(sample.missed_tokens)),
-                Style::default().fg(rgb(255, 200, 100)),
-            ),
-            Span::styled(
-                format!("({})", truncate_smart(&sample.reason, reason_w.max(4))),
-                Style::default().fg(rgb(140, 140, 150)),
-            ),
-        ]));
-    }
-
-    if cache.miss_attributions.len() > 5 {
-        framed = framed.footer(frame::more(cache.miss_attributions.len() - 5));
-    }
-
-    framed
-}
-
-fn kv_cache_pcts(cache: &CacheHitInfo) -> Option<(u8, Option<u8>, Option<u8>, Color)> {
-    let lifetime_ratio = cache.hit_ratio()?;
-    let lifetime_pct = ratio_pct(lifetime_ratio);
-    let warm_pct = cache.optimal_ratio().map(ratio_pct);
-    let last_pct = cache.last_ratio().map(ratio_pct);
-    let last_optimal_pct = cache.last_optimal_ratio().map(ratio_pct);
-    let health_pct = last_optimal_pct
-        .or(last_pct)
-        .or(warm_pct)
-        .unwrap_or(lifetime_pct);
-    Some((
-        lifetime_pct,
-        warm_pct,
-        last_pct,
-        kv_cache_optimal_color(health_pct),
-    ))
-}
-
-/// Border headline: `KV cache 90% yield`, or observed hit rate without a baseline.
-fn render_kv_cache_title(cache: &CacheHitInfo) -> Line<'static> {
-    let mut spans = vec![frame::label("KV cache ")];
-    match kv_cache_pcts(cache) {
-        Some((_, Some(warm), _, color)) => {
-            spans.push(Span::styled(
-                format!("{warm}%"),
-                Style::default().fg(color).bold(),
-            ));
-            spans.push(frame::dim(" yield"));
-        }
-        Some((lifetime_pct, None, _, color)) => {
-            // Restored sessions lack the historical reusable-prefix denominator.
-            // That is missing telemetry, not evidence the cache is still warming.
-            spans.push(Span::styled(
-                format!("{lifetime_pct}%"),
-                Style::default().fg(color).bold(),
-            ));
-            spans.push(frame::dim(" hit"));
-        }
-        None => {}
-    }
-    Line::from(spans)
-}
-
-/// Body row: `last 94% · session 39%`.
-fn render_kv_cache_rates_line(cache: &CacheHitInfo) -> Line<'static> {
-    let Some((lifetime_pct, _, last_pct, color)) = kv_cache_pcts(cache) else {
-        return Line::default();
-    };
-    let mut spans = Vec::new();
-    if let Some(last_pct) = last_pct {
-        spans.push(Span::styled(
-            "last ",
-            Style::default().fg(rgb(140, 140, 150)),
-        ));
-        spans.push(Span::styled(
-            format!("{}%", last_pct),
-            Style::default().fg(color).bold(),
-        ));
-        spans.push(Span::styled(" · ", Style::default().fg(rgb(80, 80, 90))));
-    }
-    spans.push(Span::styled(
-        "session ",
-        Style::default().fg(rgb(140, 140, 150)),
-    ));
-    spans.push(Span::styled(
-        format!("{}%", lifetime_pct),
-        Style::default().fg(color).bold(),
-    ));
-    Line::from(spans)
-}
-
-fn render_kv_cache_summary_line(cache: &CacheHitInfo) -> Line<'static> {
-    let Some(lifetime_ratio) = cache.hit_ratio() else {
-        return Line::default();
-    };
-
-    let lifetime_pct = ratio_pct(lifetime_ratio);
-    let warm_pct = cache.optimal_ratio().map(ratio_pct);
-    let last_pct = cache.last_ratio().map(ratio_pct);
-    let last_optimal_pct = cache.last_optimal_ratio().map(ratio_pct);
-    let health_pct = last_optimal_pct
-        .or(last_pct)
-        .or(warm_pct)
-        .unwrap_or(lifetime_pct);
-    let color = kv_cache_optimal_color(health_pct);
-
-    let mut spans = vec![Span::styled(
-        "KV cache: ",
-        Style::default().fg(rgb(180, 180, 190)).bold(),
-    )];
-
-    if let Some(warm_pct) = warm_pct {
-        spans.push(Span::styled(
-            "yield ",
-            Style::default().fg(rgb(140, 140, 150)),
-        ));
-        spans.push(Span::styled(
-            format!("{}%", warm_pct),
-            Style::default().fg(color).bold(),
-        ));
-    } else {
-        spans.push(Span::styled(
-            format!("hit {}%", lifetime_pct),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ));
-    }
-
-    if let Some(last_pct) = last_pct {
-        spans.push(Span::styled(" · ", Style::default().fg(rgb(80, 80, 90))));
-        spans.push(Span::styled(
-            "last ",
-            Style::default().fg(rgb(140, 140, 150)),
-        ));
-        spans.push(Span::styled(
-            format!("{}%", last_pct),
-            Style::default().fg(color).bold(),
-        ));
-    }
-
-    spans.push(Span::styled(" · ", Style::default().fg(rgb(80, 80, 90))));
-    spans.push(Span::styled(
-        "session ",
-        Style::default().fg(rgb(140, 140, 150)),
-    ));
-    spans.push(Span::styled(
-        format!("{}%", lifetime_pct),
-        Style::default().fg(color).bold(),
-    ));
-
-    Line::from(spans)
-}
-
-fn ratio_pct(ratio: f32) -> u8 {
-    (ratio * 100.0).round().clamp(0.0, 100.0) as u8
-}
-
-fn kv_cache_optimal_color(pct: u8) -> Color {
-    match pct {
-        0..=24 => rgb(255, 110, 110),
-        25..=59 => rgb(255, 200, 100),
-        60..=84 => rgb(140, 180, 255),
-        _ => rgb(110, 210, 140),
-    }
-}
-
-fn format_cache_turn_label(turn_number: usize, call_index: u16) -> String {
-    if call_index <= 1 {
-        format!("{}>", turn_number)
-    } else {
-        format!("{}.{}>", turn_number, call_index)
-    }
-}
-
-fn compact_token_count(tokens: u64) -> String {
-    if tokens >= 1_000_000 {
-        format!("{:.1}M", tokens as f32 / 1_000_000.0)
-    } else if tokens >= 1_000 {
-        format!("{:.0}k", tokens as f32 / 1_000.0)
-    } else {
-        tokens.to_string()
-    }
-}
+#[path = "info_widget_cache.rs"]
+mod cache_render;
+#[cfg(test)]
+use cache_render::render_kv_cache_summary_line;
+use cache_render::render_kv_cache_widget;
 
 /// Render ambient mode status widget
 fn render_ambient_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
@@ -1980,6 +1857,14 @@ fn render_ambient_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
     let dim = rgb(100, 100, 110);
     let label_color = rgb(140, 140, 150);
     let max_w = inner.width.saturating_sub(2) as usize;
+    let next_due = if matches!(info.status, AmbientStatus::Disabled) && info.reminder_count > 0 {
+        info.next_reminder_wake.as_ref()
+    } else {
+        info.next_wake.as_ref()
+    };
+    let budget = info.budget_percent.filter(|pct| pct.is_finite());
+    let schedule_in_footer = budget.is_none();
+    let last_run_in_footer = schedule_in_footer && next_due.is_none();
 
     // Status line with icon
     let (icon, status_text, status_color) = match &info.status {
@@ -2050,30 +1935,41 @@ fn render_ambient_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
 
     // Last run
     if let Some(ref ago) = info.last_run_ago {
-        let mut spans = vec![Span::styled(
-            format!("Ran {}", ago),
-            Style::default().fg(label_color),
-        )];
+        let mut spans = if last_run_in_footer {
+            Vec::new()
+        } else {
+            vec![Span::styled(
+                format!("Ran {}", ago),
+                Style::default().fg(label_color),
+            )]
+        };
         if let Some(ref summary) = info.last_summary {
-            let remaining = max_w.saturating_sub(4 + ago.len());
+            let remaining = if last_run_in_footer {
+                max_w
+            } else {
+                max_w.saturating_sub(4 + ago.len())
+            };
             if remaining > 5 {
                 spans.push(Span::styled(
-                    truncate_smart(&format!(" - {}", summary), remaining),
+                    truncate_smart(
+                        &if last_run_in_footer {
+                            summary.clone()
+                        } else {
+                            format!(" - {}", summary)
+                        },
+                        remaining,
+                    ),
                     Style::default().fg(dim),
                 ));
             }
         }
-        lines.push(Line::from(spans));
+        if !spans.is_empty() {
+            lines.push(Line::from(spans));
+        }
     }
 
     // Next scheduled run
-    let next_due = if matches!(info.status, AmbientStatus::Disabled) && info.reminder_count > 0 {
-        info.next_reminder_wake.as_ref()
-    } else {
-        info.next_wake.as_ref()
-    };
-
-    if let Some(next) = next_due {
+    if let Some(next) = next_due.filter(|_| !schedule_in_footer) {
         let prefix = if matches!(info.status, AmbientStatus::Disabled) && info.reminder_count > 0 {
             "Next scheduled task"
         } else {
@@ -2088,26 +1984,22 @@ fn render_ambient_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
     let mut framed = Framed::body(lines).title(title);
 
     // Budget meter rides the bottom border.
-    if let Some(budget) = info.budget_percent {
+    if let Some(budget) = budget {
         let pct = (budget * 100.0).round().clamp(0.0, 100.0) as u8;
-        let bar_width = inner.width.saturating_sub(16).clamp(4, 10) as usize;
-        let filled = ((budget * bar_width as f32).round() as usize).min(bar_width);
-        let empty = bar_width.saturating_sub(filled);
-
-        let bar_color = if pct < 20 {
-            rgb(255, 100, 100)
-        } else if pct <= 50 {
-            rgb(255, 200, 100)
-        } else {
-            rgb(100, 200, 100)
-        };
-
-        framed = framed.footer_right(Line::from(vec![
-            frame::dim("budget "),
-            Span::styled("▰".repeat(filled), Style::default().fg(bar_color)),
-            Span::styled("▱".repeat(empty), Style::default().fg(rgb(60, 60, 70))),
-            Span::styled(format!(" {}%", pct), Style::default().fg(bar_color)),
-        ]));
+        framed = framed.footer_right(render_usage_limit_bar(
+            "budget",
+            100 - pct,
+            pct,
+            None,
+            inner.width,
+            false,
+        ));
+    } else if let Some(next) = next_due {
+        framed = framed.footer(frame::dim(format!("next {next}")));
+    } else if let Some(ago) = &info.last_run_ago {
+        framed = framed.footer(frame::dim(format!("ran {ago}")));
+    } else {
+        framed = framed.footer(frame::dim("no run recorded"));
     }
 
     framed
@@ -2195,10 +2087,6 @@ fn render_sections(
         data,
         inner.width,
     ));
-
-    if let Some(cache) = data.cache_hit_info.as_ref() {
-        lines.push(render_kv_cache_summary_line(cache));
-    }
 
     // Changed files (the detail behind the line's git counts).
     if data.dual_git_info.is_some() || data.git_info.as_ref().is_some_and(changes_has_data) {

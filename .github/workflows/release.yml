@@ -34,6 +34,7 @@ on:
   push:
     tags:
       - 'v*'
+      - '!v*-preview.*'
 
 concurrency:
   group: release-${{ inputs.tag || github.ref_name }}
@@ -52,8 +53,9 @@ jobs:
     # same class of accidental-publication path as a fork pushing a package.
     # Every other job in this workflow needs `create-release`, directly or
     # transitively, so gating this one job skips the whole workflow: a skipped
-    # dependency skips its dependents.
-    if: github.repository == '1jehuang/jcode'
+    # dependency skips its dependents. Preview tags are excluded at the trigger
+    # and here as defense in depth, including manual dispatch.
+    if: github.repository == '1jehuang/jcode' && !contains(inputs.tag || github.ref_name, '-preview.')
     runs-on: ubuntu-latest
     # Exact-commit CI includes a native Windows test job with a 150-minute cap.
     timeout-minutes: 190

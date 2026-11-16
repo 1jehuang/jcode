@@ -922,7 +922,7 @@ pub(super) async fn fetch_jcode_usage_report() -> Option<ProviderUsage> {
     match crate::subscription_api::fetch_subscription_me().await {
         Ok(me) => Some(jcode_usage_report(&me)),
         Err(error) => Some(ProviderUsage {
-            provider_name: "Jcode subscription".to_string(),
+            provider_name: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
             error: Some(format!("{error:#}")),
             ..Default::default()
         }),
@@ -995,7 +995,7 @@ pub(crate) fn jcode_usage_report(me: &crate::subscription_api::SubscriptionMe) -
         }
     }
     ProviderUsage {
-        provider_name: "Jcode subscription".to_string(),
+        provider_name: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
         limits,
         extra_info,
         hard_limit_reached,

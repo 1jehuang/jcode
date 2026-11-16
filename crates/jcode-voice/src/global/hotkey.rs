@@ -70,7 +70,7 @@ fn request(write: bool, nr: u8, size: usize) -> libc::c_ulong {
 }
 fn ioctl<T>(fd: &File, req: libc::c_ulong, value: &mut T) -> io::Result<()> {
     // SAFETY: each caller supplies the exact UAPI layout and request size.
-    if unsafe { libc::ioctl(fd.as_raw_fd(), req, value as *mut T) } < 0 {
+    if unsafe { libc::syscall(libc::SYS_ioctl, fd.as_raw_fd(), req, value as *mut T) } < 0 {
         Err(io::Error::last_os_error())
     } else {
         Ok(())

@@ -20,6 +20,7 @@ struct MessageCacheKey {
     tool_call_details: bool,
     show_tool_duration: bool,
     latex_rendering: LatexRenderingMode,
+    show_link_urls: bool,
 }
 
 #[derive(Default)]
@@ -85,6 +86,7 @@ pub struct MessageCacheContext {
     pub tool_call_details: bool,
     pub show_tool_duration: bool,
     pub latex_rendering: LatexRenderingMode,
+    pub show_link_urls: bool,
 }
 
 pub fn left_pad_lines_for_centered_mode(lines: &mut [Line<'static>], width: u16) {
@@ -138,6 +140,7 @@ where
         tool_call_details: context.tool_call_details,
         show_tool_duration: context.show_tool_duration,
         latex_rendering: context.latex_rendering,
+        show_link_urls: context.show_link_urls,
     };
 
     let mut cache = match message_cache().lock() {
@@ -173,14 +176,21 @@ mod tests {
             tool_call_details: true,
             show_tool_duration: false,
             latex_rendering: LatexRenderingMode::Image,
+            show_link_urls: false,
         };
         let mut isolated_cache = MessageCacheState::default();
         isolated_cache.insert(key.clone(), vec![Line::from("image")]);
         let unicode_key = MessageCacheKey {
             latex_rendering: LatexRenderingMode::Unicode,
+            show_link_urls: false,
             ..key.clone()
         };
         assert!(isolated_cache.get(&unicode_key).is_none());
+        let link_urls_key = MessageCacheKey {
+            show_link_urls: true,
+            ..key.clone()
+        };
+        assert!(isolated_cache.get(&link_urls_key).is_none());
         assert!(isolated_cache.get(&key).is_some());
         let weak = {
             let mut cache = message_cache().lock().unwrap();

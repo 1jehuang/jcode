@@ -188,6 +188,33 @@ fn side_panel_markdown_image_path_renders_as_image_placement() {
 }
 
 #[test]
+fn side_panel_svg_graph_renders_as_raster_image_placement() {
+    with_serialized_mermaid_state(|| {
+        clear_side_panel_render_caches();
+        let dir = tempfile::tempdir().expect("temporary graph directory");
+        let path = dir.path().join("graph.SVG");
+        std::fs::write(&path, r##"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="200"><rect width="300" height="200" fill="#ff0000"/></svg>"##)
+            .expect("write SVG graph");
+        let mut page = sample_mermaid_page("![Power draw](graph.SVG)".to_string());
+        page.file_path = dir.path().join("report.md").to_string_lossy().into_owned();
+        let rendered =
+            render_side_panel_markdown_cached(&page, Rect::new(0, 0, 40, 20), true, false);
+        assert_eq!(rendered.image_placements.len(), 1);
+        let (cached_path, width, height) =
+            mermaid::get_cached_png(rendered.image_placements[0].hash).expect("rasterized graph");
+        assert_eq!((width, height), (300, 200));
+        assert_ne!(cached_path, path);
+        let pixels = ::image::open(cached_path)
+            .expect("decodable raster")
+            .to_rgba8();
+        assert_eq!(pixels.get_pixel(150, 100).0, [255, 0, 0, 255]);
+
+        std::fs::write(&path, "not valid SVG").expect("replace with invalid SVG");
+        assert!(mermaid::register_markdown_image(&path).is_none());
+    });
+}
+
+#[test]
 fn side_panel_image_zoom_uses_scrollable_viewport_layout() {
     with_serialized_mermaid_state(|| {
         clear_side_panel_render_caches();

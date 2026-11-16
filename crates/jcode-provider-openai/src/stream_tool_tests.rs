@@ -306,7 +306,7 @@ fn unnamed_first_call_does_not_block_a_named_call() {
 }
 
 #[test]
-fn recovered_tool_call_uses_its_own_id_while_another_call_is_open() {
+fn tool_call_example_stays_text_while_a_native_call_is_open() {
     let (tx, mut stream) = stream();
     added(&tx, "a", "read");
     assert_start(&mut stream, "a", "read");
@@ -315,20 +315,35 @@ fn recovered_tool_call_uses_its_own_id_while_another_call_is_open() {
         json!({"type":"response.output_text.delta",
         "delta":"to=functions.ls {}"}),
     );
-    let StreamEvent::ToolUseStart { id, name } = next(&mut stream) else {
-        panic!("expected recovered tool start");
-    };
-    assert_eq!(name, "ls");
-    assert!(id.starts_with("fallback_text_call_"));
     assert!(
-        matches!(next(&mut stream), StreamEvent::ToolInputDeltaFor { id: actual, delta }
-        if actual == id && delta == "{}")
+        matches!(next(&mut stream), StreamEvent::TextDelta(text) if text == "to=functions.ls {}")
     );
-    assert!(matches!(next(&mut stream), StreamEvent::ToolUseEndFor { id: actual } if actual == id));
     done(&tx, "a", "{}");
     assert_delta(&mut stream, "a", "{}");
     assert_end(&mut stream, "a");
     idle(&mut stream);
+}
+
+#[test]
+fn fragmented_tool_call_example_is_preserved_verbatim() {
+    let text = "Example: `to=functions.read {\"file_path\":\"README.md\"}`. Nothing executes.";
+    for chunk_size in [1, 3, text.len()] {
+        let (tx, mut stream) = stream();
+        let mut rendered = String::new();
+        for chunk in text.as_bytes().chunks(chunk_size) {
+            let chunk = std::str::from_utf8(chunk).unwrap();
+            send(
+                &tx,
+                json!({"type":"response.output_text.delta", "delta":chunk}),
+            );
+            match next(&mut stream) {
+                StreamEvent::TextDelta(delta) => rendered.push_str(&delta),
+                other => panic!("text must never become a tool event: {other:?}"),
+            }
+            idle(&mut stream);
+        }
+        assert_eq!(rendered, text);
+    }
 }
 
 // Match the Copilot Responses shape: every event has a fresh item ID, while

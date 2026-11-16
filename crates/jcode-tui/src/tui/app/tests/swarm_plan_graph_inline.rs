@@ -1004,8 +1004,6 @@ fn assert_full_discard_clears_diagrams_and_plan_state(app: &mut App, path: &str)
     );
 }
 
-
-
 /// Margin-mode counterpart of path 1, the exact user-visible bug the fix
 /// targets: immediately after a local `/clear`, the Margin info widget
 /// (which draws `get_active_diagrams()[0]`, info_widget.rs) must no longer
@@ -1131,8 +1129,6 @@ fn test_recover_session_without_tools_leaves_stale_active_diagram_and_swarm_plan
 
     crate::tui::mermaid::clear_active_diagrams();
 }
-
-
 
 /// Path 5: Ctrl+L (all connection states) is a terminal-style clear: it
 /// appends a blank spacer and snaps to the bottom. The transcript, queue,
@@ -1689,6 +1685,7 @@ fn test_local_session_picker_switch_is_never_consumed_and_keeps_plan_graph_state
                     session_id: "session_target_456".to_string(),
                 },
                 external_path: None,
+                todo_statuses: Vec::new(),
             },
         ]),
     ));
@@ -1856,28 +1853,5 @@ fn test_recover_session_without_tools_clears_streaming_preview_diagram() {
 /// is the mirror point: an empty buffer means any surviving preview is stale,
 /// so the early return must clear the slot instead of leaking it
 /// (input.rs commit_pending_streaming_assistant_message).
-#[test]
-fn test_commit_with_emptied_stream_buffer_clears_streaming_preview_diagram() {
-    let _render_lock = scroll_render_test_lock();
-    let mut app = create_test_app();
-    let hash: u64 = 0x0005_17EA_11ED_0004;
-    seed_streaming_preview(&mut app, hash);
-
-    // Simulate a TextReplace-style rewrite that drops the fenced block the
-    // preview was rendered from, leaving the buffer empty while the preview
-    // slot is still occupied.
-    app.replace_streaming_text(String::new());
-    assert_eq!(
-        crate::tui::mermaid::get_active_diagrams()
-            .first()
-            .map(|d| d.hash),
-        Some(hash),
-        "precondition: replace_streaming_text alone leaves the preview live"
-    );
-
-    let committed = app.commit_pending_streaming_assistant_message();
-
-    assert!(!committed, "empty buffer commits nothing");
-    assert_streaming_preview_cleared(hash, "commit with emptied stream buffer");
-    crate::tui::mermaid::clear_active_diagrams();
-}
+#[path = "swarm_plan_graph_inline/streaming_commit.rs"]
+mod streaming_commit;

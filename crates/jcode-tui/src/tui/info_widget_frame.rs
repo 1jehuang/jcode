@@ -74,6 +74,23 @@ impl Framed {
         self
     }
 
+    /// Keep existing footer details, but never leave a visible frame's bottom
+    /// border empty when neither slot contains text.
+    pub(crate) fn footer_if_empty(mut self, line: impl Into<Line<'static>>) -> Self {
+        if ![&self.footer, &self.footer_right]
+            .into_iter()
+            .flatten()
+            .any(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| !span.content.trim().is_empty())
+            })
+        {
+            self.footer = Some(line.into());
+        }
+        self
+    }
+
     /// A widget whose body is empty would render as a bare border with text
     /// on it, which placement treats as border-only. Pull the headline back
     /// into the body so there is always at least one content row.
@@ -256,6 +273,38 @@ mod tests {
         let rows = render(&f, 30);
         assert!(rows[2].starts_with("╰ +3 more "), "{}", rows[2]);
         assert!(rows[2].ends_with(" ● edited ╯"), "{}", rows[2]);
+    }
+
+    #[test]
+    fn missing_or_blank_footers_receive_fallback_text() {
+        for framed in [
+            Framed::body(vec![Line::from("x")]),
+            Framed::body(vec![Line::from("x")])
+                .footer("  ")
+                .footer_right(""),
+        ] {
+            let framed = framed.footer_if_empty(dim("Working tree"));
+            for width in [8, 12, 30] {
+                let rows = render(&framed, width);
+                assert!(rows[2].contains("Wor"), "{}", rows[2]);
+                assert_eq!(UnicodeWidthStr::width(rows[2].as_str()), usize::from(width));
+            }
+        }
+    }
+
+    #[test]
+    fn fallback_preserves_existing_footer_slots() {
+        for framed in [
+            Framed::body(vec![Line::from("x")]).footer("+3 more"),
+            Framed::body(vec![Line::from("x")]).footer_right("● edited"),
+            Framed::body(vec![Line::from("x")])
+                .footer("+3 more")
+                .footer_right("● edited"),
+        ] {
+            let before = render(&framed, 30);
+            let after = render(&framed.footer_if_empty(dim("fallback")), 30);
+            assert_eq!(before, after);
+        }
     }
 
     #[test]

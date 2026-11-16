@@ -571,6 +571,7 @@ pub fn build_responses_input_with_logger(
 
     let mut ordered: Vec<Value> = Vec::with_capacity(normalized.len());
     let mut used_outputs: HashSet<String> = HashSet::new();
+    let mut relocated_outputs: HashSet<String> = HashSet::new();
     let mut injected_ordered = 0usize;
     let mut dropped_duplicate_outputs = 0usize;
     let mut rewritten_orphans = 0usize;
@@ -588,7 +589,9 @@ pub fn build_responses_input_with_logger(
             if let Some(call_id) = call_id {
                 if let Some(output_item) = output_map.get(&call_id) {
                     ordered.push(output_item.clone());
-                    used_outputs.insert(call_id);
+                    if used_outputs.insert(call_id.clone()) {
+                        relocated_outputs.insert(call_id);
+                    }
                 } else {
                     injected_ordered += 1;
                     ordered.push(serde_json::json!({
@@ -606,7 +609,11 @@ pub fn build_responses_input_with_logger(
             if let Some(call_id) = item.get("call_id").and_then(|v| v.as_str())
                 && used_outputs.contains(call_id)
             {
-                dropped_duplicate_outputs += 1;
+                // The first original was already emitted next to its call.
+                // Only additional originals are actual duplicate outputs.
+                if !relocated_outputs.remove(call_id) {
+                    dropped_duplicate_outputs += 1;
+                }
                 continue;
             }
             if let Some(message_item) = orphan_tool_output_to_user_message(&item, &missing_output) {
@@ -669,6 +676,83 @@ mod tests {
     use super::*;
     use jcode_message_types::ToolDefinition;
     use serde_json::json;
+
+    fn tool_call(id: &str) -> ChatMessage {
+        ChatMessage {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: id.into(),
+                name: "read".into(),
+                input: json!({}),
+                thought_signature: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn relocated_outputs_are_not_logged_as_duplicates() {
+        for messages in [
+            vec![tool_call("a"), ChatMessage::tool_result("a", "real", false)],
+            vec![tool_call("a")],
+            vec![ChatMessage::tool_result("a", "real", false), tool_call("a")],
+            vec![
+                tool_call("a"),
+                tool_call("b"),
+                ChatMessage::tool_result("b", "second", false),
+                ChatMessage::tool_result("a", "first", false),
+            ],
+        ] {
+            let mut logs = Vec::new();
+            let items = build_responses_input_with_logger(&messages, |_, message| {
+                logs.push(message.to_string());
+            });
+            assert!(
+                !logs.iter().any(|log| log.contains("duplicate tool output")),
+                "{logs:?}"
+            );
+            let calls = messages
+                .iter()
+                .filter(|msg| msg.role == Role::Assistant)
+                .count();
+            assert_eq!(items.len(), calls * 2);
+            for pair in items.chunks_exact(2) {
+                assert_eq!(pair[0]["type"], "function_call");
+                assert_eq!(pair[1]["type"], "function_call_output");
+                assert_eq!(pair[0]["call_id"], pair[1]["call_id"]);
+            }
+        }
+    }
+
+    #[test]
+    fn actual_duplicate_outputs_still_log_and_preserve_selected_output() {
+        // Distinct persisted IDs can collide after OpenAI ID sanitization.
+        let messages = vec![
+            tool_call("a.b"),
+            ChatMessage::tool_result("a.b", "first", false),
+            tool_call("a_b"),
+            ChatMessage::tool_result("a_b", "second", false),
+        ];
+        let mut logs = Vec::new();
+        let items = build_responses_input_with_logger(&messages, |_, message| {
+            logs.push(message.to_string());
+        });
+        assert!(
+            logs.iter()
+                .any(|log| log == "[openai] Dropped 1 duplicate tool output(s) during re-ordering"),
+            "{logs:?}"
+        );
+        assert_eq!(
+            items,
+            vec![
+                json!({"type":"function_call", "name":"read", "arguments":"{}", "call_id":"a_b"}),
+                json!({"type":"function_call_output", "call_id":"a_b", "output":"first"}),
+                json!({"type":"function_call", "name":"read", "arguments":"{}", "call_id":"a_b"}),
+                json!({"type":"function_call_output", "call_id":"a_b", "output":"first"}),
+            ]
+        );
+    }
 
     #[test]
     fn build_tools_flattens_allof_schema_for_openai() {

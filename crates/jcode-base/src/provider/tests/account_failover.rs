@@ -93,6 +93,7 @@ fn account_routing_fixture(
             .filter(|account| !labels.contains(&account.label.as_str()))
             .map(|account| format!("openai:{}", account.label))
             .collect(),
+        ..Default::default()
     }
     .save()
     .expect("save fixture pool");
@@ -716,6 +717,8 @@ fn pool_order_can_choose_explicit_api_before_same_vendor_oauth() {
             );
             let mut pool = crate::auth::account_pool::AccountPool::load();
             pool.members.insert(1, "openai-api".into());
+            // Explicit priority may opt a metered identity ahead of subscriptions.
+            pool.set_priority("openai-api", 0);
             pool.save().unwrap();
             let error = provider
                 .complete(&[], &[], "system", None)

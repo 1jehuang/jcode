@@ -219,6 +219,30 @@ fn auto_poke_feature_defaults_on_and_parses_false() {
 }
 
 #[test]
+fn todo_gate_diagnostics_defaults_off_and_requires_explicit_opt_in() {
+    assert!(!Config::default().features.todo_gate_diagnostics);
+    let omitted: Config = toml::from_str("[features]\nauto_poke = true\n").unwrap();
+    assert!(!omitted.features.todo_gate_diagnostics);
+    for enabled in [true, false] {
+        let cfg: Config =
+            toml::from_str(&format!("[features]\ntodo_gate_diagnostics = {enabled}\n")).unwrap();
+        assert_eq!(cfg.features.todo_gate_diagnostics, enabled);
+    }
+}
+
+#[test]
+fn todo_gate_digest_defaults_off_and_requires_explicit_opt_in() {
+    assert!(!Config::default().features.todo_gate_digest);
+    let omitted: Config = toml::from_str("[features]\nauto_poke = true\n").unwrap();
+    assert!(!omitted.features.todo_gate_digest);
+    let enabled: Config = toml::from_str("[features]\ntodo_gate_digest = true\n").unwrap();
+    assert!(enabled.features.todo_gate_digest);
+    assert!(enabled.features.auto_poke);
+    let disabled: Config = toml::from_str("[features]\ntodo_gate_digest = false\n").unwrap();
+    assert!(!disabled.features.todo_gate_digest);
+}
+
+#[test]
 fn auto_poke_toggle_key_defaults_parses_and_reports_disabled() {
     assert_eq!(Config::default().keybindings.auto_poke_toggle, "ctrl+p");
 
@@ -249,85 +273,8 @@ fn auto_poke_environment_override_uses_standard_boolean_values() {
     restore_env_var("JCODE_AUTO_POKE", previous);
 }
 
-#[test]
-fn latex_rendering_defaults_to_image_and_parses_all_modes() {
-    assert_eq!(
-        Config::default().display.latex_rendering,
-        LatexRenderingMode::Image
-    );
-    for (value, expected) in [
-        ("none", LatexRenderingMode::None),
-        ("unicode", LatexRenderingMode::Unicode),
-        ("image", LatexRenderingMode::Image),
-    ] {
-        let cfg: Config = toml::from_str(&format!("[display]\nlatex_rendering = \"{value}\"\n"))
-            .expect("latex rendering mode should parse");
-        assert_eq!(cfg.display.latex_rendering, expected);
-        assert_eq!(LatexRenderingMode::parse(expected.as_str()), Some(expected));
-    }
-    // An unknown mode degrades to the default instead of failing the whole
-    // config parse, which used to silently discard every other setting in
-    // config.toml (issue #689).
-    let cfg: Config = toml::from_str("[display]\ncentered = true\nlatex_rendering = \"canvas\"\n")
-        .expect("an unknown latex mode must not invalidate the config");
-    assert_eq!(cfg.display.latex_rendering, LatexRenderingMode::Image);
-    assert!(cfg.display.centered, "unrelated settings must survive");
-}
-
-#[test]
-fn latex_rendering_environment_override_accepts_aliases() {
-    let _guard = crate::storage::lock_test_env();
-    let previous = std::env::var_os("JCODE_LATEX_RENDERING");
-    crate::env::set_var("JCODE_LATEX_RENDERING", "png");
-    let mut cfg = Config::default();
-    cfg.apply_env_overrides();
-    assert_eq!(cfg.display.latex_rendering, LatexRenderingMode::Image);
-    restore_env_var("JCODE_LATEX_RENDERING", previous);
-}
-
-/// The /latex command persists through set_latex_rendering, which is a
-/// read-modify-write over the real config.toml. Pin the whole roundtrip at
-/// this layer: write, then parse the file back and confirm the mode and an
-/// unrelated sibling setting both survive, so a future refactor cannot make
-/// the setter rewrite the file without keeping other keys.
-#[test]
-fn set_latex_rendering_roundtrips_through_config_toml() {
-    let _guard = crate::storage::lock_test_env();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let previous_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
-    let previous_latex = std::env::var_os("JCODE_LATEX_RENDERING");
-    crate::env::remove_var("JCODE_LATEX_RENDERING");
-
-    // Seed a non-default sibling key so the test can catch a rewrite that
-    // drops it.
-    let seed = temp.path().join("config.toml");
-    std::fs::write(
-        &seed,
-        "[display]\ncentered = false\nlatex_rendering = \"unicode\"\n",
-    )
-    .expect("seed config");
-
-    Config::set_latex_rendering(LatexRenderingMode::None).expect("save mode");
-
-    let raw = std::fs::read_to_string(&seed).expect("read config back");
-    assert!(
-        raw.contains("latex_rendering = \"none\""),
-        "mode must be persisted, got: {raw}"
-    );
-    assert!(
-        raw.contains("centered = false"),
-        "unrelated display keys must survive the rewrite, got: {raw}"
-    );
-
-    let reloaded = Config::load_strict().expect("config parses after the write");
-    assert_eq!(reloaded.display.latex_rendering, LatexRenderingMode::None);
-    assert!(!reloaded.display.centered);
-
-    restore_env_var("JCODE_LATEX_RENDERING", previous_latex);
-    restore_env_var("JCODE_HOME", previous_home);
-    Config::invalidate_cache();
-}
+#[path = "config_latex_tests.rs"]
+mod latex;
 
 #[test]
 fn swarm_max_concurrent_agents_parses_and_allows_zero_for_unbounded() {
@@ -405,6 +352,66 @@ fn test_env_override_swarm_model() {
     assert_eq!(cfg.agents.swarm_model, None);
 
     restore_env_var("JCODE_SWARM_MODEL", prev);
+}
+
+#[test]
+fn swarm_model_selection_defaults_off_even_with_an_allowlist() {
+    let agents = Config::default().agents;
+    assert!(!agents.swarm_model_selection);
+    assert!(agents.swarm_model_allowlist.is_empty());
+    assert!(agents.validate_swarm_model_request(None).is_ok());
+    for model in [
+        "inherit",
+        "coordinator",
+        "",
+        "  ",
+        "claude-api:claude-opus-4-8",
+    ] {
+        assert!(agents.validate_swarm_model_request(Some(model)).is_err());
+    }
+    let cfg: Config =
+        toml::from_str("[agents]\nswarm_model_allowlist = [\"claude-api:claude-opus-4-8\"]\n")
+            .unwrap();
+    assert!(
+        cfg.agents
+            .validate_swarm_model_request(Some("claude-api:claude-opus-4-8"))
+            .is_err()
+    );
+}
+
+#[test]
+fn swarm_model_selection_requires_opt_in_and_exact_route_match() {
+    let cfg: Config = toml::from_str(
+        "[agents]\nswarm_model_selection = true\nswarm_model_allowlist = [\"claude:claude-opus-4-8\"]\n"
+    ).unwrap();
+    assert!(cfg.agents.validate_swarm_model_request(None).is_ok());
+    assert!(
+        cfg.agents
+            .validate_swarm_model_request(Some("claude:claude-opus-4-8"))
+            .is_ok()
+    );
+    for model in [
+        "claude-api:claude-opus-4-8",
+        "claude-opus-4-8",
+        "Claude:claude-opus-4-8",
+        "claude:claude-opus-4-8 ",
+        "inherit",
+        "",
+        "  ",
+    ] {
+        assert!(
+            cfg.agents
+                .validate_swarm_model_request(Some(model))
+                .is_err(),
+            "{model:?}"
+        );
+    }
+    let cfg: Config = toml::from_str("[agents]\nswarm_model_selection = true\n").unwrap();
+    assert!(
+        cfg.agents
+            .validate_swarm_model_request(Some("claude:claude-opus-4-8"))
+            .is_err()
+    );
 }
 
 #[test]
@@ -1225,120 +1232,8 @@ fn test_env_override_diff_mode_full_inline() {
     }
 }
 
-#[test]
-fn test_env_override_trusted_external_auth_splits_source_and_path_entries() {
-    let _guard = crate::storage::lock_test_env();
-    let prev = std::env::var_os("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES");
-    crate::env::set_var(
-        "JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES",
-        "legacy_source,claude_code_credentials|/tmp/auth.json",
-    );
-
-    let mut cfg = Config::default();
-    cfg.apply_env_overrides();
-
-    assert_eq!(cfg.auth.trusted_external_sources, vec!["legacy_source"]);
-    assert_eq!(
-        cfg.auth.trusted_external_source_paths,
-        vec!["claude_code_credentials|/tmp/auth.json"]
-    );
-
-    if let Some(prev) = prev {
-        crate::env::set_var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES", prev);
-    } else {
-        crate::env::remove_var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES");
-    }
-}
-
-#[test]
-fn test_external_auth_source_allowed_for_path_matches_saved_entry() {
-    let _guard = crate::storage::lock_test_env();
-    let dir = tempfile::TempDir::new().expect("tempdir");
-    let path = dir.path().join("auth.json");
-    std::fs::write(&path, "{}\n").expect("write auth file");
-
-    let canonical = std::fs::canonicalize(&path).expect("canonical path");
-    let mut cfg = Config::default();
-    cfg.auth.trusted_external_source_paths = vec![format!(
-        "test_source|{}",
-        canonical.to_string_lossy().to_ascii_lowercase()
-    )];
-
-    assert!(cfg.external_auth_source_allowed_for_path_config("test_source", &path));
-}
-
-#[test]
-fn test_external_auth_source_allowed_for_path_ignores_broad_legacy_entry() {
-    let _guard = crate::storage::lock_test_env();
-    let dir = tempfile::TempDir::new().expect("tempdir");
-    let path = dir.path().join("auth.json");
-    std::fs::write(&path, "{}\n").expect("write auth file");
-
-    let mut cfg = Config::default();
-    cfg.auth.trusted_external_sources = vec!["test_source".to_string()];
-
-    assert!(!cfg.external_auth_source_allowed_for_path_config("test_source", &path));
-}
-
-/// Regression test for issue #349: a removed/unknown `update_channel` value
-/// (older configs could contain `"manual"`) must not fail the whole config
-/// parse. A hard parse failure during the reload handoff left the reload
-/// marker stuck in `starting` and clients re-requested the reload forever.
-#[test]
-fn unknown_update_channel_value_falls_back_to_stable_instead_of_failing_parse() {
-    let cfg: Config = toml::from_str("[features]\nupdate_channel = \"manual\"\n")
-        .expect("unknown update_channel must not fail config parse");
-    assert_eq!(
-        cfg.features.update_channel,
-        super::UpdateChannel::Stable,
-        "unknown channel should fall back to the default"
-    );
-
-    // Other settings in the same config must survive the fallback.
-    let cfg: Config = toml::from_str(
-        "[features]\nupdate_channel = \"manual\"\nmemory = false\n\n[display]\ncentered = true\n",
-    )
-    .expect("config with unknown update_channel should parse");
-    assert_eq!(cfg.features.update_channel, super::UpdateChannel::Stable);
-    assert!(!cfg.features.memory);
-    assert!(cfg.display.centered);
-}
-
-#[test]
-fn known_update_channel_values_still_parse() {
-    let cfg: Config = toml::from_str("[features]\nupdate_channel = \"main\"\n")
-        .expect("main update_channel should parse");
-    assert_eq!(cfg.features.update_channel, super::UpdateChannel::Main);
-
-    let cfg: Config = toml::from_str("[features]\nupdate_channel = \"stable\"\n")
-        .expect("stable update_channel should parse");
-    assert_eq!(cfg.features.update_channel, super::UpdateChannel::Stable);
-}
-
-#[test]
-fn update_channel_parse_accepts_known_aliases_and_rejects_unknown() {
-    use super::UpdateChannel;
-    assert_eq!(UpdateChannel::parse("stable"), Some(UpdateChannel::Stable));
-    assert_eq!(UpdateChannel::parse("release"), Some(UpdateChannel::Stable));
-    assert_eq!(UpdateChannel::parse("main"), Some(UpdateChannel::Main));
-    assert_eq!(UpdateChannel::parse("nightly"), Some(UpdateChannel::Main));
-    assert_eq!(UpdateChannel::parse("edge"), Some(UpdateChannel::Main));
-    assert_eq!(UpdateChannel::parse(" Main "), Some(UpdateChannel::Main));
-    assert_eq!(UpdateChannel::parse("manual"), None);
-    assert_eq!(UpdateChannel::parse(""), None);
-}
-
-impl Config {
-    fn external_auth_source_allowed_for_path_config(&self, source_id: &str, path: &Path) -> bool {
-        let Ok(entry) = Self::trusted_external_auth_path_entry(source_id, path) else {
-            return false;
-        };
-        self.auth
-            .trusted_external_source_paths
-            .iter()
-            .any(|value| value.trim().eq_ignore_ascii_case(&entry))
-    }
-}
+#[path = "config_preference_tests.rs"]
+mod preferences;
 
 #[test]
 fn populate_context_limits_from_config_ref_seeds_global_cache() {
@@ -1623,12 +1518,40 @@ fn sponsors_optout_survives_config_save_and_reload() {
             );
             let saved = std::fs::read_to_string(&path).expect("read saved config");
             let saved: toml::Value = toml::from_str(&saved).expect("parse saved config");
-            assert_eq!(saved["sponsors"]["enabled"].as_bool(), Some(false));
+            assert_eq!(
+                saved
+                    .get("sponsors")
+                    .and_then(|s| s.get("enabled"))
+                    .and_then(toml::Value::as_bool)
+                    .unwrap_or(false),
+                false
+            );
         }
     }
 
     restore_env_var("JCODE_HOME", prev_home);
     Config::invalidate_cache();
+}
+
+#[test]
+fn integration_discovery_is_opt_in() {
+    assert!(!Config::default().sponsors.enabled);
+    for raw in [
+        "",
+        "[sponsors]\n",
+        "[sponsors]\nendpoint = 'https://example.com'\n",
+    ] {
+        let config: Config = toml::from_str(raw).expect("parse config");
+        assert!(!config.sponsors.enabled, "must be disabled for {raw:?}");
+    }
+    let config: Config = toml::from_str("[sponsors]\nenabled = true\n").expect("parse opt-in");
+    assert!(config.sponsors.enabled);
+    let rendered = toml::to_string_pretty(&config).expect("serialize opt-in");
+    let reloaded: Config = toml::from_str(&rendered).expect("reload opt-in");
+    assert!(
+        reloaded.sponsors.enabled,
+        "explicit opt-in must survive saving"
+    );
 }
 
 #[test]
@@ -1782,6 +1705,9 @@ fn cli_config_save_round_trips_desktop_tables() {
     Config::invalidate_cache();
 }
 
+#[path = "config_tests/default_provider.rs"]
+mod default_provider;
+
 /// `display.overscroll_status` was removed; configs that still set it (users
 /// had `"on"` written by older versions) must load without losing settings.
 #[test]
@@ -1792,4 +1718,43 @@ fn removed_overscroll_status_key_still_loads_config() {
     .expect("legacy key must not break config");
     assert!(config.display.centered);
     assert_eq!(config.display.usage_display, "used");
+}
+#[test]
+fn tool_auto_background_timeout_configuration() {
+    assert_eq!(ToolConfig::default().auto_background_timeout_ms, 3_000);
+    for contents in ["", "[tools]\n"] {
+        let config: Config = toml::from_str(contents).unwrap();
+        assert_eq!(config.tools.auto_background_timeout_ms, 3_000);
+    }
+    for timeout in [0_u64, 1, 1250, 60_000, u64::MAX / 2] {
+        let config: Config = toml::from_str(&format!(
+            "[tools]\nauto_background_timeout_ms = {timeout}\n"
+        ))
+        .unwrap();
+        assert_eq!(config.tools.auto_background_timeout_ms, timeout);
+        let roundtrip: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(roundtrip.tools.auto_background_timeout_ms, timeout);
+    }
+    for invalid in ["-1", "1.5", "\"3000\"", "true"] {
+        assert!(
+            toml::from_str::<Config>(&format!(
+                "[tools]\nauto_background_timeout_ms = {invalid}\n"
+            ))
+            .is_err()
+        );
+    }
+}
+#[test]
+fn browser_handoff_defaults_off_and_roundtrips() {
+    for contents in ["", "[tools]\n"] {
+        let config: Config = toml::from_str(contents).unwrap();
+        assert!(!config.tools.browser_handoff);
+    }
+    for enabled in [false, true] {
+        let config: Config =
+            toml::from_str(&format!("[tools]\nbrowser_handoff = {enabled}\n")).unwrap();
+        assert_eq!(config.tools.browser_handoff, enabled);
+        let restored: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored.tools.browser_handoff, enabled);
+    }
 }

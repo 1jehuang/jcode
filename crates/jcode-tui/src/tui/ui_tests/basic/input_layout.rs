@@ -366,7 +366,7 @@ fn test_copy_badge_reserves_right_margin_for_info_widgets() {
     let _env = crate::storage::lock_test_env();
     let _lock = viewport_snapshot_test_lock();
     // Construct the rendered text independently of the reservation helper.
-    let shortcut = format!(" [{}] [⇧] [A]", viewport::copy_badge_alt_label());
+    let shortcut = format!(" [{}⇧A]", viewport::copy_badge_alt_label());
     let shortcut_width = unicode_width::UnicodeWidthStr::width(shortcut.as_str());
     let mut margins = info_widget::Margins {
         right_widths: vec![30, 30, 30],
@@ -422,7 +422,7 @@ fn test_expand_badge_reserves_right_margin_for_info_widgets() {
 fn test_copy_badge_truncates_full_width_line_before_appending_shortcut() {
     let _env = crate::storage::lock_test_env();
     let _lock = viewport_snapshot_test_lock();
-    let shortcut = format!(" [{}] [⇧] [A]", viewport::copy_badge_alt_label());
+    let shortcut = format!(" [{}⇧A]", viewport::copy_badge_alt_label());
     let shortcut_width = unicode_width::UnicodeWidthStr::width(shortcut.as_str());
     let copy_badge_ui = crate::tui::app::CopyBadgeUiState::default();
     let reserved = copy_badge_reserved_width('a', &copy_badge_ui, Instant::now());
@@ -446,7 +446,7 @@ fn test_copy_badge_line_prefers_row_with_free_width_over_truncation() {
     let full = Line::from("│ ".to_string() + &"x".repeat(60));
     let short = Line::from("│ short".to_string());
     let visible_lines = vec![full, short];
-    let reserved = 14usize; // " [Alt] [⇧] [S]"
+    let reserved = 8usize; // " [Alt⇧S]"
 
     let picked = pick_copy_badge_line(0, 0, 2, 0, 2, &visible_lines, 62, reserved);
     assert_eq!(picked, 1, "badge should move to the line with free width");

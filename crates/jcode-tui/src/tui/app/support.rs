@@ -101,7 +101,10 @@ fn gather_diagnostics(app: &App) -> SupportDiagnostics {
 
     // Account identity is only present when a jcode subscription is
     // configured; skip gracefully otherwise.
-    let has_subscription = cat::has_credentials();
+    // An SSH session must never attach the laptop subscription identity to
+    // diagnostics about its remote runtime. Client version/OS remain useful.
+    let ssh_remote = crate::tui::is_ssh_remote();
+    let has_subscription = !ssh_remote && cat::has_credentials();
     let (account_id, account_email, tier) = if has_subscription {
         (
             load_env_value_from_env_or_config(cat::JCODE_ACCOUNT_ID_ENV, cat::JCODE_ENV_FILE),
@@ -132,7 +135,11 @@ fn gather_diagnostics(app: &App) -> SupportDiagnostics {
         build_channel: build_channel(),
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
-        telemetry_id: read_telemetry_id(),
+        telemetry_id: if ssh_remote {
+            None
+        } else {
+            read_telemetry_id()
+        },
         account_id,
         account_email,
         tier,
@@ -148,7 +155,13 @@ pub(super) fn handle_support_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     let diagnostics = gather_diagnostics(app);
-    let body = build_support_body(&diagnostics);
+    let mut body = build_support_body(&diagnostics);
+    if let Some(host) = crate::tui::ssh_remote_host() {
+        body.push_str(&format!(
+            "SSH runtime: {host}\nVersion and OS above describe the terminal client. \
+             Remote account identity is omitted.\n"
+        ));
+    }
     let mailto = build_mailto_url(&body);
     let opened = super::helpers::open_path_or_url_detached(&mailto).is_ok();
 
@@ -191,6 +204,21 @@ mod tests {
             model: "claude-opus-4-8".to_string(),
             last_error: Some("request timed out".to_string()),
         }
+    }
+
+    #[test]
+    fn ssh_support_omits_laptop_identity() {
+        if crate::tui::app::commands_dispatch::ssh_test_runs_in_child(
+            "ssh_support_omits_laptop_identity",
+        ) {
+            return;
+        }
+        let app = crate::tui::app::tests::create_test_app();
+        let diagnostics = gather_diagnostics(&app);
+        assert!(diagnostics.account_id.is_none());
+        assert!(diagnostics.account_email.is_none());
+        assert!(diagnostics.tier.is_none());
+        assert!(diagnostics.telemetry_id.is_none());
     }
 
     #[test]

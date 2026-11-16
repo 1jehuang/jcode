@@ -54,9 +54,11 @@ class GatewayState:
 def scenario_messages(name):
     """Pre-seeded transcripts for the layout matrix. Each is a deterministic
     content state so UI efficiency can be measured across the real range."""
+    # Every real jcode tool schema carries a required `intent` (see
+    # jcode-tool-core::ensure_intent_in_schema), so the fixture includes it.
     bash_tool = {
         "id": "t1", "name": "bash",
-        "input": '{"command": "echo hello"}',
+        "input": '{"command": "echo hello", "intent": "Check the shell responds"}',
         "output": "hello\n", "error": None,
     }
     if name == "empty":
@@ -205,7 +207,10 @@ async def stream_response(ws, state, user_text, req_id):
 
     tool_id = f"tool-{req_id}"
     await send_event(ws, {"type": "tool_start", "id": tool_id, "name": "bash"})
-    for piece in ['{"command":', ' "echo ', 'hello"}']:
+    for piece in [
+        '{"command":', ' "echo ', 'hello", ', '"intent": "Check ',
+        'the shell responds"}',
+    ]:
         await send_event(ws, {"type": "tool_input", "delta": piece})
         await asyncio.sleep(0.03)
     await send_event(ws, {"type": "tool_exec", "id": tool_id, "name": "bash"})
@@ -235,7 +240,7 @@ async def stream_response(ws, state, user_text, req_id):
         "role": "assistant", "content": answer,
         "tool_data": {
             "id": tool_id, "name": "bash",
-            "input": '{"command": "echo hello"}',
+            "input": '{"command": "echo hello", "intent": "Check the shell responds"}',
             "output": "hello\n", "error": None,
         },
     })

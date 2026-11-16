@@ -66,6 +66,76 @@ fn cache_diagnostic_fixture() -> (App, PendingKvCacheRequest) {
 }
 
 #[test]
+fn kv_cache_prefix_tag_requires_positive_complete_evidence() {
+    for change in [
+        "none",
+        "system",
+        "tools",
+        "tool_count",
+        "message",
+        "missing",
+        "partial",
+        "missing_system",
+        "missing_tools",
+    ] {
+        let (mut app, mut request) = cache_diagnostic_fixture();
+        let current = request.signature.as_mut().unwrap();
+        match change {
+            "system" => current.system_static_hash += 1,
+            "tools" => current.tools_hash += 1,
+            "tool_count" => current.tool_count += 1,
+            "message" => current.message_hashes[0] += 1,
+            "missing" => request.baseline.as_mut().unwrap().signature = None,
+            "partial" => current.message_hashes.clear(),
+            "missing_system" => {
+                current.system_static_hash = 0;
+                request
+                    .baseline
+                    .as_mut()
+                    .unwrap()
+                    .signature
+                    .as_mut()
+                    .unwrap()
+                    .system_static_hash = 0;
+            }
+            "missing_tools" => {
+                current.tools_hash = 0;
+                request
+                    .baseline
+                    .as_mut()
+                    .unwrap()
+                    .signature
+                    .as_mut()
+                    .unwrap()
+                    .tools_hash = 0;
+            }
+            _ => {}
+        }
+        assert_eq!(
+            App::kv_cache_checked_prefix_unchanged(&request),
+            change == "none",
+            "{change}"
+        );
+        for reason in [
+            KvCacheMissReason::LowRead,
+            KvCacheMissReason::ZeroRead,
+            KvCacheMissReason::HarnessToolsChanged,
+        ] {
+            let completed = request.baseline.as_ref().unwrap().completed_at;
+            app.maybe_push_kv_cache_miss_notice(
+                &request, reason, 30_000, 20_000, 50_000, completed,
+            );
+            let notice = &app.display_messages().last().expect("notice").content;
+            assert_eq!(
+                notice.contains("[prefix unchanged]"),
+                change == "none" && reason != KvCacheMissReason::HarnessToolsChanged,
+                "{change}: {notice}"
+            );
+        }
+    }
+}
+
+#[test]
 fn kv_cache_diagnostics_show_idle_gap_not_generation_time() {
     let (app, request) = cache_diagnostic_fixture();
     let fields = app.kv_cache_diagnostic_fields(&request, 52_000);

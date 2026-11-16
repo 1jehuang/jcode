@@ -21,11 +21,204 @@ fn input_pane_screen_points(
     points
 }
 
-fn drag_copy(
-    app: &mut App,
-    start: (u16, u16),
-    end: (u16, u16),
-) -> String {
+#[test]
+fn test_input_composer_held_edge_autoscrolls_both_directions() {
+    let _render_lock = scroll_render_test_lock();
+    for upward in [false, true] {
+        for soft_wrap in [false, true] {
+            let mut app = create_test_app();
+            app.input = if soft_wrap {
+                "界abc defghijklmnopqrstuvwxyz ".repeat(80)
+            } else {
+                (0..60)
+                    .map(|n| format!("line {n:02} 界"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            app.cursor_pos = if upward { app.input.len() } else { 0 };
+            let caret = app.cursor_pos;
+            let chat_scroll = app.scroll_offset();
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 24)).unwrap();
+            render_and_snap(&app, &mut terminal);
+            let points = input_pane_screen_points(40, 24);
+            let start = if upward {
+                points.last().unwrap()
+            } else {
+                points.first().unwrap()
+            };
+            let edge = if upward {
+                points.first().unwrap()
+            } else {
+                points.last().unwrap()
+            };
+            let event = |kind, col, row| MouseEvent {
+                kind,
+                column: col,
+                row,
+                modifiers: KeyModifiers::empty(),
+            };
+            app.handle_copy_selection_mouse_with(
+                event(MouseEventKind::Down(MouseButton::Left), start.0, start.1),
+                |_| true,
+            );
+            app.handle_copy_selection_mouse_with(
+                event(MouseEventKind::Drag(MouseButton::Left), edge.0, edge.1),
+                |_| true,
+            );
+            assert!(
+                crate::tui::TuiState::copy_selection_edge_autoscroll_active(&app),
+                "first edge motion must arm continuous scrolling"
+            );
+            render_and_snap(&app, &mut terminal);
+            let initial_endpoint = app.copy_selection_cursor.unwrap().abs_line;
+            for _ in 0..crate::tui::ui::input_pane_line_count().unwrap() {
+                if !app.progress_copy_selection_edge_autoscroll() {
+                    break;
+                }
+                render_and_snap(&app, &mut terminal);
+            }
+            let endpoint = app.copy_selection_cursor.unwrap();
+            let last = crate::tui::ui::input_pane_line_count().unwrap() - 1;
+            assert_eq!(
+                endpoint.abs_line,
+                if upward { 0 } else { last },
+                "upward={upward}, soft_wrap={soft_wrap}"
+            );
+            assert_ne!(
+                endpoint.abs_line, initial_endpoint,
+                "held pointer must extend past the old viewport"
+            );
+            assert_eq!(
+                app.cursor_pos, caret,
+                "selection must not move the editing caret"
+            );
+            assert_eq!(app.scroll_offset(), chat_scroll);
+            let visible = input_pane_screen_points(40, 24);
+            assert!(
+                visible
+                    .iter()
+                    .any(|(_, _, p)| p.abs_line == endpoint.abs_line),
+                "endpoint must actually be revealed"
+            );
+            let mut copied = String::new();
+            app.handle_copy_selection_mouse_with(
+                event(MouseEventKind::Up(MouseButton::Left), edge.0, edge.1),
+                |text| {
+                    copied = text.to_owned();
+                    true
+                },
+            );
+            assert_eq!(
+                copied, app.input,
+                "all originally invisible text must be copied without wrap artifacts"
+            );
+            assert!(!app.progress_copy_selection_edge_autoscroll());
+            assert!(!crate::tui::TuiState::copy_selection_edge_autoscroll_active(&app));
+        }
+    }
+}
+
+#[test]
+fn test_input_composer_edge_click_jitter_does_not_scroll() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.input = (0..60)
+        .map(|n| format!("line {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    app.cursor_pos = app.input.len();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    render_and_snap(&app, &mut terminal);
+    let (col, row, point) = input_pane_screen_points(80, 24)[0];
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Drag(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        app.handle_mouse_event(MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        });
+    }
+    assert!(!app.copy_selection_dragging);
+    assert!(!app.progress_copy_selection_edge_autoscroll());
+    let expected = app
+        .input
+        .split_inclusive('\n')
+        .take(point.abs_line)
+        .map(str::len)
+        .sum::<usize>();
+    assert_eq!(
+        app.cursor_pos, expected,
+        "edge click must retain the existing caret mapping"
+    );
+}
+
+#[test]
+fn test_input_composer_drag_leaves_edge_reverses_and_cancels() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.input = (0..60)
+        .map(|n| format!("line {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    app.cursor_pos = 0;
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    render_and_snap(&app, &mut terminal);
+    let points = input_pane_screen_points(80, 24);
+    let first = points.first().unwrap();
+    let last = points.last().unwrap();
+    let event = |kind, col, row| MouseEvent {
+        kind,
+        column: col,
+        row,
+        modifiers: KeyModifiers::empty(),
+    };
+    app.handle_copy_selection_mouse_with(
+        event(MouseEventKind::Down(MouseButton::Left), first.0, first.1),
+        |_| true,
+    );
+    // A single motion can overshoot the pane entirely.
+    app.handle_copy_selection_mouse_with(
+        event(MouseEventKind::Drag(MouseButton::Left), last.0, last.1 + 1),
+        |_| true,
+    );
+    render_and_snap(&app, &mut terminal);
+    assert!(app.progress_copy_selection_edge_autoscroll());
+    render_and_snap(&app, &mut terminal);
+    let before = app.input_selection_scroll.unwrap();
+    assert!(before > 0);
+    let middle = (first.1 + last.1) / 2;
+    app.handle_copy_selection_mouse_with(
+        event(MouseEventKind::Drag(MouseButton::Left), first.0, middle),
+        |_| true,
+    );
+    assert!(!app.progress_copy_selection_edge_autoscroll());
+    render_and_snap(&app, &mut terminal);
+    assert_eq!(
+        app.input_selection_scroll,
+        Some(before),
+        "leaving the edge must freeze the drag viewport"
+    );
+    app.handle_copy_selection_mouse_with(
+        event(MouseEventKind::Drag(MouseButton::Left), first.0, first.1),
+        |_| true,
+    );
+    render_and_snap(&app, &mut terminal);
+    assert!(
+        app.input_selection_scroll.unwrap() < before,
+        "reversal must scroll upward"
+    );
+    app.exit_copy_selection_mode();
+    assert_eq!(app.input_selection_scroll, None);
+    assert!(!app.progress_copy_selection_edge_autoscroll());
+    assert_eq!(app.cursor_pos, 0);
+}
+
+fn drag_copy(app: &mut App, start: (u16, u16), end: (u16, u16)) -> String {
     let copied = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let copied_for_closure = copied.clone();
     app.handle_copy_selection_mouse_with(
@@ -58,7 +251,7 @@ fn drag_copy(
             true
         },
     );
-    
+
     copied.lock().unwrap().clone()
 }
 
@@ -99,7 +292,10 @@ fn test_input_composer_drag_selects_and_copies_typed_text() {
 
     let copied = drag_copy(&mut app, start, end);
     assert_eq!(copied, "select this draft");
-    assert_eq!(app.status_notice(), Some("Copied selection · highlight remains visible".to_string()));
+    assert_eq!(
+        app.status_notice(),
+        Some("Copied selection · highlight remains visible".to_string())
+    );
     // The highlight stays visible after copying (c7afd6620), but the drag ends.
     assert!(!app.copy_selection_mode);
     assert!(!app.copy_selection_dragging);

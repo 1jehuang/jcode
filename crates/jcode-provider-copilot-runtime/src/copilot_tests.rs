@@ -1,5 +1,44 @@
 use super::*;
 
+#[test]
+fn forced_refresh_with_pinned_model_reports_failure_and_keeps_cache() {
+    let _lock = jcode_base::storage::lock_test_env();
+    let previous = std::env::var_os("JCODE_COPILOT_MODEL");
+    // SAFETY: all environment-mutating provider tests use lock_test_env.
+    unsafe { std::env::set_var("JCODE_COPILOT_MODEL", "pinned-model") };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let result = runtime.block_on(async {
+        let mut provider = make_test_provider(vec!["cached-model".into()]);
+        provider.set_model("pinned-model").unwrap();
+        // No request can leave the machine. Discovery fails through this
+        // closed local proxy instead of using real credentials or the network.
+        provider.client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:1").unwrap())
+            .timeout(std::time::Duration::from_millis(500))
+            .build()
+            .unwrap();
+        *provider.bearer_token.write().await = Some(copilot_auth::CopilotApiToken {
+            token: "synthetic-test-token".into(),
+            expires_at: Utc::now().timestamp() + 3600,
+        });
+        let result = provider.refresh_model_catalog().await;
+        assert_eq!(provider.model(), "pinned-model");
+        assert_eq!(provider.available_models_display(), vec!["cached-model"]);
+        result
+    });
+    match previous {
+        Some(value) => unsafe { std::env::set_var("JCODE_COPILOT_MODEL", value) },
+        None => unsafe { std::env::remove_var("JCODE_COPILOT_MODEL") },
+    }
+    assert!(
+        result.is_err(),
+        "pinned models and startup grace must not skip forced discovery"
+    );
+}
+
 fn make_test_provider(fetched: Vec<String>) -> CopilotApiProvider {
     CopilotApiProvider {
         client: jcode_base::provider::shared_http_client(),

@@ -3,17 +3,15 @@ use super::swarm_mutation_state::{
     PersistedSwarmMutationResponse, SwarmMutationRuntime, begin_or_replay, finish_request,
     request_key,
 };
-use super::turn_failover::process_server_initiated_message;
+use super::turn_failover::process_reserved_locked_message_with_server_failover;
 use super::{
     SessionInterruptQueues, SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan,
-    append_swarm_completion_report_instructions, broadcast_swarm_plan, broadcast_swarm_status,
-    create_headless_session, fanout_session_event, persist_swarm_state_for, record_swarm_event,
-    record_swarm_event_for_session, remove_background_tool_signal,
-    remove_session_channel_subscriptions, remove_session_from_swarm,
+    broadcast_swarm_plan, broadcast_swarm_status, create_headless_session, fanout_session_event,
+    persist_swarm_state_for, record_swarm_event, record_swarm_event_for_session,
+    remove_background_tool_signal, remove_session_channel_subscriptions, remove_session_from_swarm,
     remove_session_interrupt_queue, set_member_task_label, truncate_detail, update_member_status,
     update_member_status_with_report,
 };
-use crate::agent::Agent;
 use crate::config::SwarmSpawnMode;
 use crate::protocol::{NotificationType, ServerEvent};
 use crate::provider::Provider;
@@ -24,7 +22,7 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+use super::SessionAgents;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 type ClientConnections = Arc<RwLock<HashMap<String, ClientConnectionInfo>>>;
 
@@ -175,246 +173,12 @@ fn spawn_visible_session_window_with_context(
     }
 }
 
-fn provider_key_for_spawn_model(
-    model: Option<&str>,
-    provider_key_override: Option<&str>,
-) -> Option<String> {
-    if let Some(provider_key) = provider_key_override
-        .map(str::trim)
-        .filter(|provider_key| !provider_key.is_empty())
-    {
-        return Some(provider_key.to_string());
-    }
-
-    let model = model?.trim();
-    if model.is_empty() {
-        return None;
-    }
-
-    if let Some((prefix, _rest)) = model.split_once(':') {
-        let prefix = prefix.trim();
-        if crate::provider::provider_from_model_key(prefix).is_some()
-            || crate::provider_catalog::resolve_openai_compatible_profile_selection(prefix)
-                .is_some()
-            || crate::config::config().providers.contains_key(prefix)
-        {
-            return Some(prefix.to_string());
-        }
-    }
-
-    crate::provider::provider_for_model(model).map(str::to_string)
-}
-
-/// The model/auth identity a spawned swarm agent should inherit from its
-/// coordinator. Resolved with a persisted-session fallback so it stays correct
-/// even when the coordinator agent is mid-turn (its mutex held), which is the
-/// common case because spawns are issued from inside the coordinator's turn.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct CoordinatorSpawnIdentity {
-    pub model: Option<String>,
-    pub provider_key: Option<String>,
-    pub route_api_method: Option<String>,
-    pub is_canary: bool,
-}
-
-/// The resolved model + auth route a spawned swarm agent should be created
-/// with, after reconciling `agents.swarm_model` config against the
-/// coordinator's identity.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct SwarmSpawnSelection {
-    pub model: Option<String>,
-    pub provider_key: Option<String>,
-    pub route_api_method: Option<String>,
-}
-
-/// Resolve the coordinator's model/auth identity without blocking on its agent
-/// mutex. During an active coordinator turn the agent lock is held for the
-/// whole turn, so `try_lock` fails exactly when a spawn is issued. We fall back
-/// to the persisted session snapshot so spawned agents still inherit the
-/// coordinator's model, provider key, and auth route instead of silently
-/// dropping to the config default (e.g. Claude OAuth instead of the API route).
-async fn resolve_coordinator_spawn_identity(
-    req_session_id: &str,
-    sessions: &SessionAgents,
-) -> CoordinatorSpawnIdentity {
-    if let Some(agent) = {
-        let agent_sessions = sessions.read().await;
-        agent_sessions.get(req_session_id).cloned()
-    } && let Ok(agent_guard) = agent.try_lock()
-    {
-        return CoordinatorSpawnIdentity {
-            model: Some(agent_guard.provider_model()),
-            provider_key: agent_guard.session_provider_key(),
-            route_api_method: agent_guard.session_route_api_method(),
-            is_canary: agent_guard.is_canary(),
-        };
-    }
-
-    // Agent busy (mid-turn) or not resident: read the authoritative persisted
-    // session snapshot instead of falling back to config defaults.
-    match Session::load_startup_stub(req_session_id) {
-        Ok(session) => {
-            let identity = CoordinatorSpawnIdentity {
-                model: session.model.clone(),
-                provider_key: session.provider_key.clone(),
-                route_api_method: session.route_api_method.clone(),
-                is_canary: session.is_canary,
-            };
-            crate::logging::info(&format!(
-                "Swarm spawn: coordinator {} agent busy/unavailable, inheriting identity from persisted session (model={:?} provider_key={:?} route={:?} canary={})",
-                req_session_id,
-                identity.model,
-                identity.provider_key,
-                identity.route_api_method,
-                identity.is_canary,
-            ));
-            identity
-        }
-        Err(error) => {
-            crate::logging::warn(&format!(
-                "Swarm spawn: failed to load persisted coordinator session {} for model inheritance: {} (spawned agent will use server defaults)",
-                req_session_id, error
-            ));
-            CoordinatorSpawnIdentity::default()
-        }
-    }
-}
-
-/// Split a configured swarm model that carries an explicit auth-route prefix
-/// (`openai-api:`, `openai-oauth:`, `claude-api:`, `claude-oauth:`) into a
-/// structured selection so spawned sessions pin the exact provider + auth
-/// method instead of guessing from the bare model name.
-///
-/// Example: `agents.swarm_model = "openai-api:gpt-5.5"` resolves to
-/// `model = gpt-5.5`, `provider_key = openai-api-key`,
-/// `route_api_method = openai-api-key`, which makes every spawned agent use
-/// GPT-5.5 on the OpenAI API key route regardless of the coordinator's model.
-///
-/// Returns `None` for models without such a prefix, or for prefixes that carry
-/// no API-vs-OAuth decision (bare provider aliases, OpenRouter, Copilot, ...).
-/// Those keep their prefixed model and route correctly via the existing
-/// session-restore path.
-fn explicit_route_for_configured_model(model: &str) -> Option<SwarmSpawnSelection> {
-    let (_, prefix, bare) = crate::provider::explicit_model_provider_prefix(model)?;
-    let bare = bare.trim();
-    if bare.is_empty() {
-        return None;
-    }
-    // Only the dual-auth (Anthropic/OpenAI OAuth-vs-API) prefixes carry an
-    // explicit credential decision worth pinning. The canonical parser maps the
-    // prefix to its stable route id, which `ModelRouteApiMethod::parse` round-
-    // trips back to the exact auth method when the spawned session is restored.
-    let route_id = jcode_provider_core::AuthRoute::parse_explicit_credential_prefix(prefix)?
-        .route_api_method();
-    Some(SwarmSpawnSelection {
-        model: Some(bare.to_string()),
-        provider_key: Some(route_id.to_string()),
-        route_api_method: Some(route_id.to_string()),
-    })
-}
-
-/// True when a model string is one of the "inherit the coordinator" sentinels.
-fn is_inherit_sentinel(model: &str) -> bool {
-    let trimmed = model.trim();
-    trimmed.eq_ignore_ascii_case("inherit") || trimmed.eq_ignore_ascii_case("coordinator")
-}
-
-/// Selection that inherits the coordinator's model, provider key, and route.
-fn inherit_coordinator_selection(coordinator: &CoordinatorSpawnIdentity) -> SwarmSpawnSelection {
-    SwarmSpawnSelection {
-        model: coordinator.model.clone(),
-        provider_key: coordinator
-            .provider_key
-            .clone()
-            .or_else(|| provider_key_for_spawn_model(coordinator.model.as_deref(), None)),
-        route_api_method: coordinator.route_api_method.clone(),
-    }
-}
-
-/// Selection for a concrete model string (optionally route-prefixed like
-/// `openai-api:gpt-5.5`), reconciled against the coordinator's identity.
-fn selection_for_concrete_model(
-    model: String,
-    coordinator: &CoordinatorSpawnIdentity,
-) -> SwarmSpawnSelection {
-    // A model may pin an explicit provider + auth route via a prefix
-    // (e.g. "openai-api:gpt-5.5"). Honor it directly so spawned agents do
-    // NOT inherit the coordinator's model/auth and instead use the
-    // requested model on the requested API route.
-    if let Some(selection) = explicit_route_for_configured_model(&model) {
-        return selection;
-    }
-
-    // A concrete model only inherits the coordinator's provider_key/route
-    // when it targets the same model; otherwise the route would point at
-    // the wrong provider/auth mode.
-    if coordinator.model.as_deref() == Some(model.as_str()) {
-        SwarmSpawnSelection {
-            model: Some(model.clone()),
-            provider_key: coordinator
-                .provider_key
-                .clone()
-                .or_else(|| provider_key_for_spawn_model(Some(&model), None)),
-            route_api_method: coordinator.route_api_method.clone(),
-        }
-    } else {
-        SwarmSpawnSelection {
-            provider_key: provider_key_for_spawn_model(Some(&model), None),
-            model: Some(model),
-            route_api_method: None,
-        }
-    }
-}
-
-async fn session_swarm_model(
-    req_session_id: &str,
-    sessions: &SessionAgents,
-    global: Option<String>,
-) -> Option<String> {
-    let agent = sessions.read().await.get(req_session_id).cloned();
-    if let Some(agent) = agent
-        && let Ok(guard) = agent.try_lock()
-    {
-        return guard
-            .session_for_split()
-            .effective_agent_model("swarm", global);
-    }
-    Session::load_startup_stub(req_session_id)
-        .map(|session| session.effective_agent_model("swarm", global.clone()))
-        .unwrap_or(global)
-}
-
-fn resolve_swarm_spawn_selection(
-    requested_model: Option<String>,
-    configured_swarm_model: Option<String>,
-    coordinator: &CoordinatorSpawnIdentity,
-) -> SwarmSpawnSelection {
-    // An explicit per-worker choice overrides the configured default. The
-    // inheritance sentinels bypass even a concrete configured model.
-    if let Some(model) = requested_model
-        .map(|model| model.trim().to_string())
-        .filter(|model| !model.is_empty())
-    {
-        return if is_inherit_sentinel(&model) {
-            inherit_coordinator_selection(coordinator)
-        } else {
-            selection_for_concrete_model(model, coordinator)
-        };
-    }
-    // Treat empty strings and the explicit "inherit"/"coordinator" sentinels as
-    // "no override": spawned swarm agents should inherit the coordinator's model
-    // unless `agents.swarm_model` is deliberately set to a concrete model. This
-    // avoids the surprising case where a stale `swarm_model` config pins every
-    // spawned agent to an unrelated model/provider.
-    let configured_swarm_model = configured_swarm_model
-        .map(|model| model.trim().to_string())
-        .filter(|model| !model.trim().is_empty() && !is_inherit_sentinel(model));
-
-    match configured_swarm_model {
-        Some(model) => selection_for_concrete_model(model, coordinator),
-        None => inherit_coordinator_selection(coordinator),
-    }
-}
+#[path = "spawn_model_selection.rs"]
+mod spawn_model_selection;
+use spawn_model_selection::{
+    CoordinatorSpawnIdentity, SwarmSpawnSelection, provider_key_for_spawn_model,
+    resolve_coordinator_spawn_identity, resolve_swarm_spawn_selection, session_swarm_model,
+};
 
 fn persist_headed_startup_message(session_id: &str, message: &str) {
     crate::logging::info(&format!(
@@ -431,17 +195,37 @@ fn persist_headed_startup_message(session_id: &str, message: &str) {
 fn clear_headed_startup_message(session_id: &str) {
     if let Ok(jcode_dir) = crate::storage::jcode_dir() {
         let path = jcode_dir.join(format!("client-input-{}", session_id));
-        let _ = std::fs::remove_file(path);
+        if let Err(error) = std::fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::logging::warn(&format!(
+                "Unable to remove prepared spawn file {}: {error}",
+                path.display()
+            ));
+        }
     }
 }
 
 fn cleanup_prepared_visible_spawn_session(session_id: &str) {
+    crate::session_env::remove_session_env(session_id);
     clear_headed_startup_message(session_id);
-    if let Ok(path) = crate::session::session_path(session_id) {
-        let _ = std::fs::remove_file(path);
+    if let Ok(path) = crate::session::session_path(session_id)
+        && let Err(error) = std::fs::remove_file(&path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        crate::logging::warn(&format!(
+            "Failed to clean prepared session file {}: {error}",
+            path.display()
+        ));
     }
-    if let Ok(path) = crate::session::session_journal_path(session_id) {
-        let _ = std::fs::remove_file(path);
+    if let Ok(path) = crate::session::session_journal_path(session_id)
+        && let Err(error) = std::fs::remove_file(&path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        crate::logging::warn(&format!(
+            "Failed to clean prepared session file {}: {error}",
+            path.display()
+        ));
     }
 }
 
@@ -576,41 +360,12 @@ async fn register_visible_spawned_member(
 /// `requested_effort` only arrives from direct protocol clients (SDK). It wins
 /// when present, then the user's `agents.swarm_effort` config pin, and
 /// otherwise workers run at [`DEFAULT_SWARM_WORKER_EFFORT`].
-pub(super) fn resolve_swarm_spawn_effort(
-    requested_effort: Option<&str>,
-    configured_swarm_effort: Option<&str>,
-) -> Option<String> {
-    let clean = |effort: Option<&str>| {
-        effort
-            .map(str::trim)
-            .filter(|effort| !effort.is_empty())
-            .map(str::to_string)
-    };
-    clean(requested_effort)
-        .or_else(|| clean(configured_swarm_effort))
-        .or_else(|| Some(DEFAULT_SWARM_WORKER_EFFORT.to_string()))
-}
-
-/// Reasoning effort for spawned swarm workers when neither the request nor
-/// `agents.swarm_effort` sets one.
-pub(super) const DEFAULT_SWARM_WORKER_EFFORT: &str = "low";
-
-/// Spawn mode for one swarm spawn. An explicit per-call mode wins, except
-/// `auto`: a model passing `auto` expresses no preference, so the user's
-/// configured `agents.swarm_spawn_mode` (inline by default) decides. Without
-/// this, `auto` tried a visible window first and, from terminals jcode cannot
-/// target (VS Code, Cursor), opened a separate terminal app instead of the
-/// inline gallery the user configured. Configuring `auto` still works.
-pub(super) fn resolve_swarm_spawn_mode(
-    requested: Option<SwarmSpawnMode>,
-    configured: SwarmSpawnMode,
-) -> SwarmSpawnMode {
-    match requested {
-        Some(SwarmSpawnMode::Auto) | None => configured,
-        Some(mode) => mode,
-    }
-}
-
+#[path = "spawn_policy.rs"]
+mod spawn_policy;
+use spawn_policy::inherit_coordinator_selection;
+pub(super) use spawn_policy::{
+    is_inherit_sentinel, resolve_swarm_spawn_effort, resolve_swarm_spawn_mode,
+};
 #[expect(
     clippy::too_many_arguments,
     reason = "server-side swarm spawning needs session, swarm state, provider, and event sinks together"
@@ -618,6 +373,7 @@ pub(super) fn resolve_swarm_spawn_mode(
 pub(super) async fn spawn_swarm_agent(
     req_session_id: &str,
     swarm_id: &str,
+    lane_id: Option<String>,
     working_dir: Option<String>,
     initial_message: Option<String>,
     spawn_mode: Option<SwarmSpawnMode>,
@@ -638,6 +394,10 @@ pub(super) async fn spawn_swarm_agent(
     soft_interrupt_queues: &SessionInterruptQueues,
     client_connections: &ClientConnections,
 ) -> anyhow::Result<String> {
+    let agents_config = &crate::config::config().agents;
+    agents_config
+        .validate_swarm_model_request(requested_model.as_deref())
+        .map_err(anyhow::Error::msg)?;
     let resolved_working_dir =
         resolve_spawn_working_dir(working_dir, req_session_id, sessions, swarm_members).await;
     let coordinator = resolve_coordinator_spawn_identity(req_session_id, sessions).await;
@@ -647,7 +407,6 @@ pub(super) async fn spawn_swarm_agent(
     // startup env (#405).
     let client_terminal_env =
         client_terminal_env_for_session(req_session_id, client_connections).await;
-    let agents_config = &crate::config::config().agents;
     let configured_swarm_model =
         session_swarm_model(req_session_id, sessions, agents_config.swarm_model.clone()).await;
     let resolved_spawn_mode = resolve_swarm_spawn_mode(spawn_mode, agents_config.swarm_spawn_mode);
@@ -677,9 +436,17 @@ pub(super) async fn spawn_swarm_agent(
         spawn_route_api_method,
     ));
 
-    let startup_message = initial_message
-        .as_deref()
-        .map(append_swarm_completion_report_instructions);
+    // Validate the explicit lane before allocating or launching a worker.
+    let mut startup_message = if let Some(lane_id) = lane_id.as_deref() {
+        let brief = super::swarm_todo_link::assignment_brief(req_session_id, lane_id, "")
+            .ok_or_else(|| anyhow::anyhow!("Todo lane {lane_id} has no open tasks"))?;
+        Some(super::swarm_todo_link::spawn_lane_message(
+            initial_message.as_deref(),
+            &brief,
+        ))
+    } else {
+        initial_message.clone()
+    };
 
     let visible_spawn = match resolved_spawn_mode {
         // Inline workers run in-process like headless ones; the difference is
@@ -696,6 +463,19 @@ pub(super) async fn spawn_swarm_agent(
             coordinator_is_canary,
             startup_message.as_deref(),
             |session_id, cwd, selfdev_requested, provider_key| {
+                crate::session_env::inherit_session_env(req_session_id, session_id);
+                if let Some(lane_id) = lane_id.as_deref() {
+                    let brief = super::swarm_todo_link::seed_spawn_lane(
+                        req_session_id,
+                        session_id,
+                        lane_id,
+                    )?;
+                    let message = super::swarm_todo_link::spawn_lane_message(
+                        initial_message.as_deref(),
+                        &brief,
+                    );
+                    persist_headed_startup_message(session_id, &message);
+                }
                 // Tag the headed window as a swarm-agent spawn so spawn hooks
                 // and terminals can identify and reroute it (JCODE_SPAWN_*).
                 let context = crate::session_launch::SessionSpawnContext::kind("swarm-agent")
@@ -756,7 +536,14 @@ pub(super) async fn spawn_swarm_agent(
         }
     }?;
 
-    let startup_message = startup_message.clone();
+    if is_headless_fallback && let Some(lane_id) = lane_id.as_deref() {
+        let brief =
+            super::swarm_todo_link::seed_spawn_lane(req_session_id, &new_session_id, lane_id)?;
+        startup_message = Some(super::swarm_todo_link::spawn_lane_message(
+            initial_message.as_deref(),
+            &brief,
+        ));
+    }
     {
         let mut plans = swarm_plans.write().await;
         if let Some(plan) = plans.get_mut(swarm_id)
@@ -792,8 +579,7 @@ pub(super) async fn spawn_swarm_agent(
     }
     // Label the worker with what it was spawned for so the swarm strip and
     // member lists can show the task, not just the animal name. An explicit
-    // spawn `label` wins; otherwise the label is derived from the raw prompt
-    // (before completion-report boilerplate is appended).
+    // spawn `label` wins; otherwise the label is derived from the initial prompt.
     if let Some(label_text) = label.as_deref().or(initial_message.as_deref()) {
         set_member_task_label(&new_session_id, label_text, swarm_members).await;
     }
@@ -831,7 +617,11 @@ pub(super) async fn spawn_swarm_agent(
             let event_history2 = Arc::clone(event_history);
             let event_counter2 = Arc::clone(event_counter);
             let swarm_event_tx2 = swarm_event_tx.clone();
-            crate::runtime_activity::spawn(async move {
+            crate::runtime_activity::spawn_session(&new_session_id, async move {
+                let mut agent = agent_arc.lock().await;
+                let Ok(lease) = agent.claim_server_turn() else {
+                    return;
+                };
                 update_member_status(
                     &sid_clone,
                     "running",
@@ -843,31 +633,28 @@ pub(super) async fn spawn_swarm_agent(
                     Some(&swarm_event_tx2),
                 )
                 .await;
-                let event_tx = super::session_event_fanout_sender(
+                let (fallback, _) = tokio::sync::mpsc::unbounded_channel();
+                let events = super::state::TurnEventChannel::new(
                     sid_clone.clone(),
                     Arc::clone(&swarm_members2),
+                    fallback,
+                    &lease,
                 );
-                let start_message_index = {
-                    let agent = agent_arc.lock().await;
-                    agent.message_count()
-                };
-                let result = process_server_initiated_message(
-                    Arc::clone(&agent_arc),
+                let start_message_index = agent.message_count();
+                let result = process_reserved_locked_message_with_server_failover(
+                    &mut agent,
+                    &lease,
                     &initial_msg,
                     vec![],
                     None,
-                    event_tx,
+                    events.sender(),
                 )
                 .await;
-                let completion_report = if result.is_ok() {
-                    let agent = agent_arc.lock().await;
-                    agent.latest_assistant_text_after(start_message_index)
-                } else {
-                    None
-                };
-                let (new_status, new_detail) = match result {
+                let completion_report =
+                    agent.recent_assistant_output_tail_after(start_message_index);
+                let (new_status, new_detail) = match &result {
                     Ok(()) => ("ready", None),
-                    Err(ref error) => ("failed", Some(truncate_detail(&error.to_string(), 120))),
+                    Err(error) => ("failed", Some(truncate_detail(&error.to_string(), 120))),
                 };
                 update_member_status_with_report(
                     &sid_clone,
@@ -881,6 +668,17 @@ pub(super) async fn spawn_swarm_agent(
                     Some(&swarm_event_tx2),
                 )
                 .await;
+                let terminal = match result {
+                    Ok(()) => ServerEvent::Done { id: 0 },
+                    Err(error) => ServerEvent::Error {
+                        id: 0,
+                        message: crate::util::format_error_chain(&error),
+                        retry_after_secs: None,
+                    },
+                };
+                let _ = events.sender().send(terminal);
+                drop(agent);
+                events.finish().await;
             });
         }
     }
@@ -892,6 +690,7 @@ pub(super) async fn spawn_swarm_agent(
 pub(super) async fn handle_comm_spawn(
     id: u64,
     req_session_id: String,
+    lane_id: Option<String>,
     working_dir: Option<String>,
     initial_message: Option<String>,
     request_nonce: Option<String>,
@@ -949,6 +748,7 @@ pub(super) async fn handle_comm_spawn(
         "spawn",
         &[
             swarm_id.clone(),
+            lane_id.clone().unwrap_or_default(),
             working_dir.clone().unwrap_or_default(),
             initial_message.clone().unwrap_or_default(),
             request_nonce.clone().unwrap_or_default(),
@@ -976,6 +776,7 @@ pub(super) async fn handle_comm_spawn(
     let response = match spawn_swarm_agent(
         &req_session_id,
         &swarm_id,
+        lane_id,
         working_dir,
         initial_message,
         spawn_mode,

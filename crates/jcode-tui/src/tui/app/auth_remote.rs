@@ -74,7 +74,30 @@ impl Drop for RemoteLogin {
 }
 
 impl App {
+    pub(super) fn start_ssh_account_login(&mut self, provider: &str, label: &str) {
+        if !crate::tui::is_ssh_remote() {
+            return;
+        }
+        if !matches!(provider, "claude" | "openai") {
+            self.push_display_message(DisplayMessage::error(
+                "Named SSH login is supported only for Claude and OpenAI. No login was started.",
+            ));
+            return;
+        }
+        if label.trim().is_empty() || label.chars().any(char::is_control) {
+            self.push_display_message(DisplayMessage::error(
+                "Invalid account label. No login was started.",
+            ));
+            return;
+        }
+        self.handle_ssh_login_with_label(&format!("/login {provider}"), Some(label));
+    }
+
     pub(super) fn handle_ssh_login_command(&mut self, input: &str) -> bool {
+        self.handle_ssh_login_with_label(input, None)
+    }
+
+    fn handle_ssh_login_with_label(&mut self, input: &str, label: Option<&str>) -> bool {
         if !crate::tui::is_ssh_remote() || input.split_whitespace().next() != Some("/login") {
             return false;
         }
@@ -107,7 +130,10 @@ impl App {
             return true;
         }
         let target = match Target::from_env() {
-            Ok(target) => target,
+            Ok(target) => match label {
+                Some(label) => target.with_account_label(label),
+                None => target,
+            },
             Err(message) => {
                 self.push_display_message(DisplayMessage::error(format!(
                     "SSH login failed: {message}"

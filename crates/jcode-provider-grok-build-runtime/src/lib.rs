@@ -14,7 +14,7 @@ use anyhow::{Result, bail};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use jcode_message_types::{Message, StreamEvent, ToolDefinition};
-use jcode_provider_core::{EventStream, ModelRoute, Provider};
+use jcode_provider_core::{EventStream, ModelCatalogRefreshSummary, ModelRoute, Provider};
 use jcode_provider_openrouter_runtime::{GROK_BUILD_MODELS, OpenRouterProvider};
 use std::future::Future;
 use std::pin::Pin;
@@ -211,12 +211,7 @@ impl Provider for GrokBuildProvider {
     }
 
     fn available_models_display(&self) -> Vec<String> {
-        let mut models: Vec<String> = GROK_BUILD_MODELS.iter().map(|m| m.to_string()).collect();
-        let current = self.model();
-        if !current.is_empty() && !models.contains(&current) {
-            models.insert(0, current);
-        }
-        models
+        self.inner.available_models_display()
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {
@@ -239,7 +234,23 @@ impl Provider for GrokBuildProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        Ok(())
+        match self.inner.prefetch_models().await {
+            Err(error) if is_unauthorized_text(&format!("{error:#}")) => {
+                jcode_base::auth::grok_build::bearer_token(true).await?;
+                self.inner.prefetch_models().await
+            }
+            result => result,
+        }
+    }
+
+    async fn refresh_model_catalog(&self) -> Result<ModelCatalogRefreshSummary> {
+        match self.inner.refresh_model_catalog().await {
+            Err(error) if is_unauthorized_text(&format!("{error:#}")) => {
+                jcode_base::auth::grok_build::bearer_token(true).await?;
+                self.inner.refresh_model_catalog().await
+            }
+            result => result,
+        }
     }
 
     fn active_auth_method_label(&self) -> Option<&'static str> {
@@ -275,6 +286,92 @@ impl Provider for GrokBuildProvider {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn live_catalog_reaches_grok_picker_and_force_refresh_preserves_cache_on_failure() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for (status, body) in [
+                (
+                    "200 OK",
+                    r#"{"data":[{"model":"grok-4.7","context_window":700000}]}"#,
+                ),
+                (
+                    "200 OK",
+                    r#"{"data":[{"model":"grok-future-release","context_window":900000}]}"#,
+                ),
+                ("503 Service Unavailable", r#"{"error":"temporary outage"}"#),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = [0; 8192];
+                let count = stream.read(&mut request).unwrap();
+                assert!(String::from_utf8_lossy(&request[..count]).starts_with("GET /v1/models "));
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        // Inject only the HTTP transport. Exercise the real wrapper's discovery,
+        // switching, route publication and refresh methods without credentials.
+        let profile = jcode_base::config::NamedProviderConfig {
+            base_url: format!("http://{address}/v1"),
+            auth: jcode_base::config::NamedProviderAuth::None,
+            model_catalog: true,
+            default_model: Some("grok-4.6".into()),
+            ..Default::default()
+        };
+        let provider = GrokBuildProvider {
+            inner: Arc::new(
+                OpenRouterProvider::new_named_openai_compatible(
+                    &format!(
+                        "grok-discovery-test-{}-{}",
+                        std::process::id(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_nanos()
+                    ),
+                    &profile,
+                )
+                .unwrap(),
+            ),
+        };
+        provider.prefetch_models().await.unwrap();
+        assert!(
+            provider
+                .available_models_for_switching()
+                .contains(&"grok-4.7".into())
+        );
+        assert!(
+            provider
+                .model_routes()
+                .iter()
+                .any(|route| route.model == "grok-4.7" && route.api_method == ROUTE_API_METHOD)
+        );
+        provider.set_model("grok-build:grok-4.7").unwrap();
+        assert_eq!(provider.context_window(), 700_000);
+
+        // A release not known to this binary must be discovered even while the
+        // existing cache is fresh. Never turn this into a static allowlist test.
+        provider.refresh_model_catalog().await.unwrap();
+        assert!(
+            provider
+                .available_models_for_switching()
+                .contains(&"grok-future-release".into())
+        );
+        assert!(provider.refresh_model_catalog().await.is_err());
+        assert!(
+            provider
+                .available_models_for_switching()
+                .contains(&"grok-future-release".into())
+        );
+        server.join().unwrap();
+    }
 
     #[test]
     fn model_selection_strips_route_prefix_and_rejects_empty() {

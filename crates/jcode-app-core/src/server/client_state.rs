@@ -1,4 +1,5 @@
 use super::ClientConnectionInfo;
+use super::SessionAgents;
 use super::server_has_newer_binary;
 use crate::agent::Agent;
 use crate::bus::Bus;
@@ -13,7 +14,6 @@ use anyhow::Result;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 use std::time::{Duration, Instant};
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum HistoryPayloadMode {
@@ -180,6 +180,7 @@ pub(super) async fn handle_get_history(
     server_icon: &str,
     was_interrupted: Option<bool>,
     supports_pdf_panels: bool,
+    supports_turn_identity: bool,
     history_base: Option<crate::protocol::HistoryBase>,
 ) -> Result<()> {
     let history_start = Instant::now();
@@ -207,6 +208,7 @@ pub(super) async fn handle_get_history(
             was_interrupted,
             activity,
             supports_pdf_panels,
+            supports_turn_identity,
             history_base,
         )
         .await?;
@@ -232,6 +234,7 @@ pub(super) async fn handle_get_history(
         HistoryPayloadMode::Full,
         true,
         supports_pdf_panels,
+        supports_turn_identity,
         history_base,
     )
     .await?;
@@ -249,15 +252,31 @@ pub(super) async fn handle_get_history(
     Ok(())
 }
 
-pub(super) async fn handle_get_model_catalog(
+async fn build_model_catalog(
     id: u64,
     session_id: &str,
     agent: &Arc<Mutex<Agent>>,
     provider: &Arc<dyn Provider>,
-    writer: &Arc<Mutex<WriteHalf>>,
-) -> Result<()> {
-    let started = Instant::now();
+) -> Result<(ServerEvent, &'static str, u128)> {
     let build_started = Instant::now();
+    let live = super::available_models_cache::try_for_agent(agent, |agent_guard| {
+        let provider = agent_guard.provider_handle();
+        (
+            agent_guard.active_resolved_credential(),
+            provider.service_tier(),
+            Some(
+                provider
+                    .available_service_tiers()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            provider.reasoning_effort(),
+            provider_oauth_email(provider.as_ref()),
+            provider.serving_oauth_account_label(),
+        )
+    })
+    .await?;
     let (
         provider_name,
         provider_model,
@@ -271,71 +290,69 @@ pub(super) async fn handle_get_model_catalog(
         provider_oauth_email,
         provider_oauth_account_label,
     ) = {
-        match agent.try_lock() {
-            Ok(agent_guard) => {
-                let catalog = super::available_models_cache::for_agent(&agent_guard).snapshot();
+        match live {
+            Some((catalog, (credential, tier, tiers, effort, email, account_label))) => {
+                let catalog = catalog.snapshot();
                 (
-                    Some(agent_guard.provider_name()),
-                    Some(agent_guard.provider_model()),
+                    catalog.provider_name,
+                    catalog.provider_model,
                     catalog.available_models,
                     catalog.model_routes,
-                    agent_guard.active_resolved_credential(),
-                    agent_guard.provider_handle().service_tier(),
-                    Some(
-                        agent_guard
-                            .provider_handle()
-                            .available_service_tiers()
-                            .into_iter()
-                            .map(str::to_string)
-                            .collect(),
-                    ),
-                    agent_guard.provider_handle().reasoning_effort(),
+                    credential,
+                    tier,
+                    tiers,
+                    effort,
                     "live",
-                    provider_oauth_email(agent_guard.provider_handle().as_ref()),
-                    agent_guard.provider_handle().serving_oauth_account_label(),
+                    email,
+                    account_label,
                 )
             }
-            Err(_) => {
+            None => {
                 crate::logging::warn(&format!(
                     "handle_get_model_catalog: session {} busy, using provider/persisted fallback",
                     session_id
                 ));
-                let persisted = Session::load_for_remote_startup(session_id)
-                    .or_else(|_| Session::load_startup_stub(session_id))
-                    .ok();
-                let persisted_model = persisted.as_ref().and_then(|session| session.model.clone());
-                let mut model_routes = provider.model_routes();
-                crate::model_usage::enrich_routes(&mut model_routes);
-                (
-                    // Same field the non-busy path builds: it must name the
-                    // profile, not the multiplexing slot (#1286). This fallback
-                    // is exactly the lock-contention case a client cannot
-                    // correct, so `provider.name()` here reached the header and
-                    // the spend ledger as `OpenRouter`.
-                    Some(provider.display_name()),
-                    persisted_model.or_else(|| Some(provider.model())),
-                    provider.available_models_display(),
-                    model_routes,
-                    provider.active_resolved_credential(),
-                    provider.service_tier(),
-                    Some(
-                        provider
-                            .available_service_tiers()
-                            .into_iter()
-                            .map(str::to_string)
-                            .collect(),
-                    ),
-                    provider.reasoning_effort(),
-                    "fallback",
-                    provider_oauth_email(provider.as_ref()),
-                    provider.serving_oauth_account_label(),
-                )
+                let session_id = session_id.to_string();
+                let provider = Arc::clone(provider);
+                tokio::task::spawn_blocking(move || {
+                    let persisted = Session::load_for_remote_startup(&session_id)
+                        .or_else(|_| Session::load_startup_stub(&session_id))
+                        .ok();
+                    let persisted_model =
+                        persisted.as_ref().and_then(|session| session.model.clone());
+                    let mut model_routes = provider.model_routes();
+                    crate::model_usage::enrich_routes(&mut model_routes);
+                    (
+                        // Same field the non-busy path builds: it must name the
+                        // profile, not the multiplexing slot (#1286). This fallback
+                        // is exactly the lock-contention case a client cannot
+                        // correct, so `provider.name()` here reached the header and
+                        // the spend ledger as `OpenRouter`.
+                        Some(provider.display_name()),
+                        persisted_model.or_else(|| Some(provider.model())),
+                        provider.available_models_display(),
+                        model_routes,
+                        provider.active_resolved_credential(),
+                        provider.service_tier(),
+                        Some(
+                            provider
+                                .available_service_tiers()
+                                .into_iter()
+                                .map(str::to_string)
+                                .collect(),
+                        ),
+                        provider.reasoning_effort(),
+                        "fallback",
+                        provider_oauth_email(provider.as_ref()),
+                        provider.serving_oauth_account_label(),
+                    )
+                })
+                .await?
             }
         }
     };
     let build_ms = build_started.elapsed().as_millis();
 
-    let encode_started = Instant::now();
     let event = ServerEvent::History {
         id,
         session_id: session_id.to_string(),
@@ -380,6 +397,39 @@ pub(super) async fn handle_get_model_catalog(
         side_panel: Default::default(),
         applets: Default::default(),
     };
+    Ok((event, source, build_ms))
+}
+
+pub(super) async fn handle_get_model_catalog(
+    id: u64,
+    session_id: &str,
+    agent: &Arc<Mutex<Agent>>,
+    provider: &Arc<dyn Provider>,
+    writer: &Arc<Mutex<WriteHalf>>,
+) -> Result<()> {
+    let started = Instant::now();
+    // Catalog discovery is ancillary to this attachment. A refresh racing the
+    // build (or a failed blocking worker) must not close the transport and
+    // revoke an otherwise healthy cloud session's owner.
+    let built = build_model_catalog(id, session_id, agent, provider).await;
+    let (event, source, build_ms) = match built {
+        Ok(built) => built,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Model catalog request failed without disconnecting session {session_id}: {error:#}"
+            ));
+            return super::client_writer::write_direct_event(
+                writer,
+                &ServerEvent::Error {
+                    id,
+                    message: format!("Could not refresh model catalog: {error}"),
+                    retry_after_secs: None,
+                },
+            )
+            .await;
+        }
+    };
+    let encode_started = Instant::now();
     let json = encode_event(&event);
     let encode_ms = encode_started.elapsed().as_millis();
     let write_started = Instant::now();
@@ -559,7 +609,19 @@ fn history_reload_recovery_snapshot_with(
             ));
             return Some(directive);
         }
-        Ok(None) => {}
+        Ok(None) => {
+            // A consumed durable intent is authoritative over leftover reload
+            // context and interruption markers. A new intent replaces it.
+            if super::reload_recovery::peek_for_session(session_id)
+                .ok()
+                .flatten()
+                .is_some_and(|record| {
+                    record.status == super::reload_recovery::ReloadRecoveryStatus::Delivered
+                })
+            {
+                return None;
+            }
+        }
         Err(err) => crate::logging::warn(&format!(
             "history_reload_recovery_snapshot: failed to read server-owned recovery intent for session={}: {}",
             session_id, err
@@ -677,6 +739,7 @@ async fn send_history_from_persisted_session(
     was_interrupted: Option<bool>,
     activity: Option<SessionActivitySnapshot>,
     supports_pdf_panels: bool,
+    supports_turn_identity: bool,
     history_base: Option<crate::protocol::HistoryBase>,
 ) -> Result<()> {
     let loaded = super::run_blocking_io(|| {
@@ -798,7 +861,15 @@ async fn send_history_from_persisted_session(
         applets: crate::applets::snapshot_for_session(session_id).unwrap_or_default(),
     };
 
-    write_event(writer, &history_event).await
+    let json = encode_event(&history_event);
+    let mut writer_guard = writer.lock().await;
+    if supports_turn_identity && let Some(state) = history_turn_state(sessions, session_id) {
+        writer_guard
+            .write_all(encode_event(&state).as_bytes())
+            .await?;
+    }
+    writer_guard.write_all(json.as_bytes()).await?;
+    Ok(())
 }
 
 /// How long the bootstrap History payload may wait on the model-name catalog.
@@ -849,6 +920,7 @@ async fn send_history_with_guard(
     payload_mode: HistoryPayloadMode,
     include_model_catalog: bool,
     supports_pdf_panels: bool,
+    supports_turn_identity: bool,
     history_base: Option<crate::protocol::HistoryBase>,
 ) -> Result<()> {
     let history_start = Instant::now();
@@ -1110,6 +1182,11 @@ async fn send_history_with_guard(
     let mut writer_guard = writer.lock().await;
     let writer_lock_ms = writer_lock_start.elapsed().as_millis();
     let write_start = Instant::now();
+    if supports_turn_identity && let Some(state) = history_turn_state(sessions, session_id) {
+        writer_guard
+            .write_all(encode_event(&state).as_bytes())
+            .await?;
+    }
     let result = writer_guard.write_all(json.as_bytes()).await;
     drop(writer_guard);
     // Release the serialized payload before any further work (logging below
@@ -1175,6 +1252,17 @@ pub(super) async fn session_activity_snapshot(
     })
 }
 
+fn history_turn_state(sessions: &SessionAgents, session_id: &str) -> Option<ServerEvent> {
+    let observer = sessions.turn_observer(session_id)?;
+    let (latest_turn_id, active) = observer.snapshot();
+    Some(ServerEvent::TurnState {
+        session_id: session_id.to_string(),
+        runtime_generation: observer.runtime_generation().to_string(),
+        turn_id: active.map(|identity| identity.turn_id),
+        latest_turn_id,
+    })
+}
+
 async fn write_event(writer: &Arc<Mutex<WriteHalf>>, event: &ServerEvent) -> Result<()> {
     // Serialize straight to bytes with the same framing as encode_event
     // (JSON body, "{}" on serialize failure, trailing newline) and drop the
@@ -1189,134 +1277,11 @@ async fn write_event(writer: &Arc<Mutex<WriteHalf>>, event: &ServerEvent) -> Res
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn session_with_provider_key(key: Option<&str>) -> crate::session::Session {
-        let mut session = crate::session::Session::create_with_id(
-            "test_history_provider_name".to_string(),
-            None,
-            None,
-        );
-        session.provider_key = key.map(str::to_string);
-        session
-    }
-
-    #[test]
-    fn history_provider_name_prefers_persisted_openai_key() {
-        let session = session_with_provider_key(Some("openai"));
-        assert_eq!(
-            history_provider_name_from_session(&session).as_deref(),
-            Some("OpenAI")
-        );
-    }
-
-    #[test]
-    fn history_provider_name_preserves_unknown_runtime_profile() {
-        let session = session_with_provider_key(Some("remote-catalog"));
-        assert_eq!(
-            history_provider_name_from_session(&session).as_deref(),
-            Some("remote-catalog")
-        );
-    }
-
-    /// A direct OpenAI-compatible profile is persisted as its source key.
-    /// Clients must receive a display label, not the raw key: passing the key
-    /// through would make the spend ledger bill it to `openai:api-key` (#1286).
-    #[test]
-    fn history_provider_name_maps_a_compatible_profile_key_to_its_label() {
-        let session = session_with_provider_key(Some("openai-compatible:deepseek"));
-        assert_eq!(
-            history_provider_name_from_session(&session).as_deref(),
-            Some("DeepSeek")
-        );
-
-        let session = session_with_provider_key(Some("openai-compatible:nvidia-nim"));
-        assert_eq!(
-            history_provider_name_from_session(&session).as_deref(),
-            Some("NVIDIA NIM")
-        );
-    }
-
-    /// The same profile is also persisted bare (`deepseek`, the session
-    /// vocabulary). Both shapes must report the profile's display name instead
-    /// of the raw key (#1286).
-    #[test]
-    fn history_provider_name_maps_a_bare_compatible_profile_key() {
-        for (key, label) in [
-            ("deepseek", "DeepSeek"),
-            ("openai-compatible", "OpenAI-compatible"),
-            ("opencode-go", "OpenCode Go"),
-            ("nvidia-nim", "NVIDIA NIM"),
-        ] {
-            let session = session_with_provider_key(Some(key));
-            assert_eq!(
-                history_provider_name_from_session(&session).as_deref(),
-                Some(label),
-                "provider key {key} must report its profile label"
-            );
-        }
-    }
-
-    /// Import-source codes live in the same field but are not profile routes:
-    /// `opencode` collides with the `OpenCode Zen` profile id, and a session
-    /// imported from that CLI must not be relabelled as the gateway.
-    #[test]
-    fn history_provider_name_keeps_import_source_codes_verbatim() {
-        for key in ["opencode", "claude-code", "openai-codex"] {
-            let session = session_with_provider_key(Some(key));
-            assert_eq!(
-                history_provider_name_from_session(&session).as_deref(),
-                Some(key),
-                "import source {key} must stay verbatim"
-            );
-        }
-    }
-
-    /// With no persisted key, the fallback must be the profile-aware label.
-    /// `Provider::name()` is the multiplexing slot (`openrouter`) that serves
-    /// every direct OpenAI-compatible profile, so it tagged DeepSeek sessions
-    /// as OpenRouter (#1286).
-    struct SlotOnlyProvider;
-
-    #[async_trait::async_trait]
-    impl Provider for SlotOnlyProvider {
-        async fn complete(
-            &self,
-            _messages: &[crate::message::Message],
-            _tools: &[crate::message::ToolDefinition],
-            _system: &str,
-            _resume_session_id: Option<&str>,
-        ) -> Result<crate::provider::EventStream> {
-            Err(anyhow::anyhow!(
-                "the history fallback test never sends a request"
-            ))
-        }
-
-        fn name(&self) -> &str {
-            "OpenRouter"
-        }
-
-        fn display_name(&self) -> String {
-            "DeepSeek".to_string()
-        }
-
-        fn fork(&self) -> Arc<dyn Provider> {
-            Arc::new(SlotOnlyProvider)
-        }
-    }
-
-    #[test]
-    fn history_provider_name_falls_back_to_the_profile_label() {
-        let session = session_with_provider_key(None);
-        assert_eq!(
-            history_provider_name(&session, &SlotOnlyProvider).as_deref(),
-            Some("DeepSeek")
-        );
-    }
-}
+#[path = "history_provider_tests.rs"]
+mod tests;
 
 pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Arc<Mutex<Agent>>) {
+    super::model_refresh::ensure_periodic_refresh(&provider);
     tokio::spawn(async move {
         let (provider_name, initial_models) = {
             let agent_guard = agent.lock().await;
@@ -1327,9 +1292,9 @@ pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Ar
         };
 
         let needs_capability_refresh = provider.model_capabilities_need_refresh();
-        if !initial_models.is_empty() && !needs_capability_refresh {
-            return;
-        }
+        // Nonempty names may be built-in fallbacks, not a discovered catalog.
+        // Let each provider apply its own freshness policy rather than making
+        // static defaults permanently suppress discovery for the whole picker.
 
         if should_debounce_attach_model_prefetch(&provider_name) {
             crate::logging::info(&format!(
@@ -1339,8 +1304,12 @@ pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Ar
             return;
         }
 
-        if provider.prefetch_models().await.is_err() {
-            return;
+        if let Err(error) = provider.prefetch_models().await {
+            crate::logging::debug(&format!(
+                "Attach-time model prefetch failed for {provider_name}: {error}"
+            ));
+            // A unified provider can fail after other runtimes refreshed.
+            // Publish those successful discoveries rather than hiding them.
         }
 
         let refreshed = {
@@ -1355,7 +1324,6 @@ pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Ar
             return;
         }
 
-        let _ = refreshed;
         Bus::global().publish_models_updated();
     });
 }

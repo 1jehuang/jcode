@@ -12,7 +12,7 @@
 //! relays the TCP stream. Nothing touches the user's own `~/.ssh`.
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
@@ -50,7 +50,7 @@ pub(crate) fn account_available() -> bool {
     crate::subscription_catalog::configured_api_key().is_some_and(|k| !k.trim().is_empty())
 }
 
-fn dir() -> Result<PathBuf> {
+pub(super) fn dir() -> Result<PathBuf> {
     Ok(crate::storage::jcode_dir()?.join("cloud"))
 }
 
@@ -111,7 +111,7 @@ pub(crate) fn ssh_args() -> Result<Vec<String>> {
 /// binary was replaced by an update reports `/path/jcode (deleted)` (or a path
 /// that no longer exists). Writing that into the config would break every
 /// later cloud connection, so fall back to the stable launcher.
-fn proxy_executable(exe: PathBuf) -> PathBuf {
+pub(super) fn proxy_executable(exe: PathBuf) -> PathBuf {
     let text = exe.to_string_lossy();
     let stale = text.ends_with(" (deleted)") || !exe.is_file();
     if !stale {
@@ -187,7 +187,7 @@ fn managed_ssh_config(
     )
 }
 
-fn ssh_quote(value: &str) -> String {
+pub(super) fn ssh_quote(value: &str) -> String {
     if value
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || b"/._-+@:".contains(&b))
@@ -202,7 +202,7 @@ fn ssh_quote(value: &str) -> String {
 // Control-plane API
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default)]
 pub(crate) struct Reply {
     #[serde(default)]
     pub state: String,
@@ -220,7 +220,7 @@ pub(crate) struct Reply {
     pub usage: Option<Usage>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default)]
 pub(crate) struct Usage {
     #[serde(default)]
     pub used_seconds: u64,
@@ -263,6 +263,14 @@ fn off_runtime<T: Send>(f: impl FnOnce() -> T + Send) -> T {
 }
 
 fn request(method: &str, path: &str, body: Option<serde_json::Value>) -> Result<Reply> {
+    request_json(method, path, body)
+}
+
+pub(super) fn request_json<T: serde::de::DeserializeOwned + Send>(
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<T> {
     let account = account()?;
     let url = format!("{}/{}", account.base, path);
     off_runtime(move || {
@@ -272,7 +280,9 @@ fn request(method: &str, path: &str, body: Option<serde_json::Value>) -> Result<
             .build()?;
         let mut req = match method {
             "POST" => client.post(&url),
-            _ => client.get(&url),
+            "GET" => client.get(&url),
+            "DELETE" => client.delete(&url),
+            _ => bail!("unsupported cloud request method"),
         }
         .bearer_auth(&account.key);
         if let Some(body) = body {
@@ -378,14 +388,18 @@ fn validated_host_keys(reply: &Reply) -> Result<Vec<String>> {
 /// go to stderr only, since stdout is the SSH wire.
 pub(crate) fn run_proxy() -> Result<()> {
     let reply = connect(&mut |message| eprintln!("[jcode cloud] {message}"))?;
+    relay_proxy(&reply, HOST, &known_hosts_path()?)
+}
+
+pub(super) fn relay_proxy(reply: &Reply, host: &str, known_hosts: &std::path::Path) -> Result<()> {
     let address: std::net::IpAddr = reply
         .address
         .as_deref()
         .and_then(|a| a.parse().ok())
         .context("Jcode Cloud returned an invalid host address")?;
-    let keys = validated_host_keys(&reply)?;
-    let known: String = keys.iter().map(|k| format!("{HOST} {k}\n")).collect();
-    write_private(&known_hosts_path()?, &known)?;
+    let keys = validated_host_keys(reply)?;
+    let known: String = keys.iter().map(|k| format!("{host} {k}\n")).collect();
+    write_private(known_hosts, &known)?;
     let addr = std::net::SocketAddr::new(address, reply.port.unwrap_or(22));
     let stream =
         off_runtime(|| std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(20)))
@@ -469,30 +483,48 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-/// Preflight runs before secrets are transferred. A release client pins its own
-/// runtime release identity; development clients only probe unless explicitly
-/// given JCODE_CLOUD_RELEASE. Existing daemons/sessions are never restarted.
+/// Preflight runs before secrets are transferred. Published clients pin their
+/// release identity. Development clients keep capable hosts, otherwise resolve
+/// the latest published release and verify its capabilities before installation.
+/// Existing daemons/sessions are never restarted.
 pub(crate) fn prepare_script(home: &str) -> Result<String> {
+    prepare_script_with_candidate(home, None)
+}
+
+pub(crate) fn prepare_script_with_candidate(home: &str, candidate: Option<&str>) -> Result<String> {
     let override_tag = std::env::var("JCODE_CLOUD_RELEASE").ok();
     let target = release_target(
         jcode_build_meta::is_release_build(),
         jcode_build_meta::semver(),
         override_tag.as_deref(),
     )?;
-    Ok(prepare_script_for_paths(
+    Ok(prepare_script_for_paths_with_candidate(
         home,
         target.as_deref(),
         "/opt/jcode-cloud/jcode",
         true,
+        candidate,
     ))
 }
 
+#[cfg(test)]
 fn prepare_script_for_paths(
     home: &str,
     target: Option<&str>,
     backend: &str,
     elevate: bool,
 ) -> String {
+    prepare_script_for_paths_with_candidate(home, target, backend, elevate, None)
+}
+
+fn prepare_script_for_paths_with_candidate(
+    home: &str,
+    target: Option<&str>,
+    backend: &str,
+    elevate: bool,
+    candidate: Option<&str>,
+) -> String {
+    let development_candidate = shell_quote(candidate.unwrap_or(""));
     let backend = shell_quote(backend);
     let privilege = if elevate { "sudo -n " } else { "" };
     let home = shell_quote(home);
@@ -500,6 +532,7 @@ fn prepare_script_for_paths(
     format!(
         r#"set -eu
 want={want}
+development_candidate={development_candidate}
 export PATH="$HOME/.local/bin:$PATH"
 cli="$HOME/.local/bin/jcode"
 # Preserve the VM's CLI/service wrappers and their host-specific environment.
@@ -575,7 +608,9 @@ capable() {{
   probe "$1" cloud receive --help >/dev/null 2>&1 &&
     probe "$1" cloud credentials --help >/dev/null 2>&1 &&
     probe "$1" cloud router-credentials --help >/dev/null 2>&1 &&
-    probe "$1" cloud cancel-return --help >/dev/null 2>&1
+    probe "$1" cloud cancel-return --help >/dev/null 2>&1 &&
+    probe "$1" cloud replace-receive --help >/dev/null 2>&1 &&
+    probe "$1" cloud group-protocol --help >/dev/null 2>&1
 }}
 version_output() {{
   env -u JCODE_RUNTIME_RELEASE_SEMVER -u JCODE_RUNTIME_RELEASE_GIT_HASH \
@@ -583,6 +618,9 @@ version_output() {{
     "$1" --no-update --no-selfdev --version 2>/dev/null
 }}
 version_matches() {{
+  # Development candidates are byte-verified by the sender and capability-tested
+  # before and after switching. They do not have a published release identity.
+  [ -z "$development_candidate" ] || return 0
   version=$(version_output "$1") || return 1
   case "$version" in
     "jcode $want"|"jcode $want "*|"$want"|"$want "*) return 0 ;;
@@ -608,15 +646,41 @@ version_at_least() {{
     }}'
 }}
 if ! capable "$cli" || ! capable "$backend" || {{ [ -n "$want" ] && {{ ! version_at_least "$cli" || ! version_at_least "$backend"; }}; }} || [ "${{JCODE_CLOUD_FORCE_UPGRADE:-}}" = 1 ]; then
-  if [ -z "$want" ]; then
-    echo '[cloud prepare] cloud CLI lacks required capabilities, or upgrade was forced. Development clients do not choose a release automatically. Set JCODE_CLOUD_RELEASE to an exact compatible published tag.' >&2
-    exit 1
+  if [ -z "$want" ] && [ -z "$development_candidate" ]; then
+    # Development builds have no corresponding published tag. Resolve the
+    # canonical latest redirect, then pin and validate that exact release.
+    latest=$(curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSLI --retry 3 \
+      -o /dev/null -w '%{{url_effective}}' https://github.com/1jehuang/jcode/releases/latest)
+    want=${{latest#https://github.com/1jehuang/jcode/releases/tag/}}
+    printf '%s\n' "$want" | LC_ALL=C awk '
+      NR != 1 || $0 !~ /^v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$/ {{ bad=1 }}
+      END {{ exit (bad || NR != 1) }}' || {{
+      echo '[cloud prepare] cannot resolve an exact published release; set JCODE_CLOUD_RELEASE to a compatible published tag' >&2
+      exit 1
+    }}
   fi
   [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] || {{
     echo '[cloud prepare] release requires Linux x86_64' >&2; exit 1;
   }}
+  stage=$(mktemp -d "$root/${{want:-development}}.XXXXXXXX")
+  if [ -n "$development_candidate" ]; then
+    echo '[cloud prepare] installing verified local development CLI (live sessions are unchanged)' >&2
+    mkdir "$stage/bin"
+    cp "$development_candidate" "$stage/bin/jcode-linux-x86_64"
+    # A native development build can require a newer loader/libc than the
+    # managed image. Its verified private bundle carries those dependencies.
+    if [ -f "$development_candidate.bin" ]; then
+      cp "$development_candidate.bin" "$stage/bin/jcode-linux-x86_64.bin"
+      source_dir=$(dirname "$development_candidate")
+      for library in "$source_dir"/lib*.so* "$source_dir"/ld-linux*.so*; do
+        [ ! -f "$library" ] || cp "$library" "$stage/bin/"
+      done
+      chmod 755 "$stage/bin/jcode-linux-x86_64.bin"
+    fi
+    candidate="$stage/bin/jcode-linux-x86_64"
+    chmod 755 "$candidate"
+  else
   echo "[cloud prepare] installing verified $want CLI (live sessions are unchanged)" >&2
-  stage=$(mktemp -d "$root/$want.XXXXXXXX")
   base="https://github.com/1jehuang/jcode/releases/download/$want"
   asset=jcode-linux-x86_64.tar.gz
   curl --proto '=https' --tlsv1.2 -fsSL --retry 3 "$base/$asset" -o "$stage/$asset"
@@ -645,8 +709,10 @@ if ! capable "$cli" || ! capable "$backend" || {{ [ -n "$want" ] && {{ ! version
   candidate="$stage/bin/jcode-linux-x86_64"
   [ -f "$candidate" ] && [ -f "$candidate.bin" ]
   chmod 755 "$candidate" "$candidate.bin"
+  fi
   capable "$candidate" && version_matches "$candidate" || {{
-    echo '[cloud prepare] downloaded release lacks required protocol capabilities or exact version' >&2; exit 1;
+    version_output "$candidate" >&2 || true
+    echo '[cloud prepare] candidate CLI lacks required protocol capabilities or exact version' >&2; exit 1;
   }}
   # Save regular files as well as symlinks, without changing their original target.
   if [ -e "$backend" ] || [ -L "$backend" ]; then
@@ -666,7 +732,7 @@ if ! capable "$cli" || ! capable "$backend" || {{ [ -n "$want" ] && {{ ! version
   capable "$backend" && version_matches "$backend" && capable "$cli" && version_matches "$cli" || exit 1
 fi
 # All handoff protocols are mandatory even when credentials are not needed yet.
-capable "$cli" || {{ echo '[cloud prepare] cloud receive, credentials and cancel-return are required' >&2; exit 1; }}
+capable "$cli" || {{ echo '[cloud prepare] cloud handoff, replacement and group protocols are required' >&2; exit 1; }}
 committed=1
 if [ -n {home} ] && [ ! -d {home} ]; then
   sudo -n install -d -o "$(id -un)" -g "$(id -gn)" -m 755 {home}
@@ -691,7 +757,7 @@ pub(crate) fn describe(reply: &Reply) -> String {
     text
 }
 
-fn create_private_dir(path: &std::path::Path) -> Result<()> {
+pub(super) fn create_private_dir(path: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
     #[cfg(unix)]
     {
@@ -701,7 +767,7 @@ fn create_private_dir(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn write_private(path: &std::path::Path, contents: &str) -> Result<()> {
+pub(super) fn write_private(path: &std::path::Path, contents: &str) -> Result<()> {
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
     {
         let mut options = std::fs::OpenOptions::new();

@@ -371,10 +371,10 @@ const INLINE_IMAGE_MARKER_PREFIX: &str = "\x00IIMG:";
 /// Create placeholder lines for an inline raster image embedded in the
 /// transcript body: a marker line encoding `(hash, rows, cols)` followed by
 /// `rows - 1` blank lines that the draw step paints the image over.
+/// Zero rows emits only a non-drawing label anchor for collapsed images.
 pub fn inline_image_placeholder_lines(hash: u64, rows: u16, cols: u16) -> Vec<Line<'static>> {
     let invisible = Style::default().fg(Color::Black).bg(Color::Black);
-    let rows = rows.max(1);
-    let mut lines = Vec::with_capacity(rows as usize);
+    let mut lines = Vec::with_capacity(rows.max(1) as usize);
     lines.push(Line::from(Span::styled(
         format!(
             "{}{:016x}:{:04x}:{:04x}{}",
@@ -585,6 +585,16 @@ pub fn terminal_theme() -> Theme {
 #[cfg(test)]
 mod fallback_note_tests {
     use super::*;
+
+    #[test]
+    fn inline_image_placeholder_zero_rows_preserves_collapsed_anchor() {
+        let lines = inline_image_placeholder_lines(0x1234, 0, 0);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            parse_inline_image_placeholder(&lines[0]),
+            Some((0x1234, 0, 0))
+        );
+    }
 
     #[test]
     fn fallback_note_explains_why_the_image_is_text() {

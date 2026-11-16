@@ -433,6 +433,16 @@ public enum SessionReducer {
 
         // History replaces the transcript wholesale: it is the server's
         // authoritative view, used on connect and reconnect.
+        //
+        // One exception: a message sent optimistically just before this
+        // payload was produced is not in it yet. Dropping it makes the user's
+        // own bubble vanish the instant they send during connect, so trailing
+        // local user entries the server has not caught up to are re-appended.
+        let optimisticTail = state.transcript.reversed()
+            .prefix { $0.role == .user && !$0.isQueued }
+            .reversed()
+        let historyUserTexts = Set(
+            payload.messages.filter { $0.role == "user" }.map(\.content))
         state.transcript = payload.messages.compactMap { message in
             let role: TranscriptEntry.Role
             switch message.role {
@@ -463,6 +473,8 @@ public enum SessionReducer {
             }
             return TranscriptEntry(role: role, text: message.content, toolCalls: toolCalls)
         }
+        state.transcript.append(
+            contentsOf: optimisticTail.filter { !historyUserTexts.contains($0.text) })
         return state
     }
 

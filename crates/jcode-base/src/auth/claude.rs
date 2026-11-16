@@ -465,6 +465,16 @@ pub fn update_account_tokens(label: &str, access: &str, refresh: &str, expires: 
 
 /// Update profile metadata for a specific account.
 pub fn update_account_profile(label: &str, email: Option<String>) -> Result<()> {
+    update_account_profile_metadata(label, email, None)
+}
+
+/// Merge discovered profile fields in one locked write, preserving credentials
+/// and last-known metadata when the profile endpoint omits a field.
+pub fn update_account_profile_metadata(
+    label: &str,
+    email: Option<String>,
+    subscription_type: Option<String>,
+) -> Result<()> {
     let _store_lock =
         crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
     let mut auth = load_auth_file()?;
@@ -473,7 +483,13 @@ pub fn update_account_profile(label: &str, email: Option<String>) -> Result<()> 
         .iter_mut()
         .find(|a| a.label == label)
     {
-        account.email = email;
+        if let Some(email) = email.filter(|value| !value.trim().is_empty()) {
+            account.email = Some(email);
+        }
+        if let Some(subscription_type) = subscription_type.filter(|value| !value.trim().is_empty())
+        {
+            account.subscription_type = Some(subscription_type);
+        }
         save_auth_file(&auth)?;
         Ok(())
     } else {

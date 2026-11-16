@@ -410,9 +410,19 @@ pub fn run_auto_update() -> Result<()> {
 
 /// Explicit updates follow the configured channel for release and dev builds alike.
 /// Source rebuilds belong to self-dev and /rebuild, not the stable update path.
-pub fn run_update() -> Result<()> {
+pub fn run_update(channel: Option<&str>) -> Result<()> {
+    let explicit_channel = channel
+        .map(|value| {
+            crate::config::UpdateChannel::parse(value)
+                .ok_or_else(|| anyhow::anyhow!("Unknown update channel: {value}"))
+        })
+        .transpose()?;
+    if let Some(channel) = explicit_channel {
+        crate::config::Config::set_update_channel(channel)?;
+        super::output::print_centered(&format!("Update channel: {channel}"));
+    }
     super::output::print_centered("Checking GitHub for latest release...");
-    match update::check_for_update_blocking() {
+    match update::check_for_update_with_channel_blocking(explicit_channel) {
         Ok(Some(release)) => {
             super::output::print_centered(&format!(
                 "Downloading {} \u{2192} {}...",

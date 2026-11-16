@@ -7,6 +7,11 @@ env:
   CARGO_BUILD_RUSTC_WRAPPER: ""
 
 on:
+  workflow_call:
+    inputs:
+      jcode_release_tag:
+        type: string
+        required: true
   workflow_dispatch:
     inputs:
       jcode_release_tag:
@@ -48,8 +53,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Test release versioning
+        working-directory: ${{ github.workspace }}
+        run: node --test scripts/test_version_sdk_release.mjs
+
       - name: Validate SDK
         run: npm run check
+
+      - name: Select SDK release channel and version
+        id: channel
+        working-directory: ${{ github.workspace }}
+        env:
+          JCODE_RELEASE_TAG: ${{ inputs.jcode_release_tag }}
+        run: node scripts/version_sdk_release.mjs "$JCODE_RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Download released jcode runtimes
         working-directory: ${{ github.workspace }}
@@ -81,8 +97,52 @@ jobs:
               echo "$name@$version already published, skipping"
               continue
             fi
-            npm publish "$package" --access public --provenance
+            log=$(mktemp)
+            if npm publish "$package" --access public --provenance --tag "${{ steps.channel.outputs.tag }}" >"$log" 2>&1; then
+              cat "$log"
+            else
+              status=$?
+              cat "$log"
+              # A retry can race the registry's visibility of an accepted upload.
+              # Only this exact duplicate conflict may defer to the mandatory
+              # visibility gate below. Authentication and other errors stay fatal.
+              if ! grep -Fq 'npm error code E409' "$log" || ! grep -Fq "Cannot publish over previously staged version \"$version\"" "$log"; then
+                exit "$status"
+              fi
+              echo "Upload already accepted, waiting for registry visibility: $name@$version"
+            fi
+            rm -f "$log"
+          done
+
+      # npm can acknowledge a publish before registry metadata exposes it.
+      # Do not make the SDK visible while its optional runtime is still missing.
+      - name: Wait for platform runtime registry visibility
+        working-directory: ${{ github.workspace }}
+        run: |
+          for package in sdk/npm/*; do
+            name=$(node -p "require('./$package/package.json').name")
+            version=$(node -p "require('./$package/package.json').version")
+            visible=false
+            for attempt in $(seq 1 20); do
+              if actual=$(npm view "$name@$version" version --prefer-online) && [ "$actual" = "$version" ]; then
+                visible=true
+                break
+              fi
+              echo "Waiting for registry visibility: $name@$version ($attempt/20)"
+              sleep 30
+            done
+            if [ "$visible" != true ]; then
+              echo "Runtime package is not visible, refusing to publish SDK: $name@$version" >&2
+              exit 1
+            fi
           done
 
       - name: Publish with npm provenance
-        run: npm publish --access public --provenance
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "$name@$version already published, skipping"
+          else
+            npm publish --access public --provenance --tag "${{ steps.channel.outputs.tag }}"
+          fi

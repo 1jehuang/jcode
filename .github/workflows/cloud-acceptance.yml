@@ -73,7 +73,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq clang mold tmux openssh-server bubblewrap util-linux python3
+          sudo apt-get install -y -qq clang mold tmux openssh-server bubblewrap util-linux python3 ripgrep
           # The fixture runs its own unprivileged loopback-only sshd, not the service.
           sudo install -d -m 0755 /run/sshd
           # cloud_acceptance_tui.py deliberately invokes this exact absolute path.

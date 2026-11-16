@@ -118,7 +118,7 @@ fn main() {
     //   Dirty:   v0.2.17-dev (abc1234, dirty)
     let is_release = std::env::var("JCODE_RELEASE_BUILD").is_ok();
     let version = if is_release {
-        format!("v{}.{}.{} ({})", major, minor, patch, git_hash)
+        format!("v{} ({})", build_semver, git_hash)
     } else if dirty {
         format!("v{}.{}.{}-dev ({}, dirty)", major, minor, patch, git_hash)
     } else {
@@ -220,19 +220,13 @@ fn root_package_version(repo_root: &Path) -> Option<String> {
 }
 
 fn parse_semver(value: &str) -> Option<(u32, u32, u32)> {
-    let trimmed = value.trim().trim_start_matches('v');
-    let mut parts = trimmed.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch = parts.next()?.parse().ok()?;
-    Some((major, minor, patch))
+    build_inputs::semver_core(value)
 }
 
 fn explicit_build_semver_override() -> Option<String> {
     std::env::var("JCODE_BUILD_SEMVER")
         .ok()
-        .map(|value| value.trim().trim_start_matches('v').to_string())
-        .filter(|value| parse_semver(value).is_some())
+        .and_then(|value| build_inputs::release_semver(&value))
 }
 
 fn resolve_build_semver(base_version: (u32, u32, u32)) -> Result<String, String> {

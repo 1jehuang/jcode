@@ -15,6 +15,7 @@ impl SessionPicker {
     }
 
     pub fn next(&mut self) {
+        self.search_selection.stop();
         // Onboarding actions form a short list above the resumable sessions.
         if self.onboarding_review_recent_project_highlighted() {
             self.onboarding_action = Some(OnboardingAction::StartNewSession);
@@ -40,6 +41,7 @@ impl SessionPicker {
     }
 
     pub fn previous(&mut self) {
+        self.search_selection.stop();
         // Onboarding: already on the first action -> nothing above it.
         if self.onboarding_review_recent_project_highlighted() {
             return;
@@ -73,6 +75,7 @@ impl SessionPicker {
     /// the offset changed relative to the last rendered maximum so the shared
     /// mouse-scroll momentum can stop draining once the bottom is reached.
     pub fn scroll_preview_down(&mut self, amount: u16) -> bool {
+        self.search_selection.stop();
         let before = self.scroll_offset;
         let target = before.saturating_add(amount);
         // Clamp to the last rendered maximum when we have one (mouse momentum and
@@ -88,6 +91,7 @@ impl SessionPicker {
 
     /// Scroll the preview up by `amount` lines. Returns whether the offset moved.
     pub fn scroll_preview_up(&mut self, amount: u16) -> bool {
+        self.search_selection.stop();
         let before = self.scroll_offset;
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
         self.scroll_offset != before
@@ -103,6 +107,12 @@ impl SessionPicker {
     /// Whether a screen coordinate falls inside the preview pane (used by the
     /// host App to route wheel events into the shared scroll-momentum queue).
     pub fn mouse_over_preview(&self, col: u16, row: u16) -> bool {
+        if self
+            .reserved_panel_area
+            .is_some_and(|r| Self::point_in_rect(col, row, r))
+        {
+            return false;
+        }
         self.last_preview_area
             .map(|r| Self::point_in_rect(col, row, r))
             .unwrap_or(false)
@@ -197,11 +207,11 @@ impl SessionPicker {
     ) -> bool {
         match code {
             KeyCode::Char('h') | KeyCode::Left => {
-                self.focus = PaneFocus::Sessions;
+                self.focus = PaneFocus::Preview;
                 true
             }
             KeyCode::Char('l') | KeyCode::Right => {
-                self.focus = PaneFocus::Preview;
+                self.focus = PaneFocus::Sessions;
                 true
             }
             KeyCode::Tab => {
@@ -241,12 +251,15 @@ impl SessionPicker {
 
     /// Handle mouse events when used as an overlay
     pub fn handle_overlay_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        let at = std::time::Instant::now();
+        let before = self.latency_selection_id();
         match mouse.kind {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 self.handle_mouse_scroll(mouse.column, mouse.row, mouse.kind);
             }
             _ => {}
         }
+        self.latency_input_complete(before, at);
     }
 
     /// Apply a single line of preview scroll in `direction` (-1 up, +1 down) and
@@ -274,11 +287,14 @@ impl SessionPicker {
 
     /// Step the session selection for a list-pane wheel event.
     pub fn step_list_selection(&mut self, direction: i16) {
+        let at = std::time::Instant::now();
+        let before = self.latency_selection_id();
         if direction < 0 {
             self.previous();
         } else if direction > 0 {
             self.next();
         }
+        self.latency_input_complete(before, at);
     }
 
     /// Current preview scroll offset, exposed for tests that assert scroll
