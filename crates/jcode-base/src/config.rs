@@ -794,7 +794,7 @@ impl Default for AcpConfig {
     fn default() -> Self {
         Self {
             profile: "standard".to_string(),
-            tool_profile: "acp".to_string(),
+            tool_profile: "full".to_string(),
         }
     }
 }
@@ -843,7 +843,13 @@ pub struct ToolConfig {
     pub browser_handoff: bool,
     /// Foreground time before automatic tool handoff, in milliseconds. Zero disables it.
     pub auto_background_timeout_ms: u64,
-    /// Tool profile: "full" (default), "acp", "minimal"/"lite", or "none".
+    /// Tool profile: "full" (default), "minimal"/"lite", or "none".
+    ///
+    /// "acp" is a legacy name for "full". It used to be a nine-tool
+    /// allow-list, which left ACP clients without `todo`, `bg`, `swarm`, web
+    /// search, memory, and skills. The prompt and the auto-background handoff
+    /// still referred to those tools, and because the profile is server-wide,
+    /// TUI sessions attached to an ACP-started daemon were cut down too.
     pub profile: String,
     /// Explicit allow-list. When set, only these tools are exposed.
     /// Use "*" or "all" to expose all tools without an allow-list.
@@ -938,23 +944,6 @@ impl ToolConfig {
         } else if self.disable_base_tools || matches!(profile.as_str(), "none" | "off" | "disabled")
         {
             Some(HashSet::new())
-        } else if matches!(profile.as_str(), "acp") {
-            Some(
-                [
-                    "bash",
-                    "read",
-                    "write",
-                    "edit",
-                    "apply_patch",
-                    "agentgrep",
-                    "ls",
-                    "batch",
-                    "mcp",
-                ]
-                .into_iter()
-                .map(|name| name.to_string())
-                .collect(),
-            )
         } else if matches!(profile.as_str(), "minimal" | "lite" | "small") {
             Some(
                 [

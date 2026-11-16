@@ -22,6 +22,36 @@ fn soft_interrupt_injected(content: &str, display_role: Option<&str>) -> ServerE
 }
 
 #[test]
+fn file_activity_delivery_uses_metadata_not_a_text_prefix() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    let content = "moss edited src/parser.rs +3-1: fix parser";
+    handle_server_event(
+        &mut app,
+        soft_interrupt_injected(content, Some("file_activity")),
+        &mut remote,
+    );
+    let message = app.display_messages().last().unwrap();
+    assert_eq!(message.role, "swarm");
+    assert_eq!(message.title.as_deref(), Some("File activity · moss"));
+
+    // Identical prose with ordinary system metadata must not be classified
+    // as file activity, either live or when history is restored.
+    handle_server_event(
+        &mut app,
+        soft_interrupt_injected(content, Some("system")),
+        &mut remote,
+    );
+    assert_eq!(app.display_messages().last().unwrap().role, "system");
+    let mut messages = vec![crate::tui::DisplayMessage::system(content)];
+    super::super::remote_notifications::normalize_swarm_delivery_messages(&mut messages);
+    assert_eq!(messages[0].role, "system");
+}
+
+#[test]
 fn every_system_and_background_delivery_adds_an_entry() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();

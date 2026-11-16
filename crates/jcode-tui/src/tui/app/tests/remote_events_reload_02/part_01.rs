@@ -921,7 +921,7 @@ fn test_swarm_await_notification_inserts_only_compact_summary() {
         .last()
         .expect("missing compact swarm await summary");
     assert_eq!(last.title.as_deref(), Some("🐝 Swarm await"));
-    assert_eq!(last.content, "✓ 1/1");
+    assert_eq!(last.content, "1/1 matched · 1 completed");
     assert!(!last.content.contains("elephant"));
     assert!(!last.content.contains("Validation"));
 }

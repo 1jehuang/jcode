@@ -56,6 +56,159 @@ fn generated_images_are_bounded_private_thumbnails() {
     assert_eq!(messages[1].images.len(), 1);
 }
 
+fn attachment_block() -> ContentBlock {
+    use base64::Engine;
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::RgbImage::from_pixel(1400, 1100, image::Rgb([10, 80, 170]))
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .unwrap();
+    ContentBlock::Image {
+        media_type: "image/png".into(),
+        data: base64::engine::general_purpose::STANDARD.encode(bytes.into_inner()),
+    }
+}
+
+#[test]
+fn gif_and_webp_attachments_are_decoded_into_bounded_wire_thumbnails() {
+    use base64::Engine;
+    for (format, media_type) in [
+        (image::ImageFormat::Gif, "image/gif"),
+        (image::ImageFormat::WebP, "image/webp"),
+    ] {
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(1400, 1100, image::Rgba([10, 80, 170, 255]))
+            .write_to(&mut encoded, format)
+            .unwrap();
+        let encoded = encoded.into_inner();
+        assert_eq!(image::guess_format(&encoded).unwrap(), format);
+        let mut session = Session::create_with_id("encoded-attachments-test".into(), None, None);
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Image {
+                media_type: media_type.into(),
+                data: base64::engine::general_purpose::STANDARD.encode(encoded),
+            }],
+        );
+        let messages = wire_messages(&session, 0);
+        assert_eq!(messages.len(), 1, "{media_type} image-only row disappeared");
+        assert_eq!(messages[0].images.len(), 1, "{media_type} was discarded");
+        let thumbnail = &messages[0].images[0];
+        assert_eq!(thumbnail.media_type, "image/jpeg");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&thumbnail.data)
+            .unwrap();
+        assert!(bytes.len() <= 256 * 1024);
+        assert_eq!(image::guess_format(&bytes).unwrap(), image::ImageFormat::Jpeg);
+        let decoded = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (1024, 805));
+    }
+}
+
+#[test]
+fn visible_user_tool_and_image_only_attachments_survive_wire_serialization() {
+    use base64::Engine;
+    let mut session = Session::create_with_id("attachments-test".into(), None, None);
+    let image = attachment_block();
+    session.add_message(
+        Role::User,
+        vec![image.clone(), text_block("My screenshot".into())],
+    );
+    session.add_message(Role::User, vec![image.clone()]);
+    // This is the real tool_output_to_content_blocks persistence format.
+    session.add_message(
+        Role::User,
+        vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "read-photo".into(),
+                content: "Loaded image".into(),
+                is_error: None,
+            },
+            image.clone(),
+        ],
+    );
+    session.add_message(Role::Assistant, vec![image]);
+    let messages = wire_messages(&session, 0);
+    assert_eq!(messages.len(), 4);
+    assert_eq!(
+        messages.iter().map(|m| m.role).collect::<Vec<_>>(),
+        ["user", "user", "tool", "assistant"]
+    );
+    assert_eq!(messages[1].text, "");
+    assert_eq!(messages[2].tool_results[0].tool_use_id, "read-photo");
+    for (seq, message) in messages.iter().enumerate() {
+        assert_eq!(message.seq, seq);
+        assert_eq!(message.images.len(), 1);
+        assert_eq!(message.images[0].media_type, "image/jpeg");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&message.images[0].data)
+            .unwrap();
+        assert!(bytes.len() <= 256 * 1024);
+        let decoded = image::load_from_memory(&bytes).unwrap();
+        assert!(decoded.width() <= 1024 && decoded.height() <= 1024);
+        let json = serde_json::to_value(message).unwrap();
+        assert_eq!(json["images"][0]["media_type"], "image/jpeg");
+    }
+    assert_eq!(wire_messages(&session, 2).len(), 2);
+}
+
+#[test]
+fn hidden_visual_context_and_invalid_attachments_are_not_uploaded() {
+    let mut session = Session::create_with_id("hidden-attachments".into(), None, None);
+    session.add_message(
+        Role::User,
+        vec![
+            text_block(
+                "  <system-reminder>\nGenerated image visual context</system-reminder>".into(),
+            ),
+            attachment_block(),
+        ],
+    );
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: "not base64".into(),
+        }],
+    );
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: "aGVsbG8=".into(),
+        }],
+    );
+    assert!(wire_messages(&session, 0).is_empty());
+    let mut blocks = vec![attachment_block(); 5];
+    assert_eq!(attached_images(&blocks).len(), 4);
+    if let ContentBlock::Image { media_type, .. } = &mut blocks[0] {
+        *media_type = "application/octet-stream".into();
+    }
+    assert!(attached_images(&blocks[..1]).is_empty());
+}
+
+#[test]
+fn attachment_wire_upgrade_replays_previously_uploaded_sessions() {
+    let mut session = Session::create_with_id("attachment-upgrade".into(), None, None);
+    session.add_message(
+        Role::User,
+        vec![attachment_block(), text_block("Photo".into())],
+    );
+    let current = wire_messages(&session, 0);
+    let progress = SessionProgress {
+        wire_version: WIRE_VERSION - 1,
+        uploaded: 1,
+        fingerprint: Some(wire_fingerprint(&current, 1)),
+        ..SessionProgress::default()
+    };
+    let (replayed, _) = incremental_messages(&session, &progress);
+    assert_eq!(replayed, current);
+    let progress = SessionProgress {
+        wire_version: WIRE_VERSION,
+        ..progress
+    };
+    assert!(incremental_messages(&session, &progress).0.is_empty());
+}
+
 #[test]
 fn image_upload_chunks_obey_byte_budget() {
     let message = WireMessage {
@@ -192,6 +345,7 @@ fn benchmark_exact_state_reuse() {
             state.sessions.insert(
                 format!("session-{i:04}"),
                 SessionProgress {
+                    wire_version: WIRE_VERSION,
                     uploaded: 200,
                     mtime_ms: 123456789,
                     revision: Some([123456789, 10000, 123456790, 1000]),
@@ -270,6 +424,7 @@ async fn benchmark_unchanged_reconciliation() {
         state.sessions.insert(
             id,
             SessionProgress {
+                wire_version: WIRE_VERSION,
                 uploaded: 100,
                 mtime_ms: session_mtime_ms(&path),
                 revision: Some(session_revision(&path)),
@@ -362,6 +517,7 @@ async fn unchanged_pass_and_identical_commit_do_not_rewrite_state() {
     let updates = BTreeMap::from([(
         "unchanged".into(),
         SessionProgress {
+            wire_version: WIRE_VERSION,
             revision: Some(session_revision(&path)),
             ..Default::default()
         },
@@ -1146,6 +1302,110 @@ fn structured_wire_epoch_invalidates_image_only_progress_once() {
     );
 }
 
+#[tokio::test]
+async fn structured_wire_version_replays_unchanged_snapshots_once() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let _lock = storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let _env = TestEnv::set(&[
+        ("JCODE_HOME", home.path().as_os_str()),
+        ("JCODE_API_KEY", std::ffi::OsStr::new("test-key")),
+        ("JCODE_API_BASE", std::ffi::OsStr::new(&base)),
+    ]);
+    let mut session = Session::create_with_id("schema-replay".into(), None, None);
+    session.messages = vec![msg(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "call-read".into(),
+            name: "read".into(),
+            input: serde_json::json!({"path":"README.md"}),
+            thought_signature: None,
+        }],
+    )];
+    session.save().unwrap();
+    DIRTY_SESSIONS.lock().unwrap().clear();
+    let path = home.path().join("sessions/schema-replay.json");
+    let revision = session_revision(&path);
+    // Even an identical fingerprint must not suppress a schema upgrade replay.
+    let fingerprint = wire_fingerprint(&wire_messages(&session, 0), 1);
+    let progress: SessionProgress = serde_json::from_value(serde_json::json!({
+        "uploaded": 1, "mtime_ms": session_mtime_ms(&path),
+        "revision": revision, "fingerprint": fingerprint,
+    }))
+    .unwrap();
+    assert_eq!(progress.wire_version, 0);
+    save_state(&MobileSyncState {
+        enabled: true,
+        ..Default::default()
+    })
+    .unwrap();
+    commit_progress(
+        load_state().generation,
+        &BTreeMap::from([(session.id.clone(), progress)]),
+    )
+    .unwrap();
+    assert_eq!(load_state().sessions[&session.id].revision, Some(revision));
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 4096];
+        let body = loop {
+            let count = socket.read(&mut buffer).await.unwrap();
+            assert_ne!(count, 0);
+            bytes.extend_from_slice(&buffer[..count]);
+            if let Some(index) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                let start = index + 4;
+                let header = String::from_utf8_lossy(&bytes[..index]);
+                let length: usize = header
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|value| value.trim().parse().unwrap())
+                    })
+                    .unwrap();
+                if bytes.len() >= start + length {
+                    break serde_json::from_slice::<serde_json::Value>(
+                        &bytes[start..start + length],
+                    )
+                    .unwrap();
+                }
+            }
+        };
+        assert_eq!(body["messages"][0]["seq"], 0);
+        assert_eq!(
+            body["messages"][0]["tool_calls"][0]["input"]["path"],
+            "README.md"
+        );
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+            .await
+            .unwrap();
+        listener
+    });
+    let client = reqwest::Client::new();
+    let report = tokio::time::timeout(Duration::from_secs(5), sync_once(&client))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.messages_uploaded, 1);
+    assert_eq!(report.sessions_uploaded, 1);
+    let listener = server.await.unwrap();
+    let state = load_state();
+    assert_eq!(state.sessions[&session.id].wire_version, WIRE_VERSION);
+    assert_eq!(state.sessions[&session.id].revision, Some(revision));
+    assert_eq!(session_revision(&path), revision);
+    assert_eq!(sync_once(&client).await.unwrap(), SyncReport::default());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
+    DIRTY_SESSIONS.lock().unwrap().clear();
+}
+
 #[test]
 fn structured_input_changes_invalidate_synced_fingerprint_without_changing_legacy_summary() {
     let mut session = Session::create_with_id("tool-hash".into(), None, None);
@@ -1455,6 +1715,7 @@ fn incremental_updates_replay_rewritten_and_shrunk_prefixes() {
     let (initial, fingerprint) = incremental_messages(&session, &SessionProgress::default());
     assert_eq!(initial.len(), 2);
     let progress = SessionProgress {
+        wire_version: WIRE_VERSION,
         uploaded: 2,
         fingerprint: Some(fingerprint),
         ..Default::default()

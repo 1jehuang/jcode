@@ -32,6 +32,7 @@ fn soft_interrupt_session_display_role(source: SoftInterruptSource) -> Option<St
     match source {
         SoftInterruptSource::User => None,
         SoftInterruptSource::System => Some(StoredDisplayRole::System),
+        SoftInterruptSource::FileActivity => Some(StoredDisplayRole::FileActivity),
         SoftInterruptSource::BackgroundTask => Some(StoredDisplayRole::BackgroundTask),
     }
 }
@@ -41,6 +42,7 @@ fn soft_interrupt_protocol_display_role(source: SoftInterruptSource) -> Option<S
         SoftInterruptSource::User => None,
         SoftInterruptSource::System => Some("system".to_string()),
         SoftInterruptSource::BackgroundTask => Some("background_task".to_string()),
+        SoftInterruptSource::FileActivity => Some("file_activity".to_string()),
     }
 }
 

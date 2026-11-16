@@ -3093,6 +3093,19 @@ fn handle_server_event_inner(
                 }
                 // Task chrome does not replace a chronological delivery entry.
                 app.push_display_message(DisplayMessage::background_task(content.clone()));
+            } else if role == "file_activity"
+                || (role == "system" && content.starts_with("⚠ File activity: "))
+            {
+                // The stacked file-activity row already shows these edits.
+                // Add a row only when this client never received them.
+                if app.file_activity_stack.is_none() {
+                    let row =
+                        super::super::remote_notifications::typed_file_activity_display_message(
+                            &content,
+                        )
+                        .unwrap_or_else(|| DisplayMessage::system(content.clone()));
+                    app.push_display_message(row);
+                }
             } else if let Some(swarm) =
                 super::super::remote_notifications::swarm_delivery_display_message(&content)
             {
@@ -3325,6 +3338,19 @@ fn handle_server_event_inner(
                     crate::id::session_icon(&sender),
                     sender
                 ));
+                return false;
+            }
+            if let Some(edit) =
+                super::super::remote_notifications::FileActivityEdit::from_notification(
+                    &sender,
+                    &notification_type,
+                )
+            {
+                // Peer edits stack into one row instead of adding one each.
+                if let Some(row) = app.push_file_activity(edit) {
+                    persist_replay_display_message(app, "swarm", row.title, &row.content);
+                }
+                app.set_status_notice(presentation.status_notice);
                 return false;
             }
             let now = std::time::Instant::now();
