@@ -756,7 +756,10 @@ async fn stopping_a_running_worker_fires_swarm_member_end() {
     let expected_dir = std::fs::canonicalize(coord_dir.path()).unwrap();
     assert_eq!(
         recorded.lines().next().unwrap_or_default(),
-        format!("stop-hook-worker|stopped|reviewer|{}", expected_dir.display()),
+        format!(
+            "stop-hook-worker|stopped|reviewer|{}",
+            expected_dir.display()
+        ),
         "{recorded}"
     );
 }
