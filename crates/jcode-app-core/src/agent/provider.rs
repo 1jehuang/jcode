@@ -95,6 +95,58 @@ impl Agent {
         self.persist_session_best_effort("observed saved account route");
     }
 
+    /// Pin a new session to the provider's current saved API-key account.
+    pub(super) fn bind_current_session_account(&mut self) {
+        if let Err(error) = self.provider.bind_session_account(None) {
+            logging::warn(&format!(
+                "Could not pin the session to its saved API-key account: {error}"
+            ));
+            return;
+        }
+        self.sync_session_account_route();
+    }
+
+    pub(super) fn finalize_initial_provider_route(&mut self) {
+        self.reconcile_explicit_provider_pin_route();
+        self.bind_current_session_account();
+    }
+
+    pub(super) fn bind_persisted_session_account(&mut self) {
+        let Some((_, label)) = self
+            .session
+            .route_api_method
+            .as_deref()
+            .and_then(crate::provider::compatible_profile_account_label)
+        else {
+            return;
+        };
+        if let Err(error) = self.provider.bind_session_account(Some(label)) {
+            logging::warn(&format!(
+                "Could not restore saved API-key account '{label}' for session {}: {error}",
+                self.session.id
+            ));
+        }
+    }
+
+    pub(super) fn sync_session_account_route(&mut self) {
+        let Some(label) = self.provider.session_account_label() else {
+            return;
+        };
+        let Some((_, api_method, _)) = self.provider.direct_openai_compatible_route_parts() else {
+            return;
+        };
+        let Some(route) = crate::provider::qualify_compatible_profile_route(&api_method, &label)
+        else {
+            return;
+        };
+        if self.session.route_api_method.as_deref() == Some(route.as_str()) {
+            return;
+        }
+        self.session.route_api_method = Some(route);
+        self.session.model = Some(self.provider_model());
+        self.persist_session_best_effort("bound API-key account route");
+    }
+
     pub(super) fn record_failed_account_route(&mut self, error: &str) {
         self.sync_bound_account_route();
         if !jcode_provider_core::classify_failover_error_message(error)
@@ -263,6 +315,7 @@ impl Agent {
         self.session.provider_key = Some(selection.runtime_key.stable_id());
         self.session.route_api_method = Some(selection.api_method.clone());
         self.session.model = Some(self.provider_model());
+        self.sync_session_account_route();
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
         self.refresh_compaction_budget();
@@ -307,6 +360,7 @@ impl Agent {
             self.session.route_api_method = None;
         }
         self.session.model = Some(self.provider_model());
+        self.sync_session_account_route();
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
         self.refresh_compaction_budget();

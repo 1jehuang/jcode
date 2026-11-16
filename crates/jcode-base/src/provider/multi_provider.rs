@@ -2,6 +2,65 @@ use super::*;
 use anyhow::Result;
 
 impl MultiProvider {
+    fn session_account_execution_provider(&self) -> Option<Arc<dyn Provider>> {
+        self.active_openrouter_execution_provider()
+    }
+
+    pub(crate) fn bind_session_account_inner(
+        &self,
+        account: Option<&str>,
+    ) -> Result<Option<String>> {
+        let Some(provider) = self.session_account_execution_provider() else {
+            return Ok(None);
+        };
+        provider.bind_session_account(account)
+    }
+
+    pub(crate) fn session_account_label_inner(&self) -> Option<String> {
+        self.session_account_execution_provider()?
+            .session_account_label()
+    }
+
+    pub(crate) fn inherit_session_account_from(&self, source: &MultiProvider) {
+        let Some(label) = source.session_account_label_inner() else {
+            return;
+        };
+        if let Err(error) = self.bind_session_account_inner(Some(&label)) {
+            crate::logging::warn(&format!(
+                "Could not preserve saved API-key account '{label}' across provider fork: {error}"
+            ));
+        }
+    }
+
+    pub(crate) fn fork_for_new_session_inner(&self) -> Arc<dyn Provider> {
+        // A shared server can outlive config changes made by a model picker in a
+        // client process. Ordinary `fork()` intentionally preserves this
+        // template's current selection, which is correct for resumed sessions and
+        // in-flight helper work but stale for a brand-new session. Reconstruct the
+        // orchestrator so the reloadable config cache and current auth state choose
+        // the provider/model again.
+        let mut provider = Self::new_fast();
+        // Reconstruction uses the same composition root. Selection, home,
+        // reloadable config and auth/catalog revisions remain part of the key.
+        provider.catalog_scope = self.catalog_scope;
+
+        // An explicit CLI initial provider/model remains the starting selection
+        // for new sessions, while each session can switch freely afterward.
+        if self.initial_provider.is_some() {
+            let active = self.active_provider();
+            let current_model = self.model();
+            let switch_request = self.fork_model_switch_request(active, &current_model);
+            if let Err(error) = provider.set_model(&switch_request) {
+                crate::logging::warn(&format!(
+                    "Failed to preserve initial provider model '{}' for new session: {}",
+                    switch_request, error
+                ));
+            }
+        }
+
+        Arc::new(provider)
+    }
+
     /// Check the exact billing identity again when a countdown expires. A
     /// removed login or a newly excluded account must never be selected.
     pub fn is_failover_route_pool_approved(route: &str) -> bool {

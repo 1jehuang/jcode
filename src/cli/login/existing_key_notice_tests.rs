@@ -63,3 +63,21 @@ fn notice_names_the_config_file_when_only_the_file_has_a_key() {
 
     crate::env::remove_var("JCODE_HOME");
 }
+
+#[test]
+fn notice_names_the_active_command_code_account() {
+    let _guard = crate::storage::lock_test_env();
+    let _home = isolated_home();
+    crate::env::remove_var("COMMAND_CODE_API_KEY");
+    crate::provider_catalog::command_code_accounts::save_account(Some("work"), "cc-secret-key")
+        .expect("save account");
+
+    let resolved = crate::provider_catalog::resolve_openai_compatible_profile(
+        crate::provider_catalog::COMMAND_CODE_PROFILE,
+    );
+    let notice = existing_api_key_notice(&resolved).expect("configured account");
+    assert!(notice.contains("active Command Code account"), "{notice}");
+    assert!(!notice.contains("cc-secret-key"), "{notice}");
+
+    crate::env::remove_var("JCODE_HOME");
+}

@@ -93,6 +93,7 @@ impl Drop for Server {
 }
 
 fn run_azure(base: String) -> Vec<Result<StreamEvent>> {
+    let _env_lock = crate::tests::ENV_LOCK.lock();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

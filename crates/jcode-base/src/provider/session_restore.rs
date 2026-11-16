@@ -1,5 +1,37 @@
 use super::*;
 
+/// Split `openai-compatible:<profile>@<account>` into its profile and account.
+pub fn compatible_profile_account_label(api_method: &str) -> Option<(&str, &str)> {
+    let (profile_id, label) = api_method
+        .trim()
+        .strip_prefix("openai-compatible:")?
+        .split_once('@')?;
+    let profile_id = profile_id.trim();
+    let label = label.trim();
+    if profile_id.is_empty()
+        || label.is_empty()
+        || label.contains([':', '@'])
+        || label.chars().any(char::is_control)
+    {
+        return None;
+    }
+    Some((profile_id, label))
+}
+
+/// Persist the selected saved account alongside the compatible-profile route.
+pub fn qualify_compatible_profile_route(api_method: &str, label: &str) -> Option<String> {
+    let api_method = api_method.trim();
+    let label = label.trim();
+    if !api_method.starts_with("openai-compatible:")
+        || label.is_empty()
+        || label.contains([':', '@'])
+        || label.chars().any(char::is_control)
+    {
+        return None;
+    }
+    Some(format!("{api_method}@{label}"))
+}
+
 /// The outcome of re-applying a persisted session's model on resume.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionModelRestore {

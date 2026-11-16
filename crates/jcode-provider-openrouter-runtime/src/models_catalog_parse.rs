@@ -194,7 +194,24 @@ pub(crate) fn parse_model_info_value(value: &Value) -> Option<ModelInfo> {
         pricing: parse_model_pricing(object.get("pricing")),
         created: object.get("created").and_then(value_as_u64),
         input: parse_input_modalities(object),
+        supported_endpoints: parse_supported_endpoints(object),
     })
+}
+
+fn parse_supported_endpoints(object: &serde_json::Map<String, Value>) -> Vec<String> {
+    object
+        .get("supported_endpoints")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|endpoint| !endpoint.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn is_muse_hidden_model(object: &serde_json::Map<String, Value>) -> bool {
@@ -502,5 +519,28 @@ mod tests {
                 .context_length,
             Some(1_007_997)
         );
+    }
+
+    #[test]
+    fn command_code_catalog_preserves_supported_endpoints_and_case() {
+        let fixture = r#"{
+            "object": "list",
+            "data": [
+                {"id":"deepseek/deepseek-v4-flash","name":"DeepSeek V4 Flash","context_length":1000000,"supported_endpoints":["/chat/completions","/responses"]},
+                {"id":"claude-sonnet-5","name":"Claude Sonnet 5","context_length":1000000,"supported_endpoints":["/messages"]},
+                {"id":"zai-org/GLM-5.3","name":"GLM-5.3","context_length":1000000,"supported_endpoints":["/chat/completions"]}
+            ]
+        }"#;
+        let models = parse_openai_compatible_models_response(fixture).unwrap();
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0].id, "deepseek/deepseek-v4-flash");
+        assert_eq!(
+            models[0].supported_endpoints,
+            vec!["/chat/completions", "/responses"]
+        );
+        assert_eq!(models[1].id, "claude-sonnet-5");
+        assert_eq!(models[1].supported_endpoints, vec!["/messages"]);
+        assert_eq!(models[2].id, "zai-org/GLM-5.3");
+        assert_eq!(models[2].context_length, Some(1_000_000));
     }
 }

@@ -1261,6 +1261,17 @@ fn list_cli_providers_includes_conifer() {
 }
 
 #[test]
+fn list_cli_providers_includes_command_code() {
+    let providers = super::report_info::list_cli_providers();
+    let provider = providers
+        .iter()
+        .find(|provider| provider.id == "command-code")
+        .expect("Command Code should be discoverable through `provider list`");
+    assert_eq!(provider.display_name, "Command Code");
+    assert_eq!(provider.auth_kind.as_deref(), Some("API key / CLI"));
+}
+
+#[test]
 fn version_command_plain_output_includes_core_fields() {
     let report = super::report_info::VersionReport {
         version: "v1.2.3 (abc1234)".to_string(),

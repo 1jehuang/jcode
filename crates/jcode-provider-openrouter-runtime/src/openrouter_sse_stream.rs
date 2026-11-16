@@ -216,6 +216,8 @@ async fn stream_response(
     } else {
         "chat/completions"
     };
+    let command_code = api_base.to_ascii_lowercase().contains("api.commandcode.ai");
+    let command_code_responses = responses_api && command_code;
     let request_kind = if azure_responses {
         "Azure OpenAI Responses"
     } else {
@@ -310,9 +312,19 @@ async fn stream_response(
         Box::pin(jcode_provider_openai::stream::OpenAIResponsesStream::new(
             response.bytes_stream(),
         ))
+    } else if command_code_responses {
+        Box::pin(jcode_provider_openai::stream::OpenAIResponsesStream::new(
+            response.bytes_stream(),
+        ))
     } else if responses_api {
         Box::pin(super::opencode_go_responses::ResponsesStream::new(
             response.bytes_stream(),
+        ))
+    } else if command_code {
+        Box::pin(OpenRouterStream::new_strict(
+            response.bytes_stream(),
+            model.clone(),
+            provider_pin,
         ))
     } else {
         Box::pin(OpenRouterStream::new(
@@ -368,6 +380,28 @@ async fn stream_response(
                 saw_message_end = true;
             }
         }
+        if command_code_responses {
+            if let StreamEvent::Error {
+                message,
+                retry_after_secs,
+            } = &event
+            {
+                let retry_hint = retry_after_secs
+                    .map(|seconds| format!(" (retry after {seconds}s)"))
+                    .unwrap_or_default();
+                return Err(anyhow::anyhow!(
+                    "Command Code Responses stream error\n  endpoint: {}\n  model: {}\n  auth: {}\n  error: {}{}",
+                    url,
+                    model,
+                    auth.label(),
+                    message,
+                    retry_hint
+                ));
+            }
+            if matches!(event, StreamEvent::MessageEnd { .. }) {
+                saw_message_end = true;
+            }
+        }
         if tx.send(Ok(event)).await.is_err() {
             return Ok(());
         }
@@ -376,6 +410,14 @@ async fn stream_response(
         }
     }
 
+    if command_code_responses && !saw_message_end {
+        return Err(anyhow::anyhow!(
+            "Command Code Responses stream ended before response.completed or response.incomplete\n  endpoint: {}\n  model: {}\n  auth: {}",
+            url,
+            model,
+            auth.label()
+        ));
+    }
     if azure_responses && !saw_message_end {
         return Err(anyhow::Error::new(AzureResponseFailure {
             retryable: true,

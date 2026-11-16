@@ -56,6 +56,11 @@ pub struct ModelInfo {
     /// rather than inferring a capability the source never claimed.
     #[serde(default)]
     pub input: Vec<String>,
+    /// Endpoint paths the provider advertised for this model, for example
+    /// `["/chat/completions", "/responses"]`. Empty when the catalog did not
+    /// say; callers must not invent a transport the provider did not list.
+    #[serde(default)]
+    pub supported_endpoints: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

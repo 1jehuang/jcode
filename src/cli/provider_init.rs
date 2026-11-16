@@ -15,6 +15,9 @@ use crate::tool;
 use super::login::run_login_provider;
 use super::output;
 
+mod provider_choice;
+pub use provider_choice::{login_provider_for_choice, profile_for_choice};
+
 pub(crate) use crate::external_auth::maybe_run_external_auth_auto_import_flow;
 use crate::external_auth::{
     can_prompt_for_external_auth, external_auth_blocked_message, prompt_to_trust_external_auth,
@@ -38,6 +41,8 @@ pub enum ProviderChoice {
     )]
     OpenaiApi,
     Openrouter,
+    #[value(alias = "commandcode")]
+    CommandCode,
     #[value(alias = "aws-bedrock", alias = "aws_bedrock")]
     Bedrock,
     #[value(alias = "azure-openai", alias = "aoai")]
@@ -161,6 +166,7 @@ impl ProviderChoice {
             Self::Openai => "openai",
             Self::OpenaiApi => "openai-api",
             Self::Openrouter => "openrouter",
+            Self::CommandCode => "command-code",
             Self::Bedrock => "bedrock",
             Self::Azure => "azure",
             Self::Opencode => "opencode",
@@ -217,7 +223,7 @@ impl ProviderChoice {
 }
 
 #[allow(deprecated)]
-const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescriptor)] = &[
+pub(crate) const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescriptor)] = &[
     (
         ProviderChoice::Jcode,
         crate::provider_catalog::JCODE_LOGIN_PROVIDER,
@@ -241,6 +247,10 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
     (
         ProviderChoice::Openrouter,
         crate::provider_catalog::OPENROUTER_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::CommandCode,
+        crate::provider_catalog::COMMAND_CODE_LOGIN_PROVIDER,
     ),
     (
         ProviderChoice::Bedrock,
@@ -486,21 +496,6 @@ fn env_model_for_choice_from<'a>(
     } else {
         None
     }
-}
-
-pub fn profile_for_choice(choice: &ProviderChoice) -> Option<OpenAiCompatibleProfile> {
-    match login_provider_for_choice(choice)?.target {
-        LoginProviderTarget::OpenAiCompatible(profile) => Some(profile),
-        _ => None,
-    }
-}
-
-#[allow(deprecated)]
-pub fn login_provider_for_choice(choice: &ProviderChoice) -> Option<LoginProviderDescriptor> {
-    PROVIDER_CHOICE_LOGIN_PROVIDERS
-        .iter()
-        .find(|(candidate, _)| candidate == choice)
-        .map(|(_, provider)| *provider)
 }
 
 #[allow(deprecated)]
@@ -1659,7 +1654,8 @@ async fn init_provider_with_model_policy(
             }
             Arc::new(multi)
         }
-        ProviderChoice::Opencode
+        ProviderChoice::CommandCode
+        | ProviderChoice::Opencode
         | ProviderChoice::OpencodeGo
         | ProviderChoice::Zai
         | ProviderChoice::Ai302

@@ -16,10 +16,7 @@ use crate::provider_catalog::ResolvedOpenAiCompatibleProfile;
 pub(super) fn existing_api_key_notice(
     resolved: &ResolvedOpenAiCompatibleProfile,
 ) -> Option<String> {
-    crate::provider_catalog::load_api_key_from_env_or_config(
-        &resolved.api_key_env,
-        &resolved.env_file,
-    )?;
+    crate::provider_catalog::load_openai_compatible_profile_api_key(resolved)?;
     Some(format!(
         "A {} API key is already configured from {}.\nPaste a new key to replace it, or press Ctrl+C to keep it.\n",
         resolved.display_name,
@@ -33,6 +30,11 @@ pub(super) fn existing_api_key_notice(
 fn credential_source(resolved: &ResolvedOpenAiCompatibleProfile) -> String {
     if std::env::var(&resolved.api_key_env).is_ok_and(|value| !value.trim().is_empty()) {
         return format!("the {} environment variable", resolved.api_key_env);
+    }
+    if resolved.id == "command-code"
+        && crate::provider_catalog::command_code_accounts::active_api_key().is_some()
+    {
+        return "the active Command Code account".to_string();
     }
     match crate::storage::app_config_dir() {
         Ok(dir) => dir.join(&resolved.env_file).display().to_string(),

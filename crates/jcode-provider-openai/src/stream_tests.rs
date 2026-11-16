@@ -437,3 +437,23 @@ fn plain_text_fallback_notice_is_still_dropped() {
 
     assert!(event.is_none());
 }
+
+#[test]
+fn incomplete_responses_stream_emits_no_message_end() {
+    use futures::StreamExt;
+    futures::executor::block_on(async {
+        let payload = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n"
+        );
+        let input = futures::stream::iter([Ok(Bytes::from(payload))]);
+        let mut stream = OpenAIResponsesStream::new(input);
+        let mut saw_end = false;
+        while let Some(item) = stream.next().await {
+            if matches!(item.expect("event"), StreamEvent::MessageEnd { .. }) {
+                saw_end = true;
+            }
+        }
+        assert!(!saw_end, "a cut-off response must not look complete");
+    });
+}
