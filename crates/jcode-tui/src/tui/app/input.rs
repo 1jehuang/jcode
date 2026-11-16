@@ -1640,12 +1640,16 @@ impl App {
             let needs_spike_challenge = quality_reviews_enabled
                 && confidence_summary.confidence_spike_detected
                 && !self.todo_confidence_spike_challenged;
+            // Goals that document why validation stopped exempt their todos:
+            // asking again cannot change an exhausted constraint.
+            let validation_targets = crate::todo::todos_needing_validation(&todos, &goals);
             let needs_validation = quality_reviews_enabled
-                && confidence_summary.completion_confidence_needs_validation;
+                && confidence_summary.completion_confidence_needs_validation
+                && !validation_targets.is_empty();
             if (needs_validation || needs_spike_challenge) && gate_budget_left {
                 self.todo_completion_gate_attempts =
                     self.todo_completion_gate_attempts.saturating_add(1);
-                let notice = if confidence_summary.completion_confidence_needs_validation {
+                let notice = if needs_validation {
                     crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Completion);
                     "🔍 Double-checking confidence for you..."
                 } else {
@@ -1658,7 +1662,11 @@ impl App {
                 self.push_display_message(DisplayMessage::system(notice));
                 // User-role content: reminder-only turns read as empty user
                 // messages and models answer instead of re-validating.
-                let summary = super::commands::build_todo_confidence_summary_message(&todos);
+                let summary = if needs_validation {
+                    crate::todo::build_todo_validation_continuation_message(&validation_targets)
+                } else {
+                    crate::todo::build_todo_confidence_spike_continuation_message(&todos)
+                };
                 self.queued_messages.push(summary);
                 self.pending_queued_dispatch = true;
                 return true;

@@ -1020,3 +1020,36 @@ fn format_background_task_stalled_markdown_handles_empty_tail() {
     ));
     assert!(rendered.contains("_No output captured yet._"));
 }
+
+#[test]
+fn redact_preview_secrets_handles_inline_and_truncated_credentials() {
+    // A collapsed, truncated status preview: the assignment is mid-line and
+    // the token is cut short, so the line-anchored patterns never match.
+    let preview = "please deploy to prod with DB_PASSWORD=hunter2hunter2 and api-key: abc123def then use sk-ant-oat01-ABCDE...";
+    let out = redact_preview_secrets(preview);
+    assert!(!out.contains("hunter2"), "{out}");
+    assert!(!out.contains("abc123def"), "{out}");
+    assert!(!out.contains("sk-ant-oat01"), "{out}");
+    assert!(out.contains("DB_PASSWORD=[REDACTED_SECRET]"), "{out}");
+    assert!(out.starts_with("please deploy to prod with"), "{out}");
+
+    let url = redact_preview_secrets("clone https://bot:s3cr3tvalue@git.example.com/repo.git");
+    assert!(!url.contains("s3cr3tvalue"), "{url}");
+    assert!(url.contains("git.example.com/repo.git"), "{url}");
+
+    let quoted = redact_preview_secrets("set token = \"two words\" now");
+    assert!(!quoted.contains("two words"), "{quoted}");
+    assert!(quoted.ends_with("now"), "{quoted}");
+}
+
+#[test]
+fn redact_preview_secrets_leaves_ordinary_prose_alone() {
+    for text in [
+        "Fix the tokenizer: it drops the last token",
+        "investigate password reset flow and cookie banner",
+        "review PR #42 at https://github.com/1jehuang/jcode/pull/42",
+        "skip flaky test in secret_store.rs",
+    ] {
+        assert_eq!(redact_preview_secrets(text), text);
+    }
+}

@@ -7,9 +7,7 @@ use crate::protocol::{NotificationType, ServerEvent};
 use crate::session::Session;
 use anyhow::Result;
 use futures::future::try_join_all;
-use jcode_swarm_core::{
-    completion_notification_with_lane_plan, normalize_completion_report, truncate_detail,
-};
+use jcode_swarm_core::{completion_notification_with_lane_plan, normalize_completion_report};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -99,6 +97,26 @@ pub(super) fn swarm_descendants(
         .collect();
     descendants.sort();
     descendants
+}
+
+/// Fire the cancel signal of every turn `session_id` is currently running.
+/// Returns how many were fired.
+///
+/// `swarm stop` removes the worker's session entry and swarm membership. A
+/// worker that was mid-turn kept its own `Arc<Agent>` and went on generating
+/// and writing files for minutes, with no handle left to stop it by.
+pub(super) fn cancel_active_turns(session_id: &str) -> usize {
+    let signals = crate::turn_cancel_registry::active_turn_signals(session_id);
+    for signal in &signals {
+        signal.fire();
+    }
+    if !signals.is_empty() {
+        crate::logging::info(&format!(
+            "SWARM_STOP_CANCELLED_ACTIVE_TURNS session={session_id} fired={}",
+            signals.len()
+        ));
+    }
+    signals.len()
 }
 
 /// Stop the running turns of every worker `session_id` spawned (workers run
@@ -1572,6 +1590,23 @@ pub(super) async fn notify_owner_of_unrestored_idle_workers(
     count
 }
 
+/// One-line preview of user or agent text for swarm status, plan progress and
+/// event history.
+///
+/// These previews are echoed to other agents (`swarm status`, `swarm list`),
+/// persisted with swarm state and rendered in every attached client, so a
+/// credential at the start of a user request must not be copied into them.
+pub(super) fn truncate_detail(text: &str, max_len: usize) -> String {
+    // Bound the redaction scan: only the head of the text can reach the
+    // preview, and prompts with pasted content can be very large.
+    let scan_chars = max_len.saturating_mul(4).saturating_add(64);
+    let head = match text.char_indices().nth(scan_chars) {
+        Some((end, _)) => &text[..end],
+        None => text,
+    };
+    jcode_swarm_core::truncate_detail(&crate::message::redact_preview_secrets(head), max_len)
+}
+
 /// Set a member's stable task label, derived from its spawn prompt or task
 /// assignment. Unlike `detail` (transient status text), the label survives
 /// status churn so UIs can always answer "what was this agent for?". A later
@@ -1581,7 +1616,9 @@ pub(super) async fn set_member_task_label(
     task_text: &str,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) {
-    let Some(label) = jcode_swarm_core::derive_swarm_task_label(task_text) else {
+    let Some(label) = jcode_swarm_core::derive_swarm_task_label(task_text)
+        .map(|label| crate::message::redact_preview_secrets(&label))
+    else {
         return;
     };
     let mut members = swarm_members.write().await;

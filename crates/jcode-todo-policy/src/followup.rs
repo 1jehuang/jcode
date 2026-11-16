@@ -14,10 +14,9 @@
 use crate::{
     ConfidenceState, GateObservation, TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE,
     TODO_LONG_SESSION_REVIEW_MESSAGE, TodoGoal, TodoItem, TodoPlan, build_actionable_poke_message,
-    build_todo_completion_continuation_message, build_todo_confidence_spike_continuation_message,
-    build_todo_ownership_continuation_message, completed_groups_have_sufficient_delivery,
-    completion_confidence_passes, spike_completed_todos, todo_status_is_cancelled,
-    todo_status_is_completed,
+    build_todo_confidence_spike_continuation_message, build_todo_ownership_continuation_message,
+    completed_groups_have_sufficient_delivery, completion_confidence_passes, spike_completed_todos,
+    todo_status_is_cancelled, todo_status_is_completed,
 };
 use serde::{Deserialize, Serialize};
 
@@ -388,13 +387,16 @@ impl FollowUpPolicy {
         let summary = ConfidenceSummary::of(todos);
         let needs_spike_challenge =
             self.gate_digest_enabled && summary.spike_detected && !self.spike_challenged;
-        let needs_validation = self.gate_digest_enabled && summary.needs_validation;
+        // Goals that document why validation stopped exempt their todos:
+        // asking again cannot change an exhausted constraint.
+        let validation_targets = crate::todos_needing_validation(todos, goals);
+        let needs_validation = self.gate_digest_enabled && !validation_targets.is_empty();
         if (needs_validation || needs_spike_challenge) && gate_budget_left {
             self.gate_attempts = self.gate_attempts.saturating_add(1);
-            let decision = if summary.needs_validation {
+            let decision = if needs_validation {
                 Decision::send(
                     FollowUpKind::CompletionValidation,
-                    build_todo_completion_continuation_message(todos),
+                    crate::build_todo_validation_continuation_message(&validation_targets),
                     "🔍 Double-checking confidence for you...",
                 )
             } else {

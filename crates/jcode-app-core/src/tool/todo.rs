@@ -961,6 +961,52 @@ fn prune_orphaned_goals(goals: Vec<TodoGoal>, todos: &[TodoItem]) -> Vec<TodoGoa
         .collect()
 }
 
+/// Explain a goal assessment that this write sent but `prune_orphaned_goals`
+/// discards because no todo carries its group any more.
+///
+/// Without this the write returned normally, the assessment vanished, and the
+/// agent kept resending it (field report: goals-only updates for a finished
+/// group were "silently dropped").
+fn ignored_goal_groups_note(incoming: &[TodoGoal], todos: &[TodoItem]) -> Option<String> {
+    if todos.is_empty() {
+        return None;
+    }
+    let live_groups: std::collections::HashSet<Option<String>> = todos
+        .iter()
+        .map(|todo| goal_group_key(todo.group.as_deref()))
+        .collect();
+    let mut ignored: Vec<String> = Vec::new();
+    for goal in incoming {
+        let key = goal_group_key(goal.group.as_deref());
+        if live_groups.contains(&key) {
+            continue;
+        }
+        let label = match key {
+            Some(group) => format!("\"{group}\""),
+            None => "(ungrouped)".to_string(),
+        };
+        if !ignored.contains(&label) {
+            ignored.push(label);
+        }
+    }
+    if ignored.is_empty() {
+        return None;
+    }
+    let mut live: Vec<String> = live_groups
+        .into_iter()
+        .map(|group| match group {
+            Some(group) => format!("\"{group}\""),
+            None => "(ungrouped)".to_string(),
+        })
+        .collect();
+    live.sort();
+    Some(format!(
+        "Note: goal assessment ignored for {}: no todo is in that group, so it was not saved. Current groups: {}.",
+        ignored.join(", "),
+        live.join(", ")
+    ))
+}
+
 fn changed_goal_fields(before: Option<&TodoGoal>, after: Option<&TodoGoal>) -> Vec<TodoGoalField> {
     let mut fields = Vec::new();
     if before.and_then(|goal| goal.closed_feedback_loop)
@@ -1646,10 +1692,13 @@ impl Tool for TodoTool {
             (|| {
                 let stored_goals = load_goals(&ctx.session_id).unwrap_or_default();
                 let stored_plan = load_plan(&ctx.session_id).unwrap_or_default();
+                let ignored_goals =
+                    ignored_goal_groups_note(params.goals.as_deref().unwrap_or_default(), &todos);
                 let goals = prune_orphaned_goals(merge_goals(&stored_goals, params.goals), &todos);
                 let plan = merge_plan(&stored_plan, params.plan);
-                let (observations, nudges) =
+                let (observations, mut nudges) =
                     record_reframe_observations(&plan, &goals, &todos, &previous);
+                nudges.extend(ignored_goals);
                 for observation in &observations {
                     let kind = match observation.kind {
                         GateObservationKind::IntentUnderstanding => {
