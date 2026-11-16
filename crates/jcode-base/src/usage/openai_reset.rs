@@ -1,11 +1,104 @@
 //! Banked Codex resets, using the same contract as openai/codex's backend-client
 //! `client/rate_limit_resets.rs`. These are earned, single-use resets, not API credits.
-//! Preparation is read-only. Redemption always requires an explicit confirmation.
+//! Preparation is read-only. Redemption requires confirmation or explicit auto-reset opt-in.
 
 use super::*;
 use serde::{Deserialize, Serialize};
 
 const RESET_CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
+
+/// Serialize automatic redemption across agents, then recheck quota under the
+/// lock. A failed or uncertain POST must not spend another grant on retry.
+pub(crate) async fn auto_reset_weekly_usage(account_label: Option<String>) -> Result<bool> {
+    let credentials = match account_label.as_deref() {
+        Some(label) => auth::codex::load_credentials_for_account(label),
+        None => auth::codex::load_oauth_credentials(),
+    }
+    .context("Automatic banked resets require the selected OAuth account")?;
+    use sha2::{Digest, Sha256};
+    let scope = format!(
+        "openai-auto-banked-reset:{}:{}",
+        credentials.account_id.as_deref().unwrap_or("default"),
+        account_label.as_deref().unwrap_or("default")
+    );
+    let _shared = super::disk_cache::lock_probe(&scope).await?;
+    let receipts = crate::storage::jcode_dir()?.join("auto_reset_receipts");
+    std::fs::create_dir_all(&receipts)?;
+    let receipt_path = receipts.join(format!(
+        "{}.json",
+        hex::encode(Sha256::digest(scope.as_bytes()))
+    ));
+    let now = chrono::Utc::now().timestamp();
+    if let Some(restored) = recent_auto_reset(&receipt_path, now)? {
+        // Waiting agents may still hold a pre-reset error or cooldown.
+        if restored {
+            invalidate_openai_usage_reset_state(account_label.as_deref()).await;
+        }
+        return Ok(restored);
+    }
+    invalidate_openai_usage_cache(account_label.as_deref()).await;
+    let report = fetch_openai_usage_for_account(
+        "OpenAI (ChatGPT)".into(),
+        credentials,
+        account_label.as_deref(),
+    )
+    .await;
+    let usage = openai_usage_data_from_provider_report(&report);
+    if !auto_reset_eligible(&usage, account_label.as_deref()) {
+        return Ok(false);
+    }
+    let Some(pending) = prepare_openai_usage_reset_for_account(account_label.clone()).await? else {
+        return Ok(false);
+    };
+    // Persist before POST so cancellation or process exit cannot immediately
+    // redeem another grant. A malformed receipt fails closed on the next call.
+    write_auto_reset_receipt(&receipt_path, now, false)?;
+    let outcome = consume_openai_usage_reset(&pending).await?;
+    crate::logging::info(&format!("Automatic banked reset: {}", outcome.message()));
+    let restored = matches!(outcome.code, ResetCode::Reset | ResetCode::AlreadyRedeemed);
+    write_auto_reset_receipt(&receipt_path, now, restored)?;
+    Ok(restored)
+}
+
+fn recent_auto_reset(path: &std::path::Path, now: i64) -> Result<Option<bool>> {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let (at, restored): (i64, bool) = serde_json::from_slice(&bytes)
+                .context("Invalid automatic reset receipt, refusing to spend another reset")?;
+            Ok((now.saturating_sub(at) < 300).then_some(restored))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn write_auto_reset_receipt(path: &std::path::Path, now: i64, restored: bool) -> Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(&serde_json::to_vec(&(now, restored))?)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn auto_reset_eligible(usage: &OpenAIUsageData, label: Option<&str>) -> bool {
+    usage
+        .seven_day
+        .as_ref()
+        .is_some_and(|window| window.usage_ratio >= 1.0)
+        && (usage.hard_limit_reached
+            || usage
+                .openai_reset_credits
+                .as_ref()
+                .is_some_and(|credits| credits.ordinary_usage_allowed == Some(false)))
+        && usage.banked_reset_available_for_account(label)
+}
 
 #[derive(Debug, Deserialize)]
 struct ResetCredits {

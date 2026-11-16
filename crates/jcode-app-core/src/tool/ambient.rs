@@ -759,7 +759,7 @@ impl Tool for ScheduleTool {
     }
 
     fn description(&self) -> &str {
-        "Schedule independent future tasks. For blocked todos, use todo external_blocker."
+        "Schedule independent future tasks."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -994,11 +994,6 @@ fn format_schedule_target(target: &ScheduleTarget) -> String {
     match target {
         ScheduleTarget::Ambient => "ambient agent".to_string(),
         ScheduleTarget::Session { session_id } => format!("resume session {}", session_id),
-        ScheduleTarget::TodoReview {
-            session_id,
-            todo_id,
-            ..
-        } => format!("review todo {todo_id} in session {session_id}"),
         ScheduleTarget::Spawn { parent_session_id } => {
             format!("spawn one child session from {}", parent_session_id)
         }

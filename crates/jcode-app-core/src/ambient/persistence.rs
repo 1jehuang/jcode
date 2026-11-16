@@ -58,6 +58,27 @@ impl AmbientState {
 // ScheduledQueue
 // ---------------------------------------------------------------------------
 
+/// Read the queue entry by entry. Timed todo reviews (`todo_review` targets)
+/// were removed with item-level blockers, and one unreadable legacy entry must
+/// not cost the user every other scheduled task. A file that is not a JSON
+/// list is still an error, so corruption never reads as an empty queue.
+fn read_queue(path: &std::path::Path) -> Result<Vec<ScheduledItem>> {
+    let entries: Vec<serde_json::Value> = storage::read_json(path)?;
+    Ok(entries
+        .into_iter()
+        .filter_map(|entry| match serde_json::from_value(entry) {
+            Ok(item) => Some(item),
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "Dropping unreadable scheduled item from {}: {error}",
+                    path.display()
+                ));
+                None
+            }
+        })
+        .collect())
+}
+
 pub struct ScheduledQueue {
     items: Vec<ScheduledItem>,
     path: PathBuf,
@@ -66,7 +87,7 @@ pub struct ScheduledQueue {
 impl ScheduledQueue {
     pub fn load(path: PathBuf) -> Self {
         let items: Vec<ScheduledItem> = if path.exists() {
-            storage::read_json(&path).unwrap_or_default()
+            read_queue(&path).unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -91,7 +112,7 @@ impl ScheduledQueue {
             .open(self.path.with_extension("json.lock"))?;
         lock.lock()?;
         let mut latest = if self.path.exists() {
-            storage::read_json::<Vec<ScheduledItem>>(&self.path)?
+            read_queue(&self.path)?
         } else {
             Vec::new()
         };

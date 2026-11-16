@@ -294,13 +294,14 @@ impl GmailClient {
             "auth_config_id": auth_config_id,
             "user_id": user_id,
         });
-        let resp = self
+        let req = self
             .http
             .post(&endpoint)
             .header("x-api-key", &cfg.api_key)
-            .json(&payload)
-            .send()
-            .await?;
+            .json(&payload);
+        // JSON serialization is eager, so only the request bytes need survive the await.
+        drop(payload);
+        let resp = req.send().await?;
         let status = resp.status();
         let text = resp.text().await?;
         if !status.is_success() {
@@ -401,6 +402,7 @@ impl GmailClient {
         if let Some(ref b) = body {
             req = req.json(b);
         }
+        drop(body);
         let resp = req.send().await?;
         let status = resp.status();
         let text = resp.text().await?;
@@ -426,13 +428,14 @@ impl GmailClient {
     ) -> Result<Value> {
         let payload = build_composio_proxy_payload(cfg, method.as_str(), url, body);
         let endpoint = format!("{}/tools/execute/proxy", cfg.base_url.trim_end_matches('/'));
-        let resp = self
+        let req = self
             .http
             .post(&endpoint)
             .header("x-api-key", &cfg.api_key)
-            .json(&payload)
-            .send()
-            .await?;
+            .json(&payload);
+        // JSON serialization is eager, so only the request bytes need survive the await.
+        drop(payload);
+        let resp = req.send().await?;
         let status = resp.status();
         let text = resp.text().await?;
         if !status.is_success() {
@@ -442,7 +445,7 @@ impl GmailClient {
                 truncate_error(&text)
             ));
         }
-        let envelope: Value = serde_json::from_str(&text)?;
+        let mut envelope: Value = serde_json::from_str(&text)?;
         // Composio wraps the upstream response as { data, status, headers }.
         if let Some(inner) = envelope.get("status").and_then(|s| s.as_u64())
             && inner >= 400
@@ -464,7 +467,10 @@ impl GmailClient {
                 truncate_error(&err.to_string())
             ));
         }
-        Ok(envelope.get("data").cloned().unwrap_or(Value::Null))
+        Ok(envelope
+            .get_mut("data")
+            .map(Value::take)
+            .unwrap_or(Value::Null))
     }
 
     pub async fn list_messages(
@@ -1247,6 +1253,181 @@ mod tests {
             user_id: Some("me".to_string()),
             auth_config_id: Some("ac_123".to_string()),
         }
+    }
+
+    // Explicit dummy credentials and a proxy-free client keep these tests entirely local.
+    async fn loopback_composio(
+        status: u16,
+        response: &str,
+        path: &'static str,
+        expected: Value,
+    ) -> (GmailClient, ComposioConfig, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = cfg();
+        config.base_url = format!("http://{}/api/v3.1/", listener.local_addr().unwrap());
+        let client = GmailClient {
+            http: reqwest::Client::builder().no_proxy().build().unwrap(),
+            backend: GmailBackend::Composio(config.clone()),
+        };
+        let response = response.to_owned();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let (headers_end, content_length) = loop {
+                let mut buf = [0; 4096];
+                let read = stream.read(&mut buf).await.unwrap();
+                assert_ne!(read, 0);
+                request.extend_from_slice(&buf[..read]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = std::str::from_utf8(&request[..end]).unwrap();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    break (end + 4, length);
+                }
+            };
+            while request.len() < headers_end + content_length {
+                let mut buf = [0; 4096];
+                let read = stream.read(&mut buf).await.unwrap();
+                assert_ne!(read, 0);
+                request.extend_from_slice(&buf[..read]);
+            }
+            let headers = std::str::from_utf8(&request[..headers_end]).unwrap();
+            assert_eq!(
+                headers.lines().next().unwrap(),
+                format!("POST {path} HTTP/1.1")
+            );
+            let headers = headers.to_ascii_lowercase();
+            assert!(headers.contains("\r\nx-api-key: test-key\r\n"));
+            assert!(headers.contains("\r\ncontent-type: application/json\r\n"));
+            assert!(!headers.contains("authorization:"));
+            assert_eq!(
+                serde_json::from_slice::<Value>(
+                    &request[headers_end..headers_end + content_length]
+                )
+                .unwrap(),
+                expected
+            );
+            let response = format!(
+                "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                response.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        (client, config, server)
+    }
+
+    #[tokio::test]
+    async fn composio_loopback_proxy_data_variants_and_exact_requests() {
+        let url = "https://gmail.invalid/messages?maxResults=10&q=a%20b";
+        for (envelope, expected) in [
+            (
+                json!({"status":200,"data":{"messages":[{"id":"m1"}]}}),
+                json!({"messages":[{"id":"m1"}]}),
+            ),
+            (
+                json!({"data":[1, {"nested":true}]}),
+                json!([1, {"nested":true}]),
+            ),
+            (json!({"data":"text","error":null}), json!("text")),
+            (json!({"data":false}), json!(false)),
+            (json!({"data":42}), json!(42)),
+            (json!({"data":null}), Value::Null),
+            (json!({"status":204}), Value::Null),
+            (json!(null), Value::Null),
+            (json!([]), Value::Null),
+        ] {
+            for body in [None, Some(json!({"nested":{"items":[1,2,3]}}))] {
+                let method = if body.is_some() {
+                    reqwest::Method::POST
+                } else {
+                    reqwest::Method::GET
+                };
+                let mut request = json!({"endpoint":url,"method":method.as_str(),"connected_account_id":"ca_123","user_id":"me"});
+                if let Some(body) = &body {
+                    request["body"] = body.clone();
+                }
+                let (client, config, server) = loopback_composio(
+                    200,
+                    &envelope.to_string(),
+                    "/api/v3.1/tools/execute/proxy",
+                    request,
+                )
+                .await;
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    client.request_composio(&config, method, url, body),
+                )
+                .await
+                .unwrap();
+                server.await.unwrap();
+                assert_eq!(result.unwrap(), expected);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn composio_loopback_proxy_errors_preserve_precedence() {
+        for (status, response, expected) in [
+            (
+                503,
+                "unavailable",
+                "Composio proxy error 503 Service Unavailable: unavailable",
+            ),
+            (
+                200,
+                r#"{"status":404,"data":{"reason":"missing"},"error":"secondary"}"#,
+                r#"Gmail API error 404 (via Composio): {"reason":"missing"}"#,
+            ),
+            (
+                200,
+                r#"{"status":400}"#,
+                "Gmail API error 400 (via Composio): ",
+            ),
+            (
+                200,
+                r#"{"error":{"reason":"denied"}}"#,
+                r#"Composio error: {"reason":"denied"}"#,
+            ),
+            (200, r#"{"error":false}"#, "Composio error: false"),
+            (200, r#"{"error":""}"#, "Composio error: \"\""),
+        ] {
+            let (client, config, server) = loopback_composio(status, response, "/api/v3.1/tools/execute/proxy", json!({"endpoint":"https://gmail.invalid/labels","method":"GET","connected_account_id":"ca_123","user_id":"me"})).await;
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                client.request_composio(
+                    &config,
+                    reqwest::Method::GET,
+                    "https://gmail.invalid/labels",
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+            server.await.unwrap();
+            assert_eq!(result.unwrap_err().to_string(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn composio_loopback_create_link_exact_request() {
+        let (client, config, server) = loopback_composio(200, r#"{"redirect_url":"https://example.invalid/consent","connected_account_id":"ca_dummy"}"#, "/api/v3.1/connected_accounts/link", json!({"auth_config_id":"ac_dummy","user_id":"dummy-user"})).await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.create_link(&config, "ac_dummy", "dummy-user"),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        let link = result.unwrap();
+        assert_eq!(link.redirect_url, "https://example.invalid/consent");
+        assert_eq!(link.connected_account_id, "ca_dummy");
     }
 
     #[test]

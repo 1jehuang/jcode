@@ -228,6 +228,8 @@ impl Tool for ReadTool {
             path: path.to_path_buf(),
             op: FileOp::Read,
             intent: None,
+            added: 0,
+            removed: 0,
             summary: Some(format!(
                 "read lines {}-{} of {}",
                 range.offset + 1,

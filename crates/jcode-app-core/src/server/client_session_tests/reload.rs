@@ -2,6 +2,53 @@ use super::*;
 use anyhow::{Result, anyhow};
 
 #[test]
+fn restored_active_pending_tool_counts_as_interrupted() {
+    let message = crate::session::StoredMessage {
+        id: "pending_bg".into(),
+        role: crate::message::Role::Assistant,
+        content: vec![ContentBlock::ToolUse {
+            id: "wait_1".into(),
+            name: "bg".into(),
+            input: serde_json::json!({"action": "wait", "max_wait_seconds": 400}),
+            thought_signature: None,
+        }]
+        .into(),
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    };
+    let agent = test_agent(vec![message]);
+    assert!(restored_session_was_interrupted(
+        "session_pending_bg",
+        &crate::session::SessionStatus::Active,
+        &agent,
+    ));
+}
+
+#[test]
+fn restored_active_completed_assistant_does_not_count_as_interrupted() {
+    let agent = test_agent(vec![crate::session::StoredMessage {
+        id: "done".into(),
+        role: crate::message::Role::Assistant,
+        content: vec![ContentBlock::Text {
+            text: "Done".into(),
+            cache_control: None,
+        }]
+        .into(),
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    }]);
+    assert!(!restored_session_was_interrupted(
+        "session_done",
+        &crate::session::SessionStatus::Active,
+        &agent,
+    ));
+}
+
+#[test]
 fn detects_reload_interrupted_generation_text() {
     let agent = test_agent(vec![crate::session::StoredMessage {
         id: "msg_1".to_string(),
@@ -9,7 +56,8 @@ fn detects_reload_interrupted_generation_text() {
         content: vec![ContentBlock::Text {
             text: "partial\n\n[generation interrupted - server reloading]".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -28,7 +76,8 @@ fn detects_reload_interrupted_tool_result() {
             tool_use_id: "tool_1".to_string(),
             content: "[Tool 'bash' interrupted by server reload after 0.2s]".to_string(),
             is_error: Some(true),
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -47,7 +96,8 @@ fn detects_reload_skipped_tool_result() {
             tool_use_id: "tool_2".to_string(),
             content: "[Skipped - server reloading]".to_string(),
             is_error: Some(true),
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -66,7 +116,8 @@ fn detects_selfdev_reload_tool_result_even_when_not_marked_error() {
             tool_use_id: "tool_2b".to_string(),
             content: "Reload initiated. Process restarting...".to_string(),
             is_error: Some(false),
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -85,7 +136,8 @@ fn ignores_normal_tool_errors() {
             tool_use_id: "tool_3".to_string(),
             content: "Error: file not found".to_string(),
             is_error: Some(true),
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -103,7 +155,8 @@ fn restored_closed_session_with_reload_marker_still_counts_as_interrupted() {
         content: vec![ContentBlock::Text {
             text: "partial\n\n[generation interrupted - server reloading]".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -137,7 +190,8 @@ fn restored_closed_session_with_pending_user_message_during_reload_should_count_
         content: vec![ContentBlock::Text {
             text: "continue this after reload".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -184,7 +238,8 @@ fn restored_closed_session_with_pending_user_message_during_socket_ready_handoff
         content: vec![ContentBlock::Text {
             text: "continue this after socket-ready handoff".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -225,7 +280,8 @@ fn restored_closed_session_with_pending_user_message_without_reload_marker_is_no
         content: vec![ContentBlock::Text {
             text: "normal pending user text".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -255,7 +311,8 @@ fn restored_closed_session_without_reload_marker_is_not_interrupted() {
         content: vec![ContentBlock::Text {
             text: "finished normally".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,

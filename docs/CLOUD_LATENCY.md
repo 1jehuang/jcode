@@ -208,11 +208,34 @@ or model turns were requested.
 The combined portable cloud package built from source `5ca28ecf7` includes both
 the wakeup client and the prior emoji change. Its immutable package SHA-256 is
 `b468432330a561081b312cadeaf051aa404ffe7dab7af142b7c4292fcb2fe317`.
-It is staged, with the previous package retained, and activation waits for idle
-turns without `--force`. Duplicate older restart watchers were retired. The
+It was staged, then superseded by a newer coordinated cloud rollout. At 18:32 UTC,
+the updater and actual `/proc` executable both confirmed running package
+`ebf6f2fa8c6783583c38d59c7b214a4b0cc38ea7b50bb767a80a962335781d19`,
+with no pending package or updater failure. Duplicate older restart watchers were retired. The
 reload client now fails closed if activity status is missing, malformed, or the
 probe fails, rather than treating that failure as zero streaming turns. Four
 hosted runtime tests, including execution of the shell idle gate, passed.
+
+A later backend deployment at 12:20 UTC reset the checked-in wakeup flag to
+`false`, causing authenticated events HTTP 503 and runtime `event_connect`
+`unavailable` records. Normal Wrangler credential refresh restored expired
+OAuth access. At 19:06 UTC, a guarded flag-only restoration deployed version
+`4eec2c69-b79a-4ab6-958d-dec876356f0c` (deployment
+`ab815f4c-f3df-43c5-8251-155a66d1e45d`). The current production `worker.js`
+bytes, all 44 bindings except that flag, and unrelated settings including targeted
+placement were preserved. Its SHA-256 stayed
+`752fde9d95de746ce5b40a349ea2c1918c4e35166f7b2a0f4fb4780b8ffc23b4`.
+The previous version `a93daf43-1cae-4907-9bec-00981c0b8cf1` remains the
+configuration-only rollback reference, subject to checking subsequent deployments.
+Read-only acceptance again passed health/sessions/commands 200, anonymous events
+401, authorized non-upgrade 426, and an authenticated WebSocket 101. The backend
+source default now stays enabled, with a regression test to prevent ordinary
+deployments from silently disabling the reviewed rollout (backend commit
+`765f34d`, full backend tests and offline dry-run passed). The actual running
+cloud daemon then reconnected naturally after its unavailable cooldown and
+logged `event_connect outcome=ok duration_ms=453`, without restarting active
+work. This is handshake timing, not phone-to-command latency. No commands or
+pushes were generated for this acceptance.
 
 The ordinary account's command inventory subsequently returned 200. Eight
 existing mixed-version records had queue-wait p50 1,916ms and maximum 2,999,318ms.

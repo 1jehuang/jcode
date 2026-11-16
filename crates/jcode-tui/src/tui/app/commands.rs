@@ -396,10 +396,11 @@ pub(super) fn create_transfer_session_from_parent(
     // not foreign dependencies, and leave the parent's durable todos intact.
     for todo in &mut todos {
         todo.waiting_on.clear();
+        todo.waiting_reason = None;
     }
     let mut child = crate::session::Session::create(Some(parent_session_id.to_string()), None);
     child.messages.clear();
-    child.compaction = compaction;
+    child.compaction = compaction.map(std::sync::Arc::new);
     child.system_prompt = parent.system_prompt.clone();
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
@@ -424,7 +425,7 @@ async fn prepare_transfer_session_local(
     let compaction = crate::compaction::build_transfer_compaction_state(
         provider,
         transfer_active_messages(&parent),
-        parent.compaction.clone(),
+        parent.compaction.as_deref().cloned(),
     )
     .await?;
     let (session_id, session_name) =
@@ -708,7 +709,7 @@ fn launch_manual_subagent(app: &mut App, spec: ManualSubagentSpec) {
     }];
     app.add_provider_message(Message {
         role: Role::Assistant,
-        content: content_blocks.clone(),
+        content: content_blocks.clone().into(),
         timestamp: Some(chrono::Utc::now()),
         tool_duration_ms: None,
     });
@@ -2815,15 +2816,6 @@ fn weighted_confidence_average(scores: impl IntoIterator<Item = (u8, u32)>) -> O
     }
 }
 
-pub(super) fn build_todo_confidence_summary_message(todos: &[crate::todo::TodoItem]) -> String {
-    let summary = todo_confidence_summary(todos);
-    if summary.confidence_spike_detected && !summary.completion_confidence_needs_validation {
-        crate::todo::build_todo_confidence_spike_continuation_message(todos)
-    } else {
-        crate::todo::build_todo_completion_continuation_message(todos)
-    }
-}
-
 pub(super) fn todo_confidence_summary(todos: &[crate::todo::TodoItem]) -> TodoConfidenceSummary {
     let completed: Vec<&crate::todo::TodoItem> = todos
         .iter()
@@ -3316,7 +3308,11 @@ fn resume_terminal_after_editor() {
     // signal arriving while these modes are re-armed runs the full cleanup.
     // Re-enter the TUI before returning to the event loop. The existing
     // ratatui Terminal remains usable and the next loop iteration redraws it.
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(ratatui::init));
+    if let Err(error) = jcode_tui_style::init_terminal() {
+        crate::logging::warn(&format!(
+            "failed to re-enter the TUI after the editor: {error}"
+        ));
+    }
     let policy = crate::perf::tui_policy();
     let _ = crossterm::execute!(std::io::stdout(), EnableBracketedPaste);
     if policy.enable_focus_change {

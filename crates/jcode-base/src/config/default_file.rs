@@ -154,7 +154,8 @@ timeout_secs = 90
 # Copilot-key push-to-talk in `jcode companion` (Linux). List keyboard evdev
 # nodes to watch, e.g. ["/dev/input/by-id/usb-Foo-event-kbd"]. Holding the key
 # while a Jcode terminal is focused sends the transcript to that session, even
-# without Jcode Desktop. Empty disables it.
+# without Jcode Desktop. Empty falls back to the keyboards picked in Jcode
+# Desktop ([desktop.voice] global_devices), and disables it if there are none.
 # global_devices = []
 
 # Show live voice input inside the input box: a waveform row above the prompt
@@ -269,6 +270,14 @@ prompt_entry_animation = true
 # server reload are excluded. Applies to local native sessions, including a
 # disconnected SDK client, since the server cannot observe OS windows directly.
 # resume_recent_close_seconds = 30
+
+# What Resume does when the picked session is already open in another local
+# jcode window (default: "off"). Linux only.
+#   "off":     attach a second client, leave the other window alone
+#   "move":    bring the existing window to the current workspace and focus it
+#              (niri). Falls back to "replace" when the window cannot be moved.
+#   "replace": resume as usual and close the other window's client
+# resume_open_elsewhere = "off"
 
 # Which time Resume shows as "x ago" and sorts by (default: "message").
 #   "message":  newest message of any role (prompts, replies, tool results)
@@ -528,8 +537,23 @@ preserve_reasoning_context = true
 # countdown = 3-second countdown before retrying on another provider; press Esc to cancel (default)
 # manual = show a notice and let you switch yourself
 # cross_provider_failover = "manual"
+# Switch immediately only for definitive usage exhaustion (default: true).
+# False preserves the countdown. Manual mode always disables automatic switching.
+exhausted_usage_immediate_failover = true
+# Retry short recoverable Anthropic throttles on the same account (default: true).
+# False yields immediately to the account router when other pool members exist.
+anthropic_retry_recoverable_rate_limits = true
 # Try another account on the same provider before switching providers (default: true)
 # same_provider_account_failover = false
+# Automatically spend earned OpenAI banked resets at an exhausted weekly limit.
+# Retries the waiting request automatically. Never buys credits. Default: true.
+# Set false to disable automatic redemption.
+# openai_auto_banked_reset = false
+# Opt in separately to earned Anthropic Fable weekly resets. Never buys credits.
+# anthropic_auto_fable_reset = true
+# Preserve earned resets while another approved pool route is ready (default: true).
+# Set false to redeem before account/provider failover instead.
+# auto_reset_only_when_no_routes = true
 cross_provider_failover = "countdown"
 # Copilot premium mode: "normal" (default), "one" (first msg only), "zero" (all free)
 # Set to "zero" if you have premium Copilot and want free requests

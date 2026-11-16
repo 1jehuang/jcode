@@ -16,6 +16,12 @@ pub enum NotificationType {
         summary: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
+        /// Lines added by the edit, when the server knows them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        added: Option<u64>,
+        /// Lines removed by the edit, when the server knows them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        removed: Option<u64>,
     },
     /// Another agent shared context
     #[serde(rename = "shared_context")]

@@ -31,6 +31,7 @@ pub(super) async fn run_json_command(
             exit_code: output.status.code(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            stdout_truncated: output.stdout_truncated,
         }),
         Err(RunError::Timeout) => {
             crate::logging::warn(&format!(

@@ -1,5 +1,6 @@
 fn remote_account_fixture(label: &str) -> crate::protocol::AccountUsageSnapshot {
     crate::protocol::AccountUsageSnapshot {
+        additional_windows: Vec::new(),
         label: label.into(),
         email: None,
         exhausted: false,

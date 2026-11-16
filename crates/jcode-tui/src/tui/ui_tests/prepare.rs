@@ -1,5 +1,33 @@
 use super::*;
 
+#[test]
+fn streaming_hash_default_fallback_invalidates_same_length_frame() {
+    let mut state = TestState {
+        status: ProcessingStatus::Streaming,
+        streaming_text: "stream-alpha".to_string(),
+        ..Default::default()
+    };
+    let first_hash = state.streaming_text_hash();
+    assert_eq!(first_hash, hash_text_for_cache(state.streaming_text()));
+    let first = prepare::prepare_messages(&state, 110, 30);
+    state.streaming_text = "stream-bravo".to_string();
+    assert_ne!(first_hash, state.streaming_text_hash());
+    assert_eq!(
+        state.streaming_text_hash(),
+        hash_text_for_cache(state.streaming_text())
+    );
+    let second = prepare::prepare_messages(&state, 110, 30);
+    assert!(!Arc::ptr_eq(&first, &second));
+    let rendered = second
+        .materialize_all_lines()
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("stream-bravo"), "{rendered}");
+    assert!(!rendered.contains("stream-alpha"), "{rendered}");
+}
+
 fn chat_swarm_member(session_id: &str) -> crate::protocol::SwarmMemberStatus {
     crate::protocol::SwarmMemberStatus {
         session_id: session_id.to_string(),

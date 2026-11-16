@@ -63,12 +63,12 @@ class PreviewPublicationTests(unittest.TestCase):
         if self.stale and sum(call[0] == "head" for call in self.calls) == 2:
             raise ValueError("master advanced")
 
-    def publish(self, ci_error=None):
+    def publish(self, ci_error=None, pinned=False):
         with (patch.object(preview, "gh", side_effect=self.fake_gh),
               patch.object(preview, "require_head", side_effect=self.head),
               patch.object(preview, "change_notes", return_value="## What changed\n\nTest change\n\n"),
               patch.object(preview, "authorize", side_effect=ci_error) as authorize):
-            preview.publish(preview.REPOSITORY, SHA, TAG, self.directory)
+            preview.publish(preview.REPOSITORY, SHA, TAG, self.directory, pinned=pinned)
         authorize.assert_called_once_with(preview.REPOSITORY, SHA, timeout=0, preview=True)
 
     def test_complete_assets_publish_only_as_nonlatest_prerelease(self):
@@ -184,6 +184,110 @@ class PreviewPublicationTests(unittest.TestCase):
         with patch.object(preview, "api", return_value={"object": {"sha": "b" * 40}}):
             with self.assertRaisesRegex(ValueError, "master advanced"):
                 preview.require_head(preview.REPOSITORY, SHA)
+
+
+class PinnedPreviewTests(PreviewPublicationTests):
+    def setUp(self):
+        super().setUp()
+        self.heads = ["b" * 40, "c" * 40]
+        self.bases = [SHA, SHA]
+        environment = patch.dict(os.environ, {"GITHUB_EVENT_NAME": "workflow_dispatch",
+                                              "GITHUB_REF": "refs/heads/master",
+                                              "GITHUB_SHA": SHA})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def fake_gh(self, *args):
+        if args == ("api", f"repos/{preview.REPOSITORY}/git/ref/heads/master"):
+            self.calls.append(args)
+            return json.dumps({"object": {"sha": self.heads.pop(0)}})
+        if args[0] == "api" and "/compare/" in args[1]:
+            self.calls.append(args)
+            return json.dumps({"merge_base_commit": {"sha": self.bases.pop(0)}})
+        return super().fake_gh(*args)
+
+    def test_pinned_ancestral_snapshot_publishes_and_rechecks_latest_master(self):
+        self.publish(pinned=True)
+        comparisons = [call for call in self.calls if call[0] == "api" and "/compare/" in call[1]]
+        self.assertEqual(comparisons, [
+            ("api", f"repos/{preview.REPOSITORY}/compare/{SHA}...{'b' * 40}"),
+            ("api", f"repos/{preview.REPOSITORY}/compare/{SHA}...{'c' * 40}")])
+        self.assertEqual(self.calls[-2], comparisons[-1])
+        self.assertEqual(self.calls[-1][:2], ("release", "edit"))
+        self.assertFalse(any(call[0] == "head" for call in self.calls))
+
+    def test_pinned_identical_master_needs_no_comparison(self):
+        self.heads = [SHA, SHA]
+        self.publish(pinned=True)
+        self.assertFalse(any("/compare/" in call[1] for call in self.calls if call[0] == "api"))
+
+    def test_pinned_invalid_event_ref_or_sha_never_writes(self):
+        for key, value in (("GITHUB_EVENT_NAME", "push"),
+                           ("GITHUB_EVENT_NAME", "pull_request"),
+                           ("GITHUB_EVENT_NAME", ""),
+                           ("GITHUB_REF", "refs/heads/feature"),
+                           ("GITHUB_REF", "refs/tags/v1.0.0"),
+                           ("GITHUB_SHA", "b" * 40)):
+            with self.subTest(key=key, value=value), patch.dict(os.environ, {key: value}):
+                with self.assertRaisesRegex(ValueError, "manual master dispatch"):
+                    self.publish(pinned=True)
+                self.assertFalse(any("POST" in call or call[0] == "release" for call in self.calls))
+
+    def test_pinned_nonancestor_never_creates_tag(self):
+        self.bases = ["d" * 40]
+        with self.assertRaisesRegex(ValueError, "not an ancestor"):
+            self.publish(pinned=True)
+        self.assertFalse(any("POST" in call or call[0] == "release" for call in self.calls))
+
+    def test_pinned_lost_ancestry_during_staging_never_publishes(self):
+        self.bases = [SHA, "d" * 40]
+        with self.assertRaisesRegex(ValueError, "not an ancestor"):
+            self.publish(pinned=True)
+        self.assertTrue(any(call[:2] == ("release", "create") for call in self.calls))
+        self.assertFalse(any(call[:2] == ("release", "edit") for call in self.calls))
+
+    def test_pinned_malformed_comparison_fails_closed(self):
+        for response in ({}, {"merge_base_commit": {}}, {"merge_base_commit": {"sha": ""}}):
+            with self.subTest(response=response), patch.object(
+                    preview, "api", side_effect=[{"object": {"sha": "b" * 40}}, response]):
+                with self.assertRaisesRegex(ValueError, "not an ancestor"):
+                    preview.require_snapshot(preview.REPOSITORY, SHA, pinned=True)
+
+    def test_pinned_keeps_asset_tag_and_stable_window_gates(self):
+        for mode in ("incomplete", "changed_tag", "existing", "stable"):
+            with self.subTest(mode=mode):
+                self.heads = ["b" * 40, "c" * 40]
+                self.bases = [SHA, SHA]
+                self.calls = []
+                for attribute in ("incomplete", "changed_tag", "existing"):
+                    setattr(self, attribute, attribute == mode)
+                with patch.object(preview, "require_preview_window",
+                                  side_effect=ValueError("stable window ended") if mode == "stable" else None):
+                    with self.assertRaises(ValueError):
+                        self.publish(pinned=True)
+                self.assertFalse(any(call[:2] == ("release", "edit") for call in self.calls))
+                checksum = self.directory / "SHA256SUMS"
+                if checksum.exists():
+                    checksum.unlink()
+
+    def test_pinned_failed_exact_sha_ci_never_creates_tag(self):
+        with self.assertRaisesRegex(RuntimeError, "failed CI"):
+            self.publish(RuntimeError("failed CI"), pinned=True)
+        self.assertEqual(self.calls, [])
+
+    def test_cli_forwards_pinned_to_both_actions(self):
+        for action in ("check-head", "publish"):
+            with (self.subTest(action=action),
+                  patch.object(sys, "argv", ["preview_release.py", action, "--repo", preview.REPOSITORY,
+                                             "--sha", SHA, "--tag", TAG, "--pinned"]),
+                  patch.object(preview, "require_preview_window"),
+                  patch.object(preview, "require_snapshot") as snapshot,
+                  patch.object(preview, "publish") as publish):
+                preview.main()
+                if action == "check-head":
+                    snapshot.assert_called_once_with(preview.REPOSITORY, SHA, True)
+                else:
+                    publish.assert_called_once_with(preview.REPOSITORY, SHA, TAG, "dist", pinned=True)
 
 
 class PreviewChangeNotesTests(unittest.TestCase):
@@ -343,13 +447,22 @@ class PreviewWorkflowTests(unittest.TestCase):
         triggers = workflow.split("on:\n", 1)[1].split("concurrency:", 1)[0]
         self.assertIn("branches: [master]", triggers)
         self.assertIn("  workflow_dispatch:\n", triggers)
-        self.assertNotIn("inputs:", triggers)
+        self.assertIn("    inputs:\n      expedite:", triggers)
+        self.assertIn("        type: boolean\n        default: false", triggers)
         self.assertIn("github.ref == 'refs/heads/master'", workflow)
         self.assertNotIn("tags:", triggers)
         self.assertNotIn("workflow_run:", triggers)
         self.assertNotIn("release:", triggers)
         self.assertIn("cancel-in-progress: ${{ github.event_name == 'push' }}", workflow)
-        self.assertIn("group: v1-preview-master", workflow)
+        self.assertIn("group: v1-preview-${{ github.event_name == 'workflow_dispatch' && inputs.expedite && 'pinned' || 'master' }}", workflow)
+        self.assertIn("JCODE_PREVIEW_PINNED: ${{ github.event_name == 'workflow_dispatch' && inputs.expedite && 'true' || 'false' }}", workflow)
+        self.assertIn("if: env.JCODE_PREVIEW_PINNED != 'true'\n        run: sleep 900", workflow)
+        self.assertEqual(workflow.count('if [ "$JCODE_PREVIEW_PINNED" = true ]; then set -- --pinned; fi'), 2)
+        for action in ("check-head", "publish"):
+            command = next(line for line in workflow.splitlines()
+                           if f"preview_release.py {action}" in line)
+            self.assertIn('"$@"', command)
+            self.assertIn('--sha "$GITHUB_SHA"', command)
         self.assertIn("vars.JCODE_V1_PREVIEW_ENABLED != 'false'", workflow)
         self.assertLess(workflow.index("run: sleep 900"), workflow.index("check_release_ci.py"))
         self.assertIn('check_release_ci.py "$GITHUB_SHA"', workflow)
@@ -478,6 +591,15 @@ class PreviewWorkflowTests(unittest.TestCase):
     def test_ci_runs_preview_tests(self):
         self.assertIn('python3 scripts/test_preview_release.py',
                       (ROOT / '.github/workflows/ci.yml').read_text())
+
+    def test_main_push_ci_is_sha_isolated_but_pr_checks_remain_latest(self):
+        workflow = (ROOT / '.github/workflows/ci.yml').read_text()
+        concurrency = workflow.split('concurrency:\n', 1)[1].split('\nenv:', 1)[0]
+        self.assertIn("group: ci-${{ github.workflow }}-${{ github.ref }}-", concurrency)
+        self.assertIn("github.event_name == 'push' && "
+                      "(github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') "
+                      "&& github.sha || 'latest'", concurrency)
+        self.assertIn('cancel-in-progress: true', concurrency)
 
 
 if __name__ == "__main__":

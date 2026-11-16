@@ -530,7 +530,8 @@ fn normalize_imported_history(session: &mut Session, apply_limits: bool) -> bool
         message.content = vec![ContentBlock::Text {
             text,
             cache_control: None,
-        }];
+        }]
+        .into();
         normalized.push(message);
     }
 
@@ -570,7 +571,7 @@ fn normalize_imported_history(session: &mut Session, apply_limits: bool) -> bool
                             "[Imported session: {omitted} older messages were omitted for a fast, provider-safe resume. Use session_search to inspect earlier external history.]"
                         ),
                         cache_control: None,
-                    }],
+                    }].into(),
                     display_role: None,
                     timestamp: None,
                     tool_duration_ms: None,
@@ -844,7 +845,7 @@ fn import_session_from_file_with_target(
             imported_messages.push(StoredMessage {
                 id: msg_id,
                 role,
-                content: content_blocks,
+                content: content_blocks.into(),
                 display_role: None,
                 timestamp: None,
                 tool_duration_ms: None,
@@ -997,7 +998,8 @@ fn append_text_message(
         content: vec![ContentBlock::Text {
             text: text.to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp,
         tool_duration_ms: None,

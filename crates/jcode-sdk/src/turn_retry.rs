@@ -52,6 +52,10 @@ pub const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(5 * 60);
 /// connection closed" is a credential failure, not a network drop.
 pub fn classify_failure(message: &str, retry_after: Option<Duration>) -> FailureKind {
     let lower = message.to_ascii_lowercase();
+    // A failover offer requires consent even if its embedded reason is transient.
+    if lower.trim_start().starts_with("[jcode-provider-failover]") {
+        return FailureKind::Permanent;
+    }
     if PERMANENT_MARKERS
         .iter()
         .any(|marker| lower.contains(marker))
@@ -102,6 +106,11 @@ const PERMANENT_MARKERS: &[&str] = &[
     "token expired",
     "no refresh token",
     "credentials have been revoked",
+    "refresh token has been revoked",
+    "refresh token was rejected",
+    "refresh token is rejected",
+    "refresh token has already been used",
+    "refresh token is no longer valid",
     "re-authenticate",
     "please log in again",
     "run /login",
@@ -137,6 +146,15 @@ const PERMANENT_MARKERS: &[&str] = &[
     "unsupported parameter",
     "invalid parameter",
     "invalid schema",
+    "invalid tool",
+    "unsupported_value",
+    "unsupported image",
+    "unsupported file",
+    "file too large",
+    "body too large",
+    "input too large",
+    "does not support the coding plan",
+    "coding plan feature",
     "invalid image",
     "image too large",
     // Policy.
@@ -215,6 +233,20 @@ const TRANSIENT_MARKERS: &[&str] = &[
 ];
 
 fn parse_retry_after(lower: &str) -> Option<Duration> {
+    // Match the exact JSON field, never a sibling such as max_rpm.
+    if lower.contains("\"retry_after_seconds\"") {
+        return lower.match_indices('{').take(8).find_map(|(idx, _)| {
+            // Text before the JSON body can contain a stray brace. A candidate
+            // that does not parse is skipped so the next one is tried.
+            match serde_json::Deserializer::from_str(&lower[idx..])
+                .into_iter::<serde_json::Value>()
+                .next()?
+            {
+                Ok(value) => structured_retry_after(&value),
+                Err(_) => None,
+            }
+        });
+    }
     let tail = &lower[lower.find("retry")?..];
     let mut words = tail.split_whitespace().take(8).peekable();
     while let Some(word) = words.next() {
@@ -237,11 +269,26 @@ fn parse_retry_after(lower: &str) -> Option<Duration> {
             "ms" | "milliseconds" => return Some(Duration::from_millis(value)),
             "m" | "min" | "mins" | "minute" | "minutes" => value.saturating_mul(60),
             "h" | "hr" | "hour" | "hours" => value.saturating_mul(3600),
-            _ => value,
+            "d" | "day" | "days" => value.saturating_mul(86400),
+            "" | "s" | "sec" | "secs" | "second" | "seconds" => value,
+            _ => return None,
         };
         return (secs > 0).then(|| Duration::from_secs(secs));
     }
     None
+}
+
+fn structured_retry_after(value: &serde_json::Value) -> Option<Duration> {
+    match value {
+        serde_json::Value::Object(map) => map
+            .get("retry_after_seconds")
+            .and_then(serde_json::Value::as_f64)
+            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+            .map(|seconds| Duration::from_secs(seconds.ceil() as u64))
+            .or_else(|| map.values().find_map(structured_retry_after)),
+        serde_json::Value::Array(items) => items.iter().find_map(structured_retry_after),
+        _ => None,
+    }
 }
 
 /// Longest a retry waits for the failed turn's closing TurnDone.
@@ -315,6 +362,9 @@ pub struct TurnRetry {
     awaiting_close: bool,
     /// The last terminal stop for the running turn, which explains its error.
     stop: Option<TurnStopReason>,
+    /// Cancellation is sticky until fresh input is accepted. Late errors from
+    /// the interrupted provider request must not resurrect a cancelled turn.
+    suppressed: bool,
 }
 
 impl TurnRetry {
@@ -342,6 +392,7 @@ impl TurnRetry {
     /// The user sent new input. Its request gets a fresh retry budget, and
     /// any retry for the old one is dropped.
     pub fn user_sent(&mut self) -> RetryDecision {
+        self.suppressed = false;
         self.attempts = 0;
         self.stop = None;
         self.awaiting_close = false;
@@ -350,7 +401,9 @@ impl TurnRetry {
 
     /// The user cancelled, cleared, or rewound the session.
     pub fn user_cancelled(&mut self) -> RetryDecision {
-        self.user_sent()
+        let decision = self.user_sent();
+        self.suppressed = true;
+        decision
     }
 
     /// Returns true once, when a scheduled retry is due. The caller should
@@ -379,6 +432,16 @@ impl TurnRetry {
         match event {
             ApiEvent::TurnStopped { reason, .. } => {
                 self.stop = Some(*reason);
+                if matches!(
+                    reason,
+                    TurnStopReason::Interrupted
+                        | TurnStopReason::Crash
+                        | TurnStopReason::ProviderGuardrail
+                        | TurnStopReason::LimitReached
+                ) {
+                    self.suppressed = true;
+                    return self.cancel_pending();
+                }
                 RetryDecision::None
             }
             // A completed turn proves the session works again. The API
@@ -396,12 +459,18 @@ impl TurnRetry {
                 RetryDecision::None
             }
             ApiEvent::SessionStatus { status, .. }
-                if matches!(status.as_str(), "cancelled" | "canceled") =>
+                if matches!(
+                    status.as_str(),
+                    "cancelled" | "canceled" | "interrupted" | "crashed"
+                ) =>
             {
                 self.user_cancelled()
             }
             // Another client (or the server) started work in this session.
-            ApiEvent::MessageAccepted { .. } if self.due.is_some() => self.cancel_pending(),
+            ApiEvent::MessageAccepted { .. } => {
+                self.suppressed = false;
+                self.cancel_pending()
+            }
             ApiEvent::Error { code, message } => self.observe_error(*code, message, now),
             _ => RetryDecision::None,
         }
@@ -409,6 +478,12 @@ impl TurnRetry {
 
     fn observe_error(&mut self, code: ErrorCode, message: &str, now: Instant) -> RetryDecision {
         let stop = self.stop.take();
+        if self.suppressed {
+            return RetryDecision::GaveUp {
+                attempts: self.attempts,
+                exhausted: false,
+            };
+        }
         // Only failed model turns are retried. Request-level errors (unknown
         // session, invalid request) are answered to the caller, not streamed
         // as turn failures, and a busy rejection is handled by steering.
@@ -431,18 +506,24 @@ impl TurnRetry {
         }
         let kind = classify_failure(message, None);
         if kind == FailureKind::Permanent {
+            self.due = None;
+            self.awaiting_close = false;
             return RetryDecision::GaveUp {
                 attempts: self.attempts,
                 exhausted: false,
             };
         }
         if self.attempts >= self.policy.max_attempts {
+            self.due = None;
+            self.awaiting_close = false;
             return RetryDecision::GaveUp {
                 attempts: self.attempts,
                 exhausted: true,
             };
         }
         let Some(delay) = self.policy.delay(self.attempts + 1, kind) else {
+            self.due = None;
+            self.awaiting_close = false;
             return RetryDecision::GaveUp {
                 attempts: self.attempts,
                 exhausted: false,

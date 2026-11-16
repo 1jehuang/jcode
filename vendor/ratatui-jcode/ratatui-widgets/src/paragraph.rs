@@ -5,7 +5,6 @@ use ratatui_core::layout::{Alignment, Position, Rect};
 use ratatui_core::style::{Style, Styled};
 use ratatui_core::text::{Line, StyledGrapheme, Text};
 use ratatui_core::widgets::Widget;
-use unicode_width::UnicodeWidthStr;
 
 use crate::block::{Block, BlockExt};
 use crate::reflow::{LineComposer, LineTruncator, WordWrapper, WrappedLine};

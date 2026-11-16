@@ -46,9 +46,13 @@ pub(super) fn ensure_started() {
         }
         dirs.sort();
         dirs.dedup();
-        let _ = std::thread::Builder::new()
+        if let Err(error) = std::thread::Builder::new()
             .name("jcode-bin-watch".to_string())
-            .spawn(move || imp::run(dirs));
+            .spawn(move || imp::run(dirs))
+        {
+            STARTED.store(false, Ordering::Release);
+            crate::logging::warn(&format!("Failed to start binary watcher: {error}"));
+        }
     }
 }
 

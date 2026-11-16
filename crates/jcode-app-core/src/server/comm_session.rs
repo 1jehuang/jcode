@@ -955,6 +955,10 @@ pub(super) async fn handle_comm_stop(
         return;
     };
 
+    // Cancel the worker's in-flight turn before its handles are removed, or it
+    // keeps generating and editing files with nothing left to stop it by.
+    super::swarm::cancel_active_turns(&target_session);
+
     let removed_agent = super::remove_session_entry(sessions, &target_session).await;
     let removed_live_agent = removed_agent.is_some();
     if let Some(agent_arc) = removed_agent {
@@ -994,6 +998,20 @@ pub(super) async fn handle_comm_stop(
             }
         }
     }
+
+    // Publish the terminal status while the member and its hook identity still
+    // exist, so `swarm_member_end` fires for a worker stopped mid-turn.
+    update_member_status(
+        &target_session,
+        "stopped",
+        Some(format!("stopped by {req_session_id}")),
+        swarm_members,
+        swarms_by_id,
+        Some(event_history),
+        Some(event_counter),
+        Some(swarm_event_tx),
+    )
+    .await;
 
     // `session_end` and `swarm_member_end` have been dispatched.
     crate::hooks::forget_swarm_identity(&target_session);

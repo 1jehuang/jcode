@@ -65,7 +65,8 @@ fn fixtures(home: &Path, count: usize) -> Vec<SessionInfo> {
             content: vec![crate::message::ContentBlock::Text {
                 text,
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,

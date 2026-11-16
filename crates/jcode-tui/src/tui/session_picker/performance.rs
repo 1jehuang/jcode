@@ -74,18 +74,21 @@ impl PreviewRenderCache {
 
 impl SessionPicker {
     pub(super) fn reuse_preview(&mut self, key: &PreviewCacheKey) -> bool {
-        if self
-            .preview_cache
-            .as_ref()
-            .is_some_and(|cache| cache.key == *key)
-        {
+        let same_content = |cache: &PreviewRenderCache| {
+            cache.key.content_hash == key.content_hash
+                && cache.key.inner_width == key.inner_width
+                && cache.key.inner_height == key.inner_height
+                && cache.key.diff_mode == key.diff_mode
+        };
+        if self.preview_cache.as_ref().is_some_and(same_content) {
+            self.refresh_preview_query(&key.search_query);
             return true;
         }
         let Some(index) = self
             .preview_reuse
             .parked
             .iter()
-            .position(|(cache, _)| cache.key == *key)
+            .position(|(cache, _)| same_content(cache))
         else {
             return false;
         };
@@ -94,7 +97,30 @@ impl SessionPicker {
         };
         self.preview_reuse.bytes -= bytes;
         self.install_sized_preview(cached, bytes);
+        self.refresh_preview_query(&key.search_query);
         true
+    }
+
+    /// Search highlighting is applied to the visible buffer by the renderer.
+    /// Changing the query only changes the jump target, not transcript content.
+    fn refresh_preview_query(&mut self, query: &str) {
+        let Some(cache) = self.preview_cache.as_mut() else {
+            return;
+        };
+        if cache.key.search_query == query {
+            return;
+        }
+        cache.key.search_query = query.to_string();
+        let tokens = loading::search_query_tokens(query);
+        cache.first_match_line = cache.wrapped_lines.iter().position(|line| {
+            let text: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            let lower = text.to_lowercase();
+            tokens.iter().any(|token| lower.contains(token.as_str()))
+        });
     }
 
     pub(super) fn install_preview(&mut self, cache: PreviewRenderCache) {

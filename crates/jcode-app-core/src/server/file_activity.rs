@@ -53,3 +53,178 @@ pub(crate) fn file_activity_scope_label(
         _ => "same file",
     }
 }
+
+/// Most entries one model-facing notice may carry before a fresh one starts.
+pub(crate) const FILE_ACTIVITY_NOTICE_MAX_ENTRIES: usize = 12;
+const FILE_ACTIVITY_INTENT_MAX_CHARS: usize = 60;
+
+/// One peer's change to one file, as told to another agent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FileActivityEntry {
+    pub agent: String,
+    /// "edited" or "wrote".
+    pub operation: String,
+    /// True when the change predates the recipient's own first edit.
+    pub previously: bool,
+    /// Path relative to the recipient's working directory when possible.
+    pub path: String,
+    pub added: u64,
+    pub removed: u64,
+    pub edits: u32,
+    pub lines: Option<(u64, u64)>,
+    /// The change overlaps lines the recipient edited.
+    pub overlap: bool,
+    pub intent: Option<String>,
+}
+
+/// Fold `entry` into `entries`, summing repeated edits by the same agent to
+/// the same file so a burst of edits stays one line.
+pub(crate) fn merge_file_activity_entry(
+    entries: &mut Vec<FileActivityEntry>,
+    entry: FileActivityEntry,
+) {
+    let Some(existing) = entries.iter_mut().find(|existing| {
+        existing.agent == entry.agent
+            && existing.path == entry.path
+            && existing.previously == entry.previously
+    }) else {
+        entries.push(entry);
+        return;
+    };
+    existing.added += entry.added;
+    existing.removed += entry.removed;
+    existing.edits += entry.edits;
+    existing.overlap |= entry.overlap;
+    existing.operation = entry.operation;
+    existing.lines = match (existing.lines, entry.lines) {
+        (Some((a, b)), Some((c, d))) => Some((a.min(c), b.max(d))),
+        _ => None,
+    };
+    if entry.intent.is_some() {
+        existing.intent = entry.intent;
+    }
+}
+
+fn format_file_activity_entry(entry: &FileActivityEntry) -> String {
+    let mut facts = vec![format!("+{}-{}", entry.added, entry.removed)];
+    if entry.edits > 1 {
+        facts.push(format!("x{}", entry.edits));
+    }
+    match entry.lines {
+        Some((start, end)) if start == end => facts.push(format!("L{start}")),
+        Some((start, end)) => facts.push(format!("L{start}-{end}")),
+        None => {}
+    }
+    if entry.overlap {
+        facts.push("overlap".to_string());
+    }
+    if entry.previously {
+        facts.push("earlier".to_string());
+    }
+    let intent = entry
+        .intent
+        .as_deref()
+        .map(|intent| intent.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|intent| !intent.is_empty())
+        .map(|intent| {
+            if intent.chars().count() > FILE_ACTIVITY_INTENT_MAX_CHARS {
+                let cut: String = intent
+                    .chars()
+                    .take(FILE_ACTIVITY_INTENT_MAX_CHARS - 1)
+                    .collect();
+                format!(": {}…", cut.trim_end())
+            } else {
+                format!(": {intent}")
+            }
+        })
+        .unwrap_or_default();
+    format!(
+        "{} {} {}{}",
+        entry.agent,
+        entry.path,
+        facts.join(" "),
+        intent
+    )
+}
+
+/// Model-facing notice, one line per peer and file:
+/// `agent path +A-R [xN] [Lstart-end] [overlap] [earlier][: intent]`.
+/// `xN` is the number of edits merged, `overlap` means the change touches
+/// lines the recipient edited, and `earlier` means it predates the
+/// recipient's own first edit. The diff itself is never included.
+pub(crate) fn format_file_activity_notice(entries: &[FileActivityEntry]) -> String {
+    let lines: Vec<String> = entries.iter().map(format_file_activity_entry).collect();
+    format!("⚠ File activity: {}", lines.join("\n"))
+}
+
+/// `path` relative to the recipient's working directory when it is inside it.
+pub(crate) fn file_activity_display_path(
+    path: &std::path::Path,
+    working_dir: Option<&std::path::Path>,
+) -> String {
+    working_dir
+        .and_then(|dir| path.strip_prefix(dir).ok())
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+/// A notice queued for one recipient that later peer edits may still fold into.
+pub(crate) struct PendingFileActivityNotice {
+    entries: Vec<FileActivityEntry>,
+    content: String,
+}
+
+/// Queue `entry` for `recipient`. While an earlier notice is still waiting to
+/// be injected, the entry is folded into it, so a burst of peer edits reaches
+/// the model as one short message instead of one message per edit.
+pub(crate) async fn deliver_file_activity_notice(
+    recipient: &str,
+    entry: FileActivityEntry,
+    pending: &mut std::collections::HashMap<String, PendingFileActivityNotice>,
+    queues: &super::state::SessionInterruptQueues,
+    sessions: &super::SessionAgents,
+) {
+    if let Some(notice) = pending.get_mut(recipient) {
+        let mut entries = notice.entries.clone();
+        merge_file_activity_entry(&mut entries, entry.clone());
+        if entries.len() <= FILE_ACTIVITY_NOTICE_MAX_ENTRIES {
+            let content = format_file_activity_notice(&entries);
+            if super::state::replace_pending_soft_interrupt(
+                recipient,
+                &notice.content,
+                content.clone(),
+                queues,
+            )
+            .await
+            {
+                notice.entries = entries;
+                notice.content = content;
+                return;
+            }
+        }
+    }
+    let entries = vec![entry];
+    let content = format_file_activity_notice(&entries);
+    if super::state::queue_soft_interrupt_for_session(
+        recipient,
+        content.clone(),
+        false,
+        jcode_agent_runtime::SoftInterruptSource::System,
+        queues,
+        sessions,
+    )
+    .await
+    {
+        pending.insert(
+            recipient.to_string(),
+            PendingFileActivityNotice { entries, content },
+        );
+    } else {
+        pending.remove(recipient);
+        crate::logging::warn(&format!(
+            "Failed to queue file-activity soft interrupt for session {recipient}"
+        ));
+    }
+}

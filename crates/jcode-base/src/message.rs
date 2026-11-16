@@ -9,8 +9,8 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 pub use jcode_message_types::{
-    CacheControl, ConnectionPhase, ContentBlock, InputShellResult, Message, Role, StreamEvent,
-    TOOL_OUTPUT_MISSING_TEXT, ToolCall, ToolDefinition, cache_relevant_message_hashes,
+    CacheControl, ConnectionPhase, ContentBlock, InputShellResult, Message, Role, SharedContent,
+    StreamEvent, TOOL_OUTPUT_MISSING_TEXT, ToolCall, ToolDefinition, cache_relevant_message_hashes,
     cache_relevant_message_value, cache_relevant_messages, ends_with_fresh_user_turn,
     extend_stable_hash, messages_with_dynamic_system_context, provider_native, replace_text_suffix,
     sanitize_tool_id, stable_message_hash,
@@ -61,6 +61,71 @@ fn compile_static_regexes(patterns: &[&str]) -> Vec<Regex> {
         .iter()
         .filter_map(|pattern| compile_static_regex(pattern))
         .collect()
+}
+
+fn replace_redaction_matches(text: &mut String, pattern: &Regex, replacement: &str) {
+    // Regex already returns a borrowed value when there are no matches. Keep
+    // the existing allocation instead of turning that borrow into a full copy
+    // for every pattern in the redaction pipeline.
+    if let std::borrow::Cow::Owned(replaced) = pattern.replace_all(text.as_str(), replacement) {
+        *text = replaced;
+    }
+}
+
+/// Redact secrets from a short one-line preview of user or agent text, such as
+/// a swarm member's status detail or task label.
+///
+/// Previews differ from persisted tool output in two ways that defeat
+/// [`redact_secrets`] alone: whitespace is collapsed, so a `KEY=value`
+/// assignment is no longer at the start of a line, and the text is truncated,
+/// so a token may be cut below the length the strict patterns require.
+pub fn redact_preview_secrets(text: &str) -> String {
+    static INLINE_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    static PARTIAL_TOKEN_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+
+    let mut redacted = text.to_string();
+    let inline = INLINE_PATTERNS.get_or_init(|| {
+        compile_static_regexes(&[
+            // `DB_PASSWORD=...`, `api-key: ...`, `token = "..."` anywhere in the line.
+            // The name must end in the keyword, so prose such as
+            // `tokenizer: ...` is left alone.
+            r#"(?i)\b([A-Za-z0-9_.-]*(?:api[_-]?key|token|secret|password|passwd|pwd|credentials?|cookie)\s*[:=]\s*)(?:"[^"]*"?|'[^']*'?|[^\s,;]+)"#,
+            r"(?i)\b(authorization\s*[:=]\s*(?:bearer\s+|basic\s+)?)[^\s,;]+",
+            // Credentials embedded in a URL: scheme://user:secret@host
+            r"([a-zA-Z][a-zA-Z0-9+.-]*://[^\s/:@]+:)[^\s/@]+@",
+        ])
+    });
+    for (index, re) in inline.iter().enumerate() {
+        let replacement = if index == 2 {
+            "${1}[REDACTED_SECRET]@"
+        } else {
+            "${1}[REDACTED_SECRET]"
+        };
+        replace_redaction_matches(&mut redacted, re, replacement);
+    }
+    // `redact_secrets` treats a known `KEY=` at line start as owning the rest
+    // of the line, which is right for env files but would erase the request
+    // that follows an inline credential. End the line after each value already
+    // redacted so only the value is removed. Previews collapse whitespace, so
+    // turning that newline back into a space loses nothing.
+    let mut redacted =
+        redact_secrets(&redacted.replace("[REDACTED_SECRET] ", "[REDACTED_SECRET]\n"))
+            .replace("[REDACTED_SECRET]\n", "[REDACTED_SECRET] ");
+    let partial = PARTIAL_TOKEN_PATTERNS.get_or_init(|| {
+        compile_static_regexes(&[
+            r"\bsk-[A-Za-z0-9_-]{6,}(?:\.\.\.|…)?",
+            r"\b(?:ghp_|github_pat_|gho_|ghs_)[A-Za-z0-9_]{4,}(?:\.\.\.|…)?",
+            r"\bxox[baprs]-[A-Za-z0-9-]{4,}(?:\.\.\.|…)?",
+            r"\bAKIA[0-9A-Z]{8,}(?:\.\.\.|…)?",
+            r"\bAIza[0-9A-Za-z_-]{8,}(?:\.\.\.|…)?",
+            r"\beyJ[A-Za-z0-9_-]{10,}[A-Za-z0-9._-]*(?:\.\.\.|…)?",
+            r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{6,}(?:\.\.\.|…)?",
+        ])
+    });
+    for re in partial {
+        replace_redaction_matches(&mut redacted, re, "[REDACTED_SECRET]");
+    }
+    redacted
 }
 
 /// Redact likely secrets from persisted tool output.
@@ -200,13 +265,11 @@ pub fn redact_secrets(text: &str) -> String {
     .collect();
 
     for re in direct_patterns {
-        redacted = re.replace_all(&redacted, "[REDACTED_SECRET]").into_owned();
+        replace_redaction_matches(&mut redacted, re, "[REDACTED_SECRET]");
     }
 
     for re in assignment_patterns {
-        redacted = re
-            .replace_all(&redacted, "${1}[REDACTED_SECRET]")
-            .into_owned();
+        replace_redaction_matches(&mut redacted, re, "${1}[REDACTED_SECRET]");
     }
 
     // Also redact custom API key variable names configured at runtime.
@@ -240,9 +303,7 @@ pub fn redact_secrets(text: &str) -> String {
             logging::debug(&format!(
                 "adding custom secret redaction pattern for key={key_name}"
             ));
-            redacted = re
-                .replace_all(&redacted, "${1}[REDACTED_SECRET]")
-                .into_owned();
+            replace_redaction_matches(&mut redacted, &re, "${1}[REDACTED_SECRET]");
         }
     }
 
