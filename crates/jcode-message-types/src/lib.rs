@@ -19,6 +19,8 @@ pub struct ToolCall {
     pub thought_signature: Option<String>,
 }
 
+mod tool_prompt_size;
+
 /// Tool definition advertised to model providers.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ToolDefinition {
@@ -66,13 +68,7 @@ impl ToolDefinition {
 
     /// Serialized size of the full tool definition payload sent to providers.
     pub fn prompt_chars(&self) -> usize {
-        serde_json::json!({
-            "name": self.name,
-            "description": self.description,
-            "input_schema": self.input_schema,
-        })
-        .to_string()
-        .len()
+        tool_prompt_size::prompt_chars(self)
     }
 
     /// Approximate prompt-token cost of this tool's top-level description.
@@ -85,14 +81,7 @@ impl ToolDefinition {
 
     /// Approximate prompt-token cost of the full tool definition payload.
     pub fn prompt_token_estimate(&self) -> usize {
-        estimate_tokens(
-            &serde_json::json!({
-                "name": self.name,
-                "description": self.description,
-                "input_schema": self.input_schema,
-            })
-            .to_string(),
-        )
+        self.prompt_chars() / 4
     }
 
     pub fn aggregate_prompt_chars(defs: &[ToolDefinition]) -> usize {
