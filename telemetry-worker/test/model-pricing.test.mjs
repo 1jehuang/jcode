@@ -97,6 +97,58 @@ test("upsert clears a stale price left on a router placeholder, and only there",
   db.close();
 });
 
+test("gateway respellings of a known release are priced as estimates", () => {
+  const index = buildPriceIndex({
+    anthropic: { models: { "claude-opus-5-5": { cost: opus }, "claude-sonnet-5-5": { cost: { input: 2, output: 10 } } } },
+    openrouter: { models: {
+      "deepseek/deepseek-v4.1-flash-1017": { cost: { input: 0.04, output: 0.5 } },
+      "deepseek/deepseek-v4.1-flash": { cost: { input: 0.2, output: 1 } },
+      "qwen/qwen3.8-27b": { cost: { input: 0.15, output: 1.9 } },
+      "stepfun/step-5-preview": { cost: { input: 1, output: 2.7 } },
+      "openai/gpt-5": { cost: { input: 1.25, output: 10 } },
+    } },
+  });
+  const of = (label) => resolvePriceRows([{ model: label, provider: "openrouter" }], index).get(label);
+  const cases = {
+    "@preset/deepseek-4-1-flash-1017-q8": 0.04,
+    "coa/DeepSeek V4.1 Flash 1017": 0.04,
+    "deepseek-v-4.1-flash-1017": 0.04,
+    "antigravity-opus5.5": 4,
+    "Claude Sonnet 5.5": 2,
+    "qwen38-27b-unc": 0.15,
+    "step-5": 1,
+  };
+  for (const [label, input] of Object.entries(cases)) {
+    assert.equal(of(label).kind, "family_estimate", label);
+    assert.equal(of(label).input, input, label);
+  }
+  // No model name, a different release, or a router placeholder: no guess.
+  for (const label of ["DeepSeek-flash-combo", "combo-ds-v4.1-flash", "wrap-gpt-5-5-x", "high", "tier2", "pool12", "1"]) {
+    assert.equal(of(label).kind, "unpriced", label);
+  }
+});
+
+test("models that can only be running locally count as free, not unpriced", () => {
+  const index = buildPriceIndex({
+    ...catalog,
+    hosted: { models: { "gemma4:12b": { cost: { input: 0.1, output: 0.3 } } } },
+  });
+  const kind = (label) => resolvePriceRows([{ model: label }], index).get(label).kind;
+  for (const label of [
+    "Qwen 3.8 FN UD-IQ3_XXS (Basalt)", "LFM3-Omni-2B-MLX-8bit", "swift15-iq2xs.gguf", "flint:40b",
+    "hf.co/xtools-at/LFM3-1.7B-GGUF:Q8_0", "/Users/someone/models/LFM3-1.7B-MLX-4bit",
+    "ornith-ai/Ornith-1.5-35B-A3B-FP8", "ripple65b-nvfp4", "gemma4:e4b",
+  ]) {
+    assert.equal(kind(label), "free", label);
+  }
+  // A hosted listing with the same id keeps its price.
+  assert.equal(kind("gemma4:12b"), "catalog");
+  // Not proof of local hardware, so these stay visible as unpriced.
+  for (const label of ["hermes-qwen:latest", "uncensored", "gpt-oss:120b-cloud", "mystery:cloud", "coder"]) {
+    assert.equal(kind(label), "unpriced", label);
+  }
+});
+
 test("upsert never downgrades a known price to unpriced", () => {
   assert.match(UPSERT_PRICE_SQL, /WHERE \(CASE excluded\.price_kind/);
 });

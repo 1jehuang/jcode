@@ -59,6 +59,21 @@ const FREE_LABEL_PATTERNS = [
   /^qwen\d[\d.]*:\d+b$/i,
 ];
 
+// Labels that can only be a model running on the user's own hardware: weight
+// file formats, quantization tags, Ollama size tags, filesystem paths. There
+// is no list price for local inference, so these count as free instead of
+// sitting in the unpriced bucket beside hosted traffic. A bare `:latest` tag
+// or an `uncensored` name is not proof: gateways use both for hosted routes.
+const LOCAL_LABEL_PATTERNS = [
+  /gguf|(^|[-_.\s/])(mlx|omlx|nvfp4|fp8|imatrix)([-_.\s:]|$)/i,
+  /(^|[-_.\s:])(ud-)?i?q\d(_[a-z0-9]+)+/i,
+  /(^|[-_.\s])iq\d[-_]?(xxs|xs|s|m)\b/i,
+  /(^|[-_.\s])\d+-?bit\b/i,
+  /:e?\d+(\.\d+)?b(-[\w.-]+)?$/i,
+  /^(hf\.co|local|lmstudio|unsloth)\//i,
+  /^(\/|~\/|[a-z]:\\)/i,
+];
+
 const EFFORT = "xhigh|x-high|max-effort|max|high|medium|low|none|minimal";
 
 // Normalize a telemetry model label toward models.dev model ids. Users reach
@@ -118,10 +133,82 @@ export function normalizeLabel(label) {
   return [...candidates].filter(Boolean);
 }
 
+// Spelling-independent token form of a model name, so the same release matches
+// however a gateway writes it: `deepseek-4-1-flash`, `DeepSeek V4.1 Flash` and
+// `deepseek-v4.1-flash` all become [deepseek, 41, flash], and `qwen38-27b`
+// meets `qwen3.8-27b` at [qwen, 38, 27b]. Version digits are glued, so
+// `gpt-5-5` is [gpt, 55] and never contains `gpt-5` ([gpt, 5]).
+export function canonTokens(name) {
+  const raw = String(name ?? "").toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/([a-z])(\d)/g, "$1 $2")
+    .split(" ").filter(Boolean);
+  const out = [];
+  for (let i = 0; i < raw.length; i++) {
+    const t = raw[i];
+    if (t === "v" && /^\d/.test(raw[i + 1] ?? "")) continue;
+    const prev = out[out.length - 1];
+    if (/^\d$/.test(t) && prev && /^\d{1,2}$/.test(prev)) out[out.length - 1] = prev + t;
+    else out.push(t);
+  }
+  return out;
+}
+
+// Catalog ids by token form. Only names specific enough to identify a release:
+// a real word plus a version, never a bare word that an alias could contain.
+function buildTokenIndex(index) {
+  const byKey = new Map();
+  for (const [modelId, entries] of index) {
+    if (isZeroCost(entries[0].cost) || /free$/i.test(modelId)) continue;
+    const base = modelId.slice(modelId.lastIndexOf("/") + 1).split(":")[0];
+    const tokens = canonTokens(base);
+    if (tokens.length < 2 || !tokens.some((t) => /^\d/.test(t)) || !tokens.some((t) => /^[a-z]{3,}$/.test(t))) continue;
+    const key = tokens.join("-");
+    const prev = byKey.get(key);
+    const best = { modelId, ...entries[0] };
+    if (!prev || compareEntries(best, prev.entry) < 0) byKey.set(key, { tokens, entry: best });
+  }
+  const byFirst = new Map();
+  for (const item of byKey.values()) {
+    if (!byFirst.has(item.tokens[0])) byFirst.set(item.tokens[0], []);
+    byFirst.get(item.tokens[0]).push(item);
+  }
+  // Longest first, so the most specific release wins.
+  for (const list of byFirst.values()) list.sort((a, b) => b.tokens.length - a.tokens.length);
+  return { byKey, byFirst };
+}
+
+function tokenEstimate(candidates, tokenIndex) {
+  let best = null;
+  for (const candidate of candidates) {
+    let tokens = canonTokens(candidate);
+    // Gateways drop the vendor word: `antigravity-opus5.5` is claude-opus-5-5.
+    const tier = tokens.findIndex((t) => /^(opus|sonnet|haiku|fable)$/.test(t));
+    if (tier >= 0 && !tokens.includes("claude")) tokens = [...tokens.slice(0, tier), "claude", ...tokens.slice(tier)];
+    // A release still in preview is often labelled without the suffix.
+    const preview = tokenIndex.byKey.get([...tokens, "preview"].join("-"));
+    for (let at = 0; at < tokens.length; at++) {
+      for (const item of tokenIndex.byFirst.get(tokens[at]) ?? []) {
+        if (best && item.tokens.length <= best.tokens.length) break;
+        if (item.tokens.every((t, i) => tokens[at + i] === t)) best = item;
+      }
+    }
+    if (!best && preview) best = preview;
+  }
+  return best?.entry ?? null;
+}
+
 export function isFreeLabel(label) {
   // Ollama cloud inference is not established as free by its route prefix.
   if (/:cloud$/i.test(label)) return false;
   return FREE_LABEL_PATTERNS.some((re) => re.test(label));
+}
+
+// Checked only after an exact catalog match fails, so a hosted model whose id
+// happens to carry a quantization tag keeps its real price.
+export function isLocalLabel(label) {
+  if (/[:-]cloud$/i.test(label)) return false;
+  return LOCAL_LABEL_PATTERNS.some((re) => re.test(label));
 }
 
 // Router placeholders say nothing about the model behind them. Some gateways
@@ -210,6 +297,7 @@ export function resolvePriceRows(observed, index) {
   const families = buildFamilyIndex(index);
   const basenames = buildBasenameIndex(index);
   const embedded = buildEmbeddedIndex(index);
+  const tokenIndex = buildTokenIndex(index);
   const rows = new Map();
   for (const row of observed) {
     const label = row.model;
@@ -227,12 +315,25 @@ export function resolvePriceRows(observed, index) {
     }
 
     const candidates = normalizeLabel(label);
-    const match = ROUTER_LABEL.test(String(label).trim()) ? null
+    const router = ROUTER_LABEL.test(String(label).trim());
+    const match = router ? null
       : pickEntry(candidates, index) ?? pickEntry(candidates, basenames);
     if (!match) {
-      let estimate = familyEstimate(label, families);
-      if (!estimate) {
-        const wrapped = embeddedEstimate(candidates, embedded);
+      // A router placeholder gets no estimate either: `pool12` is not a model.
+      let estimate = router ? null : familyEstimate(label, families);
+      if (!estimate && !router) {
+        // Local weights are checked before the looser token match, so a
+        // quantized build is not priced like the hosted release it derives from.
+        const local = isLocalLabel(label);
+        const wrapped = embeddedEstimate(candidates, embedded)
+          ?? (local ? null : tokenEstimate(candidates, tokenIndex));
+        if (!wrapped && local) {
+          rows.set(label, {
+            ...base, sourceModel: null, sourceProvider: null,
+            input: 0, output: 0, cacheRead: 0, cacheWrite: 0, kind: "free",
+          });
+          continue;
+        }
         // Re-resolve the wrapped id so `claude-opus-5.5` inside a gateway label
         // gets Anthropic's rate, not the reseller that spells it with a dot.
         const best = wrapped && pickEntry(normalizeLabel(wrapped.modelId), index);
