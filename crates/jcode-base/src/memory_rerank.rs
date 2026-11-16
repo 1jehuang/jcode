@@ -107,12 +107,24 @@ fn truncate_head(s: &str, max: usize) -> String {
 /// Build the listwise rerank prompt from a focused query and `(id, content)`
 /// candidate pairs. Candidates are presented as a 1-based numbered list.
 pub fn build_rerank_prompt(focused_query: &str, candidates: &[(String, String)]) -> String {
+    build_rerank_prompt_from_contents(
+        focused_query,
+        candidates.iter().map(|(_, content)| content.as_str()),
+    )
+}
+
+// Consume borrowed contents synchronously, returning only the bounded owned prompt.
+// No candidate copies or input iterator need to survive an inference await.
+fn build_rerank_prompt_from_contents<'a>(
+    focused_query: &str,
+    contents: impl ExactSizeIterator<Item = &'a str>,
+) -> String {
     let q = truncate_tail(focused_query, MAX_QUERY_CHARS);
-    let mut p = String::with_capacity(256 + candidates.len() * 64);
+    let mut p = String::with_capacity(256 + contents.len() * 64);
     p.push_str("CURRENT REQUEST:\n");
     p.push_str(&q);
     p.push_str("\n\nCANDIDATE MEMORIES:\n");
-    for (i, (_id, content)) in candidates.iter().enumerate() {
+    for (i, content) in contents.enumerate() {
         let one_line = truncate_head(content, MAX_CANDIDATE_CHARS).replace('\n', " ");
         p.push_str(&format!("{}. {}\n", i + 1, one_line));
     }
@@ -281,19 +293,17 @@ pub async fn rerank_candidates_consensus_attributed(
     // NOTE: a single candidate is still JUDGED (no bypass). The judge is the only
     // thing allowed to surface memory, so even one item must clear it.
 
-    let pairs: Vec<(String, String)> = candidates
-        .iter()
-        .map(|(e, _)| (e.id.clone(), e.content.clone()))
-        .collect();
-    let prompt = build_rerank_prompt(focused_query, &pairs);
+    let prompt = build_rerank_prompt_from_contents(
+        focused_query,
+        candidates.iter().map(|(entry, _)| entry.content.as_str()),
+    );
     let n = candidates.len();
 
     // Fire `votes` independent reranks concurrently.
     let futures = (0..votes).map(|_| {
-        let sidecar = sidecar.clone();
-        let prompt = prompt.clone();
+        let prompt = &prompt;
         async move {
-            match sidecar.complete(LLM_RERANK_SYSTEM, &prompt).await {
+            match sidecar.complete(LLM_RERANK_SYSTEM, prompt).await {
                 Ok(resp) => extract_ranking(&resp, n), // Some([]) = nothing relevant
                 Err(e) => {
                     match crate::sidecar::classify_error(&e) {
@@ -403,11 +413,10 @@ pub async fn rerank_candidates_with_mode_attributed(
     // NOTE: a single candidate is still JUDGED (no bypass) so the judge stays the
     // only thing that can surface memory.
 
-    let pairs: Vec<(String, String)> = candidates
-        .iter()
-        .map(|(e, _)| (e.id.clone(), e.content.clone()))
-        .collect();
-    let prompt = build_rerank_prompt(focused_query, &pairs);
+    let prompt = build_rerank_prompt_from_contents(
+        focused_query,
+        candidates.iter().map(|(entry, _)| entry.content.as_str()),
+    );
     let n = candidates.len();
 
     let order = match sidecar.complete(LLM_RERANK_SYSTEM, &prompt).await {
@@ -576,6 +585,77 @@ mod tests {
         assert!(p.contains("CURRENT REQUEST:\nfix the scroll bug"));
         assert!(p.contains("1. first memory"));
         assert!(p.contains("2. second memory"));
+    }
+
+    // Frozen pre-borrowing implementation, to guard byte-for-byte prompt parity.
+    fn legacy_prompt(query: &str, candidates: &[(String, String)]) -> String {
+        let count = query.chars().count();
+        let q: String = query.chars().skip(count.saturating_sub(4000)).collect();
+        let mut prompt = String::from("CURRENT REQUEST:\n");
+        prompt.push_str(&q);
+        prompt.push_str("\n\nCANDIDATE MEMORIES:\n");
+        for (i, (_, content)) in candidates.iter().enumerate() {
+            let content: String = content.chars().take(600).collect();
+            prompt.push_str(&format!("{}. {}\n", i + 1, content.replace('\n', " ")));
+        }
+        prompt.push_str("\nReturn candidate numbers ranked best-first as a JSON array.");
+        prompt
+    }
+
+    #[test]
+    fn borrowed_prompt_matches_legacy_exactly() {
+        let cases = [
+            (String::new(), vec![]),
+            (
+                "修正 🦀\nrequest\r\n".to_owned(),
+                vec![
+                    (
+                        "ignored identifier".to_owned(),
+                        "café\n記憶🦀\r\n".to_owned(),
+                    ),
+                    (String::new(), String::new()),
+                ],
+            ),
+            (
+                format!("discarded prefix{}", "界🦀".repeat(2100)),
+                vec![
+                    (
+                        "large id".repeat(1000),
+                        format!("{}TAIL", "é\n🦀".repeat(1000)),
+                    ),
+                    ("boundary".to_owned(), "界".repeat(600)),
+                    ("over boundary".to_owned(), "🦀".repeat(601)),
+                ],
+            ),
+        ];
+        for (query, candidates) in cases {
+            let expected = legacy_prompt(&query, &candidates);
+            assert_eq!(build_rerank_prompt(&query, &candidates), expected);
+            assert_eq!(
+                build_rerank_prompt_from_contents(
+                    &query,
+                    candidates.iter().map(|(_, content)| content.as_str()),
+                ),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_prompt_owns_only_formatted_output() {
+        let prompt = {
+            let mut candidates = cands(&["temporary"]);
+            candidates[0].0.content = format!("{}discarded tail", "界\n".repeat(300));
+            let prompt = build_rerank_prompt_from_contents(
+                "old prefix".repeat(1000).as_str(),
+                candidates.iter().map(|(entry, _)| entry.content.as_str()),
+            );
+            // The synchronous helper's result does not retain any candidate borrow.
+            candidates.clear();
+            prompt
+        };
+        assert!(!prompt.contains("discarded tail"));
+        assert!(prompt.contains(&format!("1. {}\n", "界 ".repeat(300))));
     }
 
     #[test]
