@@ -56,7 +56,7 @@ pub(crate) fn file_activity_scope_label(
 
 /// Most entries one model-facing notice may carry before a fresh one starts.
 pub(crate) const FILE_ACTIVITY_NOTICE_MAX_ENTRIES: usize = 12;
-const FILE_ACTIVITY_INTENT_MAX_CHARS: usize = 100;
+const FILE_ACTIVITY_INTENT_MAX_CHARS: usize = 60;
 
 /// One peer's change to one file, as told to another agent.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -106,17 +106,20 @@ pub(crate) fn merge_file_activity_entry(
 }
 
 fn format_file_activity_entry(entry: &FileActivityEntry) -> String {
-    let mut facts = vec![format!("+{} -{}", entry.added, entry.removed)];
+    let mut facts = vec![format!("+{}-{}", entry.added, entry.removed)];
     if entry.edits > 1 {
-        facts.push(format!("{} edits", entry.edits));
+        facts.push(format!("x{}", entry.edits));
     }
     match entry.lines {
-        Some((start, end)) if start == end => facts.push(format!("line {start}")),
-        Some((start, end)) => facts.push(format!("lines {start}-{end}")),
+        Some((start, end)) if start == end => facts.push(format!("L{start}")),
+        Some((start, end)) => facts.push(format!("L{start}-{end}")),
         None => {}
     }
     if entry.overlap {
-        facts.push("overlaps your edit".to_string());
+        facts.push("overlap".to_string());
+    }
+    if entry.previously {
+        facts.push("earlier".to_string());
     }
     let intent = entry
         .intent
@@ -136,33 +139,22 @@ fn format_file_activity_entry(entry: &FileActivityEntry) -> String {
         })
         .unwrap_or_default();
     format!(
-        "{} {}{} {} ({}){}",
+        "{} {} {}{}",
         entry.agent,
-        if entry.previously { "previously " } else { "" },
-        entry.operation,
         entry.path,
-        facts.join(", "),
+        facts.join(" "),
         intent
     )
 }
 
-/// Model-facing notice: who changed which file, how much, where, and why.
-/// The diff itself is never included. The agent re-reads the file if it cares.
+/// Model-facing notice, one line per peer and file:
+/// `agent path +A-R [xN] [Lstart-end] [overlap] [earlier][: intent]`.
+/// `xN` is the number of edits merged, `overlap` means the change touches
+/// lines the recipient edited, and `earlier` means it predates the
+/// recipient's own first edit. The diff itself is never included.
 pub(crate) fn format_file_activity_notice(entries: &[FileActivityEntry]) -> String {
-    match entries {
-        [entry] => format!("⚠ File activity: {}", format_file_activity_entry(entry)),
-        entries => {
-            let mut notice = format!(
-                "⚠ File activity: {} peer changes to files you edited",
-                entries.len()
-            );
-            for entry in entries {
-                notice.push_str("\n- ");
-                notice.push_str(&format_file_activity_entry(entry));
-            }
-            notice
-        }
-    }
+    let lines: Vec<String> = entries.iter().map(format_file_activity_entry).collect();
+    format!("⚠ File activity: {}", lines.join("\n"))
 }
 
 /// `path` relative to the recipient's working directory when it is inside it.

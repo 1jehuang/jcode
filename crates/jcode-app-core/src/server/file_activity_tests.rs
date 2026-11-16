@@ -89,7 +89,7 @@ fn notice_is_one_short_line_with_agent_path_counts_and_intent() {
     let notice = format_file_activity_notice(&[single]);
     assert_eq!(
         notice,
-        "⚠ File activity: moss edited src/parser.rs (+3 -1, lines 45-60, overlaps your edit): fix the parser"
+        "⚠ File activity: moss src/parser.rs +3-1 L45-60 overlap: fix the parser"
     );
     // The diff preview is never part of the model-facing notice.
     assert!(!notice.contains('\n'));
@@ -99,7 +99,7 @@ fn notice_is_one_short_line_with_agent_path_counts_and_intent() {
     bare.operation = "wrote".to_string();
     assert_eq!(
         format_file_activity_notice(&[bare]),
-        "⚠ File activity: fox previously wrote src/lib.rs (+10 -0)"
+        "⚠ File activity: fox src/lib.rs +10-0 earlier"
     );
 }
 
@@ -109,7 +109,7 @@ fn long_intents_are_truncated() {
     long.intent = Some("x".repeat(500));
     let notice = format_file_activity_notice(&[long]);
     assert!(notice.ends_with('…'));
-    assert!(notice.chars().count() < 160, "{}", notice.chars().count());
+    assert!(notice.chars().count() < 100, "{}", notice.chars().count());
 }
 
 #[test]
@@ -131,10 +131,9 @@ fn repeated_edits_by_one_agent_to_one_file_merge_into_one_entry() {
     assert!(entries.len() <= FILE_ACTIVITY_NOTICE_MAX_ENTRIES);
     assert_eq!(
         format_file_activity_notice(&entries),
-        "⚠ File activity: 3 peer changes to files you edited\n\
-         - moss edited src/a.rs (+5 -3, 2 edits, lines 10-45, overlaps your edit): second\n\
-         - fox edited src/a.rs (+1 -0)\n\
-         - moss edited src/b.rs (+7 -0)"
+        "⚠ File activity: moss src/a.rs +5-3 x2 L10-45 overlap: second\n\
+         fox src/a.rs +1-0\n\
+         moss src/b.rs +7-0"
     );
 }
 

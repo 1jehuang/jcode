@@ -365,23 +365,31 @@ impl super::App {
 }
 
 /// Parse one entry of the model-facing notice:
-/// `agent [previously ]edited path (+3 -1, ...)[: intent]`.
+/// `agent path +3-1 [x2] [L4-9] [overlap] [earlier][: intent]`.
 fn parse_file_activity_notice_entry(line: &str) -> Option<FileActivityEdit> {
     let (sender, rest) = line.trim().split_once(' ')?;
-    let rest = rest.strip_prefix("previously ").unwrap_or(rest);
-    let (operation, rest) = rest.split_once(' ')?;
-    if sender.is_empty() || !matches!(operation, "edited" | "wrote") {
+    if sender.is_empty() {
         return None;
     }
-    let (path, rest) = rest.split_once(" (+")?;
-    let (facts, tail) = rest.split_once(')')?;
-    let (added, after) = facts.split_once(" -")?;
-    let removed: String = after.chars().take_while(char::is_ascii_digit).collect();
+    // The counts are the first ` +A-R` token, so paths may contain spaces.
+    let (path, added, removed, after) = rest.match_indices(" +").find_map(|(at, _)| {
+        let counts = &rest[at + 2..];
+        let end = counts.find([' ', ':']).unwrap_or(counts.len());
+        let (added, removed) = counts[..end].split_once('-')?;
+        let digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+        (digits(added) && digits(removed) && at > 0)
+            .then(|| (&rest[..at], added, removed, &counts[end..]))
+    })?;
+    let (facts, tail) = match after.find(": ") {
+        Some(at) => (&after[..at], &after[at..]),
+        None => (after, ""),
+    };
     let edits = facts
-        .split(", ")
-        .find_map(|fact| fact.strip_suffix(" edits"))
+        .split_whitespace()
+        .find_map(|fact| fact.strip_prefix('x'))
         .and_then(|count| count.parse().ok())
         .unwrap_or(1);
+    let operation = "edited";
     Some(FileActivityEdit {
         sender: compact_swarm_session_label(sender),
         path: path.to_string(),
@@ -399,17 +407,11 @@ pub(super) fn parse_file_activity_notice(content: &str) -> Option<Vec<FileActivi
     let rest = content.trim().strip_prefix("⚠ File activity: ")?;
     let mut lines = rest.lines();
     let first = lines.next()?;
-    if let Some(edit) = parse_file_activity_notice_entry(first) {
-        return Some(vec![edit]);
-    }
-    let mut stack = Vec::new();
+    let mut stack = vec![parse_file_activity_notice_entry(first)?];
     for line in lines {
-        stack_file_activity_edit(
-            &mut stack,
-            parse_file_activity_notice_entry(line.strip_prefix("- ")?)?,
-        );
+        stack_file_activity_edit(&mut stack, parse_file_activity_notice_entry(line)?);
     }
-    (!stack.is_empty()).then_some(stack)
+    Some(stack)
 }
 
 pub(super) fn present_swarm_notification(
@@ -1155,14 +1157,14 @@ mod tests {
 
     #[test]
     fn delivered_model_notice_restores_as_the_same_compact_row() {
-        let single = "⚠ File activity: moss edited src/parser.rs (+3 -1, lines 2-9, overlaps your edit): fix parser";
+        let single = "⚠ File activity: moss src/parser.rs +3-1 L2-9 overlap: fix parser";
         let mut messages = vec![crate::tui::DisplayMessage::system(single)];
         super::normalize_swarm_delivery_messages(&mut messages);
         assert_eq!(messages[0].role, "swarm");
         assert_eq!(messages[0].title.as_deref(), Some("File activity · moss"));
         assert_eq!(collapsed(&messages[0]).0, "+3 -1 · fix parser");
 
-        let batch = "⚠ File activity: 2 peer changes to files you edited\n- moss edited src/parser.rs (+3 -1, 2 edits): fix parser\n- fox previously wrote src/lib.rs (+10 -0)";
+        let batch = "⚠ File activity: moss src/my parser.rs +3-1 x2: fix parser\nfox src/lib.rs +10-0 earlier";
         let stack = super::parse_file_activity_notice(batch).expect("batch notice parses");
         assert_eq!(stack.len(), 2);
         assert_eq!(stack[0].edits, 2);
