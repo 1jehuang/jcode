@@ -217,7 +217,9 @@ fn matrix_login_provider_aliases_resolve_to_canonical_ids() {
 #[test]
 fn auth_issue_profile_metadata_matches_direct_provider_endpoints() {
     assert_eq!(ZAI_PROFILE.api_base, "https://api.z.ai/api/coding/paas/v4");
-    assert_eq!(ZAI_PROFILE.default_model, Some("glm-4.5"));
+    // The catalog now ships glm-5.3 as the Z.AI default; this expectation was
+    // left on the previous generation.
+    assert_eq!(ZAI_PROFILE.default_model, Some("glm-5.3"));
     assert_eq!(DEEPSEEK_PROFILE.api_base, "https://api.deepseek.com");
     assert_eq!(DEEPSEEK_PROFILE.default_model, Some("deepseek-v4-flash"));
     assert_eq!(DEEPSEEK_PROFILE.setup_url, "https://api-docs.deepseek.com/");

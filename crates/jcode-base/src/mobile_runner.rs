@@ -617,6 +617,28 @@ mod tests {
                     }
                 }
                 requests.push(String::from_utf8(request).unwrap());
+                // Drain any request body before answering. Closing the socket
+                // with unread bytes resets the connection, so a client that is
+                // still sending (a POST with a JSON body) sees a send error
+                // instead of the response.
+                let content_length = requests
+                    .last()
+                    .and_then(|headers| {
+                        headers.lines().find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                    })
+                    .unwrap_or(0);
+                if content_length > 0 {
+                    let mut body = vec![0u8; content_length];
+                    socket.read_exact(&mut body).await.unwrap();
+                    if let Some(last) = requests.last_mut() {
+                        last.push_str(&String::from_utf8_lossy(&body));
+                    }
+                }
                 let body = page.to_string();
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
