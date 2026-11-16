@@ -5,7 +5,10 @@
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::Read;
+// `Write` is only used by the unix private-publication path.
+#[cfg(unix)]
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 pub fn local_access_seconds() -> i64 {

@@ -453,6 +453,8 @@ fn apply_terminal_event(
     match event {
         Some(Ok(Event::FocusGained)) => {
             crate::tui::reapply_configured_terminal_modes_after_focus();
+            // On Windows the repaint below shadows this binding with its own.
+            #[allow(unused_variables)]
             let redraw = app.set_client_focused(true);
             app.note_client_focus(true);
             // A ConPTY host can repaint or move the pane while unfocused

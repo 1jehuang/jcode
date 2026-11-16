@@ -6,7 +6,10 @@
 //! unavailable/full storage, or an unreported provider usage frame can still lose
 //! usage. Staging files from interrupted publication are never treated as events.
 use super::*;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
+// Only the unix directory-sync path opens a bare File handle.
+#[cfg(unix)]
+use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
 #[cfg(not(test))]

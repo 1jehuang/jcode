@@ -15,6 +15,8 @@ pub(super) fn destructive_command_refusal(
     justification: Option<&str>,
     working_dir: Option<std::path::PathBuf>,
 ) -> Option<String> {
+    // `mut` is required by the non-Windows scratch path override below.
+    #[allow(unused_mut)]
     let mut risk_ctx = jcode_command_risk::RiskContext::from_env(working_dir);
     // Assess the same scratch path that the child shell actually receives.
     #[cfg(not(windows))]

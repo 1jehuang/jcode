@@ -4,7 +4,10 @@
 //! reads one-line responses. Used for `pane.report_agent`,
 //! `pane.report_agent_session`, and `pane.release_agent`.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+// `Context` is only needed by the unix socket implementation below.
+#[cfg(unix)]
+use anyhow::Context;
 use serde_json::Value;
 use std::path::Path;
 #[cfg(unix)]

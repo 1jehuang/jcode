@@ -12,7 +12,7 @@ use crate::protocol::SwarmMemberStatus;
 use jcode_tui_core::keybind::alt_chord_lower;
 use jcode_tui_render::swarm_gallery::{
     GalleryMember, SwarmStripHint, display_order, humanize_age, is_active_status, render_gallery,
-    render_swarm_compact, render_swarm_dock, render_swarm_live_card, render_swarm_panel,
+    render_swarm_live_card, render_swarm_panel,
     render_swarm_strip, render_swarm_strip_vertical, status_accent, status_glyph,
 };
 use ratatui::prelude::*;
@@ -405,7 +405,7 @@ pub(crate) fn render_swarm_plan_dag(
             style = style.add_modifier(Modifier::BOLD);
         }
 
-        let mut spans = vec![
+        let spans = vec![
             Span::styled(connector, Style::default().fg(Color::Rgb(75, 75, 88))),
             Span::styled(
                 if node.completed {

@@ -189,6 +189,8 @@ fn secure_file(file: &File, _path: &Path) -> Result<()> {
 }
 
 fn secret_options() -> OpenOptions {
+    // `mut` is required by the unix mode call below.
+    #[allow(unused_mut)]
     let mut options = OpenOptions::new();
     #[cfg(unix)]
     {

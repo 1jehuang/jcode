@@ -9,7 +9,7 @@ use crate::tui::elicitation_types::{
     ButtonSpec, ChoiceOption, DateTimeKind, ElicitAction, ElicitOverlayState, ElicitRequest,
     ElicitResponse, FieldSpec, NotesSpec, Urgency,
 };
-use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers};
 
 impl App {
     /// Handle an incoming elicitation message from the tool-core global channel.

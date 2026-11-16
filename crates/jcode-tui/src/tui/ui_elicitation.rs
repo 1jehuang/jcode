@@ -6,7 +6,6 @@
 
 use super::{clear_area, dim_color, rgb};
 use crate::tui::elicitation_types::{ElicitOverlayState, FieldSpec};
-use crate::tui::TuiState;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 

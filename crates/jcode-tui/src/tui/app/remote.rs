@@ -598,7 +598,14 @@ async fn apply_terminal_event<B: Backend>(
         Some(Ok(Event::FocusGained)) => {
             crate::tui::reapply_configured_terminal_modes_after_focus();
             input_attribution.event = Some("focus_gained".to_string());
-            needs_redraw |= app.set_client_focused(true);
+            // Windows repaints unconditionally below, so only the side effect is
+            // needed there; `|=` would be a dead store on that platform.
+            #[cfg(not(windows))]
+            {
+                needs_redraw |= app.set_client_focused(true);
+            }
+            #[cfg(windows)]
+            app.set_client_focused(true);
             app.note_client_focus(true);
             // Repaint every row: a ConPTY host may have moved the pane while
             // unfocused (#1812).
@@ -992,7 +999,12 @@ where
     match event {
         Some(Ok(Event::FocusGained)) => {
             crate::tui::reapply_configured_terminal_modes_after_focus();
-            needs_redraw |= app.set_client_focused(true);
+            #[cfg(not(windows))]
+            {
+                needs_redraw |= app.set_client_focused(true);
+            }
+            #[cfg(windows)]
+            app.set_client_focused(true);
             app.note_client_focus(true);
             // Repaint every row: a ConPTY host may have moved the pane while
             // unfocused (#1812).
