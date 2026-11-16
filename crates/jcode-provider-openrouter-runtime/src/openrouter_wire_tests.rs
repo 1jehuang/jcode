@@ -2,6 +2,94 @@
 
 use super::*;
 
+#[tokio::test]
+async fn named_profile_headers_reach_chat_and_catalog_without_leaking() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    for configured in [true, false] {
+        let (base_url, captured) = spawn_single_response_chat_server();
+        let profile = jcode_base::config::NamedProviderConfig {
+            base_url: base_url.clone(),
+            api_key: Some("profile-test-key".into()),
+            default_model: Some("example-model".into()),
+            headers: if configured {
+                std::collections::BTreeMap::from([
+                    ("User-Agent".into(), "example-coding-client/1.0".into()),
+                    ("X-Client".into(), "profile-only".into()),
+                ])
+            } else {
+                Default::default()
+            },
+            ..Default::default()
+        };
+        let provider = OpenRouterProvider::new_named_openai_compatible("headers-test", &profile)
+            .expect("profile should initialize");
+        let auth = (provider.auth)().unwrap();
+        for base in [&base_url, "https://api.anthropic.com/v1"] {
+            let request = auth
+                .apply_catalog(Client::new().get(format!("{base}/models")), base)
+                .await
+                .unwrap()
+                .build()
+                .unwrap();
+            assert_eq!(request.headers().contains_key("x-client"), configured);
+            if configured {
+                assert_eq!(request.headers()["user-agent"], "example-coding-client/1.0");
+            }
+            if base.contains("api.anthropic.com") {
+                assert_eq!(request.headers()["x-api-key"], "profile-test-key");
+                assert!(!request.headers().contains_key("authorization"));
+            } else {
+                assert_eq!(
+                    request.headers()["authorization"],
+                    "Bearer profile-test-key"
+                );
+            }
+        }
+        let mut stream = provider
+            .complete(&[Message::user("hello")], &[], "test", None)
+            .await
+            .unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+        let raw = captured
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .to_ascii_lowercase();
+        assert!(raw.contains("authorization: bearer profile-test-key"));
+        assert_eq!(raw.contains("x-client: profile-only"), configured);
+        assert_eq!(
+            raw.contains("user-agent: example-coding-client/1.0"),
+            configured
+        );
+    }
+}
+
+#[test]
+fn named_profile_headers_reject_invalid_headers_without_echoing_values() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    for (name, value) in [
+        ("bad header", "private-value"),
+        ("x-client", "private\r\nvalue"),
+    ] {
+        let profile = jcode_base::config::NamedProviderConfig {
+            base_url: "http://localhost:1234/v1".into(),
+            auth: jcode_base::config::NamedProviderAuth::None,
+            headers: std::collections::BTreeMap::from([(name.into(), value.into())]),
+            ..Default::default()
+        };
+        let error =
+            match OpenRouterProvider::new_named_openai_compatible("invalid-header", &profile) {
+                Ok(_) => panic!("invalid header should be rejected"),
+                Err(error) => format!("{error:#}"),
+            };
+        assert!(error.contains("Invalid"));
+        assert!(!error.contains("private"));
+    }
+}
+
 /// Issue #1167: OpenCode Go/Zen require a stable per-conversation
 /// `x-opencode-session` header; other OpenAI-compatible hosts must not get it.
 #[test]

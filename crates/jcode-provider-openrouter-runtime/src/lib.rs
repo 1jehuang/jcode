@@ -44,7 +44,7 @@ use jcode_provider_openrouter::{
 };
 use models_catalog_parse::parse_openai_compatible_models_response;
 use reqwest::Client;
-use reqwest::header::HeaderName;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -431,6 +431,10 @@ fn apply_grok_cli_turn_headers(
 
 #[derive(Debug, Clone)]
 enum ProviderAuth {
+    WithHeaders {
+        auth: Box<ProviderAuth>,
+        headers: HeaderMap,
+    },
     AuthorizationBearer {
         token: String,
         label: String,
@@ -455,8 +459,18 @@ enum ProviderAuth {
 }
 
 impl ProviderAuth {
+    fn credentials(&self) -> &Self {
+        match self {
+            Self::WithHeaders { auth, .. } => auth.credentials(),
+            _ => self,
+        }
+    }
+
     async fn apply(&self, req: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilder> {
         match self {
+            Self::WithHeaders { auth, headers } => {
+                Box::pin(auth.apply(req.headers(headers.clone()))).await
+            }
             Self::AuthorizationBearer { token, .. } => Ok(req.bearer_auth(token)),
             Self::HeaderValue {
                 header_name, value, ..
@@ -479,6 +493,7 @@ impl ProviderAuth {
 
     fn label(&self) -> &str {
         match self {
+            Self::WithHeaders { auth, .. } => auth.label(),
             Self::AuthorizationBearer { label, .. } => label,
             Self::HeaderValue { label, .. } => label,
             Self::AzureEntra { label } => label,
@@ -1326,6 +1341,15 @@ impl OpenRouterProvider {
         let api_base = normalize_api_base(&profile.base_url).ok_or_else(|| {
             anyhow::anyhow!("Provider profile '{}' has invalid base_url", profile_name)
         })?;
+        let mut headers = HeaderMap::new();
+        for (name, value) in &profile.headers {
+            let header_name = HeaderName::from_bytes(name.as_bytes()).with_context(|| {
+                format!("Invalid header name in provider profile '{profile_name}'")
+            })?;
+            let header_value = HeaderValue::from_str(value)
+                .with_context(|| format!("Invalid value for provider header '{name}'"))?;
+            headers.insert(header_name, header_value);
+        }
         let auth_profile = profile.clone();
         let auth: AuthResolver = Arc::new(move || {
             let key_env = auth_profile
@@ -1337,7 +1361,7 @@ impl OpenRouterProvider {
             let key = key_env
                 .and_then(|name| load_named_profile_api_key(name, &auth_profile))
                 .or_else(|| auth_profile.api_key.clone());
-            Ok(match auth_profile.auth {
+            let auth = match auth_profile.auth {
                 jcode_base::config::NamedProviderAuth::None => ProviderAuth::None {
                     label: "local endpoint (no auth)".to_string(),
                 },
@@ -1361,6 +1385,14 @@ impl OpenRouterProvider {
                         .ok_or_else(|| anyhow::anyhow!("{} not found in environment", key_label))?,
                     label: key_label,
                 },
+            };
+            Ok(if headers.is_empty() {
+                auth
+            } else {
+                ProviderAuth::WithHeaders {
+                    auth: Box::new(auth),
+                    headers: headers.clone(),
+                }
             })
         });
         auth()?;
