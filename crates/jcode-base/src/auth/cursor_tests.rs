@@ -4,7 +4,8 @@ use super::*;
 fn config_file_path_under_jcode() {
     let path = config_file_path().unwrap();
     let path_str = path.to_string_lossy();
-    assert!(path_str.contains("jcode"));
+    // The app-owned config directory carries this product's name.
+    assert!(path_str.contains("kcode"), "{path_str}");
     assert!(path_str.ends_with("cursor.env"));
 }
 

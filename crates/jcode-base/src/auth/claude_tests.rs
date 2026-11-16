@@ -99,8 +99,11 @@ fn sandboxed_jcode_home_is_detected_without_hiding_explicit_env_credentials() {
 #[test]
 fn real_jcode_home_is_not_treated_as_a_sandbox() {
     let _lock = crate::storage::lock_test_env();
-    let real_home = dirs::home_dir().unwrap().join(".jcode");
-    let _home = EnvVarGuard::set("JCODE_HOME", &real_home);
+    // "Not a sandbox" means the override resolves to this product's *default*
+    // home. Pointing it at `.jcode` no longer qualifies: that is the other
+    // product's directory, and storage refuses to adopt it.
+    let default_home = dirs::home_dir().unwrap().join(".kcode");
+    let _home = EnvVarGuard::set("KCODE_HOME", &default_home);
 
     assert!(!crate::storage::running_with_sandboxed_home());
 }
