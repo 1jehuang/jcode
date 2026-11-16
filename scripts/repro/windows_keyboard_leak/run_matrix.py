@@ -34,7 +34,7 @@ DEFAULT_CONTROL = Path(os.environ.get(
 
 
 def run_one(name: str, binary: str, fixture: Path, out: Path, expect_bug: bool,
-            gap_ms: float, inject_mode: str) -> dict:
+            gap_ms: float, inject_mode: str, resume_arg: str = "") -> dict:
     run_dir = out / name
     if run_dir.exists():
         shutil.rmtree(run_dir)
@@ -47,17 +47,22 @@ def run_one(name: str, binary: str, fixture: Path, out: Path, expect_bug: bool,
         "--gap-ms", str(gap_ms),
         "--inject-mode", inject_mode,
     ]
+    if resume_arg:
+        argv += ["--resume-arg", resume_arg]
     if expect_bug:
         argv.append("--expect-bug")
     proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace")
     result_path = run_dir / "result.json"
     payload = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else {}
-    payload["exit_code"] = proc.returncode
-    payload["run_dir"] = str(run_dir)
+    # Fill the failure shape first: the metadata below would otherwise make `payload`
+    # truthy and the missing-result branch unreachable, which leaves rows without a
+    # label and breaks the summary with a KeyError.
     if not payload:
         payload["label"] = name
         payload["verdict"] = "NO_RESULT"
         payload["stderr_tail"] = (proc.stderr or "")[-800:]
+    payload["exit_code"] = proc.returncode
+    payload["run_dir"] = str(run_dir)
     return payload
 
 
@@ -70,6 +75,8 @@ def main() -> int:
     ap.add_argument("--runs", type=int, default=10)
     ap.add_argument("--gap-ms", type=float, default=15.0)
     ap.add_argument("--inject-mode", choices=["atomic", "chars"], default="atomic")
+    ap.add_argument("--resume-arg", default="",
+                    help="session name to resume; derived from the fixture filename when omitted")
     ap.add_argument("--no-controls", action="store_true")
     args = ap.parse_args()
 
@@ -82,15 +89,15 @@ def main() -> int:
 
     if not args.no_controls and Path(args.control_binary).exists():
         rows.append(run_one("control-pre", args.control_binary, fixture, out, True, args.gap_ms,
-                            args.inject_mode))
+                            args.inject_mode, args.resume_arg))
 
     for index in range(1, args.runs + 1):
         rows.append(run_one(f"fixed-{index:02d}", args.binary, fixture, out, False, args.gap_ms,
-                            args.inject_mode))
+                            args.inject_mode, args.resume_arg))
 
     if not args.no_controls and Path(args.control_binary).exists():
         rows.append(run_one("control-post", args.control_binary, fixture, out, True, args.gap_ms,
-                            args.inject_mode))
+                            args.inject_mode, args.resume_arg))
 
     fixed = [r for r in rows if r["label"].startswith("fixed-")]
     controls = [r for r in rows if r["label"].startswith("control-")]
@@ -115,7 +122,9 @@ def main() -> int:
         "runs_red": len(fixed) - len(greens),
         "controls_expected": 0 if args.no_controls else 2,
         "controls_reproduced": len(reproduced),
-        "distinct_fixture_hashes_across_runs": sorted(fixture_hashes),
+        # A run that never produced a result has no fixture hash; sorting the raw
+        # keys would compare None with str and raise.
+        "distinct_fixture_hashes_across_runs": sorted(h for h in fixture_hashes if h),
         "failure_histogram": dict(failures),
         "gap_max_ms_per_run": [r.get("gap_max_ms") for r in fixed],
         "inject_mode": args.inject_mode,

@@ -2,8 +2,13 @@
 
 import glob
 import json
+import re
 import sys
 from pathlib import Path
+
+# "<n>> text" or "<n>› text": the prompt number counts user messages, so it is not
+# fixed, and the prompt glyph differs by terminal font coverage.
+COMPOSER = re.compile(r"^\s*\d+\s*[>\u203a]")
 
 root = Path(sys.argv[1])
 names = ["session_loaded", "injection_within_burst_window", "leak_absent_after_injection",
@@ -17,7 +22,9 @@ def composer(run_dir: Path, stage: str) -> str:
     if not path.exists():
         return "<missing>"
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        if line.startswith("2>"):
+        # The prompt number counts the session's user messages, so it is not
+        # always 2: any fixture can produce 3> or 12>.
+        if COMPOSER.match(line):
             return line.rstrip()
     return "<no composer row>"
 

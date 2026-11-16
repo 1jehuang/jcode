@@ -13,8 +13,10 @@ import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-HARNESS = ROOT / "harness"
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent.parent
+# The wrapper lives beside this script, not in a `harness/` subdirectory.
+HARNESS = HERE
 TAPES = Path(os.environ.get("JCODE_REPRO_TAPES", ROOT / "tapes"))
 ESC = "\x1b"
 REPORT = f"{ESC}[119;1:3u"   # 'w' release, the shape that leaked into the composer

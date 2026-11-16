@@ -128,6 +128,13 @@ fn is_report_fragment(fragment: &str) -> bool {
         return false;
     };
     if let Some(body) = body.strip_suffix('u') {
+        // A real kitty report always carries the modifier field: `CSI code;mods u`
+        // or `CSI code;mods:event u`. Without the separator this is ordinary text,
+        // and treating it as a report deletes typed code: `array[100usize]` reaches
+        // `[100u` while the `u` is being typed, and `[100u` alone must stay text.
+        if !body.contains(';') {
+            return false;
+        }
         let mut saw_event_type = false;
         let mut first_code = None;
         for (index, part) in body.split(';').enumerate() {
@@ -266,6 +273,22 @@ mod tests {
                  modifyOtherKeys, or a stack pop"
             );
         }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn typed_indexing_code_is_never_mistaken_for_a_report() {
+        // Typing `array[100usize]` passes through `[100u` for a moment. Without a
+        // modifier field that is ordinary text, and stripping it would silently
+        // delete what the user wrote, leaving `arraysize]`.
+        for typed in ["[100u", "[1u", "[2026u", "[0u"] {
+            assert!(!is_report_fragment(typed), "{typed} is typed code, not a report");
+        }
+        // The shapes that really do leak from a host that arms CSI-u stay reports.
+        assert!(is_report_fragment("[119;1:3u"));
+        assert!(is_report_fragment("[27;3;97~"));
+        // A hand-typed modified key has a control code, not a printable one.
+        assert!(!is_report_fragment("[1;5u"));
     }
 
     #[test]

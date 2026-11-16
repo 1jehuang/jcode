@@ -111,11 +111,22 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def resume_name(fixture: Path) -> str:
+    """The memorable session name a saved session encodes: session_<name>_<ts>_<id>."""
+    parts = fixture.stem.split("_")
+    return parts[1] if len(parts) >= 3 and parts[0] == "session" else fixture.stem
+
+
 def prepare_run(run_dir: Path, fixture: Path) -> tuple[Path, Path]:
     """Fresh, byte-identical world for this run."""
     home = run_dir / "home"
     sessions = home / "sessions"
     cwd = run_dir / "cwd"
+    # Reusing a run directory must not let an earlier run's log satisfy this one:
+    # the menu verdict reads the log for the session load.
+    logs = home / "logs"
+    if logs.exists():
+        shutil.rmtree(logs, ignore_errors=True)
     for path in (sessions, cwd):
         path.mkdir(parents=True, exist_ok=True)
     target = sessions / fixture.name
@@ -174,7 +185,9 @@ def main() -> int:
     ap.add_argument("--inject-mode", choices=["atomic", "chars"], default="atomic",
                     help="atomic = one write of the whole report, like a terminal; "
                          "chars = one byte at a time, kept for comparison")
-    ap.add_argument("--resume-arg", default="mosquito")
+    # Defaults to the session name encoded in the fixture filename, so any saved
+    # session can be used, not only the one this harness was written against.
+    ap.add_argument("--resume-arg", default="")
     ap.add_argument("--resume-menu", action="store_true",
                     help="launch bare --resume so the session picker renders, instead of resuming by name")
     ap.add_argument("--ready-marker", default="",
@@ -223,7 +236,7 @@ def main() -> int:
     if args.resume_menu:
         argv.append("--resume")
     else:
-        argv += ["--resume", args.resume_arg]
+        argv += ["--resume", args.resume_arg or resume_name(fixture)]
 
     result: dict = {
         "label": args.label,
@@ -393,7 +406,26 @@ def main() -> int:
         result["verdict"] = "BUG_REPRODUCED" if ok else "HARNESS_BLIND"
     else:
         ok = all(checks.values())
-        result["verdict"] = "GREEN" if ok else "RED"
+        if ok:
+            result["verdict"] = "GREEN"
+        elif (
+            checks.get("leak_absent_after_injection")
+            and checks.get("leak_absent_at_end")
+            and checks.get("positive_control_present")
+            and not checks.get("scrub_logged_report_as_text")
+        ):
+            # The screen is clean and typing works, but the app never logged a strip,
+            # which is the only direct evidence the report arrived. That is a run that
+            # proved nothing rather than a failed one, and calling it RED sends people
+            # hunting for a regression that did not happen.
+            result["verdict"] = "INCONCLUSIVE"
+            result["notes"].append(
+                "no strip logged: the report most likely never reached the composer; "
+                "rerun, or use run_matrix.py where one run's delivery does not decide the result"
+            )
+            ok = False
+        else:
+            result["verdict"] = "RED"
 
     (run_dir / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps({k: result[k] for k in ("label", "verdict", "checks", "gap_max_ms")}, indent=2))

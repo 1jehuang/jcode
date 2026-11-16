@@ -859,6 +859,11 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
         crate::logging::info(&format!(
             "Stripped a keyboard-protocol report that arrived as text: {fragment:?}"
         ));
+        // The picker filter was built from the text before the strip, so a report
+        // arriving after `/model ` can leave the picker matching nothing while the
+        // visible command is clean. Rebuild it from what is actually there.
+        app.sync_model_picker_preview_from_input();
+        app.reset_tab_completion();
     }
     // A key stream may still be receiving the rest of a multi-file drop. Do not
     // strip quoting from a verified non-image prefix until submission, otherwise

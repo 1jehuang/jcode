@@ -43,6 +43,21 @@ messages = [
 if not messages:
     raise SystemExit(f"{source_path} has no messages to derive a fixture from")
 
+# Copy only fields that carry structure, never conversation content. A recorded
+# session also holds `compaction`, `memory_injections`, `system_prompt` and other
+# fields that contain summaries and recalled private text; copying the whole object
+# and patching a few keys would publish them.
+SAFE_FIELDS = (
+    "created_at",
+    "updated_at",
+    "last_active_at",
+    "provider_key",
+    "model",
+    "reasoning_effort",
+    "env_snapshots",
+)
+template = {key: template[key] for key in SAFE_FIELDS if key in template}
+
 template["id"] = "session_probe_1735689600000_0123456789abcdef"
 template["title"] = "probe fixture"
 template["short_name"] = "probe"

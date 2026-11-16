@@ -1,46 +1,10 @@
 {
-  "id": "session_probe_1735689600000_0123456789abcdef",
-  "parent_id": null,
-  "title": "probe fixture",
   "created_at": "2026-11-14T15:57:54.260699100Z",
   "updated_at": "2026-11-14T16:41:01.385677500Z",
-  "messages": [
-    {
-      "id": "message_1794671874398_3841897249415407205",
-      "role": "user",
-      "content": [
-        {
-          "type": "text",
-          "text": "Composer regression fixture: this session exists so a probe can resume it."
-        }
-      ],
-      "display_role": "system",
-      "timestamp": "2026-11-14T15:57:54.398103Z"
-    },
-    {
-      "id": "message_1794671874443_3343139261941869566",
-      "role": "user",
-      "content": [
-        {
-          "type": "text",
-          "text": "Fixture loaded. The composer below is the surface under test."
-        }
-      ],
-      "timestamp": "2026-11-14T15:57:54.443145900Z"
-    }
-  ],
-  "model_usage_turn_id": "session_mosquito_1794671874260_10867a3abffb9231:message_1794671874447_5861142971604717399",
+  "last_active_at": "2026-11-14T16:10:06.641435900Z",
   "provider_key": "opencode-go",
   "model": "deepseek-v4.1-flash",
   "reasoning_effort": "low",
-  "is_canary": false,
-  "working_dir": null,
-  "short_name": "probe",
-  "status": "Closed",
-  "last_pid": 21836,
-  "last_active_at": "2026-11-14T16:10:06.641435900Z",
-  "is_debug": false,
-  "saved": false,
   "env_snapshots": [
     {
       "captured_at": "2026-11-14T15:57:54.398181600Z",
@@ -117,6 +81,40 @@
       "is_canary": false,
       "testing_build": null,
       "working_git": null
+    }
+  ],
+  "id": "session_probe_1735689600000_0123456789abcdef",
+  "title": "probe fixture",
+  "short_name": "probe",
+  "parent_id": null,
+  "working_dir": null,
+  "is_debug": false,
+  "is_canary": false,
+  "saved": false,
+  "status": "Closed",
+  "messages": [
+    {
+      "id": "message_1794671874398_3841897249415407205",
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Composer regression fixture: this session exists so a probe can resume it."
+        }
+      ],
+      "display_role": "system",
+      "timestamp": "2026-11-14T15:57:54.398103Z"
+    },
+    {
+      "id": "message_1794671874443_3343139261941869566",
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Fixture loaded. The composer below is the surface under test."
+        }
+      ],
+      "timestamp": "2026-11-14T15:57:54.443145900Z"
     }
   ]
 }

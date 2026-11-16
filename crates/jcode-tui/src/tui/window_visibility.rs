@@ -1,4 +1,4 @@
-//! Whether an unfocused client's window can be seen at all.
+﻿//! Whether an unfocused client's window can be seen at all.
 //!
 //! Terminal focus reports give two states, focused and not. A tiling desktop
 //! needs a third: an unfocused window may sit next to the focused one in plain
@@ -369,6 +369,8 @@ fn parse_niri(
     result
 }
 
+// Mostly portable, but the niri tests call `parse_niri`, which is `cfg(unix)`, so
+// the module keeps the Unix gate until those are split into their own submodule.
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
