@@ -692,10 +692,11 @@ impl Sidecar {
             .context("Failed to parse Claude API response")?;
 
         if let Some(usage) = result.usage.as_ref() {
-            crate::telemetry::record_provider_usage(
+            crate::telemetry::record_provider_usage_with_model_attribution(
                 None,
                 "claude",
-                reported_sidecar_model(model, result.model.as_deref()),
+                model,
+                jcode_provider_core::nonempty_response_model(result.model.as_deref()),
                 crate::telemetry::UsageSource::Sidecar,
                 crate::telemetry::ProviderUsage {
                     input_tokens: usage.input_tokens,
@@ -1073,22 +1074,18 @@ fn parse_openai_usage(usage: &serde_json::Value) -> Option<crate::telemetry::Pro
     })
 }
 
-fn reported_sidecar_model<'a>(requested: &'a str, reported: Option<&'a str>) -> &'a str {
-    reported
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-        .unwrap_or(requested)
-}
-
 fn record_openai_sidecar_usage(model: &str, response: Option<&serde_json::Value>) {
     if let Some(response) = response
         && let Some(parsed) = response.get("usage").and_then(parse_openai_usage)
     {
-        let model = reported_sidecar_model(model, response.get("model").and_then(|v| v.as_str()));
-        crate::telemetry::record_provider_usage(
+        let resolved_model = jcode_provider_core::nonempty_response_model(
+            response.get("model").and_then(|v| v.as_str()),
+        );
+        crate::telemetry::record_provider_usage_with_model_attribution(
             None,
             "openai",
             model,
+            resolved_model,
             crate::telemetry::UsageSource::Sidecar,
             parsed,
         );
@@ -1394,17 +1391,17 @@ mod tests {
     }
 
     #[test]
-    fn sidecar_model_prefers_reported_identity_with_requested_fallback() {
+    fn sidecar_model_metadata_never_infers_configured_identity() {
         assert_eq!(
-            reported_sidecar_model("alias", Some("served-snapshot")),
-            "served-snapshot"
+            jcode_provider_core::nonempty_response_model(Some("served-snapshot")),
+            Some("served-snapshot")
         );
         assert_eq!(
-            reported_sidecar_model("alias", Some(" served-snapshot ")),
-            "served-snapshot"
+            jcode_provider_core::nonempty_response_model(Some(" served-snapshot ")),
+            Some("served-snapshot")
         );
         for reported in [None, Some(""), Some("  ")] {
-            assert_eq!(reported_sidecar_model("alias", reported), "alias");
+            assert_eq!(jcode_provider_core::nonempty_response_model(reported), None);
         }
         let parsed: ClaudeMessagesResponse = serde_json::from_value(serde_json::json!({
             "model": "claude-served-snapshot", "content": []

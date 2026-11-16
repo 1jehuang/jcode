@@ -582,10 +582,13 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
     }];
 
     let mut provider_name = provider.name().to_string();
-    let mut model = provider.model();
+    let model = provider.model();
     let response = provider.complete(&messages, &[], system, None).await?;
     let mut result = String::new();
-    let mut usage = SimpleCompletionUsage::default();
+    let mut usage = SimpleCompletionUsage {
+        requested_model: Some(model.clone()),
+        ..Default::default()
+    };
     tokio::pin!(response);
 
     while let Some(event) = response.next().await {
@@ -600,13 +603,25 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
                 cache_read_input_tokens,
                 cache_creation_input_tokens,
             }) => {
-                model = provider.model();
                 usage.observe(
                     input_tokens,
                     output_tokens,
                     cache_read_input_tokens,
                     cache_creation_input_tokens,
                 );
+            }
+            Ok(StreamEvent::ResolvedModel { model }) => {
+                if let Some(model) = nonempty_response_model(Some(&model)) {
+                    usage.resolved_model = Some(model.to_owned());
+                }
+            }
+            Ok(StreamEvent::RetryRollback { .. }) => {
+                result.clear();
+                usage = SimpleCompletionUsage {
+                    requested_model: Some(model.clone()),
+                    ..Default::default()
+                };
+                provider_name = provider.name().to_string();
             }
             Ok(StreamEvent::UpstreamProvider { provider }) => provider_name = provider,
             Ok(StreamEvent::MessageEnd { stop_reason })
@@ -708,12 +723,21 @@ impl std::error::Error for SimpleCompletionError {
 /// input tokens and a final event with output tokens). Each field keeps the
 /// latest value reported, matching how the agent turn loop treats repeated
 /// `TokenUsage` events (they are cumulative snapshots, not deltas).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SimpleCompletionUsage {
+    /// Model requested before the call, including private routing aliases.
+    pub requested_model: Option<String>,
+    /// Actual model explicitly reported by this response, never inferred.
+    pub resolved_model: Option<String>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cache_read_input_tokens: Option<u64>,
     pub cache_creation_input_tokens: Option<u64>,
+}
+
+/// Normalize optional response metadata without falling back to a configured ID.
+pub fn nonempty_response_model(model: Option<&str>) -> Option<&str> {
+    model.map(str::trim).filter(|model| !model.is_empty())
 }
 
 impl SimpleCompletionUsage {
