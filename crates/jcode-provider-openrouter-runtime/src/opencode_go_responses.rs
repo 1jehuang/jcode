@@ -186,6 +186,7 @@ pub(crate) struct ResponsesStream {
     // can split a UTF-8 character at any byte.
     buffer: Vec<u8>,
     pending: Vec<StreamEvent>,
+    resolved_model: Option<String>,
     tools: HashMap<String, ToolState>,
     thinking: bool,
     ended: bool,
@@ -199,6 +200,7 @@ impl ResponsesStream {
             inner: Box::pin(stream),
             buffer: Vec::new(),
             pending: Vec::new(),
+            resolved_model: None,
             tools: HashMap::new(),
             thinking: false,
             ended: false,
@@ -209,6 +211,18 @@ impl ResponsesStream {
         let Ok(value) = serde_json::from_str::<Value>(data) else {
             return;
         };
+        if let Some(model) = value
+            .get("response")
+            .and_then(|response| response.get("model"))
+            .and_then(Value::as_str)
+            .filter(|model| !model.trim().is_empty())
+            && self.resolved_model.as_deref() != Some(model)
+        {
+            self.resolved_model = Some(model.to_owned());
+            self.pending.push(StreamEvent::ResolvedModel {
+                model: model.to_owned(),
+            });
+        }
         let kind = value
             .get("type")
             .and_then(Value::as_str)
@@ -505,6 +519,31 @@ impl Stream for ResponsesStream {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resolved_model_metadata_dedupes_and_resets_per_attempt() {
+        for _attempt in 0..2 {
+            let mut stream = super::ResponsesStream::new(futures::stream::empty());
+            for data in [
+                r#"{"type":"response.created","model":"requested-alias","response":{}}"#,
+                r#"{"type":"response.created","response":{"model":" "}}"#,
+                r#"{"type":"response.created","response":{"model":"actual-snapshot"}}"#,
+                r#"{"type":"response.in_progress","response":{"model":"actual-snapshot"}}"#,
+                r#"{"type":"response.in_progress","response":{"model":"other-snapshot"}}"#,
+            ] {
+                stream.parse_event(data);
+            }
+            let models = stream
+                .pending
+                .iter()
+                .filter_map(|event| match event {
+                    super::StreamEvent::ResolvedModel { model } => Some(model.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(models, ["actual-snapshot", "other-snapshot"]);
+        }
+    }
+
     use super::*;
     use futures::StreamExt;
 
