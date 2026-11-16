@@ -282,7 +282,10 @@ mod tests {
         // modifier field that is ordinary text, and stripping it would silently
         // delete what the user wrote, leaving `arraysize]`.
         for typed in ["[100u", "[1u", "[2026u", "[0u"] {
-            assert!(!is_report_fragment(typed), "{typed} is typed code, not a report");
+            assert!(
+                !is_report_fragment(typed),
+                "{typed} is typed code, not a report"
+            );
         }
         // The shapes that really do leak from a host that arms CSI-u stay reports.
         assert!(is_report_fragment("[119;1:3u"));
