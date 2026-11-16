@@ -564,6 +564,18 @@ pub struct OpenAiDeviceCode {
     pub expires_at_ms: i64,
 }
 
+// Field order preserves the sorted keys of the legacy serde_json maps.
+#[derive(Serialize)]
+struct OpenAiDeviceStartRequest<'a> {
+    client_id: &'a str,
+}
+
+#[derive(Serialize)]
+struct OpenAiDevicePollRequest<'a> {
+    device_auth_id: &'a str,
+    user_code: &'a str,
+}
+
 pub async fn start_openai_device_login() -> Result<OpenAiDeviceCode> {
     start_openai_device_login_at(openai::AUTH_BASE).await
 }
@@ -581,7 +593,9 @@ pub async fn start_openai_device_login_at(base: &str) -> Result<OpenAiDeviceCode
     }
     let resp = crate::provider::shared_http_client()
         .post(format!("{base}/api/accounts/deviceauth/usercode"))
-        .json(&serde_json::json!({ "client_id": openai::CLIENT_ID }))
+        .json(&OpenAiDeviceStartRequest {
+            client_id: openai::CLIENT_ID,
+        })
         .timeout(Duration::from_secs(20))
         .send()
         .await?;
@@ -632,7 +646,10 @@ pub async fn poll_openai_device_login_at(
     }
     let resp = crate::provider::shared_http_client()
         .post(format!("{base}/api/accounts/deviceauth/token"))
-        .json(&serde_json::json!({ "device_auth_id": device_auth_id, "user_code": user_code }))
+        .json(&OpenAiDevicePollRequest {
+            device_auth_id,
+            user_code,
+        })
         .timeout(Duration::from_secs(20))
         .send()
         .await?;
@@ -1604,6 +1621,89 @@ async fn refresh_tokens_at_url(token_url: &str, refresh_token: &str) -> Result<O
         id_token: None,
         scopes: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod device_request_tests {
+    use super::{OpenAiDevicePollRequest, OpenAiDeviceStartRequest, openai};
+
+    #[test]
+    fn device_request_serialization_matches_legacy_bytes() {
+        let start = OpenAiDeviceStartRequest {
+            client_id: openai::CLIENT_ID,
+        };
+        assert_eq!(
+            serde_json::to_vec(&start).unwrap(),
+            serde_json::to_vec(&serde_json::json!({"client_id": openai::CLIENT_ID})).unwrap()
+        );
+        for (device_auth_id, user_code) in [
+            ("", ""),
+            ("fake-device", "FAKE-CODE"),
+            ("quote\"\\\n\t", "雪\r\u{0000}"),
+        ] {
+            let poll = OpenAiDevicePollRequest {
+                device_auth_id,
+                user_code,
+            };
+            assert_eq!(
+                serde_json::to_vec(&poll).unwrap(),
+                serde_json::to_vec(&serde_json::json!({
+                    "device_auth_id": device_auth_id,
+                    "user_code": user_code,
+                }))
+                .unwrap()
+            );
+        }
+        assert_eq!(
+            serde_json::to_string(&OpenAiDevicePollRequest {
+                device_auth_id: "",
+                user_code: "",
+            })
+            .unwrap(),
+            r#"{"device_auth_id":"","user_code":""}"#
+        );
+    }
+
+    #[test]
+    fn device_request_bodies_outlive_borrowed_sources() {
+        let client = reqwest::Client::new();
+        let (start, poll) = {
+            let client_id = String::from("fake-client");
+            let device_auth_id = String::from("fake-device");
+            let user_code = String::from("FAKE-CODE");
+            let start = client
+                .post("http://127.0.0.1:1/api/accounts/deviceauth/usercode")
+                .json(&OpenAiDeviceStartRequest {
+                    client_id: &client_id,
+                })
+                .build()
+                .unwrap();
+            let poll = client
+                .post("http://127.0.0.1:1/api/accounts/deviceauth/token")
+                .json(&OpenAiDevicePollRequest {
+                    device_auth_id: &device_auth_id,
+                    user_code: &user_code,
+                })
+                .build()
+                .unwrap();
+            (start, poll)
+        };
+        // Building serializes synchronously. No source or payload survives here,
+        // and neither request is sent to a network endpoint.
+        for (request, expected) in [
+            (start, r#"{"client_id":"fake-client"}"#),
+            (
+                poll,
+                r#"{"device_auth_id":"fake-device","user_code":"FAKE-CODE"}"#,
+            ),
+        ] {
+            assert_eq!(request.headers()["content-type"], "application/json");
+            assert_eq!(
+                request.body().unwrap().as_bytes().unwrap(),
+                expected.as_bytes()
+            );
+        }
+    }
 }
 
 #[cfg(test)]
