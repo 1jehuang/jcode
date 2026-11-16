@@ -534,17 +534,16 @@ pub fn cached_openai_reasoning_efforts() -> Option<HashMap<String, Vec<String>>>
 pub fn cached_openai_reasoning_efforts_for_scope(
     scope: &str,
 ) -> Option<HashMap<String, Vec<String>>> {
-    let scope = scope.to_string();
-    let store = load_persisted_model_catalog_store(OPENAI_MODEL_CATALOG_CACHE_FILE)?;
-    let efforts = store.scopes.get(&scope)?.reasoning_efforts.clone();
+    let mut store = load_persisted_model_catalog_store(OPENAI_MODEL_CATALOG_CACHE_FILE)?;
+    let efforts = store.scopes.remove(scope)?.reasoning_efforts;
     (!efforts.is_empty()).then_some(efforts)
 }
 
 /// Return the account-scoped service tier snapshot. Missing model entries are
 /// unknown, but present empty vectors are authoritative capability denials.
 pub fn cached_openai_service_tiers_for_scope(scope: &str) -> Option<HashMap<String, Vec<String>>> {
-    let store = load_persisted_model_catalog_store(OPENAI_MODEL_CATALOG_CACHE_FILE)?;
-    Some(store.scopes.get(scope)?.service_tiers.clone())
+    let mut store = load_persisted_model_catalog_store(OPENAI_MODEL_CATALOG_CACHE_FILE)?;
+    Some(store.scopes.remove(scope)?.service_tiers)
 }
 
 /// Test-only: clear the process-global in-memory model catalogs. The catalog
@@ -968,10 +967,10 @@ pub fn refresh_openai_model_catalog_in_background_for_scope(
                 ));
                 persist_openai_model_catalog_for_scope(&scope, &catalog);
                 if !catalog.context_limits.is_empty() {
-                    populate_context_limits(catalog.context_limits.clone());
+                    populate_context_limits(catalog.context_limits);
                 }
                 if !catalog.available_models.is_empty() {
-                    populate_account_models_for_scope(&scope, catalog.available_models.clone());
+                    populate_account_models_for_scope(&scope, catalog.available_models);
                 }
             }
             Ok(_) => {
@@ -1274,6 +1273,90 @@ pub fn provider_for_model(model: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod catalog_ownership_tests {
     use super::*;
+
+    struct CatalogTestHome {
+        previous: Option<std::ffi::OsString>,
+        _temp: tempfile::TempDir,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl CatalogTestHome {
+        fn new() -> Self {
+            let lock = crate::storage::lock_test_env();
+            let temp = tempfile::tempdir().unwrap();
+            let previous = std::env::var_os("JCODE_HOME");
+            crate::env::set_var("JCODE_HOME", temp.path());
+            Self {
+                previous,
+                _temp: temp,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for CatalogTestHome {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                crate::env::set_var("JCODE_HOME", previous);
+            } else {
+                crate::env::remove_var("JCODE_HOME");
+            }
+        }
+    }
+
+    #[test]
+    fn owned_capability_reads_preserve_missing_empty_and_account_scopes() {
+        let _home = CatalogTestHome::new();
+        assert_eq!(cached_openai_reasoning_efforts_for_scope("missing"), None);
+        assert_eq!(cached_openai_service_tiers_for_scope("missing"), None);
+        let efforts = HashMap::from([
+            (
+                "future-model".to_string(),
+                vec!["high".to_string(), "low".to_string()],
+            ),
+            ("explicit-empty".to_string(), Vec::new()),
+        ]);
+        let tiers = HashMap::from([
+            ("future-model".to_string(), vec!["priority".to_string()]),
+            ("denied".to_string(), Vec::new()),
+        ]);
+        let mut selected = snapshot(vec!["future-model".to_string()], HashMap::new());
+        selected.reasoning_efforts = efforts.clone();
+        selected.service_tiers = tiers.clone();
+        let store = PersistedModelCatalogStore {
+            scopes: HashMap::from([
+                ("oauth::account".to_string(), selected),
+                (
+                    "api-key::endpoint".to_string(),
+                    snapshot(vec!["other".to_string()], HashMap::new()),
+                ),
+            ]),
+        };
+        save_persisted_model_catalog_store(OPENAI_MODEL_CATALOG_CACHE_FILE, &store);
+        let path = model_catalog_cache_path(OPENAI_MODEL_CATALOG_CACHE_FILE).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                cached_openai_reasoning_efforts_for_scope("oauth::account"),
+                Some(efforts.clone())
+            );
+            assert_eq!(
+                cached_openai_service_tiers_for_scope("oauth::account"),
+                Some(tiers.clone())
+            );
+            assert_eq!(
+                cached_openai_reasoning_efforts_for_scope("api-key::endpoint"),
+                None
+            );
+            assert_eq!(
+                cached_openai_service_tiers_for_scope("api-key::endpoint"),
+                Some(HashMap::new())
+            );
+            assert_eq!(cached_openai_reasoning_efforts_for_scope("missing"), None);
+            assert_eq!(cached_openai_service_tiers_for_scope("missing"), None);
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
 
     fn service() -> ModelCatalogService {
         ModelCatalogService::new(
