@@ -93,13 +93,16 @@ pub(crate) fn copy_via_clipboard_helper(program: &str, args: &[&str], text: &str
 }
 
 /// How long to poll for an early failure before the answer becomes ambiguous.
+#[cfg(not(any(windows, target_os = "macos")))]
 const EARLY_FAILURE_WINDOW: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// Extra grace once the poll expires, so a starved-but-doomed child still
 /// reports its real status rather than being mistaken for a resident owner.
+#[cfg(not(any(windows, target_os = "macos")))]
 const RESIDENT_GRACE: std::time::Duration = std::time::Duration::from_millis(850);
 
 /// Poll cadence while waiting.
+#[cfg(not(any(windows, target_os = "macos")))]
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// Tests for the external clipboard-helper spawn path (issue #684). They use
