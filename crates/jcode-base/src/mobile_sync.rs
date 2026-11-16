@@ -989,6 +989,24 @@ pub struct SyncReport {
     pub errors: usize,
 }
 
+// Fixed labels distinguish actionable failures without logging response bodies,
+// account identity, endpoint URLs, or credentials.
+fn upload_http_outcome(status: reqwest::StatusCode) -> &'static str {
+    match status.as_u16() {
+        401 => "unauthorized",
+        403 => "forbidden",
+        404 => "route_missing",
+        413 => "payload_too_large",
+        429 => "rate_limited",
+        500..=599 => "server_error",
+        _ => "http_error",
+    }
+}
+
+#[cfg(test)]
+#[path = "mobile_sync_diagnostics_tests.rs"]
+mod diagnostics_tests;
+
 async fn upload(
     client: &reqwest::Client,
     api_base: &str,
@@ -997,7 +1015,7 @@ async fn upload(
     body: &UploadBody<'_>,
 ) -> Result<()> {
     let mut timing = SyncTiming::new("http_upload");
-    timing.outcome = "error";
+    timing.outcome = "transport_error";
     let url = format!(
         "{}/mobile/sessions/{}",
         api_base.trim_end_matches('/'),
@@ -1010,10 +1028,20 @@ async fn upload(
         .timeout(Duration::from_secs(30))
         .send()
         .await
+        .map_err(|error| {
+            timing.outcome = if error.is_timeout() {
+                "timeout"
+            } else if error.is_connect() {
+                "connect_error"
+            } else {
+                "transport_error"
+            };
+            error
+        })
         .context("mobile sync upload failed")?;
     let status = response.status();
     if !status.is_success() {
-        timing.outcome = "http_error";
+        timing.outcome = upload_http_outcome(status);
         // Response bodies can echo private content or credentials.
         anyhow::bail!("mobile sync upload returned {status}");
     }
@@ -1088,8 +1116,10 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
         timing.outcome = "skipped_disabled";
         return Ok(SyncReport::default());
     }
-    let api_key = crate::subscription_catalog::configured_api_key()
-        .context("mobile sync needs a Jcode account: run `jcode account login`")?;
+    let api_key = crate::subscription_catalog::configured_api_key().with_context(|| {
+        timing.outcome = "missing_account";
+        "mobile sync needs a Jcode account: run `jcode account login`"
+    })?;
     let api_base = subscription_api::configured_api_base();
     let mut credential_hash = std::collections::hash_map::DefaultHasher::new();
     api_key.hash(&mut credential_hash);
