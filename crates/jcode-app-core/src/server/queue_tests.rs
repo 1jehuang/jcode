@@ -242,7 +242,22 @@ async fn file_activity_notices_fold_into_the_pending_one_until_delivered() {
         &sessions,
     )
     .await;
-    let queued = queue.lock().expect("queue lock");
-    assert_eq!(queued.len(), 1);
-    assert_eq!(queued[0].content, "⚠ File activity: moss a.rs +2-1");
+    {
+        let queued = queue.lock().expect("queue lock");
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].content, "⚠ File activity: moss a.rs +2-1");
+    }
+    assert_eq!(pending.len(), 1);
+
+    // A session that went away no longer holds an entry in the pending map.
+    queues.write().await.clear();
+    deliver_file_activity_notice(
+        "session_gone",
+        entry("moss", "a.rs"),
+        &mut pending,
+        &queues,
+        &sessions,
+    )
+    .await;
+    assert!(pending.is_empty(), "stale pending notices are pruned");
 }

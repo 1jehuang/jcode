@@ -186,6 +186,21 @@ pub(crate) async fn deliver_file_activity_notice(
     queues: &super::state::SessionInterruptQueues,
     sessions: &super::SessionAgents,
 ) {
+    // Keep only notices that are still waiting in a live session's queue, so
+    // the map never outgrows the sessions with an undelivered notice.
+    if !pending.is_empty() {
+        let queues = queues.read().await;
+        pending.retain(|session_id, notice| {
+            queues.get(session_id).is_some_and(|queue| {
+                queue.lock().is_ok_and(|queued| {
+                    queued.iter().any(|message| {
+                        message.source == jcode_agent_runtime::SoftInterruptSource::System
+                            && message.content == notice.content
+                    })
+                })
+            })
+        });
+    }
     if let Some(notice) = pending.get_mut(recipient) {
         let mut entries = notice.entries.clone();
         merge_file_activity_entry(&mut entries, entry.clone());
