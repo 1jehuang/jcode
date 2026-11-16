@@ -518,10 +518,9 @@ fn add_cache_breakpoint(messages: &mut [Message]) -> bool {
                 cache_control: None,
                 ..
             }
-        ) {
-            if let ContentBlock::Text { cache_control, .. } = &mut msg.content[block_index] {
-                *cache_control = Some(CacheControl::ephemeral(None));
-            }
+        ) && let ContentBlock::Text { cache_control, .. } = &mut msg.content[block_index]
+        {
+            *cache_control = Some(CacheControl::ephemeral(None));
         }
         return true;
     }
