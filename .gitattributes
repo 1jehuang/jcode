@@ -8,3 +8,11 @@
 # `text=auto` keeps binary files untouched and lets git detect them, so this is
 # safe to apply repository-wide.
 * text=auto
+
+# Shell scripts are executed, not just read. With `text=auto` alone a Windows
+# checkout gets CRLF, and every `bash scripts/install.sh` then fails with
+# "No such file or directory" because the shebang becomes `/usr/bin/env bash\r`.
+# Pinning them to LF keeps the installers and their test scripts runnable on
+# every platform.
+*.sh text eol=lf
+*.bash text eol=lf
