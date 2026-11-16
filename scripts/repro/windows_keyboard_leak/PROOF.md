@@ -180,6 +180,28 @@ should not be dressed up as either.
 So the menu path is covered as far as *selection and load*, and its keyboard behaviour remains
 covered only by the unit tests for the picker handover.
 
+## In CI
+
+A recorded session cannot leave the machine it came from, so the synthetic fixture under
+`fixture/` exists for CI: 1 KB, same schema, two short messages, no user content. It is thin
+enough to land on the first-run overlay, which is why the probe gained `--dismiss-overlay`. It
+is still a valid control: against the pre-scrub commit it reproduces the leak.
+
+`.github/workflows/ci.yml` has a `windows-keyboard-probe` job, gated on `workflow_dispatch` so it
+cannot slow down or flake ordinary pull requests. Dispatched against this branch
+(`gh workflow run ci.yml --repo KooshaPari/KCode --ref fix/conpty-keyboard-protocol`), it built the
+client on `windows-latest`, installed `pywinpty`/`pyte`, ran the probe and **passed**, reporting:
+
+```
+"verdict": "GREEN",
+"leak_absent_after_injection": true,
+"leak_absent_at_end": true,
+"scrub_logged_report_as_text": true,
+```
+
+That last line is the one that matters: the report genuinely arrived and was stripped, so the
+clean screen is evidence rather than an absence of input. Probe artifacts are uploaded either way.
+
 ## CI
 
 Measured before the branch was rebased onto master; the rebase rewrote the commits, so these are
