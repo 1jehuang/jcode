@@ -370,8 +370,14 @@ function embeddedEstimate(candidates, embedded) {
 // to correct it to 'unpriced' when a routing/subscription alias was mislabeled.
 export const PRICE_KIND_RANK_SQL = (col) =>
   `(CASE ${col} WHEN 'unpriced' THEN 0 WHEN 'family_estimate' THEN 1 ELSE 2 END)`;
+// Router placeholders name no model, so an old price row for one is always
+// wrong (the catalog lists a $0 "auto" that used to match) and must not be
+// preserved. Mirrors ROUTER_LABEL.
+export const ROUTER_LABEL_SQL = (col) =>
+  `(lower(${col}) IN ('auto', 'default', 'unknown', 'router', 'pool') OR (lower(${col}) GLOB 'pool[0-9]*' AND lower(${col}) NOT GLOB 'pool*[^0-9]*'))`;
 export const PRICE_UPSERT_GUARD_SQL = `${PRICE_KIND_RANK_SQL("excluded.price_kind")} >= ${PRICE_KIND_RANK_SQL("model_prices.price_kind")}
-   OR (model_prices.price_kind = 'free' AND excluded.price_kind = 'unpriced')`;
+   OR (model_prices.price_kind = 'free' AND excluded.price_kind = 'unpriced')
+   OR (excluded.price_kind = 'unpriced' AND ${ROUTER_LABEL_SQL("model_prices.model")})`;
 export const UPSERT_PRICE_SQL = `INSERT INTO model_prices (model, source_model, source_provider, input_usd_per_mtok, output_usd_per_mtok, cache_read_usd_per_mtok, cache_write_usd_per_mtok, input_includes_cache_read, price_kind, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
 ON CONFLICT(model) DO UPDATE SET source_model=excluded.source_model, source_provider=excluded.source_provider, input_usd_per_mtok=excluded.input_usd_per_mtok, output_usd_per_mtok=excluded.output_usd_per_mtok, cache_read_usd_per_mtok=excluded.cache_read_usd_per_mtok, cache_write_usd_per_mtok=excluded.cache_write_usd_per_mtok, input_includes_cache_read=excluded.input_includes_cache_read, price_kind=excluded.price_kind, updated_at=datetime('now')

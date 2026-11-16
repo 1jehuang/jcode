@@ -66,14 +66,34 @@ test("upsert repairs obsolete free classifications without erasing catalog rates
   const db = new DatabaseSync(":memory:");
   db.exec(readFileSync(new URL("../migrations/0023_model_prices.sql", import.meta.url), "utf8"));
   const put = (kind, input) => db.prepare(UPSERT_PRICE_SQL)
-    .run("unknown", null, null, input, null, null, null, 0, kind);
-  const get = () => db.prepare("SELECT price_kind, input_usd_per_mtok AS i FROM model_prices WHERE model='unknown'").get();
+    .run("some-alias", null, null, input, null, null, null, 0, kind);
+  const get = () => db.prepare("SELECT price_kind, input_usd_per_mtok AS i FROM model_prices WHERE model='some-alias'").get();
   put("free", 0);
   put("unpriced", null);
   assert.deepEqual({ ...get() }, { price_kind: "unpriced", i: null });
   put("catalog", 4);
   put("unpriced", null);
   assert.deepEqual({ ...get() }, { price_kind: "catalog", i: 4 });
+  db.close();
+});
+
+test("upsert clears a stale price left on a router placeholder, and only there", () => {
+  const db = new DatabaseSync(":memory:");
+  db.exec(readFileSync(new URL("../migrations/0023_model_prices.sql", import.meta.url), "utf8"));
+  const put = (model, kind, input) => db.prepare(UPSERT_PRICE_SQL)
+    .run(model, null, null, input, null, null, null, 0, kind);
+  const kind = (model) => db.prepare("SELECT price_kind AS k FROM model_prices WHERE model=?").get(model).k;
+  const labels = ["auto", "Default", "unknown", "router", "pool", "pool12", "pooled-model", "pool1x", "auto-router-9"];
+  for (const label of labels) {
+    put(label, "catalog", 0);
+    put(label, "unpriced", null);
+    // The SQL guard must agree with what the resolver refuses to price.
+    const placeholder = resolvePriceRows([{ model: label }],
+      buildPriceIndex({ gw: { models: { [label]: { cost: { input: 1, output: 2 } } } } })).get(label).kind === "unpriced";
+    assert.equal(kind(label), placeholder ? "unpriced" : "catalog", label);
+  }
+  assert.equal(kind("auto"), "unpriced");
+  assert.equal(kind("pooled-model"), "catalog");
   db.close();
 });
 
