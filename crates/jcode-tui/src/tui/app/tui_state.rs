@@ -4,6 +4,34 @@ use std::cell::RefCell;
 use std::sync::Mutex;
 use std::time::Duration;
 
+const CONTEXT_SNAPSHOT_TTL: Duration = Duration::from_millis(250);
+
+/// Remote transcript and prompt inputs are versioned by server-event handling.
+/// Expiring an unchanged remote snapshot only rescans the same history and
+/// serializes every tool input again. Local state retains the short TTL since
+/// provider/compaction inputs can change outside display-message revisions.
+fn reusable_context_snapshot<'a>(
+    app: &App,
+    age: Duration,
+    cached: &'a CachedContextSnapshot,
+    session_key: &str,
+    message_count: usize,
+    compaction: (usize, usize, bool),
+) -> Option<&'a crate::tui::ContextSnapshot> {
+    ((app.is_remote || age < CONTEXT_SNAPSHOT_TTL)
+        && cached.session_key == session_key
+        && cached.is_remote == app.is_remote
+        && cached.display_messages_version == app.display_messages_version
+        && cached.context_revision == app.context_revision
+        && cached.message_count == message_count
+        && (
+            cached.compaction_count,
+            cached.compaction_summary_chars,
+            cached.is_compacting,
+        ) == compaction)
+        .then_some(&cached.snapshot)
+}
+
 const REMOTE_STARTUP_HEADER_DEBOUNCE: Duration = Duration::from_millis(400);
 
 fn startup_usage_slot_pending(
@@ -1315,7 +1343,6 @@ impl crate::tui::TuiState for App {
         use std::time::Instant;
 
         static CACHE: Mutex<Option<(Instant, CachedContextSnapshot)>> = Mutex::new(None);
-        const TTL: Duration = Duration::from_millis(250);
 
         let session_key = if self.is_remote {
             self.remote_session_id
@@ -1356,17 +1383,16 @@ impl crate::tui::TuiState for App {
 
         if let Ok(cache) = CACHE.lock()
             && let Some((ts, cached)) = &*cache
-            && ts.elapsed() < TTL
-            && cached.session_key == session_key
-            && cached.is_remote == self.is_remote
-            && cached.display_messages_version == self.display_messages_version
-            && cached.context_revision == self.context_revision
-            && cached.message_count == message_count
-            && cached.compaction_count == compaction_count
-            && cached.compaction_summary_chars == compaction_summary_chars
-            && cached.is_compacting == is_compacting
+            && let Some(snapshot) = reusable_context_snapshot(
+                self,
+                ts.elapsed(),
+                cached,
+                &session_key,
+                message_count,
+                (compaction_count, compaction_summary_chars, is_compacting),
+            )
         {
-            return cached.snapshot.clone();
+            return snapshot.clone();
         }
 
         let mut info = self.context_info.clone();
@@ -2864,6 +2890,10 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tui_state_context_cache_tests.rs"]
+mod context_cache_tests;
 
 #[cfg(test)]
 #[path = "tui_state_sidebar_usage_tests.rs"]
