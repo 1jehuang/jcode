@@ -909,12 +909,20 @@ fn truncate_line_for_narrow_short_text_unchanged() {
 
 #[test]
 fn truncate_line_for_narrow_long_text_truncated_with_ellipsis() {
+    use unicode_width::UnicodeWidthStr;
     let text = "[sending] 4.2s · ↑120 ↓340";
     let line = Line::from(vec![Span::styled(text, Style::default())]);
     let truncated = truncate_line_for_narrow(line, 15);
-    // Should be truncated to fit within 15 display columns.
+    // The clip is by display columns, not UTF-8 bytes: the '·' and '…' are
+    // multi-byte, so a byte count can exceed `max_cols` while the rendered
+    // width is exactly `max_cols`.
     let rendered: String = truncated.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert!(rendered.len() <= 15, "got {}: {rendered}", rendered.len());
+    let display_cols = UnicodeWidthStr::width(rendered.as_str());
+    assert!(
+        display_cols <= 15,
+        "got display_cols={display_cols} (bytes={}): {rendered}",
+        rendered.len()
+    );
     assert!(rendered.ends_with('…'), "expected ellipsis: {rendered}");
 }
 
@@ -930,9 +938,10 @@ fn truncate_line_for_narrow_multiple_spans() {
         .iter()
         .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
         .sum();
-    // The second span is clipped to what the first span left minus one column
-    // for the ellipsis, so the total is max_cols - 1 regardless of the split.
-    assert_eq!(total_width, 7, "exact cumulative width: got {total_width}");
+    // "⏳ " takes 2 display columns, leaving 6. The second span fills those 6
+    // with five ASCII characters plus a one-column '…', so the total is exactly
+    // the requested width rather than one column short of it.
+    assert_eq!(total_width, 8, "exact cumulative width: got {total_width}");
     assert!(
         truncated.spans.last().unwrap().content.ends_with('…'),
         "clipped span must end with an ellipsis"

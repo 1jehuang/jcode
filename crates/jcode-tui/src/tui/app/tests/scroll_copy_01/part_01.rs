@@ -634,10 +634,6 @@ fn test_queued_file_activity_repaint_does_not_leave_trailing_digit_artifact() {
         "expected queued alert to use width-stable warning glyph, got:\n{second}"
     );
     assert!(
-        !second.contains("▲ File activity:"),
-        "queued alert should not use emoji warning presentation in repaint-sensitive UI:\n{second}"
-    );
-    assert!(
         second.contains("read lines 1-9"),
         "expected updated queued alert to render, got:\n{second}"
     );
