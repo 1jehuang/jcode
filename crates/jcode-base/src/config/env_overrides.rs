@@ -458,6 +458,16 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_MEMORY_JEV_PROVIDER") {
             self.agents.memory_jev_provider = v.trim().to_ascii_lowercase();
         }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_JEV_TIMEOUT_SECS") {
+            if let Ok(parsed) = v.trim().parse::<u64>() {
+                self.agents.memory_jev_timeout_secs = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_JEV_SELECTION_TIMEOUT_SECS") {
+            if let Ok(parsed) = v.trim().parse::<u64>() {
+                self.agents.memory_jev_selection_timeout_secs = parsed;
+            }
+        }
         for (key, target) in [
             ("JCODE_MEMORY_JEV_MODEL", &mut self.agents.memory_jev_model),
             (

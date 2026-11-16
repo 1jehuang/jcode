@@ -14,8 +14,35 @@ use std::time::Duration;
 pub const MAX_BATCH_ENTRIES: usize = 24;
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
 pub const MAX_QUERY_BYTES: usize = 8 * 1024;
-const SELECTION_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_SELECTION_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_MODEL: &str = crate::jev::DEFAULT_MEMORY_JEV_MODEL;
+
+/// Total deadline for one Jev relevance selection. Batches are sequential and
+/// each request is bounded by `memory_jev_timeout_secs`, so a configured
+/// deadline below one request timeout is a misconfiguration: it is raised to
+/// three request timeouts, enough for sequential batches to make progress.
+/// A zero value means unset.
+fn selection_deadline() -> Duration {
+    selection_deadline_for(
+        crate::config::config()
+            .agents
+            .memory_jev_selection_timeout_secs,
+        crate::jev::jev_request_timeout().as_secs(),
+    )
+}
+
+fn selection_deadline_for(configured_secs: u64, request_secs: u64) -> Duration {
+    let secs = if configured_secs == 0 {
+        DEFAULT_SELECTION_TIMEOUT_SECS
+    } else {
+        configured_secs
+    };
+    Duration::from_secs(if secs < request_secs {
+        request_secs * 3
+    } else {
+        secs
+    })
+}
 
 /// Injectable decision transport. Errors abort the entire selection, including
 /// already-scored batches. Implementations must return the full response object.
@@ -214,7 +241,7 @@ pub async fn select_with_transport<T: RelevanceTransport + ?Sized>(
     // Compare before f32 rounding, using the configured decimal threshold.
     // A provider score just below 0.8 must not round up into acceptance.
     let threshold: f64 = threshold.to_string().parse()?;
-    tokio::time::timeout(SELECTION_TIMEOUT, async {
+    tokio::time::timeout(selection_deadline(), async {
         // Canonical tie order independent of graph HashMap iteration and recency.
         let mut keyed = entries
             .into_iter()

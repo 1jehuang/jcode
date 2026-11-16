@@ -496,6 +496,22 @@ async fn live_synthetic_relevance_acceptance() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn selection_deadline_below_request_timeout_is_raised_to_three_timeouts() {
+    // Configured below the per-request timeout: raise to 3x the request
+    // timeout so sequential batches can make progress.
+    assert_eq!(selection_deadline_for(60, 120), Duration::from_secs(360));
+    // Equal is not below, so it is used verbatim.
+    assert_eq!(selection_deadline_for(120, 120), Duration::from_secs(120));
+    // Zero means unset: default 60 applies when it is not below the request
+    // timeout.
+    assert_eq!(selection_deadline_for(0, 25), Duration::from_secs(60));
+    // Unset default below a large request timeout is raised too.
+    assert_eq!(selection_deadline_for(0, 120), Duration::from_secs(360));
+    // Configured above the request timeout: used verbatim.
+    assert_eq!(selection_deadline_for(240, 120), Duration::from_secs(240));
+}
+
 #[tokio::test]
 async fn private_metadata_stays_local_but_full_original_is_returned() {
     let mock = Mock::default();
