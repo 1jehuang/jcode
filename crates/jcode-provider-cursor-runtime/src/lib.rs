@@ -7,6 +7,13 @@
 //! The pure model-catalog data (`AVAILABLE_MODELS`, `is_known_model`) stays in
 //! `jcode_base::provider::cursor` because base's model-routing logic needs it
 //! without a runtime.
+//!
+//! Response model attribution is currently unavailable: the decoded ChatService
+//! and AgentService response schemas do not expose a verified served-model
+//! field. Catalog IDs and AgentService's locally resolved request model are
+//! request metadata, not evidence of which model answered. Do not emit
+//! `StreamEvent::ResolvedModel` from those values. Unknown protobuf fields must
+//! not be guessed to contain model identity.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
