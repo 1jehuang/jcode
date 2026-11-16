@@ -1678,10 +1678,10 @@ fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
             .any(|line| line.contains("Intent partial: This deliberately long assessment detail")),
         "wide={wide:?}"
     );
-    assert!(
-        wide.iter().any(|line| line.contains('…')),
-        "wide intent should remain on one ellipsized line: {wide:?}"
-    );
+    // Wide widths wrap so the whole objective stays readable; compact ellipsizes.
+    let keeps_tail = |lines: &[String]| lines.iter().any(|l| l.contains("narrow terminal window"));
+    assert!(keeps_tail(&wide), "wide intent should stay complete: {wide:?}");
+    assert!(!wide.iter().any(|l| l.contains('…')), "wide wrap: {wide:?}");
     assert!(
         !narrow
             .iter()

@@ -107,7 +107,7 @@
     "crates/jcode-tui/src/tui/ui_frame_metrics.rs": 1497,
     "crates/jcode-tui/src/tui/ui_header/account_router.rs": 1554,
     "crates/jcode-tui/src/tui/ui_input.rs": 3119,
-    "crates/jcode-tui/src/tui/ui_messages.rs": 4764,
+    "crates/jcode-tui/src/tui/ui_messages.rs": 4722,
     "crates/jcode-tui/src/tui/ui_pinned.rs": 1233,
     "crates/jcode-tui/src/tui/ui_prepare.rs": 2966,
     "crates/jcode-tui/src/tui/ui_todo_stages.rs": 1227,

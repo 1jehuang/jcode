@@ -3,6 +3,8 @@ mod gmail_drafts;
 use gmail_drafts::*;
 #[path = "ui_messages/todo_completion.rs"]
 mod todo_completion;
+#[path = "ui_messages/todo_intent.rs"]
+mod todo_intent;
 #[cfg(test)]
 #[path = "ui_messages/todo_payload_cache_tests.rs"]
 mod todo_payload_cache_tests;
@@ -1169,7 +1171,7 @@ fn render_todos_message_with_cap(
             .map(|line| super::truncate_line_with_ellipsis_to_width(line, width as usize))
             .collect();
     }
-    push_todo_plan_details(&mut lines, &plan, base_indent, inner_width, compact_details);
+    todo_intent::push_todo_plan_details(&mut lines, &plan, base_indent, inner_width, compact_details);
     if todos.is_empty() {
         lines.push(todo_card_line(
             vec![Span::styled(
@@ -1644,50 +1646,6 @@ fn wrap_todo_detail(value: &str, width: usize) -> Vec<String> {
         chunks.push(current);
     }
     chunks
-}
-
-/// Plan-level assessment lines shown once above the todo groups.
-fn push_todo_plan_details(
-    lines: &mut Vec<Line<'static>>,
-    plan: &crate::todo::TodoPlan,
-    base_indent: &str,
-    inner_width: usize,
-    compact_details: bool,
-) {
-    let intention = plan
-        .user_intention
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    if let Some(state) = plan.understands_user_intent {
-        let state_color = match state {
-            crate::todo::IntentUnderstanding::Uncertain => todo_failure_color(),
-            crate::todo::IntentUnderstanding::Partial => todo_warning_color(),
-            crate::todo::IntentUnderstanding::Clear
-            | crate::todo::IntentUnderstanding::Complete => todo_score_color(),
-        };
-        let mut spans = vec![
-            Span::styled("Intent ", Style::default().fg(todo_label_color())),
-            Span::styled(state.as_str().to_string(), Style::default().fg(state_color)),
-            Span::styled(": ", Style::default().fg(todo_label_color())),
-        ];
-        if let Some(intention) = intention {
-            spans.push(Span::styled(
-                intention.to_string(),
-                Style::default().fg(todo_meta_color()),
-            ));
-        }
-        lines.push(todo_card_line(spans, base_indent, inner_width));
-    } else if let Some(intention) = intention {
-        push_todo_detail(
-            lines,
-            "Intent",
-            intention,
-            base_indent,
-            inner_width,
-            compact_details,
-        );
-    }
 }
 
 fn push_todo_detail(
