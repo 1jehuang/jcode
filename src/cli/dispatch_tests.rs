@@ -402,3 +402,89 @@ auth = "none"
         ProviderChoice::OpenaiCompatible
     ));
 }
+
+/// Seed one saved session and return its id.
+fn seed_named_session(session_id: &str, title: &str) {
+    let mut session = crate::session::Session::create_with_id(
+        session_id.to_string(),
+        None,
+        Some("Generated planning title".to_string()),
+    );
+    session.rename_title(Some(title.to_string()));
+    session.save().expect("save named session");
+}
+
+/// `jcode --resume <name>` is the first resume entry point: the name typed by
+/// the user must resolve through the session store to the full id.
+#[test]
+fn resolve_resume_id_resolves_a_session_name_and_id_alike() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let session_id = "session_resumename_1770000000000_abc123";
+    seed_named_session(session_id, "ResumeByName");
+
+    assert_eq!(
+        resolve_resume_id("ResumeByName").expect("resolve by exact name"),
+        session_id
+    );
+    assert_eq!(
+        resolve_resume_id("resumebyname").expect("resolve by name, case-insensitive"),
+        session_id
+    );
+    assert_eq!(
+        resolve_resume_id(session_id).expect("resolve by full id"),
+        session_id
+    );
+    assert!(
+        resolve_resume_id("no-such-session-name").is_err(),
+        "an unknown name must not silently resolve"
+    );
+
+    crate::env::remove_var("JCODE_HOME");
+}
+
+/// `--resume <name>` must normalize to the full id before the TUI starts, so
+/// the resumed client subscribes with the same id the menu would use.
+#[test]
+fn resolve_resume_arg_normalizes_a_name_to_the_full_session_id() {
+    use clap::Parser as _;
+
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let session_id = "session_resumearg_1770000000000_def456";
+    seed_named_session(session_id, "ResumeArgTarget");
+
+    let mut args = Args::parse_from(["jcode", "--resume", "ResumeArgTarget"]);
+    resolve_resume_arg(&mut args).expect("resolve --resume by name");
+    assert_eq!(
+        args.resume.as_deref(),
+        Some(session_id),
+        "--resume <name> must become --resume <full id>"
+    );
+
+    crate::env::remove_var("JCODE_HOME");
+}
+
+/// A handoff already in progress keeps the raw id for the server, so a resume
+/// during reload does not exit the client (issue #328) and does not rewrite it
+/// into a locally-resolved id that the server may not know.
+#[test]
+fn resolve_resume_arg_keeps_the_raw_id_during_a_reload_handoff() {
+    use clap::Parser as _;
+
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var("JCODE_RESUMING", "1");
+
+    let mut args = Args::parse_from(["jcode", "--resume", "server_only_session_id"]);
+    resolve_resume_arg(&mut args).expect("handoff deferral must not exit");
+    assert_eq!(args.resume.as_deref(), Some("server_only_session_id"));
+
+    crate::env::remove_var("JCODE_RESUMING");
+    crate::env::remove_var("JCODE_HOME");
+}

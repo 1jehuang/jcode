@@ -603,57 +603,110 @@ fn picker_resume_exe() -> Result<std::path::PathBuf> {
     }
 }
 
-pub fn list_sessions() -> Result<()> {
-    fn build_resume_target_command(
-        exe: &std::path::Path,
-        target: &jcode_tui_session_picker::ResumeTarget,
-    ) -> (std::path::PathBuf, Vec<String>) {
-        if let Some(args) = cloud_resume_target_args(target) {
-            return (exe.to_path_buf(), args);
-        }
-        match target {
-            jcode_tui_session_picker::ResumeTarget::JcodeSession { session_id } => (
-                exe.to_path_buf(),
-                vec!["--resume".to_string(), session_id.clone()],
-            ),
-            jcode_tui_session_picker::ResumeTarget::ClaudeCodeSession { session_id, .. } => (
-                exe.to_path_buf(),
-                vec![
-                    "--resume".to_string(),
-                    crate::import::imported_claude_code_session_id(session_id),
-                ],
-            ),
-            jcode_tui_session_picker::ResumeTarget::CodexSession { session_id, .. } => (
-                exe.to_path_buf(),
-                vec![
-                    "--resume".to_string(),
-                    crate::import::imported_codex_session_id(session_id),
-                ],
-            ),
-            jcode_tui_session_picker::ResumeTarget::PiSession { session_path } => (
-                exe.to_path_buf(),
-                vec![
-                    "--resume".to_string(),
-                    crate::import::imported_pi_session_id(session_path),
-                ],
-            ),
-            jcode_tui_session_picker::ResumeTarget::OpenCodeSession { session_id, .. } => (
-                exe.to_path_buf(),
-                vec![
-                    "--resume".to_string(),
-                    crate::import::imported_opencode_session_id(session_id),
-                ],
-            ),
-            jcode_tui_session_picker::ResumeTarget::CursorSession { session_id, .. } => (
-                exe.to_path_buf(),
-                vec![
-                    "--resume".to_string(),
-                    crate::import::imported_cursor_session_id(session_id),
-                ],
-            ),
-        }
+/// The command the resume menu spawns for a chosen target.
+///
+/// Kept at module scope rather than nested in [`list_sessions`] so the menu
+/// path, which is the second way into `--resume`, can be tested directly: a
+/// selected session must become `--resume <full id>` for the child process.
+fn build_resume_target_command(
+    exe: &std::path::Path,
+    target: &jcode_tui_session_picker::ResumeTarget,
+) -> (std::path::PathBuf, Vec<String>) {
+    if let Some(args) = cloud_resume_target_args(target) {
+        return (exe.to_path_buf(), args);
+    }
+    match target {
+        jcode_tui_session_picker::ResumeTarget::JcodeSession { session_id } => (
+            exe.to_path_buf(),
+            vec!["--resume".to_string(), session_id.clone()],
+        ),
+        jcode_tui_session_picker::ResumeTarget::ClaudeCodeSession { session_id, .. } => (
+            exe.to_path_buf(),
+            vec![
+                "--resume".to_string(),
+                crate::import::imported_claude_code_session_id(session_id),
+            ],
+        ),
+        jcode_tui_session_picker::ResumeTarget::CodexSession { session_id, .. } => (
+            exe.to_path_buf(),
+            vec![
+                "--resume".to_string(),
+                crate::import::imported_codex_session_id(session_id),
+            ],
+        ),
+        jcode_tui_session_picker::ResumeTarget::PiSession { session_path } => (
+            exe.to_path_buf(),
+            vec![
+                "--resume".to_string(),
+                crate::import::imported_pi_session_id(session_path),
+            ],
+        ),
+        jcode_tui_session_picker::ResumeTarget::OpenCodeSession { session_id, .. } => (
+            exe.to_path_buf(),
+            vec![
+                "--resume".to_string(),
+                crate::import::imported_opencode_session_id(session_id),
+            ],
+        ),
+        jcode_tui_session_picker::ResumeTarget::CursorSession { session_id, .. } => (
+            exe.to_path_buf(),
+            vec![
+                "--resume".to_string(),
+                crate::import::imported_cursor_session_id(session_id),
+            ],
+        ),
+    }
+}
+
+#[cfg(test)]
+mod resume_menu_tests {
+    use super::build_resume_target_command;
+    use jcode_tui_session_picker::ResumeTarget;
+    use std::path::Path;
+
+    /// `jcode --resume` with no id opens the menu; choosing a session there
+    /// must hand the child a full session id, never the display name.
+    #[test]
+    fn menu_selection_resumes_the_full_session_id() {
+        let exe = Path::new("jcode.exe");
+        let session_id = "session_menu_1770000000000_abcdef";
+        let (program, args) = build_resume_target_command(
+            exe,
+            &ResumeTarget::JcodeSession {
+                session_id: session_id.to_string(),
+            },
+        );
+        assert_eq!(program, exe);
+        assert_eq!(
+            args,
+            vec!["--resume".to_string(), session_id.to_string()],
+            "the menu must resume by id"
+        );
     }
 
+    /// Imported sessions from the menu resume through their imported id, so the
+    /// child resolves the same transcript the menu previewed.
+    #[test]
+    fn menu_selection_for_an_imported_codex_session_uses_the_imported_id() {
+        let exe = Path::new("jcode.exe");
+        let (_, args) = build_resume_target_command(
+            exe,
+            &ResumeTarget::CodexSession {
+                session_id: "codex-menu-test".to_string(),
+                session_path: "/tmp/rollout.jsonl".to_string(),
+            },
+        );
+        assert_eq!(
+            args,
+            vec![
+                "--resume".to_string(),
+                crate::import::imported_codex_session_id("codex-menu-test"),
+            ]
+        );
+    }
+}
+
+pub fn list_sessions() -> Result<()> {
     fn command_display(program: &std::path::Path, args: &[String]) -> String {
         std::iter::once(program.to_string_lossy().to_string())
             .chain(args.iter().cloned())

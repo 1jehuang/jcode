@@ -2231,3 +2231,49 @@ pub fn prewarm_focused_side_panel(
 
 #[cfg(test)]
 mod tests;
+
+/// The resume and reload handoff is the path where the reported leak got worse
+/// (issue #224): the client inherits a terminal the previous process already
+/// armed, adopts the entry instead of pushing a new one, and must therefore
+/// clear reporting rather than re-arm it on the Windows decoder.
+#[cfg(all(test, windows))]
+mod resume_keyboard_tests {
+    use super::*;
+
+    #[test]
+    fn resume_handoff_clears_instead_of_rearming_keyboard_reporting() {
+        let _guard = TERMINAL_OWNERSHIP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        reset_keyboard_enhancement_ownership_for_test();
+
+        // Handoff: the inherited entry becomes ours; no push is attempted.
+        adopt_keyboard_enhancement_ownership();
+        assert!(kitty_keyboard_push_active().load(Ordering::Acquire));
+
+        let mut focus = Vec::new();
+        reapply_terminal_modes_after_focus_to(&mut focus, false, true).expect("focus reapply");
+        let text = String::from_utf8_lossy(&focus);
+        let keyboard_writes: Vec<&str> = text
+            .split("\x1b[")
+            .filter(|part| part.ends_with('u'))
+            .collect();
+        assert_eq!(
+            keyboard_writes,
+            vec!["=0u"],
+            "a resumed client may only write the stack-neutral clear, got {text:?}"
+        );
+
+        // Teardown of an adopted entry is the same stack-neutral clear.
+        let mut teardown = Vec::new();
+        assert!(disable_keyboard_enhancement_if_owned_to(
+            &mut teardown,
+            false
+        ));
+        assert_eq!(teardown, b"\x1b[=0u".as_slice());
+        assert!(!kitty_keyboard_push_active().load(Ordering::Acquire));
+
+        reset_keyboard_enhancement_ownership_for_test();
+    }
+}
+
