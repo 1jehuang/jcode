@@ -1,58 +1,59 @@
 """Build a small, committable session fixture for the CI probe.
 
 The real reproduction uses a local recorded session, which never leaves the machine
-it was recorded on. CI only needs *a* session to resume, so this writes a minimal
-one from the same schema: same keys, two short messages, no user content.
+it was recorded on. CI only needs *a* session to resume, so this keeps the recorded
+session's own message shapes and type-controlled fields (ids, roles, timestamps,
+display roles) and only replaces the text inside each message's content blocks. That
+way every enum and field type stays valid: a hand-written message object drifts from
+the schema the moment a variant is renamed.
 """
 
 from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
-TEMPLATE = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-OUT = Path(sys.argv[2])
+source_path, out_path = Path(sys.argv[1]), Path(sys.argv[2])
+template = json.loads(source_path.read_text(encoding="utf-8"))
+
+KEEP_MESSAGES = 2
+TEXTS = [
+    "Composer regression fixture: this session exists so a probe can resume it.",
+    "Fixture loaded. The composer below is the surface under test.",
+]
 
 
-def stamp(offset: int) -> str:
-    return datetime(2026, 1, 1, 0, 0, offset, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+def with_text(message: dict, text: str) -> dict:
+    """Keep the message shape, replace only the text inside its content blocks."""
+    blocks = message.get("content")
+    if isinstance(blocks, list):
+        replaced = [dict(block, text=text) for block in blocks if block.get("type") == "text"]
+        if replaced:
+            message["content"] = replaced[:1]
+            return message
+    message["content"] = [{"type": "text", "text": text}]
+    return message
 
 
-template = TEMPLATE
+messages = [
+    with_text(dict(message), TEXTS[index % len(TEXTS)])
+    for index, message in enumerate(template.get("messages", [])[:KEEP_MESSAGES])
+]
+if not messages:
+    raise SystemExit(f"{source_path} has no messages to derive a fixture from")
+
 template["id"] = "session_probe_1735689600000_0123456789abcdef"
 template["title"] = "probe fixture"
 template["short_name"] = "probe"
-template["created_at"] = stamp(0)
-template["updated_at"] = stamp(2)
-template["last_active_at"] = stamp(2)
+template["parent_id"] = None
 template["working_dir"] = None
 template["is_debug"] = False
 template["is_canary"] = False
 template["saved"] = False
 template["status"] = "Closed"
-template["parent_id"] = None
-template["last_pid"] = None
-template["model_usage_turn_id"] = None
-template["env_snapshots"] = []
-template["messages"] = [
-    {
-        "id": "msg_probe_0001",
-        "role": "user",
-        "content": "Composer regression fixture: this session exists so a probe can resume it.",
-        "display_role": "user",
-        "timestamp": stamp(0),
-    },
-    {
-        "id": "msg_probe_0002",
-        "role": "assistant",
-        "content": "Fixture loaded. The composer below is the surface under test.",
-        "display_role": "assistant",
-        "timestamp": stamp(1),
-    },
-]
+template["messages"] = messages
 
-OUT.parent.mkdir(parents=True, exist_ok=True)
-OUT.write_text(json.dumps(template, indent=2), encoding="utf-8")
-print(f"{OUT}  {OUT.stat().st_size} bytes")
+out_path.parent.mkdir(parents=True, exist_ok=True)
+out_path.write_text(json.dumps(template, indent=2), encoding="utf-8")
+print(f"{out_path}  {out_path.stat().st_size} bytes  {len(messages)} messages")
