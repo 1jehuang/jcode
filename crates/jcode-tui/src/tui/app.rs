@@ -1567,6 +1567,7 @@ pub struct App {
     /// Remote todo snapshot paired with its owning session. Never read SSH
     /// session IDs from laptop-local todo storage.
     remote_todos_payload: Option<(String, String)>,
+    remote_todos_cache: std::cell::RefCell<Option<todos_view::remote_cache::RemoteTodoCache>>,
     remote_todos_requested_at: Option<Instant>,
     /// The connected server sends a todo snapshot on every change, so no
     /// periodic poll is needed. Learned from the snapshots themselves and
