@@ -555,7 +555,7 @@ impl Sidecar {
                 .await
                 .context("Failed to parse OpenAI API response")
                 .map_err(OpenAiSidecarError::other)?;
-            record_openai_sidecar_usage(model, Some(&result));
+            record_openai_sidecar_usage(model, Some(&result), None);
             extract_openai_response_text(&result).map_err(OpenAiSidecarError::other)
         }
     }
@@ -1009,6 +1009,7 @@ async fn collect_openai_sse_text(response: reqwest::Response, model: &str) -> Re
     let mut stream = response.bytes_stream();
     let mut text = String::new();
     let mut buf = String::new();
+    let mut resolved_model = None;
 
     while let Some(chunk) = stream.next().await {
         let bytes = chunk.context("Error reading SSE stream")?;
@@ -1024,6 +1025,9 @@ async fn collect_openai_sse_text(response: reqwest::Response, model: &str) -> Re
                     return Ok(text);
                 }
                 if let Ok(event) = serde_json::from_str::<SseEvent>(data) {
+                    if let Some(model) = openai_sidecar_response_model(event.response.as_ref()) {
+                        resolved_model = Some(model.to_owned());
+                    }
                     match event.kind.as_str() {
                         "response.output_text.delta" => {
                             if let Some(delta) = event.delta {
@@ -1031,7 +1035,11 @@ async fn collect_openai_sse_text(response: reqwest::Response, model: &str) -> Re
                             }
                         }
                         "response.completed" | "response.incomplete" => {
-                            record_openai_sidecar_usage(model, event.response.as_ref());
+                            record_openai_sidecar_usage(
+                                model,
+                                event.response.as_ref(),
+                                resolved_model.as_deref(),
+                            );
                             return Ok(text);
                         }
                         "response.failed" | "error" => {
@@ -1074,13 +1082,23 @@ fn parse_openai_usage(usage: &serde_json::Value) -> Option<crate::telemetry::Pro
     })
 }
 
-fn record_openai_sidecar_usage(model: &str, response: Option<&serde_json::Value>) {
+fn openai_sidecar_response_model(response: Option<&serde_json::Value>) -> Option<&str> {
+    jcode_provider_core::nonempty_response_model(
+        response
+            .and_then(|response| response.get("model"))
+            .and_then(|model| model.as_str()),
+    )
+}
+
+fn record_openai_sidecar_usage(
+    model: &str,
+    response: Option<&serde_json::Value>,
+    observed_model: Option<&str>,
+) {
     if let Some(response) = response
         && let Some(parsed) = response.get("usage").and_then(parse_openai_usage)
     {
-        let resolved_model = jcode_provider_core::nonempty_response_model(
-            response.get("model").and_then(|v| v.as_str()),
-        );
+        let resolved_model = openai_sidecar_response_model(Some(response)).or(observed_model);
         crate::telemetry::record_provider_usage_with_model_attribution(
             None,
             "openai",
@@ -1403,6 +1421,18 @@ mod tests {
         for reported in [None, Some(""), Some("  ")] {
             assert_eq!(jcode_provider_core::nonempty_response_model(reported), None);
         }
+        for (body, expected) in [
+            (
+                serde_json::json!({"model": " served-snapshot "}),
+                Some("served-snapshot"),
+            ),
+            (serde_json::json!({"model": " "}), None),
+            (serde_json::json!({"model": 42}), None),
+            (serde_json::json!({}), None),
+        ] {
+            assert_eq!(openai_sidecar_response_model(Some(&body)), expected);
+        }
+        assert_eq!(openai_sidecar_response_model(None), None);
         let parsed: ClaudeMessagesResponse = serde_json::from_value(serde_json::json!({
             "model": "claude-served-snapshot", "content": []
         }))
@@ -1428,8 +1458,12 @@ mod tests {
 
     #[test]
     fn sse_completed_event_exposes_response_usage() {
-        let data = r#"{"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":3}}}"#;
+        let data = r#"{"type":"response.completed","response":{"model":"served-snapshot","usage":{"input_tokens":10,"output_tokens":3}}}"#;
         let event: SseEvent = serde_json::from_str(data).expect("sse event");
+        assert_eq!(
+            openai_sidecar_response_model(event.response.as_ref()),
+            Some("served-snapshot")
+        );
         let usage = event
             .response
             .as_ref()
