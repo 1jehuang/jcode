@@ -1,79 +1,613 @@
 use crate::color;
 use crate::color::rgb;
 use ratatui::prelude::*;
+use serde::Deserialize;
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicPtr, Ordering};
+
+#[repr(usize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ThemeColor {
+    Background,
+    User,
+    Ai,
+    Tool,
+    FileLink,
+    Dim,
+    Accent,
+    SystemMessage,
+    Queued,
+    Asap,
+    Pending,
+    UserText,
+    UserBg,
+    InputText,
+    InputBg,
+    AiText,
+    Bold,
+    MarkdownText,
+    HeaderIcon,
+    HeaderName,
+    HeaderSession,
+    /// Success / additions.
+    Success,
+    /// Warnings.
+    Warning,
+    /// Errors / deletions.
+    Error,
+    /// Informational highlights.
+    Info,
+    /// Borders and rules.
+    Border,
+    /// Selected row background.
+    SelectionBg,
+}
+
+const THEME_COLOR_COUNT: usize = ThemeColor::SelectionBg as usize + 1;
+
+#[derive(Debug, Clone)]
+pub struct Theme {
+    name: String,
+    colors: BTreeMap<ThemeColor, Color>,
+}
+
+impl Theme {
+    fn new(name: impl Into<String>, colors: BTreeMap<ThemeColor, Color>) -> Self {
+        Self {
+            name: name.into(),
+            colors,
+        }
+    }
+
+    fn color(&self, key: ThemeColor) -> Color {
+        self.colors.get(&key).copied().unwrap_or(Color::Reset)
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ThemeFile {
+    colors: BTreeMap<String, String>,
+}
+
+const BUILTIN_THEMES: &[&str] = &["system", "light", "dark"];
+static ACTIVE_THEME: OnceLock<AtomicPtr<ThemeSnapshot>> = OnceLock::new();
+
+#[derive(Debug, Clone)]
+struct ThemeSnapshot {
+    name: String,
+    colors: [Color; THEME_COLOR_COUNT],
+    /// Which semantic roles the theme recolors relative to the palette
+    /// defaults, and to what. Empty for the built-in themes, which reuse the
+    /// palette defaults exactly; every entry is a semantic override a custom
+    /// TOML theme asked for. Precomputed at snapshot build so the per-frame
+    /// substitution pass never compares per cell.
+    semantic_overrides: Vec<(crate::palette::Role, Color)>,
+    uses_terminal_adaptation: bool,
+}
+
+impl ThemeSnapshot {
+    fn from_theme(theme: &Theme) -> Self {
+        let name = theme.name().to_string();
+        let uses_terminal_adaptation = theme_uses_terminal_adaptation(&name);
+        let colors = theme_colors_array(theme);
+        Self {
+            name,
+            semantic_overrides: theme_semantic_overrides(theme),
+            colors,
+            uses_terminal_adaptation,
+        }
+    }
+
+    fn color(&self, key: ThemeColor) -> Color {
+        self.colors[key as usize]
+    }
+}
+
+fn active_theme() -> &'static AtomicPtr<ThemeSnapshot> {
+    ACTIVE_THEME.get_or_init(|| AtomicPtr::new(std::ptr::null_mut()))
+}
+
+fn active_theme_snapshot() -> &'static ThemeSnapshot {
+    let slot = active_theme();
+    let current = slot.load(Ordering::Acquire);
+    if !current.is_null() {
+        // SAFETY: snapshots are intentionally leaked after publication so active
+        // render readers can dereference them without a lock or epoch guard.
+        return unsafe { &*current };
+    }
+
+    let snapshot = Box::into_raw(Box::new(ThemeSnapshot::from_theme(&system_theme())));
+    match slot.compare_exchange(
+        std::ptr::null_mut(),
+        snapshot,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => unsafe { &*snapshot },
+        Err(existing) => {
+            // Another thread won initialization. Drop our unpublished snapshot.
+            unsafe {
+                drop(Box::from_raw(snapshot));
+                &*existing
+            }
+        }
+    }
+}
+
+pub fn active_theme_name() -> String {
+    active_theme_snapshot().name.clone()
+}
+
+/// Whether the active palette should be post-processed by the terminal
+/// light/dark adapter from `theme_mode`.
+///
+/// `system` and `light` reuse jcode's native palette plus master's rendered
+/// buffer adapter. Custom TOML themes are explicit palettes, so adapting them
+/// again would surprise users and can invert hand-picked colors.
+pub fn active_theme_uses_terminal_adaptation() -> bool {
+    active_theme_snapshot().uses_terminal_adaptation
+}
+
+fn theme_uses_terminal_adaptation(name: &str) -> bool {
+    name.eq_ignore_ascii_case("system") || name.eq_ignore_ascii_case("light")
+}
+
+pub fn set_theme(name: &str, themes_dir: Option<&Path>) -> anyhow::Result<()> {
+    let theme = load_theme(name, themes_dir)?;
+    let snapshot = Box::into_raw(Box::new(ThemeSnapshot::from_theme(&theme)));
+    // SAFETY: publish the fully-built snapshot with one AcqRel swap, mirroring
+    // the init CAS above. Any snapshot the swap detaches stays leaked on
+    // purpose: concurrent Acquire readers may still hold a reference to it, so
+    // freeing it would race the next render pass. Theme changes are rare and
+    // each snapshot is tiny, making the leak the safe trade.
+    let _old = active_theme().swap(snapshot, Ordering::AcqRel);
+    Ok(())
+}
+
+pub fn load_theme(name: &str, themes_dir: Option<&Path>) -> anyhow::Result<Theme> {
+    let name = name.trim();
+    match name.to_ascii_lowercase().as_str() {
+        "" | "auto" | "system" => Ok(system_theme()),
+        "light" => Ok(system_palette_named("light")),
+        "dark" => Ok(dark_theme()),
+        _ => load_custom_theme(name, themes_dir),
+    }
+}
+
+pub fn available_theme_names(themes_dir: Option<&Path>) -> Vec<String> {
+    let mut names = BUILTIN_THEMES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<Vec<_>>();
+    if let Some(dir) = themes_dir
+        && let Ok(entries) = std::fs::read_dir(dir)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if !is_safe_custom_theme_name(stem) {
+                continue;
+            }
+            if !names.iter().any(|name| name == stem) {
+                names.push(stem.to_string());
+            }
+        }
+    }
+    names
+}
+
+// Build the snapshot color array indexed by ThemeColor discriminant.
+// ALL_THEME_COLORS is count- and order-checked at compile time below, so
+// every discriminant slot gets its own variant's color.
+//
+// Every RGB value is routed through `color::rgb`, the same quantizing gate
+// all other color sources pass through, so a custom theme renders
+// identically on truecolor and 256-color terminals (#1877). Named colors
+// and `Color::Reset` are already renderable as-is and pass through
+// untouched.
+fn theme_colors_array(theme: &Theme) -> [Color; THEME_COLOR_COUNT] {
+    std::array::from_fn(|i| quantized(theme.color(ALL_THEME_COLORS[i])))
+}
+
+/// Terminal-quantize one theme color for display. Hex values from
+/// `parse_color` arrive as raw `Color::Rgb`; renderable named colors and
+/// `Reset` are returned unchanged.
+fn quantized(color: Color) -> Color {
+    match color {
+        Color::Rgb(r, g, b) => color::rgb(r, g, b),
+        other => other,
+    }
+}
+
+/// Semantic roles a theme overrides, with the theme's replacement color
+/// (already quantized). A role is listed only when the theme's value differs
+/// from the palette default the historical UI rendered, so built-in themes
+/// produce an empty list and the substitution pass is a no-op for them.
+fn theme_semantic_overrides(theme: &Theme) -> Vec<(crate::palette::Role, Color)> {
+    SEMANTIC_ROLE_SLOTS
+        .iter()
+        .copied()
+        .filter(|&(key, role)| !theme_color_is_default(theme.color(key), role.default_rgb()))
+        .map(|(key, role)| (role, quantized(theme.color(key))))
+        .collect()
+}
+
+/// Whether a theme color equals the palette default for its role. Built-in
+/// theme colors are already quantized (`rgb(...)` at build), custom TOML
+/// values are raw `Color::Rgb`, so both representations are recognized.
+fn theme_color_is_default(color: Color, default: (u8, u8, u8)) -> bool {
+    match color {
+        Color::Rgb(r, g, b) => (r, g, b) == default,
+        Color::Indexed(index) => {
+            crate::color::indexed_to_rgb(index) == default
+                || crate::color::rgb_to_xterm256(default.0, default.1, default.2) == index
+        }
+        _ => false,
+    }
+}
+
+/// The six semantic theme slots and the palette role each recolors. Their
+/// defaults must match `Role::default_rgb`; asserted in theme tests.
+const SEMANTIC_ROLE_SLOTS: [(ThemeColor, crate::palette::Role); 6] = [
+    (ThemeColor::Success, crate::palette::Role::Success),
+    (ThemeColor::Warning, crate::palette::Role::Warning),
+    (ThemeColor::Error, crate::palette::Role::Error),
+    (ThemeColor::Info, crate::palette::Role::Info),
+    (ThemeColor::Border, crate::palette::Role::Border),
+    (ThemeColor::SelectionBg, crate::palette::Role::SelectionBg),
+];
+
+// One entry per ThemeColor variant, in discriminant order. The declared
+// length is THEME_COLOR_COUNT, so adding or removing a variant without
+// updating this list fails to compile instead of silently miscoloring.
+const ALL_THEME_COLORS: [ThemeColor; THEME_COLOR_COUNT] = [
+    ThemeColor::Background,
+    ThemeColor::User,
+    ThemeColor::Ai,
+    ThemeColor::Tool,
+    ThemeColor::FileLink,
+    ThemeColor::Dim,
+    ThemeColor::Accent,
+    ThemeColor::SystemMessage,
+    ThemeColor::Queued,
+    ThemeColor::Asap,
+    ThemeColor::Pending,
+    ThemeColor::UserText,
+    ThemeColor::UserBg,
+    ThemeColor::InputText,
+    ThemeColor::InputBg,
+    ThemeColor::AiText,
+    ThemeColor::Bold,
+    ThemeColor::MarkdownText,
+    ThemeColor::HeaderIcon,
+    ThemeColor::HeaderName,
+    ThemeColor::HeaderSession,
+    ThemeColor::Success,
+    ThemeColor::Warning,
+    ThemeColor::Error,
+    ThemeColor::Info,
+    ThemeColor::Border,
+    ThemeColor::SelectionBg,
+];
+
+// Compile-time check that entry i is the variant with discriminant i.
+// Rejects reordering and duplicates, so the array stays index-aligned with
+// ThemeColor no matter how it is edited.
+const _: () = {
+    let mut i = 0;
+    while i < ALL_THEME_COLORS.len() {
+        assert!(
+            ALL_THEME_COLORS[i] as usize == i,
+            "ThemeColor index mismatch"
+        );
+        i += 1;
+    }
+};
+
+fn themed_color(key: ThemeColor) -> Color {
+    active_theme_snapshot().color(key)
+}
+
+fn load_custom_theme(name: &str, themes_dir: Option<&Path>) -> anyhow::Result<Theme> {
+    if !is_safe_custom_theme_name(name) {
+        anyhow::bail!(
+            "Invalid theme name '{}': use only ASCII letters, numbers, '-' or '_'",
+            name
+        );
+    }
+    let dir = themes_dir.ok_or_else(|| anyhow::anyhow!("No themes directory configured"))?;
+    let path = dir.join(format!("{name}.toml"));
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("Failed to read theme {}: {}", path.display(), e))?;
+    let file: ThemeFile = toml::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse theme {}: {}", path.display(), e))?;
+
+    let mut theme = system_palette_named(name);
+    for (raw_key, raw_value) in file.colors {
+        let key = parse_theme_color(&raw_key).ok_or_else(|| {
+            anyhow::anyhow!("Unknown theme color '{}': {}", raw_key, path.display())
+        })?;
+        let value = parse_color(&raw_value).ok_or_else(|| {
+            anyhow::anyhow!("Invalid theme color '{}': {}", raw_value, path.display())
+        })?;
+        theme.colors.insert(key, value);
+    }
+    Ok(theme)
+}
+
+fn is_safe_custom_theme_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+fn parse_theme_color(raw: &str) -> Option<ThemeColor> {
+    match raw.trim().replace('-', "_").to_ascii_lowercase().as_str() {
+        "background" | "background_color" | "app_bg" | "app_background" => {
+            Some(ThemeColor::Background)
+        }
+        "user" | "user_color" => Some(ThemeColor::User),
+        "ai" | "ai_color" => Some(ThemeColor::Ai),
+        "tool" | "tool_color" => Some(ThemeColor::Tool),
+        "file_link" | "file_link_color" => Some(ThemeColor::FileLink),
+        "dim" | "dim_color" => Some(ThemeColor::Dim),
+        "accent" | "accent_color" => Some(ThemeColor::Accent),
+        "system_message" | "system_message_color" => Some(ThemeColor::SystemMessage),
+        "queued" | "queued_color" => Some(ThemeColor::Queued),
+        "asap" | "asap_color" => Some(ThemeColor::Asap),
+        "pending" | "pending_color" => Some(ThemeColor::Pending),
+        "user_text" => Some(ThemeColor::UserText),
+        "user_bg" => Some(ThemeColor::UserBg),
+        "input_text" => Some(ThemeColor::InputText),
+        "input_bg" => Some(ThemeColor::InputBg),
+        "ai_text" => Some(ThemeColor::AiText),
+        "bold" | "bold_color" => Some(ThemeColor::Bold),
+        "markdown_text" | "md_text" => Some(ThemeColor::MarkdownText),
+        "header_icon" | "header_icon_color" => Some(ThemeColor::HeaderIcon),
+        "header_name" | "header_name_color" => Some(ThemeColor::HeaderName),
+        "header_session" | "header_session_color" => Some(ThemeColor::HeaderSession),
+        "success" | "success_color" => Some(ThemeColor::Success),
+        "warning" | "warning_color" => Some(ThemeColor::Warning),
+        "error" | "error_color" => Some(ThemeColor::Error),
+        "info" | "info_color" => Some(ThemeColor::Info),
+        "border" | "border_color" => Some(ThemeColor::Border),
+        "selection_bg" | "selection_bg_color" => Some(ThemeColor::SelectionBg),
+        _ => None,
+    }
+}
+
+fn named_color(name: &str) -> Option<Color> {
+    // ratatui named colors. Useful for users who want a terminal-quantized
+    // color (256-color friendly) instead of an explicit RGB value.
+    Some(match name {
+        "black" => Color::Black,
+        "red" => Color::Red,
+        "green" => Color::Green,
+        "yellow" => Color::Yellow,
+        "blue" => Color::Blue,
+        "magenta" => Color::Magenta,
+        "cyan" => Color::Cyan,
+        "gray" | "grey" => Color::Gray,
+        "darkgray" | "darkgrey" => Color::DarkGray,
+        "lightred" => Color::LightRed,
+        "lightgreen" => Color::LightGreen,
+        "lightyellow" => Color::LightYellow,
+        "lightblue" => Color::LightBlue,
+        "lightmagenta" => Color::LightMagenta,
+        "lightcyan" => Color::LightCyan,
+        "white" => Color::White,
+        _ => return None,
+    })
+}
+
+fn parse_color(raw: &str) -> Option<Color> {
+    let raw = raw.trim();
+    if raw.eq_ignore_ascii_case("reset") || raw.eq_ignore_ascii_case("default") {
+        return Some(Color::Reset);
+    }
+    // Named colors (red, blue, light-cyan, ...) for user convenience.
+    if let Some(color) = named_color(&raw.to_ascii_lowercase().replace(['-', ' '], "")) {
+        return Some(color);
+    }
+    let hex = raw.strip_prefix('#')?;
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    // Length and hex-digit checks above guarantee every 2-byte slice exists
+    // and parses, so the invalid branch is unreachable.
+    let channel = |pair: usize| -> u8 {
+        u8::from_str_radix(hex.get(pair..pair + 2).expect("validated hex slice"), 16)
+            .expect("ASCII hex digits always parse")
+    };
+    Some(Color::Rgb(channel(0), channel(2), channel(4)))
+}
+
+fn system_theme() -> Theme {
+    system_palette_named("system")
+}
+
+fn system_palette_named(name: &str) -> Theme {
+    Theme::new(
+        name,
+        BTreeMap::from([
+            (ThemeColor::Background, Color::Reset),
+            (ThemeColor::User, rgb(138, 180, 248)),
+            (ThemeColor::Ai, rgb(129, 199, 132)),
+            (ThemeColor::Tool, rgb(120, 120, 120)),
+            (ThemeColor::FileLink, rgb(180, 200, 255)),
+            (ThemeColor::Dim, rgb(80, 80, 80)),
+            (ThemeColor::Accent, rgb(186, 139, 255)),
+            (ThemeColor::SystemMessage, rgb(255, 170, 220)),
+            (ThemeColor::Queued, rgb(255, 193, 7)),
+            (ThemeColor::Asap, rgb(110, 210, 255)),
+            (ThemeColor::Pending, rgb(140, 140, 140)),
+            (ThemeColor::UserText, rgb(245, 245, 255)),
+            (ThemeColor::UserBg, rgb(35, 40, 50)),
+            (ThemeColor::InputText, Color::Reset),
+            (ThemeColor::InputBg, Color::Reset),
+            (ThemeColor::AiText, rgb(220, 220, 215)),
+            (ThemeColor::Bold, rgb(240, 240, 235)),
+            (ThemeColor::MarkdownText, rgb(200, 200, 195)),
+            (ThemeColor::HeaderIcon, rgb(120, 210, 230)),
+            (ThemeColor::HeaderName, rgb(190, 210, 235)),
+            (ThemeColor::HeaderSession, rgb(255, 255, 255)),
+            // Semantic accents. These mirror crate::palette::Role defaults so
+            // the built-in theme is byte-identical to the historical palette,
+            // but custom TOML themes can now override them independently.
+            (ThemeColor::Success, rgb(100, 200, 100)),
+            (ThemeColor::Warning, rgb(255, 200, 100)),
+            (ThemeColor::Error, rgb(255, 100, 100)),
+            (ThemeColor::Info, rgb(140, 180, 255)),
+            (ThemeColor::Border, rgb(100, 100, 110)),
+            (ThemeColor::SelectionBg, rgb(60, 60, 80)),
+        ]),
+    )
+}
+
+fn dark_theme() -> Theme {
+    let mut theme = system_palette_named("dark");
+    // Force an explicit dark background so the app is readable even on
+    // terminals with a white/light default background. The system theme keeps
+    // Color::Reset (terminal default) and relies on the buffer adapter for
+    // light backgrounds; the explicit "dark" theme must guarantee a dark bg.
+    theme.colors.insert(ThemeColor::Background, rgb(18, 18, 26));
+    // Force input text to white so it is readable on the dark background.
+    // Color::Reset inherits the terminal default fg, which may be dark or
+    // low-contrast on some terminals, making typed text invisible.
+    theme
+        .colors
+        .insert(ThemeColor::InputText, rgb(240, 240, 245));
+    // Force an explicit dark input background too. The system theme keeps
+    // Color::Reset and relies on the buffer adapter, but the explicit "dark"
+    // theme must guarantee contrast: a light terminal default background would
+    // make white input text invisible without an explicit dark InputBg.
+    theme.colors.insert(ThemeColor::InputBg, rgb(18, 18, 26));
+    theme
+}
 
 pub fn user_color() -> Color {
-    crate::palette::role_color(crate::palette::Role::User)
+    themed_color(ThemeColor::User)
+}
+pub fn background_color() -> Color {
+    themed_color(ThemeColor::Background)
 }
 pub fn ai_color() -> Color {
-    crate::palette::role_color(crate::palette::Role::Ai)
+    themed_color(ThemeColor::Ai)
 }
 pub fn tool_color() -> Color {
-    crate::palette::role_color(crate::palette::Role::Tool)
+    themed_color(ThemeColor::Tool)
 }
 pub fn file_link_color() -> Color {
-    crate::palette::role_color(crate::palette::Role::FileLink)
+    themed_color(ThemeColor::FileLink)
 }
 pub fn dim_color() -> Color {
-    crate::palette::role_color(crate::palette::Role::Dim)
+    themed_color(ThemeColor::Dim)
 }
 pub fn accent_color() -> Color {
-    crate::palette::role_color(crate::palette::Role::Accent)
+    themed_color(ThemeColor::Accent)
 }
 pub fn system_message_color() -> Color {
-    crate::palette::role_color(crate::palette::Role::System)
+    themed_color(ThemeColor::SystemMessage)
 }
 pub fn queued_color() -> Color {
-    crate::palette::role_color(crate::palette::Role::Queued)
+    themed_color(ThemeColor::Queued)
 }
 pub fn asap_color() -> Color {
-    crate::palette::role_color(crate::palette::Role::Asap)
+    themed_color(ThemeColor::Asap)
 }
 pub fn pending_color() -> Color {
-    crate::palette::role_color(crate::palette::Role::Pending)
+    themed_color(ThemeColor::Pending)
 }
 pub fn user_text() -> Color {
-    crate::palette::role_color(crate::palette::Role::UserText)
+    themed_color(ThemeColor::UserText)
 }
 pub fn user_bg() -> Color {
-    crate::palette::role_color(crate::palette::Role::UserBg)
+    themed_color(ThemeColor::UserBg)
+}
+pub fn input_text() -> Color {
+    themed_color(ThemeColor::InputText)
+}
+/// Ready-made style for input text lines, so callers do not each wrap
+/// `input_text()` in a fresh `Style`.
+pub fn input_text_style() -> Style {
+    Style::default().fg(input_text())
+}
+pub fn input_bg() -> Color {
+    themed_color(ThemeColor::InputBg)
 }
 pub fn ai_text() -> Color {
-    crate::palette::role_color(crate::palette::Role::AiText)
+    themed_color(ThemeColor::AiText)
+}
+pub fn bold_color() -> Color {
+    themed_color(ThemeColor::Bold)
+}
+pub fn markdown_text_color() -> Color {
+    themed_color(ThemeColor::MarkdownText)
 }
 pub fn header_icon_color() -> Color {
-    crate::palette::role_color(crate::palette::Role::HeaderIcon)
+    themed_color(ThemeColor::HeaderIcon)
 }
 pub fn header_name_color() -> Color {
-    crate::palette::role_color(crate::palette::Role::HeaderName)
+    themed_color(ThemeColor::HeaderName)
 }
 pub fn header_session_color() -> Color {
-    crate::palette::role_color(crate::palette::Role::HeaderSession)
+    themed_color(ThemeColor::HeaderSession)
 }
 
-/// Success / additions accent.
+/// Semantic accents. These resolve through the theme system so custom TOML
+/// themes can override them, falling back to the historical palette defaults
+/// when unset. This is a deliberate design choice: the palette buffer-adapt pass
+/// still re-expresses configured palette overrides, so these accessors return
+/// the role default (not the configured palette color) to avoid double-substitution.
 pub fn success_color() -> Color {
-    crate::palette::role_color(crate::palette::Role::Success)
+    themed_color(ThemeColor::Success)
 }
-/// Warning accent.
 pub fn warning_color() -> Color {
-    crate::palette::role_color(crate::palette::Role::Warning)
+    themed_color(ThemeColor::Warning)
 }
-/// Error / deletions accent.
 pub fn error_color() -> Color {
-    crate::palette::role_color(crate::palette::Role::Error)
+    themed_color(ThemeColor::Error)
 }
-/// Informational accent.
 pub fn info_color() -> Color {
-    crate::palette::role_color(crate::palette::Role::Info)
+    themed_color(ThemeColor::Info)
 }
-/// Borders and rules.
 pub fn border_color() -> Color {
-    crate::palette::role_color(crate::palette::Role::Border)
+    themed_color(ThemeColor::Border)
 }
-/// Selected-row background.
 pub fn selection_bg_color() -> Color {
-    crate::palette::role_color(crate::palette::Role::SelectionBg)
+    themed_color(ThemeColor::SelectionBg)
+}
+
+/// Themed selection background, if the active theme overrides it. The
+/// historical selection fill is a blend computed per base background, so it
+/// never matches a role default; `selection_bg_for` consults this directly.
+/// Returns the value only when it differs from the palette default, which
+/// keeps built-in themes on the blend path.
+pub fn themed_selection_bg() -> Option<Color> {
+    let snapshot = active_theme_snapshot();
+    snapshot
+        .semantic_overrides
+        .iter()
+        .find(|(role, _)| *role == crate::palette::Role::SelectionBg)
+        .map(|(_, color)| *color)
+}
+
+/// Semantic overrides of the active theme, for the per-frame substitution
+/// pass. Empty for built-in themes, so the pass short-circuits.
+pub(crate) fn semantic_overrides() -> &'static [(crate::palette::Role, Color)] {
+    active_theme_snapshot().semantic_overrides.as_slice()
 }
 
 // Spinner frames for animated status. Keep these single-cell because the fast
@@ -241,59 +775,5 @@ pub fn animated_tool_color(elapsed: f32, enable_decorative_animations: bool) -> 
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn spinner_frames_are_circular_braille_sequence() {
-        assert_eq!(
-            SPINNER_FRAMES,
-            &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-        );
-        assert!(is_activity_indicator_frame("⠋"));
-        assert!(is_activity_indicator_frame("⠏"));
-        assert!(!is_activity_indicator_frame("/"));
-    }
-
-    #[test]
-    fn spinner_frame_wraps_at_sequence_length() {
-        let fps = 10.0;
-        assert_eq!(spinner_frame(0.0, fps), "⠋");
-        assert_eq!(spinner_frame(0.9, fps), "⠏");
-        assert_eq!(spinner_frame(1.0, fps), "⠋");
-    }
-
-    #[test]
-    fn activity_indicator_still_advances_without_decorative_animations() {
-        // With decorative animations disabled the single-cell spinner must keep
-        // ticking instead of freezing on one frame.
-        let first = activity_indicator(0.0, 12.5, false);
-        let later = activity_indicator(1.0, 12.5, false);
-        assert!(SPINNER_FRAMES.contains(&first));
-        assert_ne!(
-            first, later,
-            "liveness spinner should advance within one second"
-        );
-    }
-
-    #[test]
-    fn liveness_spinner_advances_smoothly_within_a_few_frames() {
-        // The single-cell fast path patches one status cell per 80ms tick, so the
-        // non-decorative liveness spinner should advance well faster than ~1 Hz
-        // (it should not still read as frozen between consecutive fast-path ticks).
-        let frame_at = |elapsed: f32| activity_indicator(elapsed, 12.5, false);
-        // One 80ms fast-path tick should already move to the next frame.
-        assert_ne!(
-            frame_at(0.0),
-            frame_at(0.08),
-            "liveness spinner should advance every fast-path tick (80ms)"
-        );
-        // It must be meaningfully faster than the old ~1.5 Hz cadence.
-        const {
-            assert!(
-                LIVENESS_SPINNER_FPS >= 8.0,
-                "liveness spinner should animate at a smooth, responsive rate"
-            );
-        }
-    }
-}
+#[path = "theme_tests.rs"]
+mod tests;

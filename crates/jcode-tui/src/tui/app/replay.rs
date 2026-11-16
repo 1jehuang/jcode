@@ -341,7 +341,12 @@ fn schedule_replay_events(timeline: &[TimelineEvent]) -> Vec<(f64, ReplayEvent)>
 fn draw_swarm_replay_frame(frame: &mut Frame<'_>, panes: &mut [SwarmReplayPane], sim_time_ms: f64) {
     jcode_tui_mermaid::begin_terminal_image_frame();
     draw_swarm_replay_panes(frame, panes, sim_time_ms);
-    jcode_tui_style::adapt_buffer_for_display(frame.buffer_mut());
+    // One finish_frame pass per frame, mirroring `ui::draw`: it fills explicit
+    // theme backgrounds and applies either terminal adaptation or the custom
+    // palette pass. The old call site ran adapt_buffer_for_display here and a
+    // second finish_frame at the loop, so a light-mode frame was adapted twice
+    // and custom theme colors were flipped away from their hand-picked values.
+    jcode_tui_style::finish_frame(frame.buffer_mut());
     crate::tui::ui::adapt_buffer_for_emoji_preference(frame.buffer_mut());
     jcode_tui_mermaid::finish_terminal_image_frame(frame.buffer_mut());
 }

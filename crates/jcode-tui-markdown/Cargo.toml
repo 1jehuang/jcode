@@ -8,6 +8,7 @@ publish = false
 jcode-render-core = { path = "../jcode-render-core" }
 jcode-tui-mermaid = { path = "../jcode-tui-mermaid", optional = true }
 jcode-tui-workspace = { path = "../jcode-tui-workspace" }
+jcode-tui-style = { path = "../jcode-tui-style" }
 dirs = "5"
 image = { version = "0.25", default-features = false, features = ["png"] }
 mdwright-latex = "0.1.3"
