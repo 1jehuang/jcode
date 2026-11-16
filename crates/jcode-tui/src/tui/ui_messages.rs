@@ -3302,7 +3302,6 @@ pub(crate) fn compact_swarm_await_summary(message: &str) -> String {
         }
         if line.starts_with('✓') || line.starts_with('✗') {
             total += 1;
-            done += usize::from(line.starts_with('✓'));
             let status = line
                 .rsplit_once(" (")
                 .and_then(|(_, status)| status.strip_suffix(')'))
@@ -3312,6 +3311,9 @@ pub(crate) fn compact_swarm_await_summary(message: &str) -> String {
                 | "blocked" | "cancelled" => status,
                 _ => "unknown",
             };
+            // Old recovered notifications incorrectly checkmarked unknown
+            // workers. Do not perpetuate that false match in persisted history.
+            done += usize::from(line.starts_with('✓') && status != "unknown");
             *outcomes.entry(status).or_default() += 1;
         }
     }

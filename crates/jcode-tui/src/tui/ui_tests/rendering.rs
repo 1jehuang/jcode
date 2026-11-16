@@ -143,9 +143,9 @@ fn test_swarm_await_summary_reports_outcomes_not_just_target_matches() {
         ),
         (
             "✓ fox (unknown)\n✓ wolf (future-status)",
-            "2/2 matched · 2 unknown",
+            "0/2 matched · 2 unknown",
         ),
-        ("✓ fox", "1/1 matched · 1 unknown"),
+        ("✓ fox", "0/1 matched · 1 unknown"),
         ("", "outcome unknown"),
     ] {
         let report = format!(
