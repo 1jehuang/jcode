@@ -331,6 +331,36 @@ pub fn parse_openai_response_event(
     completed_tool_items: &mut HashSet<String>,
     pending: &mut VecDeque<StreamEvent>,
 ) -> Option<StreamEvent> {
+    // Use only upstream response metadata, never the requested model alias.
+    // Keep this in the shared parser so WebSocket and HTTP transports agree.
+    let mut model = None;
+    let event = parse_openai_response_event_inner(
+        data,
+        saw_text_delta,
+        saw_thinking_delta,
+        streaming_tool_calls,
+        completed_tool_items,
+        pending,
+        &mut model,
+    );
+    if let Some(model) = model {
+        if let Some(event) = event {
+            pending.push_front(event);
+        }
+        return Some(StreamEvent::ResolvedModel { model });
+    }
+    event
+}
+
+fn parse_openai_response_event_inner(
+    data: &str,
+    saw_text_delta: &mut bool,
+    saw_thinking_delta: &mut bool,
+    streaming_tool_calls: &mut HashMap<String, StreamingToolCallState>,
+    completed_tool_items: &mut HashSet<String>,
+    pending: &mut VecDeque<StreamEvent>,
+    resolved_model: &mut Option<String>,
+) -> Option<StreamEvent> {
     if data == "[DONE]" {
         return Some(StreamEvent::MessageEnd { stop_reason: None });
     }
@@ -362,6 +392,14 @@ pub fn parse_openai_response_event(
             return None;
         }
     };
+
+    *resolved_model = event
+        .response
+        .as_ref()
+        .and_then(|response| response.get("model"))
+        .and_then(Value::as_str)
+        .filter(|model| !model.trim().is_empty())
+        .map(str::to_owned);
 
     if matches!(
         event.kind.as_str(),
@@ -918,6 +956,7 @@ pub struct OpenAIResponsesStream {
     /// so split CJK characters are not dropped (#609).
     utf8: jcode_core::util::Utf8StreamDecoder,
     pending: VecDeque<StreamEvent>,
+    resolved_model: Option<String>,
     saw_text_delta: bool,
     saw_thinking_delta: bool,
     streaming_tool_calls: HashMap<String, StreamingToolCallState>,
@@ -933,6 +972,7 @@ impl OpenAIResponsesStream {
             buffer: String::new(),
             utf8: jcode_core::util::Utf8StreamDecoder::new(),
             pending: VecDeque::new(),
+            resolved_model: None,
             saw_text_delta: false,
             saw_thinking_delta: false,
             streaming_tool_calls: HashMap::new(),
@@ -1026,6 +1066,12 @@ impl Stream for OpenAIResponsesStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
         loop {
             if let Some(event) = self.parse_next_event() {
+                if let StreamEvent::ResolvedModel { model } = &event {
+                    if self.resolved_model.as_ref() == Some(model) {
+                        continue;
+                    }
+                    self.resolved_model = Some(model.clone());
+                }
                 return Poll::Ready(Some(Ok(event)));
             }
 
@@ -1055,6 +1101,10 @@ impl Stream for OpenAIResponsesStream {
 #[cfg(test)]
 #[path = "stream_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "resolved_model_tests.rs"]
+mod resolved_model_tests;
 
 #[cfg(test)]
 #[path = "stream_tool_tests.rs"]

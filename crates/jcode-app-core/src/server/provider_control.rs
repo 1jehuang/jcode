@@ -930,6 +930,7 @@ pub(super) async fn handle_notify_auth_changed(
             return;
         }
         let activation = crate::auth::lifecycle::activate_auth_change(&activation_request);
+        super::account_usage::request_after_auth_change(id, client_event_tx_clone.clone());
         if let Some(provider_id) = activation.provider_id.as_deref() {
             // A renewed login must get a real request instead of inheriting the
             // previous credential's cached runtime failure.
@@ -1022,6 +1023,13 @@ pub(super) async fn handle_notify_auth_changed(
                         let _ = client_event_tx_clone.send(available_models_snapshot_into_event(latest_snapshot.clone()));
                     }
                 }
+                // ModelsUpdated is a catalog-change hint, not a completion wake:
+                // MultiProvider's PendingGuard clears pending without publishing
+                // on failure, and success publishes before the guard drops. An
+                // event-only wait could therefore stall until the 10 s ceiling,
+                // even after successful work. Keep polling until providers expose
+                // a completion notification ordered after clearing pending on
+                // every exit path (including failures and cancellation).
                 _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
             }
         }
@@ -1162,6 +1170,7 @@ pub(super) async fn handle_unbound_notify_auth_changed(
         provider_hint,
         auth,
     ));
+    super::account_usage::request_after_auth_change(id, client_event_tx.clone());
     if let Some(provider_id) = activation.provider_id.as_deref() {
         crate::provider::clear_provider_unavailable_for_account(provider_id);
     }

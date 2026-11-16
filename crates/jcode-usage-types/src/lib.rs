@@ -725,7 +725,14 @@ pub struct UsageReportEvent {
     /// What made the call: `agent`, `compaction`, `sidecar`.
     pub source: &'static str,
     pub provider: String,
+    /// Effective provider-resolved ID, or the requested label when unknown.
     pub model: String,
+    /// Original request alias. Absent on older clients and historical reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
+    /// ID observed in the provider response, never inferred from an alias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<String>,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_input_tokens: u64,

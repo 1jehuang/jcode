@@ -605,10 +605,11 @@ where
     writer.flush().await?;
     if let Some(reply_to) = frame.reply_to {
         // Avoid a second serialization of large replies just for the name.
+        // Missing event names remain empty timing labels, not request failures.
         let event = line
             .split_once("\"ev\":\"")
             .and_then(|(_, rest)| rest.split('"').next())
-            .unwrap_or_default();
+            .unwrap_or("");
         pending.finish(reply_to, event, line.len(), source);
     }
     Ok(())

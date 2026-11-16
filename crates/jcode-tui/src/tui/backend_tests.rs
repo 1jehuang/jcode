@@ -286,15 +286,39 @@ async fn cloud_expiry_revokes_without_midturn_protocol_write() {
 #[test]
 fn account_usage_poll_is_immediate_then_throttled() {
     let now = Instant::now();
-    assert!(account_usage_poll_due(None, now));
-    assert!(!account_usage_poll_due(Some(now), now));
+    let focused = account_usage_poll_interval(true);
+    assert!(account_usage_poll_due(None, now, focused));
+    assert!(!account_usage_poll_due(Some(now), now, focused));
     assert!(!account_usage_poll_due(
         Some(now),
-        now + Duration::from_secs(29)
+        now + Duration::from_secs(29),
+        focused
     ));
     assert!(account_usage_poll_due(
         Some(now),
-        now + Duration::from_secs(30)
+        now + Duration::from_secs(30),
+        focused
+    ));
+}
+
+#[test]
+fn account_usage_poll_is_slow_unfocused_and_catches_up_on_focus() {
+    let now = Instant::now();
+    let unfocused = account_usage_poll_interval(false);
+    // A window that has never polled still gets its first snapshot.
+    assert!(account_usage_poll_due(None, now, unfocused));
+    let later = now + Duration::from_secs(120);
+    assert!(!account_usage_poll_due(Some(now), later, unfocused));
+    // The same elapsed time is overdue the moment the window is focused.
+    assert!(account_usage_poll_due(
+        Some(now),
+        later,
+        account_usage_poll_interval(true)
+    ));
+    assert!(account_usage_poll_due(
+        Some(now),
+        now + Duration::from_secs(300),
+        unfocused
     ));
 }
 
@@ -825,5 +849,53 @@ async fn request_send_does_not_block_ui_when_server_stops_reading() {
     assert!(
         result.is_ok(),
         "request sends must not wait on the socket writer"
+    );
+}
+
+#[tokio::test]
+async fn focus_is_reported_once_per_change_and_only_to_servers_that_accept_it() {
+    let mut remote = RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().unwrap();
+    let (reader, _writer) = peer.into_split();
+    let mut reader = BufReader::new(reader);
+
+    // An older server never advertises the capability and would answer the
+    // request with an error, so nothing may be sent to it.
+    remote.sync_focus(false, false).await;
+    remote.note_server_capabilities(&["session_tools".to_string()]);
+    remote.sync_focus(false, false).await;
+    // Stream keepalive Pongs carry no capabilities and must not unset support.
+    remote.note_server_capabilities(&[crate::protocol::CLIENT_FOCUS_CAPABILITY.to_string()]);
+    remote.note_server_capabilities(&[]);
+
+    remote.sync_focus(false, false).await;
+    remote.sync_focus(false, false).await;
+    // Going out of sight is a change worth one report, and so is coming back.
+    remote.sync_focus(false, true).await;
+    remote.sync_focus(false, true).await;
+    remote.sync_focus(false, false).await;
+    remote.sync_focus(true, false).await;
+    // A focused window is never reported hidden, whatever a stale probe says.
+    remote.sync_focus(true, true).await;
+    let marker = remote.request_todos().await.unwrap();
+
+    let mut seen = Vec::new();
+    loop {
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line))
+            .await
+            .expect("request arrives")
+            .unwrap();
+        match serde_json::from_str::<Request>(&line).unwrap() {
+            Request::ClientFocus {
+                focused, hidden, ..
+            } => seen.push((focused, hidden)),
+            Request::GetTodos { id } if id == marker => break,
+            other => panic!("unexpected request {other:?}"),
+        }
+    }
+    assert_eq!(
+        seen,
+        vec![(false, false), (false, true), (false, false), (true, false)]
     );
 }

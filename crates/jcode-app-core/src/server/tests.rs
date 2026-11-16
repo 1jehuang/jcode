@@ -51,6 +51,8 @@ fn file_access_with_summary(summary: Option<&str>) -> FileAccess {
         intent: None,
         summary: summary.map(str::to_string),
         detail: None,
+        added: 0,
+        removed: 0,
     }
 }
 
@@ -62,6 +64,8 @@ fn file_touch_with_summary(summary: Option<&str>) -> FileTouch {
         intent: None,
         summary: summary.map(str::to_string),
         detail: None,
+        added: 0,
+        removed: 0,
     }
 }
 
@@ -1031,3 +1035,6 @@ async fn background_task_progress_notifies_attached_clients() {
 
 #[path = "startup_recovery_tests.rs"]
 mod startup_recovery;
+
+#[path = "mobile_local_tests.rs"]
+mod mobile_local;

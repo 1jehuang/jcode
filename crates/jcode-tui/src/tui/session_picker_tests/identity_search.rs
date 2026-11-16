@@ -31,6 +31,7 @@ fn resume_identity_search_prioritizes_cloud_swan_over_mentions_before_and_after_
     ] {
         picker.search_query = query.into();
         picker.rebuild_items();
+        wait_for_picker_search(&mut picker);
         assert_eq!(
             picker
                 .session_by_ref(picker.visible_sessions[0])
@@ -84,4 +85,17 @@ fn resume_identity_search_does_not_promote_partial_identity_or_fake_cloud_mentio
         super::super::identity_search::rank(&cloud, &unrelated),
         (false, false, false)
     );
+}
+
+#[test]
+fn resume_identity_search_does_not_treat_topic_title_as_identity() {
+    let mut session = make_session("bug", "elephant", false, SessionStatus::Closed);
+    session.title = "Desktop rendering bug".into();
+    let tokens = loading::search_query_tokens("render");
+    assert_eq!(
+        super::super::identity_search::rank(&session, &tokens),
+        (false, false, false),
+    );
+    session.save_label = Some("render".into());
+    assert!(super::super::identity_search::rank(&session, &tokens).0);
 }

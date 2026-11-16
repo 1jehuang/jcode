@@ -209,7 +209,7 @@ pub fn build_messages(system: &str, messages: &[ChatMessage]) -> Vec<Value> {
                         result.push(json!({
                             "role": "tool",
                             "tool_call_id": sanitize_tool_id(&missing_id),
-                            "content": missing_output.clone(),
+                            "content": missing_output,
                         }));
                     }
                 }
@@ -250,6 +250,47 @@ pub fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_tool_outputs_remain_independent_in_wire_payload() {
+        let message = ChatMessage {
+            role: Role::Assistant,
+            content: ["first", "second"]
+                .into_iter()
+                .map(|id| ContentBlock::ToolUse {
+                    id: id.to_string(),
+                    name: "fixture".to_string(),
+                    input: json!({}),
+                    thought_signature: None,
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            timestamp: None,
+            tool_duration_ms: None,
+        };
+        let mut wire = build_messages("fixture system", &[message]);
+        let outputs = wire
+            .iter()
+            .filter(|item| item["role"] == "tool")
+            .collect::<Vec<_>>();
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(
+            outputs[0]["content"],
+            format!("[Error] {TOOL_OUTPUT_MISSING_TEXT}")
+        );
+        assert_eq!(
+            outputs[1]["content"],
+            format!("[Error] {TOOL_OUTPUT_MISSING_TEXT}")
+        );
+        assert_eq!(outputs[0]["tool_call_id"], "first");
+        assert_eq!(outputs[1]["tool_call_id"], "second");
+        let first = wire.iter_mut().find(|item| item["role"] == "tool").unwrap();
+        first["content"] = json!("changed independently");
+        assert_eq!(
+            wire.last().unwrap()["content"],
+            format!("[Error] {TOOL_OUTPUT_MISSING_TEXT}")
+        );
+    }
 
     fn swarm_shaped_tool() -> ToolDefinition {
         ToolDefinition {

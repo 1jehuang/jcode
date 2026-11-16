@@ -460,7 +460,7 @@ fn test_prepare_body_swarm_await_wake_is_not_a_numbered_prompt() {
                 .map(extract_line_text)
                 .collect::<Vec<_>>()
                 .join("\n");
-            assert!(text.contains("🐝 ✓ 1/1"), "{text}");
+            assert!(text.contains("🐝 Swarm await"), "{text}");
             assert!(!text.contains("worker transcript"), "{text}");
             assert!(!text.contains("Swarm await finished"), "{text}");
             assert_eq!(prepared.user_prompt_texts.len(), 2);

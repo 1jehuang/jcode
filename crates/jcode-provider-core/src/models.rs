@@ -8,20 +8,24 @@ pub const DEFAULT_OPENAI_MODEL: &str = "gpt-6.1-sol";
 ///
 /// NOTE: The Mythos preview family was retired by Anthropic and 404s, so it is
 /// intentionally NOT listed here. `claude-fable-5` was briefly retired but is
-/// live again. Opus 5.5 launched 2026-09-22. The list is curated best-first;
+/// live again. Opus 5.5 launched 2026-09-22 and `claude-fable-5-2` on
+/// 2026-11-09. The list is curated best-first;
 /// position 0 is the flagship used for post-login default selection.
 pub const ALL_CLAUDE_MODELS: &[&str] = &[
     "claude-opus-5-5",
     DEFAULT_CLAUDE_MODEL,
     "claude-opus-5",
+    "claude-fable-5-2",
     "claude-fable-5-1",
     "claude-fable-5",
     "claude-opus-4-8",
     "claude-opus-4-6",
     "claude-opus-4-6[1m]",
+    "claude-sonnet-5-5",
     "claude-sonnet-5",
     "claude-sonnet-4-6",
     "claude-sonnet-4-6[1m]",
+    "claude-haiku-5-5",
     "claude-haiku-4-5",
     "claude-opus-4-5",
     "claude-sonnet-4-5",
@@ -578,6 +582,31 @@ mod tests {
             ALL_OPENAI_MODELS.first().copied(),
             Some(DEFAULT_OPENAI_MODEL)
         );
+    }
+
+    /// Regression: a live Claude model missing from the bundled list has no
+    /// Claude OAuth/API route until the account catalog has been fetched, so
+    /// the picker could only offer it through some other provider that lists
+    /// the same id (a user picking Fable 5.2 landed on an OpenAI-compatible
+    /// endpoint instead of their Claude subscription).
+    #[test]
+    fn bundled_claude_list_covers_live_generations() {
+        for model in ["claude-fable-5-2", "claude-sonnet-5-5", "claude-haiku-5-5"] {
+            assert!(ALL_CLAUDE_MODELS.contains(&model), "{model} missing");
+            assert_eq!(provider_for_model(model), Some("claude"), "{model}");
+            assert_eq!(
+                context_limit_for_model_with_provider(model, Some("claude")),
+                Some(1_000_000),
+                "{model}"
+            );
+            assert_eq!(
+                crate::anthropic::anthropic_max_output_tokens(model),
+                128_000,
+                "{model}"
+            );
+        }
+        let position = |model: &str| ALL_CLAUDE_MODELS.iter().position(|m| *m == model);
+        assert!(position("claude-fable-5-2") < position("claude-fable-5-1"));
     }
 
     #[test]
