@@ -354,6 +354,9 @@ impl JevClient {
     /// while any other attempt is still pending.
     async fn send_hedged(&self, body: Vec<u8>, questions: &Map<String, Value>) -> Result<Value> {
         use futures::StreamExt;
+        // All attempts send identical immutable wire bytes. Share their backing
+        // rather than copying the full request for every hedge and retry.
+        let body = bytes::Bytes::from(body);
         let attempt = |client: &Client, delay: Duration, primary: bool| {
             let body = body.clone();
             let client = client.clone();
@@ -392,14 +395,19 @@ impl JevClient {
     }
 
     async fn send(&self, endpoint: &str, body: Vec<u8>) -> Result<Value> {
-        self.send_with(&self.client, endpoint, body).await
+        self.send_with(&self.client, endpoint, body.into()).await
     }
 
     /// Decisions requests are side-effect-free classifications, so transient
     /// overload responses (429/502/503/504/529) are retried with a short bounded
     /// backoff on the same provider and account. Auth, billing, redirect, and
     /// other failures are never retried and never fall back to another account.
-    async fn send_with(&self, client: &Client, endpoint: &str, body: Vec<u8>) -> Result<Value> {
+    async fn send_with(
+        &self,
+        client: &Client,
+        endpoint: &str,
+        body: bytes::Bytes,
+    ) -> Result<Value> {
         let mut attempt = 0;
         loop {
             let response = self.send_once(client, endpoint, body.clone()).await?;
@@ -434,7 +442,12 @@ impl JevClient {
         }
     }
 
-    async fn send_once(&self, client: &Client, endpoint: &str, body: Vec<u8>) -> Result<Response> {
+    async fn send_once(
+        &self,
+        client: &Client,
+        endpoint: &str,
+        body: bytes::Bytes,
+    ) -> Result<Response> {
         let mut request = client
             .post(endpoint)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -1407,6 +1420,61 @@ mod tests {
             api_key: "test-route-secret".into(),
             endpoint: format!("{base}/v1/decisions"),
             me_endpoint: (provider == JevProvider::Jcode).then(|| format!("{base}/v1/me")),
+        }
+    }
+
+    #[test]
+    fn retry_and_hedge_transport_bodies_share_the_original_allocation() {
+        let original = vec![b'x'; 64 * 1024];
+        let original_ptr = original.as_ptr();
+        let wire = bytes::Bytes::from(original);
+        assert_eq!(wire.as_ptr(), original_ptr);
+        let attempts: Vec<_> = (0..16).map(|_| reqwest::Body::from(wire.clone())).collect();
+        for attempt in &attempts {
+            let payload = attempt.as_bytes().unwrap();
+            assert_eq!(payload.as_ptr(), original_ptr);
+            assert_eq!(payload.len(), 64 * 1024);
+        }
+        drop(wire);
+        assert!(
+            attempts
+                .iter()
+                .all(|attempt| { attempt.as_bytes().unwrap().iter().all(|byte| *byte == b'x') })
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_retry_body_preserves_every_large_request_byte() {
+        let (base, worker) = mock_server(vec![
+            (503, "overloaded".into(), vec![]),
+            (529, "overloaded".into(), vec![]),
+            (200, response().to_string(), vec![]),
+        ]);
+        let client = mock_client(&base, JevProvider::OpenRouter);
+        let original = request_body(
+            JevProvider::OpenRouter,
+            json!({"memory": "界\n🦀".repeat(8_000)}),
+            &questions(),
+        )
+        .unwrap();
+        assert!(original.len() > 64 * 1024);
+        assert!(original.len() <= MAX_REQUEST_BYTES);
+        let result = client
+            .send(&client.endpoint, original.clone())
+            .await
+            .unwrap();
+        assert!(validate_answers(&result, &questions()).is_ok());
+        let requests = worker.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        for request in requests {
+            let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+            assert_eq!(body.as_bytes(), original);
+            assert!(
+                headers
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer test-route-secret")
+            );
+            assert!(headers.contains("Jcode Memory"));
         }
     }
 
