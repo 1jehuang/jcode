@@ -430,8 +430,11 @@ Private-page growth was also lower but noisier, so this is not a guaranteed
 production PSS reduction. The pinned builds contain concurrent changes, while
 pointer-sharing, copy-on-write and byte-identical JSON tests independently
 verify the removed encrypted-body allocation. No history or cache was discarded.
-Custom tool catalogs and transcript/provider-cache payload duplication remain
-separate candidates requiring their own ownership and mutation analysis.
+At that stage, custom tool catalogs and transcript/provider-cache payload
+copies remained separate candidates. Later rounds added MCP schema snapshot
+sharing and shared transcript payloads with copy-on-write isolation, documented
+above. Those fixes do not prove that every custom tool or request owner is
+redundant, or that all remaining production heap is fully attributed.
 
 ## Hard caps
 
