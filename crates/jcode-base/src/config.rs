@@ -950,6 +950,10 @@ impl ToolConfig {
                     "ls",
                     "batch",
                     "mcp",
+                    // Skills are advertised in the system prompt. Without
+                    // the loader the model reads SKILL.md through bash,
+                    // whose output cap drops the tail of a large skill.
+                    "skill_manage",
                 ]
                 .into_iter()
                 .map(|name| name.to_string())

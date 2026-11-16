@@ -739,6 +739,8 @@ fn tool_config_acp_profile_allows_core_coding_plus_batch() {
     assert!(allowed.contains("batch"));
     assert!(allowed.contains("mcp"));
     assert!(allowed.contains("edit"));
+    // Skills are listed in the prompt, so the profile must expose their loader.
+    assert!(allowed.contains("skill_manage"));
     assert!(!allowed.contains("replace"));
     assert!(!allowed.contains("swarm"));
     assert!(!allowed.contains("subagent"));

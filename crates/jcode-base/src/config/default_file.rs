@@ -451,7 +451,8 @@ browser_handoff = false
 auto_background_timeout_ms = 3000
 # Controls which built-in tools are sent to the model.
 # Profiles: "full" (default), "acp", "minimal"/"lite", or "none".
-# acp keeps core coding tools plus batch for generic ACP clients.
+# acp keeps core coding tools plus batch, mcp, and skill_manage for generic
+# ACP clients.
 # minimal keeps core coding tools only: bash, read, write, edit, multiedit,
 # apply_patch, patch, agentgrep, glob, grep, and ls.
 profile = "full"
