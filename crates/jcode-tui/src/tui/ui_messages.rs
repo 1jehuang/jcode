@@ -3349,6 +3349,28 @@ pub(crate) fn encode_swarm_agent_snapshot(
     }
 }
 
+/// Stable, theme-aware identity accent shared by every prose delivery from an
+/// agent. Hash the memorable name, not the restart-specific storage ID or the
+/// notification kind, so live, expanded and restored transcripts agree.
+fn swarm_agent_color(sender: &str) -> Color {
+    use jcode_tui_style::{Role, role_color};
+    const ACCENTS: [Role; 7] = [
+        Role::Ai,
+        Role::Warning,
+        Role::System,
+        Role::Accent,
+        Role::User,
+        Role::HeaderIcon,
+        Role::Asap,
+    ];
+    let sender = sender.trim();
+    let name = crate::id::extract_session_name(sender).unwrap_or(sender);
+    let hash = name.bytes().fold(0x811c9dc5_u32, |hash, byte| {
+        (hash ^ u32::from(byte.to_ascii_lowercase())).wrapping_mul(0x01000193)
+    });
+    role_color(ACCENTS[hash as usize % ACCENTS.len()])
+}
+
 struct CompactSwarmNotification<'a> {
     sender: &'a str,
     marker: String,
@@ -3358,37 +3380,39 @@ struct CompactSwarmNotification<'a> {
 }
 
 fn compact_swarm_notification(title: &str) -> Option<CompactSwarmNotification<'_>> {
-    let (sender, marker, marker_before_icon, text_color, file_activity) =
+    let (sender, marker, marker_before_icon, file_activity) =
         if let Some(sender) = title.strip_prefix("DM from ") {
-            (sender, String::new(), false, rgb(130, 130, 140), false)
+            (sender, String::new(), false, false)
         } else if let Some(sender) = title.strip_prefix("Task · ") {
-            (sender, String::new(), false, rgb(220, 236, 255), false)
+            (sender, String::new(), false, false)
         } else if let Some((channel, sender)) = title
             .strip_prefix('#')
             .and_then(|rest| rest.rsplit_once(" · "))
         {
-            (
-                sender,
-                format!("#{channel} · "),
-                false,
-                rgb(214, 247, 244),
-                false,
-            )
+            (sender, format!("#{channel} · "), false, false)
         } else if let Some(sender) = title.strip_prefix("Broadcast · ") {
-            (sender, "📣 ".to_string(), false, rgb(255, 240, 214), false)
+            (sender, "📣 ".to_string(), false, false)
         } else if let Some(sender) = title.strip_prefix("Shared context · ") {
-            (sender, "🧠 ".to_string(), false, rgb(221, 247, 232), false)
+            (sender, "🧠 ".to_string(), false, false)
         } else if let Some(sender) = title.strip_prefix("File activity · ") {
-            (sender, "✎ ".to_string(), false, dim_color(), true)
+            (sender, "✎ ".to_string(), false, true)
         } else if title == "File activity" {
-            ("", "✎ ".to_string(), false, dim_color(), true)
+            ("", "✎ ".to_string(), false, true)
         } else if let Some(sender) = title.strip_prefix("File conflict · ") {
-            (sender, "⚠ ".to_string(), true, rgb(255, 190, 150), true)
+            (sender, "⚠ ".to_string(), true, true)
         } else {
             let sender = title.strip_prefix("Swarm · ")?;
-            (sender, String::new(), false, rgb(225, 225, 235), false)
+            (sender, String::new(), false, false)
         };
     let sender = sender.trim();
+    let sender = crate::id::extract_session_name(sender).unwrap_or(sender);
+    let text_color = if title.starts_with("File conflict") {
+        rgb(255, 190, 150)
+    } else if file_activity {
+        dim_color()
+    } else {
+        swarm_agent_color(sender)
+    };
     (!sender.is_empty() || title == "File activity").then_some(CompactSwarmNotification {
         sender,
         marker,
@@ -3442,11 +3466,7 @@ fn render_compact_agent_notification(
         body
     };
     let text_color = notification.text_color;
-    let icon_style = Style::default().fg(if title.starts_with("File activity") {
-        dim_color()
-    } else {
-        rgb(255, 200, 100)
-    });
+    let icon_style = Style::default().fg(text_color);
     let body_style = Style::default().fg(text_color);
     let max_width = centered_wrap_width(width, markdown::center_code_blocks(), 96);
 
@@ -3518,8 +3538,10 @@ fn render_compact_agent_notification(
     let body_width = max_width.saturating_sub(3).max(1);
     let mut rendered_body = if body.is_empty() {
         vec![Line::from(Span::styled(String::new(), body_style))]
-    } else {
+    } else if notification.file_activity {
         markdown::render_markdown_with_width(&body, Some(body_width))
+    } else {
+        markdown::render_markdown_with_width_and_prose_color(&body, Some(body_width), text_color)
     };
     if rendered_body.is_empty() {
         rendered_body.push(Line::from(Span::styled(body, body_style)));
@@ -4697,6 +4719,10 @@ fn tool_output_token_badge(content: &str) -> ToolOutputTokenBadge {
         color,
     }
 }
+
+#[cfg(test)]
+#[path = "ui_messages/agent_color_tests.rs"]
+mod agent_color_tests;
 
 #[cfg(test)]
 #[path = "ui_messages/tests.rs"]
