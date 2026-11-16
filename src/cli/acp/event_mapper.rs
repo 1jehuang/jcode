@@ -62,6 +62,11 @@ impl EventMapper {
             }
             ServerEvent::ToolExec { id, name } => {
                 self.current_tool_id = Some(id.clone());
+                // Look up the buffered input by the event's ID before serializing the update.
+                let raw_input = self
+                    .tool_inputs
+                    .get(&id)
+                    .and_then(|input| parse_json_object(input));
                 let mut update = json!({
                     "sessionUpdate": "tool_call_update",
                     "toolCallId": id,
@@ -69,10 +74,7 @@ impl EventMapper {
                     "kind": tool_kind(&name),
                     "status": "in_progress",
                 });
-                if let Some(input) = self
-                    .tool_inputs
-                    .get(update["toolCallId"].as_str().unwrap_or_default())
-                    && let Some(raw_input) = parse_json_object(input)
+                if let Some(raw_input) = raw_input
                     && let Some(object) = update.as_object_mut()
                 {
                     object.insert("rawInput".to_string(), raw_input);
@@ -138,7 +140,7 @@ impl EventMapper {
                     "type": "content",
                     "content": {
                         "type": "text",
-                        "text": format!("Generated image: {path} ({output_format}){}", revised_prompt.map(|prompt| format!("\nRevised prompt: {prompt}")).unwrap_or_default()),
+                        "text": format!("Generated image: {path} ({output_format}){}", revised_prompt.map_or_else(String::new, |prompt| format!("\nRevised prompt: {prompt}"))),
                     }
                 }]
             })],

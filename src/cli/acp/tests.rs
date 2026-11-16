@@ -211,6 +211,28 @@ fn event_mapper_maps_tool_lifecycle() {
     assert_eq!(done[0]["content"][0]["content"]["text"], "ok");
 }
 
+/// Generated images retain their path and include the revised prompt only when present.
+#[test]
+fn event_mapper_preserves_generated_image_details() {
+    let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+    for (prompt, expected) in [
+        (None, "Generated image: image.png (png)"),
+        (
+            Some("updated"),
+            "Generated image: image.png (png)\nRevised prompt: updated",
+        ),
+    ] {
+        let updates = mapper.map_event(ServerEvent::GeneratedImage {
+            id: "image1".to_string(),
+            path: "image.png".to_string(),
+            metadata_path: None,
+            output_format: "png".to_string(),
+            revised_prompt: prompt.map(str::to_string),
+        });
+        assert_eq!(updates[0]["content"][0]["content"]["text"], expected);
+    }
+}
+
 /// A tool's text remains available and its image is sent as ACP image content.
 #[test]
 fn event_mapper_surfaces_live_tool_images() {
