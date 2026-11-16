@@ -156,14 +156,20 @@ impl Agent {
             .as_ref()
             .map(std::path::PathBuf::from);
 
-        let (split, _context_info) = crate::prompt::build_system_prompt_split_with_agents_md(
-            skill_prompt.as_deref(),
-            available_skills,
-            self.session.is_canary,
-            memory_prompt,
-            working_dir.as_deref(),
-            self.agents_md_snapshot.clone(),
-        );
+        let (split, _context_info) =
+            crate::prompt::build_system_prompt_split_with_capabilities_and_agents_md(
+                skill_prompt.as_deref(),
+                available_skills,
+                self.session.is_canary,
+                memory_prompt,
+                working_dir.as_deref(),
+                {
+                    let mut capabilities = crate::prompt::PromptCapabilities::current();
+                    capabilities.text_only_model = !self.provider.supports_image_input();
+                    capabilities
+                },
+                self.agents_md_snapshot.clone(),
+            );
 
         split
     }
