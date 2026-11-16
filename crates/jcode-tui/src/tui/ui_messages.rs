@@ -3440,15 +3440,19 @@ fn render_completion_lane_body(
     width: usize,
     prose_color: Color,
 ) -> Option<Vec<Line<'static>>> {
-    let (intro, rest) = body.split_once("Lane plan:")?;
-    let (plan, report) = rest.split_once("Final response:")?;
-    if !intro.lines().any(|line| line.starts_with("Agent ")) {
+    let (intro, rest) = body.split_once("\n\nLane plan:\n")?;
+    let (plan, report) = rest.split_once("\n\nFinal response:\n")?;
+    if !intro
+        .lines()
+        .last()
+        .is_some_and(|line| line.starts_with("Agent "))
+    {
         return None;
     }
     let render = |text: &str| {
         markdown::render_markdown_with_width_and_prose_color(text.trim(), Some(width), prose_color)
     };
-    let mut lines = render(intro);
+    let mut lines = Vec::new();
     let plan_lines: Vec<_> = plan.lines().collect();
     let mut found_lane = false;
     for (index, raw) in plan_lines.iter().enumerate() {
@@ -3523,7 +3527,18 @@ fn render_completion_lane_body(
     if !found_lane {
         return None;
     }
-    lines.extend(render(report));
+    if report.trim() == "No report captured."
+        || report.trim() == "No final assistant response was captured."
+    {
+        lines.push(Line::from(Span::styled(
+            "No report captured.",
+            Style::default()
+                .fg(jcode_tui_style::role_color(jcode_tui_style::Role::Dim))
+                .dim(),
+        )));
+    } else {
+        lines.extend(render(report));
+    }
     Some(lines)
 }
 

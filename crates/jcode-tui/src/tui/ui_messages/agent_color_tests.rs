@@ -14,6 +14,8 @@ fn completion_lanes_use_pinned_todo_palette_and_dots() {
         assert!(!text.contains("Lane plan:"));
         assert!(!text.contains("Phase 2"));
         assert!(!text.contains("Final response:"));
+        assert!(!text.contains("Agent daisy"));
+        assert!(!text.contains("Worker summary"));
         for row in &rows {
             if row
                 .spans
@@ -39,6 +41,17 @@ fn completion_lanes_use_pinned_todo_palette_and_dots() {
         }
     }
     assert!(render_completion_lane_body("Agent note without envelope", 80, accent).is_none());
+    let missing = body.replace("**Report remains accented.**", "No report captured.");
+    let rows = render_completion_lane_body(&missing, 80, accent).unwrap();
+    let missing_span = rows
+        .iter()
+        .flat_map(|row| &row.spans)
+        .find(|span| span.content == "No report captured.")
+        .unwrap();
+    assert_eq!(
+        missing_span.style.fg,
+        Some(jcode_tui_style::role_color(jcode_tui_style::Role::Dim))
+    );
 }
 
 #[test]

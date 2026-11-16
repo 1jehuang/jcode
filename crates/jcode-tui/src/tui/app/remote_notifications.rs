@@ -452,7 +452,8 @@ fn parse_completion_notice(trimmed: &str) -> Option<CompletionNotice<'_>> {
     if sender.is_empty()
         || !(details.starts_with("Recent output (automatically captured):\n")
             || details.starts_with("No recent assistant output was captured. ")
-            || details.starts_with("Lane plan:\n"))
+            || details.starts_with("Lane plan:\n")
+            || details.starts_with("Final response:\n"))
     {
         return None;
     }
@@ -496,7 +497,10 @@ fn completion_response_line(details: &str) -> Option<String> {
         .or_else(|| details.split_once("Recent output (automatically captured):\n"))?
         .1;
     let line = jcode_tui_messages::swarm_preview_line(response, usize::MAX);
-    (!line.is_empty() && line != "No final assistant response was captured.").then_some(line)
+    (!line.is_empty()
+        && line != "No final assistant response was captured."
+        && line != "No report captured.")
+        .then_some(line)
 }
 
 /// Collapsed transcript content for a completion handoff. The row already
@@ -932,6 +936,11 @@ mod tests {
                 .tldr
                 .to_string()
         };
+        let compact = "Agent tulip finished their work and is ready for more.\n\nFinal response:\nNo report captured.";
+        let compact_row =
+            super::swarm_delivery_display_message(compact).expect("compact completion");
+        assert_eq!(compact_row.title.as_deref(), Some("Swarm · tulip"));
+        assert!(!tldr_of(&compact_row.content).contains("No report captured."));
         let handoff = "Agent panda finished their work and is ready for more.\n\nLane plan:\nPhase 2 · resident-query-archive: 1/2 completed\n- [completed] Archive\n- [pending] Upload cap\n\nFinal response:\n\nReadback verified.\nMore detail.";
         let restored = super::swarm_delivery_display_message(handoff).expect("swarm row");
         assert_eq!(restored.title.as_deref(), Some("Swarm · panda"));
