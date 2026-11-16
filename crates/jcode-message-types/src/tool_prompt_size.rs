@@ -9,38 +9,17 @@ pub(super) fn prompt_chars(tool: &ToolDefinition) -> usize {
         + value_chars(&tool.input_schema)
 }
 
-// Compact serde_json preserves UTF-8 and escapes only quotes, backslashes and
-// ASCII controls. Counting those bytes avoids both a schema clone and JSON I/O.
+// Serialize each borrowed component rather than first cloning the complete
+// schema tree into another Value. Value's Display uses the existing compact
+// serializer, so escaping and number formatting stay identical to legacy JSON.
 fn string_chars(value: &str) -> usize {
-    2 + value.len()
-        + value
-            .bytes()
-            .map(|byte| match byte {
-                b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 8 | 12 => 1,
-                0..=31 => 5,
-                _ => 0,
-            })
-            .sum::<usize>()
+    serde_json::to_string(value)
+        .expect("string serialization cannot fail")
+        .len()
 }
 
 fn value_chars(value: &Value) -> usize {
-    match value {
-        Value::Null => 4,
-        Value::Bool(true) => 4,
-        Value::Bool(false) => 5,
-        Value::Number(number) => number.to_string().len(),
-        Value::String(text) => string_chars(text),
-        Value::Array(items) => {
-            2 + items.len().saturating_sub(1) + items.iter().map(value_chars).sum::<usize>()
-        }
-        Value::Object(fields) => {
-            2 + fields.len().saturating_sub(1)
-                + fields
-                    .iter()
-                    .map(|(key, value)| string_chars(key) + 1 + value_chars(value))
-                    .sum::<usize>()
-        }
-    }
+    value.to_string().len()
 }
 
 #[cfg(test)]
@@ -120,7 +99,7 @@ mod tests {
         }
         let counted = start.elapsed();
         eprintln!(
-            "tool prompt accounting exact-count-v3: legacy={legacy:?} counted={counted:?} ratio={:.2}x",
+            "tool prompt accounting no-schema-clone: legacy={legacy:?} counted={counted:?} ratio={:.2}x",
             legacy.as_secs_f64() / counted.as_secs_f64()
         );
     }
