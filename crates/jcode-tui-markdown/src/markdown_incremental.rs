@@ -297,6 +297,9 @@ impl IncrementalMarkdownRenderer {
             .map(|checkpoint| checkpoint.offset)
     }
 
+    /// Test-only: production no longer keeps a checkpoint (see `render`), so this
+    /// whole cluster exists to check the checkpoint logic itself.
+    #[cfg(test)]
     fn find_last_complete_block_checkpoint(&self, text: &str) -> Option<CompleteBlockCheckpoint> {
         let mut checkpoint = None;
         let mut line_start = 0usize;
@@ -498,16 +501,19 @@ fn find_stable_split(tail: &str) -> StableSplit {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 struct CompleteBlockCheckpoint {
     offset: usize,
     needs_separator: bool,
 }
 
+#[cfg(test)]
 pub(crate) fn is_heading_line(line: &str) -> bool {
     let hashes = line.chars().take_while(|c| *c == '#').count();
     hashes > 0 && hashes <= 6 && line.chars().nth(hashes) == Some(' ')
 }
 
+#[cfg(test)]
 pub(crate) fn is_thematic_break_line(line: &str) -> bool {
     let trimmed = line.trim();
     let mut marker: Option<char> = None;
@@ -530,6 +536,7 @@ pub(crate) fn is_thematic_break_line(line: &str) -> bool {
     count >= 3
 }
 
+#[cfg(test)]
 pub(crate) fn looks_like_ordered_list_item(line: &str) -> bool {
     let trimmed = line.trim_start();
     let digit_count = trimmed.chars().take_while(|c| c.is_ascii_digit()).count();
@@ -538,6 +545,7 @@ pub(crate) fn looks_like_ordered_list_item(line: &str) -> bool {
         && matches!(trimmed.chars().nth(digit_count + 1), Some(' ' | '\t'))
 }
 
+#[cfg(test)]
 pub(crate) fn infer_markdown_line_kind(line: &str) -> MarkdownBlockKind {
     let trimmed = line.trim_start();
     if is_heading_line(trimmed) {

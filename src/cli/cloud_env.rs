@@ -142,7 +142,8 @@ fn collect(root: &Path, request: &Request, source: Source) -> Result<Payload> {
 }
 
 fn exchange_bounded(
-    mut command: Command,
+    // Only the Unix branch mutates the command; the fallback branch drops it.
+    #[cfg_attr(not(unix), allow(unused_mut))] mut command: Command,
     bytes: Vec<u8>,
     timeout: std::time::Duration,
 ) -> Result<Vec<u8>> {

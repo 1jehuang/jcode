@@ -90,6 +90,8 @@ const PROBE_EVERY_UNKNOWN: Duration = Duration::from_secs(30);
 /// A hidden result older than this is ignored, so a probe that stops being refreshed
 /// (or hangs) can never leave a window stuck in the hidden cadence.
 const FRESH_FOR: Duration = Duration::from_secs(8);
+// Only the niri IPC probe below uses this.
+#[cfg(unix)]
 const PROBE_IO_TIMEOUT: Duration = Duration::from_millis(400);
 
 static STATE: AtomicU8 = AtomicU8::new(0);

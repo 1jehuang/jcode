@@ -197,7 +197,6 @@ struct SwarmTreeRow<'a> {
 
 #[derive(Clone)]
 struct DagNode {
-    item_id: String,
     label: String,
     completed: bool,
     active: bool,
@@ -333,7 +332,6 @@ pub(crate) fn render_swarm_plan_dag(
             format!("{prefix} {}", item.content)
         };
         let mut node = DagNode {
-            item_id: id.to_string(),
             label,
             completed,
             active,

@@ -1,6 +1,8 @@
 //! Native SSH attach: the TUI is local; its daemon and workspace are remote.
 
-use anyhow::{Context, Result, bail};
+#[cfg(unix)]
+use anyhow::Context;
+use anyhow::{Result, bail};
 
 use super::args::{Args, Command};
 use super::provider_init::ProviderChoice;
@@ -13,6 +15,7 @@ pub(crate) fn stash_client_reload(session_id: String) {
         .unwrap_or_else(|error| error.into_inner()) = Some(session_id);
 }
 
+#[cfg(unix)]
 fn client_reload_command(
     executable: &std::path::Path,
     args: &Args,
@@ -233,6 +236,7 @@ fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+#[cfg(any(unix, test))]
 fn last_transfer_for_host<'a>(
     host: &str,
     lease: Option<&'a crate::storage::SessionLease>,

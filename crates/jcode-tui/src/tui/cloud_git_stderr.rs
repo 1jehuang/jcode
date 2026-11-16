@@ -75,7 +75,10 @@ pub(super) async fn drain(reader: impl AsyncRead + Unpin, mut emit: impl FnMut(S
 }
 
 /// Unlike kill_on_drop, this also kills pipe-holding descendants on cancellation.
-pub(super) struct ProcessGroup(pub(super) Option<u32>);
+pub(super) struct ProcessGroup(
+    // Read only by the Unix kill below.
+    #[cfg_attr(not(unix), allow(dead_code))] pub(super) Option<u32>,
+);
 impl Drop for ProcessGroup {
     fn drop(&mut self) {
         #[cfg(unix)]

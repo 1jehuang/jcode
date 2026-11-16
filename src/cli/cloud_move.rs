@@ -2731,6 +2731,10 @@ pub(crate) fn stash_handoff(handoff: crate::tui::CloudHandoff) {
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(handoff);
 }
 
+// `tui_launch` stashes the `/local` cloud-attach handoff and the SSH guard in
+// `ssh.rs` consumes it once the transport has closed. That caller is Unix-only,
+// so the whole pair is dead weight on Windows.
+#[cfg(unix)]
 pub(crate) fn take_stashed_handoff() -> Option<crate::tui::CloudHandoff> {
     STASHED_HANDOFF
         .lock()

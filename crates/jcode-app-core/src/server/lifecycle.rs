@@ -14,6 +14,8 @@ const TEMP_SERVER_EXIT_CODE: i32 = super::EXIT_IDLE_TIMEOUT;
 /// Wait (bounded) for an in-flight session save before the process exits.
 /// Exiting between a checkpoint's snapshot write and journal delete used to
 /// duplicate history on the next load (#1632).
+// The daemon SIGTERM handler that calls this is Unix-only.
+#[cfg(unix)]
 pub(crate) async fn drain_session_saves_before_exit() {
     crate::logging::info("Server received SIGTERM, shutting down gracefully");
     let drained = tokio::task::spawn_blocking(|| {

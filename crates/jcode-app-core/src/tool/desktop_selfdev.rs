@@ -406,6 +406,8 @@ fn peer_process(stream: &tokio::net::UnixStream) -> Result<(u32, PathBuf)> {
     ))
 }
 
+// Only the Unix desktop-socket connect path resolves a host profile.
+#[cfg(any(unix, test))]
 fn host_profile(root: &Path, exe: &Path) -> Result<String> {
     // Reject installed binaries, other checkouts and ambiguous custom target directories.
     let relative = exe
@@ -489,7 +491,10 @@ async fn bounded_output(mut reader: impl AsyncRead + Unpin) -> Result<String> {
 }
 
 // Kill the entire private process group on timeout or cancellation, including Xvfb/compiler descendants.
-struct ProcessGroup(u32);
+struct ProcessGroup(
+    // Read only by the Unix kill below.
+    #[cfg_attr(not(unix), allow(dead_code))] u32,
+);
 impl Drop for ProcessGroup {
     fn drop(&mut self) {
         #[cfg(unix)]

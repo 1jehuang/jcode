@@ -5,8 +5,7 @@
 //! the 10-rule child message template.
 
 use jcode_permission_bubble::{
-    ChildTemplate, ForkDepthGuard, ForkDepthResult, MAX_FORK_DEPTH, build_child_message,
-    build_forked_messages,
+    ForkDepthGuard, ForkDepthResult, build_child_message,
 };
 use jcode_session_types::StoredMessage;
 

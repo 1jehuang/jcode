@@ -718,6 +718,7 @@ fn handle_replaced_signal() -> ! {
     std::process::exit(0);
 }
 
+#[cfg(any(unix, test))]
 fn signal_cleanup_terminal_modes_to(mut writer: impl Write) -> bool {
     // The ownership check and the restore writes run under the kitty state
     // lock so an in-flight editor handoff cannot split them: the handoff

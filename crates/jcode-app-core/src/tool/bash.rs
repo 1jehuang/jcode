@@ -624,6 +624,7 @@ fn tool_scratch_dir() -> Option<std::path::PathBuf> {
 /// on unix the command runs in its own session with no controlling terminal so
 /// prompts that open /dev/tty directly (sudo, ssh, git credentials) fail fast
 /// instead of hanging. The agent sees the failure and reruns non-interactively.
+#[cfg(not(windows))]
 const NON_INTERACTIVE_ENV: &[(&str, &str)] = &[
     ("GIT_TERMINAL_PROMPT", "0"),
     ("GIT_ASKPASS", "true"),

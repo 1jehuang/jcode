@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+// Detached turns only spawn a supervisor on Unix.
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 

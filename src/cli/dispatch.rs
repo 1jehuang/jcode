@@ -1,6 +1,8 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
-use anyhow::{Context, Result};
+#[cfg(unix)]
+use anyhow::Context;
+use anyhow::Result;
 use std::io::IsTerminal;
 use std::process::{Command as ProcessCommand, Stdio};
 use std::time::Instant;

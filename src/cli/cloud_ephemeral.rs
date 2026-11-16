@@ -37,6 +37,8 @@ fn validate_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+// Only the tests below read this back.
+#[cfg(test)]
 pub(super) fn host_id(host: &str) -> Option<&str> {
     host.strip_prefix(HOST_PREFIX)
         .filter(|id| validate_id(id).is_ok())
