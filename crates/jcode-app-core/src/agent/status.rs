@@ -1,30 +1,24 @@
 use super::*;
 
 fn assistant_output_tail_after(messages: &[StoredMessage], start_index: usize) -> Option<String> {
-    use std::borrow::Cow;
-    let chunks: Vec<Cow<'_, str>> = messages
+    messages
         .iter()
         .skip(start_index)
+        .rev()
         .filter(|message| message.role == Role::Assistant)
-        .flat_map(|message| &message.content)
-        .filter_map(|block| match block {
-            ContentBlock::Text { text, .. } => Some(Cow::Borrowed(text.as_str())),
-            ContentBlock::ToolUse { name, input, .. } => {
-                let intent = ToolCall::intent_from_input(input)
-                    .map(|intent| jcode_swarm_core::truncate_detail(&intent, 240));
-                Some(Cow::Owned(match intent {
-                    Some(intent) => format!("[Tool: {name} · {intent}]"),
-                    None => format!("[Tool: {name}]"),
-                }))
-            }
-            // Never include private reasoning, user prompts, or tool result bodies.
-            _ => None,
+        .find_map(|message| {
+            let text = message
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text, .. } => Some(text.as_str()),
+                    // Never include tool activity, private reasoning, or results.
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            jcode_swarm_core::normalize_completion_report(Some(text))
         })
-        .collect();
-    jcode_swarm_core::recent_output_tail(
-        chunks.iter().map(|chunk| chunk.as_ref()),
-        jcode_swarm_core::SWARM_OUTPUT_TAIL_TOKENS,
-    )
 }
 
 impl Agent {
@@ -171,8 +165,8 @@ impl Agent {
             })
     }
 
-    /// Recent public assistant output from this turn, including tool-call markers.
-    /// No final answer or explicit report tool call is needed for delivery.
+    /// Tail of the latest non-empty assistant text response at or after `start_index`.
+    /// Earlier commentary, tool activity, reasoning, and results are excluded.
     pub fn recent_assistant_output_tail_after(&self, start_index: usize) -> Option<String> {
         assistant_output_tail_after(&self.session.messages, start_index)
     }
@@ -330,7 +324,7 @@ mod output_tail_tests {
     }
 
     #[test]
-    fn automatic_output_tail_includes_commentary_when_turn_ends_on_tools() {
+    fn automatic_output_tail_excludes_tools_and_private_content() {
         let messages = vec![
             message(
                 "assistant",
@@ -344,8 +338,9 @@ mod output_tail_tests {
                 "assistant",
                 serde_json::json!([
                     {"type":"reasoning", "text":"private reasoning must not leak"},
-                {"type":"reasoning_trace", "text":"private trace must not leak"},
-                {"type":"text", "text":"Implemented the parser fix."},
+                    {"type":"reasoning_trace", "text":"private trace must not leak"},
+                    {"type":"text", "text":"Implemented the parser fix."},
+                    {"type":"tool_result", "tool_use_id":"prior", "content":"private result must not leak"},
                     {"type":"tool_use", "id":"test", "name":"bash", "input":{"intent":"Run parser tests"}}
                 ]),
             ),
@@ -357,13 +352,14 @@ mod output_tail_tests {
         ];
         assert_eq!(
             assistant_output_tail_after(&messages, 1).as_deref(),
-            Some("Implemented the parser fix.\n\n[Tool: bash · Run parser tests]")
+            Some("Implemented the parser fix.")
         );
         assert_eq!(assistant_output_tail_after(&messages, messages.len()), None);
+        assert_eq!(assistant_output_tail_after(&messages, usize::MAX), None);
     }
 
     #[test]
-    fn automatic_output_tail_spans_assistant_messages_and_keeps_newest_text() {
+    fn automatic_output_tail_uses_only_latest_nonempty_assistant_response() {
         let messages = vec![
             message(
                 "assistant",
@@ -371,20 +367,39 @@ mod output_tail_tests {
             ),
             message(
                 "assistant",
-                serde_json::json!([{"type":"text", "text":"final commentary"}]),
+                serde_json::json!([
+                    {"type":"text", "text":"final commentary"},
+                    {"type":"text", "text":"second paragraph"}
+                ]),
+            ),
+            message(
+                "assistant",
+                serde_json::json!([
+                    {"type":"text", "text":" \n\t"},
+                    {"type":"tool_use", "id":"test", "name":"bash", "input":{}}
+                ]),
             ),
         ];
         assert_eq!(
             assistant_output_tail_after(&messages, 0).as_deref(),
-            Some("first commentary\n\nfinal commentary")
+            Some("final commentary\n\nsecond paragraph")
         );
-        let long = format!("{}\nLATEST RESULT", "old".repeat(3000));
+        assert_eq!(assistant_output_tail_after(&messages, 2), None);
+    }
+
+    #[test]
+    fn automatic_output_tail_preserves_utf8_when_truncating_latest_response() {
+        let long = format!("{}\nLATEST RESULT", "界🦀".repeat(3000));
         let messages = [message(
             "assistant",
             serde_json::json!([{"type":"text", "text":long}]),
         )];
         let tail = assistant_output_tail_after(&messages, 0).unwrap();
-        assert!(tail.len() <= jcode_swarm_core::SWARM_OUTPUT_TAIL_TOKENS * 4);
+        assert_eq!(
+            tail.chars().count(),
+            jcode_swarm_core::MAX_SWARM_COMPLETION_REPORT_CHARS
+        );
+        assert!(tail.starts_with("[Earlier response text truncated by jcode.]"));
         assert!(tail.ends_with("LATEST RESULT"));
     }
 }

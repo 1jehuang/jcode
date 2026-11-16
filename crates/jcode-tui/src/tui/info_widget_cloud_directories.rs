@@ -15,24 +15,15 @@ fn fit(text: &str, width: usize) -> String {
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
-    if clean.width() <= width {
-        return clean;
-    }
-    if width == 0 {
-        return String::new();
-    }
-    let mut result = String::new();
+    // Cut at the widget edge with no ellipsis so every cell carries content.
     let mut used = 0;
-    for c in clean.chars() {
-        let cells = c.width().unwrap_or(0);
-        if used + cells > width - 1 {
-            break;
+    for (idx, c) in clean.char_indices() {
+        used += c.width().unwrap_or(0);
+        if used > width {
+            return clean[..idx].trim_end().to_string();
         }
-        result.push(c);
-        used += cells;
     }
-    result.push('…');
-    result
+    clean
 }
 
 pub(super) fn render_cloud_directories(data: &InfoWidgetData, inner: Rect) -> Framed {

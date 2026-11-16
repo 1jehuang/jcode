@@ -246,7 +246,20 @@ fn resolve_build_semver(base_version: (u32, u32, u32)) -> Result<String, String>
     // turn invalidated `jcode-build-meta` and force-recompiled the entire crate
     // graph (base -> app-core -> tui -> cli). Deriving the value deterministically
     // keeps incremental rebuilds incremental.
-    let offset = commits_since_base_tag(base_version).unwrap_or(0);
+    let offset = commits_since_base_tag(base_version)
+        .or_else(|| {
+            let description = match std::env::var("JCODE_BUILD_GIT_TAG") {
+                Ok(description) => Some(description),
+                Err(std::env::VarError::NotPresent) => None,
+                Err(std::env::VarError::NotUnicode(_)) => {
+                    println!("cargo:warning=Ignoring non-Unicode JCODE_BUILD_GIT_TAG");
+                    None
+                }
+            }
+            .or_else(|| metadata_value("git_tag"))?;
+            build_inputs::base_tag_offset(&description, base_version)
+        })
+        .unwrap_or(0);
     let patch = base_version.2.saturating_add(offset);
     Ok(format!("{}.{}.{}", base_version.0, base_version.1, patch))
 }

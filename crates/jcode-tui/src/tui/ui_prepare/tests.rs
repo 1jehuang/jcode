@@ -306,3 +306,60 @@ fn header_cache_ttl_is_not_sized_to_the_frame_rate() {
          signature, so the TTL should only bound slow background drift"
     );
 }
+
+#[test]
+fn wrapping_a_streaming_reply_in_two_parts_matches_wrapping_it_whole() {
+    let text = concat!(
+        "## Heading\n\n",
+        "A first paragraph that is long enough to wrap across several rows of a narrow pane, ",
+        "with **bold** words and `code` in it.\n\n",
+        "- a list item that also wraps onto a continuation row with a hanging indent\n",
+        "- second item\n\n",
+        "```rust\nfn main() { println!(\"a line of code long enough to need wrapping too\"); }\n```\n\n",
+        "A closing paragraph, again long enough that it wraps onto more than one row here.\n",
+    );
+    for width in [20u16, 34, 80] {
+        let md_lines = markdown::render_markdown_with_width(text, Some(width as usize - 4));
+        for prefix_blank in [false, true] {
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            if prefix_blank {
+                lines.push(Line::from(""));
+            }
+            lines.extend(md_lines.iter().cloned());
+            let whole = wrap_lines(lines.clone(), &[], &[], &[], width);
+            for split in 1..lines.len() {
+                let mut head = lines.clone();
+                let tail = head.split_off(split);
+                let joined = append_wrapped_tail(
+                    &wrap_lines(head, &[], &[], &[], width),
+                    wrap_lines(tail, &[], &[], &[], width),
+                );
+                let context = format!("width {width}, prefix_blank {prefix_blank}, split {split}");
+                assert_eq!(joined.wrapped_lines, whole.wrapped_lines, "{context}");
+                assert_eq!(
+                    joined.wrapped_plain_lines, whole.wrapped_plain_lines,
+                    "{context}"
+                );
+                assert_eq!(
+                    joined.wrapped_copy_offsets, whole.wrapped_copy_offsets,
+                    "{context}"
+                );
+                assert_eq!(joined.raw_plain_lines, whole.raw_plain_lines, "{context}");
+                let map = |prepared: &PreparedMessages| {
+                    prepared
+                        .wrapped_line_map
+                        .iter()
+                        .map(|m| (m.raw_line, m.start_col, m.end_col))
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(map(&joined), map(&whole), "{context}");
+                assert_eq!(
+                    joined.image_regions.len(),
+                    whole.image_regions.len(),
+                    "{context}"
+                );
+                assert!(joined.wrapped_user_indices.is_empty() && joined.copy_targets.is_empty());
+            }
+        }
+    }
+}

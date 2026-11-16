@@ -23,6 +23,16 @@ work. Command failures do not trigger provider fallback or clear an active chat.
 Local daemon mode is distinct from SSH mode and retains its existing behavior.
 Command sequences are not an atomic remote-command API.
 
+## Fork hotkey (Super/Alt+Space)
+
+The next-prompt-to-new-session hotkey works over SSH. Enter sends a daemon
+`Split`, so the fork exists only on the host. The prompt is staged in the
+laptop's client-input file for the new session ID, and a second `jcode --ssh`
+client is opened in a new terminal with the same host, binary, server socket and
+remote working directory. That client attaches and submits the prompt. The
+original terminal stays on the parent session. If no terminal can be opened, the
+exact command is printed instead. No laptop session storage is read or written.
+
 ## Cloud auto-poke ownership
 
 SSH/cloud subscriptions enable the daemon's persisted automatic follow-up policy

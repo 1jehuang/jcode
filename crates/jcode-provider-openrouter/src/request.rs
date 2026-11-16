@@ -313,7 +313,7 @@ pub fn build_chat_messages(
                             api_messages.push(serde_json::json!({
                                 "role": "tool",
                                 "tool_call_id": sanitize_tool_id(&missing_id),
-                                "content": missing_output.clone()
+                                "content": missing_output
                             }));
                         }
                     }
@@ -422,7 +422,7 @@ pub fn build_chat_messages(
                 normalized.push(serde_json::json!({
                     "role": "tool",
                     "tool_call_id": id,
-                    "content": missing_output.clone()
+                    "content": missing_output
                 }));
             }
         }
@@ -478,7 +478,7 @@ pub fn build_chat_messages(
             api_messages.push(serde_json::json!({
                 "role": "tool",
                 "tool_call_id": id,
-                "content": missing_output.clone()
+                "content": missing_output
             }));
         }
         jcode_logging::info(&format!(
@@ -539,7 +539,7 @@ pub fn build_chat_messages(
                             reordered.push(serde_json::json!({
                                 "role": "tool",
                                 "tool_call_id": id,
-                                "content": missing_output.clone()
+                                "content": missing_output
                             }));
                         }
                     }
@@ -589,7 +589,8 @@ mod request_tests {
                     name: "read".to_string(),
                     input: json!({"path": output}),
                     thought_signature: None,
-                }],
+                }]
+                .into(),
                 timestamp: None,
                 tool_duration_ms: None,
             },
@@ -638,7 +639,8 @@ mod request_tests {
                 name: "read".to_string(),
                 input: json!({"path": format!("{id}.txt")}),
                 thought_signature: Some(signature.to_string()),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         };

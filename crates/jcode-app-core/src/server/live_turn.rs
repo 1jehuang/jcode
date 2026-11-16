@@ -13,7 +13,7 @@
 //! `Done`/`Error` event (id 0) so attached clients can settle the externally
 //! started turn in their UI.
 
-use super::turn_failover::process_reserved_locked_message_with_server_failover;
+use super::turn_failover::process_reserved_locked_context_with_server_failover;
 use super::{
     SwarmEvent, SwarmMember, truncate_detail, update_member_status,
     update_member_status_with_report,
@@ -91,7 +91,14 @@ pub(super) async fn idle_live_agent(
         return None;
     }
 
-    agent.try_lock_owned().ok()
+    let agent = agent.try_lock_owned().ok()?;
+    // A session that moved to another machine (or a stale copy) cannot run
+    // turns here. Starting one only produces a lease error per wake, so leave
+    // the wake queued for whichever copy is runnable.
+    if agent.session_lease_blocked() {
+        return None;
+    }
+    Some(agent)
 }
 
 /// Spawn `message` as a full tracked turn in a live session.
@@ -103,8 +110,31 @@ pub(super) async fn idle_live_agent(
 /// finish rendering the externally started turn.
 pub(super) async fn spawn_tracked_live_turn(
     session_id: &str,
+    agent: OwnedMutexGuard<Agent>,
+    message: String,
+    system_reminder: Option<String>,
+    display_role: Option<crate::session::StoredDisplayRole>,
+    status_detail: Option<String>,
+    swarm: LiveTurnSwarmContext,
+) -> bool {
+    spawn_tracked_live_turn_with_images(
+        session_id,
+        agent,
+        message,
+        Vec::new(),
+        system_reminder,
+        display_role,
+        status_detail,
+        swarm,
+    )
+    .await
+}
+
+pub(super) async fn spawn_tracked_live_turn_with_images(
+    session_id: &str,
     mut agent: OwnedMutexGuard<Agent>,
     message: String,
+    images: Vec<(String, String)>,
     system_reminder: Option<String>,
     display_role: Option<crate::session::StoredDisplayRole>,
     status_detail: Option<String>,
@@ -150,28 +180,26 @@ pub(super) async fn spawn_tracked_live_turn(
         let start_message_index = agent.message_count();
         let pending_queue = agent.soft_interrupt_queue();
         let (result, stop_reason) = catch_live_turn_panic(async {
-            if let Some(display_role) = display_role {
-                agent
-                    .run_reserved_streaming_mpsc(
-                        &turn_lease,
-                        &message,
-                        vec![],
-                        system_reminder,
-                        event_tx.clone(),
-                        Some(display_role),
-                    )
-                    .await
-            } else {
-                process_reserved_locked_message_with_server_failover(
+            if !images.is_empty() {
+                return super::turn_failover::process_reserved_locked_message_with_server_failover(
                     &mut agent,
                     &turn_lease,
                     &message,
-                    vec![],
+                    images,
                     system_reminder,
                     event_tx.clone(),
                 )
-                .await
+                .await;
             }
+            process_reserved_locked_context_with_server_failover(
+                &mut agent,
+                &turn_lease,
+                &message,
+                system_reminder,
+                display_role.unwrap_or(crate::session::StoredDisplayRole::System),
+                event_tx.clone(),
+            )
+            .await
         })
         .await;
         let completion_report = agent.recent_assistant_output_tail_after(start_message_index);
@@ -341,6 +369,10 @@ mod stop_reason_tests {
 }
 
 #[cfg(test)]
+#[path = "live_context_tests.rs"]
+mod context_tests;
+
+#[cfg(test)]
 mod durable_error_tests {
     use super::*;
     use crate::message::{Message, ToolDefinition};
@@ -464,6 +496,7 @@ mod durable_error_tests {
         );
 
         let mut stopped = false;
+        let mut wake_entries = 0;
         let error_message = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let event = event_rx.recv().await.expect("live turn event stream");
@@ -472,6 +505,16 @@ mod durable_error_tests {
                     event => event,
                 };
                 match payload {
+                    ServerEvent::SoftInterruptInjected {
+                        content,
+                        display_role,
+                        ..
+                    } => {
+                        assert_eq!(content, "wake worker");
+                        assert_eq!(display_role.as_deref(), Some("system"));
+                        assert!(!stopped, "input delivery must precede terminal events");
+                        wake_entries += 1;
+                    }
                     ServerEvent::TurnStopped {
                         reason, message, ..
                     } => {
@@ -491,6 +534,7 @@ mod durable_error_tests {
         .await
         .expect("failed live turn must terminate");
         assert!(stopped);
+        assert_eq!(wake_entries, 1);
         assert_eq!(error_message, format!("mock HTTP 400: {FAILURE}"));
         assert_eq!(provider.0.load(Ordering::SeqCst), 1);
         assert_eq!(members.read().await[&session_id].status, "failed");

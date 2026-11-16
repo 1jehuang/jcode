@@ -65,7 +65,7 @@ fn include_old_saved_sessions_on_initial_load() -> bool {
 }
 
 const SESSION_LIST_CACHE_TTL: Duration = Duration::from_secs(5);
-const SESSION_LIST_DISK_CACHE_VERSION: u32 = 3;
+const SESSION_LIST_DISK_CACHE_VERSION: u32 = 4;
 const SESSION_LIST_DISK_CACHE_MAX_AGE_SECONDS: i64 = 7 * 24 * 60 * 60;
 const SAVED_METADATA_TAIL_SCAN_BYTES: u64 = 64 * 1024;
 const INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES: usize = 64 * 1024;
@@ -160,7 +160,7 @@ struct SessionListCacheState {
 }
 
 #[derive(Serialize, Deserialize)]
-struct GroupedSessionListDiskCache {
+struct GroupedSessionListDiskCache<Groups = Vec<ServerGroup>, Orphans = Vec<SessionInfo>> {
     version: u32,
     generated_at: chrono::DateTime<chrono::Utc>,
     sessions_dir: PathBuf,
@@ -171,8 +171,8 @@ struct GroupedSessionListDiskCache {
     /// file stays readable (it was written with externals on).
     #[serde(default = "crate::tui::session_picker::loading::default_true")]
     external_sessions: bool,
-    server_groups: Vec<ServerGroup>,
-    orphan_sessions: Vec<SessionInfo>,
+    server_groups: Groups,
+    orphan_sessions: Orphans,
 }
 
 pub(crate) fn default_true() -> bool {
@@ -237,6 +237,26 @@ fn session_list_disk_cache_is_usable(
             <= SESSION_LIST_DISK_CACHE_MAX_AGE_SECONDS
 }
 
+/// Borrow the inventories while writing. Cloning them here duplicates every
+/// search index and loaded transcript solely for the duration of serialization.
+fn grouped_session_list_disk_cache<'a>(
+    sessions_dir: &Path,
+    scan_limit: usize,
+    server_groups: &'a [ServerGroup],
+    orphan_sessions: &'a [SessionInfo],
+) -> GroupedSessionListDiskCache<&'a [ServerGroup], &'a [SessionInfo]> {
+    GroupedSessionListDiskCache {
+        version: SESSION_LIST_DISK_CACHE_VERSION,
+        generated_at: chrono::Utc::now(),
+        sessions_dir: sessions_dir.to_path_buf(),
+        scan_limit,
+        include_old_saved_sessions: include_old_saved_sessions_on_initial_load(),
+        external_sessions: include_external_sessions(),
+        server_groups,
+        orphan_sessions,
+    }
+}
+
 fn write_grouped_session_list_disk_cache(
     sessions_dir: &Path,
     scan_limit: usize,
@@ -246,16 +266,8 @@ fn write_grouped_session_list_disk_cache(
     let Ok(path) = session_list_disk_cache_path() else {
         return;
     };
-    let cache = GroupedSessionListDiskCache {
-        version: SESSION_LIST_DISK_CACHE_VERSION,
-        generated_at: chrono::Utc::now(),
-        sessions_dir: sessions_dir.to_path_buf(),
-        scan_limit,
-        include_old_saved_sessions: include_old_saved_sessions_on_initial_load(),
-        external_sessions: include_external_sessions(),
-        server_groups: server_groups.to_vec(),
-        orphan_sessions: orphan_sessions.to_vec(),
-    };
+    let cache =
+        grouped_session_list_disk_cache(sessions_dir, scan_limit, server_groups, orphan_sessions);
     if let Err(err) = storage::write_json_fast(&path, &cache) {
         crate::logging::debug(&format!(
             "failed to write session picker disk cache {}: {}",
@@ -417,9 +429,11 @@ fn send_session_list_updates_with_discovery(
 mod search_text;
 pub(super) use super::transcript_search::source::SourceBuckets;
 use super::transcript_search::source::{BucketSink, Source, Walk, message_role_source, push_mark};
+#[cfg(test)]
+use search_text::raw_value_search_excerpt;
 pub(super) use search_text::{
     build_search_index, classified_search_excerpt, classify_json_into, push_sampled_search_text,
-    raw_value_display_text, raw_value_search_excerpt,
+    raw_value_display_text,
 };
 
 #[cfg(test)]
@@ -1321,6 +1335,8 @@ struct SessionMessageSummaryData {
     assistant_message_count: usize,
     estimated_tokens: usize,
     first_user_prompt: Option<String>,
+    /// A fork boundary overrides the opening intent of earlier snapshot/journal data.
+    saw_fork_marker: bool,
     search_text: SourceBuckets,
     /// Newest stored message timestamp, of any role (prompts, replies, tools).
     last_message_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -1330,6 +1346,10 @@ impl SessionMessageSummaryData {
     fn add_message(&mut self, message: &SessionMessageSummary) {
         if let Some(ts) = message.timestamp {
             self.last_message_at = Some(self.last_message_at.map_or(ts, |cur| cur.max(ts)));
+        }
+        if message.is_fork_marker {
+            self.first_user_prompt = None;
+            self.saw_fork_marker = true;
         }
         if !summary_message_is_visible_conversation(message) {
             return;
@@ -1371,9 +1391,10 @@ impl SessionMessageSummaryData {
             .assistant_message_count
             .saturating_add(other.assistant_message_count);
         self.estimated_tokens = self.estimated_tokens.saturating_add(other.estimated_tokens);
-        if self.first_user_prompt.is_none() {
+        if other.saw_fork_marker || self.first_user_prompt.is_none() {
             self.first_user_prompt = other.first_user_prompt;
         }
+        self.saw_fork_marker |= other.saw_fork_marker;
         self.search_text
             .merge(&other.search_text, INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES);
     }
@@ -1441,6 +1462,7 @@ struct SessionMessageSummary {
     // allocating or walking it. After display metadata is known, we inspect only
     // the raw prefix for old snapshots that predate `display_role`.
     content_starts_with_system_reminder: bool,
+    is_fork_marker: bool,
     /// Bounded per-source samples of the content, classified by block type.
     content_search: Option<SourceBuckets>,
     content_text: Option<String>,
@@ -1505,6 +1527,20 @@ impl<'de> Visitor<'de> for SessionMessageSummaryVisitor {
         }
 
         let role = role.ok_or_else(|| serde::de::Error::missing_field("role"))?;
+        // Inspect explicit fork reminders even when display_role hides them.
+        // Decode the text so escaped newlines and block-form content work alike.
+        let is_fork_marker = matches!(role, Role::User)
+            && content.is_some_and(raw_content_starts_with_system_reminder)
+            && content
+                .and_then(raw_value_display_text)
+                .is_some_and(|text| {
+                    text.trim_start()
+                        .strip_prefix("<system-reminder>")
+                        .is_some_and(|body| {
+                            body.trim_start()
+                                .starts_with("This session was forked (split) from session ")
+                        })
+                });
         let content_starts_with_system_reminder = matches!(role, Role::User)
             && display_role.is_none()
             && content.is_some_and(raw_content_starts_with_system_reminder);
@@ -1522,6 +1558,7 @@ impl<'de> Visitor<'de> for SessionMessageSummaryVisitor {
         Ok(SessionMessageSummary {
             role,
             content_starts_with_system_reminder,
+            is_fork_marker,
             content_search,
             content_text,
             display_role,
@@ -2069,7 +2106,10 @@ fn load_external_sessions(enabled: bool, scan_limit: usize) -> Vec<SessionInfo> 
 
         let mut external = Vec::new();
         for handle in [claude, codex, pi, opencode, cursor] {
-            external.extend(handle.join().unwrap_or_default());
+            match handle.join() {
+                Ok(sessions) => external.extend(sessions),
+                Err(_) => crate::logging::warn("External session loader panicked"),
+            }
         }
         external
     })
@@ -2152,6 +2192,7 @@ fn load_external_claude_code_sessions(scan_limit: usize) -> Vec<SessionInfo> {
         .collect()
 }
 
+#[cfg(test)]
 pub(super) fn load_claude_code_preview_from_path(path: &Path) -> Option<Vec<PreviewMessage>> {
     load_claude_code_external_preview(path).map(|preview| preview.messages)
 }
@@ -2200,6 +2241,7 @@ pub(super) fn load_claude_code_external_preview(path: &Path) -> Option<ExternalP
     out.non_empty()
 }
 
+#[cfg(test)]
 pub(super) fn load_claude_code_preview(session_id: &str) -> Option<Vec<PreviewMessage>> {
     let sessions = match crate::import::list_claude_code_sessions() {
         Ok(sessions) => sessions,
@@ -2351,6 +2393,7 @@ fn find_codex_session_file(session_id: &str) -> Option<PathBuf> {
     None
 }
 
+#[cfg(test)]
 pub(super) fn load_codex_preview_from_path(path: &Path) -> Option<Vec<PreviewMessage>> {
     load_codex_external_preview(path).map(|preview| preview.messages)
 }
@@ -2412,6 +2455,7 @@ pub(super) fn load_codex_external_preview(path: &Path) -> Option<ExternalPreview
     out.non_empty()
 }
 
+#[cfg(test)]
 pub(super) fn load_codex_preview(session_id: &str) -> Option<Vec<PreviewMessage>> {
     let path = find_codex_session_file(session_id)?;
     load_codex_preview_from_path(&path)
@@ -2424,7 +2468,9 @@ pub(super) fn load_codex_external_preview_by_id(session_id: &str) -> Option<Exte
 #[path = "loading/pi_sessions.rs"]
 mod pi_sessions;
 use pi_sessions::load_external_pi_sessions;
-pub(super) use pi_sessions::{load_pi_external_preview, load_pi_preview_from_path};
+pub(super) use pi_sessions::load_pi_external_preview;
+#[cfg(test)]
+pub(super) use pi_sessions::load_pi_preview_from_path;
 fn load_external_opencode_sessions(scan_limit: usize) -> Vec<SessionInfo> {
     let Ok(root) = crate::storage::user_home_path(".local/share/opencode/storage/session") else {
         return Vec::new();
@@ -2442,6 +2488,7 @@ fn load_external_opencode_sessions(scan_limit: usize) -> Vec<SessionInfo> {
     .collect()
 }
 
+#[cfg(test)]
 pub(super) fn load_opencode_preview_from_path(path: &Path) -> Option<Vec<PreviewMessage>> {
     load_opencode_external_preview(path).map(|preview| preview.messages)
 }
@@ -2721,6 +2768,7 @@ fn load_external_cursor_sessions(scan_limit: usize) -> Vec<SessionInfo> {
         .collect()
 }
 
+#[cfg(test)]
 pub(super) fn load_cursor_preview_from_path(path: &Path) -> Option<Vec<PreviewMessage>> {
     load_cursor_external_preview(path).map(|preview| preview.messages)
 }

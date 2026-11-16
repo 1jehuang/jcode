@@ -277,6 +277,10 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                     println!("Jcode server is running.");
                 }
             }
+            ServerCommand::ExecWorker => {
+                crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
+                crate::tool::remote_exec::run_worker_stdio().await?;
+            }
             ServerCommand::Keepalive => {
                 run_server_keepalive(
                     &args.provider,
@@ -327,6 +331,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             flow_id,
             cancel,
             no_validate,
+            device_code,
             google,
             api_base,
             api_key,
@@ -342,6 +347,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 flow_id,
                 cancel,
                 no_validate,
+                device_code,
                 openai_compatible_api_base: api_base,
                 openai_compatible_api_key: api_key,
                 openai_compatible_api_key_env: api_key_env,

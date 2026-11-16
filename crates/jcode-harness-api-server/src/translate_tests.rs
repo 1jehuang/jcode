@@ -474,6 +474,29 @@ fn wake_request_is_forwarded_with_explicit_session_and_payload() {
 }
 
 #[test]
+fn api_sessions_enable_server_account_routing_on_create_attach_and_reconnect() {
+    let mut state = BridgeState::default();
+    for request in [
+        json!({"req": "create_session", "id": 1}),
+        json!({"req": "attach_session", "id": 2, "session_id": "s1"}),
+        json!({"req": "attach_session", "id": 3, "session_id": "s1"}),
+    ] {
+        let outbound = state.api_request_to_legacy(&request);
+        let subscription = outbound
+            .iter()
+            .find_map(|outbound| match outbound {
+                Outbound::Legacy(value) if value["type"] == "subscribe" => Some(value),
+                _ => None,
+            })
+            .expect("every attachment must subscribe to the daemon");
+        assert_eq!(
+            subscription["supports_server_failover"], true,
+            "API clients must route exhausted accounts rather than retry the same account: {request}"
+        );
+    }
+}
+
+#[test]
 fn create_session_maps_to_subscribe() {
     let mut state = BridgeState::default();
     let out = state.api_request_to_legacy(&json!({"req": "create_session", "id": 1}));
@@ -649,6 +672,56 @@ fn subscribe_forwards_hello_client_name() {
         panic!("expected legacy outbound");
     };
     assert!(value.get("client_name").is_none());
+}
+
+#[test]
+fn mobile_sessions_continue_after_transport_disconnect() {
+    for client in [
+        "jcode-ios",
+        "jcode-android",
+        "jcode-ios/0.3.0",
+        "jcode-android/1.0",
+    ] {
+        for req in ["create_session", "attach_session"] {
+            let mut state = BridgeState::default();
+            state.client_name = Some(client.into());
+            let out = state.api_request_to_legacy(&json!({
+                "req": req, "id": 1, "session_id": "mobile-session",
+            }));
+            let Outbound::Legacy(subscribe) = &out[0] else {
+                panic!("expected subscribe for {client} {req}");
+            };
+            assert_eq!(subscribe["continue_on_disconnect"], true, "{client} {req}");
+            assert!(subscribe.get("crash_on_disconnect").is_none());
+        }
+    }
+}
+
+#[test]
+fn non_mobile_sessions_keep_existing_disconnect_policy() {
+    for client in [
+        None,
+        Some("jcode-desktop-linux"),
+        Some("custom-sdk"),
+        Some("jcode-ios-other"),
+    ] {
+        for req in ["create_session", "attach_session"] {
+            let desktop = client == Some("jcode-desktop-linux");
+            let mut state = BridgeState::with_crash_on_disconnect(desktop);
+            state.client_name = client.map(str::to_owned);
+            let out = state.api_request_to_legacy(&json!({
+                "req": req, "id": 1, "session_id": "session",
+            }));
+            let Outbound::Legacy(subscribe) = &out[0] else {
+                panic!("expected subscribe");
+            };
+            assert!(subscribe.get("continue_on_disconnect").is_none());
+            assert_eq!(
+                subscribe["crash_on_disconnect"].as_bool().unwrap_or(false),
+                desktop
+            );
+        }
+    }
 }
 
 #[test]

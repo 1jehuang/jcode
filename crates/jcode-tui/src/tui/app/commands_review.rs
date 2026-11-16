@@ -68,7 +68,8 @@ fn judge_transcript_text_message(role: Role, text: String) -> StoredMessage {
         content: vec![ContentBlock::Text {
             text,
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,

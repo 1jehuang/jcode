@@ -13,7 +13,7 @@ jcode-session-types = { path = "../jcode-session-types" }
 jcode-transport = { path = "../jcode-transport" }
 serde = "1"
 serde_json = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 tokio = { version = "1", features = ["net", "io-util", "io-std", "rt-multi-thread", "macros", "sync", "time"] }
 
 [target.'cfg(unix)'.dependencies]

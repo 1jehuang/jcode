@@ -966,6 +966,30 @@ fn config_env_fingerprint_ignores_runtime_only_jcode_vars() {
     restore_env_var("JCODE_DISPLAY_CENTERED", prev_display_centered);
 }
 
+// Changing the resume override must invalidate the cached configuration.
+#[test]
+fn config_cache_reloads_after_resume_open_elsewhere_changes() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_resume = std::env::var_os("JCODE_RESUME_OPEN_ELSEWHERE");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::env::set_var("JCODE_RESUME_OPEN_ELSEWHERE", "off");
+    Config::invalidate_cache();
+
+    let before = crate::config::config().display.resume_open_elsewhere;
+    crate::env::set_var("JCODE_RESUME_OPEN_ELSEWHERE", "replace");
+    let after = crate::config::config().display.resume_open_elsewhere;
+
+    // Restore process-wide state before checking the result, even on failure.
+    restore_env_var("JCODE_HOME", prev_home);
+    restore_env_var("JCODE_RESUME_OPEN_ELSEWHERE", prev_resume);
+    Config::invalidate_cache();
+
+    assert_eq!(before, jcode_config_types::ResumeOpenElsewhere::Off);
+    assert_eq!(after, jcode_config_types::ResumeOpenElsewhere::Replace);
+}
+
 #[test]
 fn config_env_fingerprint_tracks_every_apply_env_override_var() {
     let override_source = include_str!("config/env_overrides.rs");
@@ -1056,6 +1080,34 @@ fn test_provider_failover_defaults_match_new_behavior() {
         super::CrossProviderFailoverMode::Countdown
     );
     assert!(provider.same_provider_account_failover);
+    assert!(provider.openai_auto_banked_reset);
+    assert!(!provider.anthropic_auto_fable_reset);
+}
+
+#[test]
+fn automatic_banked_reset_defaults_on_and_supports_explicit_opt_out() {
+    let cfg: Config = toml::from_str("[provider]\nopenai_auto_banked_reset = false\n").unwrap();
+    assert!(!cfg.provider.openai_auto_banked_reset);
+    let cfg: Config = toml::from_str("[provider]\n").unwrap();
+    assert!(cfg.provider.openai_auto_banked_reset);
+    assert!(cfg.provider.auto_reset_only_when_no_routes);
+    assert!(!cfg.provider.anthropic_auto_fable_reset);
+    let cfg: Config = toml::from_str("[provider]\nanthropic_auto_fable_reset = true\n").unwrap();
+    assert!(cfg.provider.anthropic_auto_fable_reset);
+    assert!(cfg.provider.openai_auto_banked_reset);
+}
+
+#[test]
+fn automatic_reset_routes_first_by_default_and_can_be_overridden() {
+    let cfg: Config = toml::from_str("[provider]\n").unwrap();
+    assert!(cfg.provider.auto_reset_only_when_no_routes);
+    assert!(ProviderConfig::default().auto_reset_only_when_no_routes);
+    let cfg: Config = toml::from_str(
+        "[provider]\nopenai_auto_banked_reset = true\nanthropic_auto_fable_reset = true\nauto_reset_only_when_no_routes = false\n",
+    ).unwrap();
+    assert!(!cfg.provider.auto_reset_only_when_no_routes);
+    assert!(cfg.provider.openai_auto_banked_reset);
+    assert!(cfg.provider.anthropic_auto_fable_reset);
 }
 
 #[test]
@@ -1703,6 +1755,29 @@ fn cli_config_save_round_trips_desktop_tables() {
 
     restore_env_var("JCODE_HOME", prev_home);
     Config::invalidate_cache();
+}
+
+#[test]
+fn global_voice_devices_fall_back_to_desktop_selection() {
+    let desktop: Config =
+        toml::from_str("[desktop.voice]\nglobal_devices = [\"/dev/input/event3\", \"\"]\n")
+            .unwrap();
+    assert_eq!(
+        desktop.global_voice_devices(),
+        vec![std::path::PathBuf::from("/dev/input/event3")]
+    );
+
+    let explicit: Config = toml::from_str(
+        "[dictation]\nglobal_devices = [\"/dev/input/event7\"]\n\n\
+         [desktop.voice]\nglobal_devices = [\"/dev/input/event3\"]\n",
+    )
+    .unwrap();
+    assert_eq!(
+        explicit.global_voice_devices(),
+        vec![std::path::PathBuf::from("/dev/input/event7")]
+    );
+
+    assert!(Config::default().global_voice_devices().is_empty());
 }
 
 #[path = "config_tests/default_provider.rs"]

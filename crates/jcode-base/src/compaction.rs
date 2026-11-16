@@ -420,6 +420,25 @@ impl CompactionManager {
         );
     }
 
+    /// Compare the persisted view exactly without cloning its potentially large
+    /// encrypted payload. This must track every field exported by persisted_state.
+    pub fn persisted_state_matches(
+        &self,
+        state: Option<&crate::session::StoredCompactionState>,
+    ) -> bool {
+        match (self.active_summary.as_ref(), state) {
+            (None, None) => true,
+            (Some(summary), Some(state)) => {
+                summary.text == state.summary_text
+                    && summary.openai_encrypted_content == state.openai_encrypted_content
+                    && summary.covers_up_to_turn == state.covers_up_to_turn
+                    && summary.original_turn_count == state.original_turn_count
+                    && self.compacted_count == state.compacted_count
+            }
+            _ => false,
+        }
+    }
+
     /// Export the currently active compacted view for persistence.
     pub fn persisted_state(&self) -> Option<crate::session::StoredCompactionState> {
         self.active_summary
@@ -1246,7 +1265,7 @@ impl CompactionManager {
                     .sum();
                 let summary = Summary {
                     text: result.summary_text,
-                    openai_encrypted_content: result.openai_encrypted_content,
+                    openai_encrypted_content: result.openai_encrypted_content.map(Into::into),
                     covers_up_to_turn: result.covers_up_to_turn,
                     original_turn_count: self.pending_cutoff,
                 };
@@ -1352,7 +1371,7 @@ impl CompactionManager {
                     .openai_encrypted_content
                     .as_ref()
                     .map(|encrypted_content| ContentBlock::OpenAICompaction {
-                        encrypted_content: encrypted_content.clone(),
+                        encrypted_content: encrypted_content.to_string(),
                     })
                     .unwrap_or_else(|| ContentBlock::Text {
                         text: compacted_summary_text_block(&summary.text),
@@ -1363,7 +1382,7 @@ impl CompactionManager {
 
                 result.push(Message {
                     role: Role::User,
-                    content: vec![summary_block],
+                    content: vec![summary_block].into(),
                     timestamp: None,
                     tool_duration_ms: None,
                 });
