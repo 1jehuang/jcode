@@ -639,6 +639,7 @@ pub(super) fn swarm_delivery_display_message(content: &str) -> Option<crate::tui
 }
 
 /// Full underlying body of swarm display content, collapsed or not.
+#[cfg(test)]
 pub(super) fn swarm_display_full_body(content: &str) -> &str {
     match jcode_tui_messages::parse_collapsible_swarm_content(content) {
         Some(parsed) if !parsed.body.trim().is_empty() => parsed.body.trim(),
@@ -820,8 +821,13 @@ fn present_swarm_notification_inner(
             status_notice: format!("Shared context: {}", key),
         },
         NotificationType::FileConflict { path, .. } => {
-            let edit = FileActivityEdit::from_notification(sender, notification_type)
-                .expect("file conflict notification");
+            let Some(edit) = FileActivityEdit::from_notification(sender, notification_type) else {
+                return SwarmNotificationPresentation {
+                    title: format!("File activity · {}", sender),
+                    message: compact_swarm_path(path),
+                    status_notice: format!("File activity · {}", compact_swarm_path(path)),
+                };
+            };
             let message = file_activity_stack_message(std::slice::from_ref(&edit), false);
             SwarmNotificationPresentation {
                 title: message.title.unwrap_or_default(),

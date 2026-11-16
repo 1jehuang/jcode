@@ -70,7 +70,8 @@ fn canonical_diagnostic_parts(
 ) -> (&[Value], Option<&Value>, Option<&Value>) {
     let items = payload[if responses { "input" } else { "messages" }]
         .as_array()
-        .expect("canonical Copilot input is an array");
+        .map(Vec::as_slice)
+        .unwrap_or_default();
     let system = if responses {
         payload.get("instructions")
     } else {

@@ -66,9 +66,7 @@ impl Serialize for MergedSessions<'_> {
         // Preserve BTreeMap order, including keys inserted between existing ones.
         loop {
             match (current.peek(), updates.peek()) {
-                (Some((old_id, _)), Some((id, _))) if old_id == id => {
-                    let (id, old) = current.next().unwrap();
-                    let (_, progress) = updates.next().unwrap();
+                (Some(&(id, old)), Some(&(update_id, progress))) if id == update_id => {
                     map.serialize_entry(
                         id,
                         if replaces(Some(old), progress) {
@@ -77,18 +75,20 @@ impl Serialize for MergedSessions<'_> {
                             old
                         },
                     )?;
+                    current.next();
+                    updates.next();
                 }
-                (Some((old_id, _)), Some((id, _))) if old_id < id => {
-                    let (id, progress) = current.next().unwrap();
+                (Some(&(id, progress)), Some(&(update_id, _))) if id < update_id => {
                     map.serialize_entry(id, progress)?;
+                    current.next();
                 }
-                (_, Some(_)) => {
-                    let (id, progress) = updates.next().unwrap();
+                (_, Some(&(id, progress))) => {
                     map.serialize_entry(id, progress)?;
+                    updates.next();
                 }
-                (Some(_), None) => {
-                    let (id, progress) = current.next().unwrap();
+                (Some(&(id, progress)), None) => {
                     map.serialize_entry(id, progress)?;
+                    current.next();
                 }
                 (None, None) => break,
             }

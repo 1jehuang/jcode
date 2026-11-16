@@ -48,12 +48,7 @@ pub fn is_websocket_fallback_notice(data: &str) -> bool {
     // as a transport control frame.
     // The phrase is only a prefilter. Ordinary token deltas need no JSON parse
     // here, while frames containing it still require validated classification.
-    if !data.to_lowercase().contains(WEBSOCKET_FALLBACK_NOTICE)
-        || is_structured_response_event(data)
-    {
-        return false;
-    }
-    true
+    data.to_lowercase().contains(WEBSOCKET_FALLBACK_NOTICE) && !is_structured_response_event(data)
 }
 
 /// Validated wire envelope shared by transport bookkeeping. Parsing through

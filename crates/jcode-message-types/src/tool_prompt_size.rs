@@ -9,13 +9,18 @@ pub(super) fn prompt_chars(tool: &ToolDefinition) -> usize {
         + value_chars(&tool.input_schema)
 }
 
-// Serialize each borrowed component rather than first cloning the complete
-// schema tree into another Value. Value's Display uses the existing compact
-// serializer, so escaping and number formatting stay identical to legacy JSON.
+// Count string escaping directly and format borrowed schema values instead of
+// cloning the complete schema tree into another Value. Value's Display uses
+// the compact serializer, preserving escaping and number formatting.
 fn string_chars(value: &str) -> usize {
-    serde_json::to_string(value)
-        .expect("string serialization cannot fail")
-        .len()
+    2 + value
+        .chars()
+        .map(|ch| match ch {
+            '"' | '\\' | '\n' | '\r' | '\t' | '\u{08}' | '\u{0c}' => 2,
+            '\u{00}'..='\u{1f}' => 6,
+            _ => ch.len_utf8(),
+        })
+        .sum::<usize>()
 }
 
 fn value_chars(value: &Value) -> usize {
@@ -61,6 +66,10 @@ mod tests {
         let controls: String = (0..=127).map(char::from).collect();
         let strings = [controls, "界🦀/\u{2028}\u{2029}".repeat(50), String::new()];
         for text in strings {
+            assert_eq!(
+                string_chars(&text),
+                serde_json::to_string(&text).unwrap().len()
+            );
             let schema =
                 json!({text.clone(): [text, i64::MIN, u64::MAX, -0.0, 1e-300, 1e300, {}, []]});
             assert_eq!(

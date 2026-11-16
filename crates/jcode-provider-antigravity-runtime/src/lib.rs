@@ -409,9 +409,9 @@ fn canonical_payload(request: &CodeAssistGenerateRequest) -> Value {
         "model": &request.model,
         "tool_config": &request.request.tool_config,
     });
-    let object = payload
-        .as_object_mut()
-        .expect("canonical payload is an object");
+    let Value::Object(object) = &mut payload else {
+        return Value::Null;
+    };
     object.insert(
         "contents".into(),
         serde_json::to_value(&request.request.contents).unwrap_or(Value::Null),

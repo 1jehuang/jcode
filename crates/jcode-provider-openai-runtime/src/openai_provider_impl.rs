@@ -12,6 +12,7 @@ fn catalog_error_is_auth_rejection(err: &anyhow::Error) -> bool {
         .is_some_and(|status| status.0 == 401 || status.0 == 403)
 }
 
+#[cfg(test)]
 #[test]
 fn borrowed_request_fingerprint_fields_match_owned_fields() {
     use jcode_provider_core::fingerprint::stable_hash_json;

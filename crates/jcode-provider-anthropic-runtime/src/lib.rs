@@ -1276,9 +1276,9 @@ fn anthropic_canonical_payload(request: &ApiRequest) -> Value {
         "temperature": request.temperature,
     });
 
-    let object = payload
-        .as_object_mut()
-        .expect("canonical payload is an object");
+    let Value::Object(object) = &mut payload else {
+        return Value::Null;
+    };
     object.insert("messages".into(), messages_value);
     object.insert("system".into(), system_value.unwrap_or(Value::Null));
     object.insert("tools".into(), tools_value.unwrap_or(Value::Null));

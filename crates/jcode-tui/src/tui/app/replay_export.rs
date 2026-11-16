@@ -184,7 +184,7 @@ pub(super) fn normalize_todo_snapshot(value: Value) -> Result<String> {
         .or_insert_with(|| json!(crate::todo::TodoPlan::default()));
     payload
         .as_object_mut()
-        .unwrap()
+        .context("todo snapshot must be an object")?
         .entry("goals")
         .or_insert_with(|| json!([]));
     let _: crate::todo::TodoPlan =

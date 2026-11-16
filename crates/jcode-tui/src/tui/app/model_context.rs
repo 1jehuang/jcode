@@ -291,19 +291,23 @@ impl App {
             // The composer may already have attachment slots. Remap markers
             // in the recovered prompt once, so swaps and collisions cannot
             // associate its text with a different image.
-            static IMAGE_MARKER: std::sync::LazyLock<regex::Regex> =
-                std::sync::LazyLock::new(|| regex::Regex::new(r"\[image (\d+)\]").unwrap());
-            self.input = IMAGE_MARKER
-                .replace_all(&restored, |captures: &regex::Captures<'_>| {
-                    captures[1]
-                        .parse::<usize>()
-                        .ok()
-                        .and_then(|number| number.checked_sub(1))
-                        .and_then(|index| image_indices.get(index).copied().flatten())
-                        .map(|index| format!("[image {index}]"))
-                        .unwrap_or_else(|| captures[0].to_string())
-                })
-                .into_owned();
+            static IMAGE_MARKER: std::sync::LazyLock<Result<regex::Regex, regex::Error>> =
+                std::sync::LazyLock::new(|| regex::Regex::new(r"\[image (\d+)\]"));
+            self.input = if let Ok(marker) = &*IMAGE_MARKER {
+                marker
+                    .replace_all(&restored, |captures: &regex::Captures<'_>| {
+                        captures[1]
+                            .parse::<usize>()
+                            .ok()
+                            .and_then(|number| number.checked_sub(1))
+                            .and_then(|index| image_indices.get(index).copied().flatten())
+                            .map(|index| format!("[image {index}]"))
+                            .unwrap_or_else(|| captures[0].to_string())
+                    })
+                    .into_owned()
+            } else {
+                restored.clone()
+            };
             self.cursor_pos = self.input.len();
         } else if !restored.is_empty() && self.input != restored {
             // Do not turn a partially typed command or prompt into a different
@@ -635,7 +639,9 @@ impl App {
                         || crate::provider::MultiProvider::is_failover_route_pool_approved(route)
                 }) && (!self.is_remote || remote_resend.is_some()) =>
             {
-                let target = prompt.target_route.as_ref().expect("approved target");
+                let Some(target) = prompt.target_route.as_ref() else {
+                    return;
+                };
                 if self.automatic_failover_targets.contains(target)
                     || self.automatic_failover_targets.len()
                         >= usize::from(Self::AUTO_RETRY_MAX_ATTEMPTS)
@@ -1525,12 +1531,10 @@ impl App {
             "RECOVERY_RETRY_RESTORE",
             "terminal_retry_stop",
         );
-        if self
+        if let Some(pending) = self
             .rate_limit_pending_message
-            .as_ref()
-            .is_some_and(|pending| !pending.is_system)
+            .take_if(|pending| !pending.is_system)
         {
-            let pending = self.rate_limit_pending_message.take().unwrap();
             let raw_input = self.last_submitted_input.take();
             self.restore_failover_payload(super::FallbackResendPayload {
                 content: pending.content,
