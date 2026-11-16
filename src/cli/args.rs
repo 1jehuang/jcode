@@ -1142,6 +1142,12 @@ pub(crate) enum ModelCommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum SessionCommand {
+    /// Copy a selected jcode session into KCode; never modifies the source
+    ImportJcode {
+        /// Session ID in ~/.jcode/sessions (no paths or credentials imported)
+        session: String,
+    },
+
     /// Rename a saved session's human-readable name/title
     Rename {
         /// Session ID or memorable short name, e.g. fox

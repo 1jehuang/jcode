@@ -72,6 +72,17 @@ fn arm_debug_client_parent_death_signal() {
 fn arm_debug_client_parent_death_signal() {}
 
 pub(crate) async fn run_main(mut args: Args) -> Result<()> {
+    // Session import is a narrow, read-only copy out of jcode's storage. It runs
+    // before bootstrap so no startup side effect (config migration, provider
+    // discovery, server spawn) can touch the source product's directory.
+    if let Some(Command::Session(SessionCommand::ImportJcode { session })) = &args.command {
+        let imported = crate::storage::session_import::import_jcode_session(session)?;
+        println!(
+            "Imported {} session files into KCode (jcode source unchanged)",
+            imported.len()
+        );
+        return Ok(());
+    }
     arm_debug_client_parent_death_signal();
     if args.ssh.is_some() {
         // A remote session ID and working directory belong to the remote host.
@@ -462,6 +473,9 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             commands::run_memory_command(map_memory_subcommand(subcmd)).await?;
         }
         Some(Command::Session(subcmd)) => match subcmd {
+            SessionCommand::ImportJcode { .. } => {
+                unreachable!("session import is handled before bootstrap")
+            }
             SessionCommand::Rename {
                 session,
                 name,

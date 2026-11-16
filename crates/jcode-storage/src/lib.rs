@@ -4,6 +4,9 @@ use serde::de::DeserializeOwned;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+pub mod product_paths;
+pub mod session_import;
+
 #[cfg(windows)]
 use std::collections::{HashMap, HashSet};
 #[cfg(windows)]
@@ -185,10 +188,13 @@ fn default_product_home() -> Option<PathBuf> {
 
 pub fn jcode_dir() -> Result<PathBuf> {
     if let Some(path) = home_override() {
+        product_paths::require_kcode_path(&path)?;
         return Ok(path);
     }
 
-    default_product_home().ok_or_else(|| anyhow::anyhow!("No home directory"))
+    let path = default_product_home().ok_or_else(|| anyhow::anyhow!("No home directory"))?;
+    product_paths::require_kcode_path(&path)?;
+    Ok(path)
 }
 
 /// Whether `KCODE_HOME`/`JCODE_HOME` redirects this process away from the
@@ -247,7 +253,9 @@ pub fn app_config_dir() -> Result<PathBuf> {
 
     let config_dir =
         dirs::config_dir().ok_or_else(|| anyhow::anyhow!("No config directory found"))?;
-    Ok(config_dir.join("kcode"))
+    let path = config_dir.join("kcode");
+    product_paths::require_kcode_path(&path)?;
+    Ok(path)
 }
 
 /// Resolve a path under the user's home directory, but sandbox it under
