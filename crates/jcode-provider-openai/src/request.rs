@@ -398,7 +398,7 @@ pub fn build_responses_input_with_logger(
                                     items.push(serde_json::json!({
                                         "type": "function_call_output",
                                         "call_id": sanitize_tool_id(id),
-                                        "output": missing_output.clone()
+                                        "output": missing_output
                                     }));
                                     used_outputs.insert(id.clone());
                                 }
@@ -426,7 +426,7 @@ pub fn build_responses_input_with_logger(
             items.push(serde_json::json!({
                 "type": "function_call_output",
                 "call_id": sanitize_tool_id(&call_id),
-                "output": missing_output.clone()
+                "output": missing_output
             }));
         }
     }
@@ -526,7 +526,7 @@ pub fn build_responses_input_with_logger(
             normalized.push(serde_json::json!({
                 "type": "function_call_output",
                 "call_id": call_id,
-                "output": missing_output.clone()
+                "output": missing_output
             }));
         }
     }
@@ -597,7 +597,7 @@ pub fn build_responses_input_with_logger(
                     ordered.push(serde_json::json!({
                         "type": "function_call_output",
                         "call_id": call_id,
-                        "output": missing_output.clone()
+                        "output": missing_output
                     }));
                     used_outputs.insert(call_id);
                 }

@@ -2178,6 +2178,11 @@ fn tool_title(name: &str) -> String {
         "edit" | "multiedit" | "patch" | "apply_patch" | "replace" => "Editing files".to_string(),
         "agentgrep" | "grep" | "glob" | "ls" => "Searching workspace".to_string(),
         "webfetch" | "websearch" => "Fetching web content".to_string(),
+        "todo" => "Updating plan".to_string(),
+        "bg" => "Managing background tasks".to_string(),
+        "skill_manage" => "Loading skill".to_string(),
+        "swarm" => "Coordinating agents".to_string(),
+        "codemode" => "Running script".to_string(),
         other => other.replace('_', " "),
     }
 }
@@ -2186,9 +2191,11 @@ pub(crate) fn tool_kind(name: &str) -> &'static str {
     match name {
         "read" => "read",
         "write" | "edit" | "multiedit" | "patch" | "apply_patch" | "replace" => "edit",
-        "bash" | "bg" | "selfdev" => "execute",
+        "bash" | "bg" | "selfdev" | "codemode" => "execute",
         "agentgrep" | "grep" | "glob" | "ls" | "session_search" | "conversation_search" => "search",
-        "webfetch" | "websearch" | "codesearch" => "fetch",
+        "webfetch" | "websearch" | "codesearch" | "browser" => "fetch",
+        "skill_manage" => "read",
+        "todo" => "think",
         _ => "other",
     }
 }

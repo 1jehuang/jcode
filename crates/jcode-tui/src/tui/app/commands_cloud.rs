@@ -423,7 +423,12 @@ fn start_cloud_command(
             {
                 if let Some(rest) = line.strip_prefix("[cloud ") {
                     let detail = rest.split_once("] ").map(|(_, d)| d).unwrap_or(rest);
-                    let _ = progress_tx.send(CloudEvent::Progress(detail.to_string()));
+                    if progress_tx
+                        .send(CloudEvent::Progress(detail.to_string()))
+                        .is_err()
+                    {
+                        crate::logging::debug("Cloud command progress receiver closed");
+                    }
                 }
                 collected.push_str(&line);
                 collected.push('\n');

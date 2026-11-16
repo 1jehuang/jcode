@@ -285,6 +285,45 @@ fn message_start_warns_when_server_substitutes_a_different_model() {
 }
 
 #[test]
+fn resolved_model_uses_upstream_alias_target_and_deduplicates_metadata() {
+    let mut state = SseStreamState {
+        requested_model_base: "claude-alias".into(),
+        ..Default::default()
+    };
+    let event = SseEvent {
+        event_type: "message_start".into(),
+        data: serde_json::json!({"message": {"model": "claude-actual-20260101"}}).to_string(),
+    };
+    let events = process_sse_event(&event, &mut state, false);
+    assert!(events.iter().any(|event| matches!(event,
+        StreamEvent::ResolvedModel { model } if model == "claude-actual-20260101")));
+    assert!(
+        !process_sse_event(&event, &mut state, false)
+            .iter()
+            .any(|event| matches!(event, StreamEvent::ResolvedModel { .. }))
+    );
+}
+
+#[test]
+fn resolved_model_does_not_infer_missing_or_empty_metadata() {
+    for message in [serde_json::json!({}), serde_json::json!({"model": " "})] {
+        let mut state = SseStreamState {
+            requested_model_base: "claude-alias".into(),
+            ..Default::default()
+        };
+        let event = SseEvent {
+            event_type: "message_start".into(),
+            data: serde_json::json!({"message": message}).to_string(),
+        };
+        assert!(
+            !process_sse_event(&event, &mut state, false)
+                .iter()
+                .any(|event| matches!(event, StreamEvent::ResolvedModel { .. }))
+        );
+    }
+}
+
+#[test]
 fn test_anthropic_thinking_sse_events() {
     let mut state = SseStreamState::default();
     let start = SseEvent {

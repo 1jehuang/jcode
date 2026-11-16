@@ -446,6 +446,22 @@ semantics and is deliberately excluded. Do not backfill v2 by copying its
 counters or silently combine the two contracts. V2 coverage starts with the
 versioned client/server rollout, not the start of historical telemetry.
 
+New reports add optional `requested_model` and `resolved_model` labels. The
+requested label preserves the original request alias. Resolution is populated
+only from a provider response, not inferred from pricing or alias mappings.
+`model` is the effective response ID when resolved, otherwise the requested
+label. Ingestion uses this effective ID for per-model aggregates and appends both
+labels to the dedicated usage firehose. Migration 0032 adds the coarse
+`daily_model_attribution_v1` rollup keyed by contract version, date, source,
+provider, effective model, requested model, resolved model, build channel and CI.
+It includes response counts and all token buckets. Empty resolution means
+unknown. Both canonical usage and attribution aggregate atomically before all
+model strings and token payloads are cleared from the receipt ledger. Metadata
+is not stored per response. Reports without metadata remain accepted and create
+no attribution rows. Neither historical aggregates nor session-end
+`model_end` are rewritten as resolved IDs. Apply migration 0032 before deploying
+the updated worker. Client integration and deployment are separate steps.
+
 `npm run token-value` and `npm run token-value:daily` are **legacy session-end
 estimates**, retained for historical context. They read only `session_end`, not
 `turn_end`, `session_crash`, or response events. Session counters are attributed
@@ -466,6 +482,7 @@ npm run token-value            # dashboard using prices already stored in D1
 npm run token-value:daily      # legacy per-day estimates, in date order
 npm run migrate:model-usage    # legacy response rollup table (migration 0027)
 npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0031_usage_report_receipts.sql
+npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0032_usage_model_attribution.sql
 npm run model-usage            # authoritative v2 response rollup, by month/source
 ```
 

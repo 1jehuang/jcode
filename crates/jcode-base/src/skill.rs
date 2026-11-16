@@ -59,6 +59,16 @@ pub struct SkillRegistry {
     /// Keys inserted by plugin discovery, refreshed per workspace access.
     plugin_keys: std::collections::HashSet<String>,
     command_origins: HashMap<String, (String, PathBuf)>,
+    // SKILL.md files that were found but could not be loaded, so reloads and
+    // listings can say why a skill is missing instead of omitting it silently.
+    load_errors: Vec<SkillLoadError>,
+}
+
+/// A `SKILL.md` that was discovered but rejected while loading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillLoadError {
+    pub path: PathBuf,
+    pub error: String,
 }
 
 /// Maximum directory depth scanned under a Claude Code plugin root when
@@ -320,6 +330,11 @@ impl SkillRegistry {
     pub fn merge_overlay(&mut self, overlay: Self) {
         for skill in overlay.skills.into_values() {
             self.insert_shared_skill(skill);
+        }
+        for failed in overlay.load_errors {
+            if !self.load_errors.contains(&failed) {
+                self.load_errors.push(failed);
+            }
         }
     }
 
@@ -635,17 +650,48 @@ impl SkillRegistry {
 
             if path.is_dir() {
                 let skill_file = path.join("SKILL.md");
-                if skill_file.exists()
-                    && let Ok(skill) = Self::parse_skill(&skill_file)
-                {
-                    self.plugin_keys.remove(&skill.name);
-                    self.command_origins.remove(&skill.name);
-                    self.insert_loaded_skill(skill);
+                if skill_file.exists() {
+                    self.load_skill_file(&skill_file, None);
                 }
             }
         }
 
         Ok(())
+    }
+
+    /// Parse one discovered `SKILL.md` and register it, or record why it was
+    /// rejected. Returns whether the skill loaded.
+    fn load_skill_file(&mut self, skill_file: &Path, prefix: Option<&str>) -> bool {
+        match Self::parse_skill(skill_file) {
+            Ok(mut skill) => {
+                self.load_errors.retain(|failed| failed.path != skill_file);
+                if let Some(prefix) = prefix {
+                    skill.name = format!("{prefix}:{}", skill.name);
+                    self.plugin_keys.insert(skill.name.clone());
+                } else {
+                    self.plugin_keys.remove(&skill.name);
+                }
+                self.command_origins.remove(&skill.name);
+                self.insert_loaded_skill(skill);
+                true
+            }
+            Err(error) => {
+                self.load_errors.retain(|failed| failed.path != skill_file);
+                self.load_errors.push(SkillLoadError {
+                    path: skill_file.to_path_buf(),
+                    error: format!("{error:#}"),
+                });
+                false
+            }
+        }
+    }
+
+    /// `SKILL.md` files that were found but could not be loaded, sorted by
+    /// path for stable output.
+    pub fn load_errors(&self) -> Vec<&SkillLoadError> {
+        let mut errors: Vec<&SkillLoadError> = self.load_errors.iter().collect();
+        errors.sort_by(|a, b| a.path.cmp(&b.path));
+        errors
     }
 
     /// Parse a SKILL.md file
@@ -725,10 +771,108 @@ impl SkillRegistry {
             Ok(frontmatter) => frontmatter,
             // Claude Code retries with loose values quoted, so a description
             // like `Triggers on: explore ...` still loads instead of vanishing.
-            Err(error) => serde_yaml::from_str(&quote_lossy_values(yaml)).map_err(|_| error)?,
+            Err(error) => match serde_yaml::from_str(&quote_lossy_values(yaml)) {
+                Ok(frontmatter) => frontmatter,
+                // Ignore malformed optional metadata, but keep valid YAML with
+                // incorrect field types as an error.
+                Err(_) if serde_yaml::from_str::<serde_yaml::Value>(yaml).is_err() => {
+                    Self::parse_frontmatter_lenient(yaml).ok_or(error)?
+                }
+                Err(_) => return Err(error.into()),
+            },
         };
 
         Ok((frontmatter, body))
+    }
+
+    /// Fallback for frontmatter that is not valid YAML: read the top-level
+    /// `name`, `description` and `allowed-tools` keys as plain text and ignore
+    /// everything else. Retains optional fields and the invocation restriction used by plugin skills.
+    fn parse_frontmatter_lenient(yaml: &str) -> Option<SkillFrontmatter> {
+        fn top_level_key(line: &str) -> Option<(&str, &str)> {
+            if line.starts_with([' ', '\t', '#', '-']) {
+                return None;
+            }
+            let (key, rest) = line.split_once(':')?;
+            let valid = !key.is_empty()
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+            (valid && (rest.is_empty() || rest.starts_with([' ', '\t']))).then_some((key, rest))
+        }
+        fn unquote(value: &str) -> String {
+            let value = value.trim();
+            for quote in ['"', '\''] {
+                if value.len() >= 2 && value.starts_with(quote) && value.ends_with(quote) {
+                    return value[1..value.len() - 1].to_string();
+                }
+            }
+            value.to_string()
+        }
+
+        let mut entries: Vec<(&str, Vec<&str>)> = Vec::new();
+        for line in yaml.lines() {
+            if let Some((key, rest)) = top_level_key(line) {
+                entries.push((key, vec![rest]));
+            } else if let Some((_, lines)) = entries.last_mut() {
+                lines.push(line);
+            }
+        }
+        let scalar = |key: &str| -> Option<String> {
+            let (_, lines) = entries.iter().find(|(entry, _)| *entry == key)?;
+            let first = lines[0].trim();
+            // Block scalar indicators (`>-`, `|`) carry no text of their own.
+            let head = if first.starts_with(['>', '|']) {
+                ""
+            } else {
+                first
+            };
+            let joined = std::iter::once(head)
+                .chain(lines[1..].iter().map(|line| line.trim()))
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let value = unquote(&joined);
+            (!value.is_empty()).then_some(value)
+        };
+
+        let name = scalar("name");
+        let description = scalar("description");
+        let allowed_tools = entries
+            .iter()
+            .find(|(entry, _)| *entry == "allowed-tools")
+            .and_then(|(_, lines)| {
+                let inline = lines[0]
+                    .trim()
+                    .trim_start_matches('[')
+                    .trim_end_matches(']');
+                if !inline.is_empty() {
+                    return Some(AllowedTools::CommaDelimited(inline.to_string()));
+                }
+                let items: Vec<String> = lines[1..]
+                    .iter()
+                    .filter_map(|line| line.trim().strip_prefix('-'))
+                    .map(unquote)
+                    .filter(|item| !item.is_empty())
+                    .collect();
+                (!items.is_empty()).then_some(AllowedTools::Sequence(items))
+            });
+        let disable_model_invocation = match scalar("disable-model-invocation")
+            .map(|value| serde_yaml::from_str(&value))
+            .transpose()
+        {
+            Ok(value) => value.unwrap_or(false),
+            Err(error) => {
+                crate::logging::debug(&format!("Invalid skill invocation restriction: {error}"));
+                return None;
+            }
+        };
+        Some(SkillFrontmatter {
+            name,
+            description,
+            allowed_tools,
+            disable_model_invocation,
+        })
     }
 
     /// Get a skill by name. A bare name also finds a plugin's `plugin:name`
@@ -825,6 +969,7 @@ impl SkillRegistry {
         self.skills.clear();
         self.plugin_keys.clear();
         self.command_origins.clear();
+        self.load_errors.clear();
 
         let mut count = 0;
 
@@ -866,17 +1011,7 @@ impl SkillRegistry {
 
             if path.is_dir() {
                 let skill_file = path.join("SKILL.md");
-                if skill_file.exists()
-                    && let Ok(mut skill) = Self::parse_skill(&skill_file)
-                {
-                    if let Some(prefix) = prefix {
-                        skill.name = format!("{prefix}:{}", skill.name);
-                        self.plugin_keys.insert(skill.name.clone());
-                    } else {
-                        self.plugin_keys.remove(&skill.name);
-                    }
-                    self.command_origins.remove(&skill.name);
-                    self.insert_loaded_skill(skill);
+                if skill_file.exists() && self.load_skill_file(&skill_file, prefix) {
                     count += 1;
                 }
             }

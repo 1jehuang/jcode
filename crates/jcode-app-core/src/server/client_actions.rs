@@ -1179,11 +1179,13 @@ pub(super) async fn handle_resume_all_sessions(
         if !super::live_turn::spawn_tracked_live_turn_with_publication(
             &session_id,
             agent_guard,
-            String::new(),
-            Vec::new(),
-            Some(reminder.clone()),
-            None,
-            Some("resuming interrupted session".to_string()),
+            super::live_turn::LiveTurnInput {
+                message: String::new(),
+                images: Vec::new(),
+                system_reminder: Some(reminder.clone()),
+                display_role: None,
+                status_detail: Some("resuming interrupted session".to_string()),
+            },
             swarm,
             publication,
         )

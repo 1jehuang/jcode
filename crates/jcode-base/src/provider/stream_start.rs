@@ -162,6 +162,7 @@ async fn await_stream_start(mut stream: EventStream) -> Result<EventStream> {
             StreamEvent::ConnectionType { .. }
             | StreamEvent::StatusDetail { .. }
             | StreamEvent::ServiceTier { .. }
+            | StreamEvent::ResolvedModel { .. }
             | StreamEvent::SessionId(_)
             | StreamEvent::UpstreamProvider { .. } => false,
             _ => true,
@@ -188,6 +189,9 @@ mod tests {
         let stream: EventStream = Box::pin(futures::stream::iter(vec![
             Ok(StreamEvent::ConnectionType {
                 connection: "https/sse".into(),
+            }),
+            Ok(StreamEvent::ResolvedModel {
+                model: "upstream-model".into(),
             }),
             Ok(StreamEvent::ConnectionPhase {
                 phase: ConnectionPhase::SendingRequest,

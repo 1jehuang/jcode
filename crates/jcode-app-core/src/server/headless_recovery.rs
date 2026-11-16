@@ -230,11 +230,13 @@ pub(super) async fn recover(server: &Server) {
             super::live_turn::spawn_tracked_live_turn_with_publication(
                 &session_id,
                 held,
-                String::new(),
-                Vec::new(),
-                Some(reminder),
-                None,
-                Some("resuming after reload".into()),
+                super::live_turn::LiveTurnInput {
+                    message: String::new(),
+                    images: Vec::new(),
+                    system_reminder: Some(reminder),
+                    display_role: None,
+                    status_detail: Some("resuming after reload".into()),
+                },
                 swarm,
                 publication,
             )

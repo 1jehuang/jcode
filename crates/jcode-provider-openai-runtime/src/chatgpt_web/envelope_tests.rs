@@ -84,6 +84,25 @@ fn tool_call_parser_accepts_valid_exact_envelope() {
 }
 
 #[test]
+fn tool_call_payload_moves_large_nested_input_and_preserves_optional_input() {
+    let text = "tool input 日本語".repeat(65536);
+    let pointer = text.as_ptr();
+    let mut payload = json!({"name": " bash ", "input": {"nested": [{}]}});
+    payload["input"]["nested"][0]["text"] = Value::String(text);
+    let parsed = tool_call_from_payload(payload).unwrap();
+    assert_eq!(parsed.name, "bash");
+    assert_eq!(
+        parsed.input["nested"][0]["text"].as_str().unwrap().as_ptr(),
+        pointer
+    );
+    assert_eq!(
+        only_call("<jcode_tool_call>{\"name\":\"bash\"}</jcode_tool_call>").input,
+        json!({})
+    );
+    assert!(tool_call_from_payload(json!({"name": "bash", "input": null})).is_err());
+}
+
+#[test]
 fn a_complete_call_missing_its_closing_tag_is_kept_and_trailing_notes_dropped() {
     // Observed live from GPT-5.6 Sol: leaked notes after the call and no
     // closing tag.

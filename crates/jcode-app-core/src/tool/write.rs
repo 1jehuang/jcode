@@ -94,6 +94,8 @@ impl Tool for WriteTool {
             generate_diff_summary("", &params.content)
         };
         let detail = build_file_touch_preview(&diff);
+        let (added, removed) =
+            super::edit_stats::line_delta(old_content.as_deref().unwrap_or(""), &params.content);
 
         // Publish file touch event for swarm coordination
         Bus::global().publish(BusEvent::FileTouch(FileTouch {
@@ -110,6 +112,8 @@ impl Tool for WriteTool {
                 format!("created new file ({} lines)", line_count)
             }),
             detail,
+            added,
+            removed,
         }));
 
         let mut body = if existed {

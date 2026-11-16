@@ -447,12 +447,23 @@ pub fn completion_notification_with_lane_plan(
     lane_plan: Option<&str>,
 ) -> String {
     let intro = completion_status_intro(name, status);
-    let plan = lane_plan
-        .filter(|plan| !plan.trim().is_empty())
-        .unwrap_or("No lane plan available.");
-    let response = normalize_completion_report(report.map(str::to_string))
-        .unwrap_or_else(|| "No final assistant response was captured.".to_string());
-    format!("{intro}\n\nLane plan:\n{plan}\n\nFinal response:\n{response}")
+    let plan = lane_plan.map(str::trim).filter(|plan| !plan.is_empty());
+    let response = normalize_completion_report(report.map(str::to_string));
+    let mut message = intro;
+    if let Some(plan) = plan {
+        message.push_str("\n\nLane plan:\n");
+        // The lane counts already convey completed work. Keep task names only
+        // when there is no result report, and always retain unfinished tasks.
+        let compact = plan
+            .lines()
+            .filter(|line| response.is_none() || !line.trim_start().starts_with("- [completed] "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        message.push_str(&compact);
+    }
+    message.push_str("\n\nFinal response:\n");
+    message.push_str(response.as_deref().unwrap_or("No report captured."));
+    message
 }
 
 pub fn truncate_detail(text: &str, max_len: usize) -> String {
@@ -667,8 +678,33 @@ mod tests {
         assert!(!message.contains("Recent output"));
         assert!(!message.contains("Use assign_task"));
         let empty = completion_notification_message("owl", "failed", None);
-        assert!(empty.contains("No lane plan available."));
-        assert!(empty.contains("No final assistant response was captured."));
+        assert!(!empty.contains("Lane plan:"));
+        assert!(empty.contains("No report captured."));
+        assert!(!message.contains("[completed] Offline checks"));
+
+        let no_report = completion_notification_with_lane_plan(
+            "tulip",
+            "ready",
+            None,
+            Some(
+                "Phase 1 · controlled-compare: 1/1 completed\n- [completed] Implement sealed-image controlled comparison",
+            ),
+        );
+        assert!(no_report.contains("Implement sealed-image controlled comparison"));
+        assert!(no_report.contains("No report captured."));
+        assert!(!no_report.contains("No lane plan available."));
+        let redundant = completion_notification_with_lane_plan(
+            "tulip",
+            "ready",
+            Some("Implemented and tested."),
+            Some(
+                "Phase 1 · controlled-compare: 1/1 completed\n- [completed] Implement sealed-image controlled comparison",
+            ),
+        );
+        assert!(!redundant.contains("Implement sealed-image controlled comparison"));
+        assert!(redundant.contains("controlled-compare: 1/1 completed"));
+        assert!(redundant.contains("Implemented and tested."));
+        assert!(redundant.len() < no_report.len());
     }
 
     #[test]

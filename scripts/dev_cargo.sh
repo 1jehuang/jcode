@@ -26,6 +26,11 @@ case "$(pwd -P)" in
   *) exec cargo "$@" ;;
 esac
 
+# Self-dev builds launched by the daemon may not carry JCODE_SESSION_ID.
+# Explicitly ask the installed justrust Cargo shim to apply hosted routing,
+# while preserving caller opt-outs and nested-run recursion protection.
+export JUSTRUST_CARGO_ROUTE="${JUSTRUST_CARGO_ROUTE:-1}"
+
 # shellcheck source=scripts/remote_config.sh
 source "$repo_root/scripts/remote_config.sh"
 jcode_load_remote_config

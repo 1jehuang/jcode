@@ -815,6 +815,33 @@ async fn injected_soft_interrupts_report_client_ids_per_group_in_queue_order() {
 }
 
 #[tokio::test]
+async fn file_activity_interrupt_keeps_typed_identity_without_model_prefix() {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = Agent::new(provider, registry);
+    let content = "moss edited src/parser.rs +3-1: fix parser";
+    agent.queue_soft_interrupt(
+        content.into(),
+        vec![],
+        false,
+        SoftInterruptSource::FileActivity,
+    );
+    let injected = agent.inject_soft_interrupts();
+    let stored = agent.session.messages.last().unwrap();
+    assert_eq!(
+        stored.display_role,
+        Some(crate::session::StoredDisplayRole::FileActivity)
+    );
+    assert!(matches!(&stored.content[0], ContentBlock::Text { text, .. } if text == content));
+    let events = Agent::build_soft_interrupt_events(injected, "D", None);
+    assert!(
+        matches!(&events[0], ServerEvent::SoftInterruptInjected { content: text, display_role: Some(role), .. }
+        if text == content && role == "file_activity")
+    );
+}
+
+#[tokio::test]
 async fn adjacent_notifications_each_emit_a_delivery_event() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let registry = Registry::new(provider.clone()).await;

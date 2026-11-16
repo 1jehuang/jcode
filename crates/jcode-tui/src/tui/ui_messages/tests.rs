@@ -3032,7 +3032,7 @@ fn render_swarm_message_collapsed_shows_tldr_and_expand_badge_only() {
         .flat_map(|line| &line.spans)
         .find(|span| span.content.contains("fixed the flaky test"))
         .expect("DM preview span");
-    assert_eq!(preview.style.fg, Some(rgb(130, 130, 140)));
+    assert_eq!(preview.style.fg, Some(swarm_agent_color("sheep")));
     assert!(
         !plain.contains("race in the setup helper"),
         "collapsed card must hide the full body: {plain}"

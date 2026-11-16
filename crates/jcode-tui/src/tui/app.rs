@@ -1259,6 +1259,9 @@ pub struct App {
     // Pending pasted images (media_type, base64_data) attached to next message
     pending_images: Vec<(String, String)>,
     input_image_markers: input_images::InputImageMarkers,
+    // Expanded prompt history (Alt+E) backfill: (transcript rows when the last
+    // older-history load was requested, loads requested since the toggle).
+    prompt_history_backfill: (Option<usize>, u8),
     // One-shot flag: the next submitted prompt is routed to a new headed session.
     route_next_prompt_to_new_session: bool,
     // Restore-time flag: auto-submit restored input after startup.
@@ -1487,6 +1490,9 @@ pub struct App {
     /// When each swarm agent last sent us a notification, keyed by sender, so
     /// notifications can show time since that agent's previous message.
     swarm_last_message_at: std::collections::HashMap<String, std::time::Instant>,
+    /// Transcript index and contents of the newest file-activity row, so
+    /// consecutive peer edits stack into it instead of adding rows.
+    file_activity_stack: Option<(usize, Vec<remote_notifications::FileActivityEdit>)>,
     // Latest swarm plan snapshot (local or remote server event stream)
     swarm_plan_items: Vec<crate::plan::PlanItem>,
     swarm_plan_version: Option<u64>,
@@ -1583,6 +1589,7 @@ pub struct App {
     /// Remote todo snapshot paired with its owning session. Never read SSH
     /// session IDs from laptop-local todo storage.
     remote_todos_payload: Option<(String, String)>,
+    remote_todos_cache: std::cell::RefCell<Option<todos_view::remote_cache::RemoteTodoCache>>,
     remote_todos_requested_at: Option<Instant>,
     /// The connected server sends a todo snapshot on every change, so no
     /// periodic poll is needed. Learned from the snapshots themselves and

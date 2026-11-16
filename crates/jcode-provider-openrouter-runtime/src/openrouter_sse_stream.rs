@@ -601,6 +601,20 @@ fn retry_wait(
 
 /// Hint for a 429. Kept next to [`retry_wait`] so the promise matches it.
 const RATE_LIMIT_HINT: &str = "Hint: the provider rate limited this request (per-minute or quota cap), not a network problem. jcode waits as long as the provider asks (up to 60s per retry) and backs off within its retry budget; if it keeps failing, wait a minute, lower request frequency, or switch to another provider with /model.";
+/// Whether a (lowercased) 429 body says the account's allowance is used up,
+/// as opposed to asking the client to slow down.
+fn is_exhausted_quota_error(error_str: &str) -> bool {
+    [
+        "freeusagelimiterror",
+        "free usage limit",
+        "insufficient_quota",
+        "insufficient quota",
+        "exceeded your current quota",
+        "billing",
+    ]
+    .iter()
+    .any(|marker| error_str.contains(marker))
+}
 
 fn is_retryable_error(error_str: &str) -> bool {
     // Explicit non-retryable HTTP statuses take precedence over the loose
@@ -610,9 +624,13 @@ fn is_retryable_error(error_str: &str) -> bool {
     // not depend on provider-specific body wording.
     match parsed_http_status(error_str) {
         Some(400 | 401 | 402 | 403 | 404 | 405 | 406 | 422) => return false,
-        // 429 rate limit, and every 5xx: the server is up but overloaded or
-        // failing on its side (500, 502, 503, 504, and the non-standard 529
-        // "overloaded" some providers send). Waiting and resending can help.
+        // 429 rate limit, and every 5xx: the server answered but is overloaded
+        // or failing on its side. This includes non-standard codes such as the
+        // 529 "overloaded" some OpenAI-compatible providers send (#1596).
+        // A 429 that reports an exhausted allowance is not a rate limit: the
+        // same request fails identically until the plan changes. Retrying it
+        // left `jcode run` silent for minutes on a free-tier limit.
+        Some(429) if is_exhausted_quota_error(error_str) => return false,
         Some(429 | 500..=599) => return true,
         _ => {}
     }
@@ -779,6 +797,19 @@ mod tests {
             {\"error\":{\"message\":\"this request requires more credits, or fewer \
             max_tokens. you requested up to 65536 tokens, but can only afford 34424\"}}";
         assert!(!is_retryable_error(err));
+    }
+
+    /// Field report: OpenCode Zen free models answer 429 FreeUsageLimitError.
+    /// That was retried 8 times with backoff, so `jcode run` printed nothing.
+    #[test]
+    fn exhausted_quota_429_fails_fast_but_rate_limit_429_retries() {
+        let quota = "openai-compatible chat request failed\n  status: 429 Too Many Requests\n  response: {\"type\":\"error\",\"error\":{\"type\":\"FreeUsageLimitError\",\"message\":\"Free usage limit reached.\"}}"
+            .to_lowercase();
+        assert!(!is_retryable_error(&quota));
+        let openai = "status: 429 too many requests\n  response: {\"error\":{\"code\":\"insufficient_quota\"}}";
+        assert!(!is_retryable_error(openai));
+        let rate = "status: 429 too many requests\n  response: {\"error\":{\"message\":\"rate limit exceeded, retry in 2s\"}}";
+        assert!(is_retryable_error(rate));
     }
 
     #[test]

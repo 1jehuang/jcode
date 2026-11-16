@@ -11,6 +11,63 @@ use std::sync::mpsc;
 use std::time::Duration;
 use tempfile::TempDir;
 
+#[test]
+fn cache_breakpoint_preserves_shared_payload_when_already_marked() {
+    let original = Message {
+        role: Role::User,
+        content: vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "large-output".into(),
+                content: "x".repeat(1024 * 1024),
+                is_error: None,
+            },
+            ContentBlock::Text {
+                text: "continue".into(),
+                cache_control: Some(CacheControl::ephemeral(Some("1h".into()))),
+            },
+        ]
+        .into(),
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let mut request = vec![original.clone()];
+    let before = serde_json::to_vec(&request).unwrap();
+    assert!(add_cache_breakpoint(&mut request));
+    assert!(request[0].content.shares_storage_with(&original.content));
+    assert_eq!(serde_json::to_vec(&request).unwrap(), before);
+}
+
+#[test]
+fn cache_breakpoint_detaches_only_when_a_marker_is_missing() {
+    let original = Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "continue".into(),
+            cache_control: None,
+        }]
+        .into(),
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let mut request = vec![original.clone()];
+    assert!(add_cache_breakpoint(&mut request));
+    assert!(!request[0].content.shares_storage_with(&original.content));
+    assert!(matches!(
+        &original.content[0],
+        ContentBlock::Text {
+            cache_control: None,
+            ..
+        }
+    ));
+    let marked = request[0].clone();
+    assert!(add_cache_breakpoint(&mut request));
+    assert!(request[0].content.shares_storage_with(&marked.content));
+    assert!(!add_cache_breakpoint(&mut [Message {
+        role: Role::Assistant,
+        ..original
+    }]));
+}
+
 pub(crate) struct SharedEnvLock;
 
 pub(crate) static ENV_LOCK: SharedEnvLock = SharedEnvLock;

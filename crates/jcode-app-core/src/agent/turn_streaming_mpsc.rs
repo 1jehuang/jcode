@@ -906,7 +906,13 @@ impl Agent {
                     StreamEvent::ServiceTier { tier, requested } => {
                         let _ = event_tx.send(ServerEvent::ServiceTierReported { requested, tier });
                     }
+                    StreamEvent::ResolvedModel { model } => {
+                        usage_recorder.resolve_model(model);
+                    }
                     StreamEvent::RetryRollback { attempt, max } => {
+                        // Preserve reported usage from the failed attempt, but
+                        // never let its model or counters bleed into the retry.
+                        usage_recorder.finish();
                         // A transient transport fault hit mid-stream after partial
                         // output was already emitted; the provider is replaying the
                         // request from the top. Discard everything accumulated for

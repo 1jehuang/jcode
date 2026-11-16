@@ -277,6 +277,7 @@ fn incremental_updates_replay_rewritten_and_shrunk_prefixes() {
     let (initial, fingerprint) = incremental_messages(&session, &SessionProgress::default());
     assert_eq!(initial.len(), 2);
     let progress = SessionProgress {
+        wire_version: WIRE_VERSION,
         uploaded: 2,
         fingerprint: Some(fingerprint),
         ..Default::default()

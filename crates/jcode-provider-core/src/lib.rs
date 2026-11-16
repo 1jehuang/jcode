@@ -682,6 +682,8 @@ pub fn is_guardrail_stop_reason(stop_reason: Option<&str>) -> bool {
 #[derive(Debug)]
 pub struct SimpleCompletionError {
     pub usage: SimpleCompletionUsage,
+    /// Request API transport, retained for correct usage/cache normalization.
+    /// This is not the upstream compute vendor returned by a gateway.
     pub provider: String,
     pub model: String,
     source: anyhow::Error,
@@ -721,12 +723,21 @@ impl std::error::Error for SimpleCompletionError {
 /// input tokens and a final event with output tokens). Each field keeps the
 /// latest value reported, matching how the agent turn loop treats repeated
 /// `TokenUsage` events (they are cumulative snapshots, not deltas).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SimpleCompletionUsage {
+    /// Model requested before the call, including private routing aliases.
+    pub requested_model: Option<String>,
+    /// Actual model explicitly reported by this response, never inferred.
+    pub resolved_model: Option<String>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cache_read_input_tokens: Option<u64>,
     pub cache_creation_input_tokens: Option<u64>,
+}
+
+/// Normalize optional response metadata without falling back to a configured ID.
+pub fn nonempty_response_model(model: Option<&str>) -> Option<&str> {
+    model.map(str::trim).filter(|model| !model.is_empty())
 }
 
 impl SimpleCompletionUsage {

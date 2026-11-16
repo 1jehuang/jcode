@@ -2040,10 +2040,22 @@ pub(crate) fn gather_git_info_in(dir: Option<&std::path::Path>) -> Option<GitInf
             .stderr(std::process::Stdio::null());
         cmd
     };
-    let spawn = |args: &[&str]| git().args(args).spawn().ok();
+    let spawn = |args: &[&str]| match git().args(args).spawn() {
+        Ok(child) => Some(child),
+        Err(error) => {
+            crate::logging::debug(&format!("Cannot start background git probe: {error}"));
+            None
+        }
+    };
     let collect = |child: Option<std::process::Child>| {
         child
-            .and_then(|child| child.wait_with_output().ok())
+            .and_then(|child| match child.wait_with_output() {
+                Ok(output) => Some(output),
+                Err(error) => {
+                    crate::logging::debug(&format!("Cannot collect background git probe: {error}"));
+                    None
+                }
+            })
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
     };
@@ -2200,7 +2212,13 @@ pub(crate) fn parse_recent_commits(
             let mut lines = record.lines();
             let mut fields = lines.next()?.splitn(3, '\x1f');
             let hash = fields.next()?.trim().to_string();
-            let timestamp = fields.next()?.trim().parse().ok()?;
+            let timestamp = match fields.next()?.trim().parse() {
+                Ok(timestamp) => timestamp,
+                Err(error) => {
+                    crate::logging::debug(&format!("Cannot parse git commit timestamp: {error}"));
+                    return None;
+                }
+            };
             let subject = fields.next().unwrap_or("").trim().to_string();
             let (mut added, mut removed) = (None, None);
             // " 3 files changed, 12 insertions(+), 4 deletions(-)"

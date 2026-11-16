@@ -495,6 +495,7 @@ fn malformed_skill_does_not_block_directory_loaders() {
         .expect("load skills while skipping malformed file");
     assert!(registry.contains("valid"));
     assert!(!registry.contains("malformed"));
+    assert_eq!(registry.load_errors().len(), 1);
 
     let mut counted_registry = SkillRegistry::default();
     let count = counted_registry
@@ -894,4 +895,107 @@ fn plugin_skill_dirs_empty_for_missing_root() {
     let temp = tempfile::tempdir().expect("tempdir");
     let missing = temp.path().join("does-not-exist");
     assert!(SkillRegistry::plugin_skill_dirs_under(&missing).is_empty());
+}
+
+/// Field report: a third-party skill whose long unquoted description contained
+/// `: ` ("Also covers 0.17.0-dev deltas: b.args...") was dropped by
+/// `reload_all` with no error. The description length was a red herring; the
+/// colon made the frontmatter invalid YAML.
+#[test]
+fn long_unquoted_description_containing_a_colon_still_loads() {
+    let temp = tempfile::tempdir().unwrap();
+    let description = format!(
+        "Up-to-date Zig patterns for 0.17.0-dev. {} Also covers 0.17.0-dev deltas: b.args→run_cmd.addPassthruArgs(), std.gpu→std.spirv.",
+        "Use when writing, reviewing, or debugging Zig code. ".repeat(24)
+    );
+    assert!(description.chars().count() > 1024);
+    let path = write_skill_file(
+        temp.path(),
+        "zig",
+        &format!(
+            "---\nname: zig\ndescription: {description}\nlicense: MIT\ncompatibility:\n  - claude-code\n  - codex\nmetadata:\n  version: \"0.17.0-dev\"\n  note: nested: colon\nallowed-tools:\n  - bash\n  - read\n---\n\n# Zig\n"
+        ),
+    );
+    let skill = SkillRegistry::parse_skill(&path).expect("skill should load");
+    assert_eq!(skill.name, "zig");
+    assert_eq!(skill.description, description);
+    assert_eq!(
+        skill.allowed_tools,
+        Some(vec!["bash".to_string(), "read".to_string()])
+    );
+    assert_eq!(skill.content, "# Zig");
+}
+
+#[test]
+fn lenient_frontmatter_handles_quotes_and_inline_tools() {
+    let (frontmatter, _) = SkillRegistry::parse_frontmatter(
+        "---\nname: \"quoted\"\ndescription: first: part\n  continued line\nallowed-tools: bash, read\nbroken: [unclosed\n---\nbody",
+    )
+    .unwrap();
+    assert_eq!(frontmatter.name.as_deref(), Some("quoted"));
+    assert_eq!(
+        frontmatter.description.as_deref(),
+        Some("first: part continued line")
+    );
+    assert!(matches!(
+        frontmatter.allowed_tools,
+        Some(AllowedTools::CommaDelimited(ref tools)) if tools == "bash, read"
+    ));
+}
+
+#[test]
+fn unloadable_skills_are_reported_instead_of_silently_skipped() {
+    let temp = tempfile::tempdir().unwrap();
+    write_skill_file(
+        temp.path(),
+        "good",
+        "---\nname: good\ndescription: Works\n---\n\nbody\n",
+    );
+    let broken = write_skill_file(
+        temp.path(),
+        "broken",
+        "---\nname: broken\ndescription: []\n---\n\nbody\n",
+    );
+    let no_frontmatter = write_skill_file(temp.path(), "plain", "# just markdown\n");
+
+    let mut registry = SkillRegistry::default();
+    assert_eq!(registry.load_from_dir_count(temp.path()).unwrap(), 1);
+    assert!(registry.get("good").is_some());
+    let errors = registry.load_errors();
+    assert_eq!(errors.len(), 2);
+    assert_eq!(errors[0].path, broken);
+    assert!(
+        errors[0].error.contains("description"),
+        "{}",
+        errors[0].error
+    );
+    assert_eq!(errors[1].path, no_frontmatter);
+    assert!(errors[1].error.contains("Missing YAML frontmatter"));
+
+    // Fixing the file clears its error on the next load, and snapshots that
+    // merge an overlay carry the overlay's errors along.
+    std::fs::write(
+        &broken,
+        "---\nname: broken\ndescription: Fixed\n---\n\nbody\n",
+    )
+    .unwrap();
+    let mut merged = SkillRegistry::default();
+    merged.merge_overlay(registry.clone());
+    assert_eq!(merged.load_errors().len(), 2);
+    assert_eq!(registry.load_from_dir_count(temp.path()).unwrap(), 2);
+    assert_eq!(registry.load_errors().len(), 1);
+}
+
+#[test]
+fn lenient_frontmatter_preserves_user_only_plugin_skills() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = write_skill_file(
+        temp.path(),
+        "user-only",
+        "---\ndescription: first: part\n  continued line\ndisable-model-invocation: true\nmetadata:\n  note: nested: colon\n---\nRun on request.\n",
+    );
+    let skill = SkillRegistry::parse_skill(&path).unwrap();
+    assert_eq!(skill.name, "user-only");
+    assert_eq!(skill.description, "first: part continued line");
+    assert!(skill.disable_model_invocation);
 }

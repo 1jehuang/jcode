@@ -96,7 +96,7 @@ use self::swarm::{
     broadcast_swarm_status, expired_terminal_member_ids, member_consumes_swarm_capacity,
     record_swarm_event, record_swarm_event_for_session, refresh_swarm_task_staleness,
     remove_plan_participant, remove_session_from_swarm, rename_plan_participant, run_swarm_message,
-    send_swarm_plan_to_session, set_member_task_label, swarm_is_self_or_ancestor,
+    send_swarm_plan_to_session, set_member_task_label, swarm_is_self_or_ancestor, truncate_detail,
     update_member_status, update_member_status_with_report, update_member_status_with_report_tldr,
 };
 use self::swarm_channels::{
@@ -126,9 +126,7 @@ use crate::tool::selfdev::ReloadContext;
 use crate::transport::Listener;
 use anyhow::Result;
 use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource};
-use jcode_swarm_core::{
-    format_structured_completion_report, summarize_plan_items, truncate_detail,
-};
+use jcode_swarm_core::{format_structured_completion_report, summarize_plan_items};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -520,7 +518,11 @@ use self::util::{
 };
 
 mod file_activity;
-use self::file_activity::file_activity_scope_label;
+use self::file_activity::{
+    FileActivityEntry, PendingFileActivityNotice, deliver_file_activity_notice,
+    file_activity_display_path, file_activity_scope_label, format_file_activity_notice,
+    parse_file_activity_line_range,
+};
 
 mod file_touch_service;
 pub(crate) use self::file_touch_service::FileTouchService;
@@ -1549,6 +1551,9 @@ impl Server {
         swarm_event_tx: broadcast::Sender<SwarmEvent>,
     ) {
         let mut last_cleanup = Instant::now();
+        // Per-recipient notice still waiting for injection, so bursts of peer
+        // edits fold into one model-facing message.
+        let mut pending_file_notices: HashMap<String, PendingFileActivityNotice> = HashMap::new();
         const TOUCH_EXPIRY: Duration = Duration::from_secs(30 * 60); // 30 min
         const CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60); // 5 min
 
@@ -1587,6 +1592,8 @@ impl Server {
                                 intent: touch.intent.clone(),
                                 summary: touch.summary.clone(),
                                 detail: touch.detail.clone(),
+                                added: touch.added,
+                                removed: touch.removed,
                             },
                         )
                         .await;
@@ -1681,30 +1688,45 @@ impl Server {
                         let members = swarm_members.read().await;
                         let current_member = members.get(&session_id);
                         let current_name = current_member.and_then(|m| m.friendly_name.clone());
+                        // The editor only needs to hear about earlier peer
+                        // changes once, on its first edit of this file. Later
+                        // peer edits already reach it as "just edited" notices.
+                        let first_own_modification =
+                            file_touch.accesses_for_path(&path).await.is_none_or(|all| {
+                                all.iter()
+                                    .filter(|access| {
+                                        access.session_id == session_id
+                                            && access.op.is_modification()
+                                    })
+                                    .count()
+                                    <= 1
+                            });
 
                         // Alert the current agent about previous peer touches (one per agent).
-                        if let Some(member) = current_member {
+                        if let Some(member) = current_member.filter(|_| first_own_modification) {
                             for prev in &previous_touches {
                                 let prev_member = members.get(&prev.session_id);
                                 let prev_name = prev_member.and_then(|m| m.friendly_name.clone());
-                                let scope = file_activity_scope_label(prev, &touch);
-                                let intent_suffix = prev
-                                    .intent
-                                    .as_ref()
-                                    .map(|intent| format!(" — intent: {}", intent))
-                                    .unwrap_or_default();
-                                let alert_msg = format!(
-                                    "⚠ File activity: {} — {} — {} previously {} this file{}{}",
-                                    path.display(),
-                                    scope,
-                                    prev_name.as_deref().unwrap_or(&prev.session_id[..8]),
-                                    prev.op.as_str(),
-                                    prev.summary
-                                        .as_ref()
-                                        .map(|s| format!(": {}", s))
-                                        .unwrap_or_default(),
-                                    intent_suffix
-                                );
+                                let entry = FileActivityEntry {
+                                    agent: prev_name.clone().unwrap_or_else(|| {
+                                        prev.session_id[..8.min(prev.session_id.len())].to_string()
+                                    }),
+                                    operation: prev.op.as_str().to_string(),
+                                    previously: true,
+                                    path: file_activity_display_path(
+                                        &path,
+                                        member.working_dir.as_deref(),
+                                    ),
+                                    added: prev.added,
+                                    removed: prev.removed,
+                                    edits: 1,
+                                    lines: parse_file_activity_line_range(prev.summary.as_deref()),
+                                    overlap: file_activity_scope_label(prev, &touch)
+                                        == "overlapping lines",
+                                    intent: prev.intent.clone(),
+                                };
+                                let alert_msg =
+                                    format_file_activity_notice(std::slice::from_ref(&entry));
                                 let notification = ServerEvent::Notification {
                                     from_session: prev.session_id.clone(),
                                     from_name: prev_name,
@@ -1714,53 +1736,47 @@ impl Server {
                                         intent: prev.intent.clone(),
                                         summary: prev.summary.clone(),
                                         detail: prev.detail.clone(),
+                                        added: Some(prev.added),
+                                        removed: Some(prev.removed),
                                     },
                                     message: alert_msg.clone(),
                                 };
                                 let _ = member.event_tx.send(notification);
 
-                                if !queue_soft_interrupt_for_session(
+                                deliver_file_activity_notice(
                                     &session_id,
-                                    alert_msg.clone(),
-                                    false,
-                                    SoftInterruptSource::System,
+                                    entry,
+                                    &mut pending_file_notices,
                                     &soft_interrupt_queues,
                                     &sessions,
                                 )
-                                .await
-                                {
-                                    crate::logging::warn(&format!(
-                                        "Failed to queue file-activity soft interrupt for session {}",
-                                        session_id
-                                    ));
-                                }
+                                .await;
                             }
                         }
 
                         // Alert previous agents about the current modification.
                         for prev in &previous_touches {
                             if let Some(prev_member) = members.get(&prev.session_id) {
-                                let scope = file_activity_scope_label(prev, &touch);
-                                let intent_suffix = touch
-                                    .intent
-                                    .as_ref()
-                                    .map(|intent| format!(" — intent: {}", intent))
-                                    .unwrap_or_default();
-                                let alert_msg = format!(
-                                    "⚠ File activity: {} — {} — {} just {} this file you previously worked with{}{}",
-                                    path.display(),
-                                    scope,
-                                    current_name
-                                        .as_deref()
-                                        .unwrap_or(&session_id[..8.min(session_id.len())]),
-                                    touch.op.as_str(),
-                                    touch
-                                        .summary
-                                        .as_ref()
-                                        .map(|s| format!(": {}", s))
-                                        .unwrap_or_default(),
-                                    intent_suffix
-                                );
+                                let entry = FileActivityEntry {
+                                    agent: current_name.clone().unwrap_or_else(|| {
+                                        session_id[..8.min(session_id.len())].to_string()
+                                    }),
+                                    operation: touch.op.as_str().to_string(),
+                                    previously: false,
+                                    path: file_activity_display_path(
+                                        &path,
+                                        prev_member.working_dir.as_deref(),
+                                    ),
+                                    added: touch.added,
+                                    removed: touch.removed,
+                                    edits: 1,
+                                    lines: parse_file_activity_line_range(touch.summary.as_deref()),
+                                    overlap: file_activity_scope_label(prev, &touch)
+                                        == "overlapping lines",
+                                    intent: touch.intent.clone(),
+                                };
+                                let alert_msg =
+                                    format_file_activity_notice(std::slice::from_ref(&entry));
                                 let notification = ServerEvent::Notification {
                                     from_session: session_id.clone(),
                                     from_name: current_name.clone(),
@@ -1770,26 +1786,21 @@ impl Server {
                                         intent: touch.intent.clone(),
                                         summary: touch.summary.clone(),
                                         detail: touch.detail.clone(),
+                                        added: Some(touch.added),
+                                        removed: Some(touch.removed),
                                     },
                                     message: alert_msg.clone(),
                                 };
                                 let _ = prev_member.event_tx.send(notification);
 
-                                if !queue_soft_interrupt_for_session(
+                                deliver_file_activity_notice(
                                     &prev.session_id,
-                                    alert_msg.clone(),
-                                    false,
-                                    SoftInterruptSource::System,
+                                    entry,
+                                    &mut pending_file_notices,
                                     &soft_interrupt_queues,
                                     &sessions,
                                 )
-                                .await
-                                {
-                                    crate::logging::warn(&format!(
-                                        "Failed to queue file-activity soft interrupt for session {}",
-                                        prev.session_id
-                                    ));
-                                }
+                                .await;
                             }
                         }
                     }

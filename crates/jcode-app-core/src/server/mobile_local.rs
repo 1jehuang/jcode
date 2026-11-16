@@ -7,7 +7,7 @@
 //! session is idle and is queued behind the current turn when it is busy.
 
 use super::live_turn::{
-    LiveTurnSwarmContext, idle_live_agent, spawn_tracked_live_turn_with_images,
+    LiveTurnInput, LiveTurnSwarmContext, idle_live_agent, spawn_tracked_live_turn_with_images,
 };
 use super::state::{fanout_live_client_event, queue_soft_interrupt_with_images_for_session};
 use super::{SessionAgents, SessionInterruptQueues};
@@ -84,11 +84,13 @@ impl DaemonSessions {
                 spawn_tracked_live_turn_with_images(
                     session_id,
                     agent,
-                    text.to_string(),
-                    images.clone(),
-                    None,
-                    None,
-                    None,
+                    LiveTurnInput {
+                        message: text.to_string(),
+                        images: images.clone(),
+                        system_reminder: None,
+                        display_role: None,
+                        status_detail: None,
+                    },
                     self.swarm.clone(),
                 )
                 .await

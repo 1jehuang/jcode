@@ -90,6 +90,25 @@ fn test_image_attachment_backspace_detaches_payload_and_reports_status() {
 }
 
 #[test]
+fn test_escape_then_undo_keeps_pasted_image_attached() {
+    let mut app = create_test_app();
+    crate::tui::app::input_images::attach_image(
+        &mut app,
+        "image/png".into(),
+        "aGVsbG8=".into(),
+    );
+    app.handle_key(KeyCode::Esc, KeyModifiers::NONE).unwrap();
+    assert_eq!(app.input(), "");
+    assert!(!crate::tui::TuiState::input_image_attached(&app, 1));
+    app.undo_input_change();
+    assert_eq!(app.input(), "[image 1]");
+    assert!(crate::tui::TuiState::input_image_attached(&app, 1));
+    let prepared = crate::tui::app::input::take_prepared_input(&mut app);
+    assert_eq!(prepared.images.len(), 1);
+    assert!(app.pending_images.is_empty());
+}
+
+#[test]
 fn test_image_placeholder_before_text_submits_as_user_turn_with_image() {
     let mut app = create_test_app();
     attach_test_image(&mut app);

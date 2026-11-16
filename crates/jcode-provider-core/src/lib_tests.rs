@@ -4,6 +4,8 @@ use super::*;
 struct SimpleFailureProvider {
     error_event: bool,
     fail: bool,
+    resolved_model: Option<String>,
+    retry: bool,
     model_reads: Arc<std::sync::atomic::AtomicUsize>,
 }
 
@@ -28,6 +30,26 @@ impl Provider for SimpleFailureProvider {
                 cache_creation_input_tokens: None,
             }),
         ];
+        if self.retry {
+            events.push(Ok(StreamEvent::ResolvedModel {
+                model: "discarded-model".into(),
+            }));
+            events.push(Ok(StreamEvent::RetryRollback { attempt: 1, max: 2 }));
+            events.push(Ok(StreamEvent::TextDelta("retried".into())));
+            events.push(Ok(StreamEvent::TokenUsage {
+                input_tokens: Some(9),
+                output_tokens: None,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+            }));
+        }
+        // Actual identity can arrive after usage.
+        if let Some(model) = &self.resolved_model {
+            events.push(Ok(StreamEvent::ResolvedModel {
+                model: model.clone(),
+            }));
+            events.push(Ok(StreamEvent::ResolvedModel { model: "  ".into() }));
+        }
         if self.fail {
             events.push(if self.error_event {
                 Ok(StreamEvent::Error {
@@ -83,8 +105,13 @@ async fn simple_completion_failure_preserves_partial_usage_and_source() {
     assert_eq!(failure.usage.input_tokens, Some(42));
     assert_eq!(failure.usage.output_tokens, None);
     assert_eq!(failure.usage.cache_read_input_tokens, Some(12));
-    assert_eq!(failure.provider, "upstream");
-    assert_eq!(failure.model, "test-model");
+    assert_eq!(failure.provider, "route");
+    assert_eq!(failure.model, "requested-alias");
+    assert_eq!(
+        failure.usage.requested_model.as_deref(),
+        Some("requested-alias")
+    );
+    assert_eq!(failure.usage.resolved_model, None);
     assert!(
         error
             .chain()
@@ -129,6 +156,53 @@ async fn simple_completion_success_returns_usage_once() {
     assert_eq!(text, "partial");
     assert_eq!(usage.input_tokens, Some(42));
     assert_eq!(usage.output_tokens, Some(7));
+    assert_eq!(usage.requested_model.as_deref(), Some("requested-alias"));
+    assert_eq!(usage.resolved_model, None);
+}
+
+#[tokio::test]
+async fn simple_completion_preserves_alias_and_late_actual_model_on_success_and_failure() {
+    for fail in [false, true] {
+        let provider = SimpleFailureProvider {
+            fail,
+            resolved_model: Some(" actual-snapshot ".into()),
+            ..Default::default()
+        };
+        let result = provider
+            .complete_simple_with_usage("prompt", "system")
+            .await;
+        let usage = match result {
+            Ok((_, usage)) => usage,
+            Err(error) => error
+                .downcast_ref::<SimpleCompletionError>()
+                .unwrap()
+                .usage
+                .clone(),
+        };
+        assert_eq!(usage.requested_model.as_deref(), Some("requested-alias"));
+        assert_eq!(usage.resolved_model.as_deref(), Some("actual-snapshot"));
+        assert_eq!(usage.input_tokens, Some(42));
+    }
+}
+
+#[tokio::test]
+async fn simple_completion_retry_resets_actual_model_and_usage() {
+    for resolved in [None, Some("retry-model".to_owned())] {
+        let provider = SimpleFailureProvider {
+            retry: true,
+            resolved_model: resolved.clone(),
+            ..Default::default()
+        };
+        let (text, usage) = provider
+            .complete_simple_with_usage("prompt", "system")
+            .await
+            .unwrap();
+        assert_eq!(text, "retried");
+        assert_eq!(usage.input_tokens, Some(9));
+        assert_eq!(usage.cache_read_input_tokens, None);
+        assert_eq!(usage.requested_model.as_deref(), Some("requested-alias"));
+        assert_eq!(usage.resolved_model, resolved);
+    }
 }
 
 #[test]

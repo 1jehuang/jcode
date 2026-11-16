@@ -60,6 +60,70 @@ struct PersistedModelCatalogScope {
     observed_at_unix_secs: u64,
 }
 
+// Keep field order identical to PersistedModelCatalogScope. Only the refreshed
+// payload is borrowed, avoiding deep copies made solely for serialization.
+#[derive(Serialize)]
+struct BorrowedScope<'a> {
+    models: &'a [String],
+    context_limits: &'a HashMap<String, usize>,
+    reasoning_efforts: &'a HashMap<String, Vec<String>>,
+    service_tiers: &'a HashMap<String, Vec<String>>,
+    observed_at_unix_secs: u64,
+}
+
+struct ScopeOverlay<'a> {
+    scopes: &'a HashMap<String, PersistedModelCatalogScope>,
+    scope: &'a str,
+    replacement: BorrowedScope<'a>,
+}
+
+impl Serialize for ScopeOverlay<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.scopes.len()))?;
+        for (scope, snapshot) in self.scopes {
+            if scope == self.scope {
+                map.serialize_entry(scope, &self.replacement)?;
+            } else {
+                map.serialize_entry(scope, snapshot)?;
+            }
+        }
+        map.end()
+    }
+}
+
+#[derive(Serialize)]
+struct StoreOverlay<'a> {
+    scopes: ScopeOverlay<'a>,
+}
+
+fn borrowed_catalog_store<'a>(
+    store: &'a mut PersistedModelCatalogStore,
+    scope: &'a str,
+    replacement: BorrowedScope<'a>,
+) -> StoreOverlay<'a> {
+    // Insert exactly as the owned path did, preserving HashMap bucket order
+    // even for a new scope. The discarded old payload is no longer needed.
+    // Empty placeholders allocate no model/context/capability collections.
+    store.scopes.insert(
+        scope.to_string(),
+        PersistedModelCatalogScope {
+            models: Vec::new(),
+            context_limits: HashMap::new(),
+            reasoning_efforts: HashMap::new(),
+            service_tiers: HashMap::new(),
+            observed_at_unix_secs: replacement.observed_at_unix_secs,
+        },
+    );
+    StoreOverlay {
+        scopes: ScopeOverlay {
+            scopes: &store.scopes,
+            scope,
+            replacement,
+        },
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn filtered_display_models(models: impl IntoIterator<Item = String>) -> Vec<String> {
     models
@@ -390,7 +454,7 @@ fn model_ids_with_context_aliases(models: Vec<String>) -> Vec<String> {
             continue;
         }
         if seen.insert(model.clone()) {
-            deduped.push(model.clone());
+            deduped.push(model);
         }
         if model_exposes_1m_alias(&normalized) {
             let alias = format!("{}[1m]", normalized);
@@ -464,7 +528,7 @@ fn load_persisted_model_catalog_store(file_name: &str) -> Option<PersistedModelC
     crate::storage::read_json(&path).ok()
 }
 
-fn save_persisted_model_catalog_store(file_name: &str, store: &PersistedModelCatalogStore) {
+fn save_persisted_model_catalog_store(file_name: &str, store: &(impl Serialize + ?Sized)) {
     let Ok(path) = model_catalog_cache_path(file_name) else {
         return;
     };
@@ -497,17 +561,18 @@ fn persist_scoped_model_catalog(
         .lock()
         .unwrap_or_else(|err| err.into_inner());
     let mut store = load_persisted_model_catalog_store(file_name).unwrap_or_default();
-    store.scopes.insert(
-        scope.to_string(),
-        PersistedModelCatalogScope {
-            models: models.to_vec(),
-            context_limits: context_limits.clone(),
-            reasoning_efforts: reasoning_efforts.clone(),
-            service_tiers: service_tiers.clone(),
+    let view = borrowed_catalog_store(
+        &mut store,
+        scope,
+        BorrowedScope {
+            models,
+            context_limits,
+            reasoning_efforts,
+            service_tiers,
             observed_at_unix_secs: observed_at_unix_secs(observed_at),
         },
     );
-    save_persisted_model_catalog_store(file_name, &store);
+    save_persisted_model_catalog_store(file_name, &view);
 }
 
 fn hydrate_catalog_cache_from_disk(
@@ -515,8 +580,8 @@ fn hydrate_catalog_cache_from_disk(
     scope: &str,
     service: &ModelCatalogService,
 ) -> Option<Vec<String>> {
-    let store = load_persisted_model_catalog_store(file_name)?;
-    let persisted = store.scopes.get(scope)?.clone();
+    let mut store = load_persisted_model_catalog_store(file_name)?;
+    let persisted = store.scopes.remove(scope)?;
     if persisted.models.is_empty() {
         return None;
     }
@@ -535,7 +600,7 @@ fn hydrate_catalog_cache_from_disk(
     let observed_at = system_time_from_unix_secs(persisted.observed_at_unix_secs);
     service.hydrate_scope_models_from_snapshot(scope, normalized, observed_at);
     if !persisted.context_limits.is_empty() {
-        populate_context_limits(persisted.context_limits.clone());
+        populate_context_limits(persisted.context_limits);
     }
 
     Some(model_ids_with_context_aliases(persisted.models))
@@ -575,17 +640,16 @@ pub fn cached_openai_reasoning_efforts() -> Option<HashMap<String, Vec<String>>>
 pub fn cached_openai_reasoning_efforts_for_scope(
     scope: &str,
 ) -> Option<HashMap<String, Vec<String>>> {
-    let scope = scope.to_string();
-    let store = load_persisted_model_catalog_store(OPENAI_MODEL_CATALOG_CACHE_FILE)?;
-    let efforts = store.scopes.get(&scope)?.reasoning_efforts.clone();
+    let mut store = load_persisted_model_catalog_store(OPENAI_MODEL_CATALOG_CACHE_FILE)?;
+    let efforts = store.scopes.remove(scope)?.reasoning_efforts;
     (!efforts.is_empty()).then_some(efforts)
 }
 
 /// Return the account-scoped service tier snapshot. Missing model entries are
 /// unknown, but present empty vectors are authoritative capability denials.
 pub fn cached_openai_service_tiers_for_scope(scope: &str) -> Option<HashMap<String, Vec<String>>> {
-    let store = load_persisted_model_catalog_store(OPENAI_MODEL_CATALOG_CACHE_FILE)?;
-    Some(store.scopes.get(scope)?.service_tiers.clone())
+    let mut store = load_persisted_model_catalog_store(OPENAI_MODEL_CATALOG_CACHE_FILE)?;
+    Some(store.scopes.remove(scope)?.service_tiers)
 }
 
 /// Test-only: clear the process-global in-memory model catalogs. The catalog
@@ -640,13 +704,13 @@ pub fn cached_context_limit_for_model(model: &str) -> Option<usize> {
 /// Called once at startup when OpenAI OAuth credentials are available.
 pub fn populate_context_limits(models: HashMap<String, usize>) {
     if let Ok(mut cache) = CONTEXT_LIMIT_CACHE.write() {
-        for (model, limit) in &models {
+        for (model, limit) in models {
             crate::logging::info(&format!(
                 "Context limit cache: {} = {}k",
                 model,
                 limit / 1000
             ));
-            cache.insert(model.clone(), *limit);
+            cache.insert(model, limit);
         }
     }
 }
@@ -1012,10 +1076,10 @@ pub fn refresh_openai_model_catalog_in_background_for_scope(
                 ));
                 persist_openai_model_catalog_for_scope(&scope, &catalog);
                 if !catalog.context_limits.is_empty() {
-                    populate_context_limits(catalog.context_limits.clone());
+                    populate_context_limits(catalog.context_limits);
                 }
                 if !catalog.available_models.is_empty() {
-                    populate_account_models_for_scope(&scope, catalog.available_models.clone());
+                    populate_account_models_for_scope(&scope, catalog.available_models);
                 }
             }
             Ok(_) => {
@@ -1336,6 +1400,449 @@ pub fn provider_for_model_with_hint(
 /// Detect which provider a model belongs to
 pub fn provider_for_model(model: &str) -> Option<&'static str> {
     provider_for_model_with_hint(model, None)
+}
+
+#[cfg(test)]
+mod catalog_ownership_tests {
+    use super::*;
+
+    #[test]
+    fn model_picker_transfers_first_string_and_preserves_order() {
+        let first = "ownership-picker-future-model-a".to_string();
+        let second = "ownership-picker-future-model-b".to_string();
+        let first_backing = first.as_ptr();
+        let second_backing = second.as_ptr();
+        let duplicate = first.clone();
+        let result = model_ids_with_context_aliases(vec![
+            String::new(),
+            first,
+            duplicate,
+            second,
+            String::new(),
+        ]);
+        assert_eq!(
+            result,
+            [
+                "ownership-picker-future-model-a",
+                "ownership-picker-future-model-b",
+            ]
+        );
+        assert_eq!(result[0].as_ptr(), first_backing);
+        assert_eq!(result[1].as_ptr(), second_backing);
+    }
+
+    fn overlay<'a>(
+        store: &'a mut PersistedModelCatalogStore,
+        scope: &'a str,
+        replacement: &'a PersistedModelCatalogScope,
+    ) -> StoreOverlay<'a> {
+        borrowed_catalog_store(
+            store,
+            scope,
+            BorrowedScope {
+                models: &replacement.models,
+                context_limits: &replacement.context_limits,
+                reasoning_efforts: &replacement.reasoning_efforts,
+                service_tiers: &replacement.service_tiers,
+                observed_at_unix_secs: replacement.observed_at_unix_secs,
+            },
+        )
+    }
+
+    fn benchmark_snapshot(count: usize) -> PersistedModelCatalogScope {
+        let mut result = snapshot(Vec::new(), HashMap::new());
+        result.observed_at_unix_secs = 1_795_000_123;
+        for index in 0..count {
+            let model = format!("future-model-{index:05}-long-model-name");
+            result.models.push(model.clone());
+            result.context_limits.insert(model.clone(), 128_000 + index);
+            result
+                .reasoning_efforts
+                .insert(model.clone(), vec!["low".into(), "high".into()]);
+            result.service_tiers.insert(
+                model,
+                if index % 2 == 0 {
+                    vec!["priority".into()]
+                } else {
+                    Vec::new()
+                },
+            );
+        }
+        result
+    }
+
+    #[test]
+    fn borrowed_overlay_matches_legacy_compact_and_pretty_bytes() {
+        for count in [0, 1, 32, 2048] {
+            let replacement = benchmark_snapshot(count);
+            for scope_count in [0, 1, 8] {
+                let store = PersistedModelCatalogStore {
+                    scopes: (0..scope_count)
+                        .map(|index| (format!("account::{index}"), benchmark_snapshot(3)))
+                        .collect(),
+                };
+                for scope in ["account::0", "api-key::new-endpoint"] {
+                    let mut legacy = store.clone();
+                    legacy.scopes.insert(scope.to_string(), replacement.clone());
+                    let mut candidate = store.clone();
+                    let view = overlay(&mut candidate, scope, &replacement);
+                    assert_eq!(
+                        serde_json::to_vec(&view).unwrap(),
+                        serde_json::to_vec(&legacy).unwrap()
+                    );
+                    assert_eq!(
+                        serde_json::to_vec_pretty(&view).unwrap(),
+                        serde_json::to_vec_pretty(&legacy).unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn thread_cpu_ns() -> u64 {
+        let mut time = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: clock_gettime writes only the valid timespec pointed to here.
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) },
+            0
+        );
+        time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64
+    }
+
+    #[test]
+    #[ignore = "release-only CPU experiment, run explicitly with --release --ignored --nocapture"]
+    #[cfg(target_os = "linux")]
+    fn scoped_writer_release_cpu_comparison() {
+        assert!(!cfg!(debug_assertions), "run with --release");
+        use std::hint::black_box;
+        for (name, models, scopes, batch) in [
+            ("tiny", 1, 1, 4096),
+            ("small", 32, 4, 512),
+            ("large", 2048, 8, 8),
+        ] {
+            let replacement = benchmark_snapshot(models);
+            let fixture = PersistedModelCatalogStore {
+                scopes: (0..scopes)
+                    .map(|index| (format!("account::{index}"), benchmark_snapshot(models)))
+                    .collect(),
+            };
+            for scope in ["account::0", "api-key::new-endpoint"] {
+                let mut legacy_times = Vec::new();
+                let mut overlay_times = Vec::new();
+                for round in 0..9 {
+                    for candidate in if round % 2 == 0 {
+                        [false, true]
+                    } else {
+                        [true, false]
+                    } {
+                        // Parsing is identical for both paths. Prepare equally owned stores
+                        // outside timing to isolate update + serialization + destruction CPU.
+                        let stores: Vec<_> = (0..batch).map(|_| fixture.clone()).collect();
+                        let start = thread_cpu_ns();
+                        for mut store in stores {
+                            if candidate {
+                                let view = overlay(&mut store, scope, &replacement);
+                                black_box(serde_json::to_vec(&view).unwrap());
+                            } else {
+                                store.scopes.insert(scope.to_string(), replacement.clone());
+                                black_box(serde_json::to_vec(&store).unwrap());
+                            }
+                            black_box(store);
+                        }
+                        let elapsed = (thread_cpu_ns() - start) / batch;
+                        if candidate {
+                            overlay_times.push(elapsed);
+                        } else {
+                            legacy_times.push(elapsed);
+                        }
+                    }
+                }
+                legacy_times.sort_unstable();
+                overlay_times.sort_unstable();
+                println!(
+                    "{name} scope={scope} legacy_ns={} overlay_ns={} ratio={:.4} legacy_samples={legacy_times:?} overlay_samples={overlay_times:?}",
+                    legacy_times[4],
+                    overlay_times[4],
+                    overlay_times[4] as f64 / legacy_times[4] as f64
+                );
+            }
+        }
+    }
+
+    struct CatalogTestHome {
+        previous: Option<std::ffi::OsString>,
+        _temp: tempfile::TempDir,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl CatalogTestHome {
+        fn new() -> Self {
+            let lock = crate::storage::lock_test_env();
+            let temp = tempfile::tempdir().unwrap();
+            let previous = std::env::var_os("JCODE_HOME");
+            crate::env::set_var("JCODE_HOME", temp.path());
+            Self {
+                previous,
+                _temp: temp,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for CatalogTestHome {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                crate::env::set_var("JCODE_HOME", previous);
+            } else {
+                crate::env::remove_var("JCODE_HOME");
+            }
+        }
+    }
+
+    #[test]
+    fn borrowed_persistence_preserves_empty_timestamp_and_concurrent_scopes() {
+        let _home = CatalogTestHome::new();
+        let file_name = "borrowed-catalog-persistence.json";
+        let path = model_catalog_cache_path(file_name).unwrap();
+        let replacement = benchmark_snapshot(3);
+        let persist = |scope: &str, models: &[String]| {
+            persist_scoped_model_catalog(
+                file_name,
+                scope,
+                models,
+                &replacement.context_limits,
+                &replacement.reasoning_efforts,
+                &replacement.service_tiers,
+                system_time_from_unix_secs(replacement.observed_at_unix_secs),
+            );
+        };
+        persist("empty", &[]);
+        assert!(!path.exists(), "empty input must not create a cache");
+        persist("oauth::account", &replacement.models);
+        persist("api-key::endpoint", &replacement.models);
+        let before = std::fs::read(&path).unwrap();
+        persist("oauth::account", &[]);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        std::thread::scope(|threads| {
+            for index in 0..8 {
+                let persist = &persist;
+                let models = &replacement.models;
+                threads.spawn(move || persist(&format!("concurrent::{index}"), models));
+            }
+        });
+        let store = load_persisted_model_catalog_store(file_name).unwrap();
+        assert_eq!(
+            store.scopes.len(),
+            10,
+            "serialized read-modify-write must retain every scope"
+        );
+        let expected = serde_json::to_value(&replacement).unwrap();
+        for snapshot in store.scopes.values() {
+            assert_eq!(serde_json::to_value(snapshot).unwrap(), expected);
+        }
+
+        let updated = vec!["updated-model".to_string()];
+        persist("oauth::account", &updated);
+        let store = load_persisted_model_catalog_store(file_name).unwrap();
+        assert_eq!(store.scopes["oauth::account"].models, updated);
+        assert_eq!(
+            serde_json::to_value(&store.scopes["api-key::endpoint"]).unwrap(),
+            expected
+        );
+        assert_eq!(
+            store.scopes["oauth::account"].observed_at_unix_secs,
+            replacement.observed_at_unix_secs
+        );
+    }
+
+    #[test]
+    fn owned_capability_reads_preserve_missing_empty_and_account_scopes() {
+        let _home = CatalogTestHome::new();
+        assert_eq!(cached_openai_reasoning_efforts_for_scope("missing"), None);
+        assert_eq!(cached_openai_service_tiers_for_scope("missing"), None);
+        let efforts = HashMap::from([
+            (
+                "future-model".to_string(),
+                vec!["high".to_string(), "low".to_string()],
+            ),
+            ("explicit-empty".to_string(), Vec::new()),
+        ]);
+        let tiers = HashMap::from([
+            ("future-model".to_string(), vec!["priority".to_string()]),
+            ("denied".to_string(), Vec::new()),
+        ]);
+        let mut selected = snapshot(vec!["future-model".to_string()], HashMap::new());
+        selected.reasoning_efforts = efforts.clone();
+        selected.service_tiers = tiers.clone();
+        let store = PersistedModelCatalogStore {
+            scopes: HashMap::from([
+                ("oauth::account".to_string(), selected),
+                (
+                    "api-key::endpoint".to_string(),
+                    snapshot(vec!["other".to_string()], HashMap::new()),
+                ),
+            ]),
+        };
+        save_persisted_model_catalog_store(OPENAI_MODEL_CATALOG_CACHE_FILE, &store);
+        let path = model_catalog_cache_path(OPENAI_MODEL_CATALOG_CACHE_FILE).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                cached_openai_reasoning_efforts_for_scope("oauth::account"),
+                Some(efforts.clone())
+            );
+            assert_eq!(
+                cached_openai_service_tiers_for_scope("oauth::account"),
+                Some(tiers.clone())
+            );
+            assert_eq!(
+                cached_openai_reasoning_efforts_for_scope("api-key::endpoint"),
+                None
+            );
+            assert_eq!(
+                cached_openai_service_tiers_for_scope("api-key::endpoint"),
+                Some(HashMap::new())
+            );
+            assert_eq!(cached_openai_reasoning_efforts_for_scope("missing"), None);
+            assert_eq!(cached_openai_service_tiers_for_scope("missing"), None);
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    fn service() -> ModelCatalogService {
+        ModelCatalogService::new(
+            ACCOUNT_MODEL_CACHE_TTL,
+            ACCOUNT_MODEL_REFRESH_RETRY_INTERVAL,
+            RUNTIME_UNAVAILABLE_TTL,
+        )
+    }
+
+    fn snapshot(
+        models: Vec<String>,
+        context_limits: HashMap<String, usize>,
+    ) -> PersistedModelCatalogScope {
+        PersistedModelCatalogScope {
+            models,
+            context_limits,
+            reasoning_efforts: HashMap::new(),
+            service_tiers: HashMap::new(),
+            observed_at_unix_secs: observed_at_unix_secs(SystemTime::now()) - 5,
+        }
+    }
+
+    #[test]
+    fn populate_context_limits_moves_keys_and_preserves_unrelated_entries() {
+        let model = "catalog-ownership-moved-key".to_string();
+        let allocation = model.as_ptr() as usize;
+        let unrelated = "catalog-ownership-unrelated-key".to_string();
+        populate_context_limits(HashMap::from([(unrelated.clone(), 42), (model.clone(), 1)]));
+        populate_context_limits(HashMap::from([(model, 987_654)]));
+        populate_context_limits(HashMap::new());
+        let mut cache = CONTEXT_LIMIT_CACHE.write().unwrap();
+        let (key, value) = cache.get_key_value("catalog-ownership-moved-key").unwrap();
+        // HashMap retains an existing equal key when replacing its value.
+        assert_eq!(*value, 987_654);
+        assert_eq!(cache.get(&unrelated), Some(&42));
+        assert_ne!(key.as_ptr() as usize, allocation);
+        cache.remove("catalog-ownership-moved-key");
+        cache.remove(&unrelated);
+
+        let fresh = "catalog-ownership-fresh-key".to_string();
+        let allocation = fresh.as_ptr() as usize;
+        drop(cache);
+        populate_context_limits(HashMap::from([(fresh, 123_456)]));
+        let mut cache = CONTEXT_LIMIT_CACHE.write().unwrap();
+        let (key, value) = cache.get_key_value("catalog-ownership-fresh-key").unwrap();
+        assert_eq!(
+            key.as_ptr() as usize,
+            allocation,
+            "new keys must be moved, not cloned"
+        );
+        assert_eq!(*value, 123_456);
+        cache.remove("catalog-ownership-fresh-key");
+    }
+
+    #[test]
+    fn hydration_moves_only_selected_scope_without_mutating_disk() {
+        let _env = crate::storage::lock_test_env();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let file_name = path.to_str().unwrap();
+        let selected = "catalog-ownership-selected".to_string();
+        let other = "catalog-ownership-other".to_string();
+        let selected_snapshot = snapshot(
+            vec![selected.clone(), selected.clone()],
+            HashMap::from([(selected.clone(), 1_000_000)]),
+        );
+        let observed_at = system_time_from_unix_secs(selected_snapshot.observed_at_unix_secs);
+        let store = PersistedModelCatalogStore {
+            scopes: HashMap::from([
+                ("account::selected".to_string(), selected_snapshot),
+                (
+                    "endpoint::other".to_string(),
+                    snapshot(vec![other.clone()], HashMap::from([(other.clone(), 9)])),
+                ),
+                (
+                    "empty".to_string(),
+                    snapshot(
+                        Vec::new(),
+                        HashMap::from([("catalog-ownership-empty".to_string(), 9)]),
+                    ),
+                ),
+                (
+                    "invalid".to_string(),
+                    snapshot(
+                        vec![String::new()],
+                        HashMap::from([("catalog-ownership-invalid".to_string(), 9)]),
+                    ),
+                ),
+            ]),
+        };
+        crate::storage::write_json(&path, &store).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let service = service();
+        assert_eq!(
+            hydrate_catalog_cache_from_disk(file_name, "account::selected", &service),
+            Some(vec![selected.clone(), format!("{selected}[1m]")])
+        );
+        assert_eq!(
+            service.model_ids("account::selected"),
+            Some(vec![selected.clone()])
+        );
+        assert_eq!(service.observed_at("account::selected"), Some(observed_at));
+        assert_eq!(service.model_ids("endpoint::other"), None);
+        assert_eq!(cached_context_limit_for_model(&selected), Some(1_000_000));
+        assert_eq!(cached_context_limit_for_model(&other), None);
+        for scope in ["missing", "empty", "invalid"] {
+            assert_eq!(
+                hydrate_catalog_cache_from_disk(file_name, scope, &service),
+                None
+            );
+            assert_eq!(service.model_ids(scope), None);
+        }
+        assert_eq!(
+            cached_context_limit_for_model("catalog-ownership-empty"),
+            None
+        );
+        assert_eq!(
+            cached_context_limit_for_model("catalog-ownership-invalid"),
+            None
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            load_persisted_model_catalog_store(file_name)
+                .unwrap()
+                .scopes
+                .len(),
+            4
+        );
+        CONTEXT_LIMIT_CACHE.write().unwrap().remove(&selected);
+    }
 }
 
 #[cfg(test)]
