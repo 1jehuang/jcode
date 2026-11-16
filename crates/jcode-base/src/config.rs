@@ -31,7 +31,9 @@ const CONFIG_CACHE_CHECK_INTERVAL: Duration = if cfg!(test) {
 #[cfg(test)]
 #[test]
 fn kagi_websearch_documented_config_parses() {
-    let docs = include_str!("../../../docs/kagi-web-search.md");
+    // Normalize line endings: a Windows checkout of this markdown file has CRLF,
+    // and splitting on "```toml\n" would then find nothing.
+    let docs = include_str!("../../../docs/kagi-web-search.md").replace("\r\n", "\n");
     let example = docs
         .split("```toml\n")
         .nth(1)

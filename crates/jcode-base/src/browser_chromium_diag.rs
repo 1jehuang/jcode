@@ -203,7 +203,12 @@ mod tests {
     fn reports_missing_disabled_other_folder_and_healthy_installs() {
         let temp = tempfile::tempdir().unwrap();
         let user_data = temp.path();
-        let expected = Path::new("/home/u/.jcode/browser/extensions/chromium");
+        // Native absolute paths: a POSIX literal is not absolute on Windows, and
+        // the "another folder" classification compares real paths.
+        let expected = user_data.join("browser").join("extensions").join("chromium");
+        let expected = expected.as_path();
+        let other_folder = user_data.join("Downloads").join("bridge");
+        let other_folder_json = serde_json::Value::String(other_folder.to_string_lossy().into());
 
         local_state(user_data, &["Default"]);
         write_profile(user_data, "Default", None);
@@ -225,13 +230,13 @@ mod tests {
         write_profile(
             user_data,
             "Default",
-            Some(json!({"path": "/Users/u/Downloads/bridge", "disable_reasons": []})),
+            Some(json!({"path": other_folder_json, "disable_reasons": []})),
         );
         assert_eq!(
             inspect_user_data(user_data, expected),
             Some(ChromiumExtensionState::OtherFolder {
                 profile: "Default".into(),
-                path: "/Users/u/Downloads/bridge".into()
+                path: other_folder.to_string_lossy().into()
             })
         );
 

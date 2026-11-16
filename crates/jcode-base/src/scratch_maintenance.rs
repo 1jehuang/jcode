@@ -283,8 +283,24 @@ mod tests {
 
     fn age(path: &Path, by: Duration) {
         let when = SystemTime::now() - by;
-        File::options()
-            .read(true)
+        let mut options = File::options();
+        options.read(true);
+        // Setting a timestamp needs FILE_WRITE_ATTRIBUTES. A plain read handle
+        // fails with "Access is denied", and a directory cannot be opened at all
+        // without FILE_FLAG_BACKUP_SEMANTICS.
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            const GENERIC_READ: u32 = 0x8000_0000;
+            const FILE_WRITE_ATTRIBUTES: u32 = 0x0000_0100;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            options
+                .access_mode(GENERIC_READ | FILE_WRITE_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+        }
+        #[cfg(not(windows))]
+        options.write(true);
+        options
             .open(path)
             .and_then(|file| file.set_modified(when))
             .expect("set mtime");

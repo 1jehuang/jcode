@@ -29,7 +29,10 @@ fn parsed_state_reuse_matches_old_output_and_reads_current_bytes() {
     // Equal byte length and identical mtime still require fresh authorization.
     let before = std::fs::metadata(&path).unwrap().modified().unwrap();
     std::fs::write(&path, valid.replace("\"generation\":7", "\"generation\":8")).unwrap();
-    std::fs::File::open(&path)
+    std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(&path)
         .unwrap()
         .set_modified(before)
         .unwrap();
@@ -37,7 +40,10 @@ fn parsed_state_reuse_matches_old_output_and_reads_current_bytes() {
     assert!(!sync_still_enabled(7));
     assert!(sync_still_enabled(8));
     std::fs::write(&path, valid.replace("true", "null")).unwrap();
-    std::fs::File::open(&path)
+    std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(&path)
         .unwrap()
         .set_modified(before)
         .unwrap();
@@ -299,7 +305,10 @@ async fn unchanged_pass_and_identical_commit_do_not_rewrite_state() {
     )]);
     commit_progress(generation, &updates).unwrap();
     let state = state_path().unwrap();
-    std::fs::File::open(&state)
+    std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(&state)
         .unwrap()
         .set_times(std::fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(100)))
         .unwrap();

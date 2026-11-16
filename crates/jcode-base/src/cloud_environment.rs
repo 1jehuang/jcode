@@ -656,6 +656,9 @@ mod tests {
             }
         }
     }
+    // Private publication is unix-only by design: it relies on the file mode to
+    // keep credentials opaque, and `publish_private` refuses to guess elsewhere.
+    #[cfg(unix)]
     #[test]
     fn environment_root_subdirectory_and_invalid_values() {
         let _guard = crate::storage::lock_test_env();
@@ -686,6 +689,7 @@ mod tests {
         .unwrap();
         assert!(load_environment(&subdirectory).is_err());
     }
+    #[cfg(unix)]
     #[test]
     fn concurrent_manifest_and_environment_updates_are_not_lost() {
         let _guard = crate::storage::lock_test_env();
@@ -805,6 +809,7 @@ mod tests {
         assert!(credential_paths("ssh").is_err());
         assert!(parse_request(br#"{"action":"fetch","resource":{"kind":"env_var","name":"TOKEN","value":"secret"}}"#).is_err());
     }
+    #[cfg(unix)]
     #[test]
     fn opaque_publish_and_metadata() {
         let root = root();
@@ -839,6 +844,7 @@ mod tests {
         }
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[cfg(unix)]
     #[test]
     fn existing_credentials_are_preserved() {
         let root = root();

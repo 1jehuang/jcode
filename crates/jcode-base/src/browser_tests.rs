@@ -27,7 +27,8 @@ fn test_rewrite_command_with_full_path() {
     // If binary exists, it rewrites; if not, returns unchanged
     if browser_binary_path().exists() {
         assert!(result.contains("ping"));
-        assert!(result.contains(".jcode/browser"));
+        // The path is native, so separators differ by platform.
+        assert!(result.contains(".kcode") && result.contains("browser"));
     } else {
         assert_eq!(result, cmd);
     }
@@ -38,7 +39,7 @@ fn test_paths() {
     let _guard = crate::storage::lock_test_env();
 
     let bdir = browser_dir();
-    assert!(bdir.to_string_lossy().contains(".jcode"));
+    assert!(bdir.to_string_lossy().contains(".kcode"));
     assert!(bdir.to_string_lossy().ends_with("browser"));
 
     let bin = browser_binary_path();

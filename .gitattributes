@@ -16,3 +16,8 @@
 # every platform.
 *.sh text eol=lf
 *.bash text eol=lf
+
+# Markdown is read by tests that parse fenced examples with literal `\n`
+# separators, so it must not carry CRLF either.
+*.md text eol=lf
+docs/**/*.md text eol=lf

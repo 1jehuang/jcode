@@ -244,7 +244,7 @@ fn ordinary_resume_never_stops_a_live_claude_process() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
-    let external = temp.path().join("external/.claude");
+    let external = temp.path().join("external").join(".claude");
     let transcript = external.join("projects/demo/ordinary-live.jsonl");
     std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
     write_claude_transcript(&transcript, "ordinary-live");
@@ -280,7 +280,7 @@ fn explicit_takeover_preserves_history_and_stops_only_matching_process() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
-    let external = temp.path().join("external/.claude");
+    let external = temp.path().join("external").join(".claude");
     let transcript = external.join("projects/demo/takeover-live.jsonl");
     std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
     write_claude_transcript(&transcript, "takeover-live");
@@ -343,7 +343,7 @@ fn takeover_with_no_complete_messages_leaves_claude_running() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
-    let external = temp.path().join("external/.claude");
+    let external = temp.path().join("external").join(".claude");
     let transcript = external.join("projects/demo/incomplete-live.jsonl");
     std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
     std::fs::write(&transcript, "{\"type\":\"progress\",\"data\":{}}\n").unwrap();
@@ -380,7 +380,7 @@ fn takeover_rejects_a_transcript_from_a_different_live_session() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
-    let external = temp.path().join("external/.claude");
+    let external = temp.path().join("external").join(".claude");
     let transcript = external.join("projects/demo/wrong-session.jsonl");
     std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
     write_claude_transcript(&transcript, "different-session");
@@ -414,7 +414,7 @@ fn takeover_timeout_preserves_the_staged_jcode_session_after_sigterm() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
-    let external = temp.path().join("external/.claude");
+    let external = temp.path().join("external").join(".claude");
     let transcript = external.join("projects/demo/slow-exit.jsonl");
     std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
     write_claude_transcript(&transcript, "slow-exit");
@@ -546,7 +546,7 @@ fn test_discover_projects_uses_sandboxed_external_home() {
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
-    let project_dir = temp.path().join("external/.claude/projects/demo");
+    let project_dir = temp.path().join("external").join(".claude").join("projects").join("demo");
     std::fs::create_dir_all(&project_dir).unwrap();
     std::fs::write(
         project_dir.join("sessions-index.json"),
@@ -564,7 +564,7 @@ fn test_list_claude_code_sessions_uses_live_transcripts_when_index_is_stale() {
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
-    let project_dir = temp.path().join("external/.claude/projects/demo-project");
+    let project_dir = temp.path().join("external").join(".claude").join("projects").join("demo-project");
     std::fs::create_dir_all(&project_dir).unwrap();
 
     let indexed_session_path = project_dir.join("live-session-1.jsonl");
@@ -610,7 +610,12 @@ fn test_list_claude_code_sessions_uses_live_transcripts_when_index_is_stale() {
         .iter()
         .find(|session| session.session_id == "live-session-1")
         .expect("indexed live transcript should be discovered");
-    assert_eq!(indexed.full_path, indexed_session_path.to_string_lossy());
+    // Discovery builds paths by joining with '/', so compare canonically rather
+    // than byte-for-byte against a natively-joined path.
+    assert_eq!(
+        std::fs::canonicalize(&indexed.full_path).unwrap(),
+        std::fs::canonicalize(&indexed_session_path).unwrap()
+    );
     assert_eq!(
         indexed.summary.as_deref(),
         Some("Investigate the login bug")
@@ -621,7 +626,10 @@ fn test_list_claude_code_sessions_uses_live_transcripts_when_index_is_stale() {
         .iter()
         .find(|session| session.session_id == "orphan-session-2")
         .expect("orphan live transcript should be discovered");
-    assert_eq!(orphan.full_path, orphan_session_path.to_string_lossy());
+    assert_eq!(
+        std::fs::canonicalize(&orphan.full_path).unwrap(),
+        std::fs::canonicalize(&orphan_session_path).unwrap()
+    );
     assert_eq!(orphan.first_prompt, "Summarize the deployment issue");
     assert_eq!(orphan.message_count, 2);
 }
@@ -632,11 +640,15 @@ fn test_list_claude_code_sessions_uses_index_metadata_without_parsing_transcript
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
-    let project_dir = temp.path().join("external/.claude/projects/demo-project");
+    let project_dir = temp.path().join("external").join(".claude").join("projects").join("demo-project");
     std::fs::create_dir_all(&project_dir).unwrap();
 
     let transcript_path = project_dir.join("indexed-session.jsonl");
     std::fs::write(&transcript_path, "{this is not valid jsonl}\n").unwrap();
+    // A Windows path contains backslashes, so it has to be JSON-encoded rather
+    // than interpolated into a quoted string.
+    let transcript_json =
+        serde_json::to_string(&transcript_path.to_string_lossy().to_string()).unwrap();
 
     std::fs::write(
         project_dir.join("sessions-index.json"),
@@ -644,7 +656,7 @@ fn test_list_claude_code_sessions_uses_index_metadata_without_parsing_transcript
             concat!(
                 "{{\"version\":1,\"entries\":[",
                 "{{\"sessionId\":\"indexed-session\",",
-                "\"fullPath\":\"{}\",",
+                "\"fullPath\":{},",
                 "\"firstPrompt\":\"Investigate the login bug\",",
                 "\"summary\":\"Investigate the login bug\",",
                 "\"messageCount\":2,",
@@ -653,7 +665,7 @@ fn test_list_claude_code_sessions_uses_index_metadata_without_parsing_transcript
                 "\"projectPath\":\"/tmp/demo-project\"",
                 "}}]}}"
             ),
-            transcript_path.display()
+            transcript_json
         ),
     )
     .unwrap();
@@ -678,7 +690,7 @@ fn test_list_claude_code_sessions_skips_empty_index_entries_without_messages() {
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
-    let project_dir = temp.path().join("external/.claude/projects/demo-project");
+    let project_dir = temp.path().join("external").join(".claude").join("projects").join("demo-project");
     std::fs::create_dir_all(&project_dir).unwrap();
 
     let transcript_path = project_dir.join("empty-session.jsonl");
@@ -694,13 +706,13 @@ fn test_list_claude_code_sessions_skips_empty_index_entries_without_messages() {
             concat!(
                 "{{\"version\":1,\"entries\":[",
                 "{{\"sessionId\":\"empty-session\",",
-                "\"fullPath\":\"{}\",",
+                "\"fullPath\":{},",
                 "\"firstPrompt\":\"\",",
                 "\"summary\":\"\",",
                 "\"messageCount\":0",
                 "}}]}}"
             ),
-            transcript_path.display()
+            serde_json::to_string(&transcript_path.to_string_lossy().to_string()).unwrap()
         ),
     )
     .unwrap();
@@ -718,7 +730,7 @@ fn test_import_claude_session_uses_recovered_live_transcript() {
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
-    let project_dir = temp.path().join("external/.claude/projects/demo-project");
+    let project_dir = temp.path().join("external").join(".claude").join("projects").join("demo-project");
     std::fs::create_dir_all(&project_dir).unwrap();
 
     let transcript_path = project_dir.join("live-session-1.jsonl");
@@ -959,7 +971,7 @@ fn test_resolve_resume_target_to_jcode_imports_claude_code_session() {
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
-    let project_dir = temp.path().join("external/.claude/projects/demo-project");
+    let project_dir = temp.path().join("external").join(".claude").join("projects").join("demo-project");
     std::fs::create_dir_all(&project_dir).unwrap();
     let transcript_path = project_dir.join("claude-resolve-test.jsonl");
     std::fs::write(
@@ -1017,7 +1029,7 @@ fn test_reimporting_claude_session_preserves_jcode_continuation() {
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
-    let project_dir = temp.path().join("external/.claude/projects/demo-project");
+    let project_dir = temp.path().join("external").join(".claude").join("projects").join("demo-project");
     std::fs::create_dir_all(&project_dir).unwrap();
     let transcript_path = project_dir.join("claude-continued.jsonl");
     std::fs::write(

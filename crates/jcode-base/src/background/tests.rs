@@ -734,9 +734,22 @@ async fn reconcile_leaves_non_orphans_alone() -> Result<()> {
     let legacy = running_status_fixture("keep2bbbb", "session-keep");
     write_status_fixture(&manager, &legacy).await;
 
-    // Owned by a live foreign process (PID 1 is always alive on Unix).
+    // Owned by a live foreign process. PID 1 is always alive on Unix; Windows has
+    // no PID 1, so a child process stands in as the live foreign owner. It must
+    // not be this process: a status owned by *this* pid is treated as an orphan.
+    #[cfg(windows)]
+    let mut live_child = std::process::Command::new("cmd")
+        .args(["/C", "ping", "-n", "30", "127.0.0.1"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn live foreign process");
     let mut foreign = running_status_fixture("keep3cccc", "session-keep");
-    foreign.owner_pid = Some(1);
+    #[cfg(unix)]
+    let live_foreign_pid = 1;
+    #[cfg(windows)]
+    let live_foreign_pid = live_child.id();
+    foreign.owner_pid = Some(live_foreign_pid);
     foreign.owner_instance = Some("init-instance".to_string());
     write_status_fixture(&manager, &foreign).await;
 
@@ -760,6 +773,10 @@ async fn reconcile_leaves_non_orphans_alone() -> Result<()> {
             "{task_id} should not be reconciled"
         );
     }
+    // Only after every read: a status read self-heals an orphan, so the
+    // stand-in owner has to stay alive until the assertions are done.
+    #[cfg(windows)]
+    let _ = live_child.kill();
     Ok(())
 }
 
