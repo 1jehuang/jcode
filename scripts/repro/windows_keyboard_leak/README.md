@@ -80,10 +80,23 @@ python vhs_matrix.py --out runs\vhs-matrix --runs 5 --binary path\to\jcode-fixed
 | `run_matrix.py` | N identical runs plus bracketing negative controls; refuses to pass unless every run is green |
 | `check_counts.py` | per-check pass counts over a matrix directory |
 | `show_records.py` | every per-run record as one table, with the composer row each run ended on |
+| `make_fixture.py` | builds the small synthetic session under `fixture/` from a recorded one, so CI has something to resume |
 | `make_tapes.py` | generates the VHS tapes, embedding the real ESC byte so the tape can emit the report |
 | `vhs_matrix.py` | second, independent driver: VHS runs with log-based assertions |
 | `resume_world.cmd` | builds a disposable world (fixture copy, isolated home) and resumes it by name |
 | `PROOF.md` | the measured result: 10/10, 2/2 controls, 5/5 VHS, and the limits |
+
+## The synthetic fixture, and CI
+
+`fixture/session_probe_1735689600000_0123456789abcdef.json` is 1 KB, contains no user content, and
+exists so the probe can run where a recorded session cannot: it has the same schema and two
+short messages. A session that thin lands on the first-run welcome screen, so it needs
+`--dismiss-overlay`. It is a valid control too: against the pre-scrub commit it reproduces the
+leak, so it is not too weak to be meaningful.
+
+`.github/workflows/ci.yml` has a `windows-keyboard-probe` job that runs exactly this, gated on
+`workflow_dispatch` so it cannot slow down or flake ordinary pull requests. Trigger it with
+`gh workflow run ci.yml --ref <branch>`; the probe's artifacts are uploaded either way.
 
 ## Artifacts per run
 

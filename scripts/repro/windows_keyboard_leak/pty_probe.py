@@ -185,6 +185,8 @@ def main() -> int:
                     help="keys sent before Enter in the picker, e.g. 's' to reveal debug sessions")
     ap.add_argument("--cwd-dir", default="",
                     help="cwd for the client; defaults to a scratch directory under the run")
+    ap.add_argument("--dismiss-overlay", action="store_true",
+                    help="step past the first-run welcome overlay that a trivial session triggers")
     ap.add_argument("--rows", type=int, default=40)
     ap.add_argument("--cols", type=int, default=120)
     ap.add_argument("--ready-timeout", type=float, default=60.0)
@@ -266,6 +268,18 @@ def main() -> int:
             result["notes"].append("terminal never settled with the session up")
         else:
             result["checks"]["session_loaded"] = True
+
+        if args.dismiss_overlay and wait_for_text(cap, "Welcome to jcode", 10.0):
+            # A session with almost nothing in it lands on the welcome screen, so
+            # step past it the way a new user does: pick "New session" and confirm.
+            proc.write("\x1b[B")
+            time.sleep(0.4)
+            proc.write("\r")
+            time.sleep(2.5)
+            proc.write("\x1b")
+            time.sleep(0.8)
+            result["overlay_dismissed"] = True
+            before = snapshot("01a-after-overlay")
 
         if args.menu_pick:
             # Open the highlighted entry the way a user does. The default picker

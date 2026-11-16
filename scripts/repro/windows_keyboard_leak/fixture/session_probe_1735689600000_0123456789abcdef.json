@@ -1,0 +1,36 @@
+{
+  "id": "session_probe_1735689600000_0123456789abcdef",
+  "parent_id": null,
+  "title": "probe fixture",
+  "created_at": "2026-01-01T00:00:00Z",
+  "updated_at": "2026-01-01T00:00:02Z",
+  "messages": [
+    {
+      "id": "msg_probe_0001",
+      "role": "user",
+      "content": "Composer regression fixture: this session exists so a probe can resume it.",
+      "display_role": "user",
+      "timestamp": "2026-01-01T00:00:00Z"
+    },
+    {
+      "id": "msg_probe_0002",
+      "role": "assistant",
+      "content": "Fixture loaded. The composer below is the surface under test.",
+      "display_role": "assistant",
+      "timestamp": "2026-01-01T00:00:01Z"
+    }
+  ],
+  "model_usage_turn_id": null,
+  "provider_key": "opencode-go",
+  "model": "deepseek-v4.1-flash",
+  "reasoning_effort": "low",
+  "is_canary": false,
+  "working_dir": null,
+  "short_name": "probe",
+  "status": "Closed",
+  "last_pid": null,
+  "last_active_at": "2026-01-01T00:00:02Z",
+  "is_debug": false,
+  "saved": false,
+  "env_snapshots": []
+}
