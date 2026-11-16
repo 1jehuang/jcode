@@ -518,6 +518,8 @@ mod tests {
             let dir = tempfile::tempdir().expect("temp usage home");
             crate::env::set_var("JCODE_HOME", dir.path());
             crate::usage::clear_anthropic_usage_cache_for_tests();
+            crate::usage::clear_remote_account_usage();
+            crate::config::Config::invalidate_cache();
             Self(lock, previous, dir)
         }
     }
@@ -529,6 +531,8 @@ mod tests {
                 None => crate::env::remove_var("JCODE_HOME"),
             }
             crate::usage::clear_anthropic_usage_cache_for_tests();
+            crate::usage::clear_remote_account_usage();
+            crate::config::Config::invalidate_cache();
         }
     }
 

@@ -182,6 +182,12 @@ mod account_snapshot_tests {
             let dir = tempfile::tempdir().expect("temp usage home");
             crate::env::set_var("JCODE_HOME", dir.path());
             clear_anthropic_usage_cache_for_tests();
+            // Remote-managed account usage is another process-global source that
+            // a preceding test can populate.
+            crate::usage::clear_remote_account_usage();
+            // Config is a process-global cache resolved against the *previous*
+            // home; without this it keeps describing another test's directory.
+            crate::config::Config::invalidate_cache();
             Self(lock, previous, dir)
         }
     }
@@ -193,6 +199,8 @@ mod account_snapshot_tests {
                 None => crate::env::remove_var("JCODE_HOME"),
             }
             clear_anthropic_usage_cache_for_tests();
+            crate::usage::clear_remote_account_usage();
+            crate::config::Config::invalidate_cache();
         }
     }
 
