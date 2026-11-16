@@ -1142,7 +1142,15 @@ impl App {
                     .content
                     .rsplit_once(" Hidden user prompts: ")
                     .and_then(|(_, count)| count.strip_suffix('.'))
-                    .and_then(|count| count.parse::<usize>().ok())
+                    .and_then(|count| match count.parse::<usize>() {
+                        Ok(count) => Some(count),
+                        Err(error) => {
+                            crate::logging::warn(&format!(
+                                "Invalid compacted-history hidden prompt count: {error}"
+                            ));
+                            None
+                        }
+                    })
             });
         // New servers include the authoritative offset. A remote startup stub
         // has no transcript, and a retained local snapshot may be stale.

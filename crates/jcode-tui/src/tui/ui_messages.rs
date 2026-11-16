@@ -3275,11 +3275,18 @@ pub(crate) fn compact_swarm_await_summary(message: &str) -> String {
         .split_once("Recovered ")
         .and_then(|(_, rest)| rest.split_once(" swarm wait(s) after restart: "))
         .and_then(|(count, rest)| {
-            let count = count.parse::<usize>().ok()?;
+            let parse_count = |text: &str| match text.parse::<usize>() {
+                Ok(count) => Some(count),
+                Err(error) => {
+                    crate::logging::debug(&format!("Invalid recovered swarm wait count: {error}"));
+                    None
+                }
+            };
+            let count = parse_count(count)?;
             let (completed, rest) = rest.split_once(" completed, ")?;
-            let completed = completed.parse::<usize>().ok()?;
+            let completed = parse_count(completed)?;
             let (timed_out, _) = rest.split_once(" timed out.")?;
-            let timed_out = timed_out.parse::<usize>().ok()?;
+            let timed_out = parse_count(timed_out)?;
             Some(format!(
                 "recovered {count} waits · {completed} completed, {timed_out} timed out"
             ))
@@ -3484,6 +3491,11 @@ fn render_completion_lanes(
                 .take_while(|line| line.trim().is_empty() || line.trim().starts_with("- ["))
                 .filter(|line| line.trim().starts_with("- [in_progress]"))
                 .count();
+            let label = if first_lane_only {
+                format!("{label} {done}/{total}")
+            } else {
+                label.to_string()
+            };
             let label_width = width.saturating_sub(total.min(12).saturating_add(2));
             let mut spans = super::truncate_line_with_ellipsis_to_width(
                 &Line::from(Span::styled(

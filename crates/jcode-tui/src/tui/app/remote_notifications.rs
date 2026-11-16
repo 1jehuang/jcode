@@ -148,6 +148,19 @@ pub(super) struct FileActivityEdit {
     pub edits: u32,
 }
 
+fn parse_file_activity_count<T: std::str::FromStr>(text: &str) -> Option<T>
+where
+    T::Err: std::fmt::Display,
+{
+    match text.parse() {
+        Ok(count) => Some(count),
+        Err(error) => {
+            crate::logging::debug(&format!("Invalid file activity count: {error}"));
+            None
+        }
+    }
+}
+
 fn non_empty(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -388,7 +401,7 @@ fn parse_file_activity_notice_entry(line: &str) -> Option<FileActivityEdit> {
     let edits = facts
         .split_whitespace()
         .find_map(|fact| fact.strip_prefix('x'))
-        .and_then(|count| count.parse().ok())
+        .and_then(parse_file_activity_count)
         .unwrap_or(1);
     Some(FileActivityEdit {
         sender: compact_swarm_session_label(sender),
@@ -397,7 +410,10 @@ fn parse_file_activity_notice_entry(line: &str) -> Option<FileActivityEdit> {
         intent: non_empty(tail.strip_prefix(": ")),
         summary: None,
         detail: None,
-        delta: Some((added.parse().ok()?, removed.parse().ok()?)),
+        delta: Some((
+            parse_file_activity_count(added)?,
+            parse_file_activity_count(removed)?,
+        )),
         edits,
     })
 }
@@ -830,7 +846,7 @@ fn present_swarm_notification_inner(
             };
             let message = file_activity_stack_message(std::slice::from_ref(&edit), false);
             SwarmNotificationPresentation {
-                title: message.title.unwrap_or_default(),
+                title: message.title.unwrap_or_else(|| "File activity".to_string()),
                 message: message.content,
                 status_notice: format!("File activity · {}", compact_swarm_path(path)),
             }
@@ -840,6 +856,25 @@ fn present_swarm_notification_inner(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn file_activity_counts_reject_overflow_and_invalid_wire_values() {
+        assert_eq!(
+            super::parse_file_activity_count::<u64>("18446744073709551615"),
+            Some(u64::MAX)
+        );
+        assert_eq!(
+            super::parse_file_activity_count::<u64>("18446744073709551616"),
+            None
+        );
+        assert_eq!(
+            super::parse_file_activity_count::<u32>("4294967295"),
+            Some(u32::MAX)
+        );
+        assert_eq!(super::parse_file_activity_count::<u32>("4294967296"), None);
+        assert_eq!(super::parse_file_activity_count::<u64>("-1"), None);
+        assert_eq!(super::parse_file_activity_count::<u64>("unknown"), None);
+    }
+
     use super::{compact_plan_message_body, present_swarm_notification};
     use crate::protocol::NotificationType;
 
@@ -983,10 +1018,13 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert!(lines[0].width() <= 60);
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.starts_with(&format!(
-            "{} resident-query-archive 1/2",
-            crate::id::session_icon("panda")
-        )));
+        assert!(
+            text.starts_with(&format!(
+                "{} resident-query-archive 1/2",
+                crate::id::session_icon("panda")
+            )),
+            "unexpected completion preview: {text:?}"
+        );
         assert!(!text.contains("finished their work"));
 
         // Abnormal outcomes stay visible, extra lanes are counted, and a

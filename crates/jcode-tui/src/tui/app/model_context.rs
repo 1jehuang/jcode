@@ -17,7 +17,13 @@ impl App {
         let compact = reason.find('{').and_then(|start| {
             let mut values = serde_json::Deserializer::from_str(&reason[start..])
                 .into_iter::<serde_json::Value>();
-            let value = values.next()?.ok()?;
+            let value = match values.next()? {
+                Ok(value) => value,
+                Err(error) => {
+                    crate::logging::debug(&format!("Provider failure body is not JSON: {error}"));
+                    return None;
+                }
+            };
             let message = value
                 .pointer("/error/message")
                 .or_else(|| value.get("message"))

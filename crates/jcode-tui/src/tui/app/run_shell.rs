@@ -999,7 +999,9 @@ impl App {
             needs_redraw = true;
             // The Pong lists what this server supports. Until it arrives no
             // focus is reported, which the server treats as focused.
-            let _ = remote_conn.request_capabilities().await;
+            if let Err(error) = remote_conn.request_capabilities().await {
+                crate::logging::warn(&format!("Cannot request remote capabilities: {error}"));
+            }
 
             let mut bus_receiver_remote = Bus::global().subscribe();
             if let Some(status) = Bus::global().latest_update_status() {
