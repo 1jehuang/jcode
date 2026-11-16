@@ -22,6 +22,9 @@ fn recent_history_negotiation_preserves_local_verified_prefix() {
     );
 }
 
+// Reads the dummy peer's raw stream directly, which only exists on unix test
+// transports. Gated so the rest of this suite still builds on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn recent_history_page_request_explicitly_selects_normal_transcript() {
     let mut remote = RemoteConnection::dummy();
@@ -36,6 +39,9 @@ async fn recent_history_page_request_explicitly_selects_normal_transcript() {
     );
 }
 
+// Asserts the request bytes through the dummy peer's raw stream, which only
+// exists on unix test transports.
+#[cfg(unix)]
 #[tokio::test]
 async fn slow_usage_hydration_does_not_block_subscribe_or_async_runtime() {
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
