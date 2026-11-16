@@ -12,6 +12,157 @@
 //! emit nothing at all.
 use std::io::{self, Write};
 
+#[cfg(windows)]
+use std::cell::RefCell;
+#[cfg(windows)]
+use std::collections::VecDeque;
+#[cfg(windows)]
+use std::time::{Duration, Instant};
+
+/// A burst of typed characters spanning longer than this is human typing, not
+/// one keyboard report.
+#[cfg(windows)]
+const REPORT_BURST_WINDOW: Duration = Duration::from_secs(2);
+
+/// Largest pause allowed inside a single report.
+#[cfg(windows)]
+const REPORT_MAX_GAP: Duration = Duration::from_millis(750);
+
+/// Longest report shape worth remembering: `[119;1:3u` and `[27;3;97~` fit.
+#[cfg(windows)]
+const REPORT_BUFFER_CAPACITY: usize = 16;
+
+#[cfg(windows)]
+thread_local! {
+    /// Characters typed from key events, newest last. Only used to decide
+    /// whether a literal report fragment was typed as one contiguous burst.
+    static TYPED: RefCell<VecDeque<(Instant, char)>> = RefCell::new(VecDeque::new());
+}
+
+/// Record composer text that arrived from a key event.
+///
+/// Only single characters are remembered: a paste, an IME commit or a dropped
+/// path clears the buffer, because none of those can be a keyboard report.
+#[cfg(windows)]
+pub(super) fn note_typed_text(text: &str) {
+    TYPED.with(|typed| {
+        let mut typed = typed.borrow_mut();
+        let mut chars = text.chars();
+        match (chars.next(), chars.next()) {
+            (Some(c), None) => {
+                if typed.len() == REPORT_BUFFER_CAPACITY {
+                    typed.pop_front();
+                }
+                typed.push_back((Instant::now(), c));
+            }
+            _ => typed.clear(),
+        }
+    });
+}
+
+/// Remove a keyboard-protocol report that reached the composer as text.
+///
+/// Returns the stripped fragment so the caller can report it. This is the last
+/// line of defence for issue #224: negotiation and focus handling no longer ask
+/// for reporting the console decoder cannot consume, but a host that arms its
+/// own keyboard mode still delivers `[119;1:3u` one character at a time.
+#[cfg(windows)]
+pub(super) fn scrub_leaked_report(input: &mut String, cursor: &mut usize) -> Option<String> {
+    let burst: Vec<(Instant, char)> = TYPED.with(|typed| typed.borrow().iter().copied().collect());
+    let stripped = scrub_matching_report(input, cursor, &burst)?;
+    TYPED.with(|typed| typed.borrow_mut().clear());
+    Some(stripped)
+}
+
+/// Core of [`scrub_leaked_report`] with the typed burst supplied, so tests can
+/// drive it without a terminal.
+#[cfg(windows)]
+fn scrub_matching_report(
+    input: &mut String,
+    cursor: &mut usize,
+    burst: &[(Instant, char)],
+) -> Option<String> {
+    if *cursor != input.len() {
+        return None;
+    }
+    let start = input.rfind('[')?;
+    let fragment = input[start..].to_string();
+    if !is_report_fragment(&fragment) {
+        return None;
+    }
+    let len = fragment.chars().count();
+    if burst.len() < len {
+        return None;
+    }
+    let tail = &burst[burst.len() - len..];
+    if !tail.iter().map(|(_, c)| *c).eq(fragment.chars()) {
+        return None;
+    }
+    let first = tail.first()?.0;
+    let last = tail.last()?.0;
+    if last.duration_since(first) > REPORT_BURST_WINDOW {
+        return None;
+    }
+    if tail
+        .windows(2)
+        .any(|pair| pair[1].0.duration_since(pair[0].0) > REPORT_MAX_GAP)
+    {
+        return None;
+    }
+    input.truncate(start);
+    *cursor = start;
+    Some(fragment)
+}
+
+/// Whether `fragment` has the shape of a keyboard report rather than text.
+///
+/// Accepts kitty `CSI code;mods:event u` (the `:event` sub-parameter is what a
+/// decoder that cannot parse it leaves behind) and tmux/xterm
+/// `CSI 27;mod;code ~`. Everything else is treated as ordinary text.
+#[cfg(windows)]
+fn is_report_fragment(fragment: &str) -> bool {
+    if fragment.chars().count() < 5 {
+        return false;
+    }
+    let Some(body) = fragment.strip_prefix('[') else {
+        return false;
+    };
+    if let Some(body) = body.strip_suffix('u') {
+        let mut saw_event_type = false;
+        let mut first_code = None;
+        for (index, part) in body.split(';').enumerate() {
+            let (code, event) = match part.split_once(':') {
+                Some((code, event)) => {
+                    saw_event_type = true;
+                    (code, Some(event))
+                }
+                None => (part, None),
+            };
+            if !is_decimal(code) || event.is_some_and(|event| !is_decimal(event)) {
+                return false;
+            }
+            if index == 0 {
+                first_code = code.parse::<u32>().ok();
+            }
+        }
+        // A release/repeat report always carries `:event`. A modified key may
+        // not, but its code is a printable/keypad code (at least space) rather
+        // than a control code, which is what keeps `[1;5u` typed by a human
+        // from being treated as a report.
+        return saw_event_type || first_code.is_some_and(|code| code >= 32);
+    }
+    if let Some(body) = body.strip_suffix('~') {
+        let parts: Vec<&str> = body.split(';').collect();
+        return parts.len() >= 3 && parts[0] == "27" && parts.iter().all(|part| is_decimal(part));
+    }
+    false
+}
+
+#[cfg(windows)]
+fn is_decimal(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 /// One operation on the keyboard-protocol state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Action {
@@ -169,5 +320,90 @@ mod tests {
             b"\x1b[>7u"
         };
         assert_eq!(output, expected);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod leaked_report_tests {
+    use super::*;
+
+    fn burst(text: &str, gap_ms: u64) -> Vec<(Instant, char)> {
+        let start = Instant::now();
+        text.chars()
+            .enumerate()
+            .map(|(index, c)| (start + Duration::from_millis(gap_ms * index as u64), c))
+            .collect()
+    }
+
+    #[test]
+    fn recognises_the_fragments_a_console_decoder_cannot_parse() {
+        // Release report, exactly what #224 captured.
+        assert!(is_report_fragment("[119;1:3u"));
+        // Modified key without an event sub-parameter.
+        assert!(is_report_fragment("[97;5u"));
+        // tmux/xterm modifyOtherKeys.
+        assert!(is_report_fragment("[27;3;97~"));
+    }
+
+    #[test]
+    fn leaves_ordinary_text_alone() {
+        for text in [
+            "[1;5u", // control code, which a human can type
+            "[hello]",
+            "[1234]",
+            "array[32]",
+            "[27;3;97",
+            "u",
+            "",
+        ] {
+            assert!(!is_report_fragment(text), "{text} must stay text");
+        }
+    }
+
+    #[test]
+    fn strips_a_fragment_typed_as_one_burst() {
+        let mut input = String::from("hi[119;1:3u");
+        let mut cursor = input.len();
+        let stripped = scrub_matching_report(&mut input, &mut cursor, &burst("[119;1:3u", 20));
+        assert_eq!(stripped.as_deref(), Some("[119;1:3u"));
+        assert_eq!(input, "hi");
+        assert_eq!(cursor, 2);
+    }
+
+    #[test]
+    fn keeps_a_fragment_typed_slowly_by_a_human() {
+        let mut input = String::from("hi[119;1:3u");
+        let mut cursor = input.len();
+        // 3 s total span: human typing, not one report.
+        assert!(scrub_matching_report(&mut input, &mut cursor, &burst("[119;1:3u", 400)).is_none());
+        assert_eq!(input, "hi[119;1:3u");
+    }
+
+    #[test]
+    fn keeps_a_fragment_with_a_long_pause_inside() {
+        let mut typed = burst("[119", 10);
+        // A 1.5 s pause in the middle of the shape.
+        let resume = typed.last().unwrap().0 + Duration::from_millis(1500);
+        for (index, c) in ";1:3u".chars().enumerate() {
+            typed.push((resume + Duration::from_millis(10 * index as u64), c));
+        }
+        let mut input = String::from("[119;1:3u");
+        let mut cursor = input.len();
+        assert!(scrub_matching_report(&mut input, &mut cursor, &typed).is_none());
+    }
+
+    #[test]
+    fn ignores_a_fragment_that_is_not_at_the_cursor() {
+        let mut input = String::from("[119;1:3u tail");
+        let mut cursor = input.len();
+        assert!(scrub_matching_report(&mut input, &mut cursor, &burst("[119;1:3u", 20)).is_none());
+        assert_eq!(input, "[119;1:3u tail");
+    }
+
+    #[test]
+    fn ignores_a_shape_whose_characters_were_not_the_typed_burst() {
+        let mut input = String::from("[119;1:3u");
+        let mut cursor = input.len();
+        assert!(scrub_matching_report(&mut input, &mut cursor, &burst("[97;1;3u", 20)).is_none());
     }
 }
