@@ -160,10 +160,55 @@ fn test_swarm_await_summary_reports_outcomes_not_just_target_matches() {
 }
 
 #[test]
+fn test_swarm_await_summary_preserves_recovered_wait_counts_and_timeouts() {
+    let recovery = "Await incomplete. Recovered 55 swarm wait(s) after restart: 2 completed, 53 timed out. Missing workers are not confirmed complete.";
+    for (members, expected) in [
+        (
+            "",
+            "recovered 55 waits · 2 completed, 53 timed out · member outcome unknown",
+        ),
+        (
+            "\n\nMember statuses:\n✗ fox (unknown)\n✗ wolf (unknown)",
+            "recovered 55 waits · 2 completed, 53 timed out · 0/2 matched · 2 unknown",
+        ),
+        (
+            "\n\nMember statuses:\n✓ fox (completed)",
+            "recovered 55 waits · 2 completed, 53 timed out · 1/1 matched · 1 completed",
+        ),
+    ] {
+        let report = format!("🐝 **Swarm await finished**\n\n{recovery}{members}");
+        assert_eq!(compact_swarm_await_summary(&report), expected);
+    }
+    assert_eq!(
+        compact_swarm_await_summary(
+            "All members done. Recovered 3 swarm wait(s) after restart: 3 completed, 0 timed out."
+        ),
+        "recovered 3 waits · 3 completed, 0 timed out · member outcome unknown"
+    );
+    assert_eq!(
+        compact_swarm_await_summary(
+            "Await incomplete. Timed out. Still waiting on: fox\n\nMember statuses:\n✗ fox (unknown)"
+        ),
+        "timed out · 0/1 matched · 1 unknown"
+    );
+    assert_eq!(
+        compact_swarm_await_summary("Await incomplete. Timed out. Still waiting on: fox"),
+        "timed out · member outcome unknown"
+    );
+    assert_eq!(
+        compact_swarm_await_summary(
+            "All members done.\n\nRecent outputs:\nTimed out. Recovered 55 swarm wait(s) after restart: 0 completed, 55 timed out."
+        ),
+        "outcome unknown"
+    );
+}
+
+#[test]
 fn test_swarm_await_row_is_single_line_and_display_width_safe() {
     crate::tui::markdown::set_center_code_blocks(false);
     for content in [
         "3/3 matched · 3 unknown",
+        "recovered 55 waits · 2 completed, 53 timed out · 0/2 matched · 2 unknown",
         "✓ 3/3",
         "finished",
         "1/1 matched\n界界界 completed",

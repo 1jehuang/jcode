@@ -3247,6 +3247,37 @@ pub(crate) fn compact_swarm_await_summary(message: &str) -> String {
         .strip_prefix("🐝 **Swarm await finished**")
         .map(str::trim)
         .unwrap_or_else(|| message.trim());
+    // Preserve wait-level recovery/timeout results independently of member
+    // statuses. Recovery deduplicates workers, so member counts cannot stand in
+    // for the number of waits recovered after a restart.
+    let header = body
+        .lines()
+        .take_while(|line| {
+            !matches!(
+                line.trim(),
+                "Member statuses:" | "Recent outputs:" | "Completion reports:"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let recovered = header
+        .split_once("Recovered ")
+        .and_then(|(_, rest)| rest.split_once(" swarm wait(s) after restart: "))
+        .and_then(|(count, rest)| {
+            let count = count.parse::<usize>().ok()?;
+            let (completed, rest) = rest.split_once(" completed, ")?;
+            let completed = completed.parse::<usize>().ok()?;
+            let (timed_out, _) = rest.split_once(" timed out.")?;
+            let timed_out = timed_out.parse::<usize>().ok()?;
+            Some(format!(
+                "recovered {count} waits · {completed} completed, {timed_out} timed out"
+            ))
+        });
+    let wait_outcome = recovered.or_else(|| {
+        header
+            .contains("Timed out.")
+            .then(|| "timed out".to_string())
+    });
     let mut done = 0usize;
     let mut total = 0usize;
     let mut in_statuses = false;
@@ -3285,7 +3316,7 @@ pub(crate) fn compact_swarm_await_summary(message: &str) -> String {
         }
     }
 
-    if total > 0 {
+    let member_outcome = if total > 0 {
         let outcomes = outcomes
             .into_iter()
             .map(|(status, count)| format!("{count} {status}"))
@@ -3294,6 +3325,13 @@ pub(crate) fn compact_swarm_await_summary(message: &str) -> String {
         format!("{done}/{total} matched · {outcomes}")
     } else {
         "outcome unknown".to_string()
+    };
+    match wait_outcome {
+        Some(wait_outcome) if total == 0 => {
+            format!("{wait_outcome} · member outcome unknown")
+        }
+        Some(wait_outcome) => format!("{wait_outcome} · {member_outcome}"),
+        None => member_outcome,
     }
 }
 
