@@ -1,6 +1,5 @@
 use anyhow::Result;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -65,8 +64,10 @@ fn fingerprint(config: &McpConfig) -> Result<String> {
             )
         })
         .collect();
-    let encoded = serde_json::to_vec(&servers)?;
-    Ok(hex::encode(Sha256::digest(encoded)))
+    // Canonical JSON (recursively sorted keys) so other tools can recompute it.
+    let value = serde_json::to_value(&servers)?;
+    let digest = crate::project_trust::digest_json(&value);
+    Ok(digest.trim_start_matches("sha256:").to_string())
 }
 
 pub(super) fn review_project_config(
@@ -449,5 +450,24 @@ mod shared_store_tests {
             "non-secret values stay visible: {shown}"
         );
         assert!(review.redacted);
+    }
+
+    #[test]
+    fn fingerprint_is_digest_of_recursively_sorted_json() {
+        let mut config = McpConfig::default();
+        config.servers.insert(
+            "a".to_string(),
+            serde_json::from_str(r#"{"command":"node","args":["x"]}"#).unwrap(),
+        );
+        let server = &config.servers["a"];
+        // Keys in alphabetical order, as the documented canonical format.
+        let expected = serde_json::json!({"a": {
+            "args": server.args, "command": server.command, "disabled": server.disabled,
+            "enabled": server.enabled, "env": {}, "headers": {}, "shared": server.shared,
+            "transport": server.transport, "url": server.url,
+        }});
+        let text = crate::project_trust::canonical_json(&expected);
+        let want = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(text.as_bytes()));
+        assert_eq!(fingerprint(&config).unwrap(), want);
     }
 }

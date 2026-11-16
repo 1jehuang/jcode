@@ -242,3 +242,14 @@ fn safe_terminal_text_escapes_control_and_invisible_characters() {
     assert_eq!(safe_terminal_text("a\u{1b}[31mb"), "a\\u{1b}[31mb");
     assert_eq!(safe_terminal_text("x\u{202e}y"), "x\\u{202e}y");
 }
+
+#[cfg(unix)]
+#[test]
+fn distinct_non_utf8_paths_get_distinct_keys() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let invalid = Path::new(OsStr::from_bytes(b"/tmp/proj-\xff"));
+    let replaced = Path::new("/tmp/proj-\u{fffd}");
+    assert_ne!(key(invalid), key(replaced));
+    assert_eq!(key(replaced), "/tmp/proj-\u{fffd}");
+}
