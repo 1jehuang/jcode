@@ -459,7 +459,10 @@ fn completion_lane_label(details: &str) -> Option<String> {
             return None;
         }
         let (name, progress) = line.strip_suffix(" completed")?.rsplit_once(": ")?;
-        let name = match name.strip_prefix("Phase ").and_then(|rest| rest.split_once(" · ")) {
+        let name = match name
+            .strip_prefix("Phase ")
+            .and_then(|rest| rest.split_once(" · "))
+        {
             Some((number, name)) if number.bytes().all(|b| b.is_ascii_digit()) => name,
             _ => name,
         };
