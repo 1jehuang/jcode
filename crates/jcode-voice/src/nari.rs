@@ -244,11 +244,12 @@ fn is_prompt_echo(text: &str) -> bool {
     covered.iter().all(|covered| *covered)
 }
 
-/// Conservative bound on the recognition context sent per session.
+/// Conservative bound on the desktop recognition context sent per session.
+#[cfg(any(feature = "desktop-config", test))]
 const MAX_PROMPT_CHARS: usize = 1000;
 
-/// Recognition context: built-in names plus desktop `[dictation] vocabulary`,
-/// deduplicated case-insensitively and bounded without splitting a term.
+/// Desktop vocabulary context, bounded and deduplicated. Mobile sends no
+/// vocabulary context because the provider can append it to genuine speech.
 pub fn recognition_prompt() -> String {
     #[cfg(feature = "desktop-config")]
     {
@@ -256,10 +257,14 @@ pub fn recognition_prompt() -> String {
     }
     #[cfg(not(feature = "desktop-config"))]
     {
-        build_prompt(&[])
+        // Production ASR appended the full vocabulary after real mobile speech.
+        // Do not seed recognition with text the user did not say. Keep desktop
+        // custom vocabulary opt-in behavior separate from mobile dictation.
+        String::new()
     }
 }
 
+#[cfg(any(feature = "desktop-config", test))]
 fn build_prompt(extra: &[String]) -> String {
     let mut seen = HashSet::new();
     let mut prompt = String::new();
@@ -939,6 +944,19 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "desktop-config"))]
+    #[test]
+    fn mobile_recognition_does_not_seed_unsaid_vocabulary() {
+        assert!(recognition_prompt().is_empty());
+        for spoken in [
+            "The quick brown fox jumps over the lazy dog.",
+            "Ask Jcode and Claude to review the Rust code.",
+            "My custom vocabulary includes OAuth and Neovim.",
+        ] {
+            assert_eq!(correct_transcript(spoken), spoken);
+        }
+    }
+
     #[test]
     fn recognition_context_is_only_a_vocabulary_list() {
         let prompt = build_prompt(&[]);
@@ -1044,9 +1062,8 @@ mod tests {
 
     #[cfg(not(feature = "desktop-config"))]
     #[test]
-    fn lightweight_prompt_uses_builtin_vocabulary() {
-        assert_eq!(recognition_prompt(), build_prompt(&[]));
-        assert!(recognition_prompt().contains("Jcode"));
+    fn lightweight_prompt_does_not_seed_unsaid_vocabulary() {
+        assert!(recognition_prompt().is_empty());
     }
 
     #[test]
