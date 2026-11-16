@@ -680,14 +680,24 @@ fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
 
 #[test]
 fn test_definitive_exhaustion_immediate_switch_and_manual_safety() {
-    for (mode, enabled, reason, immediate) in [
-        ("countdown", true, "OAuth usage exhausted", true),
-        ("countdown", false, "OAuth usage exhausted", false),
-        ("manual", true, "OAuth usage exhausted", false),
+    for (mode, enabled, reason, prior_target, immediate) in [
+        ("countdown", true, "OAuth usage exhausted", None, true),
+        ("countdown", false, "OAuth usage exhausted", None, false),
+        ("manual", true, "OAuth usage exhausted", None, false),
+        // 1cf6c1402 made the first automatic failover instant for generic 429s too,
+        // while subsequent failovers within the same turn wait for the countdown.
         (
             "countdown",
             true,
             "429 rate_limit_error: This request would exceed your account's rate limit. Please try again later.",
+            None,
+            true,
+        ),
+        (
+            "countdown",
+            true,
+            "OAuth usage exhausted",
+            Some("claude-oauth@prior:claude-sonnet-4"),
             false,
         ),
     ] {
@@ -696,6 +706,9 @@ fn test_definitive_exhaustion_immediate_switch_and_manual_safety() {
                 "[provider]\ncross_provider_failover = \"{mode}\"\nexhausted_usage_immediate_failover = {enabled}\n"
             ));
             let (mut app, active) = create_switchable_test_app("claude");
+            if let Some(prior) = prior_target {
+                app.automatic_failover_targets.push(prior.into());
+            }
             app.handle_turn_error(failover_error_message(
                 &crate::provider::ProviderFailoverPrompt {
                     from_provider: "claude".into(),

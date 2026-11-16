@@ -293,17 +293,10 @@ impl IncrementalMarkdownRenderer {
     /// Find the last complete block in text
     #[cfg(test)]
     pub(crate) fn find_last_complete_block(&self, text: &str) -> Option<usize> {
-        self.find_last_complete_block_checkpoint(text)
-            .map(|checkpoint| checkpoint.offset)
-    }
-
-    fn find_last_complete_block_checkpoint(&self, text: &str) -> Option<CompleteBlockCheckpoint> {
         let mut checkpoint = None;
         let mut line_start = 0usize;
         let mut fence_state: Option<(char, usize)> = None;
         let mut display_math_open = false;
-        let mut last_nonblank_kind: Option<MarkdownBlockKind> = None;
-        let spacing_mode = effective_markdown_spacing_mode();
 
         while line_start <= text.len() {
             let relative_end = text[line_start..].find('\n');
@@ -322,14 +315,7 @@ impl IncrementalMarkdownRenderer {
                 Some((fence_char, fence_len)) => {
                     if is_closing_fence(line, fence_char, fence_len) {
                         fence_state = None;
-                        last_nonblank_kind = Some(MarkdownBlockKind::CodeBlock);
-                        checkpoint = Some(CompleteBlockCheckpoint {
-                            offset: line_end_including_newline,
-                            needs_separator: spacing_separates_after(
-                                MarkdownBlockKind::CodeBlock,
-                                spacing_mode,
-                            ),
-                        });
+                        checkpoint = Some(line_end_including_newline);
                     }
                 }
                 None => {
@@ -337,14 +323,7 @@ impl IncrementalMarkdownRenderer {
                         let dd_count = count_unescaped_double_dollar(line);
                         if dd_count % 2 == 1 {
                             display_math_open = false;
-                            last_nonblank_kind = Some(MarkdownBlockKind::DisplayMath);
-                            checkpoint = Some(CompleteBlockCheckpoint {
-                                offset: line_end_including_newline,
-                                needs_separator: spacing_separates_after(
-                                    MarkdownBlockKind::DisplayMath,
-                                    spacing_mode,
-                                ),
-                            });
+                            checkpoint = Some(line_end_including_newline);
                         }
                     } else if let Some((fence_char, fence_len)) = parse_opening_fence(line) {
                         fence_state = Some((fence_char, fence_len));
@@ -354,33 +333,12 @@ impl IncrementalMarkdownRenderer {
                             if dd_count % 2 == 1 {
                                 display_math_open = true;
                             } else {
-                                last_nonblank_kind = Some(MarkdownBlockKind::DisplayMath);
-                                checkpoint = Some(CompleteBlockCheckpoint {
-                                    offset: line_end_including_newline,
-                                    needs_separator: spacing_separates_after(
-                                        MarkdownBlockKind::DisplayMath,
-                                        spacing_mode,
-                                    ),
-                                });
+                                checkpoint = Some(line_end_including_newline);
                             }
-                        } else if line_ends_with_newline && is_heading_line(line.trim_start()) {
-                            last_nonblank_kind = Some(MarkdownBlockKind::Heading);
-                            checkpoint = Some(CompleteBlockCheckpoint {
-                                offset: line_end_including_newline,
-                                needs_separator: spacing_separates_after(
-                                    MarkdownBlockKind::Heading,
-                                    spacing_mode,
-                                ),
-                            });
-                        } else if line.trim().is_empty() {
-                            checkpoint = Some(CompleteBlockCheckpoint {
-                                offset: line_end_including_newline,
-                                needs_separator: last_nonblank_kind
-                                    .map(|kind| spacing_separates_after(kind, spacing_mode))
-                                    .unwrap_or(false),
-                            });
-                        } else {
-                            last_nonblank_kind = Some(infer_markdown_line_kind(line));
+                        } else if line_ends_with_newline
+                            && (is_heading_line(line.trim_start()) || line.trim().is_empty())
+                        {
+                            checkpoint = Some(line_end_including_newline);
                         }
                     }
                 }
@@ -497,64 +455,30 @@ fn find_stable_split(tail: &str) -> StableSplit {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct CompleteBlockCheckpoint {
-    offset: usize,
-    needs_separator: bool,
+#[cfg(test)]
+fn count_unescaped_double_dollar(line: &str) -> usize {
+    let bytes = line.as_bytes();
+    let mut count = 0usize;
+    let mut ix = 0usize;
+
+    while ix + 1 < bytes.len() {
+        if bytes[ix] == b'\\' {
+            ix += 2;
+            continue;
+        }
+        if bytes[ix] == b'$' && bytes[ix + 1] == b'$' {
+            count += 1;
+            ix += 2;
+            continue;
+        }
+        ix += 1;
+    }
+
+    count
 }
 
+#[cfg(test)]
 pub(crate) fn is_heading_line(line: &str) -> bool {
     let hashes = line.chars().take_while(|c| *c == '#').count();
     hashes > 0 && hashes <= 6 && line.chars().nth(hashes) == Some(' ')
-}
-
-pub(crate) fn is_thematic_break_line(line: &str) -> bool {
-    let trimmed = line.trim();
-    let mut marker: Option<char> = None;
-    let mut count = 0usize;
-
-    for ch in trimmed.chars() {
-        if ch == ' ' || ch == '\t' {
-            continue;
-        }
-        match marker {
-            None if matches!(ch, '-' | '*' | '_') => {
-                marker = Some(ch);
-                count = 1;
-            }
-            Some(existing) if ch == existing => count += 1,
-            _ => return false,
-        }
-    }
-
-    count >= 3
-}
-
-pub(crate) fn looks_like_ordered_list_item(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    let digit_count = trimmed.chars().take_while(|c| c.is_ascii_digit()).count();
-    digit_count > 0
-        && matches!(trimmed.chars().nth(digit_count), Some('.' | ')'))
-        && matches!(trimmed.chars().nth(digit_count + 1), Some(' ' | '\t'))
-}
-
-pub(crate) fn infer_markdown_line_kind(line: &str) -> MarkdownBlockKind {
-    let trimmed = line.trim_start();
-    if is_heading_line(trimmed) {
-        MarkdownBlockKind::Heading
-    } else if is_thematic_break_line(trimmed) {
-        MarkdownBlockKind::Rule
-    } else if trimmed.starts_with('>') {
-        MarkdownBlockKind::BlockQuote
-    } else if trimmed.starts_with("- ")
-        || trimmed.starts_with("* ")
-        || trimmed.starts_with("+ ")
-        || looks_like_ordered_list_item(trimmed)
-    {
-        MarkdownBlockKind::List
-    } else if trimmed.starts_with('<') {
-        MarkdownBlockKind::HtmlBlock
-    } else {
-        MarkdownBlockKind::Paragraph
-    }
 }
