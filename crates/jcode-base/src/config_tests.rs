@@ -724,34 +724,41 @@ fn tool_config_explicit_disabled_overrides_all_enabled_sentinel() {
 }
 
 #[test]
-fn tool_config_acp_profile_allows_core_coding_plus_batch() {
-    let cfg = ToolConfig {
-        profile: "acp".to_string(),
-        ..ToolConfig::default()
-    };
-    let allowed = cfg.allowed_tools().expect("acp profile is an allow-list");
-
-    assert!(allowed.contains("bash"));
-    assert!(allowed.contains("read"));
-    assert!(allowed.contains("write"));
-    assert!(allowed.contains("apply_patch"));
-    assert!(allowed.contains("agentgrep"));
-    assert!(allowed.contains("batch"));
-    assert!(allowed.contains("mcp"));
-    assert!(allowed.contains("edit"));
-    // Skills are listed in the prompt, so the profile must expose their loader.
-    assert!(allowed.contains("skill_manage"));
-    assert!(!allowed.contains("replace"));
-    assert!(!allowed.contains("swarm"));
-    assert!(!allowed.contains("subagent"));
-    assert!(!allowed.contains("side_panel"));
+fn tool_config_acp_profile_is_the_full_toolset() {
+    // Configs written before ACP parity still say `tool_profile = "acp"`.
+    // That name must not restrict tools: ACP clients get everything the TUI
+    // gets (todo, bg, swarm, skill_manage, web search, memory, ...).
+    for profile in ["acp", "ACP", "full", ""] {
+        let cfg = ToolConfig {
+            profile: profile.to_string(),
+            ..ToolConfig::default()
+        };
+        let selection = cfg.selection();
+        assert!(
+            selection.allowed_tools.is_none(),
+            "profile {profile:?} must not be an allow-list"
+        );
+        assert!(selection.disabled_tools.is_empty());
+    }
 }
 
 #[test]
-fn acp_config_defaults_to_standard_profile_and_acp_tools() {
+fn tool_config_acp_profile_still_honors_explicit_lists() {
+    let cfg = ToolConfig {
+        profile: "acp".to_string(),
+        disabled: vec!["swarm".to_string()],
+        ..ToolConfig::default()
+    };
+    let selection = cfg.selection();
+    assert!(selection.allowed_tools.is_none());
+    assert!(selection.disabled_tools.contains("swarm"));
+}
+
+#[test]
+fn acp_config_defaults_to_standard_profile_and_full_tools() {
     let cfg = Config::default();
     assert_eq!(cfg.acp.profile, "standard");
-    assert_eq!(cfg.acp.tool_profile, "acp");
+    assert_eq!(cfg.acp.tool_profile, "full");
 }
 
 #[test]
@@ -849,7 +856,7 @@ fn test_generated_default_config_has_expected_user_defaults() {
         "generated default config should document tool profiles"
     );
     assert!(
-        content.contains("[acp]") && content.contains("tool_profile = \"acp\""),
+        content.contains("[acp]") && content.contains("tool_profile = \"full\""),
         "generated default config should document ACP profile settings"
     );
     assert!(
