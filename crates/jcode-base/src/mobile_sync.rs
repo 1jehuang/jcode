@@ -67,6 +67,9 @@ const MAX_STRUCTURED_TOOLS: usize = 32;
 const MAX_TOOL_INPUT_BYTES: usize = 8 * 1024;
 const MAX_TOOL_ID_BYTES: usize = 256;
 const MAX_STRUCTURED_BYTES: usize = 240 * 1024;
+// Bump when existing cloud rows need replaying, even if snapshot bytes and
+// visible-message fingerprints are unchanged. Missing versions deserialize as 0.
+const WIRE_VERSION: u32 = 1;
 /// Only sessions touched within this window are synced on enable.
 const BACKFILL_WINDOW: Duration = Duration::from_secs(14 * 24 * 3600);
 const SYNC_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -128,6 +131,10 @@ pub struct MobileSyncState {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct SessionProgress {
+    /// Wire schema successfully uploaded for this snapshot. Independent of file
+    /// revisions so representation upgrades cannot take the unchanged fast path.
+    #[serde(default)]
+    pub wire_version: u32,
     /// Number of transcript entries already uploaded.
     pub uploaded: usize,
     /// Snapshot+journal mtime (unix ms) at the last successful pass.
@@ -797,7 +804,8 @@ fn wire_fingerprint(messages: &[WireMessage], end: usize) -> u64 {
 fn incremental_messages(session: &Session, progress: &SessionProgress) -> (Vec<WireMessage>, u64) {
     let mut messages = wire_messages(session, 0);
     let fingerprint = wire_fingerprint(&messages, session.messages.len());
-    let unchanged_prefix = progress.uploaded <= session.messages.len()
+    let unchanged_prefix = progress.wire_version == WIRE_VERSION
+        && progress.uploaded <= session.messages.len()
         && progress.fingerprint == Some(wire_fingerprint(&messages, progress.uploaded));
     if unchanged_prefix {
         messages.retain(|message| message.seq >= progress.uploaded);
@@ -1032,7 +1040,10 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
             .cloned()
             .unwrap_or_else(SessionProgress::default);
         let revision = session_revision(&path);
-        if progress.revision == Some(revision) && !dirty.contains(&id) {
+        if progress.wire_version == WIRE_VERSION
+            && progress.revision == Some(revision)
+            && !dirty.contains(&id)
+        {
             unchanged_count += 1;
             continue;
         }
@@ -1057,6 +1068,7 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
             updates.insert(
                 id,
                 SessionProgress {
+                    wire_version: WIRE_VERSION,
                     uploaded: progress.uploaded,
                     mtime_ms: mtime,
                     revision: Some(revision),
@@ -1107,6 +1119,7 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
             updates.insert(
                 id,
                 SessionProgress {
+                    wire_version: WIRE_VERSION,
                     uploaded: session.messages.len(),
                     mtime_ms: mtime,
                     revision: Some(revision),
