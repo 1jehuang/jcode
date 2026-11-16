@@ -2382,9 +2382,14 @@
       "unwrap_or_default": 1
     },
     "crates/jcode-tui/src/tui/app/input.rs": {
-      "dot_ok": 12,
+      "dot_ok": 11,
       "let_underscore": 3,
       "unwrap_or_default": 3
+    },
+    "crates/jcode-tui/src/tui/app/input/dropped.rs": {
+      "dot_ok": 1,
+      "let_underscore": 0,
+      "unwrap_or_default": 0
     },
     "crates/jcode-tui/src/tui/app/local.rs": {
       "dot_ok": 0,

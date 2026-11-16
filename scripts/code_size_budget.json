@@ -82,7 +82,7 @@
     "crates/jcode-tui/src/tui/app/helpers.rs": 2116,
     "crates/jcode-tui/src/tui/app/hotkey_feedback.rs": 1227,
     "crates/jcode-tui/src/tui/app/inline_interactive.rs": 4249,
-    "crates/jcode-tui/src/tui/app/input.rs": 4379,
+    "crates/jcode-tui/src/tui/app/input.rs": 4258,
     "crates/jcode-tui/src/tui/app/model_context.rs": 2197,
     "crates/jcode-tui/src/tui/app/navigation.rs": 1958,
     "crates/jcode-tui/src/tui/app/onboarding_flow_control.rs": 1821,
