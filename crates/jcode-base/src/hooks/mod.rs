@@ -315,6 +315,31 @@ fn build_hook_process(
     Ok(cmd)
 }
 
+/// Reap `child` on a background thread, killing it once `timeout` elapses.
+fn reap_with_deadline(mut child: std::process::Child, timeout: std::time::Duration) {
+    let _ = std::thread::Builder::new()
+        .name("jcode-hook-observer".to_string())
+        .spawn(move || {
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) | Err(_) => return,
+                    Ok(None) => {}
+                }
+                if std::time::Instant::now() >= deadline {
+                    crate::logging::warn(&format!(
+                        "Project observer hook exceeded {}ms and was killed",
+                        timeout.as_millis()
+                    ));
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        });
+}
+
 /// Fire an observer hook for `event` if one is configured.
 ///
 /// Detached and fire-and-forget: failures are logged, never propagated, and
@@ -326,7 +351,7 @@ pub fn dispatch_observer(event: HookEvent) {
     }
     let event_name = event.event;
     for scoped in commands {
-        let command_line = scoped.command;
+        let command_line = scoped.command.clone();
         let event = event.clone().with_scope(&scoped.scope);
         match build_hook_process(&command_line, &event) {
             Ok(mut cmd) => {
@@ -335,7 +360,17 @@ pub fn dispatch_observer(event: HookEvent) {
                     .stderr(std::process::Stdio::null());
                 match crate::platform::spawn_detached_without_console_window(&mut cmd) {
                     Ok(child) => {
-                        crate::platform::reap_detached(child);
+                        if scoped.scope.is_project() {
+                            // Project observers get the project's timeout,
+                            // clamped by `project_timeout_cap_ms`.
+                            let cap = crate::config::config().hooks.project_timeout_cap_ms;
+                            reap_with_deadline(
+                                child,
+                                std::time::Duration::from_millis(scoped.effective_timeout_ms(cap)),
+                            );
+                        } else {
+                            crate::platform::reap_detached(child);
+                        }
                         crate::logging::debug(&format!(
                             "Hook '{event_name}' dispatched to '{command_line}' (session={:?})",
                             event.session_id

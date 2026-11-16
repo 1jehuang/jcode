@@ -86,7 +86,8 @@ post_tool_feedback_timeout_ms = 30000
 - **Timeouts.** A project may set `<event>_timeout_ms` for its own commands. It
   is part of the trusted digest and clamped by the global
   `[hooks] project_timeout_cap_ms` (default 120000). Global `*_timeout_ms`
-  values apply to global commands.
+  values apply to global commands. For project observer hooks the timeout is
+  enforced by killing the process once it elapses (default: the cap).
 - **Switches.** `[hooks] project_hooks = false` in the global config, or
   `JCODE_PROJECT_HOOKS=0`, disables all project hooks.
 - **Environment.** Every hook (global ones too) gets `JCODE_PROJECT_DIR` and a

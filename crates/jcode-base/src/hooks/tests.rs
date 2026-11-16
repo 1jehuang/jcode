@@ -652,3 +652,24 @@ async fn hook_process_replaces_daemon_terminal_env_with_client_snapshot() {
         "client-pane-b|herdr-pane-b|client-pane-b|herdr-pane-b"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn project_observer_is_killed_after_its_timeout() {
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn sleep");
+    let pid = child.id();
+    // Keep a handle-free view: reap_with_deadline owns the child.
+    let _ = &mut child;
+    super::reap_with_deadline(child, std::time::Duration::from_millis(100));
+    let process = std::path::PathBuf::from(format!("/proc/{pid}"));
+    for _ in 0..200 {
+        if !process.exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("observer {pid} outlived its timeout");
+}
