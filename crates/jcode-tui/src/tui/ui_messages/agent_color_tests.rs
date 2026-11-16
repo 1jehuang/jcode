@@ -1,6 +1,39 @@
 use super::*;
 
 #[test]
+fn collapsed_completion_lanes_match_pinned_todo_style() {
+    markdown::set_center_code_blocks(false);
+    for done in [0, 1] {
+        let body = format!(
+            "Agent tulip finished their work and is ready for more.\n\nLane plan:\nPhase 1 · restart-acceptance: {done}/1 completed\n\nFinal response:\nResult retained."
+        );
+        let content = jcode_tui_messages::encode_collapsible_swarm_content(
+            &format!("restart-acceptance {done}/1 · Result retained."),
+            &body,
+        );
+        let message = DisplayMessage::swarm("Swarm · tulip", content);
+        for width in [1, 4, 16, 40, 100] {
+            let rows = render_swarm_message(&message, width, crate::config::DiffDisplayMode::Off);
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0].width() <= usize::from(width));
+            if width == 100 {
+                let text = rows[0].to_string();
+                assert!(!text.contains(&format!("{done}/1")), "{text}");
+                assert!(text.contains(if done == 1 { "●" } else { "○" }), "{text}");
+                assert!(text.contains("Result retained."), "{text}");
+                assert!(
+                    rows[0]
+                        .spans
+                        .iter()
+                        .any(|span| span.content.contains("restart-acceptance")
+                            && span.style.fg == Some(todo_group_color()))
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn completion_lanes_use_pinned_todo_palette_and_dots() {
     let body = "Worker summary\nAgent daisy finished their work and is ready for more.\n\nLane plan:\nPhase 2 · 界-release: 1/3 completed\n- [in_progress] Verify\n- [pending] Publish\nPhase 3 · docs: 2/2 completed\n\nFinal response:\n**Report remains accented.**";
     let accent = swarm_agent_color("daisy");

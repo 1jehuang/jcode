@@ -3440,6 +3440,15 @@ fn render_completion_lane_body(
     width: usize,
     prose_color: Color,
 ) -> Option<Vec<Line<'static>>> {
+    render_completion_lanes(body, width, prose_color, false)
+}
+
+fn render_completion_lanes(
+    body: &str,
+    width: usize,
+    prose_color: Color,
+    first_lane_only: bool,
+) -> Option<Vec<Line<'static>>> {
     let (intro, rest) = body.split_once("\n\nLane plan:\n")?;
     let (plan, report) = rest.split_once("\n\nFinal response:\n")?;
     if !intro
@@ -3498,6 +3507,9 @@ fn render_completion_lane_body(
                 &Line::from(spans),
                 width,
             ));
+            if first_lane_only {
+                return Some(lines);
+            }
         } else if let Some(task) = raw
             .strip_prefix("- [")
             .and_then(|line| line.split_once("] "))
@@ -3628,7 +3640,20 @@ fn render_compact_agent_notification(
             .as_deref()
             .map(UnicodeWidthStr::width)
             .unwrap_or(0);
-        prefix.push(Span::styled(preview, body_style));
+        let completion_lane = collapsible
+            .filter(|_| !notification.file_activity)
+            .and_then(|parsed| {
+                render_completion_lanes(parsed.body.trim(), max_width, text_color, true)
+            })
+            .and_then(|rows| rows.into_iter().next());
+        if let Some(lane) = completion_lane {
+            prefix.extend(lane.spans);
+            if let Some((_, detail)) = preview.split_once(" · ") {
+                prefix.push(Span::styled(format!(" · {detail}"), body_style));
+            }
+        } else {
+            prefix.push(Span::styled(preview, body_style));
+        }
         let mut line = super::truncate_line_with_ellipsis_to_width(
             &Line::from(prefix),
             max_width.saturating_sub(badge_width + usage_width).max(1),
