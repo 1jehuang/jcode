@@ -75,7 +75,7 @@ fn is_mouse_scroll_kind(kind: MouseEventKind) -> bool {
 }
 
 impl App {
-    const MOUSE_SCROLL_INTENT_LINES: i16 = 3;
+    pub(super) const MOUSE_SCROLL_INTENT_LINES: i16 = 3;
     /// Upper bound on lines enqueued per wheel notch after velocity
     /// acceleration. Kept close to the base intent so the boost is only a subtle
     /// nudge on fast flicks rather than a large jump.
@@ -1537,32 +1537,8 @@ impl App {
             self.set_diff_pane_focus(false);
         }
 
-        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && crate::tui::ui::viewport::pinned_todo_more_area().is_some_and(|area| {
-                super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
-            })
-        {
-            self.pinned_todos_expanded = !self.pinned_todos_expanded;
-            crate::tui::ui::viewport::reset_pinned_todo_scroll();
-            finish_mouse_event!(false, "pinned_todos_toggle");
-        }
-
-        if self.pinned_todos_expanded
-            && matches!(
-                mouse.kind,
-                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-            )
-            && crate::tui::ui::viewport::pinned_todo_scroll_area().is_some_and(|area| {
-                super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
-            })
-        {
-            let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
-                -(Self::MOUSE_SCROLL_INTENT_LINES as isize)
-            } else {
-                Self::MOUSE_SCROLL_INTENT_LINES as isize
-            };
-            crate::tui::ui::viewport::scroll_pinned_todos(delta);
-            finish_mouse_event!(false, "pinned_todos_scroll");
+        if let Some(tag) = self.try_handle_inline_chrome_mouse(mouse) {
+            finish_mouse_event!(false, tag);
         }
 
         // A left press in the composer moves the caret first (native text-field

@@ -12,8 +12,8 @@ pub use jcode_config_types::{
     NamedProviderConfig, NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig,
     NotificationsConfig, PowerConfig, ProviderConfig, ReasoningDisplayMode, ResumeOpenElsewhere,
     ResumeTimeMode, SafetyConfig, SessionConfig, SessionPickerResumeAction, SponsorsConfig,
-    SwarmSpawnMode, SwarmStripLayout, TerminalConfig, UpdateChannel, WebSearchConfig,
-    WebSearchEngine,
+    SuggestedRepliesConfig, SwarmSpawnMode, SwarmStripLayout, TerminalConfig, UpdateChannel,
+    WebSearchConfig, WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -286,6 +286,20 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_SMTP_PASSWORD",
     "JCODE_SPAWN_HOOK",
     "JCODE_STREAM_IDLE_TIMEOUT_SECS",
+    "JCODE_SUGGESTED_REPLIES",
+    "JCODE_SUGGESTED_REPLIES_ENABLED",
+    "JCODE_SUGGESTIONS_JEV_PROVIDER",
+    "JCODE_USE_OPEN_GF",
+    "JCODE_MAX_SECONDARY_SUGGESTIONS",
+    "JCODE_SUGGESTED_REPLIES_MAX_SECONDARY",
+    "JCODE_CONFIDENCE_THRESHOLD",
+    "JCODE_SUGGESTED_REPLIES_CONFIDENCE_THRESHOLD",
+    "JCODE_SUGGESTED_REPLIES_SHOW_CONFIDENCE",
+    "JCODE_SUGGESTED_REPLIES_CUSTOM_PROMPTS",
+    "JCODE_ENABLE_FULL_AUTO_EXPLORER",
+    "JCODE_SUGGESTED_REPLIES_ENABLE_FINISH_CATEGORY",
+    "JCODE_ENABLE_FINISH_CATEGORY",
+    "OPENJEV_API_KEY",
     "JCODE_MAX_RETRIES",
     "JCODE_MCP_TOOLS",
     "JCODE_MCP_TOOLS_TOKEN_THRESHOLD",
@@ -732,6 +746,9 @@ pub struct Config {
 
     /// Auto-judge configuration
     pub autojudge: AutoJudgeConfig,
+
+    /// Two-stage cascading Suggested Replies with Default Action Focus configuration
+    pub suggested_replies: SuggestedRepliesConfig,
 
     /// Partner discovery configuration. Skipped when it matches the shipped
     /// default so saving config never bakes today's default into the file (see

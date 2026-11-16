@@ -478,6 +478,11 @@ impl App {
     }
 
     pub(super) fn toggle_input_stash(&mut self) {
+        if self.suggested_replies_has_staged_input() && self.stashed_input.is_some() {
+            self.input.clear();
+            self.cursor_pos = 0;
+        }
+        self.cancel_suggested_replies_interaction(false);
         if let Some((stashed, stashed_cursor)) = self.stashed_input.take() {
             let current_input = std::mem::replace(&mut self.input, stashed);
             let current_cursor = std::mem::replace(&mut self.cursor_pos, stashed_cursor);
@@ -494,4 +499,129 @@ impl App {
             self.set_status_notice("📋 Input stashed");
         }
     }
+
+    pub(super) fn undo_input_change(&mut self) {
+        self.cancel_suggested_replies_interaction(false);
+        self.input_typing_undo = None;
+        if let Some((input, cursor_pos)) = self.input_undo_stack.pop() {
+            self.history_draft = None;
+            self.input = input;
+            self.cursor_pos = cursor_pos.min(self.input.len());
+            self.reset_tab_completion();
+            self.sync_model_picker_preview_from_input();
+            self.set_status_notice("↶ Input restored");
+        } else {
+            self.set_status_notice("Nothing to undo");
+        }
+    }
+
+    pub(super) fn apply_startup_notices(&mut self) {
+        for notice in self.provider.drain_startup_notices() {
+            self.status_notice = Some((notice, Instant::now()));
+        }
+    }
+
+    pub(super) fn kv_cache_ttl_status(&self) -> Option<crate::tui::CacheTtlInfo> {
+        let baseline = self.kv_cache.kv_cache_baseline.as_ref()?;
+        if baseline.session_id != self.kv_cache_session_id()
+            || baseline.cache_generation != self.kv_cache.cache_generation
+            || baseline.provider != self.kv_cache_provider_name()
+            || baseline.model != self.kv_cache_provider_model()
+        {
+            return None;
+        }
+        let ttl_secs = baseline.cache_ttl_secs?;
+        let elapsed = baseline.completed_at.elapsed().as_secs();
+        let remaining = ttl_secs.saturating_sub(elapsed);
+        Some(crate::tui::CacheTtlInfo {
+            remaining_secs: remaining,
+            ttl_secs,
+            is_cold: remaining == 0,
+            cold_for_secs: elapsed.saturating_sub(ttl_secs),
+            cached_tokens: Some(baseline.input_tokens),
+            is_estimate: crate::provider::cache_ttl_is_estimate(&baseline.provider),
+        })
+    }
+
+    pub(super) fn try_handle_inline_chrome_mouse(
+        &mut self,
+        mouse: MouseEvent,
+    ) -> Option<&'static str> {
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && ui::viewport::pinned_todo_more_area().is_some_and(|area| {
+                super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
+            })
+        {
+            self.pinned_todos_expanded = !self.pinned_todos_expanded;
+            ui::viewport::reset_pinned_todo_scroll();
+            return Some("pinned_todos_toggle");
+        }
+        if self.pinned_todos_expanded
+            && matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            )
+            && ui::viewport::pinned_todo_scroll_area().is_some_and(|area| {
+                super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
+            })
+        {
+            let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                -(Self::MOUSE_SCROLL_INTENT_LINES as isize)
+            } else {
+                Self::MOUSE_SCROLL_INTENT_LINES as isize
+            };
+            ui::viewport::scroll_pinned_todos(delta);
+            return Some("pinned_todos_scroll");
+        }
+        self.handle_suggested_reply_mouse_click(mouse)
+    }
+
+    pub(super) fn poll_remote_ui_tick(&mut self) -> bool {
+        let mut redraw = false;
+        redraw |= self.refresh_todos_view_if_needed();
+        redraw |= self.refresh_todo_card_if_needed();
+        redraw |= self.refresh_completed_todo_report(false);
+        redraw |= self.refresh_pinned_todos_if_needed();
+        redraw |= self.refresh_justrust_status();
+        redraw |= self.prune_irrelevant_background_tasks();
+        redraw |= self.refresh_side_panel_linked_content_if_due();
+        redraw |= self.poll_model_picker_load();
+        redraw |= self.poll_session_picker_load();
+        redraw |= self.poll_session_picker_presence();
+        redraw |= self.poll_session_picker_search_submission();
+        redraw |= self.onboarding_tick();
+        redraw |= self.progress_update_simulator();
+        redraw |= self.poll_and_queue_suggested_replies_tick();
+        redraw |= self.refresh_keybindings_if_config_reloaded();
+        redraw
+    }
+
+    pub(super) fn kv_cache_common_prefix_messages(
+        current: &KvCacheRequestSignature,
+        previous: &KvCacheRequestSignature,
+    ) -> usize {
+        current
+            .message_hashes
+            .iter()
+            .zip(previous.message_hashes.iter())
+            .take_while(|(current, previous)| current == previous)
+            .count()
+    }
+}
+
+pub(in crate::tui) fn active_openai_reset_hint<S: TuiState + ?Sized>(state: &S) -> Option<String> {
+    if state.is_processing() || crate::tui::is_ssh_remote() {
+        return None;
+    }
+    let auth_method = state.info_widget_data().auth_method;
+    if auth_method != crate::tui::info_widget::AuthMethod::OpenAIOAuth {
+        return None;
+    }
+    let usage = crate::usage::get_openai_usage_sync();
+    let account_label = crate::auth::codex::active_account_label();
+    let hint =
+        ui::input_ui::openai_reset_status_hint(auth_method, &usage, account_label.as_deref())?;
+    let credits = usage.openai_reset_credits.as_ref()?;
+    let key = format!("{:?}:{}", account_label, credits.available_count);
+    state.reset_hint_visible(&key).then_some(hint)
 }

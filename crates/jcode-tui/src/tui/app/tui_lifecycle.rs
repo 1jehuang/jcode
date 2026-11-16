@@ -902,11 +902,10 @@ impl App {
             workspace_client: crate::tui::workspace_client::WorkspaceClientState::default(),
             prompt_history_search: None,
             persisted_prompt_history: None,
+            suggested_replies: Default::default(),
         };
 
-        for notice in app.provider.drain_startup_notices() {
-            app.status_notice = Some((notice, Instant::now()));
-        }
+        app.apply_startup_notices();
 
         app
     }
@@ -1420,11 +1419,10 @@ impl App {
             workspace_client: crate::tui::workspace_client::WorkspaceClientState::default(),
             prompt_history_search: None,
             persisted_prompt_history: None,
+            suggested_replies: Default::default(),
         };
 
-        for notice in app.provider.drain_startup_notices() {
-            app.status_notice = Some((notice, Instant::now()));
-        }
+        app.apply_startup_notices();
 
         app
     }

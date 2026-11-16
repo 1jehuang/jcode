@@ -675,6 +675,7 @@ impl App {
 
     pub(super) fn clear_display_messages(&mut self) {
         self.compacted_history_lazy = CompactedHistoryLazyState::default();
+        self.invalidate_suggested_replies_on_session_switch();
         // The transcript is about to be discarded; forget where the live reasoning
         // block started so a stale offset can't slice the new stream.
         self.reasoning_block_start = None;

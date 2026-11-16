@@ -6,12 +6,12 @@ pub use update_policy::{CrossProviderFailoverMode, UpdateChannel};
 mod menubar;
 mod power;
 mod session;
+mod suggested_replies;
+pub use display::{DisplayConfig, ResumeOpenElsewhere, ResumeTimeMode};
+pub use menubar::MenubarConfig;
+pub use power::PowerConfig;
 pub use session::{HibernationMode, SessionConfig};
-pub use {
-    display::{DisplayConfig, ResumeOpenElsewhere, ResumeTimeMode},
-    menubar::MenubarConfig,
-    power::PowerConfig,
-};
+pub use suggested_replies::SuggestedRepliesConfig;
 pub mod keybindings;
 mod serde_lenient;
 pub use keybindings::{
