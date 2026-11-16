@@ -92,6 +92,39 @@ The full hosted serial MCP OAuth suite passed all 22 tests, including existing
 loopback login, refresh, and security coverage. These are structural allocation
 and lifetime improvements, not measured production RSS reductions.
 
+Antigravity project lookup retains stack-owned metadata structs with borrowed
+strings instead of an owned nested JSON tree. Serialization key order and
+endpoint fallback behavior are unchanged. All 11 hosted serial authentication
+tests passed, including exact legacy bytes and builder ownership after the
+metadata inputs leave scope. Per-attempt wire serialization is unchanged.
+
+Gemini authorization-code exchange drops its owned form and copied credential
+strings immediately after eager form encoding. A credential-free builder test
+verifies exact URL-encoded bytes, trimming, optional verifier, and endpoint after
+all source strings leave scope. All 12 hosted serial Gemini authentication tests
+passed. No external OAuth calls or production RSS comparisons were used.
+
+Device authorization metadata uses typed static references instead of an owned
+JSON map. Exact legacy bytes and optional requested-tier omission are checked
+for every tier. The full hosted subscription API group passed all 12 tests,
+including builder-owned bytes after metadata leaves scope. No live login,
+billing, payment, or plan mutation was performed.
+
+### Report request ownership acceptance (2026-11-16)
+
+Sponsor usage flushing moves its reports into a typed serialization view instead
+of constructing a second nested JSON tree, then drops the source reports before
+network response waits. Exact sorted legacy keys, report order, timeout, and
+best-effort delivery policy are unchanged. All 5 scoped hosted tests passed,
+including a source-drop marker checked before any send. No telemetry was sent.
+
+Mobile command completion serializes borrowed session IDs or a short-lived
+formatted error directly, without an intermediate owned JSON map. Exact legacy
+success/error bytes, authorization, endpoint, and timeout remain unchanged. All
+12 hosted mobile runner tests passed, including Unicode, escaping, empty IDs,
+and chained-error wire coverage. No real commands were dispatched. These gains
+are structural reductions in duplicate allocation and source lifetime only.
+
 ### Schema, reranking, and retry ownership acceptance (2026-11-16)
 
 The MCP schema cache now shares immutable catalog backing between memoized
