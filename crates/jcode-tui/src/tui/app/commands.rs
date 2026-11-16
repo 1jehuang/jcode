@@ -2124,8 +2124,8 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
                         duration_secs: None,
                         title: None,
                         tool_data: rendered.tool_data,
-                        timestamp: None,
-                        tool_duration_ms: None,
+                        timestamp: rendered.timestamp,
+                        tool_duration_ms: rendered.tool_duration_ms,
                     });
                 }
 

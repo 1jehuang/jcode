@@ -617,7 +617,12 @@ pub fn render_messages_and_images_with_compacted_history(
                         tool_calls: Vec::new(),
                         tool_data: Some(tool_data),
                         stored_index: Some(stored_index),
-                        timestamp: msg.timestamp,
+                        // Provider-native items carry no wall-clock time of
+                        // their own; stamping the assistant message's time
+                        // would show earlier searches in the same response as
+                        // finishing at response end. Leave None: the badge
+                        // hides when the true run time is unknown.
+                        timestamp: None,
                         tool_duration_ms: msg.tool_duration_ms,
                     });
                 }
