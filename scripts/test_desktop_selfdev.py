@@ -181,11 +181,11 @@ def main():
                 parser.error('--output-dir must be outside both repositories')
         root.mkdir(mode=0o700, parents=True, exist_ok=False)
     else:
-        scratch = Path(os.environ.get('JCODE_SCRATCH_DIR', str(Path.home() / '.cache/jcode-acceptance')))
+        scratch = Path(os.environ.get('KCODE_SCRATCH_DIR', str(Path.home() / '.cache/jcode-acceptance')))
         scratch = scratch.resolve()
         for checkout in (repo, desktop):
             if scratch == checkout or checkout in scratch.parents:
-                parser.error('JCODE_SCRATCH_DIR must be outside both repositories')
+                parser.error('KCODE_SCRATCH_DIR must be outside both repositories')
         scratch.mkdir(mode=0o700, parents=True, exist_ok=True)
         root = Path(tempfile.mkdtemp(prefix='desktop-selfdev-', dir=scratch))
     print(f'Artifacts: {root}', flush=True)
@@ -215,11 +215,11 @@ def main():
         'HOME': str(root / 'home'), 'XDG_RUNTIME_DIR': str(root / 'runtime'),
         'XDG_CONFIG_HOME': str(root / 'config'), 'XDG_CACHE_HOME': str(root / 'cache'),
         'XDG_DATA_HOME': str(root / 'data'), 'XDG_STATE_HOME': str(root / 'state'),
-        'TMPDIR': str(root / 'tmp'), 'JCODE_HOME': str(root / 'jcode'),
-        'JCODE_RUNTIME_DIR': str(root / 'runtime'), 'JCODE_SOCKET': str(root / 'runtime/daemon.sock'),
-        'JCODE_API_SOCKET': str(root / 'runtime/api.sock'), 'JCODE_DEBUG_CONTROL': '1',
-        'JCODE_NO_TELEMETRY': '1', 'JCODE_TEMP_SERVER': '1',
-        'JCODE_SERVER_OWNER_PID': str(os.getpid()), 'JCODE_TEMP_SERVER_IDLE_SECS': '300',
+        'TMPDIR': str(root / 'tmp'), 'KCODE_HOME': str(root / 'jcode'),
+        'KCODE_RUNTIME_DIR': str(root / 'runtime'), 'KCODE_SOCKET': str(root / 'runtime/daemon.sock'),
+        'KCODE_API_SOCKET': str(root / 'runtime/api.sock'), 'KCODE_DEBUG_CONTROL': '1',
+        'KCODE_NO_TELEMETRY': '1', 'KCODE_TEMP_SERVER': '1',
+        'KCODE_SERVER_OWNER_PID': str(os.getpid()), 'KCODE_TEMP_SERVER_IDLE_SECS': '300',
     }
     processes, logs = [], []
     def launch(name, command):
@@ -231,13 +231,13 @@ def main():
         return process
     try:
         daemon = launch('daemon', [binary, '--no-update', '--no-selfdev', '--provider', 'jcode', 'serve'])
-        wait_socket(Path(env['JCODE_SOCKET']), daemon)
+        wait_socket(Path(env['KCODE_SOCKET']), daemon)
         debug = root / 'runtime/daemon-debug.sock'
         wait_socket(debug, daemon)
-        adapter = launch('bridge', [bridge, env['JCODE_API_SOCKET'], env['JCODE_SOCKET']])
-        wait_socket(Path(env['JCODE_API_SOCKET']), adapter)
+        adapter = launch('bridge', [bridge, env['KCODE_API_SOCKET'], env['KCODE_SOCKET']])
+        wait_socket(Path(env['KCODE_API_SOCKET']), adapter)
         helper = root / 'sdk-target/debug/desktop-selfdev-sdk-acceptance'
-        result = subprocess.run([str(helper), env['JCODE_API_SOCKET'], str(debug), str(desktop),
+        result = subprocess.run([str(helper), env['KCODE_API_SOCKET'], str(debug), str(desktop),
                                  str(nested), str(root / 'desktop-link'),
                                  str(root / 'regular/jcode-desktop'), str(repo)],
                                 cwd=root, env=env, text=True, capture_output=True, timeout=180)

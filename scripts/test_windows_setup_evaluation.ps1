@@ -6,22 +6,22 @@ Set-StrictMode -Version Latest
 $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $installScript = Join-Path $repoRoot 'scripts\install.ps1'
 $uninstallScript = Join-Path $repoRoot 'scripts\uninstall.ps1'
-$testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("jcode-windows-setup-eval-{0}" -f ([guid]::NewGuid().ToString('N')))
+$testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("kcode-windows-setup-eval-{0}" -f ([guid]::NewGuid().ToString('N')))
 
 $envNames = @(
     'LOCALAPPDATA',
     'APPDATA',
     'USERPROFILE',
-    'JCODE_HOME',
+    'KCODE_HOME',
     'TEMP',
     'TMP',
     'PATH',
-    'JCODE_INSTALL_PS1_IMPORT_ONLY',
-    'JCODE_UNINSTALL_PS1_IMPORT_ONLY',
-    'JCODE_SKIP_SERVER_RELOAD',
-    'JCODE_INSTALL_SKIP_BINARY_VALIDATION',
-    'JCODE_DISABLE_ENV_BROADCAST',
-    'JCODE_WINDOWS_SETUP_SKIP_EXTERNALS'
+    'KCODE_INSTALL_PS1_IMPORT_ONLY',
+    'KCODE_UNINSTALL_PS1_IMPORT_ONLY',
+    'KCODE_SKIP_SERVER_RELOAD',
+    'KCODE_INSTALL_SKIP_BINARY_VALIDATION',
+    'KCODE_DISABLE_ENV_BROADCAST',
+    'KCODE_WINDOWS_SETUP_SKIP_EXTERNALS'
 )
 $originalEnv = @{}
 foreach ($name in $envNames) {
@@ -74,10 +74,10 @@ function Assert-PathMissing([string]$Path, [string]$Message) {
 }
 
 function Assert-PathCount([string]$PathValue, [string]$Entry, [int]$ExpectedCount, [string]$Message) {
-    $entryKey = ConvertTo-JcodePathKey $Entry
+    $entryKey = ConvertTo-KcodePathKey $Entry
     $count = 0
-    foreach ($candidate in (Split-JcodePathList $PathValue)) {
-        if ((ConvertTo-JcodePathKey $candidate) -eq $entryKey) { $count += 1 }
+    foreach ($candidate in (Split-KcodePathList $PathValue)) {
+        if ((ConvertTo-KcodePathKey $candidate) -eq $entryKey) { $count += 1 }
     }
     Assert-Equal $ExpectedCount $count $Message
 }
@@ -93,16 +93,16 @@ function New-IsolatedWindowsProfile([string]$Name) {
     $local = Join-Path $root 'Local App Data'
     $profile = Join-Path $root 'User Profile'
     $appData = Join-Path $profile 'AppData\Roaming'
-    $jcodeHome = Join-Path $root 'Jcode Home'
+    $kcodeHome = Join-Path $root 'Kcode Home'
     $temp = Join-Path $root 'Temp'
-    foreach ($dir in @($local, $profile, $appData, $jcodeHome, $temp)) {
+    foreach ($dir in @($local, $profile, $appData, $kcodeHome, $temp)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
 
     $env:LOCALAPPDATA = $local
     $env:USERPROFILE = $profile
     $env:APPDATA = $appData
-    $env:JCODE_HOME = $jcodeHome
+    $env:KCODE_HOME = $kcodeHome
     $env:TEMP = $temp
     $env:TMP = $temp
 
@@ -111,19 +111,19 @@ function New-IsolatedWindowsProfile([string]$Name) {
         LocalAppData = $local
         UserProfile = $profile
         AppData = $appData
-        JcodeHome = $jcodeHome
+        KcodeHome = $kcodeHome
         Temp = $temp
-        InstallDir = Join-Path $local 'jcode\bin'
-        LauncherPath = Join-Path $local 'jcode\bin\jcode.exe'
-        BuildsDir = Join-Path $local 'jcode\builds'
-        SetupHintsPath = Join-Path $jcodeHome 'setup_hints.json'
-        HotkeyDir = Join-Path $jcodeHome 'hotkey'
-        StartupShortcutPath = Join-Path $appData 'Microsoft\Windows\Start Menu\Programs\Startup\jcode-hotkey.lnk'
+        InstallDir = Join-Path $local 'kcode\bin'
+        LauncherPath = Join-Path $local 'kcode\bin\kcode.exe'
+        BuildsDir = Join-Path $local 'kcode\builds'
+        SetupHintsPath = Join-Path $kcodeHome 'setup_hints.json'
+        HotkeyDir = Join-Path $kcodeHome 'hotkey'
+        StartupShortcutPath = Join-Path $appData 'Microsoft\Windows\Start Menu\Programs\Startup\kcode-hotkey.lnk'
     }
 }
 
 function Set-InstallScriptProfileGlobals($Profile) {
-    $script:JcodeHome = $Profile.JcodeHome
+    $script:KcodeHome = $Profile.KcodeHome
     $script:HotkeyDir = $Profile.HotkeyDir
     $script:SetupHintsPath = $Profile.SetupHintsPath
 }
@@ -146,19 +146,19 @@ $coveredScenarios = [ordered]@{
 New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 
 try {
-    $env:JCODE_INSTALL_PS1_IMPORT_ONLY = '1'
-    $env:JCODE_SKIP_SERVER_RELOAD = '1'
-    $env:JCODE_INSTALL_SKIP_BINARY_VALIDATION = '1'
+    $env:KCODE_INSTALL_PS1_IMPORT_ONLY = '1'
+    $env:KCODE_SKIP_SERVER_RELOAD = '1'
+    $env:KCODE_INSTALL_SKIP_BINARY_VALIDATION = '1'
     . $installScript -SkipAlacrittySetup -SkipHotkeySetup
 
     Invoke-Case 'release_lookup_avoids_unauthenticated_github_api' {
-        Assert-Equal 'v1.2.3' (Resolve-JcodeReleaseTagFromUri 'https://github.com/1jehuang/jcode/releases/tag/v1.2.3') 'release redirect parser should extract the stable tag'
-        Assert-Equal 'v1.2.3-rc.1' (Resolve-JcodeReleaseTagFromUri 'https://github.com/1jehuang/jcode/releases/tag/v1.2.3-rc.1?source=latest') 'release redirect parser should stop before query parameters'
-        Assert-Equal $true (Test-JcodeReleaseTag 'v1.2.3') 'stable release tags should validate'
-        Assert-Equal $false (Test-JcodeReleaseTag 'latest') 'unversioned release labels should not validate'
+        Assert-Equal 'v1.2.3' (Resolve-KcodeReleaseTagFromUri 'https://github.com/KooshaPari/KCode/releases/tag/v1.2.3') 'release redirect parser should extract the stable tag'
+        Assert-Equal 'v1.2.3-rc.1' (Resolve-KcodeReleaseTagFromUri 'https://github.com/KooshaPari/KCode/releases/tag/v1.2.3-rc.1?source=latest') 'release redirect parser should stop before query parameters'
+        Assert-Equal $true (Test-KcodeReleaseTag 'v1.2.3') 'stable release tags should validate'
+        Assert-Equal $false (Test-KcodeReleaseTag 'latest') 'unversioned release labels should not validate'
         $scriptText = Get-Content -LiteralPath $installScript -Raw
         Assert-NotContains $scriptText 'api.github.com/repos/$Repo/releases/latest' 'installer should not use the rate-limited unauthenticated GitHub API'
-        Assert-Contains $scriptText 'jcode.sh/releases' 'installer should include independent static release metadata'
+        Assert-Contains $scriptText 'github.com/KooshaPari/KCode/releases' 'installer should point at the KCode release metadata base'
 
         $script:releaseLookupRequests = @()
         function Invoke-WebRequest {
@@ -169,22 +169,22 @@ try {
                 [string]$OutFile
             )
             $script:releaseLookupRequests += $Uri
-            if ($Uri -eq 'https://jcode.sh/releases/latest/version') {
+            if ($Uri -eq 'https://github.com/KooshaPari/KCode/releases/latest/version') {
                 return [pscustomobject]@{ Content = "v1.2.3`n" }
             }
-            if ($Uri -eq 'https://jcode.sh/releases/v1.2.3/download-bases') {
+            if ($Uri -eq 'https://github.com/KooshaPari/KCode/releases/v1.2.3/download-bases') {
                 return [pscustomobject]@{ Content = "https://mirror.example/releases/v1.2.3`n" }
             }
-            if ($Uri -eq 'https://github.com/1jehuang/jcode/releases/latest') {
+            if ($Uri -eq 'https://github.com/KooshaPari/KCode/releases/latest') {
                 throw 'simulated GitHub block'
             }
             throw "unexpected URI: $Uri"
         }
         try {
-            Assert-Equal 'v1.2.3' (Get-LatestJcodeReleaseTag) 'static metadata should cover a blocked GitHub release lookup'
-            $bases = @(Get-JcodeReleaseDownloadBases 'v1.2.3')
+            Assert-Equal 'v1.2.3' (Get-LatestKcodeReleaseTag) 'static metadata should cover a blocked GitHub release lookup'
+            $bases = @(Get-KcodeReleaseDownloadBases 'v1.2.3')
             Assert-Equal 'https://mirror.example/releases/v1.2.3' $bases[0] 'configured mirror should be preferred'
-            Assert-Equal 'https://github.com/1jehuang/jcode/releases/download/v1.2.3' $bases[1] 'GitHub should remain the final fallback'
+            Assert-Equal 'https://github.com/KooshaPari/KCode/releases/download/v1.2.3' $bases[1] 'GitHub should remain the final fallback'
         } finally {
             Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
         }
@@ -194,10 +194,10 @@ try {
         $profile = New-IsolatedWindowsProfile 'path-dedupe'
         $installVariant = ($profile.InstallDir.ToUpperInvariant() + '\')
         $currentPath = "C:\Tools;$installVariant;$($profile.InstallDir);C:\Tools\;C:\Other"
-        $pathUpdate = Resolve-JcodePathUpdate -InstallDir $profile.InstallDir -CurrentPath $currentPath
+        $pathUpdate = Resolve-KcodePathUpdate -InstallDir $profile.InstallDir -CurrentPath $currentPath
         Assert-Equal "$($profile.InstallDir);C:\Tools;C:\Tools\;C:\Other" $pathUpdate.Path 'install PATH update should prepend the canonical launcher dir without rewriting unrelated entries'
-        Assert-PathCount $pathUpdate.Path $profile.InstallDir 1 'updated PATH should contain exactly one jcode launcher dir'
-        Assert-Equal 2 $pathUpdate.RemovedManagedEntries 'PATH update should remove both stale jcode launcher entries before re-adding one'
+        Assert-PathCount $pathUpdate.Path $profile.InstallDir 1 'updated PATH should contain exactly one kcode launcher dir'
+        Assert-Equal 2 $pathUpdate.RemovedManagedEntries 'PATH update should remove both stale kcode launcher entries before re-adding one'
         Assert-Equal 0 $pathUpdate.RemovedDuplicateEntries 'PATH update should preserve unrelated duplicate entries'
 
         $script:setCalls = 0
@@ -205,11 +205,11 @@ try {
         $script:appliedPath = $null
         $setPathAction = { param($value) $script:setCalls += 1; $script:appliedPath = $value }
         $broadcastAction = { $script:broadcastCalls += 1 }
-        $first = Set-JcodeUserPath -InstallDir $profile.InstallDir -CurrentPath 'C:\Tools' -SetUserPathAction $setPathAction -BroadcastAction $broadcastAction
+        $first = Set-KcodeUserPath -InstallDir $profile.InstallDir -CurrentPath 'C:\Tools' -SetUserPathAction $setPathAction -BroadcastAction $broadcastAction
         Assert-Equal 1 $script:setCalls 'user PATH setter should be called once when PATH changes'
         Assert-Equal 1 $script:broadcastCalls 'environment broadcast should be called once when PATH changes'
         Assert-Equal $true $first.Broadcasted 'changed PATH update should report a broadcast'
-        $second = Set-JcodeUserPath -InstallDir $profile.InstallDir -CurrentPath $script:appliedPath -SetUserPathAction $setPathAction -BroadcastAction $broadcastAction
+        $second = Set-KcodeUserPath -InstallDir $profile.InstallDir -CurrentPath $script:appliedPath -SetUserPathAction $setPathAction -BroadcastAction $broadcastAction
         Assert-Equal 1 $script:setCalls 'user PATH setter should not be called when PATH is already correct'
         Assert-Equal 1 $script:broadcastCalls 'environment broadcast should not be called when PATH is unchanged'
         Assert-Equal $false $second.Broadcasted 'unchanged PATH update should not report a broadcast'
@@ -221,16 +221,16 @@ try {
         Assert-Contains $text '0x001A' 'installer should broadcast WM_SETTINGCHANGE'
         Assert-Contains $text '"Environment"' 'installer should broadcast the Environment lParam'
         Assert-Contains $text 'SendMessageTimeout([IntPtr]0xffff' 'installer should broadcast to HWND_BROADCAST'
-        $env:JCODE_DISABLE_ENV_BROADCAST = '1'
-        Assert-Equal $false (Send-JcodeEnvironmentChangedBroadcast) 'broadcast helper should honor the deterministic no-mutate opt-out'
-        $env:JCODE_DISABLE_ENV_BROADCAST = $null
+        $env:KCODE_DISABLE_ENV_BROADCAST = '1'
+        Assert-Equal $false (Send-KcodeEnvironmentChangedBroadcast) 'broadcast helper should honor the deterministic no-mutate opt-out'
+        $env:KCODE_DISABLE_ENV_BROADCAST = $null
         $script:coveredScenarios.wm_settingchange = $true
     }
 
     $script:mockUserPath = $null
     $script:pathWrites = 0
     $script:pathBroadcasts = 0
-    function Set-JcodeUserPath {
+    function Set-KcodeUserPath {
         param(
             [Parameter(Mandatory = $true)][string]$InstallDir,
             [AllowNull()][string]$CurrentPath,
@@ -238,7 +238,7 @@ try {
             [scriptblock]$BroadcastAction,
             [bool]$Broadcast = $true
         )
-        $update = Resolve-JcodePathUpdate -InstallDir $InstallDir -CurrentPath $script:mockUserPath
+        $update = Resolve-KcodePathUpdate -InstallDir $InstallDir -CurrentPath $script:mockUserPath
         if ($update.Changed) {
             $script:mockUserPath = $update.Path
             $script:pathWrites += 1
@@ -253,7 +253,7 @@ try {
     Invoke-Case 'clean_install_isolated_profile_and_opt_out' {
         $profile = New-IsolatedWindowsProfile 'clean-install'
         Set-InstallScriptProfileGlobals $profile
-        $source = Join-Path $profile.Root 'jcode-v1.exe'
+        $source = Join-Path $profile.Root 'kcode-v1.exe'
         Set-Content -Path $source -Value 'version-one' -NoNewline
         $script:mockUserPath = 'C:\Tools'
         $script:pathWrites = 0
@@ -265,16 +265,16 @@ try {
         $script:SkipAlacrittySetup = $true
         $script:SkipHotkeySetup = $true
 
-        Invoke-JcodeInstall
+        Invoke-KcodeInstall
 
         Assert-PathExists $profile.LauncherPath 'clean install should create the launcher in the isolated LOCALAPPDATA tree'
         Assert-Equal 'version-one' (Get-Content -LiteralPath $profile.LauncherPath -Raw) 'launcher should contain the local artifact contents'
-        Assert-PathExists (Join-Path $profile.BuildsDir 'stable\jcode.exe') 'clean install should populate the stable build channel'
-        Assert-PathExists (Join-Path $profile.BuildsDir 'versions\0.0.1-eval\jcode.exe') 'clean install should populate the immutable versioned build'
+        Assert-PathExists (Join-Path $profile.BuildsDir 'stable\kcode.exe') 'clean install should populate the stable build channel'
+        Assert-PathExists (Join-Path $profile.BuildsDir 'versions\0.0.1-eval\kcode.exe') 'clean install should populate the immutable versioned build'
         Assert-PathCount $script:mockUserPath $profile.InstallDir 1 'clean install should persist exactly one launcher PATH entry in the mocked user PATH'
         Assert-Equal 1 $script:pathWrites 'clean install should write mocked user PATH once'
         Assert-Equal 1 $script:pathBroadcasts 'clean install should broadcast exactly once for a PATH change'
-        Assert-PathExists $profile.SetupHintsPath 'clean install should write setup hints into isolated JCODE_HOME'
+        Assert-PathExists $profile.SetupHintsPath 'clean install should write setup hints into isolated KCODE_HOME'
         $state = Get-Content -LiteralPath $profile.SetupHintsPath -Raw | ConvertFrom-Json
         Assert-Equal $false $state.hotkey_configured 'SkipHotkeySetup should record hotkey opt-out without configuring the listener'
         Assert-Equal $false $state.alacritty_configured 'SkipAlacrittySetup should avoid deterministic terminal installation side effects'
@@ -286,8 +286,8 @@ try {
     Invoke-Case 'upgrade_and_idempotency_do_not_duplicate_path' {
         $profile = New-IsolatedWindowsProfile 'upgrade-install'
         Set-InstallScriptProfileGlobals $profile
-        $sourceV1 = Join-Path $profile.Root 'jcode-v1.exe'
-        $sourceV2 = Join-Path $profile.Root 'jcode-v2.exe'
+        $sourceV1 = Join-Path $profile.Root 'kcode-v1.exe'
+        $sourceV2 = Join-Path $profile.Root 'kcode-v2.exe'
         Set-Content -Path $sourceV1 -Value 'version-one' -NoNewline
         Set-Content -Path $sourceV2 -Value 'version-two' -NoNewline
         $script:mockUserPath = 'C:\Tools'
@@ -299,19 +299,19 @@ try {
 
         $script:Version = 'v1.0.0-eval'
         $script:ArtifactExePath = $sourceV1
-        Invoke-JcodeInstall
+        Invoke-KcodeInstall
         $writesAfterFirstInstall = $script:pathWrites
         $broadcastsAfterFirstInstall = $script:pathBroadcasts
 
         $script:Version = 'v1.0.1-eval'
         $script:ArtifactExePath = $sourceV2
-        Invoke-JcodeInstall
+        Invoke-KcodeInstall
         Assert-Equal 'version-two' (Get-Content -LiteralPath $profile.LauncherPath -Raw) 'upgrade should replace launcher contents with the new build'
         Assert-PathCount $script:mockUserPath $profile.InstallDir 1 'upgrade should preserve exactly one launcher PATH entry'
         Assert-Equal $writesAfterFirstInstall $script:pathWrites 'upgrade should not rewrite PATH when it is already correct'
         Assert-Equal $broadcastsAfterFirstInstall $script:pathBroadcasts 'upgrade should not rebroadcast when PATH is unchanged'
 
-        Invoke-JcodeInstall
+        Invoke-KcodeInstall
         Assert-PathCount $script:mockUserPath $profile.InstallDir 1 'reinstalling same version should remain idempotent for PATH'
         Assert-Equal $writesAfterFirstInstall $script:pathWrites 'idempotent reinstall should not write PATH again'
         $script:coveredScenarios.upgrade_idempotency = $true
@@ -320,26 +320,26 @@ try {
     Invoke-Case 'copilot_key_mapping_and_spaces_non_ascii_paths' {
         $profile = New-IsolatedWindowsProfile 'hotkey-spaces-nonascii'
         Set-InstallScriptProfileGlobals $profile
-        $env:JCODE_WINDOWS_SETUP_SKIP_EXTERNALS = '1'
-        $jcodeExe = Join-Path $profile.Root '路径 With Spaces\jcode.exe'
-        New-Item -ItemType Directory -Path (Split-Path -Parent $jcodeExe) -Force | Out-Null
-        Set-Content -Path $jcodeExe -Value 'fake exe' -NoNewline
+        $env:KCODE_WINDOWS_SETUP_SKIP_EXTERNALS = '1'
+        $kcodeExe = Join-Path $profile.Root '路径 With Spaces\kcode.exe'
+        New-Item -ItemType Directory -Path (Split-Path -Parent $kcodeExe) -Force | Out-Null
+        Set-Content -Path $kcodeExe -Value 'fake exe' -NoNewline
         New-Item -ItemType Directory -Path $profile.HotkeyDir -Force | Out-Null
-        Set-Content -Path (Join-Path $profile.HotkeyDir 'jcode-hotkey.ps1') -Value 'legacy listener' -Force
+        Set-Content -Path (Join-Path $profile.HotkeyDir 'kcode-hotkey.ps1') -Value 'legacy listener' -Force
 
-        $ok = Install-JcodeHotkey -JcodeExePath $jcodeExe
+        $ok = Install-KcodeHotkey -KcodeExePath $kcodeExe
         Assert-Equal $true $ok 'hotkey install should succeed using the deterministic external-command skip hook'
-        $vbsPath = Join-Path $profile.HotkeyDir 'jcode-hotkey-launcher.vbs'
+        $vbsPath = Join-Path $profile.HotkeyDir 'kcode-hotkey-launcher.vbs'
         Assert-PathMissing $vbsPath 'hotkey install should remove the legacy hidden VBScript trampoline'
-        $shortcutScriptPath = Join-Path $profile.HotkeyDir 'jcode-hotkey-shortcut.ps1'
-        Assert-PathExists $shortcutScriptPath 'hotkey install should render the deterministic Startup shortcut script under the isolated JCODE_HOME'
+        $shortcutScriptPath = Join-Path $profile.HotkeyDir 'kcode-hotkey-shortcut.ps1'
+        Assert-PathExists $shortcutScriptPath 'hotkey install should render the deterministic Startup shortcut script under the isolated KCODE_HOME'
         $shortcutScript = Get-Content -LiteralPath $shortcutScriptPath -Raw
         Assert-Contains $shortcutScript 'powershell.exe' 'Startup shortcut should target PowerShell directly'
         Assert-Contains $shortcutScript 'ExecutionPolicy RemoteSigned' 'Startup shortcut should use RemoteSigned execution policy'
         Assert-NotContains $shortcutScript 'ExecutionPolicy Bypass' 'Startup shortcut should not bypass execution policy'
         Assert-Contains $shortcutScript 'setup-hotkey --listen-windows-hotkey' 'Startup shortcut should start the native Windows hotkey listener'
-        Assert-Contains $shortcutScript $jcodeExe 'Startup shortcut should preserve spaces and non-ASCII characters in the jcode path'
-        Assert-PathMissing (Join-Path $profile.HotkeyDir 'jcode-hotkey.ps1') 'hotkey upgrade should remove the legacy PowerShell listener'
+        Assert-Contains $shortcutScript $kcodeExe 'Startup shortcut should preserve spaces and non-ASCII characters in the kcode path'
+        Assert-PathMissing (Join-Path $profile.HotkeyDir 'kcode-hotkey.ps1') 'hotkey upgrade should remove the legacy PowerShell listener'
         $scriptText = Get-Content -LiteralPath $installScript -Raw
         Assert-Contains $scriptText 'Configured Alt+; and the Copilot key' 'installer should document both Windows launch-key mappings'
         $script:coveredScenarios.copilot_key_mapping = $true
@@ -349,14 +349,14 @@ try {
     Invoke-Case 'missing_windows_terminal_is_not_required' {
         $profile = New-IsolatedWindowsProfile 'missing-windows-terminal'
         Set-InstallScriptProfileGlobals $profile
-        $env:JCODE_WINDOWS_SETUP_SKIP_EXTERNALS = '1'
+        $env:KCODE_WINDOWS_SETUP_SKIP_EXTERNALS = '1'
         $env:WT_SESSION = $null
         $env:WindowsTerminal = $null
-        $jcodeExe = Join-Path $profile.Root 'No Windows Terminal\jcode.exe'
-        New-Item -ItemType Directory -Path (Split-Path -Parent $jcodeExe) -Force | Out-Null
-        Set-Content -Path $jcodeExe -Value 'fake exe' -NoNewline
+        $kcodeExe = Join-Path $profile.Root 'No Windows Terminal\kcode.exe'
+        New-Item -ItemType Directory -Path (Split-Path -Parent $kcodeExe) -Force | Out-Null
+        Set-Content -Path $kcodeExe -Value 'fake exe' -NoNewline
 
-        Assert-Equal $true (Install-JcodeHotkey -JcodeExePath $jcodeExe) 'hotkey setup should not require Windows Terminal to be installed or active'
+        Assert-Equal $true (Install-KcodeHotkey -KcodeExePath $kcodeExe) 'hotkey setup should not require Windows Terminal to be installed or active'
         $scriptText = Get-Content -LiteralPath $installScript -Raw
         Assert-NotContains $scriptText 'wt.exe' 'installer should not shell out to Windows Terminal for hotkey setup'
         $script:coveredScenarios.missing_windows_terminal = $true
@@ -369,25 +369,25 @@ try {
         $missingSource = Join-Path $profile.Root 'missing-source.exe'
         $threw = $false
         try {
-            Install-JcodeLauncher -SourcePath $missingSource -LauncherPath $profile.LauncherPath | Out-Null
+            Install-KcodeLauncher -SourcePath $missingSource -LauncherPath $profile.LauncherPath | Out-Null
         } catch {
             $threw = $true
         }
         Assert-Equal $true $threw 'launcher install should surface copy failures'
         Assert-Equal 'known-good' (Get-Content -LiteralPath $profile.LauncherPath -Raw) 'failed launcher install should preserve the existing launcher'
-        $tempLaunchers = @(Get-ChildItem -LiteralPath $profile.InstallDir -Filter '.jcode-launcher-*.tmp.exe' -Force -ErrorAction SilentlyContinue)
+        $tempLaunchers = @(Get-ChildItem -LiteralPath $profile.InstallDir -Filter '.kcode-launcher-*.tmp.exe' -Force -ErrorAction SilentlyContinue)
         Assert-Equal 0 $tempLaunchers.Count 'failed launcher install should not leave temporary launcher files behind'
         $script:coveredScenarios.rollback_failure = $true
     }
 
-    $env:JCODE_UNINSTALL_PS1_IMPORT_ONLY = '1'
+    $env:KCODE_UNINSTALL_PS1_IMPORT_ONLY = '1'
     . $uninstallScript
 
     function Get-CimInstance { @() }
     $script:uninstallUserPath = $null
     $script:uninstallSetCalls = 0
     $script:uninstallBroadcasts = 0
-    function Remove-JcodeUserPath {
+    function Remove-KcodeUserPath {
         param(
             [Parameter(Mandatory = $true)][string]$InstallDir,
             [AllowNull()][string]$CurrentPath,
@@ -395,7 +395,7 @@ try {
             [scriptblock]$BroadcastAction,
             [bool]$Broadcast = $true
         )
-        $update = Resolve-JcodePathRemoval -InstallDir $InstallDir -CurrentPath $script:uninstallUserPath
+        $update = Resolve-KcodePathRemoval -InstallDir $InstallDir -CurrentPath $script:uninstallUserPath
         if ($update.Changed) {
             $script:uninstallUserPath = $update.Path
             $script:uninstallSetCalls += 1
@@ -407,29 +407,29 @@ try {
 
     Invoke-Case 'uninstall_guards_purge_paths_and_process_scope' {
         $profile = New-IsolatedWindowsProfile 'uninstall-safety'
-        Assert-Equal $true (Test-JcodeSafePurgePath $profile.JcodeHome) 'dedicated jcode data directories should be purgeable'
-        Assert-Equal $false (Test-JcodeSafePurgePath $profile.UserProfile) 'the user profile must never be accepted as a purge target'
-        Assert-Equal $false (Test-JcodeSafePurgePath $profile.Root) 'a parent workspace must never be accepted as a purge target'
-        Assert-Equal $true (Test-JcodeManagedExecutablePath -ExecutablePath $profile.LauncherPath -LauncherPath $profile.LauncherPath -BuildsDir $profile.BuildsDir) 'the installed launcher should be recognized as managed'
-        Assert-Equal $true (Test-JcodeManagedExecutablePath -ExecutablePath (Join-Path $profile.InstallDir '.jcode-launcher-old-a1b2c3.exe') -LauncherPath $profile.LauncherPath -BuildsDir $profile.BuildsDir) 'a renamed live-upgrade launcher should be recognized as managed'
-        Assert-Equal $false (Test-JcodeManagedExecutablePath -ExecutablePath (Join-Path $profile.InstallDir 'other-tool.exe') -LauncherPath $profile.LauncherPath -BuildsDir $profile.BuildsDir) 'unrelated executables beside the launcher must not be terminated'
-        Assert-Equal $true (Test-JcodeManagedExecutablePath -ExecutablePath (Join-Path $profile.BuildsDir 'stable\jcode.exe') -LauncherPath $profile.LauncherPath -BuildsDir $profile.BuildsDir) 'installed version binaries should be recognized as managed'
-        Assert-Equal $false (Test-JcodeManagedExecutablePath -ExecutablePath (Join-Path $profile.Root 'development\jcode.exe') -LauncherPath $profile.LauncherPath -BuildsDir $profile.BuildsDir) 'unrelated development binaries must not be terminated'
+        Assert-Equal $true (Test-KcodeSafePurgePath $profile.KcodeHome) 'dedicated kcode data directories should be purgeable'
+        Assert-Equal $false (Test-KcodeSafePurgePath $profile.UserProfile) 'the user profile must never be accepted as a purge target'
+        Assert-Equal $false (Test-KcodeSafePurgePath $profile.Root) 'a parent workspace must never be accepted as a purge target'
+        Assert-Equal $true (Test-KcodeManagedExecutablePath -ExecutablePath $profile.LauncherPath -LauncherPath $profile.LauncherPath -BuildsDir $profile.BuildsDir) 'the installed launcher should be recognized as managed'
+        Assert-Equal $true (Test-KcodeManagedExecutablePath -ExecutablePath (Join-Path $profile.InstallDir '.kcode-launcher-old-a1b2c3.exe') -LauncherPath $profile.LauncherPath -BuildsDir $profile.BuildsDir) 'a renamed live-upgrade launcher should be recognized as managed'
+        Assert-Equal $false (Test-KcodeManagedExecutablePath -ExecutablePath (Join-Path $profile.InstallDir 'other-tool.exe') -LauncherPath $profile.LauncherPath -BuildsDir $profile.BuildsDir) 'unrelated executables beside the launcher must not be terminated'
+        Assert-Equal $true (Test-KcodeManagedExecutablePath -ExecutablePath (Join-Path $profile.BuildsDir 'stable\kcode.exe') -LauncherPath $profile.LauncherPath -BuildsDir $profile.BuildsDir) 'installed version binaries should be recognized as managed'
+        Assert-Equal $false (Test-KcodeManagedExecutablePath -ExecutablePath (Join-Path $profile.Root 'development\kcode.exe') -LauncherPath $profile.LauncherPath -BuildsDir $profile.BuildsDir) 'unrelated development binaries must not be terminated'
     }
 
     Invoke-Case 'uninstall_cleanup_removes_binaries_path_and_keeps_user_data' {
         $profile = New-IsolatedWindowsProfile 'uninstall-cleanup'
         New-Item -ItemType Directory -Path $profile.InstallDir -Force | Out-Null
         New-Item -ItemType Directory -Path (Join-Path $profile.BuildsDir 'stable') -Force | Out-Null
-        New-Item -ItemType Directory -Path $profile.JcodeHome -Force | Out-Null
+        New-Item -ItemType Directory -Path $profile.KcodeHome -Force | Out-Null
         New-Item -ItemType Directory -Path $profile.HotkeyDir -Force | Out-Null
         New-Item -ItemType Directory -Path (Split-Path -Parent $profile.StartupShortcutPath) -Force | Out-Null
         Set-Content -Path $profile.LauncherPath -Value 'installed launcher' -NoNewline
-        $oldLauncherPath = Join-Path $profile.InstallDir '.jcode-launcher-old-a1b2c3.exe'
+        $oldLauncherPath = Join-Path $profile.InstallDir '.kcode-launcher-old-a1b2c3.exe'
         Set-Content -Path $oldLauncherPath -Value 'previous running launcher' -NoNewline
-        Set-Content -Path (Join-Path $profile.BuildsDir 'stable\jcode.exe') -Value 'stable build' -NoNewline
-        Set-Content -Path (Join-Path $profile.JcodeHome 'config.toml') -Value 'kept = true' -NoNewline
-        Set-Content -Path (Join-Path $profile.HotkeyDir 'jcode-hotkey.ps1') -Value 'legacy listener' -NoNewline
+        Set-Content -Path (Join-Path $profile.BuildsDir 'stable\kcode.exe') -Value 'stable build' -NoNewline
+        Set-Content -Path (Join-Path $profile.KcodeHome 'config.toml') -Value 'kept = true' -NoNewline
+        Set-Content -Path (Join-Path $profile.HotkeyDir 'kcode-hotkey.ps1') -Value 'legacy listener' -NoNewline
         Set-Content -Path $profile.StartupShortcutPath -Value 'startup shortcut' -NoNewline
         @{ hotkey_configured = $true; hotkey_dismissed = $false } | ConvertTo-Json | Set-Content -Path $profile.SetupHintsPath -Encoding UTF8
         $installVariant = ($profile.InstallDir.ToUpperInvariant() + '\')
@@ -437,19 +437,19 @@ try {
         $script:uninstallSetCalls = 0
         $script:uninstallBroadcasts = 0
 
-        $exitCode = Invoke-JcodeUninstall -InstallDir $profile.InstallDir -Yes
+        $exitCode = Invoke-KcodeUninstall -InstallDir $profile.InstallDir -Yes
         Assert-Equal 0 $exitCode 'uninstall should complete successfully in the isolated profile'
         Assert-PathMissing $profile.LauncherPath 'uninstall should remove the launcher'
         Assert-PathMissing $oldLauncherPath 'uninstall should remove renamed live-upgrade launchers'
         Assert-PathMissing $profile.InstallDir 'uninstall should remove the empty launcher directory'
         Assert-PathMissing $profile.BuildsDir 'uninstall should remove installed build binaries'
         Assert-PathMissing $profile.StartupShortcutPath 'uninstall should remove the launch-hotkey Startup shortcut'
-        Assert-PathMissing (Join-Path $profile.HotkeyDir 'jcode-hotkey.ps1') 'uninstall should remove legacy launch-hotkey artifacts'
-        Assert-PathExists (Join-Path $profile.JcodeHome 'config.toml') 'uninstall without -Purge should keep user data'
+        Assert-PathMissing (Join-Path $profile.HotkeyDir 'kcode-hotkey.ps1') 'uninstall should remove legacy launch-hotkey artifacts'
+        Assert-PathExists (Join-Path $profile.KcodeHome 'config.toml') 'uninstall without -Purge should keep user data'
         $setupHints = Get-Content -LiteralPath $profile.SetupHintsPath -Raw | ConvertFrom-Json
         Assert-Equal $false $setupHints.hotkey_configured 'uninstall should clear the persisted hotkey-configured state'
         Assert-Equal $true $setupHints.hotkey_dismissed 'uninstall should keep the removed hotkey prompt dismissed'
-        Assert-Equal 'C:\Keep' $script:uninstallUserPath 'uninstall should remove all jcode-managed PATH variants and keep unrelated entries'
+        Assert-Equal 'C:\Keep' $script:uninstallUserPath 'uninstall should remove all kcode-managed PATH variants and keep unrelated entries'
         Assert-Equal 1 $script:uninstallSetCalls 'uninstall should write mocked user PATH once when cleanup changes it'
         Assert-Equal 1 $script:uninstallBroadcasts 'uninstall should broadcast once after PATH cleanup'
         $script:coveredScenarios.uninstall_cleanup = $true
