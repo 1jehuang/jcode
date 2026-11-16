@@ -1004,6 +1004,9 @@ pub(super) async fn handle_comm_stop(
             },
         );
     }
+    // Cancel the worker's in-flight turn before its handles are removed, or it
+    // keeps generating and editing files with nothing left to stop it by.
+    super::swarm::cancel_active_turns(&target_session);
 
     let removed_agent = super::remove_session_entry(sessions, &target_session).await;
     let removed_live_agent = removed_agent.is_some();

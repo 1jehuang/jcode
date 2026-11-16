@@ -389,7 +389,9 @@ impl Sparkline<'_> {
                     let height = if max_height == 0 {
                         0
                     } else {
-                        *value * u64::from(spark_area.height) * 8 / max_height
+                        (*value * u64::from(spark_area.height) * 8)
+                            .checked_div(max_height)
+                            .unwrap_or_default()
                     };
                     (height, None, *style)
                 }

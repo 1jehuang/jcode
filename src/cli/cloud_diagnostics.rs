@@ -358,9 +358,9 @@ pub(super) fn doctor(target: &super::Target, json: bool) -> Result<()> {
             (report.ssh, report.remote_version) = version_probe(&host, &target.remote_binary());
             report.notes.push("SSH probes disable proxies, forwarding, multiplexing, and host-key updates. Proxy-only aliases require a separate connectivity check.");
         }
-        Err(_) => report
-            .notes
-            .push("No target configured. Pass --host or sign in to a Jcode account."),
+        Err(_) => report.notes.push(
+            "No target configured. Run `jcode account login` to use Jcode Cloud, or pass --host.",
+        ),
     }
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);

@@ -56,8 +56,19 @@ async fn publish_startup_snapshot(snapshot: &Snapshot) {
 /// Queue an asynchronous response. The shared mutex covers the entire worker,
 /// so simultaneous clients coalesce into one fetch and errors get a retry floor.
 pub(super) fn request(id: u64, tx: mpsc::UnboundedSender<ServerEvent>) {
+    request_with_refresh(id, tx, false);
+}
+
+/// Re-enumerate freshly saved credentials without clearing endpoint caches or
+/// provider Retry-After deadlines. Publish directly so the login's client does
+/// not have to wait for its next periodic usage poll.
+pub(super) fn request_after_auth_change(id: u64, tx: mpsc::UnboundedSender<ServerEvent>) {
+    request_with_refresh(id, tx, true);
+}
+
+fn request_with_refresh(id: u64, tx: mpsc::UnboundedSender<ServerEvent>, force: bool) {
     tokio::spawn(async move {
-        let snapshot = snapshot_with(STATE.get_or_init(Mutex::default), fetch).await;
+        let snapshot = snapshot_with(STATE.get_or_init(Mutex::default), fetch, force).await;
         let _ = tx.send(ServerEvent::AccountUsage {
             id,
             anthropic: snapshot.anthropic,
@@ -66,13 +77,13 @@ pub(super) fn request(id: u64, tx: mpsc::UnboundedSender<ServerEvent>) {
     });
 }
 
-async fn snapshot_with<F, Fut>(state: &Mutex<State>, fetch: F) -> Snapshot
+async fn snapshot_with<F, Fut>(state: &Mutex<State>, fetch: F, force: bool) -> Snapshot
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Snapshot>,
 {
     let mut state = state.lock().await;
-    if state.due(Instant::now()) {
+    if force || state.due(Instant::now()) {
         match tokio::time::timeout(Duration::from_secs(120), fetch()).await {
             Ok(snapshot) => {
                 state.snapshot = snapshot;
@@ -140,7 +151,10 @@ fn wire_snapshot(
             || lower.contains("rate limit")
             || lower.contains("too many requests")
         {
-            "Couldn't fetch usage (429: lookup throttled)".to_string()
+            match crate::usage::usage_error_retry_at(&error) {
+                Some(at) => format!("Couldn't fetch usage (429: lookup throttled) (retry at {at})"),
+                None => "Couldn't fetch usage (429: lookup throttled)".to_string(),
+            }
         } else if lower.contains("401") || lower.contains("unauthorized") {
             "Usage authentication failed (401)".to_string()
         } else {
@@ -149,6 +163,11 @@ fn wire_snapshot(
     });
     let failed = error.is_some();
     AccountUsageSnapshot {
+        additional_windows: if !failed || preserve_last_known {
+            value.additional_windows
+        } else {
+            Vec::new()
+        },
         label: value.label,
         email: value.email,
         exhausted: !failed && value.exhausted,
@@ -178,6 +197,7 @@ mod tests {
 
     fn account(error: Option<&str>) -> crate::usage::AccountUsageSnapshot {
         crate::usage::AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "test".into(),
             email: None,
             exhausted: true,
@@ -208,6 +228,10 @@ mod tests {
                 "Usage authentication failed (401)",
             ),
             ("secret transport diagnostic", "Usage unavailable"),
+            (
+                "HTTP 429 secret (retry at 2026-01-01T00:00:00Z)",
+                "Couldn't fetch usage (429: lookup throttled) (retry at 2026-01-01T00:00:00Z)",
+            ),
         ] {
             let account = wire_snapshot(account(Some(raw)), true);
             assert_eq!(account.error.as_deref(), Some(safe));
@@ -223,18 +247,27 @@ mod tests {
     #[test]
     fn stale_wire_values_remain_display_only_and_unknown_stays_unknown() {
         let mut known = account(Some("HTTP 429 secret diagnostics"));
+        known
+            .additional_windows
+            .push(crate::protocol::AccountUsageWindow {
+                label: "Fable 7d".into(),
+                usage_ratio: 0.8,
+                resets_at: None,
+            });
         known.seven_day_ratio = Some(0.42);
         let stale = wire_snapshot(known.clone(), true);
         assert_eq!(stale.five_hour_ratio, Some(1.0));
         assert_eq!(stale.seven_day_ratio, Some(0.42));
         assert!(stale.error.is_some());
         assert!(!stale.exhausted);
+        assert_eq!(stale.additional_windows, known.additional_windows);
 
         // OpenAI has no equivalent provenance gate yet, so keep its failed
         // wire snapshots unknown rather than broadening this Anthropic fix.
         let unsupported = wire_snapshot(known.clone(), false);
         assert!(unsupported.five_hour_ratio.is_none());
         assert!(unsupported.seven_day_ratio.is_none());
+        assert!(unsupported.additional_windows.is_empty());
 
         known.five_hour_ratio = None;
         known.seven_day_ratio = None;
@@ -243,6 +276,44 @@ mod tests {
         assert!(unknown.seven_day_ratio.is_none());
         assert!(unknown.error.is_some());
         assert!(!unknown.exhausted);
+    }
+
+    #[tokio::test]
+    async fn auth_change_replaces_fresh_login_error_without_waiting_for_poll_deadline() {
+        let state = Mutex::new(State {
+            snapshot: Snapshot {
+                anthropic: vec![wire_snapshot(account(Some("HTTP 401")), true)],
+                ..Default::default()
+            },
+            next_fetch: Some(Instant::now() + REFRESH),
+        });
+        let cached = snapshot_with(
+            &state,
+            || async { panic!("ordinary polls must reuse the fresh daemon snapshot") },
+            false,
+        )
+        .await;
+        assert!(cached.anthropic[0].error.is_some());
+        let refreshed = snapshot_with(
+            &state,
+            || async {
+                Snapshot {
+                    anthropic: vec![wire_snapshot(account(None), true)],
+                    ..Default::default()
+                }
+            },
+            true,
+        )
+        .await;
+        assert!(refreshed.anthropic[0].error.is_none());
+        assert!(state.lock().await.next_fetch.unwrap() > Instant::now());
+        let cached = snapshot_with(
+            &state,
+            || async { panic!("the auth refresh must restore ordinary polling coalescing") },
+            false,
+        )
+        .await;
+        assert_eq!(cached.anthropic, refreshed.anthropic);
     }
 
     #[tokio::test]
@@ -257,13 +328,15 @@ mod tests {
                 ..Default::default()
             }
         };
-        let (first, second) =
-            tokio::join!(snapshot_with(&state, worker), snapshot_with(&state, worker));
+        let (first, second) = tokio::join!(
+            snapshot_with(&state, worker, false),
+            snapshot_with(&state, worker, false)
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(first.openai, second.openai);
         assert_eq!(first.openai[0].label, "test");
         state.lock().await.next_fetch = Some(Instant::now() - Duration::from_secs(1));
-        let refreshed = snapshot_with(&state, worker).await;
+        let refreshed = snapshot_with(&state, worker, false).await;
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(refreshed.openai, first.openai);
     }

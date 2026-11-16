@@ -140,7 +140,8 @@ async fn opaque_recovery_public_case(
                 summary: vec!["prior thought".into()],
                 encrypted_content: Some("encrypted-history".into()),
                 status: Some("completed".into()),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },

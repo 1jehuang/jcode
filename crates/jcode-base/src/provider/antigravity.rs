@@ -47,6 +47,31 @@ pub fn load_persisted_catalog() -> Option<PersistedCatalog> {
         })
 }
 
+// Keep field order and omission rules identical to PersistedCatalog.
+#[derive(serde::Serialize)]
+struct PersistedCatalogRef<'a> {
+    models: &'a [CatalogModel],
+    fetched_at_rfc3339: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_model_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    endpoint: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct FetchAvailableModelsRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project: Option<&'a str>,
+}
+
+impl<'a> FetchAvailableModelsRequest<'a> {
+    fn new(project_id: Option<&'a str>) -> Self {
+        Self {
+            project: project_id.filter(|value| !value.trim().is_empty()),
+        }
+    }
+}
+
 /// Persist the warm catalog so later processes skip the cold fetch.
 pub fn persist_catalog(snapshot: &CatalogSnapshot) {
     if snapshot.models.is_empty() {
@@ -55,10 +80,10 @@ pub fn persist_catalog(snapshot: &CatalogSnapshot) {
     let Ok(path) = persisted_catalog_path() else {
         return;
     };
-    let payload = PersistedCatalog {
-        models: snapshot.models.clone(),
+    let payload = PersistedCatalogRef {
+        models: &snapshot.models,
         fetched_at_rfc3339: Utc::now().to_rfc3339(),
-        default_model_id: snapshot.default_model_id.clone(),
+        default_model_id: snapshot.default_model_id.as_deref(),
         endpoint: Some(jcode_provider_antigravity::antigravity_endpoint()),
     };
     if let Err(error) = crate::storage::write_json(&path, &payload) {
@@ -75,11 +100,7 @@ async fn fetch_available_models_with_project(
     access_token: &str,
     project_id: Option<&str>,
 ) -> Result<CatalogSnapshot> {
-    let request = if let Some(project_id) = project_id.filter(|value| !value.trim().is_empty()) {
-        serde_json::json!({ "project": project_id })
-    } else {
-        serde_json::json!({})
-    };
+    let request = FetchAvailableModelsRequest::new(project_id);
 
     let response = client
         .post(fetch_models_api_url())
@@ -154,4 +175,76 @@ pub async fn fetch_catalog_snapshot(client: &reqwest::Client) -> Result<CatalogS
     }
 
     fetch_available_models_with_project(client, &tokens.access_token, None).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn borrowed_catalog_matches_legacy_bytes() {
+        let model: CatalogModel = serde_json::from_value(serde_json::json!({
+            "id": "arbitrary-future-model-2099",
+            "display_name": "Future 模型",
+            "recommended": true,
+            "available": true,
+            "remaining_fraction_milli": 731
+        }))
+        .unwrap();
+        for models in [vec![], vec![model]] {
+            for default_model_id in [None, Some("arbitrary-future-model-2099".to_owned())] {
+                for endpoint in [None, Some("https://future.example/模型".to_owned())] {
+                    let legacy = PersistedCatalog {
+                        models: models.clone(),
+                        fetched_at_rfc3339: "2026-11-16T06:17:27.222+00:00".to_owned(),
+                        default_model_id: default_model_id.clone(),
+                        endpoint,
+                    };
+                    let borrowed = PersistedCatalogRef {
+                        models: &legacy.models,
+                        fetched_at_rfc3339: legacy.fetched_at_rfc3339.clone(),
+                        default_model_id: legacy.default_model_id.as_deref(),
+                        endpoint: legacy.endpoint.clone(),
+                    };
+                    assert_eq!(
+                        serde_json::to_vec(&borrowed).unwrap(),
+                        serde_json::to_vec(&legacy).unwrap()
+                    );
+                    assert_eq!(
+                        serde_json::to_vec_pretty(&borrowed).unwrap(),
+                        serde_json::to_vec_pretty(&legacy).unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn borrowed_project_matches_legacy_bytes_and_builder_owns_body() {
+        let client = reqwest::Client::new();
+        for project in [
+            None,
+            Some(""),
+            Some(" \t\n"),
+            Some("project"),
+            Some("  project  "),
+            Some(" 项目🦀 "),
+        ] {
+            let legacy = match project.filter(|value| !value.trim().is_empty()) {
+                Some(value) => serde_json::json!({ "project": value }),
+                None => serde_json::json!({}),
+            };
+            let expected = serde_json::to_vec(&legacy).unwrap();
+            let builder = {
+                let owned_project = project.map(str::to_owned);
+                let borrowed = FetchAvailableModelsRequest::new(owned_project.as_deref());
+                assert_eq!(serde_json::to_vec(&borrowed).unwrap(), expected);
+                client
+                    .post("https://example.invalid/catalog")
+                    .json(&borrowed)
+            };
+            let request = builder.build().unwrap();
+            assert_eq!(request.body().unwrap().as_bytes().unwrap(), expected);
+        }
+    }
 }

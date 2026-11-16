@@ -81,6 +81,8 @@ pub(super) async fn process_turn_with_input(
 
 pub(super) fn handle_tick(app: &mut App) -> bool {
     let reset_redraw = app.poll_usage_reset() | app.poll_cloud_job();
+    app.expire_presumed_focus();
+    crate::tui::window_visibility::poll(app.client_focused(), app.is_processing);
     app.refresh_terminal_title_metrics();
     app.sync_herdr_agent_state();
     // Liveness breadcrumb: if the UI loop wedges, the watchdog reports this as
@@ -108,6 +110,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.update_pinned_images_auto_hide();
     // Dissolve stale (off-screen) reasoning traces with zero visible motion.
     needs_redraw |= app.gc_offscreen_reasoning_traces();
+    needs_redraw |= app.maybe_backfill_expanded_prompt_history();
     // Adopt the resolved scroll position once a frame containing newly loaded
     // older history has rendered, so manual scrolling resumes seamlessly.
     needs_redraw |= app.reconcile_history_anchor();
@@ -463,6 +466,8 @@ fn apply_terminal_event(
             let key = jcode_tui_core::korean_input::normalize_key_event(key);
             crate::tui::ui::note_key_event_read();
             app.note_client_interaction();
+            let before_release =
+                (key.kind == KeyEventKind::Release).then(|| app.key_release_visible_state());
             app.update_copy_badge_key_event(key);
             app.observe_voice_key_release(&key);
             if app.handle_voice_key_event(&key) {
@@ -470,7 +475,7 @@ fn apply_terminal_event(
             } else if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                 app.handle_key_press_event(key)?;
             }
-            Ok(true)
+            Ok(before_release.is_none_or(|before| before != app.key_release_visible_state()))
         }
         Some(Ok(Event::Paste(text))) => {
             app.note_client_interaction();
@@ -511,12 +516,14 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
     app.set_status_notice(background_task_status_notice(&task));
 
     if !app.is_processing {
+        app.push_display_message(DisplayMessage::background_task(notification.clone()));
         app.add_provider_message(Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
                 text: notification,
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         });
@@ -571,12 +578,14 @@ fn handle_background_task_stalled(app: &mut App, task: crate::bus::BackgroundTas
     ));
 
     if !app.is_processing {
+        app.push_display_message(DisplayMessage::background_task(notification.clone()));
         app.add_provider_message(Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
                 text: notification.clone(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         });

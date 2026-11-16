@@ -183,18 +183,6 @@ impl Tool for EditTool {
                             "replace_all": {"type": "boolean", "description": "Replace every match."}
                         }
                     }
-                },
-                "old_string": {
-                    "type": "string",
-                    "description": "Single-edit shorthand: exact text to replace. Omit when using edits."
-                },
-                "new_string": {
-                    "type": "string",
-                    "description": "Single-edit shorthand: replacement text."
-                },
-                "replace_all": {
-                    "type": "boolean",
-                    "description": "Single-edit shorthand: replace every match."
                 }
             }
         })
@@ -220,6 +208,7 @@ impl Tool for EditTool {
             .intent
             .clone()
             .filter(|value| !value.trim().is_empty());
+        let (added, removed) = super::edit_stats::line_delta(&content, &new_content);
 
         let mut body = if let [edit] = edits.as_slice() {
             let applied = &applied[0];
@@ -238,6 +227,8 @@ impl Tool for EditTool {
                     if applied.occurrences == 1 { "" } else { "s" }
                 )),
                 detail: build_file_touch_preview(&diff),
+                added,
+                removed,
             }));
             let context = extract_context(&new_content, applied.start_line, end_line, 3);
             format!(
@@ -258,6 +249,8 @@ impl Tool for EditTool {
                     if replaced == 1 { "" } else { "s" }
                 )),
                 detail: build_file_touch_preview(&diff),
+                added,
+                removed,
             }));
             let mut body = format!(
                 "Edited {}: applied {} edits\n",
@@ -477,6 +470,9 @@ mod tests {
     fn schema_requires_canonical_nonempty_edits() {
         let schema = EditTool::new().parameters_schema();
         assert_eq!(schema["required"], json!(["file_path", "edits"]));
+        for legacy_field in ["old_string", "new_string", "replace_all"] {
+            assert!(schema["properties"].get(legacy_field).is_none());
+        }
         let edits = &schema["properties"]["edits"];
         assert_eq!(edits["type"], "array");
         assert_eq!(edits["minItems"], 1);
@@ -488,6 +484,18 @@ mod tests {
         for field in ["old_string", "new_string"] {
             assert_eq!(edits["items"]["properties"][field]["type"], "string");
         }
+    }
+
+    #[test]
+    fn legacy_single_edit_remains_executable_without_advertising_it() {
+        let input: EditInput = serde_json::from_value(json!({
+            "file_path": "f", "old_string": "a", "new_string": "b", "replace_all": true
+        }))
+        .unwrap();
+        let operations = input.operations().unwrap();
+        let (updated, applied) = apply_edits("a a", &operations, "f").unwrap();
+        assert_eq!(updated, "b b");
+        assert_eq!(applied[0].occurrences, 2);
     }
 
     #[test]

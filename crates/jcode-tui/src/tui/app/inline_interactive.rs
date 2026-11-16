@@ -2949,6 +2949,15 @@ impl App {
                 }
             };
 
+            if let ResumeTarget::JcodeSession { session_id } = &resolved_target
+                && crate::session_window::apply_resume_open_elsewhere(session_id)
+                    == crate::session_window::OpenElsewhereOutcome::Moved
+            {
+                spawned += 1;
+                names.push(name);
+                continue;
+            }
+
             match spawn_resume_target_in_new_terminal(&resolved_target, &cwd, socket.as_deref()) {
                 Ok(true) => {
                     spawned += 1;
@@ -3115,6 +3124,15 @@ impl App {
             self.session_picker_overlay = None;
             self.session_picker_mode = SessionPickerMode::Resume;
             self.set_status_notice("Already in this session");
+            return;
+        }
+
+        if crate::session_window::apply_resume_open_elsewhere(&session_id)
+            == crate::session_window::OpenElsewhereOutcome::Moved
+        {
+            self.session_picker_overlay = None;
+            self.session_picker_mode = SessionPickerMode::Resume;
+            self.set_status_notice(format!("Brought {} here", name));
             return;
         }
 

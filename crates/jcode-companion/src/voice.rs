@@ -3,7 +3,8 @@
 //! Holding the Copilot key while a Jcode CLI terminal is focused records the
 //! microphone, transcribes through Nari, and sends the text to that session,
 //! exactly like Desktop's CLI capture. Opt-in: needs `[dictation]
-//! global_devices` and a Nari key.
+//! global_devices` (or the keyboards picked in Desktop, `[desktop.voice]
+//! global_devices`) and a Nari key.
 //!
 //! When Jcode Desktop is running it shares the same routing registry
 //! (`$XDG_RUNTIME_DIR/jcode-global-voice-v1`), and the most recently focused
@@ -43,10 +44,7 @@ pub struct VoiceIndicators {
 }
 
 pub fn spawn(indicators: VoiceIndicators) {
-    let devices = jcode_base::config::config()
-        .dictation
-        .global_devices
-        .clone();
+    let devices = jcode_base::config::config().global_voice_devices();
     if devices.is_empty() {
         return;
     }
@@ -295,7 +293,7 @@ impl ActivityReporter {
     fn new(session: String) -> Self {
         let (tx, rx) = mpsc::channel::<VoiceActivity>();
         let target = session.clone();
-        let _ = std::thread::Builder::new()
+        if let Err(error) = std::thread::Builder::new()
             .name("jcode-companion-voice-activity".into())
             .spawn(move || {
                 while let Ok(mut activity) = rx.recv() {
@@ -303,19 +301,35 @@ impl ActivityReporter {
                         // Never coalesce away a terminal state change.
                         if matches!(newer, VoiceActivity::Recording { .. })
                             && !matches!(activity, VoiceActivity::Recording { .. })
+                            && let Err(error) = send_activity(&target, activity)
                         {
-                            let _ = send_activity(&target, activity);
+                            jcode_base::logging::debug(&format!(
+                                "Cannot send companion voice activity: {error}"
+                            ));
                         }
                         activity = newer;
                     }
-                    let _ = send_activity(&target, activity);
+                    if let Err(error) = send_activity(&target, activity) {
+                        jcode_base::logging::debug(&format!(
+                            "Cannot send companion voice activity: {error}"
+                        ));
+                    }
                 }
-            });
+            })
+        {
+            jcode_base::logging::warn(&format!(
+                "Cannot start companion voice activity worker: {error}"
+            ));
+        }
         Self { session, tx }
     }
 
     fn report(&self, activity: VoiceActivity) {
-        let _ = self.tx.send(activity);
+        if let Err(error) = self.tx.send(activity) {
+            jcode_base::logging::debug(&format!(
+                "Companion voice activity worker disconnected: {error}"
+            ));
+        }
     }
 
     /// Synchronous send. Returns whether the server accepted it.

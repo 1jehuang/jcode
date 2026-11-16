@@ -14,6 +14,9 @@ tokio::task_local! {
 struct ScopedState {
     unhealthy: bool,
     unknown: usize,
+    // Call sites of live unscoped reservations, so transfer diagnostics can
+    // name the work that blocks every session instead of a bare count.
+    unknown_origins: HashMap<&'static std::panic::Location<'static>, usize>,
     active: HashMap<String, usize>,
     fenced: BTreeSet<String>,
 }
@@ -45,6 +48,8 @@ pub struct ActivityReservation {
     _runtime: OwnedRwLockReadGuard<()>,
     state: Arc<Mutex<ScopedState>>,
     session: Option<String>,
+    origin: &'static std::panic::Location<'static>,
+    changed: Arc<Notify>,
 }
 
 impl ActivityReservation {
@@ -63,6 +68,14 @@ impl ActivityReservation {
 impl Drop for ActivityReservation {
     fn drop(&mut self) {
         let mut state = lock_state(&self.state);
+        if self.session.is_none()
+            && let Some(origin) = state.unknown_origins.get_mut(self.origin)
+        {
+            *origin = origin.saturating_sub(1);
+            if *origin == 0 {
+                state.unknown_origins.remove(self.origin);
+            }
+        }
         let count = match &self.session {
             Some(session) => state.active.get_mut(session),
             None => Some(&mut state.unknown),
@@ -85,6 +98,9 @@ impl Drop for ActivityReservation {
                 );
             }
         }
+        drop(state);
+        // Wake transfer admission waiting for this work to drain.
+        self.changed.notify_waiters();
     }
 }
 
@@ -119,30 +135,36 @@ fn current_session() -> Option<String> {
 }
 
 impl ActivityGate {
+    #[track_caller]
     pub fn try_enter(&self) -> anyhow::Result<ActivityReservation> {
         self.try_enter_owned(current_session())
     }
 
     /// Use for work whose effects are not limited to the ambient session.
+    #[track_caller]
     pub fn try_enter_global(&self) -> anyhow::Result<ActivityReservation> {
         self.try_enter_owned(None)
     }
 
+    #[track_caller]
     pub fn try_enter_session(&self, session: &str) -> anyhow::Result<ActivityReservation> {
         self.try_enter_owned(Some(session.to_owned()))
     }
 
+    #[track_caller]
     fn try_enter_owned(&self, session: Option<String>) -> anyhow::Result<ActivityReservation> {
+        let origin = std::panic::Location::caller();
         let runtime = self.runtime.clone().try_read_owned().map_err(|_| {
             anyhow::anyhow!("Runtime is upgrading while idle. Reconnect and retry the request.")
         })?;
-        self.reserve(runtime, session)
+        self.reserve(runtime, session, origin)
     }
 
     fn reserve(
         &self,
         runtime: OwnedRwLockReadGuard<()>,
         session: Option<String>,
+        origin: &'static std::panic::Location<'static>,
     ) -> anyhow::Result<ActivityReservation> {
         // Absent ownership must never masquerade as an unrelated session
         // and bypass a transfer fence.
@@ -170,27 +192,42 @@ impl ActivityGate {
                 anyhow::bail!("Runtime activity count overflow. Restart the runtime.");
             }
         }
+        if session.is_none() {
+            *state.unknown_origins.entry(origin).or_default() += 1;
+        }
         Ok(ActivityReservation {
             _runtime: runtime,
             state: self.scoped.clone(),
             session,
+            origin,
+            changed: self.changed.clone(),
         })
     }
 
     /// Background APIs cannot reject accepted tasks. Reserve before spawning.
-    pub async fn enter(&self) -> ActivityReservation {
-        self.enter_owned(current_session()).await
+    #[track_caller]
+    pub fn enter(&self) -> impl std::future::Future<Output = ActivityReservation> + '_ {
+        self.enter_owned(current_session(), std::panic::Location::caller())
     }
 
-    pub async fn enter_global(&self) -> ActivityReservation {
-        self.enter_owned(None).await
+    #[track_caller]
+    pub fn enter_global(&self) -> impl std::future::Future<Output = ActivityReservation> + '_ {
+        self.enter_owned(None, std::panic::Location::caller())
     }
 
-    pub async fn enter_session(&self, session: &str) -> ActivityReservation {
-        self.enter_owned(Some(session.to_owned())).await
+    #[track_caller]
+    pub fn enter_session(
+        &self,
+        session: &str,
+    ) -> impl std::future::Future<Output = ActivityReservation> + '_ {
+        self.enter_owned(Some(session.to_owned()), std::panic::Location::caller())
     }
 
-    async fn enter_owned(&self, session: Option<String>) -> ActivityReservation {
+    async fn enter_owned(
+        &self,
+        session: Option<String>,
+        origin: &'static std::panic::Location<'static>,
+    ) -> ActivityReservation {
         loop {
             // Register before checking the fence so release between check and
             // await cannot lose its wakeup. The runtime lock supplies its own
@@ -199,7 +236,7 @@ impl ActivityGate {
             tokio::pin!(changed);
             changed.as_mut().enable();
             let runtime = self.runtime.clone().read_owned().await;
-            match self.reserve(runtime, session.clone()) {
+            match self.reserve(runtime, session.clone(), origin) {
                 Ok(reservation) => return reservation,
                 Err(error) => {
                     jcode_logging::debug(&format!("Runtime activity admission waiting: {error}"));
@@ -221,6 +258,62 @@ impl ActivityGate {
             }
             Err(_) => None,
         }
+    }
+
+    /// Human-readable description of what currently blocks `sessions` from
+    /// a scoped transfer. Used for diagnostics only.
+    pub fn busy_summary(&self, sessions: &BTreeSet<String>) -> String {
+        let state = lock_state(&self.scoped);
+        let mut parts = Vec::new();
+        if state.unhealthy {
+            parts.push("activity accounting unhealthy (restart the daemon)".to_owned());
+        }
+        if state.unknown != 0 {
+            let mut origins: Vec<_> = state
+                .unknown_origins
+                .iter()
+                .map(|(origin, count)| format!("{}:{} x{count}", origin.file(), origin.line()))
+                .collect();
+            origins.sort();
+            if origins.is_empty() {
+                parts.push(format!("{} unscoped task(s)", state.unknown));
+            } else {
+                parts.push(format!(
+                    "{} unscoped task(s) from {}",
+                    state.unknown,
+                    origins.join(", ")
+                ));
+            }
+        }
+        let busy: Vec<_> = sessions
+            .iter()
+            .filter(|id| state.active.contains_key(*id))
+            .map(|id| format!("{id} x{}", state.active[id]))
+            .collect();
+        if !busy.is_empty() {
+            parts.push(format!("busy sessions: {}", busy.join(", ")));
+        }
+        let fenced: Vec<_> = sessions
+            .iter()
+            .filter(|id| state.fenced.contains(*id))
+            .cloned()
+            .collect();
+        if !fenced.is_empty() {
+            parts.push(format!("already fenced: {}", fenced.join(", ")));
+        }
+        if self.runtime.try_read().is_err() {
+            parts.push("runtime upgrade in progress".to_owned());
+        }
+        if parts.is_empty() {
+            "nothing (transient)".to_owned()
+        } else {
+            parts.join("; ")
+        }
+    }
+
+    /// Resolves after any reservation or fence is released.
+    pub async fn changed(&self) {
+        self.changed.notified().await
     }
 
     pub fn try_idle_sessions(&self, sessions: &BTreeSet<String>) -> Option<SessionIdleReservation> {
@@ -247,6 +340,7 @@ impl ActivityGate {
         })
     }
 
+    #[track_caller]
     pub fn spawn<F>(&self, future: F) -> Option<tokio::task::JoinHandle<F::Output>>
     where
         F: std::future::Future + Send + 'static,
@@ -255,6 +349,7 @@ impl ActivityGate {
         self.spawn_owned(current_session(), future)
     }
 
+    #[track_caller]
     pub fn spawn_session<F>(
         &self,
         session: &str,
@@ -267,6 +362,7 @@ impl ActivityGate {
         self.spawn_owned(Some(session.to_owned()), future)
     }
 
+    #[track_caller]
     fn spawn_owned<F>(
         &self,
         session: Option<String>,
@@ -294,6 +390,7 @@ pub fn global() -> &'static ActivityGate {
 
 /// Reserve synchronously before the first poll, inheriting ownership into
 /// detached callbacks. Tasks without a known owner remain globally blocking.
+#[track_caller]
 pub fn spawn<F>(future: F) -> Option<tokio::task::JoinHandle<F::Output>>
 where
     F: std::future::Future + Send + 'static,
@@ -302,6 +399,7 @@ where
     global().spawn(future)
 }
 
+#[track_caller]
 pub fn spawn_session<F>(session: &str, future: F) -> Option<tokio::task::JoinHandle<F::Output>>
 where
     F: std::future::Future + Send + 'static,
@@ -505,5 +603,19 @@ mod tests {
         child.abort();
         let _ = child.await;
         assert!(gate.try_idle_sessions(&selected).is_some());
+    }
+
+    #[test]
+    fn busy_summary_names_unscoped_origin_and_clears_it() {
+        let gate = ActivityGate::default();
+        let selected = BTreeSet::from(["a".to_owned()]);
+        let held = gate.try_enter_global().unwrap();
+        let summary = gate.busy_summary(&selected);
+        assert!(summary.contains("runtime_activity.rs:"), "{summary}");
+        drop(held);
+        assert_eq!(gate.busy_summary(&selected), "nothing (transient)");
+        let scoped = gate.try_enter_session("b").unwrap();
+        assert!(gate.try_idle_sessions(&selected).is_some());
+        drop(scoped);
     }
 }

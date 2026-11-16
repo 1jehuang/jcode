@@ -18,6 +18,13 @@ fn changed_lines(old: &str, new: &str, approximate: bool) -> SessionEditStats {
     stats
 }
 
+/// Exact `(added, removed)` line counts between two versions of a file, for
+/// swarm file-activity notices.
+pub(super) fn line_delta(old: &str, new: &str) -> (u64, u64) {
+    let stats = changed_lines(old, new, false);
+    (stats.added, stats.removed)
+}
+
 pub(super) async fn record(ctx: &ToolContext, old: &str, new: &str, approximate: bool) {
     let id = ctx.session_id.clone();
     let old = old.to_owned();

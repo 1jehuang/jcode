@@ -15,7 +15,7 @@ pub(super) struct SessionJournalMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) system_prompt: Option<String>,
     pub(super) updated_at: DateTime<Utc>,
-    pub(super) compaction: Option<StoredCompactionState>,
+    pub(super) compaction: Option<std::sync::Arc<StoredCompactionState>>,
     /// Compaction state can be several MB (OpenAI encrypted context). When it
     /// is unchanged since the previously persisted state, an entry omits it
     /// (`compaction: null`) and sets this flag so replay keeps the prior value.
