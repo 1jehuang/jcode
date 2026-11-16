@@ -69,6 +69,42 @@ fn attachment_block() -> ContentBlock {
 }
 
 #[test]
+fn gif_and_webp_attachments_are_decoded_into_bounded_wire_thumbnails() {
+    use base64::Engine;
+    for (format, media_type) in [
+        (image::ImageFormat::Gif, "image/gif"),
+        (image::ImageFormat::WebP, "image/webp"),
+    ] {
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(1400, 1100, image::Rgba([10, 80, 170, 255]))
+            .write_to(&mut encoded, format)
+            .unwrap();
+        let encoded = encoded.into_inner();
+        assert_eq!(image::guess_format(&encoded).unwrap(), format);
+        let mut session = Session::create_with_id("encoded-attachments-test".into(), None, None);
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Image {
+                media_type: media_type.into(),
+                data: base64::engine::general_purpose::STANDARD.encode(encoded),
+            }],
+        );
+        let messages = wire_messages(&session, 0);
+        assert_eq!(messages.len(), 1, "{media_type} image-only row disappeared");
+        assert_eq!(messages[0].images.len(), 1, "{media_type} was discarded");
+        let thumbnail = &messages[0].images[0];
+        assert_eq!(thumbnail.media_type, "image/jpeg");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&thumbnail.data)
+            .unwrap();
+        assert!(bytes.len() <= 256 * 1024);
+        assert_eq!(image::guess_format(&bytes).unwrap(), image::ImageFormat::Jpeg);
+        let decoded = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (1024, 805));
+    }
+}
+
+#[test]
 fn visible_user_tool_and_image_only_attachments_survive_wire_serialization() {
     use base64::Engine;
     let mut session = Session::create_with_id("attachments-test".into(), None, None);
