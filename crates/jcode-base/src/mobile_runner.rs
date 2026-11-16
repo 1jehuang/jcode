@@ -370,14 +370,32 @@ pub fn session_id_from_ndjson_line(line: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-async fn claim(client: &reqwest::Client, base: &str, key: &str) -> Result<Option<MobileCommand>> {
-    let response = client
+fn claim_request(
+    client: &reqwest::Client,
+    base: &str,
+    key: &str,
+    machine: &str,
+) -> reqwest::RequestBuilder {
+    #[derive(Serialize)]
+    struct ClaimPayload<'a> {
+        machine: &'a str,
+    }
+    client
         .post(format!("{base}/mobile/commands/claim"))
         .bearer_auth(key)
-        .json(&serde_json::json!({ "machine": std::env::var_os("HOSTNAME").map_or_else(String::new, |name| name.to_string_lossy().into_owned()) }))
+        .json(&ClaimPayload { machine })
         .timeout(Duration::from_secs(30))
-        .send()
-        .await?;
+}
+
+async fn claim(client: &reqwest::Client, base: &str, key: &str) -> Result<Option<MobileCommand>> {
+    let request = claim_request(
+        client,
+        base,
+        key,
+        &std::env::var_os("HOSTNAME")
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+    );
+    let response = request.send().await?;
     if !response.status().is_success() {
         anyhow::bail!("claim returned {}", response.status());
     }
@@ -602,6 +620,25 @@ pub fn spawn_cloud_runner() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claim_request_preserves_legacy_bytes_after_hostname_release() {
+        let client = reqwest::Client::new();
+        for machine in ["", "laptop", "quoted\"\\\n雪"] {
+            let source = machine.to_owned();
+            let expected = serde_json::to_vec(&serde_json::json!({ "machine": source })).unwrap();
+            let builder =
+                claim_request(&client, "https://example.invalid/v1", "dummy-key", &source);
+            drop(source);
+            let request = builder.build().unwrap();
+            assert_eq!(request.method(), reqwest::Method::POST);
+            assert_eq!(request.url().path(), "/v1/mobile/commands/claim");
+            assert_eq!(request.headers()["authorization"], "Bearer dummy-key");
+            assert_eq!(request.headers()["content-type"], "application/json");
+            assert_eq!(request.timeout(), Some(&Duration::from_secs(30)));
+            assert_eq!(request.body().unwrap().as_bytes().unwrap(), expected);
+        }
+    }
 
     #[test]
     fn completion_request_preserves_legacy_wire_contract() {
