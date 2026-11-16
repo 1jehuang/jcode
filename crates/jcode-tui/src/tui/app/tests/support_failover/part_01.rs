@@ -680,6 +680,9 @@ fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
 
 #[test]
 fn test_definitive_exhaustion_immediate_switch_and_manual_safety() {
+    // Only the first automatic switch gets the fast path, and it applies to
+    // any failure reason, not just definitive usage exhaustion. Later
+    // targets wait out the countdown instead (1cf6c1402).
     for (mode, enabled, reason, immediate) in [
         ("countdown", true, "OAuth usage exhausted", true),
         ("countdown", false, "OAuth usage exhausted", false),
@@ -688,7 +691,7 @@ fn test_definitive_exhaustion_immediate_switch_and_manual_safety() {
             "countdown",
             true,
             "429 rate_limit_error: This request would exceed your account's rate limit. Please try again later.",
-            false,
+            true,
         ),
     ] {
         with_temp_jcode_home(|| {
