@@ -40,16 +40,36 @@ pub(in crate::server) struct SpawnedWorker<'a> {
     pub working_dir: Option<&'a str>,
 }
 
+/// Register a worker's identity so its own hooks carry it. Visible workers
+/// call this before their terminal launches, since their first prompt can be
+/// submitted before `worker_spawned` runs.
+pub(in crate::server) fn register_worker_identity(
+    session_id: &str,
+    swarm_id: &str,
+    coordinator_session_id: &str,
+    label: Option<&str>,
+    agent_type: Option<&str>,
+) -> SwarmIdentity {
+    let identity = SwarmIdentity {
+        swarm_id: swarm_id.to_string(),
+        coordinator_session_id: coordinator_session_id.to_string(),
+        parent_session_id: coordinator_session_id.to_string(),
+        label: label.map(str::to_string),
+        agent_type: agent_type.map(str::to_string),
+    };
+    hooks::register_swarm_identity(session_id, identity.clone());
+    identity
+}
+
 /// Register the worker's identity and fire `swarm_member_start`.
 pub(in crate::server) fn worker_spawned(worker: &SpawnedWorker<'_>) {
-    let identity = SwarmIdentity {
-        swarm_id: worker.swarm_id.to_string(),
-        coordinator_session_id: worker.coordinator_session_id.to_string(),
-        parent_session_id: worker.coordinator_session_id.to_string(),
-        label: worker.label.map(str::to_string),
-        agent_type: worker.agent_type.map(str::to_string),
-    };
-    hooks::register_swarm_identity(worker.session_id, identity.clone());
+    let identity = register_worker_identity(
+        worker.session_id,
+        worker.swarm_id,
+        worker.coordinator_session_id,
+        worker.label,
+        worker.agent_type,
+    );
     if !hooks::hook_configured("swarm_member_start") {
         return;
     }
@@ -156,6 +176,19 @@ pub(in crate::server) fn member_status_changed(transition: &StatusTransition<'_>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identity_is_registered_before_worker_spawned_fires() {
+        let sid = "worker-prelaunch-identity";
+        assert!(hooks::swarm_identity(sid).is_none());
+        register_worker_identity(sid, "swarm-1", "coord-1", Some("task"), None);
+        let identity = hooks::swarm_identity(sid).expect("identity before launch");
+        assert_eq!(identity.swarm_id, "swarm-1");
+        assert_eq!(identity.coordinator_session_id, "coord-1");
+        assert_eq!(identity.label.as_deref(), Some("task"));
+        hooks::forget_swarm_identity(sid);
+        assert!(hooks::swarm_identity(sid).is_none());
+    }
 
     #[test]
     fn end_and_running_status_sets() {

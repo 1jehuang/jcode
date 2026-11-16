@@ -445,13 +445,27 @@ pub(super) async fn spawn_swarm_agent(
                     context = context.env("JCODE_SPAWN_SWARM_LABEL", label);
                 }
                 let context = context.with_client_terminal_env(client_terminal_env.clone());
-                spawn_visible_session_window_with_context(
+                // Register the worker identity before the terminal starts, so
+                // its first prompt hook already carries agent_id/swarm. Undone
+                // below if the window does not launch.
+                super::swarm::swarm_hooks::register_worker_identity(
+                    session_id,
+                    swarm_id,
+                    req_session_id,
+                    label.as_deref(),
+                    None,
+                );
+                let launched = spawn_visible_session_window_with_context(
                     session_id,
                     cwd,
                     selfdev_requested,
                     provider_key,
                     &context,
-                )
+                );
+                if !matches!(launched, Ok(true)) {
+                    crate::hooks::forget_swarm_identity(session_id);
+                }
+                launched
             },
         ),
     };
