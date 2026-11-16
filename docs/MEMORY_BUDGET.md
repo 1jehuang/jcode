@@ -80,6 +80,18 @@ For an optimization round:
    redesign alone is not evidence that an opportunity is impossible. Do not
    reopen an unchanged inventory merely because theoretical potential exists.
 
+### Authentication request ownership acceptance (2026-11-16)
+
+MCP dynamic registration serializes borrowed redirect URI and stack-owned
+metadata arrays directly instead of building an owned JSON map. Exact legacy
+wire bytes are preserved for empty, ordinary, escaped, and Unicode inputs.
+Token requests release their owned form fields immediately after serialization,
+rather than retaining duplicate secret-bearing strings through response waits.
+A builder regression verifies exact URL-encoded bytes after source deallocation.
+The full hosted serial MCP OAuth suite passed all 22 tests, including existing
+loopback login, refresh, and security coverage. These are structural allocation
+and lifetime improvements, not measured production RSS reductions.
+
 ### Schema, reranking, and retry ownership acceptance (2026-11-16)
 
 The MCP schema cache now shares immutable catalog backing between memoized
