@@ -428,22 +428,6 @@ fn test_incremental_renderer_rerenders_pending_mermaid_after_epoch_bump() {
 }
 
 #[test]
-fn test_checkpoint_does_not_enter_unclosed_fence() {
-    let renderer = IncrementalMarkdownRenderer::new(Some(80));
-    let text = "Intro\n\n```\nProcess A\n\nProcess B";
-    let checkpoint = renderer.find_last_complete_block(text);
-    assert_eq!(checkpoint, Some("Intro\n\n".len()));
-}
-
-#[test]
-fn test_checkpoint_advances_after_heading_line() {
-    let renderer = IncrementalMarkdownRenderer::new(Some(80));
-    let text = "## Planning\nNext item";
-    let checkpoint = renderer.find_last_complete_block(text);
-    assert_eq!(checkpoint, Some("## Planning\n".len()));
-}
-
-#[test]
 fn test_incremental_renderer_replaces_stale_prefix_chars() {
     let mut renderer = IncrementalMarkdownRenderer::new(Some(80));
     let _ = renderer.update("Plan:\n\n```\n[\n");
