@@ -409,16 +409,7 @@ fn merge_progress(
 ) -> bool {
     let mut changed = false;
     for (id, progress) in updates {
-        let version = |p: &SessionProgress| {
-            p.revision
-                .map(|r| r[0].max(r[2]))
-                .unwrap_or(p.mtime_ms.saturating_mul(1_000_000))
-        };
-        if state.sessions.get(id).is_none_or(|old| {
-            old != progress
-                && (version(old) < version(progress)
-                    || (version(old) == version(progress) && old.uploaded <= progress.uploaded))
-        }) {
+        if progress::replaces(state.sessions.get(id), progress) {
             state.sessions.insert(id.clone(), progress.clone());
             changed = true;
         }
@@ -431,10 +422,9 @@ fn commit_progress(generation: u64, updates: &BTreeMap<String, SessionProgress>)
         return Ok(());
     }
     let _lock = state_lock()?;
-    let mut current = load_state();
-    if current.enabled && current.generation == generation && merge_progress(&mut current, updates)
-    {
-        storage::write_json_secret(&state_path()?, &current)?;
+    let current = load_state_snapshot();
+    if let Some(commit) = progress::ProgressCommit::new(&current, generation, updates) {
+        storage::write_json_secret(&state_path()?, &commit)?;
     }
     Ok(())
 }
@@ -1111,7 +1101,8 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
         "pass_incremental"
     });
     timing.outcome = "error";
-    let state = load_state();
+    // Keep the parsed inventory shared across unchanged passes and fences.
+    let state = load_state_snapshot();
     if !state.enabled {
         timing.outcome = "skipped_disabled";
         return Ok(SyncReport::default());
@@ -1370,6 +1361,9 @@ async fn background_sync() {
         }
     }
 }
+
+#[path = "mobile_sync_progress.rs"]
+mod progress;
 
 #[path = "mobile_sync_thumbnail_cache.rs"]
 mod thumbnail_cache;
