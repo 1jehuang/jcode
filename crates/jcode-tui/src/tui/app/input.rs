@@ -412,9 +412,6 @@ pub(super) fn handle_paste(app: &mut App, text: String) {
 
 mod dropped;
 use dropped::{attach_dropped_images, format_dropped_path};
-// Reached from the drop tests through `super::`, not from the input path itself.
-#[cfg(test)]
-use dropped::dropped_image_files;
 pub(super) use dropped::{parse_dropped_paths, promote_dropped_images};
 
 

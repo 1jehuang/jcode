@@ -1165,7 +1165,7 @@ fn render_side_panel_markdown_lines_cached(
     let rendered_lines =
         markdown::with_diagram_mode_scope(crate::config::DiagramDisplayMode::None, || {
             mermaid::with_preferred_aspect_ratio(mermaid_aspect_ratio, || {
-                markdown::render_markdown_with_width(&page.content, Some(inner_width as usize))
+                image_paths::render_page_markdown(page, inner_width as usize)
             })
         });
     let rendered_lines = if has_protocol {
