@@ -529,8 +529,11 @@ impl Sidecar {
             }
         }
 
+        // RequestBuilder owns the serialized body. Release the duplicate JSON tree
+        // before waiting for the response (which can include a long SSE stream).
+        let builder = builder.json(&request);
+        drop(request);
         let response = builder
-            .json(&request)
             .send()
             .await
             .context("Failed to send request to OpenAI API")
@@ -609,7 +612,7 @@ impl Sidecar {
             }],
         };
 
-        let response = crate::provider::anthropic::apply_oauth_attribution_headers(
+        let builder = crate::provider::anthropic::apply_oauth_attribution_headers(
             self.client
                 .post(CLAUDE_API_URL)
                 .header("Authorization", format!("Bearer {}", creds.access_token))
@@ -622,10 +625,12 @@ impl Sidecar {
                 .header("content-type", "application/json")
                 .json(&request),
             &crate::provider::anthropic::new_oauth_request_id(),
-        )
-        .send()
-        .await
-        .context("Failed to send request to Claude API")?;
+        );
+        drop(request);
+        let response = builder
+            .send()
+            .await
+            .context("Failed to send request to Claude API")?;
 
         Self::parse_claude_response(response, &self.model).await
     }
@@ -651,14 +656,16 @@ impl Sidecar {
             }],
         };
 
-        let response = self
+        let builder = self
             .client
             .post(CLAUDE_API_KEY_URL)
             .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01")
             .header("anthropic-beta", "prompt-caching-2024-07-31")
             .header("content-type", "application/json")
-            .json(&request)
+            .json(&request);
+        drop(request);
+        let response = builder
             .send()
             .await
             .context("Failed to send request to Claude API")?;
@@ -1239,6 +1246,153 @@ mod tests {
     use crate::auth::codex;
     use std::ffi::OsString;
 
+    #[tokio::test]
+    async fn openai_private_request_preserves_wire_body_headers_and_results() {
+        use std::io::{Read, Write};
+        use std::time::Duration;
+
+        // Only loopback HTTP and explicit dummy auth, never credential discovery.
+        for chatgpt in [false, true] {
+            for success in [false, true] {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                listener.set_nonblocking(true).unwrap();
+                let url = format!("http://{}/responses", listener.local_addr().unwrap());
+                let server = std::thread::spawn(move || {
+                    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                    let mut socket = loop {
+                        match listener.accept() {
+                            Ok((socket, _)) => break socket,
+                            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                                assert!(std::time::Instant::now() < deadline, "request timed out");
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                            Err(err) => panic!("accept: {err}"),
+                        }
+                    };
+                    // BSD/macOS accepted sockets can inherit the listener's mode.
+                    socket.set_nonblocking(false).unwrap();
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(10)))
+                        .unwrap();
+                    let mut received = Vec::new();
+                    let (header_end, length) = loop {
+                        let mut chunk = [0; 4096];
+                        let count = socket.read(&mut chunk).unwrap();
+                        assert_ne!(count, 0);
+                        received.extend_from_slice(&chunk[..count]);
+                        if let Some(end) = received.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&received[..end]);
+                            let length = headers
+                                .lines()
+                                .find_map(|line| {
+                                    let (key, value) = line.split_once(':')?;
+                                    key.eq_ignore_ascii_case("content-length")
+                                        .then(|| value.trim().parse::<usize>().unwrap())
+                                })
+                                .unwrap();
+                            break (end + 4, length);
+                        }
+                    };
+                    while received.len() < header_end + length {
+                        let mut chunk = [0; 4096];
+                        let count = socket.read(&mut chunk).unwrap();
+                        assert_ne!(count, 0);
+                        received.extend_from_slice(&chunk[..count]);
+                    }
+                    let headers = String::from_utf8(received[..header_end].to_vec()).unwrap();
+                    assert!(headers.starts_with("POST /responses HTTP/1.1\r\n"));
+                    let headers: std::collections::HashMap<_, _> = headers
+                        .lines()
+                        .filter_map(|line| line.split_once(':'))
+                        .map(|(key, value)| (key.to_ascii_lowercase(), value.trim().to_owned()))
+                        .collect();
+                    assert_eq!(
+                        headers.get("authorization").map(String::as_str),
+                        Some("Bearer test-only-token")
+                    );
+                    assert_eq!(
+                        headers.get("content-type").map(String::as_str),
+                        Some("application/json")
+                    );
+                    assert_eq!(
+                        headers.get("originator").map(String::as_str),
+                        chatgpt.then_some(OPENAI_ORIGINATOR)
+                    );
+                    assert_eq!(
+                        headers.get("chatgpt-account-id").map(String::as_str),
+                        chatgpt.then_some("test-account")
+                    );
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&received[header_end..header_end + length]).unwrap();
+                    assert_eq!(
+                        body,
+                        serde_json::json!({
+                            "model": "test-model", "instructions": "system\n\"quoted\"",
+                            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello λ"}]}],
+                            "stream": chatgpt, "store": false, "reasoning": {"effort": "low"}
+                        })
+                    );
+                    let (status, content_type, body) = if !success {
+                        (
+                            "403 Forbidden",
+                            "application/json",
+                            "{\"error\":\"test denial\"}",
+                        )
+                    } else if chatgpt {
+                        (
+                            "200 OK",
+                            "text/event-stream",
+                            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\ndata: [DONE]\n\n",
+                        )
+                    } else {
+                        (
+                            "200 OK",
+                            "application/json",
+                            "{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}]}",
+                        )
+                    };
+                    write!(socket, "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                });
+                let sidecar = Sidecar {
+                    client: reqwest::Client::builder()
+                        .no_proxy()
+                        .timeout(Duration::from_secs(10))
+                        .build()
+                        .unwrap(),
+                    model: "test-model".into(),
+                    max_tokens: 16,
+                    backend: SidecarBackend::OpenAI,
+                    provider: None,
+                    reasoning_override: None,
+                };
+                let result = sidecar
+                    .complete_openai_with_model(
+                        &url,
+                        "test-only-token",
+                        Some("test-account"),
+                        chatgpt,
+                        "system\n\"quoted\"",
+                        "hello λ",
+                        "test-model",
+                        Some("low"),
+                    )
+                    .await;
+                server.join().unwrap();
+                if success {
+                    assert_eq!(result.ok().expect("successful response"), "ok");
+                } else {
+                    match result.unwrap_err() {
+                        OpenAiSidecarError::Api { status, body } => {
+                            assert_eq!(status, StatusCode::FORBIDDEN);
+                            assert_eq!(body, "{\"error\":\"test denial\"}");
+                        }
+                        OpenAiSidecarError::Other(error) => panic!("unexpected error: {error}"),
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn sidecar_model_prefers_reported_identity_with_requested_fallback() {
         assert_eq!(
@@ -1707,6 +1861,51 @@ mod tests {
         assert!(is_anthropic_oauth_forbidden(&anyhow::anyhow!(
             "Claude API error (403 Forbidden): {{\"error\":{{\"type\":\"permission_error\"}}}}"
         )));
+    }
+
+    #[test]
+    fn claude_serialized_builder_body_survives_request_drop() {
+        for oauth in [false, true] {
+            for system in ["", "be terse λ"] {
+                let request = ClaudeMessagesRequest {
+                    model: "test-claude",
+                    max_tokens: 42,
+                    system: if oauth {
+                        build_claude_system_param(system)
+                    } else {
+                        build_claude_api_key_system_param(system)
+                    },
+                    messages: vec![ClaudeMessage {
+                        role: "user",
+                        content: "hello\n\"world\"",
+                    }],
+                };
+                let builder = reqwest::Client::new()
+                    .post("http://127.0.0.1/unused")
+                    .json(&request);
+                drop(request);
+                let built = builder.build().unwrap();
+                let actual: serde_json::Value =
+                    serde_json::from_slice(built.body().unwrap().as_bytes().unwrap()).unwrap();
+                let mut expected = serde_json::json!({
+                    "model": "test-claude", "max_tokens": 42,
+                    "messages": [{"role": "user", "content": "hello\n\"world\""}]
+                });
+                let mut blocks = Vec::new();
+                if oauth {
+                    blocks.push(
+                        serde_json::json!({"type": "text", "text": CLAUDE_OAUTH_BILLING_BLOCK}),
+                    );
+                }
+                if !system.is_empty() {
+                    blocks.push(serde_json::json!({"type": "text", "text": system}));
+                }
+                if !blocks.is_empty() {
+                    expected["system"] = serde_json::json!(blocks);
+                }
+                assert_eq!(actual, expected);
+            }
+        }
     }
 
     #[test]
