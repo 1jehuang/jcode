@@ -80,6 +80,58 @@ const MAX_DIRTY_SESSIONS: usize = 1024;
 static PERSISTED: tokio::sync::Notify = tokio::sync::Notify::const_new();
 static DIRTY_SESSIONS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 static SYNC_PASS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static FAILURE_BACKOFF: Mutex<Option<FailureBackoff>> = Mutex::new(None);
+
+// Process-local only: restarting, changing account/endpoint/home, or toggling
+// sync starts fresh. Failed uploads never advance durable successful progress.
+#[derive(Default)]
+struct FailureBackoff {
+    scope: (PathBuf, u64, String, u64),
+    sessions: BTreeMap<String, FailedSession>,
+}
+
+struct FailedSession {
+    revision: [u64; 4],
+    attempts: u32,
+    retry_at: Instant,
+}
+
+impl FailureBackoff {
+    fn deferred(&mut self, id: &str, revision: [u64; 4], fresh: bool, now: Instant) -> bool {
+        if fresh
+            || self
+                .sessions
+                .get(id)
+                .is_some_and(|failure| failure.revision != revision)
+        {
+            self.sessions.remove(id);
+        }
+        self.sessions
+            .get(id)
+            .is_some_and(|failure| now < failure.retry_at)
+    }
+
+    fn failed(&mut self, id: &str, revision: [u64; 4], now: Instant) {
+        let attempts = self
+            .sessions
+            .get(id)
+            .map_or(1, |f| f.attempts.saturating_add(1));
+        if self.sessions.len() >= MAX_DIRTY_SESSIONS && !self.sessions.contains_key(id) {
+            self.sessions.pop_first();
+        }
+        let seconds = 20u64
+            .saturating_mul(1u64 << attempts.saturating_sub(1).min(4))
+            .min(300);
+        self.sessions.insert(
+            id.to_owned(),
+            FailedSession {
+                revision,
+                attempts,
+                retry_at: now + Duration::from_secs(seconds),
+            },
+        );
+    }
+}
 
 /// Called only after a durable session write, never after sync-state writes.
 /// Notify retains a permit while an upload is running. The set also retains
@@ -1046,6 +1098,23 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
     let api_key = crate::subscription_catalog::configured_api_key()
         .context("mobile sync needs a Jcode account: run `jcode account login`")?;
     let api_base = subscription_api::configured_api_base();
+    let mut credential_hash = std::collections::hash_map::DefaultHasher::new();
+    api_key.hash(&mut credential_hash);
+    let scope = (
+        storage::jcode_dir()?,
+        state.generation,
+        api_base.clone(),
+        credential_hash.finish(),
+    );
+    let mut failures = FAILURE_BACKOFF
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .filter(|cache| cache.scope == scope)
+        .unwrap_or_else(|| FailureBackoff {
+            scope,
+            ..Default::default()
+        });
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -1060,7 +1129,11 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
         Vec::new()
     };
     let dirty = std::mem::take(&mut *DIRTY_SESSIONS.lock().unwrap_or_else(|e| e.into_inner()));
-    for id in &dirty {
+    let mut pending = dirty.clone();
+    if reconcile {
+        pending.extend(failures.sessions.keys().cloned());
+    }
+    for id in &pending {
         if valid_session_id(id) && !candidates.iter().any(|(candidate, _, _)| candidate == id) {
             let path = storage::jcode_dir()?
                 .join("sessions")
@@ -1085,6 +1158,10 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
             .cloned()
             .unwrap_or_else(SessionProgress::default);
         let revision = session_revision(&path);
+        if failures.deferred(&id, revision, dirty.contains(&id), Instant::now()) {
+            unchanged_count += 1;
+            continue;
+        }
         if progress.wire_version == WIRE_VERSION
             && progress.revision == Some(revision)
             && !dirty.contains(&id)
@@ -1104,11 +1181,12 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
             Ok(s) => s,
             Err(_) => {
                 upload_timing.outcome = "load_error";
-                mark_dirty(&id);
+                failures.failed(&id, revision, Instant::now());
                 continue;
             }
         };
         if session.is_debug || session.messages.is_empty() {
+            failures.sessions.remove(&id);
             upload_timing.outcome = "skipped_empty_or_debug";
             updates.insert(
                 id,
@@ -1159,6 +1237,7 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
             report.messages_uploaded += chunk.len();
         }
         if ok {
+            failures.sessions.remove(&id);
             upload_timing.outcome = "success";
             report.sessions_uploaded += 1;
             updates.insert(
@@ -1171,7 +1250,10 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
                     fingerprint: Some(fingerprint),
                 },
             );
+        } else if upload_timing.outcome == "error" {
+            failures.failed(&id, revision, Instant::now());
         } else {
+            // A generation fence is not an upload failure. Preserve fresh work.
             mark_dirty(&id);
         }
         if reconcile
@@ -1194,6 +1276,7 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
     // Merge under a cross-process lock, never write a stale enabled flag or
     // overwrite another process's unrelated session progress.
     let mut commit = SyncTiming::new("progress_commit");
+    *FAILURE_BACKOFF.lock().unwrap_or_else(|e| e.into_inner()) = Some(failures);
     commit.outcome = "error";
     commit_progress(state.generation, &updates)?;
     commit.outcome = if updates.is_empty() {
@@ -1265,6 +1348,9 @@ async fn background_sync() {
     }
 }
 
+#[cfg(test)]
+#[path = "mobile_sync_backoff_tests.rs"]
+mod backoff_tests;
 #[cfg(test)]
 #[path = "mobile_sync_http_tests.rs"]
 mod http_tests;
