@@ -133,6 +133,285 @@ fn format_file_activity_message_compact(
     )
 }
 
+/// One peer edit shown in a file-activity row. Consecutive edits stack into a
+/// single transcript row instead of adding a row each.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FileActivityEdit {
+    pub sender: String,
+    pub path: String,
+    pub operation: String,
+    pub intent: Option<String>,
+    pub summary: Option<String>,
+    pub detail: Option<String>,
+    /// `(added, removed)` lines, when the server reported them.
+    pub delta: Option<(u64, u64)>,
+    pub edits: u32,
+}
+
+fn non_empty(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+impl FileActivityEdit {
+    pub(super) fn from_notification(
+        sender: &str,
+        notification_type: &NotificationType,
+    ) -> Option<Self> {
+        let NotificationType::FileConflict {
+            path,
+            operation,
+            intent,
+            summary,
+            detail,
+            added,
+            removed,
+        } = notification_type
+        else {
+            return None;
+        };
+        Some(Self {
+            sender: sender.to_string(),
+            path: path.clone(),
+            operation: operation.clone(),
+            intent: non_empty(intent.as_deref()),
+            summary: non_empty(summary.as_deref()),
+            detail: non_empty(detail.as_deref()),
+            delta: added.zip(*removed),
+            edits: 1,
+        })
+    }
+
+    fn is_conflict(&self) -> bool {
+        self.operation.to_ascii_lowercase().contains("conflict")
+            || self.summary.as_deref().is_some_and(|value| {
+                let value = value.to_ascii_lowercase();
+                value.contains("conflict") || value.contains("concurrent")
+            })
+    }
+
+    /// `+3 -1`, or the tool's own summary when the server sent no counts.
+    fn change_label(&self) -> String {
+        match self.delta {
+            Some((added, removed)) => format!("+{added} -{removed}"),
+            None => file_activity_summary_line(&self.operation, self.summary.as_deref()),
+        }
+    }
+}
+
+/// Add `edit` to a stack, folding repeated edits by one agent to one file.
+pub(super) fn stack_file_activity_edit(stack: &mut Vec<FileActivityEdit>, edit: FileActivityEdit) {
+    let Some(existing) = stack
+        .iter_mut()
+        .find(|existing| existing.sender == edit.sender && existing.path == edit.path)
+    else {
+        stack.push(edit);
+        return;
+    };
+    existing.delta = match (existing.delta, edit.delta) {
+        (Some((a, r)), Some((added, removed))) => Some((a + added, r + removed)),
+        _ => None,
+    };
+    existing.edits += edit.edits;
+    existing.operation = edit.operation;
+    existing.summary = edit.summary;
+    if edit.intent.is_some() {
+        existing.intent = edit.intent;
+    }
+    if edit.detail.is_some() {
+        existing.detail = edit.detail;
+    }
+}
+
+/// The single transcript row for a stack of peer edits.
+///
+/// One edit shows the agent, its line counts and intent. Several edits show
+/// only each agent's emoji and summed line counts. Paths and diffs stay
+/// behind the expand control.
+pub(super) fn file_activity_stack_message(
+    stack: &[FileActivityEdit],
+    expanded: bool,
+) -> crate::tui::DisplayMessage {
+    let (title, tldr) = match stack {
+        [edit] => (
+            format!(
+                "{} · {}",
+                if edit.is_conflict() {
+                    "File conflict"
+                } else {
+                    "File activity"
+                },
+                edit.sender
+            ),
+            format!(
+                "{}{} · {}",
+                edit.change_label(),
+                if edit.edits > 1 {
+                    format!(" · {} edits", edit.edits)
+                } else {
+                    String::new()
+                },
+                edit.intent
+                    .clone()
+                    .unwrap_or_else(|| compact_swarm_path(&edit.path))
+            ),
+        ),
+        stack => {
+            let mut senders: Vec<&str> = Vec::new();
+            for edit in stack {
+                if !senders.contains(&edit.sender.as_str()) {
+                    senders.push(&edit.sender);
+                }
+            }
+            let parts = senders
+                .iter()
+                .map(|sender| {
+                    let own = stack.iter().filter(|edit| edit.sender == *sender);
+                    let edits: u32 = own.clone().map(|edit| edit.edits).sum();
+                    let delta = own.clone().try_fold((0u64, 0u64), |(a, r), edit| {
+                        edit.delta.map(|(added, removed)| (a + added, r + removed))
+                    });
+                    let mut part = crate::id::session_icon(sender).to_string();
+                    if let Some((added, removed)) = delta {
+                        part.push_str(&format!(" +{added} -{removed}"));
+                    }
+                    if edits > 1 || delta.is_none() {
+                        part.push_str(&format!(
+                            " · {edits} edit{}",
+                            if edits == 1 { "" } else { "s" }
+                        ));
+                    }
+                    part
+                })
+                .collect::<Vec<_>>();
+            ("File activity".to_string(), parts.join("  "))
+        }
+    };
+    let body = stack
+        .iter()
+        .map(|edit| {
+            let mut part = format!(
+                "{} {} · {} · {}",
+                crate::id::session_icon(&edit.sender),
+                edit.sender,
+                compact_swarm_path(&edit.path),
+                edit.change_label()
+            );
+            if let Some(intent) = &edit.intent {
+                part.push_str(&format!("\n\nIntent: {intent}"));
+            }
+            if let Some(detail) = &edit.detail {
+                part.push_str(&format!(
+                    "\n\n```text\n{}\n```",
+                    sanitize_code_fence_content(detail)
+                ));
+            }
+            part
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let tldr = tldr
+        .replace('`', "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let content = jcode_tui_messages::encode_collapsible_swarm_content(&tldr, &body);
+    let content = if expanded {
+        jcode_tui_messages::toggle_collapsible_swarm_content(&content).unwrap_or(content)
+    } else {
+        content
+    };
+    crate::tui::DisplayMessage::swarm(title, content)
+}
+
+impl super::App {
+    /// Show a peer edit. While the newest transcript row is already a
+    /// file-activity row, the edit is folded into it. Returns the row when a
+    /// new one was added.
+    pub(super) fn push_file_activity(
+        &mut self,
+        edit: FileActivityEdit,
+    ) -> Option<crate::tui::DisplayMessage> {
+        let last = self.display_messages.len().checked_sub(1);
+        if let Some((idx, mut stack)) = self.file_activity_stack.take()
+            && Some(idx) == last
+            && let Some(row) = self.display_messages.get(idx)
+            && row.role == "swarm"
+            && row
+                .title
+                .as_deref()
+                .is_some_and(|title| title.starts_with("File "))
+        {
+            let expanded = jcode_tui_messages::parse_collapsible_swarm_content(&row.content)
+                .is_some_and(|parsed| parsed.expanded);
+            stack_file_activity_edit(&mut stack, edit);
+            let message = file_activity_stack_message(&stack, expanded);
+            self.replace_display_message_title_and_content(idx, message.title, message.content);
+            self.file_activity_stack = Some((idx, stack));
+            return None;
+        }
+        let stack = vec![edit];
+        let message = file_activity_stack_message(&stack, false);
+        self.push_display_message(message.clone());
+        self.file_activity_stack = self
+            .display_messages
+            .len()
+            .checked_sub(1)
+            .map(|idx| (idx, stack));
+        Some(message)
+    }
+}
+
+/// Parse one entry of the model-facing notice:
+/// `agent [previously ]edited path (+3 -1, ...)[: intent]`.
+fn parse_file_activity_notice_entry(line: &str) -> Option<FileActivityEdit> {
+    let (sender, rest) = line.trim().split_once(' ')?;
+    let rest = rest.strip_prefix("previously ").unwrap_or(rest);
+    let (operation, rest) = rest.split_once(' ')?;
+    if sender.is_empty() || !matches!(operation, "edited" | "wrote") {
+        return None;
+    }
+    let (path, rest) = rest.split_once(" (+")?;
+    let (facts, tail) = rest.split_once(')')?;
+    let (added, after) = facts.split_once(" -")?;
+    let removed: String = after.chars().take_while(char::is_ascii_digit).collect();
+    let edits = facts
+        .split(", ")
+        .find_map(|fact| fact.strip_suffix(" edits"))
+        .and_then(|count| count.parse().ok())
+        .unwrap_or(1);
+    Some(FileActivityEdit {
+        sender: compact_swarm_session_label(sender),
+        path: path.to_string(),
+        operation: operation.to_string(),
+        intent: non_empty(tail.strip_prefix(": ")),
+        summary: None,
+        detail: None,
+        delta: Some((added.parse().ok()?, removed.parse().ok()?)),
+        edits,
+    })
+}
+
+/// Parse a delivered model-facing file-activity notice (one or many entries).
+pub(super) fn parse_file_activity_notice(content: &str) -> Option<Vec<FileActivityEdit>> {
+    let rest = content.trim().strip_prefix("⚠ File activity: ")?;
+    let mut lines = rest.lines();
+    let first = lines.next()?;
+    if let Some(edit) = parse_file_activity_notice_entry(first) {
+        return Some(vec![edit]);
+    }
+    let mut stack = Vec::new();
+    for line in lines {
+        stack_file_activity_edit(
+            &mut stack,
+            parse_file_activity_notice_entry(line.strip_prefix("- ")?)?,
+        );
+    }
+    (!stack.is_empty()).then_some(stack)
+}
+
 pub(super) fn present_swarm_notification(
     sender: &str,
     notification_type: &NotificationType,
@@ -250,8 +529,13 @@ pub(super) fn swarm_display_full_body(content: &str) -> &str {
 
 /// Restore the same compact presentation for model-facing file notices that
 /// older transcripts saved without the structured notification payload.
-fn file_activity_delivery_display_message(content: &str) -> Option<crate::tui::DisplayMessage> {
+pub(super) fn file_activity_delivery_display_message(
+    content: &str,
+) -> Option<crate::tui::DisplayMessage> {
     let trimmed = content.trim();
+    if let Some(stack) = parse_file_activity_notice(trimmed) {
+        return Some(file_activity_stack_message(&stack, false));
+    }
     let rest = trimmed
         .strip_prefix("⚠️ File activity: ")
         .or_else(|| trimmed.strip_prefix("⚠ File activity: "))?;
@@ -398,64 +682,13 @@ fn present_swarm_notification_inner(
             message: format!("{} = {}", key, value).trim().to_string(),
             status_notice: format!("Shared context: {}", key),
         },
-        NotificationType::FileConflict {
-            path,
-            operation,
-            intent,
-            summary,
-            detail,
-        } => {
-            let summary_line =
-                format_file_activity_message_compact(path, operation, summary.as_deref())
-                    .replace('`', "");
-            let mut detail_parts = Vec::new();
-            if let Some(intent) = intent
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                detail_parts.push(format!("Intent: {intent}"));
-            }
-            if let Some(detail) = detail
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                detail_parts.push(format!(
-                    "```text\n{}\n```",
-                    sanitize_code_fence_content(detail)
-                ));
-            }
-            let detail_body = detail_parts.join("\n\n");
-            let has_details = intent
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
-                || detail
-                    .as_deref()
-                    .is_some_and(|value| !value.trim().is_empty());
-            let conflict = operation.to_ascii_lowercase().contains("conflict")
-                || summary.as_deref().is_some_and(|value| {
-                    let value = value.to_ascii_lowercase();
-                    value.contains("conflict") || value.contains("concurrent")
-                });
+        NotificationType::FileConflict { path, .. } => {
+            let edit = FileActivityEdit::from_notification(sender, notification_type)
+                .expect("file conflict notification");
+            let message = file_activity_stack_message(std::slice::from_ref(&edit), false);
             SwarmNotificationPresentation {
-                title: format!(
-                    "{} · {}",
-                    if conflict {
-                        "File conflict"
-                    } else {
-                        "File activity"
-                    },
-                    sender
-                ),
-                message: if has_details {
-                    jcode_tui_messages::encode_collapsible_swarm_content(
-                        &summary_line,
-                        &detail_body,
-                    )
-                } else {
-                    summary_line
-                },
+                title: message.title.unwrap_or_default(),
+                message: message.content,
                 status_notice: format!("File activity · {}", compact_swarm_path(path)),
             }
         }
@@ -525,6 +758,8 @@ mod tests {
             intent: Some("fix parser".to_string()),
             summary: Some("edited lines 2-9\n  and adjusted tests".to_string()),
             detail: Some("- old line\n+ new line".to_string()),
+            added: Some(1),
+            removed: Some(1),
         };
         let render = |compact| {
             let presentation =
@@ -548,8 +783,9 @@ mod tests {
                 .iter()
                 .map(|span| span.content.as_ref())
                 .collect::<String>();
-            assert!(!text.contains("fix parser"));
+            assert!(text.contains("+1 -1 · fix parser"), "{text}");
             assert!(!text.contains("old line"));
+            assert!(!text.contains("parser.rs"));
             text
         };
         assert_eq!(render(false), render(true));
@@ -770,67 +1006,170 @@ mod tests {
         assert_eq!(presentation.status_notice, "Swarm plan updated");
     }
 
-    #[test]
-    fn present_swarm_notification_formats_file_activity_with_compact_path_and_preview() {
-        let presentation = present_swarm_notification(
-            "moss",
+    fn edit(sender: &str, path: &str, delta: (u64, u64), intent: &str) -> super::FileActivityEdit {
+        super::FileActivityEdit::from_notification(
+            sender,
             &NotificationType::FileConflict {
-                path: "/home/jeremy/jcode/src/tool/communicate.rs".to_string(),
+                path: path.to_string(),
                 operation: "edited".to_string(),
-                intent: Some("wire swarm intent display".to_string()),
+                intent: Some(intent.to_string()),
                 summary: Some("edited lines 323-348 (1 occurrence)".to_string()),
                 detail: Some("323- old line\n323+ new line".to_string()),
+                added: Some(delta.0),
+                removed: Some(delta.1),
             },
-            "⚠ File activity: /home/jeremy/jcode/src/tool/communicate.rs - moss just edited this file you previously worked with: edited lines 323-348 (1 occurrence)",
-            false,
-        );
+        )
+        .expect("file conflict")
+    }
 
-        assert_eq!(presentation.title, "File activity · moss");
-        let parsed = jcode_tui_messages::parse_collapsible_swarm_content(&presentation.message)
-            .expect("file activity with details should be collapsible");
+    fn collapsed(message: &crate::tui::DisplayMessage) -> (String, String) {
+        let parsed = jcode_tui_messages::parse_collapsible_swarm_content(&message.content)
+            .expect("file activity is collapsible");
+        assert!(!parsed.expanded);
+        (parsed.tldr.to_string(), parsed.body.to_string())
+    }
+
+    #[test]
+    fn single_file_activity_shows_line_counts_and_intent_with_diff_behind_expand() {
+        for compact in [false, true] {
+            let presentation = present_swarm_notification(
+                "moss",
+                &NotificationType::FileConflict {
+                    path: "/home/jeremy/jcode/src/tool/communicate.rs".to_string(),
+                    operation: "edited".to_string(),
+                    intent: Some("wire swarm intent display".to_string()),
+                    summary: Some("edited lines 323-348 (1 occurrence)".to_string()),
+                    detail: Some("323- old line\n323+ new line".to_string()),
+                    added: Some(3),
+                    removed: Some(1),
+                },
+                "raw notice",
+                compact,
+            );
+            assert_eq!(presentation.title, "File activity · moss");
+            let parsed = jcode_tui_messages::parse_collapsible_swarm_content(&presentation.message)
+                .expect("file activity should be collapsible");
+            assert_eq!(parsed.tldr, "+3 -1 · wire swarm intent display");
+            assert!(parsed.body.contains("…/jcode/src/tool/communicate.rs"));
+            assert!(parsed.body.contains("Intent: wire swarm intent display"));
+            assert!(
+                parsed
+                    .body
+                    .contains("```text\n323- old line\n323+ new line\n```")
+            );
+            assert_eq!(
+                presentation.status_notice,
+                "File activity · …/jcode/src/tool/communicate.rs"
+            );
+        }
+    }
+
+    #[test]
+    fn file_activity_without_counts_or_intent_falls_back_to_summary_and_path() {
+        let edit = super::FileActivityEdit::from_notification(
+            "moss",
+            &NotificationType::FileConflict {
+                path: "src/a.rs".to_string(),
+                operation: "edited".to_string(),
+                intent: None,
+                summary: Some("edited lines 2-9".to_string()),
+                detail: None,
+                added: None,
+                removed: None,
+            },
+        )
+        .unwrap();
+        let (tldr, _) = collapsed(&super::file_activity_stack_message(&[edit], false));
+        assert_eq!(tldr, "Edited lines 2-9 · src/a.rs");
+    }
+
+    #[test]
+    fn stacked_file_activity_shows_only_agent_emojis_and_summed_line_counts() {
+        let mut stack = Vec::new();
+        super::stack_file_activity_edit(&mut stack, edit("moss", "src/a.rs", (3, 1), "first"));
+        super::stack_file_activity_edit(&mut stack, edit("moss", "src/a.rs", (2, 0), "second"));
+        // Same agent and file: still a single-agent row, counts summed.
+        let message = super::file_activity_stack_message(&stack, false);
+        assert_eq!(message.title.as_deref(), Some("File activity · moss"));
+        assert_eq!(collapsed(&message).0, "+5 -1 · 2 edits · second");
+
+        super::stack_file_activity_edit(&mut stack, edit("moss", "src/b.rs", (10, 4), "third"));
+        super::stack_file_activity_edit(&mut stack, edit("fox", "src/a.rs", (1, 1), "fourth"));
+        let message = super::file_activity_stack_message(&stack, false);
+        assert_eq!(message.title.as_deref(), Some("File activity"));
+        let (tldr, body) = collapsed(&message);
         assert_eq!(
-            parsed.tldr,
-            "…/jcode/src/tool/communicate.rs · Edited lines 323-348 (1 occurrence)"
+            tldr,
+            format!(
+                "{} +15 -5 · 3 edits  {} +1 -1",
+                crate::id::session_icon("moss"),
+                crate::id::session_icon("fox")
+            )
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
         );
-        assert!(parsed.body.contains("Intent: wire swarm intent display"));
+        for hidden in ["third", "fourth", "src/a.rs", "src/b.rs", "moss", "fox"] {
+            assert!(!tldr.contains(hidden), "{hidden} leaked into {tldr}");
+            assert!(body.contains(hidden), "{hidden} missing from details");
+        }
+        let lines =
+            crate::tui::ui::render_swarm_message(&message, 60, crate::config::DiffDisplayMode::Off);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].width() <= 60);
+    }
+
+    #[test]
+    fn consecutive_peer_edits_stack_into_one_transcript_row() {
+        let mut app = crate::tui::app::tests::create_test_app();
+        let before = app.display_messages.len();
         assert!(
-            parsed
-                .body
-                .contains("```text\n323- old line\n323+ new line\n```")
+            app.push_file_activity(edit("moss", "src/a.rs", (3, 1), "one"))
+                .is_some()
         );
+        assert!(
+            app.push_file_activity(edit("fox", "src/b.rs", (2, 2), "two"))
+                .is_none()
+        );
+        assert!(
+            app.push_file_activity(edit("moss", "src/a.rs", (1, 0), "three"))
+                .is_none()
+        );
+        assert_eq!(app.display_messages.len(), before + 1);
+        let row = app.display_messages.last().unwrap().clone();
+        assert_eq!(row.title.as_deref(), Some("File activity"));
+        assert!(collapsed(&row).0.contains("+4 -1 · 2 edits"));
+
+        // Anything else in the transcript ends the stack.
+        app.push_display_message(crate::tui::DisplayMessage::system("unrelated"));
+        assert!(
+            app.push_file_activity(edit("moss", "src/a.rs", (9, 9), "four"))
+                .is_some()
+        );
+        assert_eq!(app.display_messages.len(), before + 3);
         assert_eq!(
-            presentation.status_notice,
-            "File activity · …/jcode/src/tool/communicate.rs"
+            collapsed(app.display_messages.last().unwrap()).0,
+            "+9 -9 · four"
         );
     }
 
     #[test]
-    fn present_swarm_notification_compact_mode_collapses_file_activity_to_single_line() {
-        let presentation = present_swarm_notification(
-            "moss",
-            &NotificationType::FileConflict {
-                path: "/home/jeremy/jcode/src/tool/communicate.rs".to_string(),
-                operation: "edited".to_string(),
-                intent: Some("wire swarm intent display".to_string()),
-                summary: Some("edited lines 323-348 (1 occurrence)".to_string()),
-                detail: Some("323- old line\n323+ new line".to_string()),
-            },
-            "⚠ File activity: /home/jeremy/jcode/src/tool/communicate.rs - moss just edited this file you previously worked with: edited lines 323-348 (1 occurrence)",
-            true,
-        );
+    fn delivered_model_notice_restores_as_the_same_compact_row() {
+        let single = "⚠ File activity: moss edited src/parser.rs (+3 -1, lines 2-9, overlaps your edit): fix parser";
+        let mut messages = vec![crate::tui::DisplayMessage::system(single)];
+        super::normalize_swarm_delivery_messages(&mut messages);
+        assert_eq!(messages[0].role, "swarm");
+        assert_eq!(messages[0].title.as_deref(), Some("File activity · moss"));
+        assert_eq!(collapsed(&messages[0]).0, "+3 -1 · fix parser");
 
-        assert_eq!(presentation.title, "File activity · moss");
-        let parsed = jcode_tui_messages::parse_collapsible_swarm_content(&presentation.message)
-            .expect("compact mode should retain collapsible details");
-        assert_eq!(
-            parsed.tldr,
-            "…/jcode/src/tool/communicate.rs · Edited lines 323-348 (1 occurrence)"
-        );
-        assert!(parsed.body.contains("Intent: wire swarm intent display"));
-        assert!(parsed.body.contains("323- old line"));
-        assert_eq!(
-            presentation.status_notice,
-            "File activity · …/jcode/src/tool/communicate.rs"
-        );
+        let batch = "⚠ File activity: 2 peer changes to files you edited\n- moss edited src/parser.rs (+3 -1, 2 edits): fix parser\n- fox previously wrote src/lib.rs (+10 -0)";
+        let stack = super::parse_file_activity_notice(batch).expect("batch notice parses");
+        assert_eq!(stack.len(), 2);
+        assert_eq!(stack[0].edits, 2);
+        assert_eq!(stack[1].delta, Some((10, 0)));
+        assert_eq!(stack[1].intent, None);
+        let mut messages = vec![crate::tui::DisplayMessage::system(batch)];
+        super::normalize_swarm_delivery_messages(&mut messages);
+        assert_eq!(messages[0].title.as_deref(), Some("File activity"));
     }
 }

@@ -3420,11 +3420,12 @@ fn render_compact_agent_notification(
         // the preview wins rather than letting a badge force a second row.
         // Short plain notes stay clean: usage only appears on collapsible
         // messages or when the time since this agent's last message is known.
-        let usage_text = (badge.is_some() || since_last_secs.is_some())
-            .then(|| swarm_notification_usage_label(content, since_last_secs))
-            .flatten()
-            .map(|usage| format!("  {usage}"))
-            .filter(|usage| usage.width() + 8 < max_width);
+        let usage_text = (!notification.file_activity
+            && (badge.is_some() || since_last_secs.is_some()))
+        .then(|| swarm_notification_usage_label(content, since_last_secs))
+        .flatten()
+        .map(|usage| format!("  {usage}"))
+        .filter(|usage| usage.width() + 8 < max_width);
         let usage_width = usage_text
             .as_deref()
             .map(UnicodeWidthStr::width)

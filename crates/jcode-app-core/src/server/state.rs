@@ -90,6 +90,9 @@ pub struct FileAccess {
     pub intent: Option<String>,
     pub summary: Option<String>,
     pub detail: Option<String>,
+    /// Lines added/removed by this access (0 for reads).
+    pub added: u64,
+    pub removed: u64,
 }
 
 pub(super) fn latest_peer_touches(
@@ -1033,6 +1036,32 @@ pub(super) async fn queue_soft_interrupt_for_session(
         sessions,
     )
     .await
+}
+
+/// Rewrite a still-queued system notice in place. Returns `false` once the
+/// notice has been delivered (or was never queued live), so the caller queues
+/// a fresh one instead.
+pub(super) async fn replace_pending_soft_interrupt(
+    session_id: &str,
+    previous: &str,
+    content: String,
+    queues: &SessionInterruptQueues,
+) -> bool {
+    let Some(queue) = queues.read().await.get(session_id).cloned() else {
+        return false;
+    };
+    let Ok(mut pending) = queue.lock() else {
+        return false;
+    };
+    match pending.iter_mut().find(|message| {
+        message.source == SoftInterruptSource::System && message.content == previous
+    }) {
+        Some(message) => {
+            message.content = content;
+            true
+        }
+        None => false,
+    }
 }
 
 pub(super) async fn queue_soft_interrupt_with_images_for_session(

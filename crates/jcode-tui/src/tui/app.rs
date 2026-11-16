@@ -1470,6 +1470,9 @@ pub struct App {
     /// When each swarm agent last sent us a notification, keyed by sender, so
     /// notifications can show time since that agent's previous message.
     swarm_last_message_at: std::collections::HashMap<String, std::time::Instant>,
+    /// Transcript index and contents of the newest file-activity row, so
+    /// consecutive peer edits stack into it instead of adding rows.
+    file_activity_stack: Option<(usize, Vec<remote_notifications::FileActivityEdit>)>,
     // Latest swarm plan snapshot (local or remote server event stream)
     swarm_plan_items: Vec<crate::plan::PlanItem>,
     swarm_plan_version: Option<u64>,
