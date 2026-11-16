@@ -429,7 +429,9 @@ fn macos_notification_broker_app_path() -> Option<std::path::PathBuf> {
     // so Spotlight and Launchpad do not list the faceless helper as a second app.
     // Older CLIs published it in ~/Applications; keep using that copy until the
     // next interactive launch migrates it.
-    let product_home = crate::storage::jcode_dir().ok()?;
+    let Ok(product_home) = crate::storage::jcode_dir() else {
+        return None;
+    };
     let current = product_home
         .join("notifications")
         .join("macos")
@@ -459,11 +461,10 @@ pub fn macos_notification_inbox_dir() -> Option<std::path::PathBuf> {
     if let Some(path) = std::env::var_os("JCODE_MACOS_NOTIFICATION_INBOX") {
         return Some(path.into());
     }
-    crate::storage::jcode_dir().ok().map(|home| {
-        home.join("notifications")
-            .join("macos")
-            .join("inbox")
-    })
+    let Ok(home) = crate::storage::jcode_dir() else {
+        return None;
+    };
+    Some(home.join("notifications").join("macos").join("inbox"))
 }
 
 /// Queue a turn notification for the bundled LSUIElement broker and wake it.

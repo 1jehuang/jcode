@@ -91,10 +91,20 @@ mod tests {
                     Some(value) => crate::env::set_var("JCODE_HOME", value),
                     None => crate::env::remove_var("JCODE_HOME"),
                 }
+                crate::usage::clear_anthropic_usage_cache_for_tests();
+                crate::usage::clear_remote_account_usage();
+                crate::config::Config::invalidate_cache();
             }
         }
         let _restore = Restore(std::env::var_os("JCODE_HOME"));
         crate::env::set_var("JCODE_HOME", dir.path());
+        // Both usage caches are process-global and outlive the temp home. Daemon
+        // mode in particular is a latch that hides the local cache from every
+        // later test, so this module has to reset it like the cache tests do.
+        crate::usage::clear_anthropic_usage_cache_for_tests();
+        crate::usage::clear_remote_account_usage();
+        crate::usage::prefer_local_usage_cache_for_tests();
+        crate::config::Config::invalidate_cache();
         f(tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

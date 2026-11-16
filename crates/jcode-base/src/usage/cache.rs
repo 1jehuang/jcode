@@ -27,6 +27,18 @@ pub(super) fn anthropic_usage_cache() -> &'static std::sync::Mutex<HashMap<Strin
     ANTHROPIC_USAGE_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// Lock the Anthropic usage cache, recovering from poisoning.
+///
+/// A panic anywhere while this mutex is held poisons it. The previous
+/// `if let Ok(..)` sites silently dropped every later write and read, so one
+/// panic elsewhere would quietly disable caching for the rest of the process.
+/// The cache holds plain data, so recovering the guard is safe.
+fn anthropic_cache_guard() -> std::sync::MutexGuard<'static, HashMap<String, UsageData>> {
+    anthropic_usage_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Clear the process-global Anthropic usage cache.
 ///
 /// It is keyed by account label and shared by every caller in the process, so a
@@ -34,9 +46,7 @@ pub(super) fn anthropic_usage_cache() -> &'static std::sync::Mutex<HashMap<Strin
 /// Tests that assert on ordering must start from an empty cache.
 #[cfg(test)]
 pub(crate) fn clear_anthropic_usage_cache_for_tests() {
-    if let Ok(mut map) = anthropic_usage_cache().lock() {
-        map.clear();
-    }
+    anthropic_cache_guard().clear();
 }
 
 pub(super) fn openai_usage_cache() -> &'static std::sync::Mutex<HashMap<String, OpenAIUsageData>> {
@@ -185,6 +195,7 @@ mod account_snapshot_tests {
             // Remote-managed account usage is another process-global source that
             // a preceding test can populate.
             crate::usage::clear_remote_account_usage();
+            crate::usage::prefer_local_usage_cache_for_tests();
             // Config is a process-global cache resolved against the *previous*
             // home; without this it keeps describing another test's directory.
             crate::config::Config::invalidate_cache();
@@ -322,6 +333,7 @@ mod account_snapshot_tests {
         let label = "router-cache-only-test";
         let key = format!("label:{label}");
         let provider = MultiAccountProviderKind::Anthropic;
+        let _home = HermeticUsageHome::new();
         let data = UsageData {
             five_hour: 0.42,
             fetched_at: Some(Instant::now()),
@@ -561,8 +573,7 @@ pub(super) fn openai_usage_cache_key(access_token: &str, account_label: Option<&
 }
 
 pub(super) fn cached_anthropic_usage(cache_key: &str) -> Option<UsageData> {
-    let cache = anthropic_usage_cache();
-    let map = cache.lock().ok()?;
+    let map = anthropic_cache_guard();
     let cached = map.get(cache_key)?.clone();
     (!cached.is_stale()).then_some(cached)
 }
@@ -581,9 +592,7 @@ pub(super) fn cached_or_shared_anthropic_usage(cache_key: &str) -> Option<UsageD
         // Only a removed auth failure signifies a relogin. A missing file
         // must not cancel the RAM copy of a provider's throttle deadline.
         if super::anthropic_response::is_auth_failure(error) {
-            if let Ok(mut cache) = anthropic_usage_cache().lock() {
-                cache.remove(cache_key);
-            }
+            anthropic_cache_guard().remove(cache_key);
             return None;
         }
         return cached;
@@ -596,9 +605,7 @@ pub(super) fn cached_or_shared_anthropic_usage(cache_key: &str) -> Option<UsageD
 }
 
 pub(super) fn store_anthropic_usage(cache_key: String, data: UsageData) {
-    if let Ok(mut map) = anthropic_usage_cache().lock() {
-        map.insert(cache_key, data);
-    }
+    anthropic_cache_guard().insert(cache_key, data);
 }
 
 pub(super) fn cached_openai_usage(cache_key: &str) -> Option<OpenAIUsageData> {

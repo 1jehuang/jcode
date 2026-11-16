@@ -44,3 +44,19 @@ pub fn tempdir() -> std::io::Result<tempfile::TempDir> {
 pub fn tempdir_with_prefix(prefix: &str) -> std::io::Result<tempfile::TempDir> {
     tempfile::Builder::new().prefix(prefix).tempdir_in(root())
 }
+
+/// Backdate a file that mtime fixtures have just rewritten.
+///
+/// A read-only handle cannot set timestamps, and on Windows the handle also needs
+/// write access to carry `FILE_WRITE_ATTRIBUTES`. Every mtime fixture needs the
+/// same open-then-stamp sequence, so it lives here instead of being repeated.
+pub fn set_mtime(
+    path: impl AsRef<std::path::Path>,
+    modified: std::time::SystemTime,
+) -> std::io::Result<()> {
+    std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(path.as_ref())?
+        .set_modified(modified)
+}

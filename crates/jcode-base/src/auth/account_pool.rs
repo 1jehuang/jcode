@@ -519,6 +519,7 @@ mod tests {
             crate::env::set_var("JCODE_HOME", dir.path());
             crate::usage::clear_anthropic_usage_cache_for_tests();
             crate::usage::clear_remote_account_usage();
+            crate::usage::prefer_local_usage_cache_for_tests();
             crate::config::Config::invalidate_cache();
             Self(lock, previous, dir)
         }

@@ -55,6 +55,8 @@ pub use remote_accounts::{
 };
 #[cfg(test)]
 pub(crate) use cache::clear_anthropic_usage_cache_for_tests;
+#[cfg(test)]
+pub(crate) use remote_accounts::prefer_local_usage_cache_for_tests;
 pub use startup_snapshot::{
     AccountUsageStartupPublisher, hydrate_remote_account_usage,
     hydrate_remote_account_usage_for_generation,

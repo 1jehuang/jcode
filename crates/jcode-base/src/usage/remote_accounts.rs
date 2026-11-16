@@ -9,9 +9,31 @@ struct RemoteAccounts {
     received: Option<Instant>,
     anthropic: Vec<jcode_protocol::AccountUsageSnapshot>,
     openai: Vec<jcode_protocol::AccountUsageSnapshot>,
+    /// Tests only: let the local credential-based cache answer even though
+    /// daemon-only mode was entered. Cleared by every write to this state, so it
+    /// cannot outlive the test that asked for it.
+    #[cfg(test)]
+    local_cache_authoritative: bool,
 }
 
 static REMOTE: OnceLock<Mutex<RemoteAccounts>> = OnceLock::new();
+
+/// Tests only: undo the daemon-only latch described in [`cached`].
+///
+/// Entering daemon-only mode is a permanent, process-global decision, and the
+/// `OnceLock` cannot be reset. One test that switches modes therefore hides the
+/// local cache from every later test in the same binary, which is what made the
+/// `usage::cache` ordering tests fail only in a full run.
+///
+/// The marker lives in the state, not in a global flag, because any later
+/// `clear_remote_account_usage` or `set_remote_account_usage` must be able to
+/// supersede it. Call this *after* `clear_remote_account_usage`.
+#[cfg(test)]
+pub(crate) fn prefer_local_usage_cache_for_tests() {
+    if let Ok(mut state) = REMOTE.get_or_init(Mutex::default).lock() {
+        state.local_cache_authoritative = true;
+    }
+}
 
 fn try_remote_lock(
     mutex: &Mutex<RemoteAccounts>,
@@ -78,6 +100,7 @@ pub(super) fn set_remote_account_usage_with_age(
             received: Instant::now().checked_sub(age),
             anthropic,
             openai,
+            ..Default::default()
         };
     }
 }
@@ -144,6 +167,12 @@ pub(super) fn cached(
     let Ok(state) = remote.try_lock() else {
         return Some(None);
     };
+    // Daemon-only mode entered *without a response* is the one case a later test
+    // may need to undo. A real response still wins over the local cache.
+    #[cfg(test)]
+    if state.received.is_none() && state.local_cache_authoritative {
+        return None;
+    }
     Some(state.lookup(provider, label, Instant::now()))
 }
 
