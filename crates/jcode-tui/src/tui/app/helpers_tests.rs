@@ -279,7 +279,11 @@ fn pinned_resume_test_home() -> (
     let temp = tempfile::tempdir().expect("tempdir");
     let current = temp.path().join("builds").join("current");
     std::fs::create_dir_all(&current).expect("create builds/current");
-    std::fs::write(current.join("jcode"), b"#!/bin/sh\n").expect("write fake jcode binary");
+    // Use the platform's real channel binary name: on Windows it is `jcode.exe`,
+    // so a fixture that only writes `jcode` leaves the resolver with nothing to
+    // find and the resume command silently falls back to the test executable.
+    std::fs::write(current.join(crate::build::binary_name()), b"#!/bin/sh\n")
+        .expect("write fake client binary");
     let home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
     (env_lock, temp, home)
 }
@@ -295,10 +299,7 @@ fn build_resume_command_uses_imported_jcode_session_for_claude_code() {
         None,
     );
 
-    assert_eq!(
-        program.file_name().and_then(|name| name.to_str()),
-        Some("jcode")
-    );
+    assert_eq!(program.file_name().and_then(|name| name.to_str()), Some(crate::build::binary_name()));
     assert_eq!(
         args,
         vec![
@@ -322,10 +323,7 @@ fn build_resume_command_uses_imported_jcode_session_for_codex() {
         None,
     );
 
-    assert_eq!(
-        program.file_name().and_then(|name| name.to_str()),
-        Some("jcode")
-    );
+    assert_eq!(program.file_name().and_then(|name| name.to_str()), Some(crate::build::binary_name()));
     assert_eq!(
         args,
         vec![

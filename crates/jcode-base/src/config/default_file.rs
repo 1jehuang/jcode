@@ -349,6 +349,7 @@ prompt_entry_animation = true
 # info = "#8cb4ff"
 # border = "#64646e"
 # selection_bg = "#3c3c50"
+# status_text = "#8c8c9b"
 
 [features]
 # Check for and install updates during startup. Set to false for the persistent

@@ -993,7 +993,9 @@ fn test_handle_remote_disconnect_flushes_streaming_text_and_sets_reconnect_state
         .expect("missing reconnect status message");
     assert_eq!(last.role, "system");
     assert_eq!(last.title.as_deref(), Some("Connection"));
-    assert!(last.content.contains("◈ Connection lost - retrying"));
+    // The notice has used "⚡" since the reconnect copy was updated; "◈" was the
+    // older glyph, and `ui_messages::connection` parses the new prefix.
+    assert!(last.content.contains("⚡ Connection lost - retrying"));
     assert!(last.content.contains("connection to server dropped"));
     assert!(
         !last.content.contains('\n'),
