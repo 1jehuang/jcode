@@ -752,6 +752,9 @@ impl Provider for AntigravityProvider {
                     phase: ConnectionPhase::Streaming,
                 }))
                 .await;
+            if let Some(event) = response.resolved_model_event() {
+                let _ = tx.send(Ok(event)).await;
+            }
             if let Some(usage) = response
                 .response
                 .as_ref()

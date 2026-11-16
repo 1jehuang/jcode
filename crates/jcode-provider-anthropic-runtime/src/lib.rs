@@ -2636,7 +2636,17 @@ fn process_sse_event(
                 // The server echoes the model that actually served the request.
                 // Log it so we can confirm there was no silent server-side
                 // substitution (and surface it under JCODE_LOG_SERVED_MODEL).
-                if let Some(served) = parsed.message.model.as_deref() {
+                if let Some(served) = parsed
+                    .message
+                    .model
+                    .as_deref()
+                    .filter(|model| !model.trim().is_empty())
+                {
+                    if state.served_model.as_deref() != Some(served) {
+                        events.push(StreamEvent::ResolvedModel {
+                            model: served.to_string(),
+                        });
+                    }
                     state.served_model = Some(served.to_string());
                     jcode_base::logging::info(&format!("Anthropic served model={}", served));
                     if std::env::var("JCODE_LOG_SERVED_MODEL").is_ok() {
