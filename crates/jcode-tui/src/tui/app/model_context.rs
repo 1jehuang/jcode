@@ -666,7 +666,12 @@ impl App {
                 // Only the first switch gets the fast path. An exhausted
                 // fallback must not create an instantaneous account loop.
                 let immediate = config.exhausted_usage_immediate_failover
-                    && self.automatic_failover_targets.is_empty();
+                    && self.automatic_failover_targets.is_empty()
+                    // Only explicit plan or balance exhaustion may bypass the
+                    // countdown. A 429, a billing hiccup or a generic quota error is
+                    // ambiguous, so it still waits: `is_definitive_usage_exhaustion`
+                    // owns that decision for the whole codebase.
+                    && jcode_provider_core::is_definitive_usage_exhaustion(&prompt.reason);
                 self.automatic_failover_targets.push(target.clone());
                 self.pending_provider_failover = Some(super::PendingProviderFailover {
                     prompt: prompt.clone(),

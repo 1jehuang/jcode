@@ -756,7 +756,9 @@ impl App {
         let recent_history = self.recent_history_window_active();
         // A load that arrives while the reader follows the tail (the Alt+E
         // prompt-history backfill) must not pull them up to the old history.
-        let following_tail = !self.auto_scroll_paused && self.pending_history_anchor.is_none();
+        let following_tail = !self.auto_scroll_paused
+            && self.scroll_offset == 0
+            && self.pending_history_anchor.is_none();
         compact_display_messages_for_storage(&mut messages);
         carry_over_tool_durations(&self.display_messages, &mut messages);
         self.display_messages = messages;
