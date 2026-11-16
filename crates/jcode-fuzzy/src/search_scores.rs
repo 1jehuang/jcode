@@ -10,6 +10,7 @@ const MAX_BYTES: usize = 512 * 1024;
 struct TokenScores {
     prepared: PreparedTokenQuery,
     words: HashMap<Box<str>, Option<i32>>,
+    close_words: HashMap<Box<str>, bool>,
 }
 
 #[derive(Default)]
@@ -31,6 +32,7 @@ impl CachedWordScores {
                 TokenScores {
                     prepared: PreparedTokenQuery::new(token),
                     words: HashMap::new(),
+                    close_words: HashMap::new(),
                 },
             );
         }
@@ -102,13 +104,65 @@ impl CachedWordScores {
                 && token.chars().all(char::is_alphabetic)
                 && text
                     .split_whitespace()
-                    .any(|word| self.score(token, word).is_some()))
+                    .any(|word| self.search_score(token, word).is_some()))
+    }
+
+    /// Score only near spellings, rather than loose command-style subsequences.
+    pub fn best_search_score(&mut self, token: &str, text: &str) -> Option<i32> {
+        text.split_whitespace()
+            .filter_map(|word| {
+                self.search_score(token, word).map(|score| {
+                    score - word.chars().count().abs_diff(token.chars().count()) as i32
+                })
+            })
+            .max()
+    }
+
+    fn search_score(&mut self, token: &str, word: &str) -> Option<i32> {
+        if word.len() > 128 && word.chars().count() > 128 {
+            return None;
+        }
+        self.prepare(token);
+        let scores = self.tokens.get_mut(token)?;
+        let close = if let Some(close) = scores.close_words.get(word) {
+            *close
+        } else {
+            let close = crate::search_word_is_close(token, word);
+            let bytes = word.len() + std::mem::size_of::<(Box<str>, bool)>() + 32;
+            if self.entries < MAX_WORDS && self.bytes + bytes <= MAX_BYTES {
+                scores.close_words.insert(word.into(), close);
+                self.entries += 1;
+                self.bytes += bytes;
+            }
+            close
+        };
+        close.then(|| self.score(token, word)).flatten()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_search_caches_rejections_and_keeps_command_scores_independent() {
+        let mut scores = CachedWordScores::default();
+        assert!(scores.matches_text("basten", "basten"));
+        assert!(!scores.matches_text("basten", "basement standstill based"));
+        assert!(scores.best_search_score("conifg", "config").is_some());
+        let entries = scores.entries;
+        for _ in 0..100 {
+            assert!(!scores.matches_text("basten", "basement standstill based"));
+            assert!(scores.best_search_score("conifg", "config").is_some());
+        }
+        assert_eq!(scores.entries, entries);
+        assert!(scores.entries <= MAX_WORDS);
+        assert!(scores.bytes <= MAX_BYTES);
+        assert_eq!(
+            scores.score("basten", "basement"),
+            PreparedTokenQuery::new("basten").score("basement")
+        );
+    }
 
     #[test]
     fn cached_scores_and_boolean_matching_preserve_shared_matcher_semantics() {

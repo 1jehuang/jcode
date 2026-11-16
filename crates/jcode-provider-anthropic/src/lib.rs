@@ -965,7 +965,8 @@ mod cache_prefix_invariant_tests {
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         }

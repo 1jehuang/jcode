@@ -51,6 +51,12 @@ fn pending_picker() -> (SessionPicker, mpsc::Sender<(String, SearchRank)>) {
             .handle_overlay_key(KeyCode::Char(c), KeyModifiers::NONE)
             .unwrap();
     }
+    picker.rebuild_items();
+    picker.transcript_search.ranks.insert(
+        "stale".into(),
+        literal_metadata_rank("needle", &["needle".into()]),
+    );
+    picker.rebuild_items();
     assert_eq!(picker.selected_session().unwrap().id, "stale");
     let (sender, receiver) = mpsc::channel();
     picker.transcript_search.started_at = None;
@@ -180,6 +186,7 @@ fn manual_selection_submits_immediately_without_following_background_results() {
 fn no_matches_at_deadline_keeps_query_and_does_not_submit_later() {
     let (mut picker, sender) = pending_picker();
     picker.all_sessions[0].search_index = "unrelated".into();
+    picker.transcript_search.ranks.clear();
     picker.rebuild_items();
     assert!(picker.visible_sessions.is_empty());
     enter(&mut picker);

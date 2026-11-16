@@ -2375,7 +2375,8 @@ impl ProviderUsage {
 }
 
 /// Emit a `usage_report` for one provider response, attributed to the calling
-/// session and the model that actually served it.
+/// session and supplied model label. This legacy API does not claim the label
+/// was resolved by the provider. Use the attribution API for observed IDs.
 ///
 /// This is the authoritative spend signal. Unlike `session_end`, it does not
 /// depend on the session ending cleanly and does not read the process-global
@@ -2387,6 +2388,20 @@ pub fn record_provider_usage(
     session_id: Option<&str>,
     provider: &str,
     model: &str,
+    source: UsageSource,
+    usage: ProviderUsage,
+) {
+    record_provider_usage_with_model_attribution(session_id, provider, model, None, source, usage);
+}
+
+/// Record request attribution separately from the actual provider response ID.
+/// Only response-observed IDs belong in `resolved_model`. Unknown resolution
+/// leaves the requested label effective without claiming it was resolved.
+pub fn record_provider_usage_with_model_attribution(
+    session_id: Option<&str>,
+    provider: &str,
+    requested_model: &str,
+    resolved_model: Option<&str>,
     source: UsageSource,
     usage: ProviderUsage,
 ) {
@@ -2409,6 +2424,13 @@ pub fn record_provider_usage(
     let usage = usage.normalized(provider);
     let cache_read = usage.cache_read_input_tokens.unwrap_or(0);
     let cache_creation = usage.cache_creation_input_tokens.unwrap_or(0);
+    let requested_model = sanitize_telemetry_label(requested_model);
+    let resolved_model = resolved_model
+        .map(sanitize_telemetry_label)
+        // The ingestion contract bounds metadata by UTF-8 bytes. An oversized
+        // response label is unknown, not a truncated ID and not a poison event
+        // that would permanently block this response's durable usage delivery.
+        .filter(|value| !value.is_empty() && value.len() <= 120);
     let (schema_version, build_channel, git_checkout, ci, from_cargo) = telemetry_envelope();
     let event = UsageReportEvent {
         usage_contract_version: 2,
@@ -2422,7 +2444,10 @@ pub fn record_provider_usage(
         arch: std::env::consts::ARCH,
         source: source.as_str(),
         provider: sanitize_telemetry_label(provider),
-        model: sanitize_telemetry_label(model),
+        model: resolved_model.as_ref().unwrap_or(&requested_model).clone(),
+        requested_model: (!requested_model.is_empty() && requested_model.len() <= 120)
+            .then_some(requested_model),
+        resolved_model,
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
         cache_read_input_tokens: cache_read,
@@ -2456,10 +2481,11 @@ pub fn record_simple_completion_usage(
     if usage.is_empty() {
         return;
     }
-    record_provider_usage(
+    record_provider_usage_with_model_attribution(
         session_id,
         provider,
-        model,
+        usage.requested_model.as_deref().unwrap_or(model),
+        usage.resolved_model.as_deref(),
         source,
         ProviderUsage {
             input_tokens: usage.input_tokens.unwrap_or(0),
@@ -2483,7 +2509,7 @@ pub fn record_simple_completion_failure_usage(
             &failure.provider,
             &failure.model,
             source,
-            failure.usage,
+            failure.usage.clone(),
         );
     }
 }

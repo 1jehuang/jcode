@@ -317,7 +317,8 @@ mod tests {
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,
@@ -374,7 +375,8 @@ mod tests {
             content: vec![ContentBlock::Text {
                 text: "newer".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,

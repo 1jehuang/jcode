@@ -3,6 +3,90 @@ use anyhow::{Result, anyhow};
 use chrono::Utc;
 
 #[test]
+fn redaction_replacement_matches_legacy_for_borrowed_owned_and_capture_cases() {
+    for pattern in [
+        r"token-[A-Za-z0-9]+",
+        r"(?m)^(API_KEY=)[^\r\n]+",
+        r"不存在",
+        r"^$",
+    ] {
+        let pattern = Regex::new(pattern).unwrap();
+        for text in [
+            "plain 🦀 output",
+            "token-one token-two",
+            "API_KEY=private\nnext line",
+            "",
+        ] {
+            for replacement in ["[REDACTED_SECRET]", "${1}[REDACTED_SECRET]", "$$"] {
+                let expected = pattern.replace_all(text, replacement).into_owned();
+                let mut actual = text.to_owned();
+                replace_redaction_matches(&mut actual, &pattern, replacement);
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn redaction_replacement_reuses_large_unmatched_buffer() {
+    let pattern = Regex::new(r"(?m)^(API_KEY=)[^\r\n]+").unwrap();
+    let mut text = "ordinary diagnostic output\n".repeat(40_000);
+    let pointer = text.as_ptr();
+    let capacity = text.capacity();
+    for _ in 0..50 {
+        replace_redaction_matches(&mut text, &pattern, "${1}[REDACTED_SECRET]");
+        assert_eq!(text.as_ptr(), pointer);
+        assert_eq!(text.capacity(), capacity);
+    }
+    assert!(text.starts_with("ordinary diagnostic output\n"));
+}
+
+#[test]
+#[ignore = "manual allocation-ownership and timing probe"]
+fn redaction_no_match_copy_probe() {
+    let pattern = Regex::new(r"(?m)^(API_KEY=)[^\r\n]+").unwrap();
+    let source = "diagnostic token count, not a credential\n".repeat(27_000);
+    let mut legacy = source.clone();
+    let mut reused = source.clone();
+    let mut legacy_replacements = 0;
+    let mut reused_replacements = 0;
+    let mut legacy_ns = 0;
+    let mut reused_ns = 0;
+    // Alternate order to avoid attributing all cache warming to one path.
+    for iteration in 0..50 {
+        for old in if iteration % 2 == 0 {
+            [true, false]
+        } else {
+            [false, true]
+        } {
+            if old {
+                let pointer = legacy.as_ptr();
+                let at = std::time::Instant::now();
+                legacy = pattern
+                    .replace_all(&legacy, "${1}[REDACTED_SECRET]")
+                    .into_owned();
+                legacy_ns += at.elapsed().as_nanos();
+                legacy_replacements += usize::from(pointer != legacy.as_ptr());
+            } else {
+                let pointer = reused.as_ptr();
+                let at = std::time::Instant::now();
+                replace_redaction_matches(&mut reused, &pattern, "${1}[REDACTED_SECRET]");
+                reused_ns += at.elapsed().as_nanos();
+                reused_replacements += usize::from(pointer != reused.as_ptr());
+            }
+        }
+    }
+    assert_eq!(legacy, source);
+    assert_eq!(reused, source);
+    assert_eq!(legacy_replacements, 50);
+    assert_eq!(reused_replacements, 0);
+    eprintln!(
+        "redaction_no_match bytes={} iterations=50 legacy_storage_replacements={legacy_replacements} reused_storage_replacements={reused_replacements} legacy_ns={legacy_ns} reused_ns={reused_ns}",
+        source.len()
+    );
+}
+
+#[test]
 fn sanitize_tool_id_alphanumeric_passthrough() {
     assert_eq!(
         sanitize_tool_id("toolu_01XFDUDYJgAACzvnptvVer6u"),
@@ -379,7 +463,8 @@ fn with_timestamps_prepends_utc_prefix_to_user_text() -> Result<()> {
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: Some(ts),
         tool_duration_ms: None,
     }]);
@@ -402,7 +487,8 @@ fn with_timestamps_adds_tool_timing_header_with_duration() -> Result<()> {
             tool_use_id: "call_1".to_string(),
             content: "ok".to_string(),
             is_error: None,
-        }],
+        }]
+        .into(),
         timestamp: Some(ts),
         tool_duration_ms: Some(3_200),
     }]);
@@ -427,7 +513,8 @@ fn with_timestamps_skips_internal_system_reminders() -> Result<()> {
         content: vec![ContentBlock::Text {
             text: "<system-reminder>\ninternal\n</system-reminder>".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: Some(ts),
         tool_duration_ms: None,
     };
@@ -459,7 +546,8 @@ fn ends_with_fresh_user_turn_rejects_trailing_tool_result() {
                 name: "bash".to_string(),
                 input: serde_json::json!({}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(Utc::now()),
             tool_duration_ms: None,
         },
@@ -931,4 +1019,37 @@ fn format_background_task_stalled_markdown_handles_empty_tail() {
         "**Background task stalled** `stall02` · `bash` · no output or progress for 60s"
     ));
     assert!(rendered.contains("_No output captured yet._"));
+}
+
+#[test]
+fn redact_preview_secrets_handles_inline_and_truncated_credentials() {
+    // A collapsed, truncated status preview: the assignment is mid-line and
+    // the token is cut short, so the line-anchored patterns never match.
+    let preview = "please deploy to prod with DB_PASSWORD=hunter2hunter2 and api-key: abc123def then use sk-ant-oat01-ABCDE...";
+    let out = redact_preview_secrets(preview);
+    assert!(!out.contains("hunter2"), "{out}");
+    assert!(!out.contains("abc123def"), "{out}");
+    assert!(!out.contains("sk-ant-oat01"), "{out}");
+    assert!(out.contains("DB_PASSWORD=[REDACTED_SECRET]"), "{out}");
+    assert!(out.starts_with("please deploy to prod with"), "{out}");
+
+    let url = redact_preview_secrets("clone https://bot:s3cr3tvalue@git.example.com/repo.git");
+    assert!(!url.contains("s3cr3tvalue"), "{url}");
+    assert!(url.contains("git.example.com/repo.git"), "{url}");
+
+    let quoted = redact_preview_secrets("set token = \"two words\" now");
+    assert!(!quoted.contains("two words"), "{quoted}");
+    assert!(quoted.ends_with("now"), "{quoted}");
+}
+
+#[test]
+fn redact_preview_secrets_leaves_ordinary_prose_alone() {
+    for text in [
+        "Fix the tokenizer: it drops the last token",
+        "investigate password reset flow and cookie banner",
+        "review PR #42 at https://github.com/1jehuang/jcode/pull/42",
+        "skip flaky test in secret_store.rs",
+    ] {
+        assert_eq!(redact_preview_secrets(text), text);
+    }
 }

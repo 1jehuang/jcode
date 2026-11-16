@@ -21,8 +21,8 @@ fn display_message_from_stored_message(
     if text.trim().is_empty() {
         return None;
     }
-    if is_background_task_lifecycle_message(&text) {
-        return None;
+    if matches!(message.role, Role::User) && is_background_task_lifecycle_message(&text) {
+        return Some(DisplayMessage::background_task(text));
     }
     if !matches!(message.role, Role::Assistant)
         && let Some(swarm) = super::remote_notifications::swarm_delivery_display_message(&text)
@@ -31,7 +31,9 @@ fn display_message_from_stored_message(
     }
     match message.display_role {
         Some(crate::session::StoredDisplayRole::System) => Some(DisplayMessage::system(text)),
-        Some(crate::session::StoredDisplayRole::BackgroundTask) => None,
+        Some(crate::session::StoredDisplayRole::BackgroundTask) => {
+            Some(DisplayMessage::background_task(text))
+        }
         None => match message.role {
             Role::User => {
                 if crate::session::is_scheduled_task_message(message) {
@@ -126,7 +128,11 @@ impl App {
 
     pub fn push_display_message(&mut self, mut message: DisplayMessage) {
         if is_background_task_lifecycle_message(&message.content) {
-            return;
+            if matches!(message.role.as_str(), "user" | "system") {
+                message.role = "background_task".to_string();
+            } else if message.role != "background_task" && message.role != "assistant" {
+                return;
+            }
         }
         if message.role == "tool" && message.duration_secs.is_none() {
             message.duration_secs = DisplayMessage::tool_duration_from_output(&message.content);
@@ -163,7 +169,15 @@ impl App {
     }
 
     pub(super) fn replace_display_messages(&mut self, mut messages: Vec<DisplayMessage>) {
-        messages.retain(|message| !is_background_task_lifecycle_message(&message.content));
+        messages.retain_mut(|message| {
+            if !is_background_task_lifecycle_message(&message.content) {
+                return true;
+            }
+            if matches!(message.role.as_str(), "user" | "system") {
+                message.role = "background_task".to_string();
+            }
+            matches!(message.role.as_str(), "background_task" | "assistant")
+        });
         for message in &mut messages {
             if message.role == "tool" && message.duration_secs.is_none() {
                 message.duration_secs = DisplayMessage::tool_duration_from_output(&message.content);
@@ -248,11 +262,19 @@ impl App {
         &self.background_task_rows
     }
 
-    /// User-only blockers and live waits suppress all automatic continuations.
+    /// Todos awaiting user authorization and live waits suppress automatic
+    /// continuations, as does a goal declared impossible to complete.
     /// Disk state survives a TUI reload and overrides stale retained UI rows.
     pub(super) fn todo_is_paused_for_auto_followup(&self, todo: &crate::todo::TodoItem) -> bool {
-        crate::todo::todo_completely_blocked(todo)
-            || crate::todo::todo_has_external_blocker(todo)
+        let session_id = self
+            .remote_session_id
+            .as_deref()
+            .unwrap_or(&self.session.id);
+        crate::todo::todo_requires_user_auth(todo)
+            || crate::todo::todo_goal_cannot_complete(
+                todo,
+                &crate::todo::load_goals(session_id).unwrap_or_default(),
+            )
             || crate::todo::todo_waits_on_running_task(todo, |task_id| {
                 self.running_todo_await_dependency(task_id)
                     || self.running_todo_background_dependency(task_id).is_some()
@@ -728,6 +750,9 @@ impl App {
         hidden_user_prompts: usize,
     ) {
         let recent_history = self.recent_history_window_active();
+        // A load that arrives while the reader follows the tail (the Alt+E
+        // prompt-history backfill) must not pull them up to the old history.
+        let following_tail = !self.auto_scroll_paused && self.pending_history_anchor.is_none();
         compact_display_messages_for_storage(&mut messages);
         carry_over_tool_durations(&self.display_messages, &mut messages);
         self.display_messages = messages;
@@ -753,6 +778,9 @@ impl App {
         // fall back to the top when there is no anchor to honor.
         if self.pending_history_anchor.is_none() {
             self.scroll_offset = 0;
+        }
+        if following_tail {
+            self.auto_scroll_paused = false;
         }
         self.bump_display_messages_version();
         self.note_runtime_memory_event_force(
@@ -950,6 +978,58 @@ impl App {
         } else {
             self.apply_local_compacted_history_window(next_visible);
         }
+    }
+
+    /// The expanded prompt history (Alt+E) lists the last few prompts above
+    /// the viewport. A lazily loaded transcript may hold only one or two of
+    /// them, which makes the toggle look dead, so pull older history in until
+    /// the list is full. Returns true when a load was started.
+    pub(super) fn maybe_backfill_expanded_prompt_history(&mut self) -> bool {
+        const MAX_LOADS_PER_TOGGLE: u8 = 8;
+        if !crate::tui::ui::viewport::prompt_history_expanded()
+            || self.compacted_history_lazy.remaining_messages == 0
+            || self
+                .compacted_history_lazy
+                .pending_request_visible
+                .is_some()
+            || self.recent_history_paging.request.is_some()
+            || self.pending_history_anchor.is_some()
+            || self.prompt_history_backfill.1 >= MAX_LOADS_PER_TOGGLE
+        {
+            return false;
+        }
+        // Wait for a frame that includes the previous load before asking again.
+        let total = crate::tui::ui::last_total_wrapped_lines();
+        if self.prompt_history_backfill.0 == Some(total) {
+            return false;
+        }
+        let scroll = crate::tui::ui::last_resolved_chat_scroll();
+        let offscreen_prompts = crate::tui::ui::last_chat_frame().map_or(0, |frame| {
+            frame
+                .wrapped_user_prompt_starts
+                .partition_point(|line| *line < scroll)
+        });
+        if offscreen_prompts >= crate::tui::ui::viewport::EXPANDED_PROMPT_PREVIEW_COUNT {
+            return false;
+        }
+        let next_visible = self
+            .compacted_history_lazy
+            .visible_messages
+            .saturating_add(COMPACTED_HISTORY_CHUNK_MESSAGES)
+            .min(self.compacted_history_lazy.total_messages);
+        if next_visible <= self.compacted_history_lazy.visible_messages {
+            return false;
+        }
+        self.prompt_history_backfill = (Some(total), self.prompt_history_backfill.1 + 1);
+        if self.auto_scroll_paused {
+            self.capture_history_anchor(0);
+        }
+        if self.is_remote {
+            self.compacted_history_lazy.pending_request_visible = Some(next_visible);
+        } else {
+            self.apply_local_compacted_history_window(next_visible);
+        }
+        true
     }
 
     pub(super) fn take_pending_compacted_history_load(&mut self) -> Option<usize> {

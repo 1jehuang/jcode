@@ -12,7 +12,7 @@ pub struct SessionTelemetry {
     /// Normalized prompt size for one provider request, excluding output.
     pub context_tokens: u64,
     pub context_limit: Option<usize>,
-    pub compaction: Option<jcode_session_types::StoredCompactionState>,
+    pub compaction: Option<std::sync::Arc<jcode_session_types::StoredCompactionState>>,
     #[serde(default)]
     pub route_api_method: Option<String>,
     #[serde(default)]
@@ -66,6 +66,7 @@ pub fn save_context(
                 crate::usage::cached_account_usage_snapshot(provider, label)
                     .filter(|usage| usage.label == label)
                     .map(|usage| jcode_protocol::AccountUsageSnapshot {
+                        additional_windows: usage.additional_windows,
                         label: usage.label,
                         email: None,
                         exhausted: usage.exhausted,

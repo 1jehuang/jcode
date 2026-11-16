@@ -122,6 +122,10 @@ pub struct FileTouch {
     pub summary: Option<String>,
     /// Optional compact preview of what changed. Keep this short and already truncated.
     pub detail: Option<String>,
+    /// Lines added by this touch (0 for reads).
+    pub added: u64,
+    /// Lines removed by this touch (0 for reads).
+    pub removed: u64,
 }
 
 /// Streaming output tail for a swarm worker session, used to render the inline
@@ -422,6 +426,11 @@ pub enum SessionUpdateStatus {
 pub enum BusEvent {
     ToolUpdated(ToolEvent),
     TodoUpdated(TodoEvent),
+    /// A session's stored todo list, plan or goals were rewritten. Carries the
+    /// session id. Unlike `TodoUpdated` this fires for every writer, and only
+    /// client connections consume it, to push a fresh snapshot to windows
+    /// showing that session.
+    TodoStateStored(String),
     /// The coordinator changed a lane a worker owns; the worker's todo list
     /// was rewritten to match and the worker should be told.
     LaneEdited(LaneEdited),

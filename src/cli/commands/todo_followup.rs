@@ -52,12 +52,13 @@ pub(super) fn run_actionable_todos(
     tasks: &[crate::background::TaskStatusFile],
     session_id: &str,
 ) -> Vec<crate::todo::TodoItem> {
+    let goals = run_goals(session_id);
     todos
         .iter()
         .filter(|todo| {
             !crate::todo::is_incomplete_todo(todo)
-                || (!crate::todo::todo_completely_blocked(todo)
-                    && !crate::todo::todo_has_external_blocker(todo)
+                || (!crate::todo::todo_requires_user_auth(todo)
+                    && !crate::todo::todo_goal_cannot_complete(todo, &goals)
                     && !crate::todo::todo_waits_on_running_task(todo, |id| {
                         crate::todo::await_dependency::running(
                             &crate::storage::runtime_dir(),
@@ -77,11 +78,18 @@ pub(super) fn run_actionable_poke_message(
     todos: &[crate::todo::TodoItem],
     actionable: &[crate::todo::TodoItem],
 ) -> String {
-    if todos.iter().any(|todo| {
-        !todo.waiting_on.is_empty()
-            || todo.external_blocker.is_some()
-            || crate::todo::todo_completely_blocked(todo)
-    }) {
+    // Any paused or abandoned work means the generic count would overstate
+    // what is actionable, so name the actionable subset instead.
+    if actionable
+        .iter()
+        .filter(|todo| crate::todo::is_incomplete_todo(todo))
+        .count()
+        != todos
+            .iter()
+            .filter(|todo| crate::todo::is_incomplete_todo(todo))
+            .count()
+        || todos.iter().any(|todo| !todo.waiting_on.is_empty())
+    {
         let incomplete: Vec<_> = actionable
             .iter()
             .filter(|todo| crate::todo::is_incomplete_todo(todo))
@@ -92,28 +100,32 @@ pub(super) fn run_actionable_poke_message(
     message
 }
 
-pub(super) fn run_completely_blocked_notice(todos: &[crate::todo::TodoItem]) -> Option<String> {
+pub(super) fn run_goals(session_id: &str) -> Vec<crate::todo::TodoGoal> {
+    crate::todo::load_goals(session_id).unwrap_or_default()
+}
+
+pub(super) fn run_user_auth_notice(todos: &[crate::todo::TodoItem]) -> Option<String> {
     let blockers: Vec<_> = todos
         .iter()
-        .filter(|todo| crate::todo::todo_completely_blocked(todo))
+        .filter(|todo| crate::todo::todo_requires_user_auth(todo))
         .filter_map(|todo| {
-            todo.completely_blocked
+            todo.requires_user_auth
                 .as_ref()
                 .map(|blocker| format!("{}: {}", todo.id, blocker.reason))
         })
         .collect();
-    (!blockers.is_empty()).then(|| {
-        format!(
-            "✋ Completely blocked. No way forward.\n{}",
-            blockers.join("\n")
-        )
-    })
+    (!blockers.is_empty()).then(|| format!("✋ Needs your login.\n{}", blockers.join("\n")))
 }
 
-pub(super) fn run_blocked_notice(todos: &[crate::todo::TodoItem]) -> Option<String> {
+/// Why a headless run stopped with unfinished work nobody is waiting on a
+/// task for: the user must authorize it, or its goal was declared impossible.
+pub(super) fn run_blocked_notice(
+    todos: &[crate::todo::TodoItem],
+    goals: &[crate::todo::TodoGoal],
+) -> Option<String> {
     let notices: Vec<_> = [
-        run_completely_blocked_notice(todos),
-        run_external_blocker_notice(todos),
+        run_user_auth_notice(todos),
+        run_cannot_complete_notice(todos, goals),
     ]
     .into_iter()
     .flatten()
@@ -121,21 +133,21 @@ pub(super) fn run_blocked_notice(todos: &[crate::todo::TodoItem]) -> Option<Stri
     (!notices.is_empty()).then(|| notices.join("\n"))
 }
 
-pub(super) fn run_external_blocker_notice(todos: &[crate::todo::TodoItem]) -> Option<String> {
-    let blocked: Vec<_> = todos
+pub(super) fn run_cannot_complete_notice(
+    todos: &[crate::todo::TodoItem],
+    goals: &[crate::todo::TodoGoal],
+) -> Option<String> {
+    let reasons: BTreeSet<&str> = todos
         .iter()
-        .filter(|todo| crate::todo::todo_has_external_blocker(todo))
-        .filter_map(|todo| {
-            let blocker = todo.external_blocker.as_ref()?;
-            Some(format!(
-                "{}: {} (review {})",
-                todo.id,
-                blocker.reason,
-                blocker.review_at.to_rfc3339()
-            ))
-        })
+        .filter(|todo| crate::todo::is_incomplete_todo(todo))
+        .filter_map(|todo| crate::todo::todo_cannot_complete_reason(todo, goals))
         .collect();
-    (!blocked.is_empty()).then(|| format!("Unfinished todos are externally blocked. The durable scheduler will request reassessment at their review deadlines, not mark them complete.\n{}", blocked.join("\n")))
+    (!reasons.is_empty()).then(|| {
+        format!(
+            "Goal cannot be completed. Its unfinished todos were left as they are.\n{}",
+            reasons.into_iter().collect::<Vec<_>>().join("\n")
+        )
+    })
 }
 
 /// CLI owns continuation while waiting. Unlike a daemon wake, this resumes the
@@ -153,7 +165,7 @@ pub(super) async fn prepare_run_todo_follow_up(
     let dependencies: BTreeSet<_> = todos
         .iter()
         .filter(|todo| {
-            crate::todo::is_incomplete_todo(todo) && !crate::todo::todo_completely_blocked(todo)
+            crate::todo::is_incomplete_todo(todo) && !crate::todo::todo_requires_user_auth(todo)
         })
         .flat_map(|todo| todo.waiting_on.iter().cloned())
         .filter(|id| {

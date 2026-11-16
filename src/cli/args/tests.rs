@@ -634,10 +634,12 @@ fn login_no_browser_flag_parses() {
             no_validate,
             flow_id,
             cancel,
+            device_code,
         }) => {
             assert!(provider.is_none());
             assert!(account.is_none());
             assert!(no_browser);
+            assert!(!device_code);
             assert!(!print_auth_url);
             assert!(callback_url.is_none());
             assert!(auth_code.is_none());

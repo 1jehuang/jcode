@@ -26,12 +26,6 @@ pub struct IncrementalMarkdownRenderer {
     rendered_lines: Vec<Line<'static>>,
     /// Text that was rendered (for comparison)
     rendered_text: String,
-    /// Position of last safe checkpoint (after complete block)
-    last_checkpoint: usize,
-    /// Number of lines at last checkpoint
-    lines_at_checkpoint: usize,
-    /// Whether a blank separator should be preserved at the checkpoint boundary
-    checkpoint_needs_separator: bool,
     /// Whether `rendered_lines` contains a deferred-mermaid pending
     /// placeholder; when true the identical-text fast path must re-render
     /// once the deferred render epoch advances so the completed diagram
@@ -44,6 +38,35 @@ pub struct IncrementalMarkdownRenderer {
     rendered_show_link_urls: bool,
     /// Width constraint
     max_width: Option<usize>,
+    /// Byte offset into `rendered_text` where the re-rendered tail starts.
+    /// Everything before it is the stable head; `0` means no split.
+    stable_offset: usize,
+    /// Rendered lines of the stable head, reused instead of re-rendered.
+    stable_lines: Vec<Line<'static>>,
+    /// Whether a blank separator line sits between the head and the tail.
+    stable_separator: bool,
+    /// Newline count of the tail when the split was last checked against a
+    /// full render.
+    verified_tail_newlines: usize,
+    /// Bumped whenever `stable_lines` changes, so callers can key their own
+    /// per-line caches on it.
+    stable_generation: u64,
+    /// Set once this text proved unsafe to split; cleared by `reset` or when
+    /// the text stops being an extension of the previous one.
+    split_poisoned: bool,
+    /// Render context the stable head was rendered under.
+    stable_centered: bool,
+    stable_spacing: Option<MarkdownSpacingMode>,
+}
+
+/// What a scan of the re-rendered tail found.
+enum StableSplit {
+    /// No later split point yet.
+    None,
+    /// Tail-relative byte offset of a line that starts a new top-level block.
+    At(usize),
+    /// The tail holds a construct this scanner does not follow.
+    Unsafe,
 }
 
 impl IncrementalMarkdownRenderer {
@@ -51,22 +74,164 @@ impl IncrementalMarkdownRenderer {
         Self {
             rendered_lines: Vec::new(),
             rendered_text: String::new(),
-            last_checkpoint: 0,
-            lines_at_checkpoint: 0,
-            checkpoint_needs_separator: false,
             rendered_mermaid_pending: false,
             rendered_mermaid_epoch: 0,
             rendered_show_link_urls: config_snapshot().show_link_urls,
             max_width,
+            stable_offset: 0,
+            stable_lines: Vec::new(),
+            stable_separator: false,
+            verified_tail_newlines: 0,
+            stable_generation: 0,
+            split_poisoned: false,
+            stable_centered: false,
+            stable_spacing: None,
         }
+    }
+
+    /// `(generation, line_count)` of the leading lines returned by the last
+    /// `update` that came from the stable head. While the generation is
+    /// unchanged those lines are identical to the ones returned before, so a
+    /// caller may reuse work derived from them (wrapping, plain text).
+    pub fn stable_prefix(&self) -> (u64, usize) {
+        (self.stable_generation, self.stable_lines.len())
+    }
+
+    fn clear_split(&mut self) {
+        if self.stable_offset != 0 || !self.stable_lines.is_empty() {
+            self.stable_generation = next_stable_generation();
+        }
+        self.stable_offset = 0;
+        self.stable_lines = Vec::new();
+        self.stable_separator = false;
+        self.verified_tail_newlines = 0;
+    }
+
+    fn compose(
+        head: &[Line<'static>],
+        separator: bool,
+        tail: Vec<Line<'static>>,
+    ) -> Vec<Line<'static>> {
+        let mut lines = Vec::with_capacity(head.len() + tail.len() + 1);
+        lines.extend_from_slice(head);
+        if separator {
+            lines.push(Line::default());
+        }
+        lines.extend(tail);
+        lines
+    }
+
+    /// The separator (`Some(blank?)`) under which `head ++ tail` reproduces
+    /// `full` exactly, if any.
+    fn matching_separator(
+        full: &[Line<'static>],
+        head: &[Line<'static>],
+        tail: &[Line<'static>],
+    ) -> Option<bool> {
+        if tail.is_empty() || full.len() < head.len() || full[..head.len()] != *head {
+            return None;
+        }
+        let rest = &full[head.len()..];
+        if rest == tail {
+            return Some(false);
+        }
+        (rest.len() == tail.len() + 1 && line_is_blank(&rest[0]) && rest[1..] == *tail)
+            .then_some(true)
+    }
+
+    /// Render `full_text`, re-rendering only the text after the stable head
+    /// when that is known to give the same lines as a full render.
+    ///
+    /// A streamed reply only ever grows at the end, so the blocks before the
+    /// last blank-line boundary do not change. Splitting markdown there is not
+    /// safe in general (lists, reference definitions and HTML blocks reach
+    /// across blank lines), so the split is not trusted on its own: it is only
+    /// taken at a line that starts a plain top-level paragraph, text with
+    /// constructs that reach across blocks never splits, and every time the
+    /// tail gains or loses a line the composed result is compared against a
+    /// full render. A mismatch turns splitting off for the rest of the text.
+    fn render_split(&mut self, full_text: &str) -> Vec<Line<'static>> {
+        let centered = center_code_blocks();
+        let spacing = effective_markdown_spacing_mode();
+        if !self.rendered_text.is_empty() && !full_text.starts_with(self.rendered_text.as_str()) {
+            // Not an append: nothing learned about the old text carries over.
+            self.clear_split();
+            self.split_poisoned = false;
+        } else if self.stable_offset > 0
+            && (self.stable_centered != centered || self.stable_spacing != Some(spacing))
+        {
+            self.clear_split();
+        }
+        if self.split_poisoned {
+            return render_markdown_with_width(full_text, self.max_width);
+        }
+
+        let tail = &full_text[self.stable_offset..];
+        let split = if split_blocked(tail) {
+            StableSplit::Unsafe
+        } else {
+            find_stable_split(tail)
+        };
+        let candidate = match split {
+            StableSplit::Unsafe => {
+                self.clear_split();
+                self.split_poisoned = true;
+                return render_markdown_with_width(full_text, self.max_width);
+            }
+            StableSplit::At(offset) => Some(offset),
+            StableSplit::None => None,
+        };
+        if self.stable_offset == 0 && candidate.is_none() {
+            return render_markdown_with_width(full_text, self.max_width);
+        }
+        let tail_newlines = count_newlines(tail);
+        if candidate.is_none() && tail_newlines == self.verified_tail_newlines {
+            let tail_lines = render_markdown_with_width(tail, self.max_width);
+            return Self::compose(&self.stable_lines, self.stable_separator, tail_lines);
+        }
+
+        // Check the split (the current one, or the one about to be adopted)
+        // against a full render, and return the full render either way.
+        let full = render_markdown_with_width(full_text, self.max_width);
+        let (offset, head) = match candidate {
+            Some(relative) => {
+                let segment = render_markdown_with_width(&tail[..relative], self.max_width);
+                let head = if self.stable_offset == 0 {
+                    segment
+                } else {
+                    Self::compose(&self.stable_lines, self.stable_separator, segment)
+                };
+                (self.stable_offset + relative, head)
+            }
+            None => (self.stable_offset, std::mem::take(&mut self.stable_lines)),
+        };
+        let new_tail = &full_text[offset..];
+        let tail_lines = render_markdown_with_width(new_tail, self.max_width);
+        match Self::matching_separator(&full, &head, &tail_lines) {
+            Some(separator) => {
+                if candidate.is_some() {
+                    self.stable_generation = next_stable_generation();
+                }
+                self.stable_offset = offset;
+                self.stable_lines = head;
+                self.stable_separator = separator;
+                self.verified_tail_newlines = count_newlines(new_tail);
+                self.stable_centered = centered;
+                self.stable_spacing = Some(spacing);
+            }
+            None => {
+                self.stable_lines = head;
+                self.clear_split();
+                self.split_poisoned = true;
+            }
+        }
+        full
     }
 
     /// Update with new text, returns rendered lines
     ///
-    /// This method efficiently handles streaming by:
-    /// 1. Detecting if text was only appended (common case)
-    /// 2. Finding safe re-render points (after complete blocks)
-    /// 3. Only re-rendering from the last safe point
+    /// Unchanged text returns the cached lines. Any other text is rendered
+    /// in full, once.
     pub fn update(&mut self, full_text: &str) -> Vec<Line<'static>> {
         with_streaming_render_context(|| self.update_internal(full_text))
     }
@@ -78,8 +243,6 @@ impl IncrementalMarkdownRenderer {
             "rendered_lines_count": self.rendered_lines.len(),
             "rendered_lines_estimate_bytes": rendered_lines_estimate_bytes,
             "rendered_text_bytes": rendered_text_bytes,
-            "last_checkpoint": self.last_checkpoint,
-            "lines_at_checkpoint": self.lines_at_checkpoint,
             "total_estimate_bytes": rendered_lines_estimate_bytes + rendered_text_bytes,
         })
     }
@@ -109,7 +272,10 @@ impl IncrementalMarkdownRenderer {
         // completes mid-render, the stamp is already older than the new epoch
         // and the next update re-renders instead of waiting forever.
         let mermaid_epoch_before = mermaid::deferred_render_epoch();
-        self.rendered_lines = render_markdown_with_width(full_text, self.max_width);
+        if self.rendered_show_link_urls != show_link_urls {
+            self.clear_split();
+        }
+        self.rendered_lines = self.render_split(full_text);
         self.rendered_text = full_text.to_string();
         self.rendered_mermaid_pending = self
             .rendered_lines
@@ -118,9 +284,9 @@ impl IncrementalMarkdownRenderer {
         self.rendered_mermaid_epoch = mermaid_epoch_before;
         self.rendered_show_link_urls = show_link_urls;
 
-        // Find checkpoint for next incremental update
-        self.refresh_checkpoint(full_text, true);
-
+        // No checkpoint is kept: counting the lines of the completed prefix
+        // meant rendering that prefix a second time on every streamed update,
+        // and nothing read the count.
         self.rendered_lines.clone()
     }
 
@@ -229,41 +395,14 @@ impl IncrementalMarkdownRenderer {
         checkpoint
     }
 
-    /// Refresh checkpoint metadata from the latest rendered text.
-    ///
-    /// `force = true` recomputes prefix line counts even when checkpoint byte position is unchanged.
-    fn refresh_checkpoint(&mut self, full_text: &str, force: bool) {
-        let checkpoint = self.find_last_complete_block_checkpoint(full_text);
-        let new_checkpoint = checkpoint.map(|cp| cp.offset).unwrap_or(0);
-        let new_checkpoint_needs_separator =
-            checkpoint.map(|cp| cp.needs_separator).unwrap_or(false);
-        if !force
-            && new_checkpoint == self.last_checkpoint
-            && new_checkpoint_needs_separator == self.checkpoint_needs_separator
-        {
-            return;
-        }
-
-        self.last_checkpoint = new_checkpoint;
-        self.checkpoint_needs_separator = new_checkpoint_needs_separator;
-        if new_checkpoint == 0 {
-            self.lines_at_checkpoint = 0;
-        } else {
-            let prefix_lines =
-                render_markdown_with_width(&full_text[..new_checkpoint], self.max_width);
-            self.lines_at_checkpoint = prefix_lines.len();
-        }
-    }
-
     /// Reset the renderer state
     pub fn reset(&mut self) {
         self.rendered_lines.clear();
         self.rendered_text.clear();
-        self.last_checkpoint = 0;
-        self.lines_at_checkpoint = 0;
-        self.checkpoint_needs_separator = false;
         self.rendered_mermaid_pending = false;
         self.rendered_mermaid_epoch = 0;
+        self.clear_split();
+        self.split_poisoned = false;
     }
 
     /// Update width constraint, resets if changed
@@ -272,6 +411,89 @@ impl IncrementalMarkdownRenderer {
             self.max_width = max_width;
             self.reset();
         }
+    }
+}
+
+/// Generations are unique across renderers, so `(generation, line_count)`
+/// names one specific run of head lines process-wide.
+fn next_stable_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn count_newlines(text: &str) -> usize {
+    text.bytes().filter(|byte| *byte == b'\n').count()
+}
+
+/// Text that must be rendered whole: it holds something that reaches across
+/// block boundaries, has render side effects, or is pre-processed with state
+/// that a split would lose.
+fn split_blocked(text: &str) -> bool {
+    // Math is normalized by passes that pair delimiters across the whole text,
+    // and rendering it can emit a once-per-render install hint.
+    text.contains('$')
+        || text.contains("\\(")
+        || text.contains("\\[")
+        || text.contains("\\begin")
+        // Reference link and footnote definitions resolve uses anywhere.
+        || text.contains("]:")
+        // Images and diagrams register state while rendering.
+        || text.contains("![")
+        || text.contains("ermaid")
+}
+
+/// Find the last line in `tail` that starts a new top-level paragraph after a
+/// blank line, outside any fenced block. `tail` must itself start at such a
+/// line (or at the start of the text).
+fn find_stable_split(tail: &str) -> StableSplit {
+    let mut found = None;
+    let mut fence: Option<(char, usize)> = None;
+    let mut previous_blank = false;
+    let mut offset = 0usize;
+    for line in tail.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        let logical = line.strip_suffix('\n').unwrap_or(line);
+        let trimmed = logical.trim_start();
+        if let Some((marker, len)) = fence {
+            if is_closing_fence(logical, marker, len) {
+                fence = None;
+            }
+            previous_blank = false;
+            continue;
+        }
+        if trimmed.is_empty() {
+            previous_blank = true;
+            continue;
+        }
+        // HTML blocks may run across blank lines.
+        if trimmed.starts_with('<') {
+            return StableSplit::Unsafe;
+        }
+        if logical.starts_with("```") || logical.starts_with("~~~") {
+            fence = parse_opening_fence(logical);
+        } else if logical.contains("```") || logical.contains("~~~") {
+            // A fence that is indented or inside a list or quote: where it
+            // ends depends on its container, which this scan does not track.
+            let lead = logical.trim_start_matches(|c: char| {
+                c.is_whitespace() || c.is_ascii_digit() || "->*+.)".contains(c)
+            });
+            if lead.starts_with("```") || lead.starts_with("~~~") {
+                return StableSplit::Unsafe;
+            }
+        }
+        if fence.is_none()
+            && previous_blank
+            && start > 0
+            && logical.chars().next().is_some_and(char::is_alphabetic)
+        {
+            found = Some(start);
+        }
+        previous_blank = false;
+    }
+    match found {
+        Some(start) => StableSplit::At(start),
+        None => StableSplit::None,
     }
 }
 

@@ -1,4 +1,5 @@
 use super::idle_animation_repaint::{copy_cells_in, idle_animation_partial_repaint_allowed};
+use super::spinner_ticker::SpinnerTicker;
 use super::*;
 
 fn report_reload_interaction_gap() {
@@ -40,6 +41,25 @@ const STARTUP_TRANSCRIPT_POLL: std::time::Duration = std::time::Duration::from_m
 const EVENT_REDRAW_MIN_INTERVAL: Duration = Duration::from_millis(16);
 pub(super) const STATUS_SPINNER_ONLY_INTERVAL: Duration = Duration::from_millis(80);
 
+/// Keep the spinner/animation snapshot exact without cloning unchanged cells
+/// on sparse frames. Ratatui already counted flushed updates, so dense redraws
+/// retain the straight vector copy rather than paying another diff scan.
+pub(super) fn update_retained_frame(previous: &mut Buffer, rendered: &Buffer, updates: usize) {
+    let sparse = previous.area == rendered.area
+        && previous.content.len() == rendered.content.len()
+        && updates < rendered.content.len() / 4;
+    previous.area = rendered.area;
+    if sparse {
+        for (to, from) in previous.content.iter_mut().zip(&rendered.content) {
+            if to != from {
+                to.clone_from(from);
+            }
+        }
+    } else {
+        previous.content.clone_from(&rendered.content);
+    }
+}
+
 pub(super) fn redraw_timer(period: Duration) -> tokio::time::Interval {
     let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
     // Redraw ticks represent visual liveness, not elapsed simulation steps. An
@@ -69,25 +89,58 @@ pub(crate) fn refresh_preview_redraw_timer(
     }
 }
 
-pub(super) fn status_spinner_interval() -> tokio::time::Interval {
-    status_spinner_interval_after(STATUS_SPINNER_ONLY_INTERVAL)
+/// Most server events handled in one wakeup while they are being batched.
+const SERVER_EVENT_DRAIN_MAX: usize = 256;
+
+/// Whether server events may be read in batches instead of one per wakeup:
+/// only for an unfocused client that is mirroring a turn in flight. A focused
+/// client, or one with nothing running, reads every event as it arrives.
+pub(super) fn hold_server_events_while_unfocused(app: &App) -> bool {
+    app.is_processing && !app.client_focused()
 }
 
-pub(super) fn reset_status_spinner_interval(interval: &mut tokio::time::Interval, app: &App) {
-    *interval = status_spinner_interval_after(status_spinner_delay_until_next_frame(
+/// Whether the spinner thread's ticks should service the loop's other
+/// deadlines in place of runtime timers.
+///
+/// The loop runs in `block_on` on the main thread, so arming a runtime timer
+/// there unparks the worker that owns the timer driver, and its expiry wakes
+/// that worker again. A backtrace of every driver unpark on an unfocused client
+/// mirroring a streamed turn showed nothing else: the redraw tick, the server
+/// event hold and the redraw deferral, re-armed about eight times a second
+/// between them. The spinner thread already wakes the loop every 80ms then, so
+/// those deadlines are checked on its ticks and the timers stay unarmed.
+///
+/// Only for an unfocused client, where being up to half a spinner frame early
+/// or late is invisible, and only when the tick period is coarse enough to be
+/// kept by 80ms steps.
+pub(super) fn spinner_drives_deadlines(
+    spinner_available: bool,
+    focused: bool,
+    redraw_period: Duration,
+) -> bool {
+    spinner_available && !focused && redraw_period >= STATUS_SPINNER_ONLY_INTERVAL * 2
+}
+
+/// Whether a deadline checked on a spinner tick counts as reached. Half a
+/// frame of slack rounds to the nearest tick, so a 250ms deadline is met on the
+/// third tick (240ms) and not the fourth (320ms).
+pub(super) fn deadline_due_on_spinner_tick(
+    deadline: tokio::time::Instant,
+    now: tokio::time::Instant,
+) -> bool {
+    now + STATUS_SPINNER_ONLY_INTERVAL / 2 >= deadline
+}
+
+/// Spinner cadence. Not a runtime timer: see [`SpinnerTicker`] for why that
+/// cost four thread wakeups per frame.
+pub(super) fn status_spinner_interval() -> SpinnerTicker {
+    SpinnerTicker::new(STATUS_SPINNER_ONLY_INTERVAL, STATUS_SPINNER_ONLY_INTERVAL)
+}
+
+pub(super) fn reset_status_spinner_interval(interval: &mut SpinnerTicker, app: &App) {
+    interval.reset_after(status_spinner_delay_until_next_frame(
         status_spinner_elapsed(app),
     ));
-}
-
-fn status_spinner_interval_after(delay: Duration) -> tokio::time::Interval {
-    let mut interval = tokio::time::interval_at(
-        tokio::time::Instant::now() + delay,
-        STATUS_SPINNER_ONLY_INTERVAL,
-    );
-    // The spinner is visual liveness, not simulated time. If terminal/input work delays a tick,
-    // skip the missed frames instead of bursting them later.
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    interval
 }
 
 fn status_spinner_elapsed(app: &App) -> f32 {
@@ -124,11 +177,17 @@ pub(super) fn status_spinner_only_symbol(app: &App) -> Option<&'static str> {
     // responsive instead of choppy at the ~1 Hz passive-liveness redraw rate.
     // When decorative animations are off it advances at the smooth liveness
     // rate; otherwise it uses the full-rate spinner clock.
+    // A focused client streams text as full frames fast enough to carry the
+    // spinner. An unfocused one batches text slowly, so the spinner needs this
+    // path to keep its normal 80ms motion between batches.
     if !app.is_processing
-        || !app.streaming.streaming_text.is_empty()
+        || (!app.streaming.streaming_text.is_empty() && app.client_focused())
         || app.centered_mode()
         || app.has_pending_mouse_scroll_animation()
         || app.remote_startup_phase_active()
+        // Out of sight: park the spinner thread. The slow hidden tick keeps
+        // the status row current for when the window is shown again.
+        || crate::tui::window_visibility::hidden(app.client_focused())
     {
         return None;
     }
@@ -347,6 +406,14 @@ impl StatusSpinnerRenderer {
         self.last_full_frame_input.clear();
     }
 
+    /// Remember only the cells a partial repaint changed, before ratatui resets
+    /// its working buffer. The snapshot must match the flushed frame exactly.
+    fn remember_partial_frame(&mut self, rendered: &Buffer, area: Rect) {
+        if let Some(last) = self.last_frame.as_mut() {
+            copy_cells_in(rendered, last, area);
+        }
+    }
+
     /// Present an animation frame and forget its working-buffer seed.
     ///
     /// `Terminal::swap_buffers` resets the buffer that the next tick will draw
@@ -454,7 +521,8 @@ impl StatusSpinnerRenderer {
             if self.seeded_animation_area == Some(area) {
                 copy_cells_in(previous_frame, current_buffer, area);
             } else {
-                current_buffer.clone_from(previous_frame);
+                current_buffer.area = previous_frame.area;
+                current_buffer.content.clone_from(&previous_frame.content);
                 self.seeded_animation_area = Some(area);
             }
             crate::tui::ui::render_idle_animation_into(
@@ -478,20 +546,11 @@ impl StatusSpinnerRenderer {
             RestorePosition,
             EndSynchronizedUpdate
         )?;
+        // Retain exactly the flushed cells. Re-rendering samples a later clock
+        // and doubles scene work while potentially diverging from the screen.
+        self.remember_partial_frame(terminal.current_buffer_mut(), area);
         self.swap_after_animation_frame(terminal);
         terminal.backend_mut().flush()?;
-        // Keep the remembered frame current without cloning the whole screen: it
-        // already matches everywhere except the rows just re-rendered. Re-render
-        // the animation into those rows directly (deterministic for a given
-        // elapsed time, and far cheaper than copying 7680 cells) so
-        // `self.last_frame` stays byte-identical to what the terminal now shows.
-        if let Some(last) = self.last_frame.as_mut() {
-            crate::tui::ui::render_idle_animation_into(
-                last,
-                area,
-                crate::tui::TuiState::animation_elapsed(app),
-            );
-        }
         // Without this the animation-only path was invisible in `draw-stats`:
         // `partial_repaints` stayed at 0 while this path served ~60 repaints a
         // second, which reads as "the cheap path never runs" and sends anyone
@@ -537,7 +596,7 @@ impl StatusSpinnerRenderer {
 
         // Take the previous frame so its allocation can be reused below
         // (`clone_from`) instead of allocating a whole new buffer per frame.
-        let mut stored_frame = self.last_frame.take();
+        let stored_frame = self.last_frame.take();
         let previous_frame = stored_frame.as_ref();
         let draw_start = Instant::now();
         let mut render_elapsed = Duration::ZERO;
@@ -555,13 +614,11 @@ impl StatusSpinnerRenderer {
             .filter(|previous| previous.area == completed.buffer.area)
             .map(|_| completed.flushed_updates);
         let total_cells = Some(completed.buffer.content.len());
-        let completed_buffer = match stored_frame.as_mut() {
-            Some(buffer) => {
-                // Derived `Buffer::clone_from` reallocates; `Vec::clone_from`
-                // reuses the existing cell storage.
-                buffer.area = completed.buffer.area;
-                buffer.content.clone_from(&completed.buffer.content);
-                stored_frame.take().unwrap_or_default()
+        let completed_buffer = match stored_frame {
+            Some(mut buffer) => {
+                // Reuse the Vec and skip unchanged cells on sparse frames.
+                update_retained_frame(&mut buffer, completed.buffer, completed.flushed_updates);
+                buffer
             }
             None => completed.buffer.clone(),
         };
@@ -622,48 +679,46 @@ impl StatusSpinnerRenderer {
             return Ok(false);
         };
         let status_area = crate::tui::ui::last_status_area();
-        let status_patchable = status_symbol
-            .zip(status_area)
-            .is_some_and(|(symbol, area)| {
-                render_status_spinner_into_buffer(previous_frame, area, symbol)
-            });
-        if !status_patchable {
+        let Some((symbol, area)) = status_symbol.zip(status_area) else {
+            return Ok(false);
+        };
+        if !render_status_spinner_into_buffer(previous_frame, area, symbol) {
             return Ok(false);
         }
 
-        let next_frame = {
-            let current_buffer = terminal.current_buffer_mut();
-            current_buffer.clone_from(previous_frame);
-            if let Some((symbol, area)) = status_symbol.zip(status_area)
-                && status_patchable
-            {
-                render_status_spinner_into_buffer_mut(current_buffer, area, symbol);
-            }
-            current_buffer.clone()
-        };
+        if terminal.current_buffer_mut().area != previous_frame.area {
+            return Ok(false);
+        }
+        let mut cell = previous_frame[(area.x, area.y)].clone();
+        cell.set_symbol(symbol)
+            .set_style(status_spinner_patch_style());
 
         // Keep ratatui's virtual buffers authoritative while preserving the user's cursor position.
         // The only terminal mutation outside ratatui here is cursor save/restore; cell contents still
-        // go through Terminal::flush so the next full-frame diff remains synchronized. Wrap the
+        // go through Terminal's retained-cell API so the next full-frame diff stays synchronized. Wrap the
         // single-cell update in a synchronized update so it applies atomically (see issue #282).
         crossterm::queue!(
             terminal.backend_mut(),
             BeginSynchronizedUpdate,
             SavePosition
         )?;
-        terminal.flush()?;
-        crossterm::queue!(
+        let patch_result = terminal.draw_retained_cell((area.x, area.y).into(), cell.clone());
+        let cleanup_result = crossterm::queue!(
             terminal.backend_mut(),
             RestorePosition,
             EndSynchronizedUpdate
-        )?;
-        terminal.swap_buffers();
+        );
+        let patched = patch_result?;
+        cleanup_result?;
+        if patched && let Some(previous) = self.last_frame.as_mut() {
+            previous[(area.x, area.y)] = cell;
+        }
         terminal.backend_mut().flush()?;
-        self.last_frame = Some(next_frame);
-        // This path `clone_from`s the whole previous frame and patches one cell,
-        // so the animation-only repaint's "everything outside the animated rows
-        // is already seeded" assumption no longer holds. Make it re-seed once.
+        // The working buffer remains reset. A later animation repaint must seed it.
         self.seeded_animation_area = None;
+        if !patched {
+            return Ok(false);
+        }
         crate::tui::ui::note_idle_animation_partial_repaint();
         Ok(true)
     }
@@ -678,6 +733,7 @@ fn render_status_spinner_into_buffer(buffer: &Buffer, area: Rect, symbol: &str) 
         && !symbol.is_empty()
 }
 
+#[cfg(test)]
 fn render_status_spinner_into_buffer_mut(buffer: &mut Buffer, area: Rect, symbol: &str) {
     buffer.set_stringn(
         area.x,
@@ -686,11 +742,15 @@ fn render_status_spinner_into_buffer_mut(buffer: &mut Buffer, area: Rect, symbol
         1,
         // The spinner cell is patched outside the full-frame draw, so apply
         // light-theme adaptation here explicitly (no-op on dark themes).
-        Style::default().fg(jcode_tui_style::adapt_foreground_for_display(
-            jcode_tui_style::theme::ai_color(),
-            ratatui::style::Color::Reset,
-        )),
+        status_spinner_patch_style(),
     );
+}
+
+fn status_spinner_patch_style() -> Style {
+    Style::default().fg(jcode_tui_style::adapt_foreground_for_display(
+        jcode_tui_style::theme::ai_color(),
+        ratatui::style::Color::Reset,
+    ))
 }
 
 impl App {
@@ -865,6 +925,9 @@ impl App {
         let mut remote_state = remote::RemoteRunState::default();
 
         'outer: loop {
+            // Each pass connects afresh, possibly to an older server. Poll
+            // todos again until this server shows that it pushes them.
+            self.remote_todos_pushed = false;
             if self.display_messages.is_empty() {
                 if self.server_spawning {
                     self.set_remote_startup_phase(super::RemoteStartupPhase::StartingServer);
@@ -934,6 +997,9 @@ impl App {
             }
             status_spinner_renderer.invalidate();
             needs_redraw = true;
+            // The Pong lists what this server supports. Until it arrives no
+            // focus is reported, which the server treats as focused.
+            let _ = remote_conn.request_capabilities().await;
 
             let mut bus_receiver_remote = Bus::global().subscribe();
             if let Some(status) = Bus::global().latest_update_status() {
@@ -943,9 +1009,22 @@ impl App {
 
             let mut input_redraw = true;
             let mut deferred_redraw_at: Option<tokio::time::Instant> = None;
+            // See `spinner_drives_deadlines`.
+            let mut deadlines_were_on_spinner = false;
+            let mut last_loop_tick = tokio::time::Instant::now();
+            // While set, server events stay in the socket buffer. An unfocused
+            // client mirroring a turn was woken about 19 times a second by
+            // them, one event per wakeup, and nothing on screen needs that
+            // rate: text is revealed in REDRAW_UNFOCUSED_STREAM batches.
+            let mut server_events_held_until: Option<tokio::time::Instant> = None;
             // Main event loop
             loop {
                 self.sync_sleep_guard();
+                // Sends only when focus or visibility changed since the last report.
+                let focused = self.client_focused();
+                remote_conn
+                    .sync_focus(focused, crate::tui::window_visibility::hidden(focused))
+                    .await;
                 // The reload fast-start transcript is rendered off-thread. Show
                 // it as soon as it is ready instead of on the next tick: during
                 // remote startup ticks are 1s apart, which held a ready
@@ -1028,6 +1107,22 @@ impl App {
                     continue;
                 }
 
+                let spinner_available = status_spinner_renderer.spinner_only_available(&self);
+                let on_spinner = spinner_drives_deadlines(
+                    spinner_available,
+                    self.client_focused(),
+                    redraw_period,
+                );
+                if on_spinner != deadlines_were_on_spinner {
+                    deadlines_were_on_spinner = on_spinner;
+                    last_loop_tick = tokio::time::Instant::now();
+                    if !on_spinner {
+                        // The runtime timer was not polled meanwhile. Restart
+                        // it so it does not fire at once for the gap.
+                        redraw_interval = redraw_timer(redraw_period);
+                    }
+                }
+
                 tokio::select! {
                     // Poll in declaration order so user input always wins the
                     // race against server/bus chatter. During heavy streaming
@@ -1055,13 +1150,34 @@ impl App {
                             tokio::time::sleep(redraw_period).await;
                         }
                     }
-                    _ = status_spinner_interval.tick(), if status_spinner_renderer.spinner_only_available(&self) => {
+                    _ = status_spinner_interval.tick(), if spinner_available => {
                         super::wake_stats::note("spinner");
                         if !status_spinner_renderer.draw_status_spinner_only(&self, &mut terminal)? {
                             needs_redraw = true;
                         }
+                        if on_spinner {
+                            let now = tokio::time::Instant::now();
+                            if server_events_held_until
+                                .is_some_and(|at| deadline_due_on_spinner_tick(at, now))
+                            {
+                                super::wake_stats::note("server_events_released");
+                                server_events_held_until = None;
+                            }
+                            if deferred_redraw_at
+                                .is_some_and(|at| deadline_due_on_spinner_tick(at, now))
+                            {
+                                super::wake_stats::note("deferred_redraw");
+                                deferred_redraw_at = None;
+                            }
+                            if deadline_due_on_spinner_tick(last_loop_tick + redraw_period, now) {
+                                last_loop_tick = now;
+                                super::wake_stats::note("tick");
+                                needs_redraw |=
+                                    remote::handle_tick(&mut self, &mut remote_conn).await;
+                            }
+                        }
                     }
-                    _ = redraw_interval.tick() => {
+                    _ = redraw_interval.tick(), if !on_spinner => {
                         super::wake_stats::note("tick");
                         needs_redraw |= remote::handle_tick(&mut self, &mut remote_conn).await;
                     }
@@ -1070,28 +1186,69 @@ impl App {
                             Some(at) => tokio::time::sleep_until(at).await,
                             None => futures::future::pending::<()>().await,
                         }
-                    } => {
+                    }, if !on_spinner => {
                         super::wake_stats::note("deferred_redraw");
                         deferred_redraw_at = None;
                     }
-                    event = remote_conn.next_event() => {
-                        match &event {
-                            crate::tui::backend::RemoteRead::Event(event) => super::wake_stats::note_debug("server", event),
-                            crate::tui::backend::RemoteRead::Disconnected(_) => super::wake_stats::note("server:closed"),
+                    _ = async {
+                        match server_events_held_until {
+                            Some(at) => tokio::time::sleep_until(at).await,
+                            None => futures::future::pending::<()>().await,
                         }
-                        let (outcome, event_redraw) = remote::handle_remote_event(
-                            &mut self,
-                            &mut terminal,
-                            &mut remote_conn,
-                            &mut remote_state,
-                            event,
-                        )
-                        .await?;
-                        needs_redraw |= event_redraw;
-                        match outcome {
-                            remote::RemoteEventOutcome::Continue => {}
-                            remote::RemoteEventOutcome::Reconnect => continue 'outer,
-                            remote::RemoteEventOutcome::Quit => break 'outer,
+                    }, if !on_spinner => {
+                        super::wake_stats::note("server_events_released");
+                        server_events_held_until = None;
+                    }
+                    event = remote_conn.next_event(), if server_events_held_until.is_none() || self.client_focused() => {
+                        server_events_held_until = None;
+                        let mut event = event;
+                        let mut drained = 0usize;
+                        loop {
+                            match &event {
+                                crate::tui::backend::RemoteRead::Event(crate::protocol::ServerEvent::Pong { capabilities, .. }) => {
+                                    remote_conn.note_server_capabilities(capabilities);
+                                    super::wake_stats::note("server:pong");
+                                }
+                                crate::tui::backend::RemoteRead::Event(event) => super::wake_stats::note_debug("server", event),
+                                crate::tui::backend::RemoteRead::Disconnected(_) => super::wake_stats::note("server:closed"),
+                            }
+                            let (outcome, event_redraw) = remote::handle_remote_event(
+                                &mut self,
+                                &mut terminal,
+                                &mut remote_conn,
+                                &mut remote_state,
+                                event,
+                            )
+                            .await?;
+                            needs_redraw |= event_redraw;
+                            match outcome {
+                                remote::RemoteEventOutcome::Continue => {}
+                                remote::RemoteEventOutcome::Reconnect => continue 'outer,
+                                remote::RemoteEventOutcome::Quit => break 'outer,
+                            }
+                            // Unfocused mid-turn: take everything already
+                            // delivered in this one wakeup, then leave the
+                            // socket alone for one text batch. Bounded so a
+                            // flood cannot starve input or drawing.
+                            if !hold_server_events_while_unfocused(&self) {
+                                break;
+                            }
+                            drained += 1;
+                            if drained >= SERVER_EVENT_DRAIN_MAX {
+                                break;
+                            }
+                            match futures::FutureExt::now_or_never(remote_conn.next_event()) {
+                                Some(next) => event = next,
+                                None => {
+                                    server_events_held_until = Some(
+                                        tokio::time::Instant::now()
+                                            + crate::tui::redraw_schedule::unfocused_event_hold(
+                                                self.client_focused(),
+                                            ),
+                                    );
+                                    break;
+                                }
+                            }
                         }
                     }
                     command = async {

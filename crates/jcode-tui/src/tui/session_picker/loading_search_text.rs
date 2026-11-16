@@ -200,6 +200,7 @@ fn write_tags_first(value: &serde_json::Value, out: &mut String) {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn raw_value_search_excerpt(raw: &RawValue, budget: usize) -> Option<String> {
     if budget == 0 {
         return None;

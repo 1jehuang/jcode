@@ -504,10 +504,14 @@ async fn post_token(
             .clone()
             .unwrap_or_else(|| canonical_resource(resource)),
     ));
-    let response = http_for(&endpoint)?
+    let request = http_for(&endpoint)?
         .post(endpoint)
         .header(reqwest::header::ACCEPT, "application/json")
-        .form(&form)
+        .form(&form);
+    // The builder owns the encoded body. Do not retain a second copy of the
+    // token form (including secrets) while waiting for the endpoint.
+    drop(form);
+    let response = request
         .send()
         .await
         .map_err(|_| anyhow::anyhow!("OAuth token request failed"))?;
@@ -890,23 +894,37 @@ struct RegistrationResponse {
     token_endpoint_auth_method: Option<String>,
 }
 
+// Field order matches the legacy JSON map. Arrays and redirect URI are borrowed
+// or stack-owned, avoiding an additional owned JSON metadata tree.
+fn registration_request(redirect_uri: &str) -> impl Serialize + '_ {
+    #[derive(Serialize)]
+    struct Request<'a> {
+        client_name: &'static str,
+        client_uri: &'static str,
+        grant_types: [&'static str; 2],
+        redirect_uris: [&'a str; 1],
+        response_types: [&'static str; 1],
+        token_endpoint_auth_method: &'static str,
+    }
+    Request {
+        client_name: "jcode",
+        client_uri: "https://github.com/1jehuang/jcode",
+        grant_types: ["authorization_code", "refresh_token"],
+        redirect_uris: [redirect_uri],
+        response_types: ["code"],
+        token_endpoint_auth_method: "none",
+    }
+}
+
 async fn register_client(
     endpoint: &str,
     redirect_uri: &str,
     local: bool,
 ) -> Result<RegistrationResponse> {
     let endpoint = checked_url(endpoint, local)?;
-    let body = serde_json::json!({
-        "client_name": "jcode",
-        "client_uri": "https://github.com/1jehuang/jcode",
-        "redirect_uris": [redirect_uri],
-        "grant_types": ["authorization_code", "refresh_token"],
-        "response_types": ["code"],
-        "token_endpoint_auth_method": "none",
-    });
     let response = http_for(&endpoint)?
         .post(endpoint)
-        .json(&body)
+        .json(&registration_request(redirect_uri))
         .send()
         .await
         .map_err(|_| anyhow::anyhow!("OAuth client registration request failed"))?;

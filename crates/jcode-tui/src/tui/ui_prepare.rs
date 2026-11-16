@@ -45,6 +45,23 @@ fn assistant_aux_cache() -> &'static std::sync::Mutex<AssistantAuxCacheState> {
     CACHE.get_or_init(|| std::sync::Mutex::new(AssistantAuxCacheState::default()))
 }
 
+/// Diagnostic-only snapshot of unique auxiliary payload allocations.
+pub(super) fn debug_assistant_aux_memory_profile() -> serde_json::Value {
+    let cache = assistant_aux_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    super::memory_estimates::diagnostic_aux_profile(
+        cache.entries.values().map(|value| {
+            (
+                Arc::as_ptr(value) as usize,
+                std::mem::size_of::<AssistantAuxData>(),
+                &value.logical_plain_lines,
+            )
+        }),
+        cache.order.len(),
+    )
+}
+
 fn content_prefers_display_as_logical_lines(content: &str) -> bool {
     content.lines().any(|line| {
         let trimmed = line.trim();
@@ -290,6 +307,19 @@ fn first_mermaid_pending_message(prepared: &PreparedMessages) -> Option<usize> {
     )
 }
 
+fn active_codemode(app: &dyn TuiState) -> Option<crate::message::ToolCall> {
+    // Connection-phase and nested-tool events can replace RunningTool while
+    // the parent call is still live. ToolDone removes it from this list, so
+    // pending tool calls, not the transient status label, own its lifetime.
+    if !app.is_processing() {
+        return None;
+    }
+    app.streaming_tool_calls()
+        .into_iter()
+        .rev()
+        .find(|tool| tools_ui::canonical_tool_name(&tool.name) == "codemode")
+}
+
 fn active_batch_progress(app: &dyn TuiState) -> Option<crate::bus::BatchProgress> {
     match app.status() {
         ProcessingStatus::RunningTool(name) if name == "batch" => app.batch_progress(),
@@ -298,6 +328,14 @@ fn active_batch_progress(app: &dyn TuiState) -> Option<crate::bus::BatchProgress
 }
 
 pub(super) fn active_batch_progress_hash(app: &dyn TuiState) -> u64 {
+    if let Some(tool) = active_codemode(app) {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        tool.id.hash(&mut hasher);
+        tool.input.to_string().hash(&mut hasher);
+        tool.intent.hash(&mut hasher);
+        super::activity_indicator_frame_index(app.animation_elapsed(), 12.5).hash(&mut hasher);
+        return hasher.finish();
+    }
     let Some(progress) = active_batch_progress(app) else {
         return 0;
     };
@@ -389,6 +427,46 @@ fn prepare_active_batch_progress(
     width: u16,
     prefix_blank: bool,
 ) -> PreparedMessages {
+    if let Some(tool) = active_codemode(app) {
+        let block_width = if app.centered_mode() {
+            super::centered_content_block_width(width, 96)
+        } else {
+            width as usize
+        };
+        let row_width = block_width.saturating_sub(1);
+        let spinner = super::activity_indicator(app.animation_elapsed(), 12.5);
+        let mut lines = Vec::new();
+        if prefix_blank {
+            lines.push(Line::from(""));
+        }
+        let mut header = vec![
+            Span::styled(
+                format!("  {spinner} "),
+                Style::default().fg(rgb(255, 193, 94)),
+            ),
+            Span::styled("codemode", Style::default().fg(tool_color())),
+        ];
+        if let Some(intent) = tool
+            .intent
+            .as_deref()
+            .filter(|intent| !intent.trim().is_empty())
+        {
+            header.push(Span::styled(" · ", Style::default().fg(dim_color())));
+            header.push(Span::styled(
+                intent.to_owned(),
+                Style::default().fg(tool_color()),
+            ));
+        }
+        lines.push(super::truncate_line_with_ellipsis_to_width(
+            &Line::from(header),
+            row_width,
+        ));
+        lines.extend(tools_ui::codemode_preview(&tool, row_width));
+        if app.centered_mode() {
+            super::left_pad_lines_to_block_width(&mut lines, width, block_width);
+        }
+        return wrap_lines_with_map(lines, &[], &[], &[], &[], &[], width, &[], &[], &[]);
+    }
     let Some(progress) = active_batch_progress(app) else {
         return empty_prepared_messages();
     };
@@ -501,7 +579,7 @@ pub(super) fn prepare_messages(
         mermaid_aspect_bucket: crate::tui::mermaid::current_preferred_aspect_ratio_bucket(),
         is_processing: app.is_processing(),
         streaming_text_len: app.streaming_text().len(),
-        streaming_text_hash: super::hash_text_for_cache(app.streaming_text()),
+        streaming_text_hash: app.streaming_text_hash(),
         batch_progress_hash: active_batch_progress_hash(app),
         // An unpinned transcript must not reuse a previously prepared frame
         // containing anchored images. With no images, both modes are visually
@@ -634,7 +712,7 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     };
 
     let batch_start = Instant::now();
-    let has_batch_progress = active_batch_progress(app).is_some();
+    let has_batch_progress = active_batch_progress(app).is_some() || active_codemode(app).is_some();
     let batch_prefix_blank = has_batch_progress && !body_prepared.wrapped_lines.is_empty();
     let batch_progress_prepared = if has_batch_progress {
         Arc::new(prepare_active_batch_progress(
@@ -661,6 +739,12 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     let streaming_prepared = if has_streaming {
         Arc::new(prepare_streaming_cached(app, width, stream_prefix_blank))
     } else {
+        // The reply was committed or cleared: its wrapped head is dead weight.
+        STREAMING_HEAD_WRAP.with(|cache| {
+            if cache.borrow().is_some() {
+                *cache.borrow_mut() = None;
+            }
+        });
         Arc::new(empty_prepared_messages())
     };
     let streaming_ms = streaming_start.elapsed().as_secs_f64() * 1000.0;
@@ -732,7 +816,11 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
         // the header at the same screen position when the first prompt
         // arrives; the padding then simply scrolls away as the transcript
         // grows instead of vanishing in one jump.
-        let pad_top = initial_header_pad_top(height, header_prepared.wrapped_lines.len());
+        let pad_top = if app.is_replay() {
+            0
+        } else {
+            initial_header_pad_top(height, header_prepared.wrapped_lines.len())
+        };
         let mut centered = build_top_pad_lines(width, pad_top);
         centered.reserve(wrapped_lines.len());
         centered.extend(wrapped_lines);
@@ -770,7 +858,11 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     // Re-apply the initial-screen centering pad above the header so the
     // transition from the empty screen to the first message does not shift
     // anything. The pad scrolls off naturally as the transcript grows.
-    let pad_top = initial_header_pad_top(height, header_prepared.wrapped_lines.len());
+    let pad_top = if app.is_replay() {
+        0
+    } else {
+        initial_header_pad_top(height, header_prepared.wrapped_lines.len())
+    };
     let padded_header = if pad_top > 0 {
         let mut lines = build_top_pad_lines(width, pad_top);
         lines.reserve(header_prepared.wrapped_lines.len());
@@ -945,7 +1037,7 @@ fn prepare_header_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages
         Arc::new(wrap_lines(all_header_lines, &[], &[], &[], width))
     };
 
-    if prep_cache_bypassed() {
+    if app.is_replay() || prep_cache_bypassed() {
         return build();
     }
 
@@ -1184,6 +1276,7 @@ struct BodyRenderCtx<'a> {
 /// Render saved history through the live dispatcher and wrapping pipeline.
 /// No active App is borrowed: expansion state, images and in-flight swarm work
 /// from the session behind the picker must never leak into this transcript.
+#[cfg(test)]
 pub(crate) fn prepare_history_preview(
     messages: &[DisplayMessage],
     hidden_prompts: usize,
@@ -1194,12 +1287,14 @@ pub(crate) fn prepare_history_preview(
         .unwrap_or_else(|| preview_fallback::unavailable(width))
 }
 
+#[cfg(test)]
 #[path = "ui_prepare/preview_fallback.rs"]
 mod preview_fallback;
 
 /// Choose scrollbar width without fully rendering overflowing history twice.
 /// The budget excludes caller-owned header and padding rows. The flag is the
 /// wide layout's strict overflow decision, not a second narrow-layout decision.
+#[cfg(test)]
 pub(crate) fn prepare_history_preview_for_viewport(
     messages: &[DisplayMessage],
     hidden_prompts: usize,
@@ -1229,6 +1324,7 @@ pub(crate) fn prepare_history_preview_for_viewport(
     )
 }
 
+#[cfg(test)]
 fn prepare_history_preview_bounded(
     messages: &[DisplayMessage],
     hidden_prompts: usize,
@@ -2317,6 +2413,21 @@ fn prepare_streaming_cached(
         ratatui::layout::Alignment::Left
     };
 
+    // The renderer names the leading lines it did not re-render. They are
+    // only reusable here when a blank line follows them: display recentering
+    // above works on runs of non-blank lines, so a run that crossed the
+    // boundary could have shifted them.
+    let (stable_generation, stable_len) = app.streaming_markdown_stable_prefix();
+    let head_md_lines = if stable_len > 0
+        && md_lines
+            .get(stable_len)
+            .is_some_and(|line| line.spans.iter().all(|span| span.content.is_empty()))
+    {
+        stable_len
+    } else {
+        0
+    };
+
     let mut lines: Vec<Line<'static>> = Vec::new();
     if prefix_blank {
         lines.push(Line::from(""));
@@ -2325,9 +2436,98 @@ fn prepare_streaming_cached(
         lines.push(align_if_unset(line, align));
     }
 
-    let mut prepared = wrap_lines(lines, &[], &[], &[], width);
+    let mut prepared = if head_md_lines == 0 {
+        wrap_lines(lines, &[], &[], &[], width)
+    } else {
+        let head_len = head_md_lines + usize::from(prefix_blank);
+        let key = StreamingHeadKey {
+            generation: stable_generation,
+            head_len,
+            width,
+            centered,
+            prefix_blank,
+        };
+        let tail_lines = lines.split_off(head_len);
+        let head = STREAMING_HEAD_WRAP.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            match cache.as_ref() {
+                Some((cached_key, head)) if *cached_key == key => Arc::clone(head),
+                _ => {
+                    let head = Arc::new(wrap_lines(lines, &[], &[], &[], width));
+                    *cache = Some((key, Arc::clone(&head)));
+                    head
+                }
+            }
+        });
+        append_wrapped_tail(&head, wrap_lines(tail_lines, &[], &[], &[], width))
+    };
     stamp_mermaid_pending(&mut prepared, mermaid_epoch_before);
     prepared
+}
+
+/// Identifies the wrapped form of the stable head of a streaming reply.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct StreamingHeadKey {
+    generation: u64,
+    head_len: usize,
+    width: u16,
+    centered: bool,
+    prefix_blank: bool,
+}
+
+thread_local! {
+    // One entry: only the reply being streamed on this thread is ever asked for.
+    static STREAMING_HEAD_WRAP: std::cell::RefCell<Option<(StreamingHeadKey, Arc<PreparedMessages>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Join two separately wrapped runs of lines into what wrapping them together
+/// would have produced. Only valid for plain lines (no user prompts, edit
+/// ranges or copy targets), which is all `wrap_lines` emits for streaming.
+fn append_wrapped_tail(head: &PreparedMessages, tail: PreparedMessages) -> PreparedMessages {
+    let head_rows = head.wrapped_lines.len();
+    let head_raw = head.raw_plain_lines.len();
+
+    let mut wrapped_lines = Vec::with_capacity(head_rows + tail.wrapped_lines.len());
+    wrapped_lines.extend(head.wrapped_lines.iter().cloned());
+    wrapped_lines.extend(tail.wrapped_lines);
+
+    let mut wrapped_plain_lines = Vec::with_capacity(wrapped_lines.len());
+    wrapped_plain_lines.extend(head.wrapped_plain_lines.iter().cloned());
+    wrapped_plain_lines.extend(tail.wrapped_plain_lines.iter().cloned());
+
+    let mut wrapped_copy_offsets = Vec::with_capacity(wrapped_lines.len());
+    wrapped_copy_offsets.extend(head.wrapped_copy_offsets.iter().copied());
+    wrapped_copy_offsets.extend(tail.wrapped_copy_offsets.iter().copied());
+
+    let mut raw_plain_lines = Vec::with_capacity(head_raw + tail.raw_plain_lines.len());
+    raw_plain_lines.extend(head.raw_plain_lines.iter().cloned());
+    raw_plain_lines.extend(tail.raw_plain_lines.iter().cloned());
+
+    let mut wrapped_line_map = Vec::with_capacity(wrapped_lines.len());
+    wrapped_line_map.extend(head.wrapped_line_map.iter().copied());
+    wrapped_line_map.extend(tail.wrapped_line_map.iter().map(|map| WrappedLineMap {
+        raw_line: map.raw_line + head_raw,
+        ..*map
+    }));
+
+    let mut image_regions = head.image_regions.clone();
+    image_regions.extend(tail.image_regions.iter().map(|region| {
+        let mut region = *region;
+        region.abs_line_idx += head_rows;
+        region.end_line += head_rows;
+        region
+    }));
+
+    PreparedMessages {
+        wrapped_lines,
+        wrapped_plain_lines: Arc::new(wrapped_plain_lines),
+        wrapped_copy_offsets: Arc::new(wrapped_copy_offsets),
+        raw_plain_lines: Arc::new(raw_plain_lines),
+        wrapped_line_map: Arc::new(wrapped_line_map),
+        image_regions,
+        ..tail
+    }
 }
 
 pub(super) fn prepare_body(
@@ -2560,10 +2760,6 @@ fn wrap_lines(
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Wrapped-line preparation carries explicit render state to avoid hidden coupling"
-)]
 /// Drop spare span and line capacity before a body is cached. Wrapping builds
 /// lines by pushing spans, so a long session kept ~1.7x the span slots it used,
 /// and these bodies live in the body cache for the session's lifetime.
@@ -2574,6 +2770,10 @@ fn shrink_wrapped_lines(wrapped_lines: &mut Vec<Line<'static>>) {
     wrapped_lines.shrink_to_fit();
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Wrapped-line preparation carries explicit render state to avoid hidden coupling"
+)]
 fn wrap_lines_with_map(
     lines: Vec<Line<'static>>,
     seeded_raw_plain_lines: &[String],

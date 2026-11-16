@@ -13,6 +13,10 @@ pub(in crate::tui::app) struct TurnFence {
 }
 
 impl TurnFence {
+    pub(in crate::tui::app) fn diagnostic_identity(&self) -> Option<&TurnIdentity> {
+        self.active.as_ref()
+    }
+
     pub(super) fn scoped(&self) -> bool {
         self.generation.is_some()
     }
