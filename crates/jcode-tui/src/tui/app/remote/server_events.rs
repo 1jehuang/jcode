@@ -156,6 +156,9 @@ use history_fingerprint::last_applied_history_fingerprint;
 use history_fingerprint::record_applied_history_fingerprint;
 use history_fingerprint::should_skip_identical_history_payload;
 #[cfg(test)]
+#[path = "server_events/ask_form_tests.rs"]
+mod ask_form_tests;
+#[cfg(test)]
 #[path = "server_events/history_dedup_tests.rs"]
 mod history_dedup_tests;
 
@@ -246,6 +249,12 @@ pub(in crate::tui::app) fn handle_server_event(
         }
         event => (event, None),
     };
+    // Claim form traffic, including the `Done`/`Error` acknowledgements of our
+    // own answers and replay completion, before terminal handling can settle an
+    // unrelated observed turn.
+    if crate::tui::ask_form::on_event(app, &event) {
+        return true;
+    }
     if identity.is_none()
         && app.remote_turn_fence.scoped()
         && matches!(

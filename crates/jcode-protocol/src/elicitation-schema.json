@@ -1,0 +1,750 @@
+{
+  "$ref": "#/$defs/ElicitationSchema",
+  "$defs": {
+    "ElicitationSchema": {
+      "description": "Type-safe elicitation schema for requesting structured user input.\n\nThis represents a JSON Schema object with primitive-typed properties,\nas required by the elicitation specification.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "description": "Type discriminator. Always `\"object\"`. Any other value is rejected.",
+          "allOf": [
+            {
+              "$ref": "#/$defs/ElicitationSchemaType"
+            }
+          ]
+        },
+        "title": {
+          "description": "Optional title for the schema.\n\nOptional. Omitted and `null` are equivalent and mean no title is provided.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true
+        },
+        "properties": {
+          "description": "Property definitions (must be primitive types).",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ElicitationPropertySchema"
+          }
+        },
+        "required": {
+          "description": "List of required property names.\n\nOptional. Omitted and `null` are equivalent and mean no property names are required.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "description": {
+          "description": "Optional description of what this schema represents.\n\nOptional. Omitted and `null` are equivalent and mean no schema description is provided.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true
+        },
+        "_meta": {
+          "description": "The _meta property is reserved by ACP to allow clients and agents to attach additional\nmetadata to their interactions. Omitted and `null` are equivalent and mean no metadata.\nImplementations MUST NOT assign meaning to keys they do not recognize.\n\nSee protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/v2/extensibility)",
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true,
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "type",
+        "properties"
+      ]
+    },
+    "ElicitationSchemaType": {
+      "description": "Type discriminator for elicitation schemas.",
+      "oneOf": [
+        {
+          "description": "Object schema type.",
+          "type": "string",
+          "const": "object"
+        }
+      ]
+    },
+    "ElicitationPropertySchema": {
+      "description": "Property schema for elicitation form fields.\n\nEach variant corresponds to a JSON Schema `\"type\"` value.\nSingle-select enums use `type: \"string\"` with `enum` or `oneOf` set.\nMulti-select enums use `type: \"array\"`.",
+      "anyOf": [
+        {
+          "description": "String property (or single-select enum when `enum`/`oneOf` is set).",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/StringPropertySchema"
+            }
+          ]
+        },
+        {
+          "description": "Number (floating-point) property.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "number"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/NumberPropertySchema"
+            }
+          ]
+        },
+        {
+          "description": "Integer property.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "integer"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/IntegerPropertySchema"
+            }
+          ]
+        },
+        {
+          "description": "Boolean property.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "boolean"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/BooleanPropertySchema"
+            }
+          ]
+        },
+        {
+          "description": "Multi-select array property.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "array"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/MultiSelectPropertySchema"
+            }
+          ]
+        },
+        {
+          "title": "other",
+          "description": "Custom or future elicitation property schema.\n\nValues beginning with `_` are reserved for implementation-specific\nextensions. Unknown values that do not begin with `_` are reserved for\nfuture ACP variants.\n\nClients that do not understand this property schema type should preserve\nthe raw schema when storing, replaying, proxying, or forwarding\nelicitation requests. They MUST NOT render it as a known input control.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "description": "Custom or future elicitation property schema type.\n\nValues beginning with `_` are reserved for implementation-specific\nextensions. Unknown values that do not begin with `_` are reserved for\nfuture ACP variants.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "number"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "integer"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "boolean"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "array"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              }
+            ]
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "StringPropertySchema": {
+      "description": "Schema for string properties in an elicitation form.\n\nWhen `enum` or `oneOf` is set, this represents a single-select enum\nwith `\"type\": \"string\"`.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "description": "Optional title for the property.\n\nOptional. Omitted and `null` are equivalent and mean no title is provided.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true
+        },
+        "description": {
+          "description": "Human-readable description.\n\nOptional. Omitted and `null` are equivalent and mean no description is provided.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true
+        },
+        "minLength": {
+          "description": "Minimum string length.\n\nOptional. Omitted and `null` are equivalent and mean there is no minimum length constraint.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "maxLength": {
+          "description": "Maximum string length.\n\nOptional. Omitted and `null` are equivalent and mean there is no maximum length constraint.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "pattern": {
+          "description": "Pattern the string must match, in ECMA-262 regular expression syntax.\n\nOptional. Omitted and `null` are equivalent and mean there is no pattern constraint.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "regex"
+        },
+        "format": {
+          "description": "String format.\n\nOptional. Omitted and `null` are equivalent and mean there is no format constraint.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StringFormat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "default": {
+          "description": "Default value.\n\nOptional. Omitted and `null` are equivalent and mean no default value is provided.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true
+        },
+        "enum": {
+          "description": "Enum values for untitled single-select enums.\nMust contain at least one value when present.\nOptional. Omitted and `null` are equivalent and mean no untitled single-select choices are\ndeclared by `enum`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "oneOf": {
+          "description": "Titled enum options for titled single-select enums.\nMust contain at least one option when present.\nOptional. Omitted and `null` are equivalent and mean no titled single-select choices are\ndeclared by `oneOf`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/EnumOption"
+          },
+          "minItems": 1
+        },
+        "_meta": {
+          "description": "The _meta property is reserved by ACP to allow clients and agents to attach additional\nmetadata to their interactions. Omitted and `null` are equivalent and mean no metadata.\nImplementations MUST NOT assign meaning to keys they do not recognize.\n\nSee protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/v2/extensibility)",
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true,
+          "additionalProperties": true
+        }
+      }
+    },
+    "StringFormat": {
+      "description": "String format types for string properties in elicitation schemas.",
+      "anyOf": [
+        {
+          "description": "Email address format.",
+          "type": "string",
+          "const": "email"
+        },
+        {
+          "description": "URI format.",
+          "type": "string",
+          "const": "uri"
+        },
+        {
+          "description": "Date format (YYYY-MM-DD).",
+          "type": "string",
+          "const": "date"
+        },
+        {
+          "description": "Date-time format (RFC 3339).",
+          "type": "string",
+          "const": "date-time"
+        },
+        {
+          "title": "other",
+          "description": "Custom or future string format.\n\nUnknown formats are preserved. Implementations that do not understand a\nformat should treat it as an annotation rather than rejecting the schema.",
+          "type": "string"
+        }
+      ]
+    },
+    "EnumOption": {
+      "description": "A titled enum option with a const value, human-readable title, and optional description.",
+      "type": "object",
+      "properties": {
+        "const": {
+          "description": "The constant value for this option.",
+          "type": "string"
+        },
+        "title": {
+          "description": "Human-readable title for this option.",
+          "type": "string"
+        },
+        "description": {
+          "description": "Human-readable description.\n\nOptional. Omitted and `null` are equivalent and mean no description is provided.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true
+        },
+        "_meta": {
+          "description": "The _meta property is reserved by ACP to allow clients and agents to attach additional\nmetadata to their interactions. Omitted and `null` are equivalent and mean no metadata.\nImplementations MUST NOT assign meaning to keys they do not recognize.\n\nSee protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/v2/extensibility)",
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true,
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "const",
+        "title"
+      ]
+    },
+    "NumberPropertySchema": {
+      "description": "Schema for number (floating-point) properties in an elicitation form.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "description": "Optional title for the property.\n\nOptional. Omitted and `null` are equivalent and mean no title is provided.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true
+        },
+        "description": {
+          "description": "Human-readable description.\n\nOptional. Omitted and `null` are equivalent and mean no description is provided.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true
+        },
+        "minimum": {
+          "description": "Minimum value (inclusive).\n\nOptional. Omitted and `null` are equivalent and mean there is no inclusive lower bound.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "maximum": {
+          "description": "Maximum value (inclusive).\n\nOptional. Omitted and `null` are equivalent and mean there is no inclusive upper bound.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "default": {
+          "description": "Default value.\n\nOptional. Omitted and `null` are equivalent and mean no default value is provided.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "x-deserialize-default-on-error": true
+        },
+        "_meta": {
+          "description": "The _meta property is reserved by ACP to allow clients and agents to attach additional\nmetadata to their interactions. Omitted and `null` are equivalent and mean no metadata.\nImplementations MUST NOT assign meaning to keys they do not recognize.\n\nSee protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/v2/extensibility)",
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true,
+          "additionalProperties": true
+        }
+      }
+    },
+    "IntegerPropertySchema": {
+      "description": "Schema for integer properties in an elicitation form.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "description": "Optional title for the property.\n\nOptional. Omitted and `null` are equivalent and mean no title is provided.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true
+        },
+        "description": {
+          "description": "Human-readable description.\n\nOptional. Omitted and `null` are equivalent and mean no description is provided.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true
+        },
+        "minimum": {
+          "description": "Minimum value (inclusive).\n\nOptional. Omitted and `null` are equivalent and mean there is no inclusive lower bound.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "maximum": {
+          "description": "Maximum value (inclusive).\n\nOptional. Omitted and `null` are equivalent and mean there is no inclusive upper bound.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "default": {
+          "description": "Default value.\n\nOptional. Omitted and `null` are equivalent and mean no default value is provided.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "x-deserialize-default-on-error": true
+        },
+        "_meta": {
+          "description": "The _meta property is reserved by ACP to allow clients and agents to attach additional\nmetadata to their interactions. Omitted and `null` are equivalent and mean no metadata.\nImplementations MUST NOT assign meaning to keys they do not recognize.\n\nSee protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/v2/extensibility)",
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true,
+          "additionalProperties": true
+        }
+      }
+    },
+    "BooleanPropertySchema": {
+      "description": "Schema for boolean properties in an elicitation form.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "description": "Optional title for the property.\n\nOptional. Omitted and `null` are equivalent and mean no title is provided.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true
+        },
+        "description": {
+          "description": "Human-readable description.\n\nOptional. Omitted and `null` are equivalent and mean no description is provided.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true
+        },
+        "default": {
+          "description": "Default value.\n\nOptional. Omitted and `null` are equivalent and mean no default value is provided.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true
+        },
+        "_meta": {
+          "description": "The _meta property is reserved by ACP to allow clients and agents to attach additional\nmetadata to their interactions. Omitted and `null` are equivalent and mean no metadata.\nImplementations MUST NOT assign meaning to keys they do not recognize.\n\nSee protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/v2/extensibility)",
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true,
+          "additionalProperties": true
+        }
+      }
+    },
+    "MultiSelectPropertySchema": {
+      "description": "Schema for multi-select (array) properties in an elicitation form.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "description": "Optional title for the property.\n\nOptional. Omitted and `null` are equivalent and mean no title is provided.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true
+        },
+        "description": {
+          "description": "Human-readable description.\n\nOptional. Omitted and `null` are equivalent and mean no description is provided.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true
+        },
+        "minItems": {
+          "description": "Minimum number of items to select.\n\nOptional. Omitted and `null` are equivalent and mean there is no minimum selection count.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "maxItems": {
+          "description": "Maximum number of items to select.\n\nOptional. Omitted and `null` are equivalent and mean there is no maximum selection count.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "items": {
+          "description": "The items definition describing allowed values.",
+          "allOf": [
+            {
+              "$ref": "#/$defs/MultiSelectItems"
+            }
+          ]
+        },
+        "default": {
+          "description": "Default selected values.\n\nOptional. Omitted and `null` are equivalent and mean no default selections are provided.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "x-deserialize-default-on-error": true,
+          "x-deserialize-skip-invalid-items": true
+        },
+        "_meta": {
+          "description": "The _meta property is reserved by ACP to allow clients and agents to attach additional\nmetadata to their interactions. Omitted and `null` are equivalent and mean no metadata.\nImplementations MUST NOT assign meaning to keys they do not recognize.\n\nSee protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/v2/extensibility)",
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true,
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "items"
+      ]
+    },
+    "MultiSelectItems": {
+      "description": "Items for a multi-select (array) property schema.",
+      "anyOf": [
+        {
+          "description": "Multi-select string items with plain string values.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "allOf": [
+            {
+              "$ref": "#/$defs/StringMultiSelectItems"
+            }
+          ]
+        },
+        {
+          "title": "other",
+          "description": "Custom or future typed multi-select items.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "description": "Custom or future multi-select item type.\n\nValues beginning with `_` are reserved for implementation-specific\nextensions. Unknown values that do not begin with `_` are reserved for\nfuture ACP variants.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              }
+            ]
+          },
+          "additionalProperties": true
+        },
+        {
+          "title": "titled",
+          "description": "Titled multi-select items with human-readable labels.\n\nAs in MCP, titled items omit `type` and are identified by `anyOf`.",
+          "allOf": [
+            {
+              "$ref": "#/$defs/TitledMultiSelectItems"
+            }
+          ]
+        }
+      ]
+    },
+    "StringMultiSelectItems": {
+      "description": "String item schema for multi-select enum properties.",
+      "type": "object",
+      "properties": {
+        "enum": {
+          "description": "Allowed enum values. Must contain at least one value.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "_meta": {
+          "description": "The _meta property is reserved by ACP to allow clients and agents to attach additional\nmetadata to their interactions. Omitted and `null` are equivalent and mean no metadata.\nImplementations MUST NOT assign meaning to keys they do not recognize.\n\nSee protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/v2/extensibility)",
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true,
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "enum"
+      ]
+    },
+    "TitledMultiSelectItems": {
+      "description": "Items definition for titled multi-select enum properties.",
+      "type": "object",
+      "properties": {
+        "anyOf": {
+          "description": "Titled enum options. Must contain at least one option.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EnumOption"
+          },
+          "minItems": 1
+        },
+        "_meta": {
+          "description": "The _meta property is reserved by ACP to allow clients and agents to attach additional\nmetadata to their interactions. Omitted and `null` are equivalent and mean no metadata.\nImplementations MUST NOT assign meaning to keys they do not recognize.\n\nSee protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/v2/extensibility)",
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-deserialize-default-on-error": true,
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "anyOf"
+      ]
+    }
+  }
+}

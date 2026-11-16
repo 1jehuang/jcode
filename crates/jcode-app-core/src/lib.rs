@@ -30,6 +30,7 @@ pub mod ambient_runner;
 pub mod ambient_scheduler;
 pub mod build;
 pub mod catchup;
+pub mod elicitation;
 pub mod channel;
 pub use jcode_base::external_auth;
 pub mod agents_status;

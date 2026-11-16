@@ -4,6 +4,7 @@
 mod cache_monitor_tests;
 mod compaction;
 mod conversation_reset;
+mod elicitation;
 mod environment;
 mod idle_hibernation;
 mod inline_tail;
