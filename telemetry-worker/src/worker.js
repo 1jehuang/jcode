@@ -350,7 +350,8 @@ function writeConcurrencyFirehose(env, body) {
 // AE is a sampled forensic backup, not a durable ACK or additive rollup.
 export const FIREHOSE_USAGE_SCHEMA = {
   blobs: ["event", "event_id", "session_id", "id", "version", "os", "arch",
-    "source", "provider", "model", "build_channel", "occurred_at", "country"],
+    "source", "provider", "model", "build_channel", "occurred_at", "country",
+    "requested_model", "resolved_model"],
   doubles: ["input_tokens", "output_tokens", "cache_read_input_tokens",
     "cache_creation_input_tokens", "total_tokens", "responses", "is_ci", "usage_contract_version"],
 };
@@ -2379,6 +2380,14 @@ export function normalizeUsageReportEvent(body) {
   for (const field of ["provider", "model", "build_channel"]) {
     if (body[field] != null && (typeof body[field] !== "string" || body[field].trim().length > 120)) return `Invalid usage_report ${field}`;
   }
+  for (const field of ["requested_model", "resolved_model"]) {
+    const value = body[field];
+    if (value != null && (typeof value !== "string" || !value.trim()
+      || new TextEncoder().encode(value).length > 120 || /[\u0000-\u001f\u007f-\u009f]/u.test(value))) {
+      return `Invalid usage_report ${field}`;
+    }
+    if (value != null) body[field] = normalizeUsageLabel(value);
+  }
   body.usage_contract_version ??= 1;
   if (![1, 2].includes(body.usage_contract_version)) return "Invalid usage_report usage_contract_version";
   if (body.usage_contract_version === 2 && body.occurred_at == null) return "Missing usage_report occurred_at";
@@ -2402,6 +2411,14 @@ export function normalizeUsageReportEvent(body) {
   body.model = normalizeUsageLabel(body.model);
   if (!body.model) {
     return "Missing usage_report model";
+  }
+  // Resolution is response-observed metadata, not a historical alias rewrite.
+  // Old clients retain their original model and unknown attribution (NULL).
+  if (body.resolved_model != null) {
+    body.requested_model ??= body.model;
+    body.model = body.resolved_model;
+  } else if (body.requested_model != null) {
+    body.model = body.requested_model;
   }
   const suppliedTotal = body.total_tokens;
   for (const field of USAGE_TOKEN_FIELDS) {
@@ -2435,8 +2452,9 @@ async function recordDailyModelUsage(env, body) {
     INSERT INTO usage_report_ledger (
       usage_date, source, provider, model, build_channel, is_ci, responses,
       input_tokens, output_tokens, cache_read_input_tokens,
-      cache_creation_input_tokens, total_tokens, receipt_key, usage_contract_version
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      cache_creation_input_tokens, total_tokens, receipt_key, usage_contract_version,
+      requested_model, resolved_model
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(receipt_key) DO NOTHING
   `).bind(
     usageDate,
@@ -2453,6 +2471,8 @@ async function recordDailyModelUsage(env, body) {
     body.total_tokens,
     receiptKey,
     body.usage_contract_version,
+    body.requested_model ?? null,
+    body.resolved_model ?? null,
   ).run();
 }
 
