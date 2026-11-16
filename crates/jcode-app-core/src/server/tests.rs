@@ -278,7 +278,10 @@ async fn comm_stop_fires_swarm_member_end_for_running_worker() {
         runtime: crate::protocol::SwarmMemberRuntime::default(),
     };
     let swarm_members = Arc::new(RwLock::new(HashMap::from([
-        (coord_id.clone(), member(&coord_id, "coordinator", "ready", None)),
+        (
+            coord_id.clone(),
+            member(&coord_id, "coordinator", "ready", None),
+        ),
         (
             worker_id.clone(),
             member(&worker_id, "agent", "running", Some(&coord_id)),
