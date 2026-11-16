@@ -45,12 +45,22 @@ fn write_mode_for_decoder(
         // resume and teardown are harmless even when handed configured=true,
         // but they must still write nothing: the console input decoder would
         // never produce the sequences the terminal starts sending.
+        //
+        // The one write that is always safe is a clear: `CSI = 0 u` sets the
+        // flags without touching stack depth, so it cannot pop an entry an
+        // ancestor owns. A previous process, a cancelled or killed client, or
+        // the resume picker that spawns a child can leave enhancement armed.
+        // That inherited state is pure noise for a decoder that cannot consume
+        // CSI-u, and it is the intermittent, worse-on-resume half of #224.
         return match action {
-            Action::Push => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "kitty keyboard reporting is incompatible with the Windows console input decoder",
-            )),
-            Action::Set | Action::Pop => Ok(()),
+            Action::Push => {
+                write_clear_inherited_reporting(writer)?;
+                Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "kitty keyboard reporting is incompatible with the Windows console input decoder",
+                ))
+            }
+            Action::Set | Action::Pop => write_clear_inherited_reporting(writer),
         };
     }
     if inside_tmux {
@@ -64,6 +74,17 @@ fn write_mode_for_decoder(
         Action::Set => write!(writer, "\x1b[={flags}u")?,
         Action::Pop => writer.write_all(b"\x1b[<1u")?,
     }
+    writer.flush()
+}
+
+/// Write `CSI = 0 u`, which sets the kitty keyboard flags to zero without
+/// changing the stack depth.
+///
+/// Only used on the Windows console decoder, which can never consume CSI-u
+/// input, so any inherited enhancement is noise. Unlike `CSI < u` this cannot
+/// pop a stack entry owned by an ancestor process.
+fn write_clear_inherited_reporting(writer: &mut impl Write) -> io::Result<()> {
+    writer.write_all(b"\x1b[=0u")?;
     writer.flush()
 }
 
@@ -84,11 +105,39 @@ mod tests {
                 write_mode_for_decoder(&mut output, Action::Set, tmux, 7, true).unwrap();
             }
             write_mode_for_decoder(&mut output, Action::Pop, tmux, 7, true).unwrap();
-            assert!(
-                output.is_empty(),
-                "must not request CSI-u or modifyOtherKeys"
+            let mut expected = Vec::new();
+            for _ in 0..5 {
+                expected.extend_from_slice(b"\x1b[=0u");
+            }
+            assert_eq!(
+                output, expected,
+                "only the stack-neutral clear may be written, never CSI-u, \
+                 modifyOtherKeys, or a stack pop"
             );
         }
+    }
+
+    #[test]
+    fn windows_clear_never_pops_a_stack_entry_it_may_not_own() {
+        let mut output = Vec::new();
+        write_mode_for_decoder(&mut output, Action::Pop, false, 7, true).unwrap();
+        assert_eq!(output, b"\x1b[=0u".as_slice());
+        assert!(
+            !output.windows(4).any(|window| window == b"\x1b[<1"),
+            "a pop could remove an entry an ancestor owns"
+        );
+    }
+
+    #[test]
+    fn unix_never_writes_the_windows_clear() {
+        let mut output = Vec::new();
+        for action in [Action::Push, Action::Set, Action::Pop] {
+            write_mode_for_decoder(&mut output, action, false, 7, false).unwrap();
+        }
+        assert!(
+            !output.windows(5).any(|window| window == b"\x1b[=0u"),
+            "non-Windows decoders consume CSI-u, so their negotiated flags stay intact"
+        );
     }
 
     #[test]
@@ -112,6 +161,13 @@ mod tests {
         let mut output = Vec::new();
         let result = write_mode(&mut output, Action::Push, false, 7);
         assert_eq!(result.is_err(), cfg!(windows));
-        assert_eq!(output.is_empty(), cfg!(windows));
+        // The native console decoder never negotiates CSI-u, so the only bytes
+        // it may write are the stack-neutral clear.
+        let expected: &[u8] = if cfg!(windows) {
+            b"\x1b[=0u"
+        } else {
+            b"\x1b[>7u"
+        };
+        assert_eq!(output, expected);
     }
 }
