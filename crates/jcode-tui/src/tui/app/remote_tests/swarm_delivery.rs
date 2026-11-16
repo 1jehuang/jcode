@@ -22,6 +22,36 @@ fn soft_interrupt_injected(content: &str, display_role: Option<&str>) -> ServerE
 }
 
 #[test]
+fn file_activity_delivery_uses_metadata_not_a_text_prefix() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    let content = "moss edited src/parser.rs +3-1: fix parser";
+    handle_server_event(
+        &mut app,
+        soft_interrupt_injected(content, Some("file_activity")),
+        &mut remote,
+    );
+    let message = app.display_messages().last().unwrap();
+    assert_eq!(message.role, "swarm");
+    assert_eq!(message.title.as_deref(), Some("File activity · moss"));
+
+    // Identical prose with ordinary system metadata must not be classified
+    // as file activity, either live or when history is restored.
+    handle_server_event(
+        &mut app,
+        soft_interrupt_injected(content, Some("system")),
+        &mut remote,
+    );
+    assert_eq!(app.display_messages().last().unwrap().role, "system");
+    let mut messages = vec![crate::tui::DisplayMessage::system(content)];
+    super::super::remote_notifications::normalize_swarm_delivery_messages(&mut messages);
+    assert_eq!(messages[0].role, "system");
+}
+
+#[test]
 fn every_system_and_background_delivery_adds_an_entry() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -186,6 +216,47 @@ fn injected_swarm_dm_adds_delivery_entry_after_its_notification_card() {
         "model delivery must add a row even after a receipt notification"
     );
     assert_no_long_rows(&app);
+}
+
+#[test]
+fn injected_system_reminder_never_shows_raw_tags() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    // The reply-routing reminder after a swarm delivery adds no row.
+    handle_server_event(
+        &mut app,
+        soft_interrupt_injected("Cross-swarm DM from fox (swarm 'a'): done", Some("system")),
+        &mut remote,
+    );
+    let before = app.display_messages().len();
+    assert_eq!(app.display_messages().last().unwrap().role, "swarm");
+    handle_server_event(
+        &mut app,
+        soft_interrupt_injected(
+            "<system-reminder>\nYou just received a cross-swarm direct message from fox in swarm 'a'. To reply, use swarm action=dm with to_swarm='a' and to_session='session_fox'.\n</system-reminder>",
+            Some("system"),
+        ),
+        &mut remote,
+    );
+    assert_eq!(app.display_messages().len(), before);
+
+    // Any other reminder keeps its own row, minus the tags.
+    app.push_display_message(crate::tui::DisplayMessage::system("unrelated notice"));
+    handle_server_event(
+        &mut app,
+        soft_interrupt_injected(
+            "<system-reminder>\nContinue the mission.\n</system-reminder>",
+            Some("system"),
+        ),
+        &mut remote,
+    );
+    let last = app.display_messages().last().unwrap();
+    assert_eq!(last.role, "system");
+    assert_eq!(last.content, "Continue the mission.");
 }
 
 #[test]

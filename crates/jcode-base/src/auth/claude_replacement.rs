@@ -5,8 +5,12 @@ use anyhow::Result;
 pub(in crate::auth) fn stored_claude_tokens(
     label: &str,
 ) -> Option<crate::auth::oauth::OAuthTokens> {
-    let Ok(accounts) = super::list_accounts() else {
-        return None;
+    let accounts = match super::list_accounts() {
+        Ok(accounts) => accounts,
+        Err(error) => {
+            crate::logging::debug(&format!("Cannot reload stored Claude accounts: {error}"));
+            return None;
+        }
     };
     let account = accounts
         .into_iter()

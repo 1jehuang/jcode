@@ -17,7 +17,7 @@ class CargoWorkingDirectoryTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(dir=os.environ.get("JCODE_SCRATCH_DIR"))
         self.addCleanup(self.tmp.cleanup)
-        self.project = Path(self.tmp.name) / "other rust project"
+        self.project = (Path(self.tmp.name) / "other rust project").resolve()
         (self.project / "src").mkdir(parents=True)
         (self.project / "Cargo.toml").write_text(
             '[package]\nname = "cwd_probe"\nversion = "0.1.0"\nedition = "2021"\n'
@@ -68,6 +68,24 @@ class CargoWorkingDirectoryTests(unittest.TestCase):
         link = Path(self.tmp.name) / "linked project"
         link.symlink_to(self.project, target_is_directory=True)
         self.assertEqual(Path(self.metadata(link)["workspace_root"]), self.project)
+
+    def test_selfdev_routes_without_session_and_preserves_opt_out(self):
+        fake_bin = Path(self.tmp.name) / "bin"
+        fake_bin.mkdir()
+        cargo = fake_bin / "cargo"
+        cargo.write_text('#!/bin/sh\nprintf "%s" "${JUSTRUST_CARGO_ROUTE-unset}"\n')
+        cargo.chmod(0o755)
+        for override, expected in [(None, "1"), ("off", "off")]:
+            env = dict(self.env, PATH=f"{fake_bin}:{self.env['PATH']}", JCODE_REMOTE_CARGO="0")
+            env.pop("JCODE_SESSION_ID", None)
+            env.pop("JUSTRUST_CARGO_ROUTE", None)
+            if override is not None:
+                env["JUSTRUST_CARGO_ROUTE"] = override
+            result = subprocess.run(
+                [str(WRAPPER), "metadata", "--no-deps"], cwd=REPO,
+                env=env, capture_output=True, text=True, timeout=60, check=True,
+            )
+            self.assertEqual(result.stdout, expected)
 
     def test_foreign_cargo_errors_are_preserved(self):
         result = subprocess.run(

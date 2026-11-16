@@ -163,6 +163,15 @@ pub(super) async fn idle_live_agent(
     Some(agent)
 }
 
+/// Content and presentation metadata for a server-initiated turn.
+pub(super) struct LiveTurnInput {
+    pub message: String,
+    pub images: Vec<(String, String)>,
+    pub system_reminder: Option<String>,
+    pub display_role: Option<crate::session::StoredDisplayRole>,
+    pub status_detail: Option<String>,
+}
+
 /// Spawn `message` as a full tracked turn in a live session.
 ///
 /// Mirrors the client-initiated turn lifecycle: the swarm member is marked
@@ -182,63 +191,45 @@ pub(super) async fn spawn_tracked_live_turn(
     spawn_tracked_live_turn_with_images(
         session_id,
         agent,
-        message,
-        Vec::new(),
-        system_reminder,
-        display_role,
-        status_detail,
+        LiveTurnInput {
+            message,
+            images: Vec::new(),
+            system_reminder,
+            display_role,
+            status_detail,
+        },
         swarm,
     )
     .await
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "a live turn carries its prompt, images, display, and swarm context"
-)]
 pub(super) async fn spawn_tracked_live_turn_with_images(
     session_id: &str,
     agent: OwnedMutexGuard<Agent>,
-    message: String,
-    images: Vec<(String, String)>,
-    system_reminder: Option<String>,
-    display_role: Option<crate::session::StoredDisplayRole>,
-    status_detail: Option<String>,
+    input: LiveTurnInput,
     swarm: LiveTurnSwarmContext,
 ) -> bool {
     // Direct callers can explicitly replace a waiting turn. Automatic wake
     // callers have already refused sessions whose provider wait still owns it.
     super::usage_limit_resume::cancel_pending_resume(session_id);
     let publication = super::swarm::begin_turn_publication(session_id).await;
-    spawn_tracked_live_turn_with_publication(
-        session_id,
-        agent,
+    spawn_tracked_live_turn_with_publication(session_id, agent, input, swarm, publication).await
+}
+
+pub(super) async fn spawn_tracked_live_turn_with_publication(
+    session_id: &str,
+    mut agent: OwnedMutexGuard<Agent>,
+    input: LiveTurnInput,
+    swarm: LiveTurnSwarmContext,
+    publication: Arc<super::swarm::TurnPublication>,
+) -> bool {
+    let LiveTurnInput {
         message,
         images,
         system_reminder,
         display_role,
         status_detail,
-        swarm,
-        publication,
-    )
-    .await
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "startup reserves publication before exposing the recovered runtime"
-)]
-pub(super) async fn spawn_tracked_live_turn_with_publication(
-    session_id: &str,
-    mut agent: OwnedMutexGuard<Agent>,
-    message: String,
-    images: Vec<(String, String)>,
-    system_reminder: Option<String>,
-    display_role: Option<crate::session::StoredDisplayRole>,
-    status_detail: Option<String>,
-    swarm: LiveTurnSwarmContext,
-    publication: Arc<super::swarm::TurnPublication>,
-) -> bool {
+    } = input;
     let Ok(_admission) = crate::runtime_activity::global().try_enter_session(session_id) else {
         return false;
     };

@@ -208,6 +208,7 @@ impl Tool for EditTool {
             .intent
             .clone()
             .filter(|value| !value.trim().is_empty());
+        let (added, removed) = super::edit_stats::line_delta(&content, &new_content);
 
         let mut body = if let [edit] = edits.as_slice() {
             let applied = &applied[0];
@@ -226,6 +227,8 @@ impl Tool for EditTool {
                     if applied.occurrences == 1 { "" } else { "s" }
                 )),
                 detail: build_file_touch_preview(&diff),
+                added,
+                removed,
             }));
             let context = extract_context(&new_content, applied.start_line, end_line, 3);
             format!(
@@ -246,6 +249,8 @@ impl Tool for EditTool {
                     if replaced == 1 { "" } else { "s" }
                 )),
                 detail: build_file_touch_preview(&diff),
+                added,
+                removed,
             }));
             let mut body = format!(
                 "Edited {}: applied {} edits\n",

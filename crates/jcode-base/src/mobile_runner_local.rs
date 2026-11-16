@@ -14,6 +14,8 @@
 use super::{ClaimResponse, MobileCommand, POLL_INTERVAL, events};
 use crate::mobile_sync;
 use anyhow::Result;
+use serde::ser::SerializeSeq;
+use serde::{Serialize, Serializer};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -89,6 +91,35 @@ fn report(sessions: Vec<LiveSession>) -> Vec<LiveSession> {
     sessions
 }
 
+// Field order preserves the legacy serde_json map's sorted wire keys.
+#[derive(Serialize)]
+struct ClaimLocalRequest<'a> {
+    machine: &'a str,
+    sessions: ClaimLocalSessions<'a>,
+    supports_images: bool,
+}
+
+struct ClaimLocalSessions<'a>(&'a [LiveSession]);
+
+#[derive(Serialize)]
+struct ClaimLocalSession<'a> {
+    busy: bool,
+    session_id: &'a str,
+}
+
+impl Serialize for ClaimLocalSessions<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for session in self.0 {
+            sequence.serialize_element(&ClaimLocalSession {
+                busy: session.busy,
+                session_id: &session.session_id,
+            })?;
+        }
+        sequence.end()
+    }
+}
+
 async fn claim_local(
     client: &reqwest::Client,
     base: &str,
@@ -96,19 +127,19 @@ async fn claim_local(
     machine: &str,
     sessions: &[LiveSession],
 ) -> Result<Option<MobileCommand>> {
-    let sessions: Vec<_> = sessions
-        .iter()
-        .map(
-            |session| serde_json::json!({ "session_id": session.session_id, "busy": session.busy }),
-        )
-        .collect();
-    let response = client
-        .post(format!("{base}/mobile/commands/claim-local"))
-        .bearer_auth(key)
-        .json(&serde_json::json!({ "machine": machine, "sessions": sessions, "supports_images": true }))
-        .timeout(Duration::from_secs(30))
-        .send()
-        .await?;
+    let request = {
+        let body = ClaimLocalRequest {
+            machine,
+            sessions: ClaimLocalSessions(sessions),
+            supports_images: true,
+        };
+        client
+            .post(format!("{base}/mobile/commands/claim-local"))
+            .bearer_auth(key)
+            .json(&body)
+            .timeout(Duration::from_secs(30))
+    };
+    let response = request.send().await?;
     if !response.status().is_success() {
         anyhow::bail!("claim-local returned {}", response.status());
     }

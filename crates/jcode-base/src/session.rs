@@ -43,7 +43,8 @@ use journal::{PersistVectorMode, SessionJournalMeta, SessionPersistState};
 pub use maintenance::prune_old_session_backups;
 pub use memory_profile::SessionMemoryProfileSnapshot;
 use memory_profile::{
-    ContentBlockMemoryStats, SessionMemoryProfileCache, summarize_blocks, summarize_message_content,
+    ContentBlockMemoryStats, SessionMemoryProfileCache, stored_message_json_bytes,
+    summarize_blocks, summarize_message_content,
 };
 use model::SESSION_CONTEXT_PREFIX;
 pub use model::{StoredReplayEvent, StoredReplayEventKind};
@@ -469,7 +470,8 @@ impl Session {
         let message_stats =
             summarize_message_content(self.messages.iter().map(|message| &*message.content));
 
-        let session_message_json_bytes: usize = self.messages.iter().map(estimate_json_bytes).sum();
+        let session_message_json_bytes: usize =
+            self.messages.iter().map(stored_message_json_bytes).sum();
         let provider_cache_stats = summarize_message_content(
             self.provider_messages_cache
                 .iter()
@@ -478,7 +480,7 @@ impl Session {
         let provider_messages_cache_json_bytes: usize = self
             .provider_messages_cache
             .iter()
-            .map(estimate_json_bytes)
+            .map(Message::serialized_json_bytes)
             .sum();
         let provider_cache_shared_content_count = self
             .provider_messages_cache
@@ -493,10 +495,9 @@ impl Session {
         let replay_events_json_bytes: usize =
             self.replay_events.iter().map(estimate_json_bytes).sum();
         let compaction_json_bytes = self
-            .compaction
-            .as_ref()
-            .map(estimate_json_bytes)
-            .unwrap_or(0);
+            .memory_profile_cache
+            .compaction_json_bytes
+            .bytes(self.compaction.as_ref());
         let compaction_summary_bytes = self
             .compaction
             .as_ref()
@@ -535,8 +536,33 @@ impl Session {
             })
             .unwrap_or(0);
 
+        // Diagnostic-only traversal of both retained roots. One accounting pass
+        // avoids charging shared canonical/provider payload allocations twice.
+        let mut capacity = jcode_message_types::content_capacity::ContentCapacityAccounting::new();
+        capacity.record_vec_allocation(&self.messages);
+        capacity.record_vec_allocation(&self.provider_messages_cache);
+        for message in &self.messages {
+            capacity.record_shared(&message.content);
+        }
+        for message in &self.provider_messages_cache {
+            capacity.record_shared(&message.content);
+        }
+        let capacity = capacity.finish();
+
         serde_json::json!({
             "session_id": self.id,
+            "retained_transcript_capacity": {
+                "scope": "canonical messages and provider message cache, shared backing counted once",
+                "known_heap_bytes": capacity.known_heap_bytes(),
+                "string_len_bytes": capacity.string_len_bytes,
+                "string_capacity_bytes": capacity.string_capacity_bytes,
+                "vec_capacity_bytes": capacity.vec_capacity_bytes,
+                "shared_backings": capacity.shared_backings,
+                "shared_references": capacity.shared_references,
+                "json_object_entries": capacity.json_object_entries,
+                "is_lower_bound": true,
+                "excluded_overhead": "JSON map nodes/buckets, Arc headers, allocator metadata/rounding/fragmentation, and non-content message fields",
+            },
             "messages": {
                 "count": self.messages.len(),
                 "json_bytes": session_message_json_bytes,
@@ -697,7 +723,7 @@ impl Session {
             .map(|prev| crate::message::extend_stable_hash(prev, message_hash))
             .unwrap_or(message_hash);
         self.memory_profile_cache.provider_cache_count += 1;
-        self.memory_profile_cache.provider_cache_json_bytes += estimate_json_bytes(&message);
+        self.memory_profile_cache.provider_cache_json_bytes += message.serialized_json_bytes();
         self.memory_profile_cache
             .provider_cache_stats
             .merge_from(&summarize_blocks(&message.content));
@@ -719,8 +745,9 @@ impl Session {
         );
 
         self.memory_profile_cache = SessionMemoryProfileCache {
+            compaction_json_bytes: self.memory_profile_cache.compaction_json_bytes.clone(),
             messages_count: self.messages.len(),
-            messages_json_bytes: self.messages.iter().map(estimate_json_bytes).sum(),
+            messages_json_bytes: self.messages.iter().map(stored_message_json_bytes).sum(),
             message_stats,
             env_snapshots_count: self.env_snapshots.len(),
             env_snapshots_json_bytes: self.env_snapshots.iter().map(estimate_json_bytes).sum(),
@@ -736,7 +763,7 @@ impl Session {
             provider_cache_json_bytes: self
                 .provider_messages_cache
                 .iter()
-                .map(estimate_json_bytes)
+                .map(Message::serialized_json_bytes)
                 .sum(),
             provider_cache_stats,
         };
@@ -752,10 +779,9 @@ impl Session {
     pub fn memory_profile_snapshot(&mut self) -> SessionMemoryProfileSnapshot {
         self.ensure_memory_profile_cache();
         let compaction_json_bytes = self
-            .compaction
-            .as_ref()
-            .map(estimate_json_bytes)
-            .unwrap_or(0);
+            .memory_profile_cache
+            .compaction_json_bytes
+            .bytes(self.compaction.as_ref());
 
         SessionMemoryProfileSnapshot {
             message_count: self.memory_profile_cache.messages_count,
@@ -1327,32 +1353,7 @@ request in this new forked session, using the inherited conversation only as con
             compaction.summary_text = crate::message::redact_secrets(&compaction.summary_text);
         }
         for msg in &mut redacted.messages {
-            for block in &mut msg.content {
-                match block {
-                    ContentBlock::Text { text, .. }
-                    | ContentBlock::Reasoning { text }
-                    | ContentBlock::ReasoningTrace { text } => {
-                        *text = crate::message::redact_secrets(text);
-                    }
-                    ContentBlock::AnthropicThinking { thinking, .. } => {
-                        *thinking = crate::message::redact_secrets(thinking);
-                    }
-                    ContentBlock::OpenAIReasoning { summary, .. } => {
-                        for item in summary {
-                            *item = crate::message::redact_secrets(item);
-                        }
-                    }
-                    ContentBlock::ToolResult { content, .. } => {
-                        *content = crate::message::redact_secrets(content);
-                    }
-                    ContentBlock::ToolUse { input, .. } => redact_json_value(input),
-                    // Export copy only: the stored item stays verbatim for
-                    // replay, but queries can carry pasted credentials.
-                    ContentBlock::ProviderNative { item, .. } => redact_json_value(item),
-                    ContentBlock::Image { .. } => {}
-                    ContentBlock::OpenAICompaction { .. } | ContentBlock::ToolReference { .. } => {}
-                }
-            }
+            redaction::redact_shared_content(&mut msg.content);
         }
         for event in &mut redacted.replay_events {
             match &mut event.kind {
@@ -1474,7 +1475,7 @@ request in this new forked session, using the inherited conversation only as con
 
     pub fn append_stored_message(&mut self, message: StoredMessage) {
         self.memory_profile_cache.messages_count += 1;
-        self.memory_profile_cache.messages_json_bytes += estimate_json_bytes(&message);
+        self.memory_profile_cache.messages_json_bytes += stored_message_json_bytes(&message);
         self.memory_profile_cache
             .message_stats
             .merge_from(&summarize_blocks(&message.content));
@@ -1796,6 +1797,7 @@ request in this new forked session, using the inherited conversation only as con
 
 #[path = "session_redaction.rs"]
 mod redaction;
+#[cfg(test)]
 use redaction::redact_json_value;
 
 #[derive(Debug, Deserialize)]

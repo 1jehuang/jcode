@@ -235,6 +235,24 @@ async fn await_cache_keeps_reload_fallback_when_members_are_unavailable() {
 }
 
 #[tokio::test]
+async fn await_cache_rejects_unknown_only_legacy_completion() {
+    let (_env, _runtime_dir) = RuntimeEnvGuard::new();
+    for mode in [None, Some("any")] {
+        let state = cached_wait(
+            vec![cached_row("peer", "unknown", "legacy completion")],
+            vec!["peer".into()],
+            mode,
+        );
+        let (completed, rows, _, background_started) =
+            issue_cached_wait(&state, vec![], true).await;
+        assert!(!completed);
+        assert!(background_started);
+        assert_eq!(rows[0].status, "unknown");
+        assert!(!rows[0].done);
+    }
+}
+
+#[tokio::test]
 async fn await_cache_any_mode_uses_current_pending_rows_and_reports() {
     let (_env, _runtime_dir) = RuntimeEnvGuard::new();
     let state = cached_wait(

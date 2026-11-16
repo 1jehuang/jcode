@@ -305,21 +305,33 @@ impl Agent {
                 })
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
-                content,
-                display_role: Some(
-                    match message.display_role {
-                        Some(crate::session::StoredDisplayRole::BackgroundTask) => {
-                            "background_task"
+            if event_tx
+                .send(ServerEvent::SoftInterruptInjected {
+                    content,
+                    display_role: Some(
+                        match message.display_role {
+                            Some(crate::session::StoredDisplayRole::FileActivity) => {
+                                "file_activity"
+                            }
+                            Some(crate::session::StoredDisplayRole::BackgroundTask) => {
+                                "background_task"
+                            }
+                            _ => "system",
                         }
-                        _ => "system",
-                    }
-                    .to_string(),
-                ),
-                point: "context".to_string(),
-                tools_skipped: None,
-                client_ids: Vec::new(),
-            });
+                        .to_string(),
+                    ),
+                    point: "context".to_string(),
+                    tools_skipped: None,
+                    client_ids: Vec::new(),
+                })
+                .is_err()
+            {
+                logging::debug(&format!(
+                    "Context message receiver disconnected for session {}",
+                    self.session.id
+                ));
+                break;
+            }
         }
     }
 
@@ -800,9 +812,9 @@ impl Agent {
         // An SDK tool that reuses a built-in name is the caller's own and stays.
         let loader = crate::tool::load_tools::LOAD_TOOLS_NAME;
         let sdk_disabled: HashSet<String> = sdk
-            .as_ref()
-            .map(|config| config.disabled.iter().cloned().collect())
-            .unwrap_or_default();
+            .iter()
+            .flat_map(|config| config.disabled.iter().cloned())
+            .collect();
         let loader_allowed = allowed.is_none_or(|set| self.registry.tool_is_allowed(set, loader))
             && !self.registry.tool_is_disabled(&self.disabled_tools, loader)
             && !self.registry.tool_is_disabled(&sdk_disabled, loader);

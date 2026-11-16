@@ -1328,7 +1328,7 @@ fn recover_tool_name(raw: &str) -> Option<String> {
     valid.then(|| name.to_string())
 }
 
-fn tool_call_from_payload(payload: Value) -> Result<ParsedToolCall> {
+fn tool_call_from_payload(mut payload: Value) -> Result<ParsedToolCall> {
     let name = payload
         .get("name")
         .and_then(Value::as_str)
@@ -1336,7 +1336,10 @@ fn tool_call_from_payload(payload: Value) -> Result<ParsedToolCall> {
         .filter(|name| !name.is_empty())
         .ok_or_else(|| anyhow::anyhow!("jcode tool-call envelope is missing a non-empty name"))?
         .to_string();
-    let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+    let input = payload
+        .get_mut("input")
+        .map(Value::take)
+        .unwrap_or_else(|| json!({}));
     if !input.is_object() {
         anyhow::bail!("jcode tool-call envelope input must be a JSON object");
     }

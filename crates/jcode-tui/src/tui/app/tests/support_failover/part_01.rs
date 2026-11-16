@@ -718,7 +718,7 @@ fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
 }
 
 #[test]
-fn test_definitive_exhaustion_immediate_switch_and_manual_safety() {
+fn test_first_failure_immediate_switch_and_manual_safety() {
     for (mode, enabled, reason, immediate) in [
         ("countdown", true, "OAuth usage exhausted", true),
         ("countdown", false, "OAuth usage exhausted", false),

@@ -1,5 +1,5 @@
 #[path = "turn_system_reminder.rs"]
-mod system_reminder;
+pub(super) mod system_reminder;
 use super::*;
 use crate::message::ToolDefinition;
 
@@ -850,7 +850,17 @@ impl App {
                                             status_spinner_renderer.draw_full(self, terminal)?;
                                         }
                                     }
+                                    StreamEvent::ResolvedModel { model } => {
+                                        call_usage.resolved_model = jcode_provider_core::nonempty_response_model(Some(&model)).map(str::to_string);
+                                    }
                                     StreamEvent::RetryRollback { attempt, max } => {
+                                        // Account for any observed failed-attempt usage, then
+                                        // clear its response model before the next attempt.
+                                        crate::telemetry::record_simple_completion_usage(
+                                            Some(&self.session.id), &provider_name, &model_at_request_start,
+                                            crate::telemetry::UsageSource::Agent,
+                                            std::mem::take(&mut call_usage),
+                                        );
                                         // Transient transport fault mid-stream; the provider is
                                         // replaying the request from the top. Discard the partial
                                         // attempt (accumulators + on-screen streaming render) so

@@ -1,3 +1,23 @@
+#[cfg(test)]
+fn count_unescaped_double_dollar(line: &str) -> usize {
+    let bytes = line.as_bytes();
+    let mut count = 0usize;
+    let mut ix = 0usize;
+    while ix + 1 < bytes.len() {
+        if bytes[ix] == b'\\' {
+            ix += 2;
+            continue;
+        }
+        if bytes[ix] == b'$' && bytes[ix + 1] == b'$' {
+            count += 1;
+            ix += 2;
+            continue;
+        }
+        ix += 1;
+    }
+    count
+}
+
 use super::*;
 
 #[cfg(test)]

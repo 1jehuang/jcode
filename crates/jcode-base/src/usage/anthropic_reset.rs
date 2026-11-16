@@ -5,13 +5,18 @@
 //! account's reset for the week.
 
 use super::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const API_BASE: &str = "https://api.anthropic.com";
 const STATUS_PATH: &str = "/api/oauth/usage?at_wall=1&skip_spend=1";
 const PROFILE_PATH: &str = "/api/oauth/profile";
 /// Server-side program name of the weekly session-limit reset.
 const PROGRAM: &str = "juniper_tide";
+
+#[derive(Serialize)]
+struct ResetRequest {
+    program: &'static str,
+}
 
 pub use jcode_usage_types::AnthropicLimitResetOffer;
 
@@ -392,7 +397,7 @@ async fn consume_with_client(
     );
     let result = async {
         let response = authorize(client.post(url), &pending.access_token)
-            .json(&serde_json::json!({ "program": PROGRAM }))
+            .json(&ResetRequest { program: PROGRAM })
             .send()
             .await
             .context("Could not receive the Claude reset result")?;
@@ -425,3 +430,18 @@ pub fn invalidate_anthropic_usage_reset_state(account_label: Option<&str>) {
 #[cfg(test)]
 #[path = "anthropic_reset_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod request_serialization_tests {
+    use super::*;
+
+    #[test]
+    fn reset_request_matches_legacy_bytes_without_sending() {
+        let expected = serde_json::to_vec(&serde_json::json!({ "program": PROGRAM })).unwrap();
+        let builder = reqwest::Client::new()
+            .post("https://example.invalid/reset")
+            .json(&ResetRequest { program: PROGRAM });
+        let request = builder.build().unwrap();
+        assert_eq!(request.body().unwrap().as_bytes().unwrap(), expected);
+    }
+}

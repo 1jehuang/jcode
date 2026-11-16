@@ -142,6 +142,26 @@ fn compute_optimized(
     system: Option<&Value>,
     tools: Option<&Value>,
 ) -> ComputedFingerprints {
+    let fingerprints = canonical_fingerprints(payload, items, system, tools);
+    let (item_hashes, input_hash) = fingerprints.items;
+    ComputedFingerprints {
+        request: fingerprints.request,
+        items_hash: stable_hash_json(&item_hashes),
+        input_hash,
+        system: fingerprints.system,
+        tools: fingerprints.tools,
+        first: item_hashes.first().copied(),
+        last: item_hashes.last().copied(),
+        items: item_hashes,
+    }
+}
+
+fn compute_previous(
+    payload: &Value,
+    items: &[Value],
+    system: Option<&Value>,
+    tools: Option<&Value>,
+) -> ComputedFingerprints {
     let (item_hashes, input_hash) = item_fingerprints(items);
     ComputedFingerprints {
         request: stable_json_fingerprint(payload),
@@ -167,6 +187,51 @@ fn complete_fingerprint_computation_matches_legacy_fields() {
         assert_eq!(
             compute_optimized(&payload, &items, system, tools),
             compute_legacy(&payload, &items, system, tools)
+        );
+    }
+}
+
+#[test]
+fn canonical_byte_ranges_preserve_schemas_and_fallbacks() {
+    let (_, items, system, tools) = provider_fixture(2);
+    let payloads = [
+        Value::Null,
+        json!([]),
+        json!({}),
+        json!({"messages": [], "system": "different", "tools": null}),
+        json!({"nested": {"messages": items, "system": system, "tools": tools}}),
+        json!({"input": items, "instructions": system, "tools": tools}),
+        json!({"contents": items, "systemInstruction": system, "functionDeclarations": tools}),
+        // Repeated values, escaped keys, and a component also used for both
+        // system/tools must not change request order or component selection.
+        json!({"a\"\n": items, "duplicate": items, "same": system}),
+    ];
+    for payload in payloads {
+        for (system, tools) in [
+            (None, None),
+            (Some(&system), Some(&tools)),
+            (Some(&system), Some(&system)),
+            (Some(&Value::Null), Some(&Value::Null)),
+        ] {
+            assert_eq!(
+                compute_optimized(&payload, &items, system, tools),
+                compute_legacy(&payload, &items, system, tools),
+                "payload={payload:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn canonical_byte_ranges_match_with_borrowed_components() {
+    for turns in [0, 1, 4] {
+        let (payload, _, _, _) = provider_fixture(turns);
+        let items = payload["messages"].as_array().unwrap();
+        let system = payload.get("system");
+        let tools = payload.get("tools");
+        assert_eq!(
+            compute_optimized(&payload, items, system, tools),
+            compute_legacy(&payload, items, system, tools)
         );
     }
 }
@@ -226,20 +291,31 @@ fn benchmark_complete_provider_fingerprint_computation() {
                 black_box(Some(&tools)),
             )
         };
+        let previous = || {
+            compute_previous(
+                black_box(&payload),
+                black_box(&items),
+                black_box(Some(&system)),
+                black_box(Some(&tools)),
+            )
+        };
         assert_eq!(
             baseline(),
             optimized(),
             "all logged fingerprint fields must match"
         );
+        assert_eq!(previous(), optimized());
         for _ in 0..3 {
             black_box(baseline());
             black_box(optimized());
+            black_box(previous());
         }
         // Alternate order to reduce systematic cache/thermal bias. Excludes fixture setup,
         // assertions, log formatting, baseline-map locking, and all logger/disk I/O.
         let rounds = 12;
         let mut old_elapsed = Duration::ZERO;
         let mut new_elapsed = Duration::ZERO;
+        let mut previous_elapsed = Duration::ZERO;
         for round in 0..rounds {
             let mut measure_old = || {
                 let start = Instant::now();
@@ -251,22 +327,69 @@ fn benchmark_complete_provider_fingerprint_computation() {
                 black_box(optimized());
                 new_elapsed += start.elapsed();
             };
-            if round % 2 == 0 {
-                measure_old();
-                measure_new();
-            } else {
-                measure_new();
-                measure_old();
+            let mut measure_previous = || {
+                let start = Instant::now();
+                black_box(previous());
+                previous_elapsed += start.elapsed();
+            };
+            match round % 3 {
+                0 => {
+                    measure_old();
+                    measure_previous();
+                    measure_new();
+                }
+                1 => {
+                    measure_new();
+                    measure_old();
+                    measure_previous();
+                }
+                _ => {
+                    measure_previous();
+                    measure_new();
+                    measure_old();
+                }
             }
         }
         eprintln!(
-            "fingerprint pure computation: items={} payload_bytes={} rounds={} legacy={:?} optimized={:?} speedup={:.3}x",
+            "fingerprint pure computation: items={} payload_bytes={} rounds={} legacy={:?} previous={:?} optimized={:?} legacy_speedup={:.3}x previous_speedup={:.3}x",
             items.len(),
             serde_json::to_string(&payload).unwrap().len(),
             rounds,
             old_elapsed,
+            previous_elapsed,
             new_elapsed,
-            old_elapsed.as_secs_f64() / new_elapsed.as_secs_f64()
+            old_elapsed.as_secs_f64() / new_elapsed.as_secs_f64(),
+            previous_elapsed.as_secs_f64() / new_elapsed.as_secs_f64()
         );
     }
+}
+
+#[test]
+fn fingerprint_matches_legacy_across_buffer_boundaries() {
+    for length in [4093, 4094, 4095, 4096, 4097, 8191, 8192, 8193] {
+        for text in ["a".repeat(length), "\n日本語🦀\"".repeat(length)] {
+            assert_eq!(stable_json_fingerprint(&text), legacy_fingerprint(&text));
+        }
+    }
+}
+
+#[test]
+fn serialization_failure_after_large_prefix_discards_all_partial_bytes() {
+    struct FailsAfterLargePrefix;
+    impl Serialize for FailsAfterLargePrefix {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeSeq;
+            let mut sequence = serializer.serialize_seq(Some(2))?;
+            sequence.serialize_element(&"日本語\n".repeat(8192))?;
+            Err(serde::ser::Error::custom("failure after a large prefix"))
+        }
+    }
+    assert_eq!(
+        stable_json_fingerprint(&FailsAfterLargePrefix),
+        (stable_hash_str(""), 0)
+    );
+    assert_eq!(
+        stable_json_fingerprint(&FailsAfterLargePrefix),
+        legacy_fingerprint(&FailsAfterLargePrefix)
+    );
 }

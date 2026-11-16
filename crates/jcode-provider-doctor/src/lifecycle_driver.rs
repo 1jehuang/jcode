@@ -545,6 +545,52 @@ pub(crate) use crate::live_provider_probes::{
 mod tests {
     use super::*;
 
+    #[test]
+    fn borrowed_lifecycle_evidence_matches_legacy_and_retains_sources() {
+        let mut source = "fixture-only auth source 🦀".to_string();
+        let mut location = Some("sandbox/credentials".to_string());
+        let mut picker = PickerSnapshot {
+            selected_model: Some("future-model".to_string()),
+            provider_entries: vec!["future-model".to_string(), "alternate".to_string()],
+            switch_target: None,
+            switch_request: Some("fixture:alternate".to_string()),
+            switch_route_provider: None,
+            switch_route_api_method: None,
+        };
+        let legacy = serde_json::json!({
+            "source": source.clone(),
+            "credential_location": location.clone(),
+            "selected_model": picker.selected_model.clone(),
+            "provider_entries": picker.provider_entries.clone(),
+            "switch_request": picker.switch_request.clone(),
+            "switch_route_api_method": picker.switch_route_api_method.clone(),
+        });
+        let evidence = serde_json::json!({
+            "source": source,
+            "credential_location": location,
+            "selected_model": picker.selected_model,
+            "provider_entries": picker.provider_entries,
+            "switch_request": picker.switch_request,
+            "switch_route_api_method": picker.switch_route_api_method,
+        });
+        assert_eq!(evidence, legacy);
+        assert_eq!(
+            serde_json::to_vec(&evidence).unwrap(),
+            serde_json::to_vec(&legacy).unwrap()
+        );
+        assert_eq!(source, legacy["source"]);
+        assert_eq!(location.as_deref(), legacy["credential_location"].as_str());
+        assert_eq!(picker.provider_entries.len(), 2);
+        source.clear();
+        location = None;
+        picker.provider_entries.clear();
+        picker.selected_model = None;
+        picker.switch_request = None;
+        picker.switch_route_api_method = Some("changed".to_string());
+        assert!(source.is_empty() && location.is_none() && picker.provider_entries.is_empty());
+        assert_eq!(evidence, legacy);
+    }
+
     /// True when an OpenAI-compatible profile id is intentionally remapped onto a
     /// native runtime (e.g. `anthropic-api` -> `claude-api`, `openai-api`) instead
     /// of the generic `openai-compatible:<id>` route. Such profiles exist so
@@ -1275,11 +1321,8 @@ mod tests {
             jcode_base::live_tests::LiveVerificationStage::passed(
                 jcode_base::live_tests::checkpoints::AUTH_CREDENTIAL_LOADED,
             )
-            .with_evidence(
-                "auth_source",
-                serde_json::json!(api_key.auth.source.clone()),
-            )
-            .with_evidence("env_key", serde_json::json!(api_key.auth.env_key.clone())),
+            .with_evidence("auth_source", serde_json::json!(api_key.auth.source))
+            .with_evidence("env_key", serde_json::json!(api_key.auth.env_key)),
             cost_quota_safety_stage(spend_smoke || stream_smoke),
         ];
         let models_result = fetch_live_openai_compatible_models(
@@ -1358,7 +1401,7 @@ mod tests {
             )
             .with_evidence(
                 "credential_location",
-                serde_json::json!(result.credential_location.clone()),
+                serde_json::json!(result.credential_location),
             )
             .with_evidence("sandboxed", serde_json::json!(true)),
         );
@@ -1376,10 +1419,10 @@ mod tests {
             jcode_base::live_tests::LiveVerificationStage::passed(
                 jcode_base::live_tests::checkpoints::PICKER_LIVE_MODELS,
             )
-            .with_evidence("selected_model", serde_json::json!(selected.clone()))
+            .with_evidence("selected_model", serde_json::json!(selected))
             .with_evidence(
                 "picker_entries",
-                serde_json::json!(result.picker.provider_entries.clone()),
+                serde_json::json!(result.picker.provider_entries),
             ),
         );
         stages.push(
@@ -1398,11 +1441,11 @@ mod tests {
             )
             .with_evidence(
                 "switch_request",
-                serde_json::json!(result.picker.switch_request.clone()),
+                serde_json::json!(result.picker.switch_request),
             )
             .with_evidence(
                 "switch_route_api_method",
-                serde_json::json!(result.picker.switch_route_api_method.clone()),
+                serde_json::json!(result.picker.switch_route_api_method),
             ),
         );
 
@@ -1502,11 +1545,8 @@ mod tests {
             jcode_base::live_tests::LiveVerificationStage::passed(
                 jcode_base::live_tests::checkpoints::AUTH_CREDENTIAL_LOADED,
             )
-            .with_evidence(
-                "auth_source",
-                serde_json::json!(api_key.auth.source.clone()),
-            )
-            .with_evidence("env_key", serde_json::json!(api_key.auth.env_key.clone())),
+            .with_evidence("auth_source", serde_json::json!(api_key.auth.source))
+            .with_evidence("env_key", serde_json::json!(api_key.auth.env_key)),
             cost_quota_safety_stage(true),
         ];
         let models_result = fetch_live_openai_compatible_models(
@@ -1579,7 +1619,7 @@ mod tests {
             )
             .with_evidence(
                 "credential_location",
-                serde_json::json!(result.credential_location.clone()),
+                serde_json::json!(result.credential_location),
             )
             .with_evidence("sandboxed", serde_json::json!(true)),
         );
@@ -1597,10 +1637,10 @@ mod tests {
             jcode_base::live_tests::LiveVerificationStage::passed(
                 jcode_base::live_tests::checkpoints::PICKER_LIVE_MODELS,
             )
-            .with_evidence("selected_model", serde_json::json!(model.clone()))
+            .with_evidence("selected_model", serde_json::json!(model))
             .with_evidence(
                 "picker_entries",
-                serde_json::json!(result.picker.provider_entries.clone()),
+                serde_json::json!(result.picker.provider_entries),
             ),
         );
         stages.push(
@@ -1619,11 +1659,11 @@ mod tests {
             )
             .with_evidence(
                 "switch_request",
-                serde_json::json!(result.picker.switch_request.clone()),
+                serde_json::json!(result.picker.switch_request),
             )
             .with_evidence(
                 "switch_route_api_method",
-                serde_json::json!(result.picker.switch_route_api_method.clone()),
+                serde_json::json!(result.picker.switch_route_api_method),
             ),
         );
 
@@ -1732,11 +1772,8 @@ mod tests {
             jcode_base::live_tests::LiveVerificationStage::passed(
                 jcode_base::live_tests::checkpoints::AUTH_CREDENTIAL_LOADED,
             )
-            .with_evidence(
-                "auth_source",
-                serde_json::json!(api_key.auth.source.clone()),
-            )
-            .with_evidence("env_key", serde_json::json!(api_key.auth.env_key.clone())),
+            .with_evidence("auth_source", serde_json::json!(api_key.auth.source))
+            .with_evidence("env_key", serde_json::json!(api_key.auth.env_key)),
             cost_quota_safety_stage(spend_smoke || stream_smoke),
         ];
 
@@ -1809,7 +1846,7 @@ mod tests {
             )
             .with_evidence(
                 "credential_location",
-                serde_json::json!(result.credential_location.clone()),
+                serde_json::json!(result.credential_location),
             )
             .with_evidence("sandboxed", serde_json::json!(true)),
         );
@@ -1827,10 +1864,10 @@ mod tests {
             jcode_base::live_tests::LiveVerificationStage::passed(
                 jcode_base::live_tests::checkpoints::PICKER_LIVE_MODELS,
             )
-            .with_evidence("selected_model", serde_json::json!(selected.clone()))
+            .with_evidence("selected_model", serde_json::json!(selected))
             .with_evidence(
                 "picker_entries",
-                serde_json::json!(result.picker.provider_entries.clone()),
+                serde_json::json!(result.picker.provider_entries),
             ),
         );
         stages.push(
@@ -1849,11 +1886,11 @@ mod tests {
             )
             .with_evidence(
                 "switch_request",
-                serde_json::json!(result.picker.switch_request.clone()),
+                serde_json::json!(result.picker.switch_request),
             )
             .with_evidence(
                 "switch_route_api_method",
-                serde_json::json!(result.picker.switch_route_api_method.clone()),
+                serde_json::json!(result.picker.switch_route_api_method),
             ),
         );
 

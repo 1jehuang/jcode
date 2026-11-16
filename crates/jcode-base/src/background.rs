@@ -573,7 +573,11 @@ impl BackgroundTaskManager {
             // instantly cannot race the insert below and leave a permanent
             // phantom entry in the map.
             drop(status_guard);
-            let _ = registered_rx.await;
+            if let Err(error) = registered_rx.await {
+                crate::logging::debug(&format!(
+                    "Background task registration ended before completion: {error}"
+                ));
+            }
             tasks_for_prune.write().await.remove(&task_id_clone);
 
             // Read output preview for notification
@@ -794,7 +798,11 @@ impl BackgroundTaskManager {
             // persisted (and after registration below, so instant completions
             // cannot race the insert and leave a phantom entry).
             drop(status_guard);
-            let _ = registered_rx.await;
+            if let Err(error) = registered_rx.await {
+                crate::logging::debug(&format!(
+                    "Background task registration ended before completion: {error}"
+                ));
+            }
             tasks_for_prune.write().await.remove(&task_id_clone);
 
             let output_preview = if output_text.len() > 500 {

@@ -169,13 +169,25 @@ pub(crate) fn origin_label() -> &'static str {
         if crate::mobile_runner::is_cloud_machine() {
             return CLOUD_ORIGIN.to_string();
         }
-        let read = |path: &str| std::fs::read_to_string(path).ok();
+        let read = |path: &str| match std::fs::read_to_string(path) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                crate::logging::info(&format!("Machine label source {path} unavailable: {error}"));
+                None
+            }
+        };
         machine_label(
             read("/sys/devices/virtual/dmi/id/product_name").as_deref(),
-            std::env::var("HOSTNAME")
-                .ok()
-                .or_else(|| read("/etc/hostname"))
-                .as_deref(),
+            match std::env::var("HOSTNAME") {
+                Ok(hostname) => Some(hostname),
+                Err(std::env::VarError::NotPresent) => None,
+                Err(error) => {
+                    crate::logging::warn(&format!("Invalid HOSTNAME for machine label: {error}"));
+                    None
+                }
+            }
+            .or_else(|| read("/etc/hostname"))
+            .as_deref(),
         )
     })
 }
@@ -241,9 +253,15 @@ fn lookup_session_working_dir(session_id: &str) -> Option<String> {
     if session_id.is_empty() {
         return None;
     }
-    crate::session::Session::load_startup_stub(session_id)
-        .ok()
-        .and_then(|session| session.working_dir)
+    match crate::session::Session::load_startup_stub(session_id) {
+        Ok(session) => session.working_dir,
+        Err(error) => {
+            crate::logging::info(&format!(
+                "Push session directory unavailable for {session_id}: {error}"
+            ));
+            None
+        }
+    }
 }
 
 fn humanize_duration(elapsed: Duration) -> String {

@@ -1090,3 +1090,25 @@ fn test_ctx(session_id: &str) -> ToolContext {
         execution_mode: crate::tool::ToolExecutionMode::Direct,
     }
 }
+
+/// Field report: a goals-only write for a group whose todos had been replaced
+/// returned normally and saved nothing, so the agent kept resending it.
+#[test]
+fn goal_updates_for_groups_without_todos_are_reported_not_silently_dropped() {
+    let todos = vec![todo_in_group(Some("new task"), "1")];
+    let incoming = vec![
+        goal(Some("old task"), crate::todo::FeedbackLoopState::Closed),
+        goal(Some("new task"), crate::todo::FeedbackLoopState::Strong),
+        goal(Some(" old task "), crate::todo::FeedbackLoopState::Closed),
+    ];
+    let note = ignored_goal_groups_note(&incoming, &todos).expect("dropped goal must be reported");
+    assert!(note.contains("ignored for \"old task\":"), "{note}");
+    assert!(note.contains("Current groups: \"new task\"."), "{note}");
+
+    assert_eq!(ignored_goal_groups_note(&incoming[1..2], &todos), None);
+    // An empty list prunes nothing, so there is nothing to report.
+    assert_eq!(ignored_goal_groups_note(&incoming, &[]), None);
+    let flat = vec![todo_in_group(None, "1")];
+    let note = ignored_goal_groups_note(&incoming[..1], &flat).unwrap();
+    assert!(note.contains("Current groups: (ungrouped)."), "{note}");
+}

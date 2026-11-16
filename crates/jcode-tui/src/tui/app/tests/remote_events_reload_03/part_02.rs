@@ -382,7 +382,9 @@ fn test_compacted_history_event_applies_expanded_window() {
     app.remote_session_id = Some("session_lazy_history".to_string());
     app.push_display_message(DisplayMessage::assistant("existing tail"));
     app.scroll_offset = 12;
-    app.auto_scroll_paused = false;
+    // Scrolling up to load older messages pauses tail-following. Background
+    // prompt-history backfills while following the tail preserve that mode.
+    app.auto_scroll_paused = true;
 
     let needs_redraw = app.handle_server_event(
         crate::protocol::ServerEvent::CompactedHistory {

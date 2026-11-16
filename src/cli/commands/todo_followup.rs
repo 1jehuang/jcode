@@ -101,7 +101,15 @@ pub(super) fn run_actionable_poke_message(
 }
 
 pub(super) fn run_goals(session_id: &str) -> Vec<crate::todo::TodoGoal> {
-    crate::todo::load_goals(session_id).unwrap_or_default()
+    match crate::todo::load_goals(session_id) {
+        Ok(goals) => goals,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Cannot load headless goals for {session_id}: {error}"
+            ));
+            Vec::new()
+        }
+    }
 }
 
 pub(super) fn run_user_auth_notice(todos: &[crate::todo::TodoItem]) -> Option<String> {

@@ -10,6 +10,11 @@ fn picker_provider<'a>(
 }
 
 pub(super) fn with_app(f: impl FnOnce(&mut App)) {
+    let thread = std::thread::current();
+    let test_name = thread.name().expect("named test thread");
+    if super::super::commands_dispatch::ssh_test_runs_in_child(test_name) {
+        return;
+    }
     let _guard = crate::storage::lock_test_env();
     let home = tempfile::tempdir().unwrap();
     struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);

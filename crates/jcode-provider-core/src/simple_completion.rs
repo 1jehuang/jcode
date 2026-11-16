@@ -1,6 +1,5 @@
-use super::{Provider, SimpleCompletionError, SimpleCompletionUsage};
+use super::{Provider, SimpleCompletionError, SimpleCompletionUsage, nonempty_response_model};
 use anyhow::Result;
-use futures::StreamExt;
 use jcode_message_types::{ContentBlock, Message, Role, StreamEvent};
 
 /// Drive `Provider::complete` for a single user prompt and collect the text and
@@ -10,6 +9,8 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
     prompt: &str,
     system: &str,
 ) -> Result<(String, SimpleCompletionUsage)> {
+    use futures::StreamExt;
+
     let messages = vec![Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
@@ -21,11 +22,16 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
         tool_duration_ms: None,
     }];
 
-    let mut provider_name = provider.name().to_string();
-    let mut model = provider.model();
+    // Cache counter semantics belong to the API transport, not the reseller
+    // or compute backend named by an UpstreamProvider event.
+    let provider_name = provider.name().to_string();
+    let model = provider.model();
     let response = provider.complete(&messages, &[], system, None).await?;
     let mut result = String::new();
-    let mut usage = SimpleCompletionUsage::default();
+    let mut usage = SimpleCompletionUsage {
+        requested_model: Some(model.clone()),
+        ..Default::default()
+    };
     tokio::pin!(response);
 
     while let Some(event) = response.next().await {
@@ -40,7 +46,6 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
                 cache_read_input_tokens,
                 cache_creation_input_tokens,
             }) => {
-                model = provider.model();
                 usage.observe(
                     input_tokens,
                     output_tokens,
@@ -48,9 +53,21 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
                     cache_creation_input_tokens,
                 );
             }
-            Ok(StreamEvent::UpstreamProvider { provider }) => provider_name = provider,
+            Ok(StreamEvent::ResolvedModel { model }) => {
+                if let Some(model) = nonempty_response_model(Some(&model)) {
+                    usage.resolved_model = Some(model.to_owned());
+                }
+            }
+            Ok(StreamEvent::RetryRollback { .. }) => {
+                result.clear();
+                usage = SimpleCompletionUsage {
+                    requested_model: Some(model.clone()),
+                    ..Default::default()
+                };
+            }
+            Ok(StreamEvent::UpstreamProvider { .. }) => {}
             Ok(StreamEvent::MessageEnd { stop_reason })
-                if crate::is_guardrail_stop_reason(stop_reason.as_deref()) =>
+                if super::is_guardrail_stop_reason(stop_reason.as_deref()) =>
             {
                 // A refusal or content-filter stop is not a usable answer. Callers
                 // such as compaction would otherwise persist the refusal text as

@@ -122,6 +122,10 @@ pub struct FileTouch {
     pub summary: Option<String>,
     /// Optional compact preview of what changed. Keep this short and already truncated.
     pub detail: Option<String>,
+    /// Lines added by this touch (0 for reads).
+    pub added: u64,
+    /// Lines removed by this touch (0 for reads).
+    pub removed: u64,
 }
 
 /// Streaming output tail for a swarm worker session, used to render the inline

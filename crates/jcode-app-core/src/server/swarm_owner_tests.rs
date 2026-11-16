@@ -731,7 +731,7 @@ async fn forced_stop_does_not_promote_gallery_activity_to_final_response() {
             })
             .collect();
         assert_eq!(notifications.len(), 1, "{status}: {notifications:?}");
-        assert!(notifications[0].contains("No final assistant response was captured."));
+        assert!(notifications[0].contains("No report captured."));
         assert!(!notifications[0].contains("Applied fix, running validation"));
         assert!(!notifications[0].contains("stale previous turn"));
     }

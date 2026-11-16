@@ -9,6 +9,102 @@ fn jsonish(len: usize) -> Vec<u8> {
     unit.iter().copied().cycle().take(len).collect()
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn json_uploads_match_original_wire_bytes_and_headers() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let _guard = UPLINK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut state = 0x12345678u32;
+    let varied: String = (0..1024 * 1024)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            b"0123456789abcdef"[(state >> 28) as usize] as char
+        })
+        .collect();
+    for payload in ["x".repeat(1024 * 1024), varied] {
+        let body = serde_json::json!({"messages": [{"role": "user", "content": payload}]});
+        let raw = serde_json::to_vec(&body).unwrap();
+        for (mode, endpoint) in [
+            (
+                CompressionMode::Off,
+                "https://api.anthropic.com/v1/messages",
+            ),
+            (
+                CompressionMode::Always,
+                "https://api.anthropic.com/v1/messages",
+            ),
+            (
+                CompressionMode::Always,
+                "https://api.openai.com/v1/responses",
+            ),
+        ] {
+            let encoding = endpoint_encoding(endpoint);
+            let (_, compressed) = decide(&raw, mode, encoding, DEFAULT_UPLINK_BPS);
+            let expected_encoding = compressed
+                .as_ref()
+                .map(|_| encoding.unwrap().header_value());
+            let expected = compressed.unwrap_or_else(|| raw.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut received = Vec::new();
+                let mut buffer = [0u8; 8192];
+                let header_end = loop {
+                    let n = socket.read(&mut buffer).await.unwrap();
+                    assert_ne!(n, 0, "upload ended before headers");
+                    received.extend_from_slice(&buffer[..n]);
+                    if let Some(index) = received.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                    {
+                        break index + 4;
+                    }
+                };
+                let headers = String::from_utf8(received[..header_end].to_vec())
+                    .unwrap()
+                    .to_ascii_lowercase();
+                assert!(headers.contains("content-type: application/json\r\n"));
+                assert!(!headers.contains("transfer-encoding:"));
+                assert!(headers.contains(&format!("content-length: {}\r\n", expected.len())));
+                if let Some(encoding) = expected_encoding {
+                    assert!(headers.contains(&format!("content-encoding: {encoding}\r\n")));
+                } else {
+                    assert!(!headers.contains("content-encoding:"));
+                }
+                while received.len() - header_end < expected.len() {
+                    let n = socket.read(&mut buffer).await.unwrap();
+                    assert_ne!(n, 0, "upload ended before body");
+                    received.extend_from_slice(&buffer[..n]);
+                }
+                assert_eq!(&received[header_end..], expected);
+                socket.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+            });
+            let client = reqwest::Client::builder().no_proxy().build().unwrap();
+            let request = json_body(
+                client.post(format!("http://{address}/upload")),
+                endpoint,
+                &body,
+                mode,
+            )
+            .unwrap();
+            let response = tokio::time::timeout(Duration::from_secs(10), request.send())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+            server.await.unwrap();
+            assert_eq!(
+                serde_json::to_vec(&body).unwrap(),
+                raw,
+                "retry input changed"
+            );
+        }
+    }
+    reset_uplink_for_tests(None);
+}
+
 #[test]
 fn parses_modes() {
     assert_eq!(CompressionMode::parse("off"), Some(CompressionMode::Off));
