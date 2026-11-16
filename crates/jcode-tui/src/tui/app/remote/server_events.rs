@@ -3111,6 +3111,21 @@ fn handle_server_event_inner(
             {
                 // Receipt and model delivery are distinct events.
                 app.push_display_message(swarm);
+            } else if let Some(reminder) =
+                super::super::turn::system_reminder::system_reminder_body(&content)
+            {
+                // A reminder that follows a swarm delivery only tells the model
+                // how to reply to the row above it. Other reminders get their
+                // own row, without the model-facing tags.
+                let annotates_swarm_row = app
+                    .display_messages()
+                    .last()
+                    .is_some_and(|message| message.role == "swarm");
+                if !annotates_swarm_row && !reminder.is_empty() {
+                    app.push_display_message(
+                        DisplayMessage::system(reminder).with_title("Context notification"),
+                    );
+                }
             } else {
                 // Do not coalesce repeated system injections: each delivery is
                 // its own event in the conversation timeline.

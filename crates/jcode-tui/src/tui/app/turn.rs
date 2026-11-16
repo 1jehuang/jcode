@@ -1,5 +1,5 @@
 #[path = "turn_system_reminder.rs"]
-mod system_reminder;
+pub(super) mod system_reminder;
 use super::*;
 use crate::message::ToolDefinition;
 
