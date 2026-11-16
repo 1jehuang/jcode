@@ -2477,10 +2477,11 @@ pub fn record_simple_completion_usage(
     if usage.is_empty() {
         return;
     }
-    record_provider_usage(
+    record_provider_usage_with_model_attribution(
         session_id,
         provider,
-        model,
+        usage.requested_model.as_deref().unwrap_or(model),
+        usage.resolved_model.as_deref(),
         source,
         ProviderUsage {
             input_tokens: usage.input_tokens.unwrap_or(0),
@@ -2504,7 +2505,7 @@ pub fn record_simple_completion_failure_usage(
             &failure.provider,
             &failure.model,
             source,
-            failure.usage,
+            failure.usage.clone(),
         );
     }
 }

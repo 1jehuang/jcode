@@ -876,6 +876,7 @@ fn usage_report_falls_back_to_global_session_and_skips_zero_usage() {
             output_tokens: Some(400),
             cache_read_input_tokens: None,
             cache_creation_input_tokens: None,
+            ..Default::default()
         },
     );
     let emitted = TEST_EMITTED_PAYLOADS.lock().unwrap().clone();
@@ -932,12 +933,42 @@ fn provider_usage_normalizes_cache_subsets_by_transport_not_model() {
 }
 
 #[test]
+fn simple_completion_usage_prefers_observed_request_metadata() {
+    let _guard = lock_telemetry_test_state();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+    for resolved_model in [Some("actual-model".to_string()), None] {
+        record_simple_completion_usage(
+            Some("side-call"),
+            "openai",
+            "fallback-model",
+            UsageSource::Compaction,
+            jcode_provider_core::SimpleCompletionUsage {
+                requested_model: Some("private-alias".into()),
+                resolved_model,
+                input_tokens: Some(10),
+                ..Default::default()
+            },
+        );
+    }
+    let emitted = TEST_EMITTED_PAYLOADS.lock().unwrap();
+    assert_eq!(emitted.len(), 2);
+    assert_eq!(emitted[0]["model"], "actual-model");
+    assert_eq!(emitted[0]["requested_model"], "private-alias");
+    assert_eq!(emitted[0]["resolved_model"], "actual-model");
+    assert_eq!(emitted[1]["model"], "private-alias");
+    assert_eq!(emitted[1]["requested_model"], "private-alias");
+    assert!(emitted[1].get("resolved_model").is_none());
+}
+
+#[test]
 fn simple_completion_failure_reports_only_observed_usage() {
     let _guard = lock_telemetry_test_state();
     TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
     let error = anyhow::Error::new(jcode_provider_core::SimpleCompletionError::new(
         anyhow::anyhow!("private provider response content"),
         jcode_provider_core::SimpleCompletionUsage {
+            requested_model: Some("private-alias".into()),
+            resolved_model: Some("served-model".into()),
             input_tokens: Some(100),
             output_tokens: None,
             cache_read_input_tokens: Some(60),
@@ -955,6 +986,8 @@ fn simple_completion_failure_reports_only_observed_usage() {
     assert_eq!(report["session_id"], "failed-side-call");
     assert_eq!(report["provider"], "openai");
     assert_eq!(report["model"], "served-model");
+    assert_eq!(report["requested_model"], "private-alias");
+    assert_eq!(report["resolved_model"], "served-model");
     assert_eq!(report["source"], "sidecar");
     assert_eq!(report["input_tokens"], 40);
     assert_eq!(report["output_tokens"], 0);
