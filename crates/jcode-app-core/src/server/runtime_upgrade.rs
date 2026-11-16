@@ -1,4 +1,12 @@
 //! Packaged local upgrades deliberately do not use the interrupting reload path.
+// The upgrade body is `#[cfg(unix)]`-gated inside `handle`: probing, reserving,
+// checking out idle agents and exec'ing the replacement only exist there. On
+// Windows `handle` still answers the request, so the module compiles while every
+// helper behind the gate looks unreachable and each one raises a dead-code
+// warning. They are live code on unix, so they must not be deleted; scope the
+// allowance to non-unix builds instead.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
 use crate::protocol::ServerEvent;
 use crate::runtime_activity::ActivityGate;
 use anyhow::{Context, Result, bail, ensure};
