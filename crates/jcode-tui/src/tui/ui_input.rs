@@ -378,7 +378,10 @@ pub(super) fn pending_prompt_count(app: &dyn TuiState) -> usize {
             .interleave_message()
             .map(|msg| !msg.is_empty())
             .unwrap_or(false);
-    app.queued_messages().len()
+    app.queued_messages()
+        .iter()
+        .filter(|msg| !crate::todo::is_auto_poke_message(msg))
+        .count()
         + app.queued_commands().len()
         + pending_count
         + if interleave { 1 } else { 0 }
@@ -413,7 +416,11 @@ pub(super) fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
             normalized.chars().take(100).collect::<String>()
         ));
     }
-    for msg in app.queued_messages() {
+    for msg in app
+        .queued_messages()
+        .iter()
+        .filter(|msg| !crate::todo::is_auto_poke_message(msg))
+    {
         let normalized = normalize_repaint_sensitive_notice_text(msg);
         previews.push(format!(
             "⏳ {}",
@@ -440,7 +447,11 @@ pub(super) fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, sta
     for msg in app.queued_commands() {
         items.push((QueuedMsgType::Queued, msg.as_str()));
     }
-    for msg in app.queued_messages() {
+    for msg in app
+        .queued_messages()
+        .iter()
+        .filter(|msg| !crate::todo::is_auto_poke_message(msg))
+    {
         items.push((QueuedMsgType::Queued, msg.as_str()));
     }
 
