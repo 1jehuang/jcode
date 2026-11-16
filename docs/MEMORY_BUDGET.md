@@ -246,6 +246,16 @@ multiple repaired tool outputs and null/empty/Unicode remote metadata. No live
 provider request or real session mutation was used as a test. Legacy-oracle
 clones in test code were deliberately retained.
 
+The CLI test targets also passed the final hosted locked integrated check.
+
+Model picker alias expansion additionally transfers each consumed original
+String into its output rather than cloning it a second time. The separate
+owned deduplication set remains unchanged. A pointer-identity regression checks
+that the first unique strings retain their backing allocations and output
+order while empty and duplicate entries are handled as before. The final
+catalog ownership suite passed 6 tests with the optional CPU probe ignored.
+This is an allocation-copy reduction, not a measured production RAM saving.
+
 ### Schema, reranking, and retry ownership acceptance (2026-11-16)
 
 The MCP schema cache now shares immutable catalog backing between memoized

@@ -413,7 +413,7 @@ fn model_ids_with_context_aliases(models: Vec<String>) -> Vec<String> {
             continue;
         }
         if seen.insert(model.clone()) {
-            deduped.push(model.clone());
+            deduped.push(model);
         }
         if model_exposes_1m_alias(&normalized) {
             let alias = format!("{}[1m]", normalized);
@@ -1338,6 +1338,31 @@ pub fn provider_for_model(model: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod catalog_ownership_tests {
     use super::*;
+
+    #[test]
+    fn model_picker_transfers_first_string_and_preserves_order() {
+        let first = "ownership-picker-future-model-a".to_string();
+        let second = "ownership-picker-future-model-b".to_string();
+        let first_backing = first.as_ptr();
+        let second_backing = second.as_ptr();
+        let duplicate = first.clone();
+        let result = model_ids_with_context_aliases(vec![
+            String::new(),
+            first,
+            duplicate,
+            second,
+            String::new(),
+        ]);
+        assert_eq!(
+            result,
+            [
+                "ownership-picker-future-model-a",
+                "ownership-picker-future-model-b",
+            ]
+        );
+        assert_eq!(result[0].as_ptr(), first_backing);
+        assert_eq!(result[1].as_ptr(), second_backing);
+    }
 
     fn overlay<'a>(
         store: &'a mut PersistedModelCatalogStore,
