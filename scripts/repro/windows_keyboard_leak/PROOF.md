@@ -152,6 +152,24 @@ VHS is used as a second, independent driver, not as the assertion engine.
 - The evaluation is of the installed binary and pinned copies, not of a fresh `cargo build`
   of the branch head.
 
+## CI on the commit that carries this harness
+
+- `Build & Test (windows-latest)`: **pass**, 22m56s. The suite that covers the fixed code path
+  is green on the platform the leak belongs to.
+- `Build & Test (ubuntu-latest)`: 3683 passed, 3 failed. All three are pre-existing on this
+  branch and were already failing on PR #2184:
+  `tui::app::tests::test_cancel_image_only_failover_restores_attachments`
+  (`crates/jcode-tui/src/tui/app/tests/remote_failover_routes.rs:983`),
+  `test_compacted_history_event_applies_expanded_window`
+  (`.../remote_events_reload_03/part_02.rs:373`), and
+  `test_definitive_exhaustion_immediate_switch_and_manual_safety`
+  (`.../support_failover/part_01.rs:682`). None of those files is touched by this branch.
+- `Security preflight (Linux)`: 3 rustsec advisories in dependencies. The seven commits on this
+  branch change no `Cargo.toml` or `Cargo.lock`; the diff is confined to `crates/jcode-tui`,
+  `src/cli` and `scripts/repro`, so the advisories are inherited.
+- `Format` and `Quality Guardrails`: red on the base commit and on every open PR, not from this
+  branch. `scripts/check_code_size_budget.py` locally reports only pre-existing Rust files.
+
 ## Reproduce
 
 ```bat

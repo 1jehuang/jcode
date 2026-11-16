@@ -73,6 +73,7 @@ python vhs_matrix.py --out runs\vhs-matrix --runs 5 --binary path\to\jcode-fixed
 | `pty_probe.py` | one run: ConPTY, isolated `JCODE_HOME`, private socket, single-write report, snapshots, checks, artifacts |
 | `run_matrix.py` | N identical runs plus bracketing negative controls; refuses to pass unless every run is green |
 | `check_counts.py` | per-check pass counts over a matrix directory |
+| `show_records.py` | every per-run record as one table, with the composer row each run ended on |
 | `make_tapes.py` | generates the VHS tapes, embedding the real ESC byte so the tape can emit the report |
 | `vhs_matrix.py` | second, independent driver: VHS runs with log-based assertions |
 | `resume_world.cmd` | builds a disposable world (fixture copy, isolated home) and resumes it by name |
