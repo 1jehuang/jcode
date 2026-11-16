@@ -11,7 +11,7 @@
 use crate::mobile_sync;
 use crate::subscription_api;
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -384,6 +384,45 @@ async fn claim(client: &reqwest::Client, base: &str, key: &str) -> Result<Option
     Ok(response.json::<ClaimResponse>().await?.command)
 }
 
+// Field order matches the legacy serde_json::Value map's sorted wire keys.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum CompletionPayload<'a> {
+    Done {
+        session_id: &'a str,
+        status: &'static str,
+    },
+    Failed {
+        error: &'a str,
+        status: &'static str,
+    },
+}
+
+fn completion_request(
+    client: &reqwest::Client,
+    base: &str,
+    key: &str,
+    id: &str,
+    outcome: &Result<String>,
+) -> reqwest::RequestBuilder {
+    let request = client
+        .post(format!("{base}/mobile/commands/{id}/complete"))
+        .bearer_auth(key);
+    // json() serializes synchronously into the request body. Neither the
+    // borrowed payload nor the formatted error survives into the network await.
+    let request = match outcome {
+        Ok(session) => request.json(&CompletionPayload::Done {
+            session_id: session,
+            status: "done",
+        }),
+        Err(err) => request.json(&CompletionPayload::Failed {
+            error: &format!("{err:#}"),
+            status: "failed",
+        }),
+    };
+    request.timeout(Duration::from_secs(30))
+}
+
 async fn complete(
     client: &reqwest::Client,
     base: &str,
@@ -391,15 +430,7 @@ async fn complete(
     id: &str,
     outcome: &Result<String>,
 ) -> Result<()> {
-    let body = match outcome {
-        Ok(session) => serde_json::json!({ "status": "done", "session_id": session }),
-        Err(err) => serde_json::json!({ "status": "failed", "error": format!("{err:#}") }),
-    };
-    client
-        .post(format!("{base}/mobile/commands/{id}/complete"))
-        .bearer_auth(key)
-        .json(&body)
-        .timeout(Duration::from_secs(30))
+    completion_request(client, base, key, id, outcome)
         .send()
         .await?
         .error_for_status()?;
@@ -571,6 +602,41 @@ pub fn spawn_cloud_runner() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completion_request_preserves_legacy_wire_contract() {
+        let client = reqwest::Client::new();
+        for outcome in [
+            Ok(String::new()),
+            Ok("session \"quoted\"\\\n雪".to_owned()),
+            Err(anyhow::anyhow!("root \"quoted\"\\\n雪").context("outer context")),
+        ] {
+            let legacy = match &outcome {
+                Ok(session) => serde_json::json!({ "status": "done", "session_id": session }),
+                Err(err) => serde_json::json!({ "status": "failed", "error": format!("{err:#}") }),
+            };
+            let expected = serde_json::to_vec(&legacy).unwrap();
+            let request = completion_request(
+                &client,
+                "https://example.invalid/v1",
+                "dummy-key",
+                "command-123",
+                &outcome,
+            )
+            .build()
+            .unwrap();
+            drop(outcome);
+            assert_eq!(request.method(), reqwest::Method::POST);
+            assert_eq!(
+                request.url().as_str(),
+                "https://example.invalid/v1/mobile/commands/command-123/complete"
+            );
+            assert_eq!(request.headers()["authorization"], "Bearer dummy-key");
+            assert_eq!(request.headers()["content-type"], "application/json");
+            assert_eq!(request.timeout(), Some(&Duration::from_secs(30)));
+            assert_eq!(request.body().unwrap().as_bytes().unwrap(), expected);
+        }
+    }
 
     #[test]
     fn photo_wire_contract_validates_types_base64_and_total_budget() {
