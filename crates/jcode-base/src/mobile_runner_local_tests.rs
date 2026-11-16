@@ -8,6 +8,7 @@ struct Request {
     line: String,
     auth: String,
     body: serde_json::Value,
+    body_bytes: Vec<u8>,
 }
 
 /// Answers each request with the next canned JSON body.
@@ -53,6 +54,7 @@ async fn api(
                     .unwrap_or_default()
                     .to_string(),
                 body: serde_json::from_slice(&raw[head_len..head_len + body_len]).unwrap(),
+                body_bytes: raw[head_len..head_len + body_len].to_vec(),
             });
             let body = reply.to_string();
             let response = format!(
@@ -101,6 +103,59 @@ fn live(id: &str, busy: bool) -> LiveSession {
 fn message(session: &str, text: &str) -> serde_json::Value {
     serde_json::json!({"command": {"command_id": "cmd-1", "kind": "message", "session_id": session,
         "text": text, "status": "running", "target": "local"}})
+}
+
+async fn assert_legacy_claim_bytes(machine: &str, sessions: &[LiveSession]) {
+    let legacy_sessions: Vec<_> = sessions
+        .iter()
+        .map(|session| serde_json::json!({"session_id": session.session_id, "busy": session.busy}))
+        .collect();
+    let expected = serde_json::to_vec(&serde_json::json!({
+        "machine": machine, "sessions": legacy_sessions, "supports_images": true
+    }))
+    .unwrap();
+    let (base, server) = api(vec![(200, serde_json::json!({"command": null}))]).await;
+    assert!(
+        claim_local(&reqwest::Client::new(), &base, "k", machine, sessions)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body_bytes, expected);
+}
+
+#[tokio::test]
+async fn claim_bytes_match_legacy_empty_sessions() {
+    assert_legacy_claim_bytes("laptop", &[]).await;
+    assert_eq!(
+        serde_json::to_vec(&ClaimLocalRequest {
+            machine: "laptop",
+            sessions: ClaimLocalSessions(&[]),
+            supports_images: true,
+        })
+        .unwrap(),
+        br#"{"machine":"laptop","sessions":[],"supports_images":true}"#
+    );
+}
+
+#[tokio::test]
+async fn claim_bytes_match_legacy_unicode_and_escaping() {
+    assert_legacy_claim_bytes(
+        "电脑 💻\n\"\\",
+        &[live("会話_💬\t\"\\", true), live("é_\u{0000}", false)],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn claim_bytes_match_legacy_ninety_sessions() {
+    let sessions: Vec<_> = (0..90)
+        .map(|i| live(&format!("session_{i:03}"), i % 2 == 0))
+        .collect();
+    assert_eq!(sessions.len(), MAX_REPORTED_SESSIONS);
+    assert_legacy_claim_bytes("laptop", &sessions).await;
 }
 
 #[tokio::test]
