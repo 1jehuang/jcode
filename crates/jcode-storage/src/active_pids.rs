@@ -1,4 +1,4 @@
-//! Session process-ownership markers under the historical `~/.jcode/active_pids` name.
+//! Session process-ownership markers under the historical `~/.kcode/active_pids` name.
 //!
 //! “Active” means a process owns the session, not that a window is open, a client
 //! is connected, or a model is generating. In server mode, the owning PID is the
@@ -15,7 +15,7 @@
 use crate::jcode_dir;
 use std::path::PathBuf;
 
-/// Directory holding one ownership marker per session ID (`~/.jcode/active_pids`).
+/// Directory holding one ownership marker per session ID (`~/.kcode/active_pids`).
 /// Each file contains the owning process PID, not a client/window PID in server mode.
 pub fn active_pids_dir() -> Option<PathBuf> {
     jcode_dir().ok().map(|d| d.join("active_pids"))
@@ -199,7 +199,7 @@ pub fn find_active_session_id_by_pid(pid: u32) -> Option<String> {
     None
 }
 
-/// List session IDs with ownership markers in `~/.jcode/active_pids`.
+/// List session IDs with ownership markers in `~/.kcode/active_pids`.
 /// Does not check PID liveness or whether a client/window is connected.
 pub fn active_session_ids() -> Vec<String> {
     let Some(dir) = active_pids_dir() else {

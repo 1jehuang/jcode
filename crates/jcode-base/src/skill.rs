@@ -66,7 +66,7 @@ impl SkillRegistry {
     /// direct slash invocation paths. Keeping a single registry prevents slash
     /// commands from seeing a stale startup-only skill snapshot after reloads.
     ///
-    /// Holds GLOBAL skills only (plugins, `~/.jcode/skills/`,
+    /// Holds GLOBAL skills only (plugins, `~/.kcode/skills/`,
     /// `~/.agents/skills/`). Project-local skills are a per-session overlay
     /// composed at read time from the session's workspace root (issue #457);
     /// they must never enter this shared registry, and the daemon's startup
@@ -109,7 +109,7 @@ impl SkillRegistry {
     }
 
     /// Import skills from Claude Code and Codex CLI on first run.
-    /// Only runs if ~/.jcode/skills/ doesn't exist yet.
+    /// Only runs if ~/.kcode/skills/ doesn't exist yet.
     fn import_from_external() {
         let jcode_skills = match crate::storage::jcode_dir() {
             Ok(dir) => dir.join("skills"),
@@ -251,7 +251,7 @@ impl SkillRegistry {
     }
 
     /// Load only the shared global skill sources: Claude Code plugin installs,
-    /// `~/.jcode/skills/`, and `~/.agents/skills/`.
+    /// `~/.kcode/skills/`, and `~/.agents/skills/`.
     ///
     /// This is what the process-wide shared registry holds. Project-local
     /// skills are intentionally excluded: they are a per-session overlay
@@ -276,7 +276,7 @@ impl SkillRegistry {
             registry.load_from_dir(&agents_skills)?;
         }
 
-        // Load from ~/.jcode/skills/ (jcode's own global skills)
+        // Load from ~/.kcode/skills/ (jcode's own global skills)
         if let Ok(jcode_dir) = crate::storage::jcode_dir() {
             let jcode_skills = jcode_dir.join("skills");
             if jcode_skills.exists() {
@@ -602,7 +602,7 @@ impl SkillRegistry {
         self.reload_global()
     }
 
-    /// Reload the shared global skill sources (plugins, `~/.jcode/skills/`,
+    /// Reload the shared global skill sources (plugins, `~/.kcode/skills/`,
     /// `~/.agents/skills/`) into this registry.
     ///
     /// Project-local skills are intentionally NOT loaded here: they are a
@@ -635,7 +635,7 @@ impl SkillRegistry {
             count += self.load_from_dir_count(&agents_skills)?;
         }
 
-        // Load from ~/.jcode/skills/ (jcode's own global skills)
+        // Load from ~/.kcode/skills/ (jcode's own global skills)
         if let Ok(jcode_dir) = crate::storage::jcode_dir() {
             let jcode_skills = jcode_dir.join("skills");
             if jcode_skills.exists() {

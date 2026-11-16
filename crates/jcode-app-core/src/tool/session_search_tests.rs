@@ -260,7 +260,7 @@ fn timestamped_session_collection_respects_recent_limit_without_mtime_stat() {
 }
 
 #[test]
-#[ignore = "local performance benchmark over the real ~/.jcode session corpus"]
+#[ignore = "local performance benchmark over the real ~/.kcode session corpus"]
 fn bench_real_session_search_corpus() {
     if std::env::var("JCODE_SESSION_SEARCH_BENCH_REAL")
         .ok()

@@ -25,7 +25,8 @@ impl AuthTestSandbox {
             crate::env::remove_var(key);
         }
 
-        std::fs::create_dir_all(temp.path().join("config").join("jcode"))?;
+        // The app-owned config directory is `<product-home>/config/kcode`.
+        std::fs::create_dir_all(temp.path().join("config").join("kcode"))?;
         std::fs::create_dir_all(temp.path().join("external"))?;
         crate::env::set_var("JCODE_HOME", temp.path());
         crate::provider_catalog::force_apply_openai_compatible_profile_env(None);
@@ -43,7 +44,7 @@ impl AuthTestSandbox {
     }
 
     pub fn config_dir(&self) -> PathBuf {
-        self.root().join("config").join("jcode")
+        self.root().join("config").join("kcode")
     }
 
     pub fn external_dir(&self) -> PathBuf {

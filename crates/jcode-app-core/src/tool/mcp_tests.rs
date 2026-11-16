@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 fn create_test_tool() -> McpManagementTool {
     // Use an explicit empty config so tests are hermetic: McpManager::new()
-    // would load the developer's real ~/.jcode/mcp.json, and list output
+    // would load the developer's real ~/.kcode/mcp.json, and list output
     // now includes configured-but-not-connected servers (issue #436).
     let manager = Arc::new(RwLock::new(McpManager::with_config(
         crate::mcp::McpConfig::default(),

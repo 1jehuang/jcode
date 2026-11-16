@@ -1668,7 +1668,7 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
 /// saved value.
 ///
 /// Repro shape: operator's m3.1 sessions
-/// (e.g. `~/.jcode/sessions/session_deer_1791971005300_*.json` saved
+/// (e.g. `~/.kcode/sessions/session_deer_1791971005300_*.json` saved
 /// with `model = "MiniMax-M3.1-Flash-Preview"` on the openai
 /// provider) were silently resuming on the provider's current
 /// default while keeping the saved `MiniMax-M3.1-Flash-Preview` in
@@ -1692,7 +1692,7 @@ async fn restore_session_falls_back_to_provider_default_when_saved_model_is_reje
     // is the same error class a real provider would surface if the
     // saved id is no longer in its live catalog (e.g. an m3.1
     // session resumed after the operator removed the m3.1 entry
-    // from `~/.jcode/config.toml`).
+    // from `~/.kcode/config.toml`).
     let mut saved_session = crate::session::Session::create_with_id(
         "session_restore_falls_back_to_provider_default_when_saved_model_is_rejected".to_string(),
         None,

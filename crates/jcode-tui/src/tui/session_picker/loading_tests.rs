@@ -7,7 +7,7 @@ fn fork_intent_message(text: &str) -> serde_json::Value {
 const FORK_INTENT_MARKER: &str = "<system-reminder>\nThis session was forked (split) from session flamingo (session_flamingo) by the user.\n</system-reminder>";
 
 #[test]
-#[ignore = "local diagnostic: requires the original penguin and elephant transcripts in ~/.jcode"]
+#[ignore = "local diagnostic: requires the original penguin and elephant transcripts in ~/.kcode"]
 fn fork_intent_real_penguin_render_search_outranks_desktop_bug() {
     let _env_lock = crate::storage::lock_test_env();
     let home = std::env::var_os("HOME").expect("HOME for original saved sessions");

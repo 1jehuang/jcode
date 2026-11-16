@@ -8,7 +8,7 @@
 //! providers, including every OpenAI-compatible profile jcode ships.
 //!
 //! This module mirrors the OpenRouter catalog pattern:
-//!   - a 24h disk cache under `~/.jcode/cache/models_dev_pricing.json`,
+//!   - a 24h disk cache under `~/.kcode/cache/models_dev_pricing.json`,
 //!   - synchronous lookups that never block on the network,
 //!   - a background refresh scheduled on cache miss/staleness.
 //!

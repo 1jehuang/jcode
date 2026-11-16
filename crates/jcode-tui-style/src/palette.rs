@@ -14,7 +14,7 @@
 //! a role if it needs to follow `/colors`. An unconfigured palette is
 //! byte-identical to the historical hard-coded look.
 //!
-//! Configuration lives in `~/.jcode/config.toml`:
+//! Configuration lives in `~/.kcode/config.toml`:
 //!
 //! ```toml
 //! [display.colors]

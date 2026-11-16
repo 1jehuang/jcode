@@ -8,7 +8,7 @@ use std::sync::{Arc, LazyLock, Mutex as StdMutex, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
-/// Directory name under the durable state dir (`~/.jcode/state`).
+/// Directory name under the durable state dir (`~/.kcode/state`).
 const SWARM_STATE_DIR: &str = "swarm";
 /// Pre-0.36 location under the runtime dir (tmpfs on Linux, wiped on reboot).
 const LEGACY_SWARM_STATE_DIR: &str = "jcode-swarm-state";
@@ -151,7 +151,7 @@ fn state_dir() -> PathBuf {
 
 /// Unit tests that exercise high-level swarm mutation helpers do not all set
 /// `JCODE_RUNTIME_DIR`. Never let those tests fall through to the real
-/// `~/.jcode/state/swarm`: that leaked synthetic `swarm-1` plans/members into
+/// `~/.kcode/state/swarm`: that leaked synthetic `swarm-1` plans/members into
 /// live user state during ordinary `cargo test` runs. Tests that need an
 /// isolated explicit location still set `JCODE_RUNTIME_DIR` and use the normal
 /// resolver; otherwise use a process-local temp directory.

@@ -39,7 +39,7 @@ fn user_home_path_uses_external_dir_under_jcode_home() {
     let _guard = lock_test_env();
     let prev_home = std::env::var_os("JCODE_HOME");
     // `tempfile::TempDir::new()` inherits TMPDIR, which the jcode bash tool
-    // points at ~/.jcode/scratch. Rooting a synthetic JCODE_HOME inside the
+    // points at ~/.kcode/scratch. Rooting a synthetic JCODE_HOME inside the
     // live jcode tree would let the test read and write real scratch state.
     let temp = crate::test_temp::tempdir().expect("create temp dir");
     crate::env::set_var("JCODE_HOME", temp.path());
@@ -83,7 +83,7 @@ fn app_config_dir_uses_jcode_home_when_set() {
     crate::env::set_var("JCODE_HOME", temp.path());
 
     let resolved = app_config_dir().expect("resolve app config dir");
-    assert_eq!(resolved, temp.path().join("config").join("jcode"));
+    assert_eq!(resolved, temp.path().join("config").join("kcode"));
 
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);

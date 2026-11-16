@@ -87,7 +87,7 @@ fn configured_colors_survive_a_real_config_file_round_trip() {
 ///
 /// The unit tests in `jcode-config-types` cover lenient enum parsing in
 /// isolation. This covers the path the reporter actually took: hand-written
-/// `~/.jcode/config.toml`, loaded through the same global cache the running
+/// `~/.kcode/config.toml`, loaded through the same global cache the running
 /// process uses, then read back through the summary they would check. The
 /// original bug was invisible at the field level precisely because it happened
 /// during whole-file parsing, so it needs a file-level test.

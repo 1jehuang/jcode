@@ -1,7 +1,7 @@
 //! `/colors`: inspect, configure, and score the TUI color palette.
 //!
 //! Every color the TUI renders is configurable through `[display.colors]` in
-//! `~/.jcode/config.toml`. This command is the interactive front end for that:
+//! `~/.kcode/config.toml`. This command is the interactive front end for that:
 //! it lists the roles with their current values, sets them, resets them, and
 //! (the part that makes tuning tractable) scores the resulting palette with
 //! [`jcode_tui_style::harmony`] so a user gets specific, actionable feedback

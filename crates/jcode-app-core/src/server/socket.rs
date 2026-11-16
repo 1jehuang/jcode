@@ -510,7 +510,7 @@ pub(super) fn format_server_start_error(
 ) -> String {
     if stderr_output.trim().is_empty() {
         format!(
-            "Server exited before signalling ready ({}). Check logs at ~/.jcode/logs/",
+            "Server exited before signalling ready ({}). Check logs at ~/.kcode/logs/",
             status
         )
     } else {

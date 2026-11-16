@@ -8,7 +8,7 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompt/system_prompt.md");
 
 /// Load the base system prompt, allowing the user to fully replace the built-in
 /// [`DEFAULT_SYSTEM_PROMPT`]. Precedence: project `./.jcode/system-prompt.md`,
-/// then global `~/.jcode/system-prompt.md`, then the built-in default.
+/// then global `~/.kcode/system-prompt.md`, then the built-in default.
 ///
 /// This is a *replacement* hook. To merely add guidance on top of the default,
 /// use `.jcode/prompt-overlay.md` instead.
@@ -67,12 +67,12 @@ fn base_system_prompt_parts(
 
 /// Built-in default swarm prompt: model-routing guidance for spawned swarm
 /// agents (which model/effort to pick per task kind). Users can override it by
-/// creating `~/.jcode/swarm-prompt.md` (global) or `./.jcode/swarm-prompt.md`
+/// creating `~/.kcode/swarm-prompt.md` (global) or `./.jcode/swarm-prompt.md`
 /// (project). See [`load_swarm_prompt`].
 pub const DEFAULT_SWARM_PROMPT: &str = include_str!("prompt/swarm_prompt.md");
 
 /// Load the swarm prompt used to steer swarm model routing. Precedence:
-/// project `./.jcode/swarm-prompt.md`, then global `~/.jcode/swarm-prompt.md`,
+/// project `./.jcode/swarm-prompt.md`, then global `~/.kcode/swarm-prompt.md`,
 /// then the built-in [`DEFAULT_SWARM_PROMPT`].
 pub fn load_swarm_prompt(working_dir: Option<&Path>) -> String {
     let project_dir = working_dir.unwrap_or(Path::new("."));
@@ -421,14 +421,14 @@ pub fn build_system_prompt_full_with_capabilities(
         parts.push(mode_prompt);
     }
 
-    // Add optional prompt overlays from ~/.jcode/ and ./.jcode/
+    // Add optional prompt overlays from ~/.kcode/ and ./.jcode/
     let (overlay_content, overlay_chars) = load_prompt_overlay_files_from_dir(working_dir);
     if let Some(content) = overlay_content {
         info.prompt_overlay_chars = overlay_chars;
         parts.push(content);
     }
 
-    // Add optional preferred-tool guidance from ~/.jcode/ and ./.jcode/
+    // Add optional preferred-tool guidance from ~/.kcode/ and ./.jcode/
     let (preferred_tools_content, preferred_tools_chars) =
         load_preferred_tools_files_from_dir(working_dir);
     if let Some(content) = preferred_tools_content {
@@ -559,7 +559,7 @@ fn build_system_prompt_split_with_capabilities_and_agents_md(
     info.has_global_agents_md = md_info.has_global_agents_md;
     info.global_agents_md_chars = md_info.global_agents_md_chars;
 
-    // Add optional prompt overlays from ~/.jcode/ and ./.jcode/
+    // Add optional prompt overlays from ~/.kcode/ and ./.jcode/
     let (overlay_content, overlay_chars) = load_prompt_overlay_files_from_dir(working_dir);
     if let Some(content) = overlay_content {
         info.prompt_overlay_chars = overlay_chars;
@@ -979,7 +979,7 @@ pub fn load_agents_md_files_from_dir(working_dir: Option<&Path>) -> (Option<Stri
     load_agents_md_files_from_dirs(project_dir, global_agents_md.as_deref())
 }
 
-/// Load optional prompt overlay markdown from ~/.jcode/ and ./.jcode/
+/// Load optional prompt overlay markdown from ~/.kcode/ and ./.jcode/
 fn load_prompt_overlay_files_from_dir(working_dir: Option<&Path>) -> (Option<String>, usize) {
     let mut contents = vec![];
     let mut total_chars = 0usize;
@@ -1010,7 +1010,7 @@ fn load_prompt_overlay_files_from_dir(working_dir: Option<&Path>) -> (Option<Str
         && !same_canonical_path(&project_overlay, &global_overlay)
         && let Some((content, size)) = load_file(
             &global_overlay,
-            "Global Prompt Overlay (~/.jcode/prompt-overlay.md)",
+            "Global Prompt Overlay (~/.kcode/prompt-overlay.md)",
         )
     {
         total_chars += size;
@@ -1024,7 +1024,7 @@ fn load_prompt_overlay_files_from_dir(working_dir: Option<&Path>) -> (Option<Str
     }
 }
 
-/// Load optional preferred-tool guidance from ~/.jcode/ and ./.jcode/
+/// Load optional preferred-tool guidance from ~/.kcode/ and ./.jcode/
 fn load_preferred_tools_files_from_dir(working_dir: Option<&Path>) -> (Option<String>, usize) {
     let mut contents = vec![];
     let mut total_chars = 0usize;
@@ -1056,7 +1056,7 @@ fn load_preferred_tools_files_from_dir(working_dir: Option<&Path>) -> (Option<St
         && !same_canonical_path(&project_preferred_tools, &global_preferred_tools)
         && let Some((content, size)) = load_file(
             &global_preferred_tools,
-            "Global Preferred Tools (~/.jcode/preferred-tools.md)",
+            "Global Preferred Tools (~/.kcode/preferred-tools.md)",
         )
     {
         total_chars += size;

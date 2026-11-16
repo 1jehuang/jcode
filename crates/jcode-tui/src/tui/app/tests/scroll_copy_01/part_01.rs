@@ -143,7 +143,7 @@ fn create_error_copy_test_app() -> (App, ratatui::Terminal<ratatui::backend::Tes
     let mut app = create_test_app();
     app.display_messages = vec![
         DisplayMessage::user("Show me the last error"),
-        DisplayMessage::error("permission denied while opening ~/.jcode/config.toml"),
+        DisplayMessage::error("permission denied while opening ~/.kcode/config.toml"),
     ];
     app.bump_display_messages_version();
     app.scroll_offset = 0;

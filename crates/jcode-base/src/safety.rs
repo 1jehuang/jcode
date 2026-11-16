@@ -331,7 +331,7 @@ impl SafetySystem {
         lines.join("\n")
     }
 
-    /// Persist a transcript to ~/.jcode/ambient/transcripts/{timestamp}.json
+    /// Persist a transcript to ~/.kcode/ambient/transcripts/{timestamp}.json
     pub fn save_transcript(&self, transcript: &AmbientTranscript) -> Result<()> {
         let dir = storage::jcode_dir()?.join("ambient").join("transcripts");
         storage::ensure_dir(&dir)?;

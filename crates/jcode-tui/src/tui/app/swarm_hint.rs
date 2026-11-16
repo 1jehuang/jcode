@@ -63,7 +63,7 @@ pub(super) fn should_show(shows: u32, shown_this_session: bool) -> bool {
 
 /// The hint text pointing at the editable swarm prompt/config file.
 pub(super) fn hint_message() -> String {
-    "\u{2699} Swarm routing (models, effort) is configured by a prompt, not a config file. Edit ~/.jcode/swarm-prompt.md (or ./.jcode/swarm-prompt.md) to tune it".to_string()
+    "\u{2699} Swarm routing (models, effort) is configured by a prompt, not a config file. Edit ~/.kcode/swarm-prompt.md (or ./.jcode/swarm-prompt.md) to tune it".to_string()
 }
 
 impl App {

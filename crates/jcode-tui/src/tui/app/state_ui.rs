@@ -1815,7 +1815,7 @@ fn build_skills_report(app: &App) -> String {
         skills.sort_by(|a, b| a.name.cmp(&b.name));
         if skills.is_empty() {
             out.push_str(
-                "- none loaded\n  Add skills under ~/.jcode/skills/<name>/SKILL.md or ./.jcode/skills/<name>/SKILL.md\n",
+                "- none loaded\n  Add skills under ~/.kcode/skills/<name>/SKILL.md or ./.jcode/skills/<name>/SKILL.md\n",
             );
         } else {
             for skill in skills {

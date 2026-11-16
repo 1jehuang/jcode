@@ -120,7 +120,7 @@ impl SelfDevTool {
             None => {
                 let target = Self::selfdev_clone_dir()
                     .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| "~/.jcode/source/jcode".to_string());
+                    .unwrap_or_else(|_| "~/.kcode/source/jcode".to_string());
                 checks.push(SetupCheck::missing(
                     "repository",
                     "no local jcode checkout found",

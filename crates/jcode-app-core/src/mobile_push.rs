@@ -998,7 +998,7 @@ pub fn note_skipped(kind: PushKind, reason: &str) {
     }
 }
 
-/// Append one line per push attempt to `~/.jcode/logs/mobile-push.jsonl`:
+/// Append one line per push attempt to `~/.kcode/logs/mobile-push.jsonl`:
 /// what was requested, the exact payload sent, a source excerpt, and the
 /// outcome. This is the push history used to debug notification quality.
 fn record(

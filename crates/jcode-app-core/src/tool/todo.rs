@@ -255,7 +255,7 @@ fn merge_confidence_history(previous: &[TodoItem], incoming: &mut [TodoItem]) {
 
 /// How a todo call wrote, for measuring whether agents use incremental edits
 /// instead of resending the list. Counted locally in
-/// `~/.jcode/stats/todo-write-modes.json`; nothing leaves the machine.
+/// `~/.kcode/stats/todo-write-modes.json`; nothing leaves the machine.
 fn todo_write_mode(input: &Value) -> &'static str {
     let has = |key: &str| input.get(key).is_some_and(|value| !value.is_null());
     match (

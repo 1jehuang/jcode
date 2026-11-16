@@ -144,7 +144,7 @@ pub(crate) fn build_repair_brief(
     let provider = provider_hint.unwrap_or("<provider>");
     let log_line = jcode_logging::log_path()
         .map(|p| format!("Logs:    {}", p.display()))
-        .unwrap_or_else(|| "Logs:    ~/.jcode/logs/jcode-<date>.log".to_string());
+        .unwrap_or_else(|| "Logs:    ~/.kcode/logs/jcode-<date>.log".to_string());
 
     let mut brief = String::new();
     brief.push_str(

@@ -226,7 +226,7 @@ pub fn logs_dir() -> Result<PathBuf> {
 /// `/run/user/<uid>` on Linux) that is wiped on reboot, so it must only hold
 /// sockets and truly ephemeral state. State that has to outlive a reboot,
 /// such as swarm plans and member records, belongs here instead: it resolves
-/// to `~/.jcode/state` (respecting `JCODE_HOME`).
+/// to `~/.kcode/state` (respecting `JCODE_HOME`).
 ///
 /// When `JCODE_RUNTIME_DIR` is set (tests and sandboxed temp servers), it
 /// takes precedence so isolated runs never touch the real jcode home.

@@ -1073,7 +1073,7 @@ pub(super) fn handle_log_command(app: &mut App, trimmed: &str) -> bool {
     ));
 
     let mut message = format!(
-        "Log mark written: {}\n\nAgents can search ~/.jcode/logs/ for JCODE_LOG_MARK or this marker id.",
+        "Log mark written: {}\n\nAgents can search ~/.kcode/logs/ for JCODE_LOG_MARK or this marker id.",
         marker_id
     );
     if !note.is_empty() {
@@ -1315,7 +1315,7 @@ Type your password into that SSH prompt if asked. Jcode will not see or store it
             profile.name,
             crate::ssh_remote::control_socket_path(&profile.name)
                 .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| "~/.jcode/ssh-control/remote.sock".to_string()),
+                .unwrap_or_else(|_| "~/.kcode/ssh-control/remote.sock".to_string()),
             profile.ssh_target
         ))),
         Err(error) => app.push_display_message(DisplayMessage::error(format!(
@@ -2875,7 +2875,7 @@ pub(super) fn handle_dictation_command(app: &mut App, trimmed: &str) -> bool {
 
     if trimmed.starts_with("/dictate ") || trimmed.starts_with("/dictation ") {
         app.push_display_message(DisplayMessage::error(
-            "Usage: /dictate\nConfigure [dictation] in ~/.jcode/config.toml to customize command, mode, hotkey, and timeout."
+            "Usage: /dictate\nConfigure [dictation] in ~/.kcode/config.toml to customize command, mode, hotkey, and timeout."
                 .to_string(),
         ));
         return true;

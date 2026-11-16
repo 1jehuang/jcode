@@ -300,7 +300,7 @@ impl SessionHeader {
 
 /// Find recent crashed sessions for showing resume hints.
 ///
-/// Uses a fast O(n) scan of `~/.jcode/active_pids/` (typically 0-5 files)
+/// Uses a fast O(n) scan of `~/.kcode/active_pids/` (typically 0-5 files)
 /// instead of scanning the full sessions directory (tens of thousands).
 /// Each file in active_pids/ contains a PID; if that PID is dead, the
 /// session crashed. We then load only those specific session files.
@@ -532,7 +532,7 @@ pub(super) fn is_pid_running(pid: u32) -> bool {
 // ---------------------------------------------------------------------------
 // Active PID tracking
 // ---------------------------------------------------------------------------
-// Lightweight files in ~/.jcode/active_pids/<session_id> containing the PID.
+// Lightweight files in ~/.kcode/active_pids/<session_id> containing the PID.
 // Written on mark_active(), removed on mark_closed()/mark_crashed().
 // On startup we only need to scan this tiny directory (usually 0-5 files)
 // instead of the entire sessions/ directory (tens of thousands of files).
@@ -564,7 +564,7 @@ fn resume_title_matches(title: Option<&str>, normalized_query: &str) -> bool {
 /// resolved by re-importing from the external tool's own storage. Once the user
 /// removed or reinstalled that tool, the re-import failed and resume hard-exited
 /// with "No session found matching 'ses_...'" even though the imported snapshot
-/// was still sitting in `~/.jcode/sessions` (issue #336).
+/// was still sitting in `~/.kcode/sessions` (issue #336).
 ///
 /// Pi sessions are intentionally excluded: their imported id is a hash of the
 /// session *path*, not the provider id, so there is no bare-id mapping.

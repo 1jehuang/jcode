@@ -2,7 +2,7 @@
 //! (`jcode cloud move` / `jcode cloud return`).
 //!
 //! A conversation is a single linear transcript, so exactly one machine may run
-//! turns for it at a time. Each machine keeps `~/.jcode/session_leases/<id>.json`
+//! turns for it at a time. Each machine keeps `~/.kcode/session_leases/<id>.json`
 //! recording the latest migration `epoch` it knows about and whether the session
 //! currently lives here or on another host. A session copy carries the epoch of
 //! the migration that delivered it (`Session::migration_epoch`). A copy may run

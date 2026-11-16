@@ -994,7 +994,7 @@ fn matrix_openai_compatible_profile_overrides_reject_invalid_values() {
 fn matrix_openai_compatible_profile_overrides_read_from_env_file() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let config_root = temp.path().join("config").join("jcode");
+    let config_root = temp.path().join("config").join("kcode");
     std::fs::create_dir_all(&config_root).expect("config dir");
 
     let _guard = EnvGuard::save(&[
@@ -1054,7 +1054,7 @@ fn matrix_openai_compatible_localhost_override_allows_no_auth() {
 fn matrix_load_api_key_from_env_or_config_prefers_env() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let config_root = temp.path().join("config").join("jcode");
+    let config_root = temp.path().join("config").join("kcode");
     std::fs::create_dir_all(&config_root).expect("config dir");
 
     let _guard = EnvGuard::save(&["JCODE_HOME", "OPENCODE_API_KEY"]);
@@ -1076,7 +1076,7 @@ fn matrix_load_api_key_from_env_or_config_prefers_env() {
 fn matrix_load_api_key_from_env_or_config_reads_config_file() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let config_root = temp.path().join("config").join("jcode");
+    let config_root = temp.path().join("config").join("kcode");
     std::fs::create_dir_all(&config_root).expect("config dir");
 
     let _guard = EnvGuard::save(&["JCODE_HOME", "OPENCODE_API_KEY"]);
@@ -1098,7 +1098,7 @@ fn matrix_load_api_key_from_env_or_config_reads_config_file() {
 fn load_api_key_accepts_legacy_zai_key_name() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let config_root = temp.path().join("config").join("jcode");
+    let config_root = temp.path().join("config").join("kcode");
     std::fs::create_dir_all(&config_root).expect("config dir");
 
     let _guard = EnvGuard::save(&["JCODE_HOME", "ZHIPU_API_KEY", "ZAI_API_KEY"]);

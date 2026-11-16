@@ -153,7 +153,7 @@ pub(super) fn get_grouped_changelog() -> Vec<ChangelogGroup> {
 }
 
 /// Get changelog entries the user hasn't seen yet.
-/// Reads the last-seen commit hash from ~/.jcode/last_seen_changelog,
+/// Reads the last-seen commit hash from ~/.kcode/last_seen_changelog,
 /// filters the embedded changelog to only new entries, then saves the latest hash.
 /// Returns just the commit subjects (not the hashes).
 pub(super) fn get_unseen_changelog_entries() -> &'static Vec<String> {

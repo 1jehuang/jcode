@@ -28,7 +28,7 @@ fn resolve_builds_dir(
     if is_windows && let Some(local_app_data) = local_app_data {
         // Keep runtime channel discovery aligned with scripts/install.ps1 and
         // the supported Windows layout under %LOCALAPPDATA%\jcode\builds.
-        // Durable user state and logs still live under ~/.jcode.
+        // Durable user state and logs still live under ~/.kcode.
         return local_app_data.join("jcode").join("builds");
     }
 

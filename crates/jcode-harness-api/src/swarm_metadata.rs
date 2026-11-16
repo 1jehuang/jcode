@@ -30,7 +30,7 @@ struct Member {
 /// a remote daemon's session list.
 ///
 /// Respects `JCODE_RUNTIME_DIR` (isolated `durable-state/swarm`), then
-/// `JCODE_HOME` (or the default `~/.jcode`) under `state/swarm`. Missing or
+/// `JCODE_HOME` (or the default `~/.kcode`) under `state/swarm`. Missing or
 /// malformed snapshots are harmless. Values already supplied by the API win.
 /// Only swarm ownership is used, never a transcript's ordinary fork parent.
 /// Statuses describe the last persisted snapshot, not a live liveness probe.

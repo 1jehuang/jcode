@@ -54,7 +54,7 @@ fn create_test_app() -> crate::tui::app::App {
 }
 
 /// Point JCODE_HOME at a per-process temp dir when the environment does not
-/// already pin one, so tests never read the developer's real `~/.jcode`
+/// already pin one, so tests never read the developer's real `~/.kcode`
 /// state (e.g. a populated ambient queue turns `has_notification()` on and
 /// breaks the unfocused-redraw assertions). Mirrors the helper of the same
 /// name used by the main app test suite.

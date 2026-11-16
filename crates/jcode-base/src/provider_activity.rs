@@ -6,7 +6,7 @@
 //!      mirroring the dollar figures the TUI cost paths compute, since most
 //!      providers do not expose per-key spend through their public APIs.
 //!
-//! Data persists to `~/.jcode/provider_activity.json` and is shared across
+//! Data persists to `~/.kcode/provider_activity.json` and is shared across
 //! processes (server records last-used, TUI records spend, `/usage` reads
 //! both), so queries re-read the file with a short TTL instead of trusting a
 //! process-local cache.

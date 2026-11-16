@@ -825,7 +825,7 @@ impl McpManagementTool {
                 "No MCP servers connected.\n\n\
                 To connect a server, use:\n\
                 {\"action\": \"connect\", \"server\": \"name\", \"command\": \"/path/to/server\", \"args\": []}\n\n\
-                Or add servers to ~/.jcode/mcp.json or .jcode/mcp.json and use {\"action\": \"reload\"}.\n\
+                Or add servers to ~/.kcode/mcp.json or .jcode/mcp.json and use {\"action\": \"reload\"}.\n\
                 .claude/mcp.json is also supported for compatibility."
             ).with_title("MCP: No servers"));
         }
@@ -1096,7 +1096,7 @@ impl McpManagementTool {
             }
             return Ok(ToolOutput::new(
                 "No servers found in config.\n\n\
-                Add servers to ~/.jcode/mcp.json (global) or .jcode/mcp.json (project):\n\
+                Add servers to ~/.kcode/mcp.json (global) or .jcode/mcp.json (project):\n\
                 {\n  \"servers\": {\n    \"server-name\": {\n      \"command\": \"/path/to/server\",\n      \"args\": [],\n      \"env\": {},\n      \"shared\": true\n    }\n  }\n}\n\n\
                 .claude/mcp.json is also supported for compatibility."
             ).with_title("MCP: Empty config"));

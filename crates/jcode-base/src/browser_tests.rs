@@ -420,7 +420,7 @@ fn ensure_browser_session_does_not_pass_unsupported_bind_window_flag() {
 // the CLI never returns and `browser status` / `browser setup` hang for
 // minutes (measured: 2m14s and a full 3-minute cap).
 //
-// Bug B: once ~/.jcode/browser/.setup-complete existed, setup could never
+// Bug B: once ~/.kcode/browser/.setup-complete existed, setup could never
 // reinstall a vanished extension.
 
 #[cfg(unix)]

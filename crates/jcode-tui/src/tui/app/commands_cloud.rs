@@ -1070,9 +1070,9 @@ fn cloud_recovery_context(command: &str, session: &str, details: &str) -> String
          Managed SSH uses a private key, pinned host keys and the jcode cloud proxy. Never read or print the key. \
          You can access the managed remote machine using the existing bash tool: \
          `ssh -F {config} -o BatchMode=yes -o ConnectTimeout=10 jcode-cloud 'command -v jcode; jcode --version'`. \
-         Plain `ssh jcode-cloud` may not resolve: always use this generated private SSH config (normally ~/.jcode/cloud/ssh_config). \
+         Plain `ssh jcode-cloud` may not resolve: always use this generated private SSH config (normally ~/.kcode/cloud/ssh_config). \
          If the config is missing or authentication fails, report that specific blocker rather than reading keys or inventing access. \
-         Inspect local `~/.jcode/logs/cloud-problems.jsonl` and relevant remote logs with bounded output, redacting secrets. \
+         Inspect local `~/.kcode/logs/cloud-problems.jsonl` and relevant remote logs with bounded output, redacting secrets. \
          A generic Server disconnected error may come from the LOCAL daemon's handoff RPC, not the VM or provider. \
          Correlate local daemon logs at the failure time before restarting or changing the remote machine. \
          Do not alter session ownership or leases, restart daemons, or run cloud prepare/move/return/replace while diagnosing. \
@@ -1132,7 +1132,7 @@ fn format_cloud_failure(command: &str, stderr: &str) -> String {
     message
 }
 
-/// Append one record per /cloud failure to `~/.jcode/logs/cloud-problems.jsonl`
+/// Append one record per /cloud failure to `~/.kcode/logs/cloud-problems.jsonl`
 /// so recurring handoff problems can be reviewed and fixed later.
 fn record_cloud_problem(command: &str, session_id: &str, exit: Option<i32>, stderr: &str) {
     use std::io::Write;

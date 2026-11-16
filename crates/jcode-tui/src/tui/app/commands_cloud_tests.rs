@@ -474,7 +474,7 @@ fn cloud_recovery_guides_read_only_ssh_without_mutating_access() {
         "jcode cloud where --session session_test",
         "-o BatchMode=yes -o ConnectTimeout=10",
         "command -v jcode; jcode --version",
-        "~/.jcode/logs/cloud-problems.jsonl",
+        "~/.kcode/logs/cloud-problems.jsonl",
         "Do not alter session ownership or leases, restart daemons",
         "not the managed alias",
         "Validate and quote values",

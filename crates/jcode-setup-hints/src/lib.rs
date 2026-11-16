@@ -6,7 +6,7 @@
 //! - Linux: create a .desktop launcher file.
 //!
 //! Each nudge can be dismissed permanently with "Don't ask again".
-//! State is persisted in `~/.jcode/setup_hints.json`.
+//! State is persisted in `~/.kcode/setup_hints.json`.
 
 // Several launch-hotkey helpers are gated `#[cfg(any(test, target_os = "macos"))]`
 // because the unit tests exercise the macOS launch-hotkey notice logic on every
@@ -311,7 +311,7 @@ fn mac_hotkey_plan_file() -> Result<PathBuf> {
     Ok(mac_hotkey_support_dir()?.join("plan.json"))
 }
 
-/// Load the `[launch_hotkeys]` table from `~/.jcode/config.toml`.
+/// Load the `[launch_hotkeys]` table from `~/.kcode/config.toml`.
 ///
 /// Returns the default (empty -> built-in 3 hotkeys) when the file is missing or
 /// the section is absent. Best-effort: a malformed config falls back to default
@@ -1753,7 +1753,7 @@ fn install_niri_launch_hotkeys() -> Result<bool> {
 
 /// Install (or refresh) the launch-hotkey binds for a flat `#`-commented
 /// compositor config (Hyprland/omarchy, sway, i3). Bind lines execute launch
-/// scripts written under `~/.jcode/hotkey/`, so the config never embeds shell
+/// scripts written under `~/.kcode/hotkey/`, so the config never embeds shell
 /// one-liners. Writes a timestamped backup before modifying; no-op when the
 /// managed block already matches. Returns `Ok(true)` if the config changed.
 #[cfg(target_os = "linux")]
@@ -2110,7 +2110,7 @@ fn install_kde_launch_hotkeys() -> Result<bool> {
 }
 
 /// Write one executable launch script per resolved hotkey to
-/// `~/.jcode/hotkey/` and return the chord -> script binds. The scripts `cd`
+/// `~/.kcode/hotkey/` and return the chord -> script binds. The scripts `cd`
 /// into the target (with `$HOME` fallback for stale/dynamic dirs) and exec the
 /// user's terminal running jcode, so compositor bind lines stay trivial.
 #[cfg(target_os = "linux")]

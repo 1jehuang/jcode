@@ -1,7 +1,7 @@
 //! Persistent cross-session prompt history plus the Ctrl+R reverse search
 //! overlay.
 //!
-//! Every submitted prompt is recorded to `~/.jcode/prompt-history.jsonl`
+//! Every submitted prompt is recorded to `~/.kcode/prompt-history.jsonl`
 //! (JSONL, one JSON-encoded string per line, append-only with periodic
 //! compaction). Recording dedupes: resubmitting an existing prompt moves it to
 //! the most-recent slot instead of storing a second copy. Up/Down prompt

@@ -1,7 +1,7 @@
 //! Persistent memory event log for post-session analysis.
 //!
 //! Writes structured JSONL (one JSON object per line) to:
-//!   `~/.jcode/logs/memory-events-YYYY-MM-DD.jsonl`
+//!   `~/.kcode/logs/memory-events-YYYY-MM-DD.jsonl`
 //!
 //! Every memory pipeline event - embedding search, sidecar verification,
 //! injection, extraction, maintenance, tool actions - is captured with

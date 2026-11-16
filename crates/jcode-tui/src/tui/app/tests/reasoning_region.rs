@@ -442,7 +442,7 @@ fn multiple_reasoning_blocks_anchor_in_order_and_clear_next_prompt() {
 fn anchored_trace_never_moves_and_clears_on_next_prompt() {
     // Hermetic JCODE_HOME: these assertions depend on the default
     // `reasoning_display = "current"` config and on ambient/info state
-    // not leaking in from the developer's real ~/.jcode (other tests
+    // not leaking in from the developer's real ~/.kcode (other tests
     // write config overrides into the shared per-process test home).
     with_reasoning_current_home(|| {
         // Anchored traces are ordinary transcript entries: they keep their index
@@ -582,7 +582,7 @@ fn remote_reasoning_then_text_preserves_order_through_paced_buffer() {
 fn anchored_trace_survives_tool_commit_and_answer_commit() {
     // Hermetic JCODE_HOME: these assertions depend on the default
     // `reasoning_display = "current"` config and on ambient/info state
-    // not leaking in from the developer's real ~/.jcode (other tests
+    // not leaking in from the developer's real ~/.kcode (other tests
     // write config overrides into the shared per-process test home).
     with_reasoning_current_home(|| {
         // Anchored traces are independent transcript entries: neither a tool-only
@@ -629,7 +629,7 @@ fn trace_count(app: &App) -> usize {
 fn gc_dissolves_stale_traces_only_when_provably_offscreen() {
     // Hermetic JCODE_HOME: these assertions depend on the default
     // `reasoning_display = "current"` config and on ambient/info state
-    // not leaking in from the developer's real ~/.jcode (other tests
+    // not leaking in from the developer's real ~/.kcode (other tests
     // write config overrides into the shared per-process test home).
     with_reasoning_current_home(|| {
         // Stale traces (all but the most recent) are GC'd only once the transcript
@@ -679,7 +679,7 @@ fn gc_dissolves_stale_traces_only_when_provably_offscreen() {
 fn gc_never_runs_while_user_scrolled_up() {
     // Hermetic JCODE_HOME: these assertions depend on the default
     // `reasoning_display = "current"` config and on ambient/info state
-    // not leaking in from the developer's real ~/.jcode (other tests
+    // not leaking in from the developer's real ~/.kcode (other tests
     // write config overrides into the shared per-process test home).
     with_reasoning_current_home(|| {
         let mut app = create_test_app();
@@ -827,7 +827,7 @@ fn open_reasoning_region_closed_at_turn_finish_is_anchored_not_dropped() {
 fn gc_keeps_single_trace_indefinitely() {
     // Hermetic JCODE_HOME: these assertions depend on the default
     // `reasoning_display = "current"` config and on ambient/info state
-    // not leaking in from the developer's real ~/.jcode (other tests
+    // not leaking in from the developer's real ~/.kcode (other tests
     // write config overrides into the shared per-process test home).
     with_reasoning_current_home(|| {
         // With only one (current) trace there is nothing stale to collect, no

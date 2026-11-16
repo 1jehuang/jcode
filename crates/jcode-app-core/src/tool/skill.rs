@@ -133,7 +133,7 @@ impl SkillTool {
                         install
                     ),
                     None => anyhow::anyhow!(
-                        "Skill '{}' is endorsed but not installed (source: {}). Install it into ~/.jcode/skills/{}/SKILL.md, then run skill_manage reload_all.",
+                        "Skill '{}' is endorsed but not installed (source: {}). Install it into ~/.kcode/skills/{}/SKILL.md, then run skill_manage reload_all.",
                         name,
                         endorsed.source,
                         name
@@ -170,7 +170,7 @@ impl SkillTool {
         let mut output = if skills.is_empty() {
             "No skills loaded.\n\n\
             Skills are loaded from:\n\
-            - ~/.jcode/skills/<skill-name>/SKILL.md (global)\n\
+            - ~/.kcode/skills/<skill-name>/SKILL.md (global)\n\
             - ./.jcode/skills/<skill-name>/SKILL.md (project-local)\n\
             - ./.claude/skills/<skill-name>/SKILL.md (compatibility)\n\n\
             Create a SKILL.md file with YAML frontmatter:\n\

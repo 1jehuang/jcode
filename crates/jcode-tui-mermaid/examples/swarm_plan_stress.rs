@@ -9,7 +9,7 @@
 //!
 //! Cases:
 //!   (a) real deep-mode plan fixture (examples/swarm_plan_fixture.json,
-//!       snapshot of ~/.jcode/state/swarm/_home_jeremy_jcode__git.json)
+//!       snapshot of ~/.kcode/state/swarm/_home_jeremy_jcode__git.json)
 //!   (a23) first 23 items of the fixture (the original task shape)
 //!   (b) 40-node plan -> truncation with the linked 'more' summary node
 //!   (c) labels at exactly the label cap with unicode glyphs

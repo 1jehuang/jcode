@@ -401,7 +401,7 @@ impl EnvGuard {
     /// empty temp dir for the lifetime of the guard.
     ///
     /// The temp home keeps these tests hermetic: provider activation reads
-    /// on-disk model catalog caches (`~/.jcode/cache/<profile>_models.json`) to
+    /// on-disk model catalog caches (`~/.kcode/cache/<profile>_models.json`) to
     /// pick a profile's newest default model, so without an isolated home the
     /// host's real caches leak in and a stale or non-chat model (e.g. Groq's
     /// `canopylabs/orpheus-*` TTS) can be auto-selected, breaking the test on

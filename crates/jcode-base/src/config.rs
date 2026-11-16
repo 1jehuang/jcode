@@ -1,6 +1,6 @@
 //! Configuration file support for jcode
 //!
-//! Config is loaded from `~/.jcode/config.toml` (or `$JCODE_HOME/config.toml`)
+//! Config is loaded from `~/.kcode/config.toml` (or `$JCODE_HOME/config.toml`)
 //! Environment variables override config file settings.
 
 pub use jcode_config_types::{

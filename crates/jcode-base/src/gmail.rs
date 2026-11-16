@@ -105,7 +105,7 @@ impl ComposioConfig {
 }
 
 /// Persisted record of a completed Composio Gmail connection, stored at
-/// `~/.jcode/composio_gmail.json`.
+/// `~/.kcode/composio_gmail.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposioConnection {
     pub connected_account_id: String,

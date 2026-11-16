@@ -501,7 +501,7 @@ impl McpConfig {
     /// Claude Code configuration is intentionally not imported here. It is a
     /// live source read by `load_for_dir`, so persisting it would make deleted
     /// servers survive in jcode's snapshot and would duplicate inline secrets.
-    /// This only runs while ~/.jcode/mcp.json does not exist.
+    /// This only runs while ~/.kcode/mcp.json does not exist.
     fn import_from_codex_once() {
         let jcode_mcp = match crate::storage::jcode_dir() {
             Ok(dir) => dir.join("mcp.json"),
@@ -720,7 +720,7 @@ impl McpConfig {
         let mut merged = Self::default();
         let claude_mcp_enabled = std::env::var_os("JCODE_DISABLE_CLAUDE_MCP").is_none();
 
-        // Load jcode's own global config (~/.jcode/mcp.json)
+        // Load jcode's own global config (~/.kcode/mcp.json)
         if let Ok(jcode_dir) = crate::storage::jcode_dir() {
             let jcode_mcp = jcode_dir.join("mcp.json");
             if jcode_mcp.exists() {
@@ -750,7 +750,7 @@ impl McpConfig {
 
         // Older Claude Code global config is also a live source. Reading it on
         // every load preserves compatibility without copying any inline env
-        // values into ~/.jcode/mcp.json.
+        // values into ~/.kcode/mcp.json.
         if claude_mcp_enabled
             && let Ok(claude_mcp) = crate::storage::user_home_path(".claude/mcp.json")
         {
@@ -800,7 +800,7 @@ impl McpConfig {
     /// never displaces a local stdio entry for the same name.
     ///
     /// Issue #653: a `type: http` entry in `~/.claude.json` used to overwrite a
-    /// working stdio server from `~/.jcode/mcp.json`. Remote servers are now
+    /// working stdio server from `~/.kcode/mcp.json`. Remote servers are now
     /// runnable, but a remote twin of a working local server typically needs a
     /// separate login, so the local server keeps winning to avoid surprising
     /// existing setups.

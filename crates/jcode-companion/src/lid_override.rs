@@ -15,7 +15,7 @@
 //!   active plan, so no elevation is needed.
 //!
 //! Because these settings outlive the process, the original values are saved to
-//! `~/.jcode/lid_override.json` *before* anything is changed. That file is the
+//! `~/.kcode/lid_override.json` *before* anything is changed. That file is the
 //! crash-recovery journal: if the owning process dies (crash, `kill -9`, power
 //! loss) the next jcode process that sees a journal with a dead owner restores
 //! the saved values. The daemon checks this on every reconcile tick, so a stale

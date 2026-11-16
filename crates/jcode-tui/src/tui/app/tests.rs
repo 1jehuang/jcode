@@ -663,7 +663,7 @@ fn kv_cache_baseline_from_other_session_is_ignored() {
     // captured for a large session must not be diffed against a fresh, smaller
     // session, or the new history looks like a broken prefix and emits a
     // spurious `harness:_prefix_changed` miss. See the false positives in
-    // ~/.jcode/logs KV_CACHE_USAGE telemetry (common_prefix=0, current
+    // ~/.kcode/logs KV_CACHE_USAGE telemetry (common_prefix=0, current
     // message_count << baseline_message_count, yet read_pct=100/miss=none).
     let mut app = create_test_app();
     app.is_remote = true;

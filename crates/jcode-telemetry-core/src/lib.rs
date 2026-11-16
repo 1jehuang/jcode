@@ -1818,7 +1818,7 @@ pub fn record_install_if_first_run() {
         return;
     }
     // Skip install/onboarding emission under CI. Ephemeral runners start with a
-    // fresh ~/.jcode (so a new telemetry_id) on every job, which would otherwise
+    // fresh ~/.kcode (so a new telemetry_id) on every job, which would otherwise
     // look like a brand-new install and user, inflating install/active counts,
     // the onboarding funnel, and depressing retention. Session/turn/lifecycle
     // events are still emitted (tagged is_ci) so CI crash/error signal stays

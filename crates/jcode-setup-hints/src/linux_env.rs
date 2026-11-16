@@ -12,7 +12,7 @@
 //!   turn resolved launch hotkeys into the exact bind lines we manage. Instead
 //!   of inlining shell one-liners (a quoting minefield across three different
 //!   config grammars), each bind simply executes a launch script jcode writes
-//!   to `~/.jcode/hotkey/`.
+//!   to `~/.kcode/hotkey/`.
 //! * [`splice_flat_managed_block`] replaces/creates the sentinel-delimited
 //!   managed region at file scope, leaving every other line untouched.
 //!

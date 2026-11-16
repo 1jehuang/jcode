@@ -18,7 +18,7 @@ pub async fn run_configured() -> Result<DictationRun> {
     let command = cfg.command.trim();
     if command.is_empty() {
         anyhow::bail!(
-            "Dictation is not configured. Set `[dictation].command` in `~/.jcode/config.toml`."
+            "Dictation is not configured. Set `[dictation].command` in `~/.kcode/config.toml`."
         );
     }
 

@@ -670,7 +670,7 @@ impl AuthStatus {
             crate::provider_catalog::LoginProviderTarget::ClaudeApiKey => {
                 // The Anthropic API key is most commonly stored in the app
                 // config file (`~/.config/jcode/anthropic.env`), *not* an env
-                // var and *not* `~/.jcode/auth.json` (which holds the separate
+                // var and *not* `~/.kcode/auth.json` (which holds the separate
                 // OAuth accounts). List every place it can live so the real
                 // source is always discoverable instead of looking "absent".
                 let (source, detail) = summarize_sources(vec![
@@ -1356,7 +1356,7 @@ fn anthropic_oauth_source(status: &AuthStatus) -> Option<(AuthCredentialSource, 
     {
         return Some((
             AuthCredentialSource::JcodeManagedFile,
-            "~/.jcode/auth.json".to_string(),
+            "~/.kcode/auth.json".to_string(),
         ));
     }
     if let Some(source) = crate::auth::claude::preferred_external_auth_source()
@@ -1387,7 +1387,7 @@ fn openai_oauth_source(status: &AuthStatus) -> Option<(AuthCredentialSource, Str
     {
         return Some((
             AuthCredentialSource::JcodeManagedFile,
-            "~/.jcode/openai-auth.json".to_string(),
+            "~/.kcode/openai-auth.json".to_string(),
         ));
     }
     if crate::auth::codex::legacy_auth_allowed() && crate::auth::codex::legacy_auth_source_exists()

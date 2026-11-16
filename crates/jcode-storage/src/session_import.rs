@@ -14,7 +14,8 @@ pub fn import_jcode_session(session_id: &str) -> io::Result<Vec<PathBuf>> {
 
 /// The jcode home to import from.
 ///
-/// Defaults to `~/.jcode`. `KCODE_JCODE_HOME` overrides it, which keeps the
+/// Defaults to `~/.jcode`, the *other* product's home; this is the one place in
+/// the tree where that path is correct. `KCODE_JCODE_HOME` overrides it, which keeps the
 /// import testable without a real jcode installation and supports a source home
 /// that was itself redirected with `JCODE_HOME`.
 fn jcode_source_home() -> io::Result<PathBuf> {

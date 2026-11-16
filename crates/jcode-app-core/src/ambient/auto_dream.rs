@@ -26,7 +26,7 @@ struct ConsolidationOp {
 
 /// Evaluate the dream coordinator and, if ready, run consolidation.
 ///
-/// `data_dir` is the jcode data directory (e.g. `~/.jcode`).
+/// `data_dir` is the jcode data directory (e.g. `~/.kcode`).
 /// `session_count` is the total number of ambient cycles completed
 /// (fed to the session gate).
 /// `provider` is the LLM provider used for the consolidation call.

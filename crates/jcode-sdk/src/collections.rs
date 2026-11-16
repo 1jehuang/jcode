@@ -1,4 +1,4 @@
-//! User-created collections of sessions, stored in `~/.jcode/collections.json`.
+//! User-created collections of sessions, stored in `~/.kcode/collections.json`.
 //!
 //! A collection is a named group the user builds by hand, independent of the
 //! directory a session runs in. A session belongs to at most one collection.

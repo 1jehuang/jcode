@@ -12,8 +12,8 @@
 // Inventory: 278 output bytes; remote ms: 912.64, 1453.10, 736.12.
 // End-to-end fresh SSH ms: 4342.86, 4807.31, 4282.34.
 // Prior 97 MB inventory baseline was 702 ms: no inventory speedup demonstrated.
-// Reproduction script/results: ~/.jcode/scratch/bounded-preview-measure.py and
-// ~/.jcode/scratch/bounded-preview-measure-results.jsonl on the measurement host.
+// Reproduction script/results: ~/.kcode/scratch/bounded-preview-measure.py and
+// ~/.kcode/scratch/bounded-preview-measure-results.jsonl on the measurement host.
 // Scanner follow-up, 2026-11-08 UTC, same unchanged 97,722,380-byte snapshot:
 // Whole-string regex alone did not improve latency. Coalescing scalar tokens
 // plus retaining the last 80 message ranges during the first scan avoids the
@@ -26,7 +26,7 @@
 // Every pair is byte-identical (168,621 bytes, without framing/telemetry), SHA256
 // cc39e053c4a2e80dd767fee2a4142f784a44c2cd10d6685a97493d5a04cf75fc.
 // Inventory actual mmap ms 1019.11, 1507.74, 742.82: no consistent speedup.
-// Evidence: ~/.jcode/scratch/bounded-preview-final-scanner-results.jsonl and
+// Evidence: ~/.kcode/scratch/bounded-preview-final-scanner-results.jsonl and
 // paired-projection-final-results.txt, reproduced by paired-projection.py.
 // Journal follow-up, 2026-11-08 UTC, synthetic LOCAL inputs only, no cloud reads:
 // 34,662,320-byte frozen mmap journal, 220 entries x 120 ordinary messages with
@@ -36,7 +36,7 @@
 // 566.62 -> 284.27 ms (-49.8%). Every paired JSON output was byte-identical.
 // Snapshot/journal size, mtime_ns and SHA256 were unchanged across all runs.
 // Journal SHA256 aa9a2e05ed8a7500ed42fdf832b68995d488814752ec6abd69a5af2f91e4dafd.
-// Local reproduction: ~/.jcode/scratch/journal-paired.py, journal-before.py and
+// Local reproduction: ~/.kcode/scratch/journal-paired.py, journal-before.py and
 // journal-paired-results.txt. This does not establish live-cloud/SSH latency.
 use super::*;
 use std::io::Write;

@@ -4,7 +4,7 @@
 //! session transcripts to the Jcode account API so the iOS app can show them.
 //! Local sessions and sessions running on Jcode Cloud machines both upload with
 //! the account API key. Uploads are incremental: per-session high-water marks
-//! (message count + snapshot/journal revisions) live in `~/.jcode/mobile_sync.json`.
+//! (message count + snapshot/journal revisions) live in `~/.kcode/mobile_sync.json`.
 //! Successful session persistence wakes a debounced incremental pass. A 20s
 //! reconciliation also catches saves made by other processes and retries.
 //!

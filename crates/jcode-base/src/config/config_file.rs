@@ -330,7 +330,7 @@ impl Config {
 
     /// One-time bake of per-repo launch hotkeys from session history.
     ///
-    /// Scans `~/.jcode/sessions` for the directories the user works in most,
+    /// Scans `~/.kcode/sessions` for the directories the user works in most,
     /// ranks them (recency-weighted, git-root folded, home excluded), and writes
     /// a static chord -> directory mapping into config: top repo on `Cmd+;`, home
     /// on `Cmd+'`, and the next repos on `Cmd+[` / `Cmd+]` / `Cmd+\`.

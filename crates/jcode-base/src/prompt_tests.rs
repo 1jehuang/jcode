@@ -423,7 +423,7 @@ fn test_preferred_tools_files_are_loaded_from_project_and_global_jcode_dirs() {
         "expected project preferred tools content"
     );
     assert!(
-        direct_content.contains("Global Preferred Tools (~/.jcode/preferred-tools.md)"),
+        direct_content.contains("Global Preferred Tools (~/.kcode/preferred-tools.md)"),
         "expected global preferred tools section heading"
     );
     assert!(
@@ -776,33 +776,49 @@ fn with_prompt_guidance_home(test: impl FnOnce(&Path)) {
     }
     let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
     let home = tempfile::TempDir::new().unwrap();
-    let jcode_dir = home.path().join(".jcode");
+    // The product home, not a directory named `.jcode`: storage refuses to
+    // resolve a home inside a jcode directory, and this helper emulates *our*
+    // home while the project-local `.jcode` dirs below stay as they are.
+    let jcode_dir = home.path().join(".kcode");
     std::fs::create_dir(&jcode_dir).unwrap();
     crate::env::set_var("JCODE_HOME", &jcode_dir);
     test(home.path());
 }
 
+/// The project and global guidance live in different directories now (the
+/// project keeps the `.jcode` convention, this product's home is `.kcode`), so
+/// both are loaded and labelled separately rather than deduping onto one path.
+/// The alias case - one file reachable through both - is covered by the
+/// symlink test below.
 #[test]
-fn prompt_guidance_same_project_and_global_paths_are_loaded_once() {
+fn prompt_guidance_project_and_global_directories_are_both_labelled() {
     with_prompt_guidance_home(|home| {
-        let overlay = "shared overlay marker\n";
-        let tools = "shared preferred tools marker\n";
-        std::fs::write(home.join(".jcode/prompt-overlay.md"), overlay).unwrap();
-        std::fs::write(home.join(".jcode/preferred-tools.md"), tools).unwrap();
+        let project = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(project.path().join(".jcode")).unwrap();
+        let project_overlay = "project overlay marker\n";
+        let global_overlay = "global overlay marker\n";
+        std::fs::write(
+            project.path().join(".jcode/prompt-overlay.md"),
+            project_overlay,
+        )
+        .unwrap();
+        std::fs::write(home.join(".kcode/prompt-overlay.md"), global_overlay).unwrap();
 
-        let (full, full_info) = build_system_prompt_full(None, &[], false, None, Some(home));
-        let (split, split_info) = build_system_prompt_split(None, &[], false, None, Some(home));
+        let (full, full_info) =
+            build_system_prompt_full(None, &[], false, None, Some(project.path()));
+        let (split, split_info) =
+            build_system_prompt_split(None, &[], false, None, Some(project.path()));
         for prompt in [&full, &split.static_part] {
-            assert_eq!(prompt.matches(overlay.trim()).count(), 1);
-            assert_eq!(prompt.matches(tools.trim()).count(), 1);
+            assert_eq!(prompt.matches(project_overlay.trim()).count(), 1);
+            assert_eq!(prompt.matches(global_overlay.trim()).count(), 1);
             assert!(prompt.contains("Project Prompt Overlay"));
-            assert!(prompt.contains("Project Preferred Tools"));
-            assert!(!prompt.contains("Global Prompt Overlay"));
-            assert!(!prompt.contains("Global Preferred Tools"));
+            assert!(prompt.contains("Global Prompt Overlay"));
         }
         for info in [full_info, split_info] {
-            assert_eq!(info.prompt_overlay_chars, overlay.len());
-            assert_eq!(info.preferred_tools_chars, tools.len());
+            assert_eq!(
+                info.prompt_overlay_chars,
+                project_overlay.len() + global_overlay.len()
+            );
         }
     });
 }
@@ -814,7 +830,7 @@ fn prompt_guidance_symlink_aliases_are_loaded_once() {
         let project = tempfile::TempDir::new().unwrap();
         std::fs::create_dir(project.path().join(".jcode")).unwrap();
         for name in ["prompt-overlay.md", "preferred-tools.md"] {
-            let global = home.join(".jcode").join(name);
+            let global = home.join(".kcode").join(name);
             std::fs::write(&global, "shared symlink guidance").unwrap();
             std::os::unix::fs::symlink(&global, project.path().join(".jcode").join(name)).unwrap();
         }
@@ -837,9 +853,12 @@ fn prompt_guidance_distinct_files_with_identical_contents_are_both_loaded() {
         let project = tempfile::TempDir::new().unwrap();
         std::fs::create_dir(project.path().join(".jcode")).unwrap();
         for name in ["prompt-overlay.md", "preferred-tools.md"] {
-            for root in [home, project.path()] {
-                std::fs::write(root.join(".jcode").join(name), "identical guidance").unwrap();
-            }
+            // Global home is the product home (`.kcode`); the project-local
+            // convention is still `.jcode`, so these are two distinct files with
+            // identical contents and both must load.
+            std::fs::write(home.join(".kcode").join(name), "identical guidance").unwrap();
+            std::fs::write(project.path().join(".jcode").join(name), "identical guidance")
+                .unwrap();
         }
         for (content, size) in [
             load_prompt_overlay_files_from_dir(Some(project.path())),
@@ -859,7 +878,7 @@ fn prompt_guidance_missing_or_unreadable_project_keeps_global_content() {
         let project = tempfile::TempDir::new().unwrap();
         std::fs::create_dir(project.path().join(".jcode")).unwrap();
         for name in ["prompt-overlay.md", "preferred-tools.md"] {
-            std::fs::write(home.join(".jcode").join(name), "global only").unwrap();
+            std::fs::write(home.join(".kcode").join(name), "global only").unwrap();
         }
         for unreadable in [false, true] {
             if unreadable {

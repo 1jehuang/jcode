@@ -185,7 +185,7 @@ async fn config_toml_models_survive_a_real_catalog_fetch() {
             }"#,
         );
 
-        // Exactly the shape a user writes in ~/.jcode/config.toml.
+        // Exactly the shape a user writes in ~/.kcode/config.toml.
         let toml_src = format!(
             r#"
 base_url = "{api_base}"

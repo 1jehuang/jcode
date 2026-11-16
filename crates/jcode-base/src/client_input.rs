@@ -1,4 +1,4 @@
-//! Client-input handoff files (`~/.jcode/client-input-<session>`).
+//! Client-input handoff files (`~/.kcode/client-input-<session>`).
 //!
 //! When a client queues a startup submission for a session (e.g. a headed
 //! spawn or a reload), it is persisted to a small JSON file that the next

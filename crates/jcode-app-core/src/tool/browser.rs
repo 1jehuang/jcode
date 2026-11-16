@@ -358,7 +358,7 @@ impl Tool for BrowserTool {
         let mut params: BrowserInput = serde_json::from_value(input)?;
         if params.action == "handoff" && browser_handoff_disabled() {
             anyhow::bail!(
-                "Browser handoff is disabled. Use direct browser actions instead. To opt in, set [tools] browser_handoff = true in ~/.jcode/config.toml or JCODE_BROWSER_HANDOFF=1. JCODE_BROWSER_HANDOFF_DISABLED=1 overrides opt-in."
+                "Browser handoff is disabled. Use direct browser actions instead. To opt in, set [tools] browser_handoff = true in ~/.kcode/config.toml or JCODE_BROWSER_HANDOFF=1. JCODE_BROWSER_HANDOFF_DISABLED=1 overrides opt-in."
             );
         }
         let provider = resolve_provider(params.browser.as_deref())?;

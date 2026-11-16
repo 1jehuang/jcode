@@ -1,6 +1,6 @@
 //! Burst detection and attribution for session snapshot loads.
 //!
-//! A process with a large `~/.jcode/sessions` directory (100k files is real)
+//! A process with a large `~/.kcode/sessions` directory (100k files is real)
 //! can be pushed into loading *every* session snapshot by a single unbounded
 //! `read_dir` + `Session::load` loop. When that happens two bad things follow:
 //!

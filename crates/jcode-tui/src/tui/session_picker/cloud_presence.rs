@@ -1,6 +1,6 @@
 //! Running-turn presence for sessions owned by a cloud host.
 //!
-//! Local presence comes from `~/.jcode/streaming_pids`. Cloud sessions keep
+//! Local presence comes from `~/.kcode/streaming_pids`. Cloud sessions keep
 //! the same markers on their VM, so one bounded SSH read per host reports
 //! which turns are running there. Never runs on the render thread.
 use super::*;

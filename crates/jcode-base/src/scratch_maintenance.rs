@@ -1,4 +1,4 @@
-//! Background cleanup for `~/.jcode/scratch`.
+//! Background cleanup for `~/.kcode/scratch`.
 //!
 //! The bash tool points `TMPDIR` and `JCODE_SCRATCH_DIR` at this directory and
 //! tells agents to put large temporary files there. Agents routinely clone
@@ -40,7 +40,7 @@ fn retention_from_env() -> Option<Duration> {
     (days > 0).then(|| Duration::from_secs(days * 24 * 60 * 60))
 }
 
-/// Remove stale entries from `~/.jcode/scratch`.
+/// Remove stale entries from `~/.kcode/scratch`.
 ///
 /// Best-effort and rate limited to one pass per day per machine, so it is safe
 /// to call from a background thread on every startup. Only the default scratch
@@ -476,7 +476,7 @@ mod tests {
         let prev_retention = std::env::var_os(SCRATCH_RETENTION_ENV);
 
         // NOTE: `tempfile::tempdir()` is unusable for a JCODE_HOME here. In this harness TMPDIR
-        // points at `~/.jcode/scratch`, so a default tempdir is created *inside* a jcode directory
+        // points at `~/.kcode/scratch`, so a default tempdir is created *inside* a jcode directory
         // and the test would prune the very scratch tree it is asserting on. Use an explicit root
         // outside all jcode paths.
         let temp = tempfile::Builder::new()

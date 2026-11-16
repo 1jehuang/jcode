@@ -1,5 +1,5 @@
 //! Persistence for agent-mounted applet instances, one file per session at
-//! `~/.jcode/agent_applets/<session_id>.json`.
+//! `~/.kcode/agent_applets/<session_id>.json`.
 use anyhow::{Context, Result, anyhow, bail};
 pub use jcode_applet_types::agent::{self, AgentApplets};
 use jcode_applet_types::{

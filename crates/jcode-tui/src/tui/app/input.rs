@@ -4102,7 +4102,7 @@ impl App {
                             skill_name, install
                         ),
                         None => format!(
-                            "Skill /{} is endorsed but not installed (source: {}). Install it into ~/.jcode/skills/{}/SKILL.md.",
+                            "Skill /{} is endorsed but not installed (source: {}). Install it into ~/.kcode/skills/{}/SKILL.md.",
                             skill_name, endorsed.source, skill_name
                         ),
                     });

@@ -605,7 +605,7 @@ mod tests {
 
     #[test]
     fn viewer_bounds_and_rejects_private_content() {
-        // Jcode's agent environment can set TMPDIR inside ~/.jcode, which
+        // Jcode's agent environment can set TMPDIR inside ~/.kcode, which
         // this viewer intentionally rejects regardless of the file name.
         #[cfg(unix)]
         let dir = tempfile::tempdir_in("/tmp").unwrap();

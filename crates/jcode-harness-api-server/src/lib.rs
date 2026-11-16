@@ -2,9 +2,9 @@
 //! Unix socket and translates to the internal (legacy) jcode protocol.
 //!
 //! Architecture (milestone 2 of docs/HARNESS_API_AND_DESKTOP_REWRITE.md):
-//! - Listens on `~/.jcode/jcode-api.sock` (or `JCODE_API_SOCKET`).
+//! - Listens on `~/.kcode/jcode-api.sock` (or `JCODE_API_SOCKET`).
 //! - For each API client, dials the legacy daemon socket (`JCODE_SOCKET` or
-//!   `~/.jcode/jcode.sock`) and speaks `subscribe`/`message`/... on its
+//!   `~/.kcode/jcode.sock`) and speaks `subscribe`/`message`/... on its
 //!   behalf.
 //! - Translation is JSON-to-JSON so this crate does not depend on the heavy
 //!   internal protocol types and cannot be broken by additive internal

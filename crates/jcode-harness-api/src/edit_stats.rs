@@ -267,7 +267,7 @@ struct Cache {
 static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| Mutex::new(Cache::default()));
 
 /// Opt-in enrichment for a LOCAL daemon, including older running daemons.
-/// Never call this for remote sessions. Uses JCODE_HOME or ~/.jcode. Exact
+/// Never call this for remote sessions. Uses JCODE_HOME or ~/.kcode. Exact
 /// sidecars are cheap and read immediately. Legacy estimates load in background
 /// (one background worker, 32 MiB per session, 512 queued/cached entries), so
 /// callers should invoke this on periodic refresh. Missing, malformed, oversized

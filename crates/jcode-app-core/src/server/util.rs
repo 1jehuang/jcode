@@ -103,7 +103,7 @@ pub(crate) fn reload_exec_target(is_selfdev_session: bool) -> Option<(PathBuf, &
     // A managed Jcode Cloud daemon runs from an immutable release directory and
     // its runtime is selected by the root-owned updater through one launcher
     // link. That selection is authoritative (a pin may deliberately downgrade),
-    // so reload follows it instead of the self-dev/stable channels in ~/.jcode.
+    // so reload follows it instead of the self-dev/stable channels in ~/.kcode.
     if let Some(target) = managed_cloud_reload_target(running_server_binary().as_deref()) {
         crate::logging::info(&format!(
             "{MANAGED_CLOUD_LIVE_RELOAD_MARKER}: exec target {:?}",

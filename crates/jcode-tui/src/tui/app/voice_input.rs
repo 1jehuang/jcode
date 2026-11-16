@@ -157,7 +157,7 @@ impl App {
                 "Voice input found no microphone recorder. Install one of \
                  `pw-record` (PipeWire), `parecord` (PulseAudio), `arecord` \
                  (ALSA), `rec` (SoX), or `ffmpeg`, or set `[dictation] recorder` \
-                 in `~/.jcode/config.toml`."
+                 in `~/.kcode/config.toml`."
                     .to_string(),
             ));
             self.set_status_notice("No microphone recorder found");

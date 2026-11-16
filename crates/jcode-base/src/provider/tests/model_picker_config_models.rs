@@ -9,7 +9,7 @@
 // 1. MiniMax serves `MiniMax-M3.1-Flash-Preview` on chat completions but omits
 //    it from `GET /v1/models`, so a declared model was invisible in the picker
 //    even though the config explicitly names it.
-// 2. The cache namespace is process-global, so `~/.jcode/cache/minimax_models.json`
+// 2. The cache namespace is process-global, so `~/.kcode/cache/minimax_models.json`
 // could hold another provider's catalog (the report found NVIDIA NIM models
 // under `source_api_base`) and silently decide the picker.
 

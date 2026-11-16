@@ -20,7 +20,7 @@ impl Config {
     /// parses and documents the options it claims to.
     pub fn default_config_file_contents() -> String {
         let default_content = r##"# jcode configuration file
-# Location: ~/.jcode/config.toml
+# Location: ~/.kcode/config.toml
 #
 # Environment variables override these settings.
 # Run `/config` in jcode to see current settings.
@@ -509,7 +509,7 @@ tool_profile = "acp"
 # default_model = "claude-opus-5-5"
 # Default provider (optional: claude|anthropic-api|openai|openai-api|copilot|openrouter|...)
 # When set, this provider is preferred on startup if available.
-#   claude        = Claude via OAuth/subscription (token in ~/.jcode/auth.json)
+#   claude        = Claude via OAuth/subscription (token in ~/.kcode/auth.json)
 #   anthropic-api = Claude via direct Anthropic API key (ANTHROPIC_API_KEY env
 #                   or ~/.config/jcode/anthropic.env). API-key mode does NOT fall
 #                   back to OAuth; configure the key first.
@@ -732,7 +732,7 @@ swarm_stall_after_secs = 600
 # macOS only: terminal that the Cmd+; launch hotkey and in-app session spawns
 # open jcode into. One of: ghostty, iterm2, wezterm, warp, alacritty, vscode,
 # terminal (Apple Terminal). Preferred over the legacy
-# ~/.jcode/preferred_terminal.json file. After changing this, re-run
+# ~/.kcode/preferred_terminal.json file. After changing this, re-run
 # `jcode setup-hotkey` so the generated launcher script (Cmd+;) picks it up.
 # preferred = "ghostty"
 
@@ -761,7 +761,7 @@ swarm_stall_after_secs = 600
 # Synchronous tool-input transformers. Each receives the tool input JSON on
 # stdin and may print replacement JSON on stdout. Failures and empty output
 # retain the original input. Transformers run before pre_tool policy gates.
-# pre_tool_transform = ["~/.jcode/plugins/rtk-transform"]
+# pre_tool_transform = ["~/.kcode/plugins/rtk-transform"]
 # pre_tool_transform_timeout_ms = 500
 # Lifecycle hooks: external commands jcode runs at well-defined points so other
 # programs can observe or gate agent behavior. Commands are parsed shell-style
@@ -877,7 +877,7 @@ prevent_sleep_while_streaming = true
 # working. Windows temporarily sets the power plan's lid close action to "Do
 # nothing". macOS runs `sudo -n pmset -a disablesleep 1` and needs a passwordless
 # sudoers rule for /usr/bin/pmset (skipped otherwise). Original settings are
-# saved to ~/.jcode/lid_override.json and restored afterwards, even after a crash.
+# saved to ~/.kcode/lid_override.json and restored afterwards, even after a crash.
 block_lid_close = true
 
 [companion]

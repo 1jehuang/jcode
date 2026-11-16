@@ -41,7 +41,7 @@ pub fn fit_section(content: &str) -> String {
 
 /// Build a session notes prompt from a custom template.
 ///
-/// Loads `template.md` from `~/.jcode/session-memory/config/`, substitutes
+/// Loads `template.md` from `~/.kcode/session-memory/config/`, substitutes
 /// `{{variable}}` placeholders, and returns the rendered text. Falls back
 /// to the raw content if no template is found.
 pub fn render_session_template(content: &str, variables: &HashMap<String, String>) -> String {

@@ -3,7 +3,7 @@
 //! TUI clients record the session they display when they gain focus. The server
 //! reads this to route `jcode transcript` text to the session the user is
 //! looking at, and desktop-side tools (dictation, the voice companion) map a
-//! focused window to its client's session. Plain files under `~/.jcode`, so
+//! focused window to its client's session. Plain files under `~/.kcode`, so
 //! readers never need a live connection.
 
 use anyhow::{Context, Result};

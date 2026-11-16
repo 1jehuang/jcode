@@ -2,7 +2,7 @@
 //!
 //! Recovering inside a turn (see [`crate::rejection`]) fixes the immediate
 //! failure but costs a wasted round trip on every subsequent request, and the
-//! knowledge dies with the process. Writing it to `~/.jcode/schema-quirks.json`
+//! knowledge dies with the process. Writing it to `~/.kcode/schema-quirks.json`
 //! makes the second request the fast path and means the fleet self-heals in
 //! front of a provider change instead of waiting for a jcode release.
 //!
@@ -37,7 +37,7 @@ fn store_path() -> Option<PathBuf> {
     // store. This is not hypothetical: an earlier version of the test hook used
     // a process-global env var, and because tests run in parallel one of them
     // observed it unset and persisted a learned `minItems` rejection into the
-    // developer's real `~/.jcode/schema-quirks.json`, silently stripping that
+    // developer's real `~/.kcode/schema-quirks.json`, silently stripping that
     // keyword from every OpenAI request on that machine afterwards. Failing
     // closed here makes the whole class impossible rather than relying on every
     // future test remembering to isolate.
@@ -82,7 +82,7 @@ fn test_override() -> Option<PathBuf> {
 /// Gated behind `test-support` as well as `cfg(test)` so integration tests,
 /// which compile against the crate as an external dependency, can isolate
 /// themselves too. Without that an integration test would read and write the
-/// developer's real `~/.jcode/schema-quirks.json`.
+/// developer's real `~/.kcode/schema-quirks.json`.
 #[cfg(any(test, feature = "test-support"))]
 pub fn use_test_path(path: PathBuf) {
     TEST_PATH.with(|slot| *slot.borrow_mut() = Some(path));

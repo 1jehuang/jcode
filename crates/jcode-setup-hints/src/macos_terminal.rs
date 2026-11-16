@@ -99,13 +99,13 @@ pub(super) fn save_preferred_macos_terminal(terminal: MacTerminalKind) -> Result
 
 pub(super) fn effective_macos_terminal() -> MacTerminalKind {
     // Precedence: config.toml `[terminal] preferred` (discoverable, documented)
-    // > legacy `~/.jcode/preferred_terminal.json` > runtime detection.
+    // > legacy `~/.kcode/preferred_terminal.json` > runtime detection.
     config_preferred_macos_terminal()
         .or_else(load_preferred_macos_terminal)
         .unwrap_or_else(detect_macos_terminal)
 }
 
-/// Read `[terminal] preferred` from `~/.jcode/config.toml`, if present and valid.
+/// Read `[terminal] preferred` from `~/.kcode/config.toml`, if present and valid.
 fn config_preferred_macos_terminal() -> Option<MacTerminalKind> {
     #[derive(Deserialize, Default)]
     struct Wrapper {

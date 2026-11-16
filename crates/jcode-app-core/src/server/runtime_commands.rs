@@ -407,7 +407,7 @@ fn skills_report(data: &Value) -> String {
     let mut report = String::from("## Loaded skills\n\n");
     let loaded = data["skills"].as_array().map(Vec::as_slice).unwrap_or(&[]);
     if loaded.is_empty() {
-        report.push_str("No skills loaded. Add skills under `~/.jcode/skills/<name>/SKILL.md` or the workspace `.jcode/skills`.\n");
+        report.push_str("No skills loaded. Add skills under `~/.kcode/skills/<name>/SKILL.md` or the workspace `.jcode/skills`.\n");
     }
     for skill in loaded {
         let name = skill["name"].as_str().unwrap_or("");

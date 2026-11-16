@@ -10,7 +10,7 @@
 //! Run with:
 //!   cargo test -p jcode-embedding --test embed_latency_probe -- --ignored --nocapture
 //!
-//! Requires the MiniLM model to be installed (~/.jcode/models/all-MiniLM-L6-v2).
+//! Requires the MiniLM model to be installed (~/.kcode/models/all-MiniLM-L6-v2).
 
 use std::path::PathBuf;
 
