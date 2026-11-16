@@ -711,6 +711,11 @@ export default {
           } catch {
             console.warn("private OAuth account retention failed");
           }
+          // Price recently seen labels so new models are not silently valued at $0.
+          // Runs before the ledger retention loop: pricing is three small reads
+          // and a few batches, and it stopped on 2026-11-03, the first night the
+          // ledger had rows past its 8-day window, because it sat behind that loop.
+          await syncModelPricesWithRetry(env);
           try {
             for (let batch = 0; batch < 100; batch++) {
               const result = await env.DB.prepare(`DELETE FROM usage_report_ledger WHERE receipt_key IN (
@@ -722,12 +727,6 @@ export default {
             console.warn("usage ledger retention failed", err?.message || err);
           }
           await repairDailyActivityYesterday(env);
-          // Price recently seen labels so new models are not silently valued at $0.
-          try {
-            await syncModelPrices(env);
-          } catch (err) {
-            console.warn("model price sync failed", err?.message || err);
-          }
         }
         await pruneOldEvents(env);
         if (env.DB_BULK) {
@@ -752,6 +751,28 @@ export default {
     );
   },
 };
+
+function isD1Overload(err) {
+  const message = [err?.message, err?.cause?.message].filter(Boolean).join(" ");
+  return Number(err?.code) === 7429 || Number(err?.cause?.code) === 7429
+    || /\b7429\b|\bD1(?: DB| database)? is overloaded\b/i.test(message);
+}
+
+// One retry after D1's ten-second overload window, so a busy database at 04:17
+// does not cost a whole day of pricing. The upserts are idempotent. Never
+// throws: later nightly maintenance must still run.
+export async function syncModelPricesWithRetry(env, { cooldownMs = 11000, ...options } = {}) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await syncModelPrices(env, options);
+    } catch (err) {
+      console.warn("model price sync failed", err?.message || err);
+      if (attempt > 0 || !isD1Overload(err)) return null;
+      await new Promise((resolve) => setTimeout(resolve, cooldownMs));
+    }
+  }
+  return null;
+}
 
 async function repairDailyActivityYesterday(env) {
   try {
@@ -1030,10 +1051,7 @@ async function runRetentionStatement(statement) {
   try {
     return await statement.run();
   } catch (err) {
-    const message = [err?.message, err?.cause?.message].filter(Boolean).join(" ");
-    const overloaded = Number(err?.code) === 7429 || Number(err?.cause?.code) === 7429
-      || /\b7429\b|\bD1(?: DB| database)? is overloaded\b/i.test(message);
-    if (!overloaded) throw err;
+    if (!isD1Overload(err)) throw err;
     // D1's overload protection uses a ten-second resource window. Retry only
     // this idempotent retention statement, once, after that window clears.
     await new Promise((resolve) => setTimeout(resolve, 11000));

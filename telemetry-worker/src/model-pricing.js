@@ -75,6 +75,9 @@ export function normalizeLabel(label) {
   // Strip a trailing `@Provider` disambiguator (`...-4-8@Anthropic`), but not
   // a leading `@cf/...` namespace, which used to erase the whole label.
   s = s.replace(/(.)@[^@/]+$/, "$1");
+  // Ollama cloud tags (`deepseek-v4.1-flash:cloud`, `...:1017-cloud`) name the
+  // hosting route, not a different model. The base model keeps its list price.
+  s = s.replace(/:(?:[\w.]+-)?cloud$/i, "");
   // Reasoning-effort suffixes (`-xhigh`, `-high`) never change price.
   s = s.replace(/-(xhigh|x-high|max-effort)$/i, "");
   const candidates = new Set([s]);
@@ -108,7 +111,9 @@ export function normalizeLabel(label) {
       candidates.add(undated.replace(/(\d)-(\d)(?!\d)/g, "$1.$2"));
     }
     // Thinking/highspeed/tiered variants price the same as the base model.
-    candidates.add(undated.replace(/-(thinking|highspeed|tiered|high|medium|low)$/i, ""));
+    // `-fast` and `-preview` are priced at the base rate too: a premium fast
+    // tier is understated, but that is closer than counting it as $0.
+    candidates.add(undated.replace(/-(thinking|highspeed|tiered|high|medium|low|fast|preview)$/i, ""));
   }
   return [...candidates].filter(Boolean);
 }
@@ -119,21 +124,13 @@ export function isFreeLabel(label) {
   return FREE_LABEL_PATTERNS.some((re) => re.test(label));
 }
 
+// Router placeholders say nothing about the model behind them. Some gateways
+// publish a catalog id with the same name (`auto`), which must not price them.
+const ROUTER_LABEL = /^(auto|default|unknown|router|pool\d*)$/i;
+
 export function buildPriceIndex(catalog) {
   // model id (lowercased) -> [{provider, cost}], provider-preference sorted.
   const index = new Map();
-  const preference = [
-    "anthropic",
-    "openai",
-    "google",
-    "xai",
-    "deepseek",
-    "zai",
-    "zhipuai",
-    "moonshotai",
-    "minimax",
-    "openrouter",
-  ];
   for (const [providerId, provider] of Object.entries(catalog ?? {})) {
     for (const [modelId, model] of Object.entries(provider?.models ?? {})) {
       const cost = model?.cost;
@@ -143,22 +140,76 @@ export function buildPriceIndex(catalog) {
       index.get(key).push({ provider: providerId, cost });
     }
   }
-  for (const entries of index.values()) {
-    entries.sort((a, b) => {
-      const ai = preference.indexOf(a.provider);
-      const bi = preference.indexOf(b.provider);
-      // Known first-party providers first, then the cheapest-listed as a proxy
-      // for "most likely the real rate" rather than an arbitrary map order.
-      if (ai !== bi) return (ai < 0 ? 999 : ai) - (bi < 0 ? 999 : bi);
-      return a.cost.input - b.cost.input;
-    });
-  }
+  for (const entries of index.values()) entries.sort(compareEntries);
   return index;
+}
+
+const PROVIDER_PREFERENCE = [
+  "anthropic", "openai", "google", "xai", "deepseek", "zai", "zhipuai",
+  "moonshotai", "minimax", "openrouter",
+];
+
+function isZeroCost(cost) {
+  return !(cost.input > 0) && !(cost.output > 0);
+}
+
+function compareEntries(a, b) {
+  // Coding-plan and token-plan providers list every model at $0 because the
+  // plan is billed separately. That is not the model's list price, so a real
+  // rate always wins. Explicitly free labels are handled by isFreeLabel.
+  const az = isZeroCost(a.cost);
+  const bz = isZeroCost(b.cost);
+  if (az !== bz) return az ? 1 : -1;
+  const ai = PROVIDER_PREFERENCE.indexOf(a.provider);
+  const bi = PROVIDER_PREFERENCE.indexOf(b.provider);
+  // Known first-party providers first, then the cheapest-listed as a proxy
+  // for "most likely the real rate" rather than an arbitrary map order.
+  if (ai !== bi) return (ai < 0 ? 999 : ai) - (bi < 0 ? 999 : bi);
+  return a.cost.input - b.cost.input;
+}
+
+// Catalog ids that exist only with a vendor prefix (`meituan/longcat-2.5`),
+// keyed by their last segment, so a bare `LongCat-2.5` label still resolves.
+// Versioned names only: a bare word like `high` must never match by suffix.
+function buildBasenameIndex(index) {
+  const basenames = new Map();
+  for (const [modelId, entries] of index) {
+    const slash = modelId.lastIndexOf("/");
+    if (slash < 0) continue;
+    const base = modelId.slice(slash + 1);
+    if (!/\d/.test(base) || !/[a-z]{2}/.test(base) || index.has(base)) continue;
+    if (!basenames.has(base)) basenames.set(base, []);
+    basenames.get(base).push(...entries);
+  }
+  for (const entries of basenames.values()) entries.sort(compareEntries);
+  return basenames;
+}
+
+// First candidate with a price. A first-party listing beats a reseller's
+// discounted one, even when the reseller uses the more literal spelling.
+function pickEntry(candidates, source) {
+  let fallback = null;
+  let zero = null;
+  for (const candidate of candidates) {
+    const entries = source.get(candidate.toLowerCase());
+    if (!entries?.length) continue;
+    const hit = { candidate, ...entries[0] };
+    if (isZeroCost(hit.cost)) {
+      zero ??= hit;
+      continue;
+    }
+    if (PROVIDER_PREFERENCE.includes(hit.provider)) return hit;
+    fallback ??= hit;
+  }
+  // A $0 listing is used only when no spelling of the label has a real rate.
+  return fallback ?? zero;
 }
 
 // Resolve observed {model, provider} rows to one price row per label.
 export function resolvePriceRows(observed, index) {
   const families = buildFamilyIndex(index);
+  const basenames = buildBasenameIndex(index);
+  const embedded = buildEmbeddedIndex(index);
   const rows = new Map();
   for (const row of observed) {
     const label = row.model;
@@ -175,16 +226,18 @@ export function resolvePriceRows(observed, index) {
       continue;
     }
 
-    let match = null;
-    for (const candidate of normalizeLabel(label)) {
-      const entries = index.get(candidate.toLowerCase());
-      if (entries?.length) {
-        match = { candidate, ...entries[0] };
-        break;
-      }
-    }
+    const candidates = normalizeLabel(label);
+    const match = ROUTER_LABEL.test(String(label).trim()) ? null
+      : pickEntry(candidates, index) ?? pickEntry(candidates, basenames);
     if (!match) {
-      const estimate = familyEstimate(label, families);
+      let estimate = familyEstimate(label, families);
+      if (!estimate) {
+        const wrapped = embeddedEstimate(candidates, embedded);
+        // Re-resolve the wrapped id so `claude-opus-5.5` inside a gateway label
+        // gets Anthropic's rate, not the reseller that spells it with a dot.
+        const best = wrapped && pickEntry(normalizeLabel(wrapped.modelId), index);
+        estimate = best ? { modelId: best.candidate, provider: best.provider, cost: best.cost } : wrapped;
+      }
       if (estimate) {
         const cost = estimate.cost;
         rows.set(label, {
@@ -276,6 +329,42 @@ function familyEstimate(label, families) {
   return null;
 }
 
+// Gateway operators wrap a real model id in their own naming:
+// `halogen-qwen3.8-flash-next`, `maas-glm-5.3-zhipu-codeagent`,
+// `aixdev-gpt-6.1-sol`. When a whole versioned catalog id sits inside the label
+// on token boundaries, price the label at that model's rate and tag it
+// `family_estimate`. Opaque aliases (`high`, `coder`) contain no such id.
+function buildEmbeddedIndex(index) {
+  const ids = [];
+  for (const [modelId, entries] of index) {
+    if (modelId.length < 7 || /[/:@\s]/.test(modelId)) continue;
+    if (!/\d/.test(modelId) || !/[a-z]{3}/.test(modelId)) continue;
+    if (isZeroCost(entries[0].cost)) continue;
+    ids.push({ modelId, ...entries[0] });
+  }
+  // Longest first, so `gpt-6.1-sol` wins over `gpt-6.1`.
+  return ids.sort((a, b) => b.modelId.length - a.modelId.length);
+}
+
+function embeddedEstimate(candidates, embedded) {
+  for (const candidate of candidates) {
+    const label = candidate.toLowerCase();
+    for (const entry of embedded) {
+      if (entry.modelId.length >= label.length) continue;
+      const at = label.indexOf(entry.modelId);
+      if (at < 0) continue;
+      const before = label[at - 1];
+      const after = label.slice(at + entry.modelId.length);
+      if (before && /[a-z0-9.]/.test(before)) continue;
+      if (after && /^[a-z0-9]/.test(after)) continue;
+      // `gpt-5-5` contains `gpt-5` but is a different release, not a wrapper.
+      if (/^[-.]\d+(?![a-z0-9])/.test(after)) continue;
+      return entry;
+    }
+  }
+  return null;
+}
+
 // Preserve known catalog prices and estimates across transient catalog misses.
 // A prior 'free' classification is not a known catalog price: allow the resolver
 // to correct it to 'unpriced' when a routing/subscription alias was mislabeled.
@@ -317,7 +406,7 @@ export function observedLabelsSql() {
 }
 
 // Nightly cron entry: price every label seen in the last `days` days.
-export async function syncModelPrices(env, { days = 2, fetchImpl = fetch, batchSize = 50 } = {}) {
+export async function syncModelPrices(env, { days = 3, fetchImpl = fetch, batchSize = 50 } = {}) {
   const response = await fetchImpl(CATALOG_URL);
   if (!response.ok) throw new Error(`models.dev returned ${response.status}`);
   const index = buildPriceIndex(await response.json());
