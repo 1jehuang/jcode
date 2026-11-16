@@ -187,9 +187,6 @@ pub(super) async fn handle_remote_key_internal(
     }
 
     if input::is_next_prompt_new_session_hotkey(code, modifiers) {
-        if app_mod::commands_dispatch::ssh_local_action_blocked(app, "New-session routing") {
-            return Ok(());
-        }
         app.toggle_next_prompt_new_session_routing();
         return Ok(());
     }
@@ -714,7 +711,7 @@ pub(super) async fn handle_remote_key_internal(
             match app.send_action(true) {
                 SendAction::Submit => submit_prepared_remote_input(app, remote, prepared).await?,
                 SendAction::Queue => {
-                    app.queued_messages.push(prepared.expanded);
+                    queue_prepared_remote_input(app, prepared);
                 }
                 SendAction::Interleave => {
                     app.send_interleave_now(prepared.expanded, prepared.images, remote)

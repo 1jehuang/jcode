@@ -52,7 +52,7 @@ async fn callback_paths_honor_custom_and_disabled_budgets() {
         let result = execute_with_background_budget(
             registry,
             "bg".into(),
-            serde_json::json!({"action": action}),
+            serde_json::json!({"action": action, "intent": "Run  parser\ntests"}),
             ctx,
             budget,
         )
@@ -77,6 +77,11 @@ async fn callback_paths_honor_custom_and_disabled_budgets() {
             assert_eq!(
                 finished.task.status,
                 crate::bus::BackgroundTaskStatus::Completed
+            );
+            // The intent names the task, so waits do not read "Waiting for bg".
+            assert_eq!(
+                finished.task.display_name.as_deref(),
+                Some("Run parser tests")
             );
             assert_eq!(
                 crate::background::global().output(task_id).await.unwrap(),

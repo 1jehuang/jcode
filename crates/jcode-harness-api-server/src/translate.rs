@@ -598,6 +598,14 @@ impl BridgeState {
                     "supports_server_failover": true,
                     "supports_turn_identity": true,
                 });
+                // Mobile sockets disappear when the OS suspends the app or
+                // changes networks. The daemon must own their session lifetime.
+                // Preserve the existing desktop and unknown SDK client policy.
+                if self.client_name.as_deref().is_some_and(|name| {
+                    matches!(name.split('/').next(), Some("jcode-ios" | "jcode-android"))
+                }) {
+                    subscribe["continue_on_disconnect"] = json!(true);
+                }
                 if self.crash_on_disconnect {
                     subscribe["crash_on_disconnect"] = json!(true);
                 }

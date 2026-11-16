@@ -20,7 +20,7 @@ fn def(name: &str) -> ToolDefinition {
 fn msg(role: Role, content: Vec<ContentBlock>) -> Message {
     Message {
         role,
-        content,
+        content: content.into(),
         timestamp: None,
         tool_duration_ms: None,
     }

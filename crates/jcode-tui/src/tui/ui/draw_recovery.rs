@@ -9,6 +9,11 @@ use super::theme_support::dim_color;
 /// Number of recovered panics while rendering the frame.
 static DRAW_PANIC_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+#[cfg(test)]
+pub(super) fn recovered_panic_count() -> usize {
+    DRAW_PANIC_COUNT.load(Ordering::Relaxed)
+}
+
 pub(super) fn render_recovered_panic_frame(
     frame: &mut Frame,
     payload: &(dyn std::any::Any + Send),

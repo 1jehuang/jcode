@@ -2,6 +2,12 @@
 
 use super::*;
 
+#[derive(serde::Serialize)]
+struct PersistedCatalogRef<'a> {
+    models: &'a [String],
+    fetched_at_rfc3339: String,
+}
+
 impl GeminiProvider {
     pub(super) fn persisted_catalog_path() -> Result<std::path::PathBuf> {
         Ok(jcode_base::storage::app_config_dir()?.join("gemini_models_cache.json"))
@@ -40,8 +46,8 @@ impl GeminiProvider {
         let Ok(path) = Self::persisted_catalog_path() else {
             return;
         };
-        let payload = PersistedCatalog {
-            models: models.to_vec(),
+        let payload = PersistedCatalogRef {
+            models,
             fetched_at_rfc3339: Utc::now().to_rfc3339(),
         };
         if let Err(error) = jcode_base::storage::write_json(&path, &payload) {
@@ -157,5 +163,41 @@ impl GeminiProvider {
             Self::persist_catalog(&models);
         }
         Ok(models)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persisted_catalog_ref_matches_legacy_json_and_borrows_models() {
+        for models in [
+            vec![],
+            vec!["gemini-future-2099".to_owned()],
+            vec!["未来/🦀".to_owned(), "quoted\"\\\n\tmodel".to_owned()],
+        ] {
+            let timestamp = "2026-11-16T06:27:30.477+00:00".to_owned();
+            let payload = PersistedCatalogRef {
+                models: &models,
+                fetched_at_rfc3339: timestamp.clone(),
+            };
+            let legacy = PersistedCatalog {
+                models: models.clone(),
+                fetched_at_rfc3339: timestamp,
+            };
+            assert!(std::ptr::eq(payload.models, models.as_slice()));
+            for (borrowed, original) in payload.models.iter().zip(&models) {
+                assert_eq!(borrowed.as_ptr(), original.as_ptr());
+            }
+            assert_eq!(
+                serde_json::to_vec(&payload).unwrap(),
+                serde_json::to_vec(&legacy).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_vec_pretty(&payload).unwrap(),
+                serde_json::to_vec_pretty(&legacy).unwrap()
+            );
+        }
     }
 }

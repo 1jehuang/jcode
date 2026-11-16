@@ -159,7 +159,7 @@ fn stored_search_turn() -> Vec<Message> {
                     text: "Rust 1.90 shipped.".to_string(),
                     cache_control: None,
                 },
-            ],
+            ].into(),
             timestamp: None,
             tool_duration_ms: None,
         },

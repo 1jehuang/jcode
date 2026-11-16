@@ -1,6 +1,25 @@
 //! Interrupting a coordinator stops the workers it spawned.
 
-use super::{cancel_spawned_descendant_turns, swarm_descendants};
+use super::{cancel_active_turns, cancel_spawned_descendant_turns, swarm_descendants};
+
+/// Field reports: files kept appearing in a stopped worker's directory minutes
+/// after `swarm stop`, because stop dropped the handles without cancelling.
+#[test]
+fn stop_cancels_only_the_target_sessions_running_turns() {
+    let target = format!("stop-target-{}", std::process::id());
+    let other = format!("stop-other-{}", std::process::id());
+    let target_signal = InterruptSignal::new();
+    let other_signal = InterruptSignal::new();
+    let _target_turn =
+        crate::turn_cancel_registry::register_active_turn(&target, target_signal.clone());
+    let _other_turn =
+        crate::turn_cancel_registry::register_active_turn(&other, other_signal.clone());
+
+    assert_eq!(cancel_active_turns(&target), 1);
+    assert!(target_signal.is_set());
+    assert!(!other_signal.is_set());
+    assert_eq!(cancel_active_turns("stop-idle-session"), 0);
+}
 use crate::protocol::ServerEvent;
 use crate::server::SwarmMember;
 use jcode_agent_runtime::InterruptSignal;

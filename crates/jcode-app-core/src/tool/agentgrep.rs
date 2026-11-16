@@ -241,15 +241,15 @@ impl Tool for AgentGrepTool {
                 "mode": {
                     "type": "string",
                     "enum": ["grep", "find", "outline", "trace"],
-                    "description": "Mode: grep (default), find (file names), outline (one file), trace (relationship DSL)."
+                    "description": "grep (default), find (file names), outline (one file), trace (relationship DSL)."
                 },
                 "query": {
                     "type": "string",
-                    "description": "Search query. Required for grep (literal unless regex=true); optional ranking terms for find."
+                    "description": "Required for grep (literal unless regex=true); optional ranking terms for find."
                 },
                 "file": {
                     "type": "string",
-                    "description": "Single file to inspect. Required for outline."
+                    "description": "Required for outline."
                 },
                 "terms": {
                     "type": "array",
@@ -258,31 +258,31 @@ impl Tool for AgentGrepTool {
                 },
                 "regex": {
                     "type": "boolean",
-                    "description": "In grep mode, treat query as a regex. Defaults to false (literal)."
+                    "description": "grep: treat query as a regex."
                 },
                 "path": {
                     "type": "string",
-                    "description": "Directory or file to search, relative to the workspace. Omit to search the whole workspace."
+                    "description": "Directory or file, relative to the workspace. Default: whole workspace."
                 },
                 "glob": {
                     "type": "string",
-                    "description": "Optional file glob filter such as **/*.rs. Omit to search everything."
+                    "description": "File glob filter, e.g. **/*.rs."
                 },
                 "type": {
                     "type": "string",
-                    "description": "Optional ripgrep file type filter, such as rs, py, js, ts, or md."
+                    "description": "ripgrep file type, e.g. rs, py, md."
                 },
                 "max_files": {
                     "type": "integer",
-                    "description": "Maximum number of files to return for find/trace-style modes."
+                    "description": "Max files for find/trace."
                 },
                 "max_regions": {
                     "type": "integer",
-                    "description": "Maximum number of matching regions to return."
+                    "description": "Max matching regions."
                 },
                 "paths_only": {
                     "type": "boolean",
-                    "description": "Return only matching paths instead of match excerpts where supported."
+                    "description": "Return paths, not excerpts."
                 }
             }
         })

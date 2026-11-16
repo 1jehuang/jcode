@@ -468,6 +468,30 @@ pub async fn fetch_project_id(access_token: &str) -> Result<String> {
     fetch_project_id_from_endpoints(access_token, &candidate_endpoints).await
 }
 
+#[derive(Serialize)]
+struct ProjectLookupRequest<'a> {
+    metadata: ProjectLookupMetadata<'a>,
+}
+
+// Field order matches the legacy serde_json map's serialized key order.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectLookupMetadata<'a> {
+    ide_type: &'a str,
+    platform: &'a str,
+    plugin_type: &'a str,
+}
+
+fn project_lookup_request(platform: &str) -> ProjectLookupRequest<'_> {
+    ProjectLookupRequest {
+        metadata: ProjectLookupMetadata {
+            ide_type: "ANTIGRAVITY",
+            platform,
+            plugin_type: "GEMINI",
+        },
+    }
+}
+
 /// Core of [`fetch_project_id`], taking an explicit ordered endpoint list so
 /// it is unit-testable against local mock servers instead of only the
 /// production Cloud Code hosts.
@@ -484,13 +508,7 @@ async fn fetch_project_id_from_endpoints(
 ) -> Result<String> {
     let client = crate::provider::shared_http_client();
     let headers = antigravity_headers(access_token)?;
-    let body = serde_json::json!({
-        "metadata": {
-            "ideType": "ANTIGRAVITY",
-            "platform": metadata_platform(),
-            "pluginType": "GEMINI"
-        }
-    });
+    let body = project_lookup_request(metadata_platform());
     let mut errors = Vec::new();
 
     for base_url in candidate_endpoints {
@@ -668,6 +686,37 @@ mod tests {
     fn client_metadata_uses_backend_accepted_platform() {
         assert_eq!(metadata_platform(), "PLATFORM_UNSPECIFIED");
         assert!(client_metadata_header().contains("\"platform\":\"PLATFORM_UNSPECIFIED\""));
+    }
+
+    #[test]
+    fn project_lookup_request_matches_legacy_bytes_and_builder_owns_body() {
+        let legacy = serde_json::json!({
+            "metadata": {
+                "ideType": "ANTIGRAVITY",
+                "platform": metadata_platform(),
+                "pluginType": "GEMINI"
+            }
+        });
+        let expected = serde_json::to_vec(&legacy).expect("serialize legacy metadata");
+        assert_eq!(
+            expected,
+            br#"{"metadata":{"ideType":"ANTIGRAVITY","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}}"#
+        );
+        let client = reqwest::Client::new();
+        let builder = {
+            let platform = metadata_platform().to_owned();
+            let body = project_lookup_request(&platform);
+            assert!(std::ptr::eq(body.metadata.platform, platform.as_str()));
+            assert_eq!(serde_json::to_vec(&body).unwrap(), expected);
+            client
+                .post("http://localhost/v1internal:loadCodeAssist")
+                .json(&body)
+        };
+        let request = builder.build().expect("build request after metadata drops");
+        assert_eq!(
+            request.body().and_then(reqwest::Body::as_bytes),
+            Some(expected.as_slice())
+        );
     }
 
     #[test]

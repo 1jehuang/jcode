@@ -96,7 +96,8 @@ mod tests {
             content: vec![ContentBlock::Text {
                 text: text.into(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,
@@ -129,7 +130,8 @@ mod tests {
             name: "read".into(),
             input: serde_json::json!({}),
             thought_signature: None,
-        }];
+        }]
+        .into();
     }
 
     #[test]
@@ -147,7 +149,8 @@ mod tests {
             tool_use_id: "tool".into(),
             content: "result".into(),
             is_error: None,
-        }];
+        }]
+        .into();
         messages[2].tool_duration_ms = Some(1234);
         let mut rows = vec![row(3), row(5)];
         attach(&messages, &mut rows);

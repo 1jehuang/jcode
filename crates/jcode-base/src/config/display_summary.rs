@@ -378,3 +378,30 @@ impl Config {
         )
     }
 }
+
+impl Config {
+    /// Keyboards the companion watches for global push-to-talk.
+    ///
+    /// `[dictation] global_devices` wins. When it is empty, the keyboards
+    /// already chosen in Jcode Desktop (`[desktop.voice] global_devices`) are
+    /// used, so push-to-talk keeps working while Desktop is closed.
+    pub fn global_voice_devices(&self) -> Vec<std::path::PathBuf> {
+        if !self.dictation.global_devices.is_empty() {
+            return self.dictation.global_devices.clone();
+        }
+        self.desktop
+            .as_ref()
+            .and_then(|desktop| desktop.get("voice"))
+            .and_then(|voice| voice.get("global_devices"))
+            .and_then(|devices| devices.as_array())
+            .map(|devices| {
+                devices
+                    .iter()
+                    .filter_map(|device| device.as_str())
+                    .filter(|device| !device.trim().is_empty())
+                    .map(std::path::PathBuf::from)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}

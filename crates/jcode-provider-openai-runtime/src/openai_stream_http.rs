@@ -4,7 +4,7 @@ pub(crate) async fn stream_response(
     client: Client,
     credentials: Arc<RwLock<CodexCredentials>>,
     account_label: Option<String>,
-    request: Value,
+    request: &Value,
     initial_status_detail: String,
     tx: mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<(), OpenAIStreamFailure> {
@@ -13,7 +13,7 @@ pub(crate) async fn stream_response(
         .get("service_tier")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let request_model = openai_request_model(&request);
+    let request_model = openai_request_model(request);
     let stream_started_at = Instant::now();
     log_openai_stream_lifecycle(
         jcode_base::logging::LogLevel::Info,
@@ -44,7 +44,7 @@ pub(crate) async fn stream_response(
             "OpenAI credentials changed before request, retrying"
         )));
     }
-    let mut usage_recorder = OAuthUsageRecorder::capture(&creds, &request);
+    let mut usage_recorder = OAuthUsageRecorder::capture(&creds, request);
     let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
     let catalog_scope = OpenAIProvider::catalog_scope_for(&creds);
     let url = OpenAIProvider::responses_url(&creds);
@@ -64,11 +64,11 @@ pub(crate) async fn stream_response(
 
     emit_connection_phase(&tx, ConnectionPhase::SendingRequest).await;
     let connect_start = std::time::Instant::now();
-    let idle_timeout = effective_https_idle_timeout(&request);
+    let idle_timeout = effective_https_idle_timeout(request);
     let builder = jcode_provider_core::request_compression::json_body(
         builder,
         &url,
-        &request,
+        request,
         jcode_base::provider::request_compression_mode(),
     )
     .map_err(OpenAIStreamFailure::Other)?;

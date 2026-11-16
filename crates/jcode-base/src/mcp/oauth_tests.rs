@@ -3,6 +3,60 @@ use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[test]
+fn serialized_token_form_does_not_borrow_secret_storage() {
+    let form = vec![
+        ("grant_type", "refresh_token".to_owned()),
+        ("refresh_token", "dummy +&=界".to_owned()),
+        ("client_id", "public-client".to_owned()),
+        ("client_secret", "dummy-secret".to_owned()),
+        ("resource", "https://example.invalid/mcp".to_owned()),
+    ];
+    let request = reqwest::Client::new()
+        .post("https://example.invalid/token")
+        .form(&form);
+    drop(form);
+    let request = request.build().unwrap();
+    assert_eq!(
+        request.body().unwrap().as_bytes().unwrap(),
+        b"grant_type=refresh_token&refresh_token=dummy+%2B%26%3D%E7%95%8C&client_id=public-client&client_secret=dummy-secret&resource=https%3A%2F%2Fexample.invalid%2Fmcp"
+    );
+}
+
+#[test]
+fn borrowed_registration_preserves_legacy_bytes_and_owns_serialized_body() {
+    for uri in [
+        "",
+        "http://127.0.0.1:12345/callback",
+        "https://example.invalid/界?x=\"\\\n🦀",
+    ] {
+        let owned_uri = uri.to_owned();
+        let expected = serde_json::to_vec(&json!({
+            "client_name": "jcode",
+            "client_uri": "https://github.com/1jehuang/jcode",
+            "redirect_uris": [owned_uri],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none"
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&registration_request(&owned_uri)).unwrap(),
+            expected
+        );
+        let builder = reqwest::Client::new()
+            .post("https://example.invalid/register")
+            .json(&registration_request(&owned_uri));
+        drop(owned_uri);
+        let request = builder.build().unwrap();
+        assert_eq!(request.body().unwrap().as_bytes().unwrap(), expected);
+        assert_eq!(
+            request.headers()[reqwest::header::CONTENT_TYPE],
+            "application/json"
+        );
+    }
+}
+
 // These tests serve real HTTP on ephemeral 127.0.0.1 sockets. No mocked client,
 // copied OAuth implementation, external provider, browser executable or secrets.
 struct Sandbox {

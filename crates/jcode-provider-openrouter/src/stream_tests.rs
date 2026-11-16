@@ -22,6 +22,77 @@ fn test_stream() -> OpenRouterStream {
 }
 
 #[test]
+fn resolved_model_reports_actual_alias_target_once_per_attempt() {
+    for _attempt in 0..2 {
+        let mut stream = test_stream();
+        stream.buffer = concat!(
+            "data: {\"model\":\"vendor/actual-snapshot\",\"choices\":[]}\n\n",
+            "data: {\"model\":\"vendor/actual-snapshot\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+            "data: {\"model\":\"vendor/actual-snapshot\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1}}\n\n",
+        ).to_string();
+        let mut events = Vec::new();
+        while let Some(event) = stream.parse_next_event() {
+            events.push(event);
+        }
+        assert!(
+            matches!(&events[0], StreamEvent::ResolvedModel { model } if model == "vendor/actual-snapshot")
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, StreamEvent::ResolvedModel { .. }))
+                .count(),
+            1
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::TextDelta(text) if text == "hello"))
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::TokenUsage {
+                input_tokens: Some(2),
+                ..
+            }
+        )));
+    }
+}
+
+#[test]
+fn resolved_model_does_not_infer_missing_or_invalid_metadata() {
+    let mut stream = test_stream();
+    stream.buffer = concat!(
+        "data: {\"choices\":[]}\n\n",
+        "data: {\"model\":null,\"choices\":[]}\n\n",
+        "data: {\"model\":42,\"choices\":[]}\n\n",
+        "data: {\"model\":\"  \",\"choices\":[]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n",
+    )
+    .to_string();
+    while let Some(event) = stream.parse_next_event() {
+        assert!(!matches!(event, StreamEvent::ResolvedModel { .. }));
+    }
+}
+
+#[test]
+fn resolved_model_reports_changed_actual_model() {
+    let mut stream = test_stream();
+    stream.buffer = concat!(
+        "data: {\"model\":\"actual-a\",\"choices\":[]}\n\n",
+        "data: {\"model\":\"actual-b\",\"choices\":[]}\n\n",
+    )
+    .to_string();
+    assert!(
+        matches!(stream.parse_next_event(), Some(StreamEvent::ResolvedModel { model }) if model == "actual-a")
+    );
+    assert!(
+        matches!(stream.parse_next_event(), Some(StreamEvent::ResolvedModel { model }) if model == "actual-b")
+    );
+    assert!(stream.parse_next_event().is_none());
+}
+
+#[test]
 fn cache_creation_only_usage_is_not_dropped() {
     for tokens in [0, 3000] {
         let mut stream = test_stream();

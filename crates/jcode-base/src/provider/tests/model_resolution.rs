@@ -2000,7 +2000,8 @@ model_catalog = false
         content: vec![crate::message::ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -2101,7 +2102,8 @@ default_model = "opaque/model@id"
         content: vec![crate::message::ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];

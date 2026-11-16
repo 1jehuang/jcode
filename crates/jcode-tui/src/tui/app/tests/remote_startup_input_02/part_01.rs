@@ -1392,7 +1392,8 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
             content: vec![ContentBlock::Text {
                 text: "full transcript should not be copied".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,
@@ -1422,8 +1423,8 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
-                external_blocker: None,
-                completely_blocked: None,
+                waiting_reason: None,
+                requires_user_auth: None,
                 waiting_on: vec!["parent-build-task".to_string()],
             }],
         )
@@ -1440,7 +1441,7 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
 
         assert_eq!(child.parent_id.as_deref(), Some(app.session.id.as_str()));
         assert!(child.messages.is_empty());
-        assert_eq!(child.compaction, Some(transfer_compaction));
+        assert_eq!(child.compaction.as_deref(), Some(&transfer_compaction));
         assert_eq!(child.model.as_deref(), Some("test-model"));
         assert_eq!(child.provider_key.as_deref(), Some("test-provider"));
         assert_eq!(child.system_prompt, app.session.system_prompt);
@@ -1611,8 +1612,8 @@ fn test_escape_interrupt_disables_auto_poke_while_processing() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
-                external_blocker: None,
-                completely_blocked: None,
+                waiting_reason: None,
+                requires_user_auth: None,
                 waiting_on: Vec::new(),
             },
         ]));
