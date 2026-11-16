@@ -24,6 +24,7 @@ fn startup_usage_slot_waits_for_account_binding_even_with_cached_quotas() {
 
 fn snapshot() -> AccountUsageSnapshot {
     AccountUsageSnapshot {
+        additional_windows: Vec::new(),
         label: "solosystems".into(),
         email: None,
         exhausted: false,

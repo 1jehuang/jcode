@@ -1433,6 +1433,11 @@ impl App {
         &mut self,
         final_response_delivered: bool,
     ) -> bool {
+        // Playback observes recorded turns. It must never create new work from
+        // the current machine's todos, guardrails, or overnight configuration.
+        if self.is_replay {
+            return false;
+        }
         // SSH workflow state and todo reads belong to the remote daemon.
         // Even the guardrail/report checks below consult laptop session files.
         if crate::tui::is_ssh_remote() {
@@ -1471,6 +1476,9 @@ impl App {
         &mut self,
         final_response_delivered: bool,
     ) -> bool {
+        if self.is_replay {
+            return false;
+        }
         if crate::tui::is_ssh_remote() {
             return false;
         }
@@ -1632,12 +1640,16 @@ impl App {
             let needs_spike_challenge = quality_reviews_enabled
                 && confidence_summary.confidence_spike_detected
                 && !self.todo_confidence_spike_challenged;
+            // Goals that document why validation stopped exempt their todos:
+            // asking again cannot change an exhausted constraint.
+            let validation_targets = crate::todo::todos_needing_validation(&todos, &goals);
             let needs_validation = quality_reviews_enabled
-                && confidence_summary.completion_confidence_needs_validation;
+                && confidence_summary.completion_confidence_needs_validation
+                && !validation_targets.is_empty();
             if (needs_validation || needs_spike_challenge) && gate_budget_left {
                 self.todo_completion_gate_attempts =
                     self.todo_completion_gate_attempts.saturating_add(1);
-                let notice = if confidence_summary.completion_confidence_needs_validation {
+                let notice = if needs_validation {
                     crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Completion);
                     "🔍 Double-checking confidence for you..."
                 } else {
@@ -1650,7 +1662,11 @@ impl App {
                 self.push_display_message(DisplayMessage::system(notice));
                 // User-role content: reminder-only turns read as empty user
                 // messages and models answer instead of re-validating.
-                let summary = super::commands::build_todo_confidence_summary_message(&todos);
+                let summary = if needs_validation {
+                    crate::todo::build_todo_validation_continuation_message(&validation_targets)
+                } else {
+                    crate::todo::build_todo_confidence_spike_continuation_message(&todos)
+                };
                 self.queued_messages.push(summary);
                 self.pending_queued_dispatch = true;
                 return true;
@@ -1823,10 +1839,9 @@ impl App {
         }
     }
 
+    /// Works over SSH too: the fork is created by the attached daemon and the
+    /// new window is another SSH client, so nothing is read from this machine.
     pub(crate) fn toggle_next_prompt_new_session_routing(&mut self) {
-        if super::commands_dispatch::ssh_local_action_blocked(self, "New-session routing") {
-            return;
-        }
         self.route_next_prompt_to_new_session = !self.route_next_prompt_to_new_session;
         if self.route_next_prompt_to_new_session {
             self.set_status_notice("Next prompt → new session");
@@ -2180,6 +2195,8 @@ pub(super) fn handle_alt_key(app: &mut App, code: KeyCode) -> bool {
         }
         KeyCode::Char('e') => {
             let expanded = crate::tui::ui::viewport::toggle_prompt_history_expanded();
+            app.prompt_history_backfill = (None, 0);
+            app.maybe_backfill_expanded_prompt_history();
             app.set_status_notice(if expanded {
                 "Prompt history: showing more previous prompts (Alt+E to collapse)"
             } else {
@@ -3008,11 +3025,21 @@ impl App {
     /// refer to a different image.
     pub(super) fn sync_input_image_attachments(&mut self) {
         let mut removed = 0;
-        for (index, (media_type, data)) in self.pending_images.iter_mut().enumerate() {
-            if !data.is_empty() && !self.input.contains(&format!("[image {}]", index + 1)) {
-                media_type.clear();
-                data.clear();
+        if self.pending_images.is_empty() {
+            self.detached_images.clear();
+        }
+        for (index, slot) in self.pending_images.iter_mut().enumerate() {
+            let marked = self.input.contains(&format!("[image {}]", index + 1));
+            if !slot.1.is_empty() && !marked {
+                // Keep the payload: Esc and Ctrl+U promise "Ctrl+Z to restore",
+                // and a restored marker must still carry its image.
+                self.detached_images.insert(index, std::mem::take(slot));
                 removed += 1;
+            } else if slot.1.is_empty()
+                && marked
+                && let Some(payload) = self.detached_images.remove(&index)
+            {
+                *slot = payload;
             }
         }
         if removed > 0 {
@@ -3029,6 +3056,7 @@ impl App {
     }
 
     pub(super) fn take_pending_image_payloads(&mut self) -> Vec<(String, String)> {
+        self.detached_images.clear();
         std::mem::take(&mut self.pending_images)
             .into_iter()
             .filter(|(media_type, data)| !media_type.is_empty() && !data.is_empty())
@@ -3436,6 +3464,35 @@ impl App {
         self.copy_badge_ui.key_active = Some((key, expiry));
     }
 
+    /// Everything a key *release* can change on screen: the held-modifier and
+    /// held-key copy badges and the voice-input phase. Compared before and
+    /// after a release so releases that change none of it skip the full
+    /// frame. Under kitty's keyboard protocol every keystroke also reports a
+    /// release, which doubled the frames drawn while typing.
+    pub(super) fn key_release_visible_state(
+        &self,
+    ) -> (
+        bool,
+        bool,
+        Option<char>,
+        Option<super::voice_input::VoicePhase>,
+    ) {
+        // Badges render only through the `*_is_active` gates (the held key
+        // only shows under Alt+Shift), so compare those, not raw fields.
+        let now = std::time::Instant::now();
+        let badge = &self.copy_badge_ui;
+        let shift = badge.shift_is_active(now);
+        (
+            badge.alt_is_active(now),
+            shift,
+            badge
+                .key_active
+                .filter(|(_, expires_at)| shift && *expires_at > now)
+                .map(|(c, _)| c.to_ascii_lowercase()),
+            self.voice_input.as_ref().map(|voice| voice.phase),
+        )
+    }
+
     pub(super) fn record_copy_badge_feedback(&mut self, key: char, success: bool) {
         self.copy_badge_ui.copied_feedback = Some(crate::tui::app::CopyBadgeFeedback {
             key,
@@ -3653,7 +3710,7 @@ impl App {
         if self.reasoning_partial_len > 0 {
             self.reasoning_partial_len = 0;
         }
-        self.streaming.streaming_text.push_str(text);
+        self.streaming.streaming_text_mut().push_str(text);
         self.refresh_split_view_if_needed();
     }
 
@@ -3713,7 +3770,7 @@ impl App {
     }
 
     pub(super) fn replace_streaming_text(&mut self, text: String) {
-        self.streaming.streaming_text = text;
+        *self.streaming.streaming_text_mut() = text;
         // The live reasoning tail belonged to the *previous* buffer. Keeping its
         // byte length would make `strip_reasoning_partial_tail` slice at an
         // offset that has no relation to the new contents (and can land
@@ -3726,7 +3783,7 @@ impl App {
     }
 
     pub(super) fn clear_streaming_render_state(&mut self) {
-        self.streaming.streaming_text.clear();
+        self.streaming.streaming_text_mut().clear();
         self.stream_message_ended = false;
         self.deferred_stream_done_id = None;
         self.reasoning_streaming = false;
@@ -3792,7 +3849,7 @@ impl App {
     }
 
     pub(super) fn take_streaming_text(&mut self) -> String {
-        let content = std::mem::take(&mut self.streaming.streaming_text);
+        let content = std::mem::take(self.streaming.streaming_text_mut());
         self.stream_message_ended = false;
         self.deferred_stream_done_id = None;
         self.reasoning_streaming = false;
@@ -4064,6 +4121,8 @@ impl App {
         // Remember the typed prompt so we can restore it to the input box if this
         // turn fails (e.g. "token refresh needed"), instead of dropping it.
         self.last_submitted_input = Some(raw_input.clone());
+        self.automatic_failover_targets.clear();
+        self.automatic_failover_stopped = false;
 
         // See `stage_turn_for_remote_tick_loop`: a remote client must never
         // park on the local-only `pending_turn` flag.
@@ -4185,6 +4244,10 @@ impl App {
             let combined = messages.join("\n\n");
             let has_combined = !combined.is_empty();
             let preserve_visible_turn = super::commands::queued_messages_are_only_pokes(&messages);
+            if !messages.is_empty() && !preserve_visible_turn {
+                self.automatic_failover_targets.clear();
+                self.automatic_failover_stopped = false;
+            }
 
             self.commit_pending_streaming_assistant_message();
 

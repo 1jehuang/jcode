@@ -34,25 +34,61 @@ fn prune_stale_baselines(baselines: &mut HashMap<String, ProviderInputSnapshot>)
 }
 
 pub fn stable_hash_str(value: &str) -> u64 {
-    let digest = Sha256::digest(value.as_bytes());
+    stable_hash_bytes(value.as_bytes())
+}
+
+fn stable_hash_bytes(value: &[u8]) -> u64 {
+    hash_prefix(&Sha256::digest(value))
+}
+
+fn hash_prefix(digest: &[u8]) -> u64 {
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&digest[..8]);
     u64::from_be_bytes(bytes)
 }
 
 pub fn stable_hash_json<T: Serialize + ?Sized>(value: &T) -> u64 {
-    let encoded = serde_json::to_string(value).unwrap_or_default();
-    stable_hash_str(&encoded)
+    stable_json_fingerprint(value).0
 }
 
-fn stable_json_len<T: Serialize + ?Sized>(value: &T) -> usize {
-    serde_json::to_string(value)
-        .map(|encoded| encoded.len())
-        .unwrap_or_default()
+/// Hash and byte length of the same compact JSON encoding. Keep the historical
+/// empty-string hash/zero length on serialization failure, including serializers
+/// that write a prefix before returning an error.
+fn stable_json_fingerprint<T: Serialize + ?Sized>(value: &T) -> (u64, usize) {
+    let encoded = serde_json::to_vec(value).unwrap_or_default();
+    (stable_hash_bytes(&encoded), encoded.len())
 }
 
-fn item_hashes(items: &[Value]) -> Vec<u64> {
-    items.iter().map(stable_hash_json).collect()
+/// Each item's compact encoding is also exactly its contribution to the array
+/// encoding. Reuse those bytes rather than serializing the complete input again.
+/// Only one item's scratch buffer is retained for the duration of this call.
+fn item_fingerprints(items: &[Value]) -> (Vec<u64>, u64) {
+    let mut hashes = Vec::with_capacity(items.len());
+    let mut encoded = Vec::new();
+    let mut aggregate = Sha256::new();
+    let mut valid = true;
+    aggregate.update(b"[");
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            aggregate.update(b",");
+        }
+        encoded.clear();
+        if serde_json::to_writer(&mut encoded, item).is_err() {
+            // Value-to-Vec serialization normally cannot fail. Preserve the
+            // existing per-item and whole-array failure fallback if it does.
+            encoded.clear();
+            valid = false;
+        }
+        hashes.push(stable_hash_bytes(&encoded));
+        aggregate.update(&encoded);
+    }
+    aggregate.update(b"]");
+    let input_hash = if valid {
+        hash_prefix(&aggregate.finalize())
+    } else {
+        stable_hash_str("")
+    };
+    (hashes, input_hash)
 }
 
 fn prefix_matches(current: &[u64], previous: &[u64]) -> bool {
@@ -88,15 +124,11 @@ pub fn log_provider_canonical_input(
     tool_count: Option<usize>,
     extra_fields: &[(&str, String)],
 ) {
-    let request_hash = stable_hash_json(payload);
-    let request_json_chars = stable_json_len(payload);
-    let item_hashes = item_hashes(items);
+    let (request_hash, request_json_chars) = stable_json_fingerprint(payload);
+    let (item_hashes, input_hash) = item_fingerprints(items);
     let item_hashes_hash = stable_hash_json(&item_hashes);
-    let input_hash = stable_hash_json(items);
-    let system_hash = system.map(stable_hash_json);
-    let system_json_chars = system.map(stable_json_len);
-    let tools_hash = tools.map(stable_hash_json);
-    let tools_json_chars = tools.map(stable_json_len);
+    let (system_hash, system_json_chars) = system.map(stable_json_fingerprint).unzip();
+    let (tools_hash, tools_json_chars) = tools.map(stable_json_fingerprint).unzip();
     let first_item_hash = item_hashes.first().copied();
     let last_item_hash = item_hashes.last().copied();
 
@@ -196,9 +228,20 @@ pub fn log_provider_canonical_input(
 }
 
 #[cfg(test)]
+#[path = "fingerprint_tests.rs"]
+mod optimization_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn stable_hash_preserves_sha256_prefix_and_big_endian_order() {
+        assert_eq!(stable_hash_str(""), 0xe3b0_c442_98fc_1c14);
+        assert_eq!(stable_hash_str("abc"), 0xba78_16bf_8f01_cfea);
+        assert_eq!(stable_hash_json(&json!([])), 0x4f53_cda1_8c2b_aa0c);
+    }
 
     #[test]
     fn prefix_matching_allows_append_only_growth() {

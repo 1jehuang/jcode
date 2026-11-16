@@ -63,7 +63,7 @@ fn test_copy_selection_select_all_copies_rendered_math_as_latex() {
 }
 
 #[test]
-fn test_copy_selection_partial_drag_over_inline_math_copies_whole_formula() {
+fn test_copy_selection_over_inline_math_copies_latex_only_when_fully_selected() {
     let _render_lock = scroll_render_test_lock();
     let (mut app, mut terminal) = create_math_copy_test_app();
     render_and_snap(&app, &mut terminal);
@@ -80,9 +80,7 @@ fn test_copy_selection_partial_drag_over_inline_math_copies_whole_formula() {
         })
         .expect("prose line");
     let euler_col = unicode_width::UnicodeWidthStr::width(&text[..text.find("Euler").unwrap()]);
-    // Drag from the start of "Euler" to two cells into the formula.
-    let start_col = euler_col;
-    let end_col = euler_col + "Euler ".len() + 2;
+    let done_col = unicode_width::UnicodeWidthStr::width(&text[..text.find(" done.").unwrap()]);
     let row = layout.messages_area.y + (line_idx - visible_start) as u16;
     let screen_x = |target: usize| {
         (layout.messages_area.x..layout.messages_area.x + layout.messages_area.width)
@@ -92,20 +90,31 @@ fn test_copy_selection_partial_drag_over_inline_math_copies_whole_formula() {
             })
             .expect("screen x")
     };
-    let (sx, ex) = (screen_x(start_col), screen_x(end_col));
-    for (kind, column) in [
-        (MouseEventKind::Down(MouseButton::Left), sx),
-        (MouseEventKind::Drag(MouseButton::Left), ex),
-    ] {
-        app.handle_mouse_event(MouseEvent {
-            kind,
-            column,
-            row,
-            modifiers: KeyModifiers::empty(),
-        });
-    }
-    let selected = app.current_copy_selection_text().expect("selection");
-    assert_eq!(selected, "Euler $e^{i\\pi_{3}} + 1 = 0$");
+    let mut drag = |start_col: usize, end_col: usize| {
+        for (kind, column) in [
+            (MouseEventKind::Down(MouseButton::Left), screen_x(start_col)),
+            (MouseEventKind::Drag(MouseButton::Left), screen_x(end_col)),
+        ] {
+            app.handle_mouse_event(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::empty(),
+            });
+        }
+        app.current_copy_selection_text().expect("selection")
+    };
+    // Two cells into the formula: only the highlighted glyphs are copied.
+    let formula_col = euler_col + "Euler ".len();
+    let partial = drag(euler_col, formula_col + 2);
+    assert!(partial.starts_with("Euler "), "{partial}");
+    assert_eq!(
+        unicode_width::UnicodeWidthStr::width(partial.as_str()),
+        "Euler ".len() + 2
+    );
+    assert!(!partial.contains('$') && !partial.contains('\\'), "{partial}");
+    // The whole formula highlighted: copy its LaTeX source.
+    assert_eq!(drag(euler_col, done_col), "Euler $e^{i\\pi_{3}} + 1 = 0$");
 }
 
 #[test]

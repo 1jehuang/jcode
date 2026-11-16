@@ -51,6 +51,7 @@ mod lane_dispatch;
 mod lifecycle;
 mod live_status;
 mod live_turn;
+mod mobile_local;
 mod provider_control;
 mod reload;
 mod reload_recovery;
@@ -93,7 +94,7 @@ use self::swarm::{
     broadcast_swarm_status, expired_terminal_member_ids, member_consumes_swarm_capacity,
     record_swarm_event, record_swarm_event_for_session, refresh_swarm_task_staleness,
     remove_plan_participant, remove_session_from_swarm, rename_plan_participant, run_swarm_message,
-    send_swarm_plan_to_session, set_member_task_label, swarm_is_self_or_ancestor,
+    send_swarm_plan_to_session, set_member_task_label, swarm_is_self_or_ancestor, truncate_detail,
     update_member_status, update_member_status_with_report, update_member_status_with_report_tldr,
 };
 use self::swarm_channels::{
@@ -123,9 +124,7 @@ use crate::tool::selfdev::ReloadContext;
 use crate::transport::Listener;
 use anyhow::Result;
 use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource};
-use jcode_swarm_core::{
-    format_structured_completion_report, summarize_plan_items, truncate_detail,
-};
+use jcode_swarm_core::{format_structured_completion_report, summarize_plan_items};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -501,8 +500,8 @@ pub use self::socket::{
 };
 use self::socket::{signal_ready_fd, socket_has_live_listener};
 
-pub use self::util::{MANAGED_CLOUD_LIVE_RELOAD_MARKER, ServerIdentity};
 pub(crate) use self::util::server_has_newer_binary;
+pub use self::util::{MANAGED_CLOUD_LIVE_RELOAD_MARKER, ServerIdentity};
 use self::util::{
     debug_control_allowed, embedding_idle_unload_secs, git_common_dir_for, reload_exec_target,
     startup_headless_recovery_test_delay, swarm_id_for_dir, swarm_id_for_session,
@@ -1406,6 +1405,20 @@ impl Server {
         crate::mobile_sync::spawn_background_sync();
         // On Jcode Cloud machines, run sessions the phone starts or continues.
         crate::mobile_runner::spawn_cloud_runner();
+        // On the user's own computer, take messages the phone sends to
+        // sessions running here (only while mobile sync is enabled).
+        mobile_local::spawn(mobile_local::DaemonSessions {
+            sessions: Arc::clone(&self.sessions),
+            soft_interrupt_queues: Arc::clone(&self.soft_interrupt_queues),
+            swarm: live_turn::LiveTurnSwarmContext::new(
+                &self.swarm_state.members,
+                &self.swarm_state.swarms_by_id,
+                &self.event_history,
+                &self.event_counter,
+                &self.swarm_event_tx,
+            ),
+        });
+        Self::spawn_cloud_activity_keepalive(Arc::clone(&self.swarm_state.members));
 
         // Initialize the memory agent early so it's ready for all sessions
         if crate::config::config().features.memory {
@@ -1924,6 +1937,25 @@ impl Server {
                     .await
                     .is_ok();
                     lid_reported = reported.then_some(want_lid);
+                }
+            }
+        });
+    }
+
+    /// On Jcode Cloud the host powers off after 30 minutes without an SSH
+    /// client unless the busy marker is fresh. Turns keep running after the
+    /// client disconnects, so mark the host busy while any session runs.
+    fn spawn_cloud_activity_keepalive(swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>) {
+        if !crate::mobile_runner::is_cloud_machine() {
+            return;
+        }
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if Self::any_session_streaming(&swarm_members).await {
+                    crate::mobile_runner::touch_cloud_activity_marker();
                 }
             }
         });

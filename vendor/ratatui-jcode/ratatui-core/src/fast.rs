@@ -40,8 +40,18 @@ mod tests {
     #[test]
     fn matches_unicode_width() {
         for s in [
-            "", " ", "abc", "a\tb", "\u{1b}[0m", "héllo", "日本", "👍🏽", "\u{200b}", "~!@#",
-            "\n", "a\r\nb",
+            "",
+            " ",
+            "abc",
+            "a\tb",
+            "\u{1b}[0m",
+            "héllo",
+            "日本",
+            "👍🏽",
+            "\u{200b}",
+            "~!@#",
+            "\n",
+            "a\r\nb",
         ] {
             assert_eq!(str_width(s), s.width(), "{s:?}");
             assert_eq!(symbol_width(s), s.width(), "{s:?}");
@@ -59,7 +69,16 @@ mod grapheme_parity {
 
     #[test]
     fn ascii_fast_path_matches_upstream_segmentation() {
-        for s in ["", "hello world", "a\tb", "x\ry", "fn main() {}", "héllo", "e\u{301}", "👍🏽 ok"] {
+        for s in [
+            "",
+            "hello world",
+            "a\tb",
+            "x\ry",
+            "fn main() {}",
+            "héllo",
+            "e\u{301}",
+            "👍🏽 ok",
+        ] {
             let span = Span::raw(s);
             let fast: Vec<&str> = span
                 .styled_graphemes(Style::default())

@@ -644,7 +644,7 @@ impl Tool for McpManagementTool {
                 },
                 "transport": {
                     "type": "string",
-                    "enum": ["stdio", "http", "streamable-http", "sse"],
+                    "enum": ["stdio", "http", "sse"],
                     "description": "Ad hoc transport. Remote URLs default to Streamable HTTP with legacy SSE fallback."
                 }
             },

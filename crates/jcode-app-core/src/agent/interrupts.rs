@@ -9,6 +9,25 @@ use jcode_agent_runtime::{
 };
 use std::sync::Arc;
 
+fn frozen_snapshot_memory_profile(
+    locked_tools: Option<&[crate::message::ToolDefinition]>,
+    agents_md: Option<&String>,
+    skills: &[crate::prompt::SkillInfo],
+) -> serde_json::Value {
+    // Serialized schemas are an attribution proxy, not an allocation bound or
+    // capacity. The prompt strings report capacity without copying their text.
+    serde_json::json!({
+        "locked_tools_count": locked_tools.map_or(0, <[_]>::len),
+        "locked_tools_json_bytes": locked_tools
+            .map_or(0, |tools| crate::process_memory::estimate_json_bytes(&tools)),
+        "agents_md_snapshot_capacity_bytes": agents_md.map_or(0, String::capacity),
+        "prompt_skills_snapshot_count": skills.len(),
+        "prompt_skills_snapshot_capacity_bytes": skills.iter()
+            .map(|skill| skill.name.capacity().saturating_add(skill.description.capacity()))
+            .fold(0usize, usize::saturating_add),
+    })
+}
+
 fn soft_interrupt_session_display_role(source: SoftInterruptSource) -> Option<StoredDisplayRole> {
     match source {
         SoftInterruptSource::User => None,
@@ -307,6 +326,11 @@ impl Agent {
                 "pending_alert_text_bytes": pending_alert_text_bytes,
             },
             "agent": {
+                "frozen_snapshots": frozen_snapshot_memory_profile(
+                    self.locked_tools.as_deref(),
+                    self.agents_md_snapshot.0.as_ref(),
+                    &self.prompt_skills_snapshot,
+                ),
                 "memory_enabled": self.memory_enabled,
                 "allowed_tools_count": self.allowed_tools.as_ref().map(|tools| tools.len()),
                 "disabled_tools_count": self.disabled_tools.len(),
@@ -428,8 +452,10 @@ impl Agent {
         };
 
         for message in messages {
+            // User follow-ups may share a model message. Notifications must
+            // retain their own delivery events and transcript entries.
             match current_source {
-                Some(source) if source != message.source => {
+                Some(source) if source != message.source || source != SoftInterruptSource::User => {
                     flush_group(
                         self,
                         &mut injected,
@@ -532,5 +558,61 @@ impl Agent {
                 client_ids: interrupt.client_ids,
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod frozen_snapshot_memory_tests {
+    use super::frozen_snapshot_memory_profile;
+
+    #[test]
+    fn frozen_snapshot_memory_counts_schema_json_without_disclosing_schema() {
+        let tools = [crate::message::ToolDefinition::new(
+            "private-tool",
+            "private-description",
+            serde_json::json!({"type": "object", "properties": {"private-key": {"type": "string"}}}),
+        )];
+        let profile = frozen_snapshot_memory_profile(Some(&tools), None, &[]);
+        assert_eq!(profile["locked_tools_count"], 1);
+        assert_eq!(
+            profile["locked_tools_json_bytes"],
+            serde_json::to_vec(&tools).unwrap().len()
+        );
+        assert!(!profile.to_string().contains("private-"));
+    }
+
+    #[test]
+    fn frozen_snapshot_memory_empty_and_absent_values() {
+        let absent = frozen_snapshot_memory_profile(None, None, &[]);
+        assert_eq!(absent["locked_tools_count"], 0);
+        assert_eq!(absent["locked_tools_json_bytes"], 0);
+        assert_eq!(absent["agents_md_snapshot_capacity_bytes"], 0);
+        assert_eq!(absent["prompt_skills_snapshot_count"], 0);
+        assert_eq!(absent["prompt_skills_snapshot_capacity_bytes"], 0);
+        let empty = frozen_snapshot_memory_profile(Some(&[]), None, &[]);
+        assert_eq!(empty["locked_tools_json_bytes"], 2);
+    }
+
+    #[test]
+    fn frozen_snapshot_memory_counts_capacities_without_disclosing_content() {
+        let mut agents_md = String::with_capacity(512);
+        agents_md.push_str("private-project-instructions");
+        let mut name = String::with_capacity(128);
+        name.push_str("private-skill-name");
+        let mut description = String::with_capacity(256);
+        description.push_str("private-skill-description");
+        let expected_capacity = name.capacity() + description.capacity();
+        let skills = [crate::prompt::SkillInfo { name, description }];
+        let profile = frozen_snapshot_memory_profile(None, Some(&agents_md), &skills);
+        assert_eq!(
+            profile["agents_md_snapshot_capacity_bytes"],
+            agents_md.capacity()
+        );
+        assert_eq!(
+            profile["prompt_skills_snapshot_capacity_bytes"],
+            expected_capacity
+        );
+        assert_eq!(profile["prompt_skills_snapshot_count"], 1);
+        assert!(!profile.to_string().contains("private-"));
     }
 }

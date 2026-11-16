@@ -561,13 +561,16 @@ async fn enter_creates_selfdev_session_in_test_mode() {
             cache_control: None,
         }],
     );
-    parent.compaction = Some(session::StoredCompactionState {
-        summary_text: "summary".to_string(),
-        openai_encrypted_content: None,
-        covers_up_to_turn: 1,
-        original_turn_count: 1,
-        compacted_count: 1,
-    });
+    parent.compaction = Some(
+        session::StoredCompactionState {
+            summary_text: "summary".to_string(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: 1,
+            original_turn_count: 1,
+            compacted_count: 1,
+        }
+        .into(),
+    );
     parent.record_replay_display_message("system", None, "remember this context");
     parent.save().expect("save parent session");
 

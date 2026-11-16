@@ -518,6 +518,27 @@ struct NativeClaudeStreamOutcome {
     cache_creation: u64,
 }
 
+#[cfg(test)]
+#[test]
+fn borrowed_stop_reason_evidence_matches_legacy_and_retains_source() {
+    for stop_reason in [None, Some(String::new()), Some("end_turn 🦀".to_string())] {
+        let mut outcome = NativeClaudeStreamOutcome {
+            stop_reason,
+            ..Default::default()
+        };
+        let legacy = serde_json::json!(outcome.stop_reason.clone());
+        let evidence = serde_json::json!(outcome.stop_reason);
+        assert_eq!(evidence, legacy);
+        assert_eq!(
+            serde_json::to_vec(&evidence).unwrap(),
+            serde_json::to_vec(&legacy).unwrap()
+        );
+        assert_eq!(outcome.stop_reason.as_deref(), legacy.as_str());
+        outcome.stop_reason = Some("changed after serialization".to_string());
+        assert_eq!(evidence, legacy);
+    }
+}
+
 #[derive(Clone)]
 struct NativeClaudeToolCall {
     id: String,
@@ -771,7 +792,8 @@ pub async fn run_live_claude_native_smoke(
         content: vec![ContentBlock::Text {
             text: "Reply with exactly AUTH_TEST_OK and nothing else.".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -803,10 +825,7 @@ pub async fn run_live_claude_native_smoke(
     .with_duration_ms(started.elapsed().as_millis() as u64)
     .with_evidence("model", serde_json::json!(model))
     .with_evidence("matched_expected_content", serde_json::json!(true))
-    .with_evidence(
-        "stop_reason",
-        serde_json::json!(outcome.stop_reason.clone()),
-    );
+    .with_evidence("stop_reason", serde_json::json!(outcome.stop_reason));
     if let Some(usage) = outcome.usage_evidence() {
         stage = stage.with_evidence("usage", usage);
     }
@@ -831,7 +850,8 @@ pub async fn run_live_claude_native_stream_smoke(
                    only and do not call any tool."
                 .to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -901,10 +921,7 @@ pub async fn run_live_claude_native_stream_smoke(
     )
     .with_evidence("total_events", serde_json::json!(outcome.total_events))
     .with_evidence("matched_expected_content", serde_json::json!(true))
-    .with_evidence(
-        "stop_reason",
-        serde_json::json!(outcome.stop_reason.clone()),
-    );
+    .with_evidence("stop_reason", serde_json::json!(outcome.stop_reason));
     if let Some(usage) = outcome.usage_evidence() {
         stage = stage.with_evidence("usage", usage);
     }
@@ -954,7 +971,8 @@ pub async fn run_live_claude_native_tool_smoke(
                    Call the tool now; do not answer in text."
                 .to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1004,7 +1022,8 @@ pub async fn run_live_claude_native_tool_smoke(
             name: tool_call.name.clone(),
             input: parsed_arguments.clone(),
             thought_signature: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     });
@@ -1015,7 +1034,8 @@ pub async fn run_live_claude_native_tool_smoke(
             content: "TOOL_RESULT_TOKEN=42. Report this token back to confirm you read it."
                 .to_string(),
             is_error: Some(false),
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     });
@@ -1099,7 +1119,8 @@ pub async fn run_live_antigravity_native_smoke(
         content: vec![ContentBlock::Text {
             text: "Reply with exactly AUTH_TEST_OK and nothing else.".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1131,10 +1152,7 @@ pub async fn run_live_antigravity_native_smoke(
     .with_duration_ms(started.elapsed().as_millis() as u64)
     .with_evidence("model", serde_json::json!(model))
     .with_evidence("matched_expected_content", serde_json::json!(true))
-    .with_evidence(
-        "stop_reason",
-        serde_json::json!(outcome.stop_reason.clone()),
-    );
+    .with_evidence("stop_reason", serde_json::json!(outcome.stop_reason));
     if let Some(usage) = outcome.usage_evidence() {
         stage = stage.with_evidence("usage", usage);
     }
@@ -1159,7 +1177,8 @@ pub async fn run_live_antigravity_native_stream_smoke(
                    only and do not call any tool."
                 .to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1221,10 +1240,7 @@ pub async fn run_live_antigravity_native_stream_smoke(
     .with_evidence("attempts", serde_json::json!(attempts))
     .with_evidence("total_events", serde_json::json!(outcome.total_events))
     .with_evidence("matched_expected_content", serde_json::json!(true))
-    .with_evidence(
-        "stop_reason",
-        serde_json::json!(outcome.stop_reason.clone()),
-    );
+    .with_evidence("stop_reason", serde_json::json!(outcome.stop_reason));
     if let Some(usage) = outcome.usage_evidence() {
         stage = stage.with_evidence("usage", usage);
     }
@@ -1290,7 +1306,8 @@ pub async fn run_live_native_provider_smoke(
         content: vec![ContentBlock::Text {
             text: "Reply with exactly AUTH_TEST_OK and nothing else.".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1322,10 +1339,7 @@ pub async fn run_live_native_provider_smoke(
     .with_duration_ms(started.elapsed().as_millis() as u64)
     .with_evidence("model", serde_json::json!(model))
     .with_evidence("matched_expected_content", serde_json::json!(true))
-    .with_evidence(
-        "stop_reason",
-        serde_json::json!(outcome.stop_reason.clone()),
-    );
+    .with_evidence("stop_reason", serde_json::json!(outcome.stop_reason));
     if let Some(usage) = outcome.usage_evidence() {
         stage = stage.with_evidence("usage", usage);
     }
@@ -1351,7 +1365,8 @@ pub async fn run_live_native_provider_stream_smoke(
                    only and do not call any tool."
                 .to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1413,10 +1428,7 @@ pub async fn run_live_native_provider_stream_smoke(
     .with_evidence("attempts", serde_json::json!(attempts))
     .with_evidence("total_events", serde_json::json!(outcome.total_events))
     .with_evidence("matched_expected_content", serde_json::json!(true))
-    .with_evidence(
-        "stop_reason",
-        serde_json::json!(outcome.stop_reason.clone()),
-    );
+    .with_evidence("stop_reason", serde_json::json!(outcome.stop_reason));
     if let Some(usage) = outcome.usage_evidence() {
         stage = stage.with_evidence("usage", usage);
     }
@@ -1460,7 +1472,8 @@ pub async fn run_live_native_provider_reasoning_smoke(
                    its own final line."
                 .to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1517,10 +1530,7 @@ pub async fn run_live_native_provider_reasoning_smoke(
         serde_json::json!(outcome.saw_reasoning_signal),
     )
     .with_evidence("total_events", serde_json::json!(outcome.total_events))
-    .with_evidence(
-        "stop_reason",
-        serde_json::json!(outcome.stop_reason.clone()),
-    );
+    .with_evidence("stop_reason", serde_json::json!(outcome.stop_reason));
     if let Some(usage) = outcome.usage_evidence() {
         stage = stage.with_evidence("usage", usage);
     }
@@ -1585,7 +1595,8 @@ pub async fn run_live_native_provider_tool_smoke(
                    Call the tool now; do not answer in text."
                 .to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1672,7 +1683,8 @@ pub async fn run_live_native_provider_tool_smoke(
                    in text first."
                 .to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1761,7 +1773,8 @@ pub async fn run_live_native_provider_tool_smoke(
                        text and do not wait for the first result before making the second call."
                     .to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         }],
@@ -1788,7 +1801,8 @@ pub async fn run_live_native_provider_tool_smoke(
                            /tmp/auth_tool_probe_2.txt."
                         .to_string(),
                     cache_control: None,
-                }],
+                }]
+                .into(),
                 timestamp: None,
                 tool_duration_ms: None,
             },
@@ -1873,7 +1887,8 @@ fn assistant_tool_use(call: &NativeClaudeToolCall, arguments: &serde_json::Value
             name: call.name.clone(),
             input: arguments.clone(),
             thought_signature: call.thought_signature.clone(),
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }
@@ -1888,7 +1903,8 @@ fn tool_result_then_text(tool_use_id: &str, result: &str) -> Message {
             tool_use_id: tool_use_id.to_string(),
             content: result.to_string(),
             is_error: Some(false),
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }

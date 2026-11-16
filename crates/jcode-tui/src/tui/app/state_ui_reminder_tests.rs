@@ -14,7 +14,8 @@ fn stored_actionable_reminders_render_as_short_system_notices() {
             content: vec![crate::message::ContentBlock::Text {
                 text: format!("{prefix}{suffix}"),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,

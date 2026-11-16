@@ -32,6 +32,9 @@ impl OpenAIUsageData {
     pub fn display_snapshot(&self) -> Self {
         let mut snapshot = self.clone();
         let mut cleared_any_window = false;
+        snapshot
+            .additional_windows
+            .retain(|window| !reset_timestamp_passed(window.resets_at.as_deref()));
 
         if let Some(window) = snapshot.five_hour.as_mut()
             && reset_timestamp_passed(window.resets_at.as_deref())

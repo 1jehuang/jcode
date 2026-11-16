@@ -23,8 +23,8 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
-                external_blocker: None,
-                completely_blocked: None,
+                waiting_reason: None,
+                requires_user_auth: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -73,8 +73,8 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
                     confidence: None,
                     completion_confidence: None,
                     confidence_history: Vec::new(),
-                    external_blocker: None,
-                    completely_blocked: None,
+                    waiting_reason: None,
+                    requires_user_auth: None,
                     waiting_on: Vec::new(),
                 },
                 crate::todo::TodoItem {
@@ -92,8 +92,8 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
                     confidence: None,
                     completion_confidence: None,
                     confidence_history: Vec::new(),
-                    external_blocker: None,
-                    completely_blocked: None,
+                    waiting_reason: None,
+                    requires_user_auth: None,
                     waiting_on: Vec::new(),
                 },
             ],
@@ -189,8 +189,8 @@ fn test_remote_interrupted_auto_poke_requeues_after_deferred_poke() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
-                external_blocker: None,
-                completely_blocked: None,
+                waiting_reason: None,
+                requires_user_auth: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -740,7 +740,7 @@ fn test_handle_server_event_soft_interrupt_injected_unrelated_content_keeps_pend
 }
 
 #[test]
-fn test_handle_server_event_soft_interrupt_injected_background_task_retains_row_only() {
+fn test_handle_server_event_soft_interrupt_injected_background_task_adds_transcript_entry() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -757,7 +757,10 @@ fn test_handle_server_event_soft_interrupt_injected_background_task_retains_row_
         &mut remote,
     );
 
-    assert!(app.display_messages().is_empty());
+    assert_eq!(app.display_messages().len(), 1);
+    let delivered = &app.display_messages()[0];
+    assert_eq!(delivered.role, "background_task");
+    assert!(delivered.content.contains("abc123"));
     assert_eq!(
         app.background_task_rows_ref()[0].status,
         crate::tui::BackgroundTaskRowStatus::Completed
@@ -924,7 +927,7 @@ fn test_swarm_await_notification_inserts_only_compact_summary() {
 }
 
 #[test]
-fn test_background_task_markdown_is_suppressed_even_if_role_was_lost() {
+fn test_background_task_markdown_restores_delivery_role_if_role_was_lost() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
     app.set_centered(true);
@@ -937,18 +940,12 @@ fn test_background_task_markdown_is_suppressed_even_if_role_was_lost() {
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
     let text = render_and_snap(&app, &mut terminal);
 
-    // The card itself must not render: no task id, no bordered tool card, and
-    // no fragment of the background-task markdown.
-    //
-    // Deliberately not asserting the frame has no box-drawing characters at
-    // all. Info-widget overlays (overview/context) legitimately draw their own
-    // bordered box in the right margin, and whether they are docked yet
-    // depends on how many frames the process has already rendered, which makes
-    // that assertion order-dependent rather than a statement about this test.
-    assert!(!text.contains("594967sj63"), "task id leaked:\n{text}");
-    assert!(!text.contains("Background task"), "card leaked:\n{text}");
-    assert!(!text.contains("Full output"), "card body leaked:\n{text}");
-    assert!(app.display_messages().is_empty());
+    assert!(
+        text.contains("Run jcode"),
+        "delivery entry missing:\n{text}"
+    );
+    assert_eq!(app.display_messages().len(), 1);
+    assert_eq!(app.display_messages()[0].role, "background_task");
     assert_eq!(app.display_user_message_count(), 0);
 }
 

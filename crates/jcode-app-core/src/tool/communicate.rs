@@ -14,7 +14,7 @@ use crate::protocol::{
 };
 use anyhow::Result;
 use async_trait::async_trait;
-use jcode_swarm_core::validate_swarm_tldr;
+use jcode_swarm_core::{derive_swarm_task_label, validate_swarm_tldr};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -110,6 +110,7 @@ async fn fetch_swarm_members(session_id: &str) -> Result<Vec<AgentInfo>> {
     }
 }
 
+#[cfg(test)]
 fn swarm_member_is_in_flight(member: &AgentInfo) -> bool {
     matches!(
         member.status.as_deref(),
@@ -117,6 +118,7 @@ fn swarm_member_is_in_flight(member: &AgentInfo) -> bool {
     )
 }
 
+#[cfg(test)]
 fn coordination_in_flight_count(
     summary: &PlanGraphStatus,
     members: &[AgentInfo],
@@ -136,6 +138,7 @@ fn coordination_in_flight_count(
 /// assignment (and therefore one it is safe to await): a spawned headless worker,
 /// or one owned by the coordinator that issued the run. Foreign client-attached
 /// sessions are not drivable and must not count toward its in-flight workers.
+#[cfg(test)]
 fn swarm_member_is_drivable_worker(member: &AgentInfo, coordinator_session_id: &str) -> bool {
     member.is_headless.unwrap_or(false)
         || member.report_back_to_session_id.as_deref() == Some(coordinator_session_id)
@@ -478,7 +481,7 @@ impl CommunicateTool {
 
     fn new_for_working_dir(working_dir: Option<&std::path::Path>) -> Self {
         const BASE_DESCRIPTION: &str =
-            "Coordinate agents: spawn todo-lane workers, message them, and manage plans.";
+            "Coordinate agents: spawn todo-lane workers and exchange messages.";
         let swarm_prompt = crate::prompt::load_swarm_prompt(working_dir);
         let description = if swarm_prompt.is_empty() {
             BASE_DESCRIPTION.to_string()
@@ -678,7 +681,7 @@ impl Tool for CommunicateTool {
                 },
                 "to_session": {
                     "type": "string",
-                    "description": "Agent ID/unique name; alias of target_session."
+                    "description": "Agent ID/unique name."
                 },
                 "to_swarm": {
                     "type": "string",
@@ -687,10 +690,6 @@ impl Tool for CommunicateTool {
                 "channel": {
                     "type": "string",
                     "description": "Prefer DMs."
-                },
-                "target_session": {
-                    "type": "string",
-                    "description": "Alias of to_session."
                 },
                 "label": {
                     "type": "string",
@@ -708,10 +707,6 @@ impl Tool for CommunicateTool {
                 "prompt": {
                     "type": "string",
                     "description": "Extra spawn context, not lane tasks."
-                },
-                "initial_message": {
-                    "type": "string",
-                    "description": "Overrides prompt for spawn."
                 },
                 "limit": {
                     "type": "integer",
@@ -765,40 +760,10 @@ impl Tool for CommunicateTool {
             }
         });
 
-        // `swarm` is a multi-action tool, so putting `label` in the top-level
-        // `required` array would incorrectly require it for read/list/message and
-        // every other action. Use mutually exclusive action branches instead:
-        // the spawn branch requires label, while the non-spawn branch does not.
-        // `anyOf` object branches are supported by our provider schema adapters
-        // and avoid the less-portable JSON Schema `if`/`then` keywords.
-        let non_spawn_actions: Vec<Value> = schema["properties"]["action"]["enum"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|action| action.as_str() != Some("spawn"))
-            .cloned()
-            .collect();
-        schema["anyOf"] = json!([
-            {
-                "type": "object",
-                "required": ["action", "label"],
-                "properties": {
-                    "action": { "type": "string", "enum": ["spawn"] },
-                    // Gemini validates that every `required` name is defined in
-                    // the same object's `properties` and rejects the whole
-                    // request otherwise (issue #655), so declare `label` here
-                    // instead of relying on the parent schema's declaration.
-                    "label": { "type": "string", "minLength": 1 }
-                }
-            },
-            {
-                "type": "object",
-                "required": ["action"],
-                "properties": {
-                    "action": { "type": "string", "enum": non_spawn_actions }
-                }
-            }
-        ]);
+        // Advertise one spelling per capability. target_session and
+        // initial_message remain accepted by execute for older callers.
+        // required_spawn_label checks spawn's conditional requirement locally,
+        // before dispatch, without repeating the action enum in schema branches.
 
         apply_swarm_model_policy(&mut schema, &crate::config::config().agents);
         schema
@@ -1262,16 +1227,13 @@ impl Tool for CommunicateTool {
                 let label = params.required_spawn_label()?;
                 // Every spawned worker owns one lane in the coordinator's todo
                 // list: the lane named `label` in `phase` (default: the active
-                // phase), created from the prompt when it does not exist. The
+                // phase). When it does not exist it is created with one todo
+                // named after the label, with the prompt as its details. The
                 // worker's own todo list is that lane and syncs only it.
                 let prompt = params.spawn_initial_message();
                 let (lane_id, seeded_count) = {
                     let todos = crate::todo::load_todos(&ctx.session_id).unwrap_or_default();
-                    let title = prompt
-                        .as_deref()
-                        .and_then(|prompt| prompt.lines().map(str::trim).find(|l| !l.is_empty()))
-                        .map(|line| line.chars().take(60).collect::<String>())
-                        .unwrap_or_else(|| label.clone());
+                    let title = derive_swarm_task_label(&label).unwrap_or_else(|| label.clone());
                     let (updated, lane_id) = crate::todo::stages::ensure_spawn_lane(
                         &todos,
                         &label,

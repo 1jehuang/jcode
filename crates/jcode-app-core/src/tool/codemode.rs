@@ -27,9 +27,9 @@ const EXCLUDED: &[&str] = &["codemode", "batch"];
 const MAX_REPORT_CHARS: usize = 60_000;
 
 const DESCRIPTION: &str = "Run sandboxed JavaScript to chain, filter, or parallelize tool calls, including MCP. Supply an async function body using await/return; only returned values and console.log reach the conversation.\n\
-await tools.<name>(args) or callTool(name, args) uses normal tool arguments; JSON output becomes objects, other output stays text, and failures throw. Use Promise.all for independent calls.\n\
-listTools(filter?) lists names/descriptions; describeTool(name) gives the schema. Inspect these when unsure. store(key, value), load(key), storedKeys() persist JSON within this session.\n\
-No direct filesystem, network, timers, or modules. Limits: 64 MB heap, 300 s, 2000 tool calls per run.";
+tools.<name>(args) or callTool(name, args) takes normal tool arguments; JSON output becomes objects, and failures throw. Use Promise.all for independent calls.\n\
+listTools(filter?) and describeTool(name) give names and schemas. store(key, value), load(key), storedKeys() persist JSON for the session.\n\
+No direct filesystem, network, timers, or modules. Limits: 64 MB heap, 300 s, 2000 tool calls.";
 
 pub struct CodemodeTool {
     registry: WeakRegistry,

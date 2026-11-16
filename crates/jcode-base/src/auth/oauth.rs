@@ -38,6 +38,13 @@ pub mod openai {
     pub const SCOPES: &str =
         "openid profile email offline_access api.connectors.read api.connectors.invoke";
 
+    /// Device-code login (the `codex login --device-auth` flow). Works on
+    /// machines without a browser or a reachable localhost callback, such as
+    /// a cloud VM driven from a phone.
+    pub const AUTH_BASE: &str = "https://auth.openai.com";
+    pub const DEVICE_VERIFICATION_URL: &str = "https://auth.openai.com/codex/device";
+    pub const DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
+
     pub fn redirect_uri(port: u16) -> String {
         format!("http://localhost:{}{}", port, CALLBACK_PATH)
     }
@@ -545,6 +552,149 @@ pub async fn exchange_openai_callback_input(
     exchange_openai_code(&code, verifier, redirect_uri).await
 }
 
+/// A started OpenAI device-code login. The user enters `user_code` at
+/// `verification_url`; `device_auth_id` stays with the caller for polling.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenAiDeviceCode {
+    pub device_auth_id: String,
+    pub user_code: String,
+    pub interval: u64,
+    pub verification_url: String,
+    /// Unix milliseconds. Defaults to 15 minutes when the server omits it.
+    pub expires_at_ms: i64,
+}
+
+// Field order preserves the sorted keys of the legacy serde_json maps.
+#[derive(Serialize)]
+struct OpenAiDeviceStartRequest<'a> {
+    client_id: &'a str,
+}
+
+#[derive(Serialize)]
+struct OpenAiDevicePollRequest<'a> {
+    device_auth_id: &'a str,
+    user_code: &'a str,
+}
+
+pub async fn start_openai_device_login() -> Result<OpenAiDeviceCode> {
+    start_openai_device_login_at(openai::AUTH_BASE).await
+}
+
+pub async fn start_openai_device_login_at(base: &str) -> Result<OpenAiDeviceCode> {
+    #[derive(Deserialize)]
+    struct UserCodeResponse {
+        device_auth_id: String,
+        #[serde(alias = "usercode")]
+        user_code: String,
+        #[serde(default)]
+        interval: Option<serde_json::Value>,
+        #[serde(default)]
+        expires_at: Option<String>,
+    }
+    let resp = crate::provider::shared_http_client()
+        .post(format!("{base}/api/accounts/deviceauth/usercode"))
+        .json(&OpenAiDeviceStartRequest {
+            client_id: openai::CLIENT_ID,
+        })
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        if status.as_u16() == 404 {
+            anyhow::bail!(
+                "OpenAI device-code login is not enabled for this account. Turn on device code authorization in ChatGPT security settings, then try again."
+            );
+        }
+        anyhow::bail!("OpenAI device-code request failed ({status}): {text}");
+    }
+    let body: UserCodeResponse = resp.json().await?;
+    // The server sends `interval` as a string ("5"); accept a number too.
+    let interval = match body.interval {
+        Some(serde_json::Value::Number(n)) => n.as_u64(),
+        Some(serde_json::Value::String(s)) => s.trim().parse().ok(),
+        _ => None,
+    }
+    .unwrap_or(5)
+    .clamp(1, 60);
+    let expires_at_ms = body
+        .expires_at
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.timestamp_millis())
+        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() + 15 * 60 * 1000);
+    Ok(OpenAiDeviceCode {
+        device_auth_id: body.device_auth_id,
+        user_code: body.user_code,
+        interval,
+        verification_url: openai::DEVICE_VERIFICATION_URL.to_string(),
+        expires_at_ms,
+    })
+}
+
+/// Poll once. `Ok(None)` while the user has not approved the code yet.
+pub async fn poll_openai_device_login_at(
+    base: &str,
+    device_auth_id: &str,
+    user_code: &str,
+) -> Result<Option<(String, String)>> {
+    #[derive(Deserialize)]
+    struct TokenResponse {
+        authorization_code: String,
+        code_verifier: String,
+    }
+    let resp = crate::provider::shared_http_client()
+        .post(format!("{base}/api/accounts/deviceauth/token"))
+        .json(&OpenAiDevicePollRequest {
+            device_auth_id,
+            user_code,
+        })
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await?;
+    let status = resp.status();
+    // Pending approval is reported as 403 or 404.
+    if status.as_u16() == 403 || status.as_u16() == 404 {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("OpenAI device-code login failed ({status}): {text}");
+    }
+    let body: TokenResponse = resp.json().await?;
+    Ok(Some((body.authorization_code, body.code_verifier)))
+}
+
+/// Wait for approval and exchange the code for tokens.
+pub async fn finish_openai_device_login(device: &OpenAiDeviceCode) -> Result<OAuthTokens> {
+    finish_openai_device_login_at(openai::AUTH_BASE, openai::TOKEN_URL, device).await
+}
+
+pub async fn finish_openai_device_login_at(
+    base: &str,
+    token_url: &str,
+    device: &OpenAiDeviceCode,
+) -> Result<OAuthTokens> {
+    loop {
+        if let Some((code, verifier)) =
+            poll_openai_device_login_at(base, &device.device_auth_id, &device.user_code).await?
+        {
+            return exchange_openai_code_at_url(
+                token_url,
+                &code,
+                &verifier,
+                openai::DEVICE_REDIRECT_URI,
+            )
+            .await;
+        }
+        if chrono::Utc::now().timestamp_millis() >= device.expires_at_ms {
+            anyhow::bail!("The OpenAI sign-in code expired. Start sign-in again.");
+        }
+        tokio::time::sleep(Duration::from_secs(device.interval)).await;
+    }
+}
+
 /// Perform OAuth login for OpenAI/Codex
 pub async fn login_openai(no_browser: bool) -> Result<OAuthTokens> {
     let (verifier, challenge) = generate_pkce();
@@ -645,6 +795,7 @@ pub fn save_claude_tokens_for_account(tokens: &OAuthTokens, label: &str) -> Resu
         scopes,
     };
     claude_auth::upsert_account(account)?;
+    crate::usage::invalidate_anthropic_usage_auth_failure(label);
     Ok(())
 }
 
@@ -1004,6 +1155,14 @@ pub async fn refresh_claude_tokens_for_account(
                 .map(|tokens| tokens.refresh_token)
                 .filter(|token| !token.is_empty())
                 .unwrap_or(observed_refresh);
+            // Check the newest stored token under the flight lock, not the
+            // caller's possibly superseded token. Usage polling used to bypass
+            // the terminal-rejection guard and retry invalid_grant forever.
+            crate::auth::refresh_state::ensure_refresh_allowed(
+                "claude",
+                &token,
+                "Run `/login claude` to sign in again.",
+            )?;
             refresh_claude_tokens_inner(&token, Some(&label)).await
         },
     )
@@ -1462,6 +1621,89 @@ async fn refresh_tokens_at_url(token_url: &str, refresh_token: &str) -> Result<O
         id_token: None,
         scopes: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod device_request_tests {
+    use super::{OpenAiDevicePollRequest, OpenAiDeviceStartRequest, openai};
+
+    #[test]
+    fn device_request_serialization_matches_legacy_bytes() {
+        let start = OpenAiDeviceStartRequest {
+            client_id: openai::CLIENT_ID,
+        };
+        assert_eq!(
+            serde_json::to_vec(&start).unwrap(),
+            serde_json::to_vec(&serde_json::json!({"client_id": openai::CLIENT_ID})).unwrap()
+        );
+        for (device_auth_id, user_code) in [
+            ("", ""),
+            ("fake-device", "FAKE-CODE"),
+            ("quote\"\\\n\t", "雪\r\u{0000}"),
+        ] {
+            let poll = OpenAiDevicePollRequest {
+                device_auth_id,
+                user_code,
+            };
+            assert_eq!(
+                serde_json::to_vec(&poll).unwrap(),
+                serde_json::to_vec(&serde_json::json!({
+                    "device_auth_id": device_auth_id,
+                    "user_code": user_code,
+                }))
+                .unwrap()
+            );
+        }
+        assert_eq!(
+            serde_json::to_string(&OpenAiDevicePollRequest {
+                device_auth_id: "",
+                user_code: "",
+            })
+            .unwrap(),
+            r#"{"device_auth_id":"","user_code":""}"#
+        );
+    }
+
+    #[test]
+    fn device_request_bodies_outlive_borrowed_sources() {
+        let client = reqwest::Client::new();
+        let (start, poll) = {
+            let client_id = String::from("fake-client");
+            let device_auth_id = String::from("fake-device");
+            let user_code = String::from("FAKE-CODE");
+            let start = client
+                .post("http://127.0.0.1:1/api/accounts/deviceauth/usercode")
+                .json(&OpenAiDeviceStartRequest {
+                    client_id: &client_id,
+                })
+                .build()
+                .unwrap();
+            let poll = client
+                .post("http://127.0.0.1:1/api/accounts/deviceauth/token")
+                .json(&OpenAiDevicePollRequest {
+                    device_auth_id: &device_auth_id,
+                    user_code: &user_code,
+                })
+                .build()
+                .unwrap();
+            (start, poll)
+        };
+        // Building serializes synchronously. No source or payload survives here,
+        // and neither request is sent to a network endpoint.
+        for (request, expected) in [
+            (start, r#"{"client_id":"fake-client"}"#),
+            (
+                poll,
+                r#"{"device_auth_id":"fake-device","user_code":"FAKE-CODE"}"#,
+            ),
+        ] {
+            assert_eq!(request.headers()["content-type"], "application/json");
+            assert_eq!(
+                request.body().unwrap().as_bytes().unwrap(),
+                expected.as_bytes()
+            );
+        }
+    }
 }
 
 #[cfg(test)]
