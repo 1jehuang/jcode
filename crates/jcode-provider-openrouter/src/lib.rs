@@ -187,6 +187,12 @@ pub struct DiskCache {
     pub cached_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_api_base: Option<String>,
+    /// SHA-256 fingerprint of the header overrides that produced this
+    /// catalog. `None` for caches written before it existed. A different
+    /// header set (changed Authorization or routing header) must not reuse
+    /// this cache, same as a different endpoint must not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_headers_fingerprint: Option<String>,
     pub models: Vec<ModelInfo>,
 }
 
@@ -506,7 +512,7 @@ pub fn save_disk_cache(models: &[ModelInfo]) {
 }
 
 pub fn save_disk_cache_with_source(models: &[ModelInfo], source_api_base: Option<&str>) {
-    save_disk_cache_with_source_to_path(cache_path(), models, source_api_base);
+    save_disk_cache_with_source_to_path(cache_path(), models, source_api_base, None);
 }
 
 pub fn save_disk_cache_with_source_for_namespace(
@@ -514,10 +520,27 @@ pub fn save_disk_cache_with_source_for_namespace(
     models: &[ModelInfo],
     source_api_base: Option<&str>,
 ) {
+    save_disk_cache_with_source_for_namespace_with_headers(
+        namespace,
+        models,
+        source_api_base,
+        None,
+    );
+}
+
+/// Save a namespace cache tagged with both its endpoint and the fingerprint
+/// of the header overrides that produced it.
+pub fn save_disk_cache_with_source_for_namespace_with_headers(
+    namespace: &str,
+    models: &[ModelInfo],
+    source_api_base: Option<&str>,
+    source_headers_fingerprint: Option<&str>,
+) {
     save_disk_cache_with_source_to_path(
         cache_path_for_namespace(namespace),
         models,
         source_api_base,
+        source_headers_fingerprint,
     );
 }
 
@@ -525,6 +548,7 @@ fn save_disk_cache_with_source_to_path(
     path: PathBuf,
     models: &[ModelInfo],
     source_api_base: Option<&str>,
+    source_headers_fingerprint: Option<&str>,
 ) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -538,6 +562,7 @@ fn save_disk_cache_with_source_to_path(
     let cache = DiskCache {
         cached_at: now,
         source_api_base: source_api_base.map(ToString::to_string),
+        source_headers_fingerprint: source_headers_fingerprint.map(ToString::to_string),
         models: models.to_vec(),
     };
 

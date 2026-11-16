@@ -20,7 +20,16 @@ impl AnthropicProvider {
         let catalog = if is_oauth {
             jcode_base::provider::fetch_anthropic_model_catalog_oauth(&token).await?
         } else {
-            jcode_base::provider::fetch_anthropic_model_catalog(&token).await?
+            // Chat sends the transport snapshot captured at construction; a
+            // named profile clears JCODE_ANTHROPIC_HEADERS right after this
+            // provider is built, so re-reading env here would silently fall
+            // back to global headers while chat keeps the profile overrides.
+            let headers = self.direct_transport.headers.clone();
+            jcode_base::provider::fetch_anthropic_model_catalog_with_headers(
+                &token,
+                headers.as_ref().ok(),
+            )
+            .await?
         };
         // Persist so the rest of the process benefits from the warm catalog,
         // exactly like the runtime's own prefetch.
@@ -103,7 +112,16 @@ impl AnthropicProvider {
                 Err(err) => return Err(err),
             }
         } else {
-            jcode_base::provider::fetch_anthropic_model_catalog(&self.direct_api_key()?).await?
+            // Same header parity as the doctor path: use the transport
+            // snapshot captured at construction (profile overrides intact
+            // even after the named-profile env is cleared), not a fresh env
+            // read that would fall back to global headers.
+            let headers = self.direct_transport.headers.clone();
+            jcode_base::provider::fetch_anthropic_model_catalog_with_headers(
+                &self.direct_api_key()?,
+                headers.as_ref().ok(),
+            )
+            .await?
         };
         jcode_base::provider::persist_anthropic_model_catalog_for_scope(scope, &catalog);
         if !catalog.context_limits.is_empty() {
