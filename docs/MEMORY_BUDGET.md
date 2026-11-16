@@ -132,6 +132,62 @@ success/error bytes, authorization, endpoint, and timeout remain unchanged. All
 and chained-error wire coverage. No real commands were dispatched. These gains
 are structural reductions in duplicate allocation and source lifetime only.
 
+Mobile claim polling also borrows hostname metadata into direct serialization,
+dropping the converted environment value before network waits. Empty and
+Unicode/escaped hostnames preserve exact legacy bytes, endpoint, authorization,
+and timeout. The hosted mobile runner group passed 46 tests with 1 ignored.
+These include overlapping completion/local-runner coverage, not 46 additional
+independent tests to add to earlier counts. No claim was sent to production.
+
+Subscription device-token polling, email-code start, and email-code verification
+serialize borrowed fields rather than allocating intermediate JSON maps. Exact
+legacy bytes preserve which fields are trimmed and which are not, including
+Unicode whitespace, empty strings, escaping, and control characters. All 14
+hosted serial subscription API tests passed for this followup, including the
+earlier device-metadata tests. No real login or email was initiated.
+
+Scalar account request metadata now serializes stack-owned numeric fields
+directly instead of constructing JSON maps. Exact bytes for zero, one, and
+`u64::MAX` are checked using builders only. All 15 hosted subscription API tests
+passed after this followup. No financial API was invoked, and validation,
+authorization, endpoint, timeout, response handling, and billing policy did not
+change. These tests overlap the earlier 14-test group.
+
+Claude weekly/earned reset request metadata uses typed serialization instead of
+temporary JSON maps and copied grant/request IDs. Pure builder tests verify exact
+legacy bytes after input release. The existing local-fixture safety suites also
+passed: 9 weekly-reset tests and 8 earned-reset tests. Confirmation, eligibility,
+locking, durable pending markers, journal writes, idempotency, invalidation, and
+non-refundable operation sequencing are untouched. No real reset request was
+made and no grant was consumed. This is source-allocation reduction only.
+
+### Catalog persistence ownership acceptance (2026-11-16)
+
+Antigravity, Gemini, Copilot, Cursor, and Bedrock persistence serialize borrowed
+catalog views instead of cloning model strings and collections solely to write
+JSON. Antigravity's project request also borrows its optional project string.
+Cache paths, endpoint/region scope, freshness rules, refresh behavior, and model
+discovery remain unchanged. Exact compact and pretty legacy JSON tests include
+arbitrary future models absent from fallback lists, Unicode, escaping, optional
+fields, and empty collections. Bedrock additionally checks 64 combinations of
+model/profile/route/set population and region, preserving its old set iteration
+sequence without temporary cloned vectors.
+
+Hosted validation passed: the full Gemini and Cursor runtime groups (98 tests
+combined), the full Copilot runtime group (39 tests), the focused Bedrock test,
+and both Antigravity persistence/request tests. Copilot declares its already
+locked `serde` dependency directly for the new serialization view, adding no
+new package version. The integrated locked CLI test-target check also passed.
+These remove transient collection copies, not the useful catalogs themselves.
+No provider calls or production RSS reduction were used as acceptance evidence.
+
+The OpenRouter disk-cache writer's model copy is different: it publishes an
+owned in-memory memo that survives the caller's borrowed slice. Removing it
+requires an ownership/API redesign, not merely a borrowed write-only view.
+Likewise, discovery returns that separately populate a retained cache are not
+automatically redundant clones. Those paths were classified rather than
+silently weakening caching or claiming the allocation was unnecessary.
+
 ### Schema, reranking, and retry ownership acceptance (2026-11-16)
 
 The MCP schema cache now shares immutable catalog backing between memoized
