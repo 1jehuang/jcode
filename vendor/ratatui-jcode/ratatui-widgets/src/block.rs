@@ -1345,17 +1345,18 @@ mod tests {
     }
 
     #[test]
-    const fn block_can_be_const() {
+    fn block_can_be_const() {
         const _DEFAULT_STYLE: Style = Style::new();
-        const _DEFAULT_PADDING: Padding = Padding::uniform(1);
-        const _DEFAULT_BLOCK: Block = Block::bordered()
+        const DEFAULT_PADDING: Padding = Padding::uniform(1);
+        const DEFAULT_BLOCK: Block = Block::bordered()
             // the following methods are no longer const because they use Into<Style>
             // .style(_DEFAULT_STYLE)           // no longer const
             // .border_style(_DEFAULT_STYLE)    // no longer const
             // .title_style(_DEFAULT_STYLE)     // no longer const
             .title_alignment(Alignment::Left)
             .title_position(TitlePosition::Top)
-            .padding(_DEFAULT_PADDING);
+            .padding(DEFAULT_PADDING);
+        let _ = DEFAULT_BLOCK;
     }
 
     /// Ensure Style from/into works the way a user would use it.

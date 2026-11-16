@@ -204,6 +204,7 @@ fn loading_picker_search_survives_cached_and_fresh_updates_and_filters_both() {
             )))
             .expect("cached list")
     );
+    wait_for_picker_search(&mut picker);
     assert_eq!(picker.search_query, "needle");
     assert!(picker.search_active);
     assert_eq!(picker.visible_sessions.len(), 1);
@@ -220,6 +221,7 @@ fn loading_picker_search_survives_cached_and_fresh_updates_and_filters_both() {
             ))))
             .expect("fresh list")
     );
+    wait_for_picker_search(&mut picker);
     assert_eq!(picker.search_query, "needle");
     assert!(picker.search_active);
     assert_eq!(picker.visible_sessions.len(), 1);
@@ -248,6 +250,7 @@ fn loading_picker_enter_preserves_search_without_queuing_resume() {
             vec![make_session("matching", "q", false, SessionStatus::Closed)],
         )))
         .unwrap();
+    wait_for_picker_search(&mut picker);
     assert_eq!(picker.search_query, "q");
     assert!(picker.search_active);
     assert_eq!(
@@ -309,6 +312,7 @@ fn standalone_resume_refresh_preserves_cached_selection_and_search() {
             ))))
             .expect("fresh list")
     );
+    wait_for_picker_search(&mut picker);
     assert_eq!(
         picker.selected_session().map(|s| s.id.as_str()),
         Some("second")

@@ -240,7 +240,7 @@ fn fork_preserves_fetched_models() {
 fn make_msg(role: Role, blocks: Vec<ContentBlock>) -> ChatMessage {
     ChatMessage {
         role,
-        content: blocks,
+        content: blocks.into(),
         timestamp: None,
         tool_duration_ms: None,
     }

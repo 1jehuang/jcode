@@ -1,0 +1,107 @@
+use super::*;
+
+#[test]
+fn swarm_agent_color_tracks_identity_not_delivery_kind_or_restart() {
+    let daisy = swarm_agent_color("daisy");
+    assert_ne!(daisy, swarm_agent_color("tulip"));
+    assert_eq!(daisy, swarm_agent_color(" DAISY "));
+    assert_eq!(daisy, swarm_agent_color("session_daisy_123_abc"));
+    assert_eq!(daisy, swarm_agent_color("session_daisy_456_def"));
+    for title in [
+        "Swarm · daisy",
+        "DM from daisy",
+        "Task · daisy",
+        "#release · daisy",
+        "Broadcast · daisy",
+        "Shared context · daisy",
+        "Swarm · session_daisy_123_abc",
+    ] {
+        let notification = compact_swarm_notification(title).unwrap();
+        assert_eq!(notification.text_color, daisy, "{title}");
+        assert_eq!(notification.sender, "daisy");
+    }
+}
+
+#[test]
+fn swarm_agent_collapsed_and_expanded_reports_share_identity_foreground() {
+    markdown::set_center_code_blocks(false);
+    let report = "Agent daisy finished their work and is ready for more.\n\nLane plan: Phase 2 · release-candidate-validation: 0/1 completed\n\n- [in_progress] release-candidate-validation\n\nFinal response: **Blocked pending source freeze.**\n\n*Coordinator notified with concrete fixes.*";
+    let collapsed = jcode_tui_messages::encode_collapsible_swarm_content(
+        "Release validation needs a source freeze",
+        report,
+    );
+    let expanded = jcode_tui_messages::toggle_collapsible_swarm_content(&collapsed).unwrap();
+    let accent = swarm_agent_color("daisy");
+    for content in [collapsed, expanded] {
+        let message = DisplayMessage::swarm("Swarm · daisy", content);
+        let rows = render_swarm_message(&message, 100, crate::config::DiffDisplayMode::Off);
+        let mut prose_spans = 0;
+        for row in &rows {
+            for span in &row.spans {
+                if span.content.contains("Release validation")
+                    || span.content.contains("Lane plan")
+                    || span.content.contains("Blocked pending")
+                    || span.content.contains("Coordinator notified")
+                    || span.content.contains("Final response")
+                {
+                    assert_eq!(span.style.fg, Some(accent), "{span:?}");
+                    prose_spans += 1;
+                }
+            }
+        }
+        assert!(prose_spans > 0);
+        assert_eq!(rows[0].spans[0].style.fg, Some(accent));
+    }
+}
+
+#[test]
+fn swarm_agent_expansion_preserves_markdown_modifiers_and_semantic_code_colors() {
+    markdown::set_center_code_blocks(false);
+    let body = "**Strong identity prose**\n\n*Italic identity prose*\n\n`inline_code`\n\n```rust\nlet answer = 42;\n```";
+    let content = jcode_tui_messages::encode_collapsible_swarm_content("Validation report", body);
+    let expanded = jcode_tui_messages::toggle_collapsible_swarm_content(&content).unwrap();
+    let message = DisplayMessage::swarm("Swarm · tulip", expanded);
+    let rows = render_swarm_message(&message, 100, crate::config::DiffDisplayMode::Off);
+    let spans: Vec<_> = rows.iter().flat_map(|row| &row.spans).collect();
+    let accent = swarm_agent_color("tulip");
+    let strong = spans
+        .iter()
+        .find(|span| span.content.contains("Strong identity prose"))
+        .unwrap();
+    assert_eq!(strong.style.fg, Some(accent));
+    assert!(strong.style.add_modifier.contains(Modifier::BOLD));
+    let italic = spans
+        .iter()
+        .find(|span| span.content.contains("Italic identity prose"))
+        .unwrap();
+    assert_eq!(italic.style.fg, Some(accent));
+    assert!(italic.style.add_modifier.contains(Modifier::ITALIC));
+    let inline_code = spans
+        .iter()
+        .find(|span| span.content.contains("inline_code"))
+        .unwrap();
+    assert_ne!(inline_code.style.fg, Some(accent));
+    assert!(inline_code.style.bg.is_some());
+    assert!(
+        spans
+            .iter()
+            .any(|span| span.content.contains("42") && span.style.fg != Some(accent))
+    );
+}
+
+#[test]
+fn swarm_agent_collapsed_rows_remain_single_line_and_cell_width_safe() {
+    markdown::set_center_code_blocks(false);
+    let content = jcode_tui_messages::encode_collapsible_swarm_content(
+        "界界界 release candidate needs validation",
+        "Full report from daisy\n\nMore report text.",
+    );
+    let message = DisplayMessage::swarm("Swarm · daisy", content);
+    for width in [0, 1, 2, 3, 8, 16, 24, 40, 80] {
+        let rows = render_swarm_message(&message, width, crate::config::DiffDisplayMode::Off);
+        assert_eq!(rows.len(), usize::from(width > 0));
+        for row in rows {
+            assert!(row.width() <= width as usize, "{width}: {row:?}");
+        }
+    }
+}

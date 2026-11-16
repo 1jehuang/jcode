@@ -93,12 +93,14 @@ fn load_cache() -> Option<Arc<PricingCache>> {
     Some(cache)
 }
 
-fn save_cache(cache: &PricingCache) {
+fn save_cache(cache: PricingCache) -> Arc<PricingCache> {
     let path = cache_path();
+    let cache = Arc::new(cache);
     if let Ok(mut memory) = MEMORY_CACHE.lock() {
-        *memory = Some((path.clone(), Arc::new(cache.clone())));
+        *memory = Some((path.clone(), Arc::clone(&cache)));
     }
-    let _ = crate::storage::write_json(&path, cache);
+    let _ = crate::storage::write_json(&path, cache.as_ref());
+    cache
 }
 
 /// Translate a jcode provider key (runtime key, activity source key, or
@@ -379,7 +381,7 @@ async fn refresh_now() -> anyhow::Result<()> {
     }
     let body = response.text().await?;
     let cache = parse_api_response(&body)?;
-    save_cache(&cache);
+    let cache = save_cache(cache);
     crate::logging::info(&format!(
         "models.dev pricing refreshed: {} providers, {} priced models",
         cache.providers.len(),
@@ -443,7 +445,7 @@ pub(crate) fn save_test_cache(entries: &[(&str, &str, ModelCost)]) {
             .or_default()
             .insert((*model).to_string(), *cost);
     }
-    save_cache(&PricingCache {
+    save_cache(PricingCache {
         cached_at_unix_secs: now_unix_secs(),
         providers,
     });
@@ -459,6 +461,73 @@ pub(crate) fn clear_memory_cache_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_cache_moves_backing_allocations_and_preserves_disk_and_lookup() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        clear_memory_cache_for_tests();
+
+        let cache = parse_api_response(
+            r#"{"deepseek":{"models":{"future-model":{"cost":{"input":0.25,"output":1.5,"cache_read":0.05}}}}}"#,
+        )
+        .expect("parsed");
+        let expected_json = serde_json::to_vec(&cache).expect("serialize original cache");
+        let (provider, models) = cache.providers.get_key_value("deepseek").expect("provider");
+        let (model, cost) = models.get_key_value("future-model").expect("model");
+        // Entry addresses witness the outer and inner HashMap allocations,
+        // while string pointers witness both keys' separate backing buffers.
+        let provider_entry = provider as *const String;
+        let provider_bytes = provider.as_ptr();
+        let model_entry = model as *const String;
+        let model_bytes = model.as_ptr();
+        let expected_cost = *cost;
+
+        let saved = save_cache(cache);
+        let (provider, models) = saved.providers.get_key_value("deepseek").expect("provider");
+        let (model, _) = models.get_key_value("future-model").expect("model");
+        assert_eq!(provider as *const String, provider_entry);
+        assert_eq!(provider.as_ptr(), provider_bytes);
+        assert_eq!(model as *const String, model_entry);
+        assert_eq!(model.as_ptr(), model_bytes);
+        assert!(Arc::ptr_eq(&saved, &load_cache().expect("published cache")));
+        assert_eq!(
+            std::fs::read(cache_path()).expect("disk JSON"),
+            expected_json
+        );
+        assert_eq!(
+            lookup_with_provenance("openai-compatible:deepseek", "future-model"),
+            Some((expected_cost, PricingMatch::ProviderTable))
+        );
+        assert_eq!(lookup("deepseek", "missing-model"), None);
+
+        clear_memory_cache_for_tests();
+        assert_eq!(lookup("deepseek", "future-model"), Some(expected_cost));
+
+        // A disk failure must not prevent publication of the moved cache.
+        clear_memory_cache_for_tests();
+        std::fs::remove_file(cache_path()).expect("remove cache file");
+        std::fs::create_dir(cache_path()).expect("block disk write with directory");
+        let saved = save_cache(PricingCache {
+            cached_at_unix_secs: now_unix_secs(),
+            providers: HashMap::new(),
+        });
+        assert!(Arc::ptr_eq(
+            &saved,
+            &load_cache().expect("published despite disk failure")
+        ));
+        assert!(cache_path().is_dir());
+        assert_eq!(lookup("deepseek", "future-model"), None);
+
+        clear_memory_cache_for_tests();
+        if let Some(prev) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
 
     #[test]
     fn resellers_fall_back_to_vendor_pricing_seen_elsewhere() {

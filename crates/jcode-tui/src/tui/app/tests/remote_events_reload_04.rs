@@ -735,7 +735,8 @@ fn test_new_for_remote_uses_startup_stub_without_loading_full_transcript() {
         content: vec![crate::message::ContentBlock::Text {
             text: "hello from persisted history".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,

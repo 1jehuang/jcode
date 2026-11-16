@@ -212,10 +212,9 @@ fn public_schema_uses_names_and_descriptions_not_storage_fields() {
         ["items"]["items"];
     let add_item = &schema["properties"]["add"]["items"];
     let update_item = &schema["properties"]["update"]["items"];
-    for item in [phase_item, add_item, update_item] {
+    for item in [phase_item, add_item] {
         let properties = item["properties"].as_object().unwrap();
         assert!(properties.contains_key("name"));
-        assert!(properties.contains_key("description"));
         for field in ["id", "content", "details"] {
             assert!(
                 !properties.contains_key(field),
@@ -230,6 +229,9 @@ fn public_schema_uses_names_and_descriptions_not_storage_fields() {
                 .any(|field| field == "name")
         );
     }
+    assert!(add_item["properties"]["description"].is_object());
+    assert_eq!(phase_item["additionalProperties"], true);
+    assert_eq!(phase_item["properties"].as_object().unwrap().len(), 4);
     assert!(update_item["properties"]["rename_to"].is_object());
 }
 
@@ -326,4 +328,55 @@ async fn named_tool_execution_persists_ids_but_returns_public_names() {
         load_todos("named-tool-execution").unwrap()[0].content,
         "Implement"
     );
+}
+
+#[test]
+fn stringified_null_containers_do_not_conflict_with_edits() {
+    let stored = create(hierarchy(vec![named("Implement")]));
+    let updated = patch(
+        json!({
+            "phases": "null", "add": "null", "remove": "null", "goals": "null", "plan": "null",
+            "update": [{"name": "Implement", "status": "in_progress"}]
+        }),
+        &stored,
+    );
+    assert_eq!(parsed(updated)[0].status, "in_progress");
+    let replaced = create(json!({
+        "phases": hierarchy(vec![named("Ship")])["phases"].to_string()
+    }));
+    assert_eq!(parsed(replaced)[0].content, "Ship");
+}
+
+#[test]
+fn null_filled_strict_schema_edits_behave_like_omitted_fields() {
+    let stored = create(hierarchy(vec![named("Implement"), named("Test")]));
+    let before = stored["todos"].clone();
+    let updated = patch(
+        json!({
+            "accept_large_output": null, "add": null, "goals": null, "phases": null,
+            "plan": null, "remove": null,
+            "update": [{
+                "name": "Implement", "status": "in_progress", "phase": null, "lane": null,
+                "lane_owner": null, "priority": null, "description": null,
+                "confidence": null, "completion_confidence": null, "rename_to": null
+            }]
+        }),
+        &stored,
+    )["todos"]
+        .clone();
+    assert_eq!(updated[0]["status"], "in_progress");
+    for key in ["id", "content", "stage", "group", "priority"] {
+        assert_eq!(updated[0][key], before[0][key], "{key} changed");
+    }
+    let added = patch(
+        json!({"add": [{
+            "name": "Ship", "status": "pending", "priority": "high",
+            "confidence": "plausible", "after": "Test", "phase": null, "lane": null,
+            "lane_owner": null, "description": null
+        }]}),
+        &stored,
+    )["todos"]
+        .clone();
+    assert_eq!(added[2]["stage"], before[1]["stage"]);
+    assert_eq!(added[2]["group"], before[1]["group"]);
 }

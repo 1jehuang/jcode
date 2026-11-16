@@ -166,6 +166,55 @@ fn drain_reports(state: &mut ProvenanceState) -> Vec<UsageReport> {
         .collect()
 }
 
+#[derive(Serialize)]
+struct UsageRequest {
+    client_version: &'static str,
+    #[serde(serialize_with = "serialize_reports")]
+    reports: Vec<UsageReport>,
+}
+
+fn serialize_reports<S: serde::Serializer>(
+    reports: &[UsageReport],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeSeq;
+
+    // json! previously sorted object keys. Keep that exact wire order without
+    // constructing a second, nested Value representation of the reports.
+    #[derive(Serialize)]
+    struct WireReport<'a> {
+        calls: u64,
+        connects: u64,
+        day: &'a str,
+        errors: u64,
+        sponsor: &'a str,
+    }
+
+    let mut sequence = serializer.serialize_seq(Some(reports.len()))?;
+    for report in reports {
+        sequence.serialize_element(&WireReport {
+            calls: report.calls,
+            connects: report.connects,
+            day: &report.day,
+            errors: report.errors,
+            sponsor: &report.sponsor,
+        })?;
+    }
+    sequence.end()
+}
+
+fn build_flush_request(
+    client: &reqwest::Client,
+    endpoint: &str,
+    body: impl Serialize,
+) -> reqwest::RequestBuilder {
+    let request = client.post(endpoint).json(&body).timeout(FLUSH_TIMEOUT);
+    // RequestBuilder owns serialized bytes, not the report strings. Release
+    // the source before the network future (including response wait) exists.
+    drop(body);
+    request
+}
+
 fn spawn_flush(reports: Vec<UsageReport>) {
     if reports.is_empty() {
         return;
@@ -177,21 +226,20 @@ fn spawn_flush(reports: Vec<UsageReport>) {
             .endpoint
             .trim_end_matches('/')
     );
-    let body = serde_json::json!({
-        "client_version": env!("CARGO_PKG_VERSION"),
-        "reports": reports,
-    });
     // Best effort: fire and forget. A failed flush drops this hour's
     // aggregates rather than queueing unbounded state.
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.spawn(async move {
             let client = crate::provider::shared_http_client();
-            let _ = client
-                .post(&endpoint)
-                .json(&body)
-                .timeout(FLUSH_TIMEOUT)
-                .send()
-                .await;
+            let request = build_flush_request(
+                &client,
+                &endpoint,
+                UsageRequest {
+                    client_version: env!("CARGO_PKG_VERSION"),
+                    reports,
+                },
+            );
+            let _ = request.send().await;
         });
     }
 }
@@ -223,6 +271,92 @@ pub(crate) fn drain_pending_for_tests() -> Vec<UsageReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_request() -> UsageRequest {
+        UsageRequest {
+            client_version: "test-version",
+            reports: vec![
+                UsageReport {
+                    sponsor: "z\"\\\n雪".into(),
+                    day: "2026-11-16".into(),
+                    connects: 2,
+                    calls: u64::MAX,
+                    errors: 1,
+                },
+                UsageReport {
+                    sponsor: "a".into(),
+                    day: "2026-11-15".into(),
+                    connects: 0,
+                    calls: 0,
+                    errors: 0,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn usage_request_preserves_exact_legacy_bytes() {
+        for body in [
+            sample_request(),
+            UsageRequest {
+                client_version: "test-version",
+                reports: Vec::new(),
+            },
+        ] {
+            let legacy = serde_json::json!({
+                "client_version": body.client_version,
+                "reports": body.reports,
+            });
+            let bytes = serde_json::to_vec(&body).unwrap();
+            assert_eq!(bytes, serde_json::to_vec(&legacy).unwrap());
+            if !body.reports.is_empty() {
+                assert_eq!(
+                    String::from_utf8(bytes).unwrap(),
+                    "{\"client_version\":\"test-version\",\"reports\":[{\"calls\":18446744073709551615,\"connects\":2,\"day\":\"2026-11-16\",\"errors\":1,\"sponsor\":\"z\\\"\\\\\\n雪\"},{\"calls\":0,\"connects\":0,\"day\":\"2026-11-15\",\"errors\":0,\"sponsor\":\"a\"}]}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn flush_builder_releases_source_before_network_future() {
+        use std::cell::Cell;
+
+        #[derive(Serialize)]
+        #[serde(transparent)]
+        struct Tracked<'a> {
+            body: UsageRequest,
+            #[serde(skip)]
+            dropped: &'a Cell<bool>,
+        }
+        impl Drop for Tracked<'_> {
+            fn drop(&mut self) {
+                self.dropped.set(true);
+            }
+        }
+
+        let dropped = Cell::new(false);
+        let expected = serde_json::to_vec(&sample_request()).unwrap();
+        let builder = build_flush_request(
+            &reqwest::Client::new(),
+            "http://127.0.0.1:1/usage",
+            Tracked {
+                body: sample_request(),
+                dropped: &dropped,
+            },
+        );
+        assert!(
+            dropped.get(),
+            "source must be dropped before send is called"
+        );
+        // Building inspects the actual request without sending any telemetry.
+        let request = builder.build().unwrap();
+        assert_eq!(request.method(), reqwest::Method::POST);
+        assert_eq!(request.url().as_str(), "http://127.0.0.1:1/usage");
+        assert_eq!(request.headers()["content-type"], "application/json");
+        assert_eq!(request.timeout(), Some(&FLUSH_TIMEOUT));
+        assert_eq!(request.body().unwrap().as_bytes().unwrap(), expected);
+    }
 
     fn enable_sponsors() -> (std::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
         let guard = crate::storage::lock_test_env();

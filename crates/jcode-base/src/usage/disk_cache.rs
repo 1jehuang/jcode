@@ -36,6 +36,9 @@ struct Snapshot {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 struct Entry {
+    /// Reset metadata from the same coordinated usage response. Contains no credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reset_status: Option<serde_json::Value>,
     last_good: Option<Snapshot>,
     /// Latest failure and when it happened, for cross-process backoff.
     error: Option<String>,
@@ -238,6 +241,15 @@ fn entry_usage(entry: &Entry) -> UsageData {
     usage
 }
 
+pub(super) fn reset_status(key: &str) -> Option<serde_json::Value> {
+    let entry = load().remove(key)?;
+    if entry.error.is_some() || deadline(&entry)? <= now_ms() {
+        return None;
+    }
+    entry.last_good.as_ref()?;
+    entry.reset_status
+}
+
 pub(super) fn fresh(key: &str) -> Option<UsageData> {
     let entry = load().remove(key)?;
     (deadline(&entry)? > now_ms()).then(|| entry_usage(&entry))
@@ -250,7 +262,79 @@ pub(super) fn last_good(key: &str) -> Option<UsageData> {
     (age(good.fetched_unix_ms) < LAST_GOOD_MAX_AGE).then(|| to_usage(&good, None))
 }
 
+#[cfg(test)]
 pub(super) fn store_success(key: &str, data: &UsageData) -> UsageData {
+    store_success_with_reset_status(key, data, None)
+}
+
+/// Model responses carry quota telemetry independently of the usage endpoint.
+/// Refresh the two observed windows without treating old model-scoped quotas
+/// as newly observed or forgetting learned backoff.
+pub(super) fn store_response_limits(
+    key: &str,
+    five: (f32, String),
+    seven: (f32, String),
+) -> UsageData {
+    let entry = update(key, |entry| {
+        // Freeze any outstanding probe deadline before replacing last_good.
+        entry.retry_not_before_ms = deadline(entry);
+        let extra_usage_enabled = entry
+            .last_good
+            .as_ref()
+            .is_some_and(|good| good.extra_usage_enabled);
+        entry.last_good = Some(Snapshot {
+            fetched_unix_ms: now_ms(),
+            five_hour: five.0,
+            five_hour_resets_at: Some(five.1),
+            seven_day: seven.0,
+            seven_day_resets_at: Some(seven.1),
+            extra_usage_enabled,
+            ..Default::default()
+        });
+        entry.error = None;
+        entry.error_unix_ms = None;
+        // These headers did not observe reset eligibility or availability.
+        entry.reset_status = None;
+    });
+    entry_usage(&entry)
+}
+
+pub(super) fn clear_auth_failure(key: &str) {
+    // Avoid creating a cache entry or writing on every normal token refresh.
+    if !load()
+        .get(key)
+        .and_then(|entry| entry.error.as_deref())
+        .is_some_and(super::anthropic_response::is_auth_failure)
+    {
+        return;
+    }
+    update(key, |entry| {
+        if entry
+            .error
+            .as_deref()
+            .is_some_and(super::anthropic_response::is_auth_failure)
+        {
+            // Preserve a longer provider deadline inherited from an earlier
+            // 429, but discard the ordinary authentication retry floor.
+            let auth_deadline = entry
+                .error_unix_ms
+                .unwrap_or_else(now_ms)
+                .saturating_add(ERROR_BACKOFF.as_millis() as i64);
+            entry.retry_not_before_ms = entry.retry_not_before_ms.filter(|at| *at > auth_deadline);
+            entry.error = None;
+            entry.error_unix_ms = None;
+            // A new login must not inherit the rejected login's quotas.
+            entry.last_good = None;
+            entry.reset_status = None;
+        }
+    });
+}
+
+pub(super) fn store_success_with_reset_status(
+    key: &str,
+    data: &UsageData,
+    reset_status: Option<serde_json::Value>,
+) -> UsageData {
     let snapshot = Snapshot {
         fetched_unix_ms: now_ms(),
         five_hour: data.five_hour,
@@ -271,6 +355,7 @@ pub(super) fn store_success(key: &str, data: &UsageData) -> UsageData {
             entry.adaptive_interval_secs = RATE_LIMIT_BACKOFF.as_secs() * 2;
         }
         entry.last_good = Some(snapshot);
+        entry.reset_status = reset_status;
         entry.error = None;
         entry.error_unix_ms = None;
         // Do not clear learned slowdown or a provider's outstanding deadline.
@@ -580,6 +665,33 @@ mod tests {
         };
         assert!(!anthropic.is_stale());
         assert!(openai.is_stale());
+    }
+
+    #[test]
+    fn new_credentials_clear_auth_errors_but_not_inherited_rate_limit_deadlines() {
+        with_home(|| {
+            let key = "label:relogin-policy";
+            store_error_with_hint(key, "Usage API error (429)", Some("3600"));
+            let deadline = load()[key].retry_not_before_ms;
+            store_error(key, "Usage API error (401)");
+            clear_auth_failure(key);
+            let entry = load().remove(key).unwrap();
+            assert_eq!(entry.retry_not_before_ms, deadline);
+            assert_eq!(entry.adaptive_interval_secs, 1800);
+            assert!(entry.error.is_none());
+            assert!(fresh(key).is_some());
+
+            let key = "label:relogin-auth-only";
+            store_success(key, &sample());
+            store_error(key, "Usage API error (401)");
+            clear_auth_failure(key);
+            assert!(fresh(key).is_none());
+            assert!(
+                load()
+                    .get(key)
+                    .is_none_or(|entry| entry.last_good.is_none())
+            );
+        });
     }
 
     #[test]

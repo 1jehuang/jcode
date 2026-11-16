@@ -83,6 +83,20 @@ pub fn active_turn_signals(session_id: &str) -> Vec<InterruptSignal> {
         .unwrap_or_default()
 }
 
+/// Snapshot the session IDs that currently own at least one running turn.
+/// Unlike swarm status, these registrations follow the actual turn lifetime.
+pub fn active_session_ids() -> Vec<String> {
+    ACTIVE_TURNS
+        .lock()
+        .map(|map| {
+            map.iter()
+                .filter(|(_, turns)| !turns.is_empty())
+                .map(|(session_id, _)| session_id.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Move every in-flight turn registration from `old_session_id` to
 /// `new_session_id`.
 ///
@@ -172,6 +186,29 @@ pub fn has_active_turn(session_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_session_snapshot_tracks_unique_ids_rename_and_drop() {
+        let old_id = "turn_cancel_registry_snapshot_old";
+        let new_id = "turn_cancel_registry_snapshot_new";
+        let first = register_active_turn(old_id, InterruptSignal::new());
+        let second = register_active_turn(old_id, InterruptSignal::new());
+        assert_eq!(
+            active_session_ids()
+                .iter()
+                .filter(|id| *id == old_id)
+                .count(),
+            1
+        );
+        rename_active_turns(old_id, new_id);
+        let snapshot = active_session_ids();
+        assert!(!snapshot.iter().any(|id| id == old_id));
+        assert!(snapshot.iter().any(|id| id == new_id));
+        drop(first);
+        assert!(active_session_ids().iter().any(|id| id == new_id));
+        drop(second);
+        assert!(!active_session_ids().iter().any(|id| id == new_id));
+    }
 
     #[test]
     fn register_and_drop_tracks_active_signals() {

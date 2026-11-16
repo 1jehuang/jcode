@@ -363,7 +363,8 @@ fn azure_tool_turn_uses_responses_with_reasoning_and_replays_tool_history() {
                 input: serde_json::json!({"cmd":"pwd"}),
                 thought_signature: None,
             },
-        ];
+        ]
+        .into();
         let history = [
             Message::user("run pwd"),
             assistant,

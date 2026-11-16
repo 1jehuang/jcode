@@ -239,6 +239,21 @@ fn read_snapshot(socket: &Path, path: &Path) -> Option<(Snapshot, Duration)> {
 
 fn discard_expired_windows(accounts: &mut [AccountUsageSnapshot], now_ms: u64) {
     for account in accounts {
+        account.additional_windows.retain(|window| {
+            !window
+                .resets_at
+                .as_deref()
+                .and_then(|reset| match chrono::DateTime::parse_from_rfc3339(reset) {
+                    Ok(reset) => Some(reset),
+                    Err(error) => {
+                        crate::logging::debug(&format!(
+                            "Keeping usage window with invalid reset timestamp: {error}"
+                        ));
+                        None
+                    }
+                })
+                .is_some_and(|reset| i128::from(reset.timestamp_millis()) <= i128::from(now_ms))
+        });
         let expired = account
             .resets_at
             .as_deref()
@@ -316,6 +331,7 @@ mod tests {
         // Keep test artifacts inside the temporary directory, not global cache.
         publisher.path = dir.path().join("usage.json");
         let account = AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "test".into(),
             email: Some("private@example.test".into()),
             exhausted: false,
@@ -369,6 +385,28 @@ mod tests {
     #[test]
     fn reset_boundary_discards_exhaustion_but_preserves_error() {
         let mut accounts = vec![AccountUsageSnapshot {
+            additional_windows: vec![
+                jcode_protocol::AccountUsageWindow {
+                    label: "Fable".into(),
+                    usage_ratio: 0.9,
+                    resets_at: Some("2026-01-01T00:00:00Z".into()),
+                },
+                jcode_protocol::AccountUsageWindow {
+                    label: "Future".into(),
+                    usage_ratio: 0.3,
+                    resets_at: Some("2099-01-01T00:00:00Z".into()),
+                },
+                jcode_protocol::AccountUsageWindow {
+                    label: "Invalid reset".into(),
+                    usage_ratio: 0.7,
+                    resets_at: Some("not-a-timestamp".into()),
+                },
+                jcode_protocol::AccountUsageWindow {
+                    label: "Unknown reset".into(),
+                    usage_ratio: 0.8,
+                    resets_at: None,
+                },
+            ],
             label: "test".into(),
             email: None,
             exhausted: true,
@@ -386,8 +424,13 @@ mod tests {
             .unwrap()
             .timestamp_millis() as u64;
         discard_expired_windows(&mut accounts, reset - 1);
+        assert_eq!(accounts[0].additional_windows.len(), 4);
         assert!(accounts[0].exhausted);
         discard_expired_windows(&mut accounts, reset);
+        assert_eq!(accounts[0].additional_windows.len(), 3);
+        assert_eq!(accounts[0].additional_windows[1].label, "Invalid reset");
+        assert_eq!(accounts[0].additional_windows[2].label, "Unknown reset");
+        assert_eq!(accounts[0].additional_windows[0].label, "Future");
         assert!(!accounts[0].exhausted);
         assert!(accounts[0].five_hour_ratio.is_none());
         assert!(accounts[0].seven_day_ratio.is_none());
