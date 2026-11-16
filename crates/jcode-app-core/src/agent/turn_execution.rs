@@ -274,6 +274,7 @@ impl Agent {
                 content,
                 display_role: Some(
                     match message.display_role {
+                        Some(crate::session::StoredDisplayRole::FileActivity) => "file_activity",
                         Some(crate::session::StoredDisplayRole::BackgroundTask) => {
                             "background_task"
                         }

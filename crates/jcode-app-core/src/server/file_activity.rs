@@ -139,8 +139,9 @@ fn format_file_activity_entry(entry: &FileActivityEntry) -> String {
         })
         .unwrap_or_default();
     format!(
-        "{} {} {}{}",
+        "{} {} {} {}{}",
         entry.agent,
+        entry.operation,
         entry.path,
         facts.join(" "),
         intent
@@ -148,13 +149,14 @@ fn format_file_activity_entry(entry: &FileActivityEntry) -> String {
 }
 
 /// Model-facing notice, one line per peer and file:
-/// `agent path +A-R [xN] [Lstart-end] [overlap] [earlier][: intent]`.
+/// `agent edited path +A-R [xN] [Lstart-end] [overlap] [earlier][: intent]`.
 /// `xN` is the number of edits merged, `overlap` means the change touches
 /// lines the recipient edited, and `earlier` means it predates the
-/// recipient's own first edit. The diff itself is never included.
+/// recipient's own first edit. The diff itself is never included, and there
+/// is no prefix: the notice is identified by its interrupt source.
 pub(crate) fn format_file_activity_notice(entries: &[FileActivityEntry]) -> String {
     let lines: Vec<String> = entries.iter().map(format_file_activity_entry).collect();
-    format!("⚠ File activity: {}", lines.join("\n"))
+    lines.join("\n")
 }
 
 /// `path` relative to the recipient's working directory when it is inside it.
@@ -194,7 +196,7 @@ pub(crate) async fn deliver_file_activity_notice(
             queues.get(session_id).is_some_and(|queue| {
                 queue.lock().is_ok_and(|queued| {
                     queued.iter().any(|message| {
-                        message.source == jcode_agent_runtime::SoftInterruptSource::System
+                        message.source == jcode_agent_runtime::SoftInterruptSource::FileActivity
                             && message.content == notice.content
                     })
                 })
@@ -226,7 +228,7 @@ pub(crate) async fn deliver_file_activity_notice(
         recipient,
         content.clone(),
         false,
-        jcode_agent_runtime::SoftInterruptSource::System,
+        jcode_agent_runtime::SoftInterruptSource::FileActivity,
         queues,
         sessions,
     )

@@ -365,10 +365,11 @@ impl super::App {
 }
 
 /// Parse one entry of the model-facing notice:
-/// `agent path +3-1 [x2] [L4-9] [overlap] [earlier][: intent]`.
+/// `agent edited path +3-1 [x2] [L4-9] [overlap] [earlier][: intent]`.
 fn parse_file_activity_notice_entry(line: &str) -> Option<FileActivityEdit> {
     let (sender, rest) = line.trim().split_once(' ')?;
-    if sender.is_empty() {
+    let (operation, rest) = rest.split_once(' ')?;
+    if sender.is_empty() || !matches!(operation, "edited" | "wrote") {
         return None;
     }
     // The counts are the first ` +A-R` token, so paths may contain spaces.
@@ -389,7 +390,6 @@ fn parse_file_activity_notice_entry(line: &str) -> Option<FileActivityEdit> {
         .find_map(|fact| fact.strip_prefix('x'))
         .and_then(|count| count.parse().ok())
         .unwrap_or(1);
-    let operation = "edited";
     Some(FileActivityEdit {
         sender: compact_swarm_session_label(sender),
         path: path.to_string(),
@@ -403,13 +403,27 @@ fn parse_file_activity_notice_entry(line: &str) -> Option<FileActivityEdit> {
 }
 
 /// Parse a delivered model-facing file-activity notice (one or many entries).
+/// The notice has no prefix. Live deliveries are identified by their
+/// `file_activity` display role in both live delivery and restored history.
 pub(super) fn parse_file_activity_notice(content: &str) -> Option<Vec<FileActivityEdit>> {
-    let rest = content.trim().strip_prefix("⚠ File activity: ")?;
+    let content = content.trim();
+    // Notices delivered before the prefix was dropped.
+    let legacy = content.strip_prefix("⚠ File activity: ");
+    let rest = legacy.unwrap_or(content);
+    let parse_entry = |line: &str| {
+        parse_file_activity_notice_entry(line).or_else(|| {
+            // The earlier dense format omitted the verb, but carried a
+            // prefix. Only try that shape for explicitly prefixed history.
+            legacy?;
+            let (sender, rest) = line.split_once(' ')?;
+            parse_file_activity_notice_entry(&format!("{sender} edited {rest}"))
+        })
+    };
     let mut lines = rest.lines();
     let first = lines.next()?;
-    let mut stack = vec![parse_file_activity_notice_entry(first)?];
+    let mut stack = vec![parse_entry(first)?];
     for line in lines {
-        stack_file_activity_edit(&mut stack, parse_file_activity_notice_entry(line)?);
+        stack_file_activity_edit(&mut stack, parse_entry(line)?);
     }
     Some(stack)
 }
@@ -629,13 +643,22 @@ pub(super) fn swarm_display_full_body(content: &str) -> &str {
     }
 }
 
+pub(super) fn typed_file_activity_display_message(
+    content: &str,
+) -> Option<crate::tui::DisplayMessage> {
+    let stack = parse_file_activity_notice(content)?;
+    Some(file_activity_stack_message(&stack, false))
+}
+
 /// Restore the same compact presentation for model-facing file notices that
 /// older transcripts saved without the structured notification payload.
 pub(super) fn file_activity_delivery_display_message(
     content: &str,
 ) -> Option<crate::tui::DisplayMessage> {
     let trimmed = content.trim();
-    if let Some(stack) = parse_file_activity_notice(trimmed) {
+    if trimmed.starts_with("⚠ File activity: ")
+        && let Some(stack) = parse_file_activity_notice(trimmed)
+    {
         return Some(file_activity_stack_message(&stack, false));
     }
     let rest = trimmed
@@ -675,6 +698,14 @@ pub(super) fn file_activity_delivery_display_message(
 /// original notification card is not available.
 pub(super) fn normalize_swarm_delivery_messages(messages: &mut [crate::tui::DisplayMessage]) {
     for message in messages.iter_mut() {
+        if message.role == "file_activity" {
+            if let Some(stack) = parse_file_activity_notice(&message.content) {
+                *message = file_activity_stack_message(&stack, false);
+            } else {
+                message.role = "system".to_string();
+            }
+            continue;
+        }
         if !matches!(message.role.as_str(), "user" | "system") {
             continue;
         }
@@ -1321,20 +1352,35 @@ mod tests {
 
     #[test]
     fn delivered_model_notice_restores_as_the_same_compact_row() {
-        let single = "⚠ File activity: moss src/parser.rs +3-1 L2-9 overlap: fix parser";
-        let mut messages = vec![crate::tui::DisplayMessage::system(single)];
+        let single = "moss edited src/parser.rs +3-1 L2-9 overlap: fix parser";
+        let mut message = crate::tui::DisplayMessage::system(single);
+        message.role = "file_activity".to_string();
+        let mut messages = vec![message];
         super::normalize_swarm_delivery_messages(&mut messages);
         assert_eq!(messages[0].role, "swarm");
         assert_eq!(messages[0].title.as_deref(), Some("File activity · moss"));
         assert_eq!(collapsed(&messages[0]).0, "+3 -1 · fix parser");
 
-        let batch = "⚠ File activity: moss src/my parser.rs +3-1 x2: fix parser\nfox src/lib.rs +10-0 earlier";
+        let batch =
+            "moss edited src/my parser.rs +3-1 x2: fix parser\nfox wrote src/lib.rs +10-0 earlier";
+        for prose in [
+            "moss edited the parser and it works",
+            "Plan proposal received in swarm s1\nFrom: moss",
+            "moss edited a.rs +3-1\nand then some prose",
+        ] {
+            assert!(
+                super::parse_file_activity_notice(prose).is_none(),
+                "{prose}"
+            );
+        }
         let stack = super::parse_file_activity_notice(batch).expect("batch notice parses");
         assert_eq!(stack.len(), 2);
         assert_eq!(stack[0].edits, 2);
         assert_eq!(stack[1].delta, Some((10, 0)));
         assert_eq!(stack[1].intent, None);
-        let mut messages = vec![crate::tui::DisplayMessage::system(batch)];
+        let mut message = crate::tui::DisplayMessage::system(batch);
+        message.role = "file_activity".to_string();
+        let mut messages = vec![message];
         super::normalize_swarm_delivery_messages(&mut messages);
         assert_eq!(messages[0].title.as_deref(), Some("File activity"));
     }

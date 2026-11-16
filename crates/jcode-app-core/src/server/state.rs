@@ -1038,7 +1038,7 @@ pub(super) async fn queue_soft_interrupt_for_session(
     .await
 }
 
-/// Rewrite a still-queued system notice in place. Returns `false` once the
+/// Rewrite a still-queued file-activity notice in place. Returns `false` once the
 /// notice has been delivered (or was never queued live), so the caller queues
 /// a fresh one instead.
 pub(super) async fn replace_pending_soft_interrupt(
@@ -1054,7 +1054,7 @@ pub(super) async fn replace_pending_soft_interrupt(
         return false;
     };
     match pending.iter_mut().find(|message| {
-        message.source == SoftInterruptSource::System && message.content == previous
+        message.source == SoftInterruptSource::FileActivity && message.content == previous
     }) {
         Some(message) => {
             message.content = content;

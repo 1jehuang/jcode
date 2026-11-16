@@ -3093,12 +3093,14 @@ fn handle_server_event_inner(
                 }
                 // Task chrome does not replace a chronological delivery entry.
                 app.push_display_message(DisplayMessage::background_task(content.clone()));
-            } else if role == "system" && content.starts_with("⚠ File activity: ") {
+            } else if role == "file_activity"
+                || (role == "system" && content.starts_with("⚠ File activity: "))
+            {
                 // The stacked file-activity row already shows these edits.
                 // Add a row only when this client never received them.
                 if app.file_activity_stack.is_none() {
                     let row =
-                        super::super::remote_notifications::file_activity_delivery_display_message(
+                        super::super::remote_notifications::typed_file_activity_display_message(
                             &content,
                         )
                         .unwrap_or_else(|| DisplayMessage::system(content.clone()));
