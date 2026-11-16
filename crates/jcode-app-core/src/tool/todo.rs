@@ -284,8 +284,19 @@ fn record_todo_write_mode(input: &Value) {
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
     *counts.entry(mode.to_string()).or_default() += 1;
-    let _ = std::fs::create_dir_all(&dir);
-    let _ = crate::storage::write_json_fast(&path, &counts);
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        crate::logging::warn(&format!(
+            "Failed to create todo statistics directory {}: {error}",
+            dir.display()
+        ));
+        return;
+    }
+    if let Err(error) = crate::storage::write_json_fast(&path, &counts) {
+        crate::logging::warn(&format!(
+            "Failed to persist todo write statistics {}: {error}",
+            path.display()
+        ));
+    }
 }
 
 /// Every key an update may carry once names and pauses are normalized: the

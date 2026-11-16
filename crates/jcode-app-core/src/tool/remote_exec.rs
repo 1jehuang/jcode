@@ -90,9 +90,14 @@ fn worker_command() -> Option<String> {
     if WORKER_MODE.load(Ordering::Relaxed) {
         return None;
     }
-    std::env::var(WORKER_ENV)
-        .ok()
-        .filter(|command| !command.trim().is_empty())
+    match std::env::var(WORKER_ENV) {
+        Ok(command) => (!command.trim().is_empty()).then_some(command),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => {
+            crate::logging::warn(&format!("Invalid execution worker command: {error}"));
+            None
+        }
+    }
 }
 
 /// Whether this tool call should leave the runtime.
@@ -113,7 +118,9 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 fn fail_all(pending: &Pending, reason: &str) {
     let mut pending = pending.lock().unwrap_or_else(|e| e.into_inner());
     for (_, tx) in pending.drain() {
-        let _ = tx.send(Err(anyhow::anyhow!("{reason}")));
+        if tx.send(Err(anyhow::anyhow!("{reason}"))).is_err() {
+            crate::logging::debug("Execution worker failure receiver already dropped");
+        }
     }
 }
 
@@ -174,22 +181,29 @@ async fn client() -> Result<Arc<Client>> {
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&id);
             if let Some(tx) = tx {
-                let _ = tx.send(match error {
-                    Some(error) => Err(anyhow::anyhow!("{error}")),
-                    None => Ok(ToolOutput {
-                        output,
-                        title,
-                        metadata,
-                        images: images
-                            .into_iter()
-                            .map(|image| ToolImage {
-                                media_type: image.media_type,
-                                data: image.data,
-                                label: image.label,
-                            })
-                            .collect(),
-                    }),
-                });
+                if tx
+                    .send(match error {
+                        Some(error) => Err(anyhow::anyhow!("{error}")),
+                        None => Ok(ToolOutput {
+                            output,
+                            title,
+                            metadata,
+                            images: images
+                                .into_iter()
+                                .map(|image| ToolImage {
+                                    media_type: image.media_type,
+                                    data: image.data,
+                                    label: image.label,
+                                })
+                                .collect(),
+                        }),
+                    })
+                    .is_err()
+                {
+                    crate::logging::debug(&format!(
+                        "Execution result receiver dropped for call {id}"
+                    ));
+                }
             }
         }
         fail_all(&reader_pending, "execution worker disconnected");
@@ -218,7 +232,17 @@ impl Drop for CancelOnDrop {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&self.id);
-            let _ = self.client.frames.send(Frame::Cancel { id: self.id });
+            if self
+                .client
+                .frames
+                .send(Frame::Cancel { id: self.id })
+                .is_err()
+            {
+                crate::logging::debug(&format!(
+                    "Execution worker disconnected before cancel {}",
+                    self.id
+                ));
+            }
         }
     }
 }
@@ -421,7 +445,11 @@ where
                             error: Some(format!("{error:#}")),
                         },
                     };
-                    let _ = results.send(frame);
+                    if results.send(frame).is_err() {
+                        crate::logging::debug(&format!(
+                            "Execution worker output closed for call {id}"
+                        ));
+                    }
                 });
                 running.insert(id, task.abort_handle());
             }
@@ -437,7 +465,9 @@ where
         task.abort();
     }
     drop(results);
-    let _ = write_task.await;
+    write_task
+        .await
+        .map_err(|error| anyhow::anyhow!("Execution worker writer task failed: {error}"))?;
     Ok(())
 }
 

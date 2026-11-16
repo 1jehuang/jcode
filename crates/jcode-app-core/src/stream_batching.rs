@@ -194,7 +194,12 @@ impl BatchingSender {
 
     fn flush_locked(&self, pending: &mut Option<Pending>) {
         if let Some(pending) = pending.take() {
-            let _ = self.tx.send(pending.kind.event(pending.text));
+            if self.tx.send(pending.kind.event(pending.text)).is_err() {
+                crate::logging::info(&format!(
+                    "Stream receiver disconnected for session {}",
+                    self.session_id
+                ));
+            }
         }
     }
 
