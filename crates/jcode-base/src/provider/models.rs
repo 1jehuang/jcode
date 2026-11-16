@@ -59,6 +59,70 @@ struct PersistedModelCatalogScope {
     observed_at_unix_secs: u64,
 }
 
+// Keep field order identical to PersistedModelCatalogScope. Only the refreshed
+// payload is borrowed, avoiding deep copies made solely for serialization.
+#[derive(Serialize)]
+struct BorrowedScope<'a> {
+    models: &'a [String],
+    context_limits: &'a HashMap<String, usize>,
+    reasoning_efforts: &'a HashMap<String, Vec<String>>,
+    service_tiers: &'a HashMap<String, Vec<String>>,
+    observed_at_unix_secs: u64,
+}
+
+struct ScopeOverlay<'a> {
+    scopes: &'a HashMap<String, PersistedModelCatalogScope>,
+    scope: &'a str,
+    replacement: BorrowedScope<'a>,
+}
+
+impl Serialize for ScopeOverlay<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.scopes.len()))?;
+        for (scope, snapshot) in self.scopes {
+            if scope == self.scope {
+                map.serialize_entry(scope, &self.replacement)?;
+            } else {
+                map.serialize_entry(scope, snapshot)?;
+            }
+        }
+        map.end()
+    }
+}
+
+#[derive(Serialize)]
+struct StoreOverlay<'a> {
+    scopes: ScopeOverlay<'a>,
+}
+
+fn borrowed_catalog_store<'a>(
+    store: &'a mut PersistedModelCatalogStore,
+    scope: &'a str,
+    replacement: BorrowedScope<'a>,
+) -> StoreOverlay<'a> {
+    // Insert exactly as the owned path did, preserving HashMap bucket order
+    // even for a new scope. The discarded old payload is no longer needed.
+    // Empty placeholders allocate no model/context/capability collections.
+    store.scopes.insert(
+        scope.to_string(),
+        PersistedModelCatalogScope {
+            models: Vec::new(),
+            context_limits: HashMap::new(),
+            reasoning_efforts: HashMap::new(),
+            service_tiers: HashMap::new(),
+            observed_at_unix_secs: replacement.observed_at_unix_secs,
+        },
+    );
+    StoreOverlay {
+        scopes: ScopeOverlay {
+            scopes: &store.scopes,
+            scope,
+            replacement,
+        },
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn filtered_display_models(models: impl IntoIterator<Item = String>) -> Vec<String> {
     models
@@ -423,7 +487,7 @@ fn load_persisted_model_catalog_store(file_name: &str) -> Option<PersistedModelC
     crate::storage::read_json(&path).ok()
 }
 
-fn save_persisted_model_catalog_store(file_name: &str, store: &PersistedModelCatalogStore) {
+fn save_persisted_model_catalog_store(file_name: &str, store: &(impl Serialize + ?Sized)) {
     let Ok(path) = model_catalog_cache_path(file_name) else {
         return;
     };
@@ -456,17 +520,18 @@ fn persist_scoped_model_catalog(
         .lock()
         .unwrap_or_else(|err| err.into_inner());
     let mut store = load_persisted_model_catalog_store(file_name).unwrap_or_default();
-    store.scopes.insert(
-        scope.to_string(),
-        PersistedModelCatalogScope {
-            models: models.to_vec(),
-            context_limits: context_limits.clone(),
-            reasoning_efforts: reasoning_efforts.clone(),
-            service_tiers: service_tiers.clone(),
+    let view = borrowed_catalog_store(
+        &mut store,
+        scope,
+        BorrowedScope {
+            models,
+            context_limits,
+            reasoning_efforts,
+            service_tiers,
             observed_at_unix_secs: observed_at_unix_secs(observed_at),
         },
     );
-    save_persisted_model_catalog_store(file_name, &store);
+    save_persisted_model_catalog_store(file_name, &view);
 }
 
 fn hydrate_catalog_cache_from_disk(
@@ -1274,6 +1339,148 @@ pub fn provider_for_model(model: &str) -> Option<&'static str> {
 mod catalog_ownership_tests {
     use super::*;
 
+    fn overlay<'a>(
+        store: &'a mut PersistedModelCatalogStore,
+        scope: &'a str,
+        replacement: &'a PersistedModelCatalogScope,
+    ) -> StoreOverlay<'a> {
+        borrowed_catalog_store(
+            store,
+            scope,
+            BorrowedScope {
+                models: &replacement.models,
+                context_limits: &replacement.context_limits,
+                reasoning_efforts: &replacement.reasoning_efforts,
+                service_tiers: &replacement.service_tiers,
+                observed_at_unix_secs: replacement.observed_at_unix_secs,
+            },
+        )
+    }
+
+    fn benchmark_snapshot(count: usize) -> PersistedModelCatalogScope {
+        let mut result = snapshot(Vec::new(), HashMap::new());
+        result.observed_at_unix_secs = 1_795_000_123;
+        for index in 0..count {
+            let model = format!("future-model-{index:05}-long-model-name");
+            result.models.push(model.clone());
+            result.context_limits.insert(model.clone(), 128_000 + index);
+            result
+                .reasoning_efforts
+                .insert(model.clone(), vec!["low".into(), "high".into()]);
+            result.service_tiers.insert(
+                model,
+                if index % 2 == 0 {
+                    vec!["priority".into()]
+                } else {
+                    Vec::new()
+                },
+            );
+        }
+        result
+    }
+
+    #[test]
+    fn borrowed_overlay_matches_legacy_compact_and_pretty_bytes() {
+        for count in [0, 1, 32, 2048] {
+            let replacement = benchmark_snapshot(count);
+            for scope_count in [0, 1, 8] {
+                let store = PersistedModelCatalogStore {
+                    scopes: (0..scope_count)
+                        .map(|index| (format!("account::{index}"), benchmark_snapshot(3)))
+                        .collect(),
+                };
+                for scope in ["account::0", "api-key::new-endpoint"] {
+                    let mut legacy = store.clone();
+                    legacy.scopes.insert(scope.to_string(), replacement.clone());
+                    let mut candidate = store.clone();
+                    let view = overlay(&mut candidate, scope, &replacement);
+                    assert_eq!(
+                        serde_json::to_vec(&view).unwrap(),
+                        serde_json::to_vec(&legacy).unwrap()
+                    );
+                    assert_eq!(
+                        serde_json::to_vec_pretty(&view).unwrap(),
+                        serde_json::to_vec_pretty(&legacy).unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn thread_cpu_ns() -> u64 {
+        let mut time = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: clock_gettime writes only the valid timespec pointed to here.
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) },
+            0
+        );
+        time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64
+    }
+
+    #[test]
+    #[ignore = "release-only CPU experiment, run explicitly with --release --ignored --nocapture"]
+    #[cfg(target_os = "linux")]
+    fn scoped_writer_release_cpu_comparison() {
+        assert!(!cfg!(debug_assertions), "run with --release");
+        use std::hint::black_box;
+        for (name, models, scopes, batch) in [
+            ("tiny", 1, 1, 4096),
+            ("small", 32, 4, 512),
+            ("large", 2048, 8, 8),
+        ] {
+            let replacement = benchmark_snapshot(models);
+            let fixture = PersistedModelCatalogStore {
+                scopes: (0..scopes)
+                    .map(|index| (format!("account::{index}"), benchmark_snapshot(models)))
+                    .collect(),
+            };
+            for scope in ["account::0", "api-key::new-endpoint"] {
+                let mut legacy_times = Vec::new();
+                let mut overlay_times = Vec::new();
+                for round in 0..9 {
+                    for candidate in if round % 2 == 0 {
+                        [false, true]
+                    } else {
+                        [true, false]
+                    } {
+                        // Parsing is identical for both paths. Prepare equally owned stores
+                        // outside timing to isolate update + serialization + destruction CPU.
+                        let stores: Vec<_> = (0..batch).map(|_| fixture.clone()).collect();
+                        let start = thread_cpu_ns();
+                        for mut store in stores {
+                            if candidate {
+                                let view = overlay(&mut store, scope, &replacement);
+                                black_box(serde_json::to_vec(&view).unwrap());
+                            } else {
+                                store.scopes.insert(scope.to_string(), replacement.clone());
+                                black_box(serde_json::to_vec(&store).unwrap());
+                            }
+                            black_box(store);
+                        }
+                        let elapsed = (thread_cpu_ns() - start) / batch;
+                        if candidate {
+                            overlay_times.push(elapsed);
+                        } else {
+                            legacy_times.push(elapsed);
+                        }
+                    }
+                }
+                legacy_times.sort_unstable();
+                overlay_times.sort_unstable();
+                println!(
+                    "{name} scope={scope} legacy_ns={} overlay_ns={} ratio={:.4} legacy_samples={legacy_times:?} overlay_samples={overlay_times:?}",
+                    legacy_times[4],
+                    overlay_times[4],
+                    overlay_times[4] as f64 / legacy_times[4] as f64
+                );
+            }
+        }
+    }
+
     struct CatalogTestHome {
         previous: Option<std::ffi::OsString>,
         _temp: tempfile::TempDir,
@@ -1302,6 +1509,63 @@ mod catalog_ownership_tests {
                 crate::env::remove_var("JCODE_HOME");
             }
         }
+    }
+
+    #[test]
+    fn borrowed_persistence_preserves_empty_timestamp_and_concurrent_scopes() {
+        let _home = CatalogTestHome::new();
+        let file_name = "borrowed-catalog-persistence.json";
+        let path = model_catalog_cache_path(file_name).unwrap();
+        let replacement = benchmark_snapshot(3);
+        let persist = |scope: &str, models: &[String]| {
+            persist_scoped_model_catalog(
+                file_name,
+                scope,
+                models,
+                &replacement.context_limits,
+                &replacement.reasoning_efforts,
+                &replacement.service_tiers,
+                system_time_from_unix_secs(replacement.observed_at_unix_secs),
+            );
+        };
+        persist("empty", &[]);
+        assert!(!path.exists(), "empty input must not create a cache");
+        persist("oauth::account", &replacement.models);
+        persist("api-key::endpoint", &replacement.models);
+        let before = std::fs::read(&path).unwrap();
+        persist("oauth::account", &[]);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        std::thread::scope(|threads| {
+            for index in 0..8 {
+                let persist = &persist;
+                let models = &replacement.models;
+                threads.spawn(move || persist(&format!("concurrent::{index}"), models));
+            }
+        });
+        let store = load_persisted_model_catalog_store(file_name).unwrap();
+        assert_eq!(
+            store.scopes.len(),
+            10,
+            "serialized read-modify-write must retain every scope"
+        );
+        let expected = serde_json::to_value(&replacement).unwrap();
+        for snapshot in store.scopes.values() {
+            assert_eq!(serde_json::to_value(snapshot).unwrap(), expected);
+        }
+
+        let updated = vec!["updated-model".to_string()];
+        persist("oauth::account", &updated);
+        let store = load_persisted_model_catalog_store(file_name).unwrap();
+        assert_eq!(store.scopes["oauth::account"].models, updated);
+        assert_eq!(
+            serde_json::to_value(&store.scopes["api-key::endpoint"]).unwrap(),
+            expected
+        );
+        assert_eq!(
+            store.scopes["oauth::account"].observed_at_unix_secs,
+            replacement.observed_at_unix_secs
+        );
     }
 
     #[test]
