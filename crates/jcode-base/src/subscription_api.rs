@@ -725,6 +725,16 @@ pub async fn fetch_billing_with(
         .map_err(|_| AccountApiError::InvalidResponse("malformed /v1/billing JSON"))
 }
 
+#[derive(Serialize)]
+struct MonthlyHardCapRequest {
+    monthly_hard_cap_cents: u64,
+}
+
+#[derive(Serialize)]
+struct PlanRequest {
+    plan_usd: u64,
+}
+
 /// Set the monthly spending hard cap, in whole cents. Returns the new state.
 pub async fn set_monthly_hard_cap_with(
     client: &reqwest::Client,
@@ -735,7 +745,9 @@ pub async fn set_monthly_hard_cap_with(
     let response = client
         .put(endpoint_url(api_base, "billing/hard-cap"))
         .bearer_auth(api_key)
-        .json(&serde_json::json!({ "monthly_hard_cap_cents": cents }))
+        .json(&MonthlyHardCapRequest {
+            monthly_hard_cap_cents: cents,
+        })
         .timeout(ME_FETCH_TIMEOUT)
         .send()
         .await
@@ -785,7 +797,7 @@ pub async fn start_subscription_checkout_with(
     let response = client
         .post(endpoint_url(api_base, "billing/subscribe"))
         .bearer_auth(api_key)
-        .json(&serde_json::json!({ "plan_usd": plan_usd }))
+        .json(&PlanRequest { plan_usd })
         .timeout(DEVICE_REQUEST_TIMEOUT)
         .send()
         .await
@@ -823,7 +835,7 @@ pub async fn change_plan_with(
     let response = client
         .post(endpoint_url(api_base, "billing/plan"))
         .bearer_auth(api_key)
-        .json(&serde_json::json!({ "plan_usd": plan_usd }))
+        .json(&PlanRequest { plan_usd })
         .timeout(DEVICE_REQUEST_TIMEOUT)
         .send()
         .await
@@ -942,6 +954,55 @@ impl PollingBackoff {
 
     pub fn on_successful_poll(&mut self) {
         self.delay = self.base;
+    }
+}
+
+#[cfg(test)]
+mod scalar_payload_tests {
+    use super::*;
+
+    #[test]
+    fn account_scalar_payloads_match_exact_legacy_wire() {
+        let client = reqwest::Client::new();
+        for value in [0, 1, u64::MAX] {
+            let cap = MonthlyHardCapRequest {
+                monthly_hard_cap_cents: value,
+            };
+            let plan = PlanRequest { plan_usd: value };
+            let cap_bytes = serde_json::to_vec(&serde_json::json!({
+                "monthly_hard_cap_cents": value
+            }))
+            .unwrap();
+            let plan_bytes = serde_json::to_vec(&serde_json::json!({ "plan_usd": value })).unwrap();
+            assert_eq!(serde_json::to_vec(&cap).unwrap(), cap_bytes);
+            assert_eq!(serde_json::to_vec(&plan).unwrap(), plan_bytes);
+
+            // Build only, never send: verify reqwest retains the exact wire body.
+            for (path, body, expected) in [
+                (
+                    "billing/hard-cap",
+                    client.put("https://example.invalid").json(&cap),
+                    &cap_bytes,
+                ),
+                (
+                    "billing/subscribe",
+                    client.post("https://example.invalid").json(&plan),
+                    &plan_bytes,
+                ),
+                (
+                    "billing/plan",
+                    client.post("https://example.invalid").json(&plan),
+                    &plan_bytes,
+                ),
+            ] {
+                let request = body.build().unwrap();
+                assert_eq!(
+                    request.body().unwrap().as_bytes().unwrap(),
+                    expected,
+                    "{path}"
+                );
+            }
+        }
     }
 }
 
