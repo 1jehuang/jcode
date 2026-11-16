@@ -832,6 +832,50 @@ async fn dispatch_compacted_history_load(app: &mut App, remote: &mut RemoteConne
 #[path = "remote_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[test]
+fn borrowed_remote_status_fields_match_legacy_and_retain_sources() {
+    for value in [None, Some(String::new()), Some("fixture 🦀".to_string())] {
+        let mut provider_name = value.clone();
+        let mut connection_type = value.clone();
+        let mut remote_transport = value.clone();
+        let mut server_version = value;
+        let legacy = serde_json::json!({
+            "provider_name": provider_name.clone(),
+            "connection_type": connection_type.clone(),
+            "remote_transport": remote_transport.clone(),
+            "server_version": server_version.clone(),
+        });
+        let evidence = serde_json::json!({
+            "provider_name": provider_name,
+            "connection_type": connection_type,
+            "remote_transport": remote_transport,
+            "server_version": server_version,
+        });
+        assert_eq!(evidence, legacy);
+        assert_eq!(evidence.to_string(), legacy.to_string());
+        assert_eq!(provider_name.as_deref(), legacy["provider_name"].as_str());
+        assert_eq!(
+            connection_type.as_deref(),
+            legacy["connection_type"].as_str()
+        );
+        assert_eq!(
+            remote_transport.as_deref(),
+            legacy["remote_transport"].as_str()
+        );
+        assert_eq!(server_version.as_deref(), legacy["server_version"].as_str());
+        for source in [
+            &mut provider_name,
+            &mut connection_type,
+            &mut remote_transport,
+            &mut server_version,
+        ] {
+            *source = Some("changed after serialization".to_string());
+        }
+        assert_eq!(evidence, legacy);
+    }
+}
+
 pub(super) async fn handle_bus_event(
     app: &mut App,
     remote: &mut RemoteConnection,
@@ -2175,10 +2219,10 @@ async fn handle_debug_command(app: &mut App, cmd: &str, remote: &mut RemoteConne
             "scroll_offset": app.scroll_offset,
             "queued_messages": app.queued_messages.len(),
             "provider_session_id": app.provider_session_id,
-            "provider_name": app.remote_provider_name.clone(),
+            "provider_name": app.remote_provider_name,
             "model": app.remote_provider_model.as_deref().unwrap_or(app.provider.name()),
-            "connection_type": app.connection_type.clone(),
-            "remote_transport": app.remote_transport.clone(),
+            "connection_type": app.connection_type,
+            "remote_transport": app.remote_transport,
             "diagram_mode": format!("{:?}", app.diagram_mode),
             "diagram_focus": app.diagram_focus,
             "diagram_index": app.diagram_index,
@@ -2189,7 +2233,7 @@ async fn handle_debug_command(app: &mut App, cmd: &str, remote: &mut RemoteConne
             "diagram_zoom": app.diagram_zoom,
             "diagram_count": crate::tui::mermaid::get_active_diagrams().len(),
             "remote": true,
-            "server_version": app.remote_server_version.clone(),
+            "server_version": app.remote_server_version,
             "server_has_update": app.remote_server_has_update,
             "version": jcode_build_meta::version(),
             "diagram_mode": format!("{:?}", app.diagram_mode),
