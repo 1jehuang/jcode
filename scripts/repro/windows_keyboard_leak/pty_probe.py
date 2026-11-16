@@ -1,0 +1,312 @@
+"""Observability-first repro for the Windows keyboard-protocol leak (#224).
+
+Plays the role of a *stale kitty-capable terminal*: it spawns a real jcode
+binary inside a real ConPTY, watches the app's output, and then delivers
+keystrokes the way a terminal whose progressive-enhancement flags were already
+armed would deliver them, i.e. kitty CSI-u reports (`\\x1b[119;1:3u`) instead of
+plain characters. That is exactly the input the console decoder cannot consume
+and the input the decoder-side scrub is meant to strip.
+
+Every run writes its own artifacts, so a red run is diagnosable without a
+re-run:
+
+    <run-dir>/pty-stream.txt     decoded PTY output (what the app painted)
+    <run-dir>/screen/*.txt       pyte VT screen snapshots at each checkpoint
+    <run-dir>/app-log.txt        the isolated home's logs, concatenated
+    <run-dir>/fixture.sha256     hash of the session copy this run resumed
+    <run-dir>/result.json        checks, timings, verdict
+
+A run is green only when every check passes. `--dump-only` is a pilot mode that
+prints the settled screen and exits, used to keep the readiness logic honest.
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
+import hashlib
+import json
+import os
+import shutil
+import sys
+import threading
+import time
+from pathlib import Path
+
+import pyte
+from winpty import PtyProcess
+
+DEFAULT_BINARY = r"C:\Users\koosh\AppData\Local\jcode\bin\jcode.exe"
+
+# The exact report shape observed leaking into the composer on Windows.
+# 119 = 'w', 1 = no modifiers, 3 = key-release event type.
+LEAK = "\x1b[119;1:3u"
+LEAK_TEXT = "119;1:3"
+POSITIVE = "zzqx"
+
+# Timing contract of the scrub: a real leaked report arrives as one contiguous
+# burst, and the scrub refuses fragments whose characters are more than 750ms
+# apart. The harness types fast enough to be inside that contract and records
+# the observed gap so a slow-machine red is distinguishable from a real red.
+MAX_INTERCHAR_GAP_MS = 750.0
+
+
+class Capture:
+    """Decoded PTY stream plus a live VT screen."""
+
+    def __init__(self, rows: int = 40, cols: int = 120) -> None:
+        self.chunks: list[str] = []
+        self.lock = threading.Lock()
+        self.alive = True
+        self.last_output_at = 0.0
+        self.saw_output = False
+        self.vt = pyte.Screen(cols, rows)
+        self.stream = pyte.Stream(self.vt)
+
+    def pump(self, proc: PtyProcess) -> None:
+        while self.alive:
+            try:
+                chunk = proc.read(4096)
+            except EOFError:
+                break
+            except Exception:
+                break
+            if not chunk:
+                time.sleep(0.01)
+                continue
+            now = time.monotonic()
+            with self.lock:
+                self.chunks.append(chunk)
+                self.last_output_at = now
+                self.saw_output = True
+                try:
+                    self.stream.feed(chunk)
+                except Exception:
+                    pass
+
+    def text(self) -> str:
+        with self.lock:
+            return "".join(self.chunks)
+
+    def screen(self) -> str:
+        with self.lock:
+            return "\n".join(self.vt.display)
+
+    def wait_quiescent(self, quiet_s: float, timeout_s: float) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            with self.lock:
+                quiet = self.saw_output and (time.monotonic() - self.last_output_at) >= quiet_s
+            if quiet:
+                return True
+            time.sleep(0.05)
+        return False
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def prepare_run(run_dir: Path, fixture: Path) -> tuple[Path, Path]:
+    """Fresh, byte-identical world for this run."""
+    home = run_dir / "home"
+    sessions = home / "sessions"
+    cwd = run_dir / "cwd"
+    for path in (sessions, cwd):
+        path.mkdir(parents=True, exist_ok=True)
+    target = sessions / fixture.name
+    shutil.copyfile(fixture, target)
+    os.chmod(target, 0o644)
+    return home, cwd
+
+
+def collect_log(home: Path, out: Path) -> str:
+    parts: list[str] = []
+    for name in sorted(glob.glob(str(home / "logs" / "**" / "*"), recursive=True)):
+        path = Path(name)
+        if not path.is_file():
+            continue
+        try:
+            parts.append(f"### {path}\n" + path.read_text(encoding="utf-8", errors="replace"))
+        except Exception as exc:  # keep going; a missing log is evidence too
+            parts.append(f"### {path}\n<unreadable: {exc}>\n")
+    text = "\n".join(parts)
+    out.write_text(text, encoding="utf-8")
+    return text
+
+
+def main() -> int:
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--binary", default=DEFAULT_BINARY)
+    ap.add_argument("--label", default="unlabelled")
+    ap.add_argument("--run-dir", required=True)
+    ap.add_argument("--fixture", required=True)
+    ap.add_argument("--gap-ms", type=float, default=15.0)
+    ap.add_argument("--inject-mode", choices=["atomic", "chars"], default="atomic",
+                    help="atomic = one write of the whole report, like a terminal; "
+                         "chars = one byte at a time, kept for comparison")
+    ap.add_argument("--resume-arg", default="mosquito")
+    ap.add_argument("--rows", type=int, default=40)
+    ap.add_argument("--cols", type=int, default=120)
+    ap.add_argument("--ready-timeout", type=float, default=60.0)
+    ap.add_argument("--quiet-s", type=float, default=0.9)
+    ap.add_argument("--settle-s", type=float, default=2.5)
+    ap.add_argument("--dump-only", type=float, default=0.0)
+    ap.add_argument("--expect-bug", action="store_true",
+                    help="negative control: the leak MUST reach the screen")
+    args = ap.parse_args()
+
+    run_dir = Path(args.run_dir).resolve()
+    run_dir.mkdir(parents=True, exist_ok=True)
+    fixture = Path(args.fixture).resolve()
+    home, cwd = prepare_run(run_dir, fixture)
+    fixture_hash = sha256_file(home / "sessions" / fixture.name)
+    (run_dir / "fixture.sha256").write_text(
+        f"{fixture_hash}  {fixture.name}\n", encoding="utf-8")
+
+    env = dict(os.environ)
+    env.update({
+        "JCODE_HOME": str(home),
+        "KCODE_HOME": str(home),
+        "TERM": "xterm-256color",
+        "COLORTERM": "truecolor",
+        "JCODE_NO_UPDATE": "1",
+    })
+    for leaky in ("JCODE_SESSION_ID", "JCODE_SERVER", "JCODE_SOCKET"):
+        env.pop(leaky, None)
+
+    argv = [args.binary, "--no-update", "--socket", str(home / "iso.sock"),
+            "-C", str(cwd), "--resume", args.resume_arg]
+
+    result: dict = {
+        "label": args.label,
+        "binary": args.binary,
+        "argv": argv[1:],
+        "fixture": fixture.name,
+        "fixture_sha256": fixture_hash,
+        "gap_ms_target": args.gap_ms,
+        "inject_mode": args.inject_mode,
+        "checks": {},
+        "notes": [],
+    }
+
+    proc = PtyProcess.spawn(argv, env=env, dimensions=(args.rows, args.cols))
+    cap = Capture(args.rows, args.cols)
+    threading.Thread(target=cap.pump, args=(proc,), daemon=True).start()
+
+    screens = run_dir / "screen"
+    screens.mkdir(exist_ok=True)
+
+    def snapshot(name: str) -> str:
+        text = cap.screen()
+        (screens / f"{name}.txt").write_text(text, encoding="utf-8")
+        return text
+
+    try:
+        if args.dump_only:
+            time.sleep(args.dump_only)
+            snap = snapshot("pilot")
+            print(snap)
+            print("=== alive:", proc.isalive())
+            return 0
+
+        settled = cap.wait_quiescent(args.quiet_s, args.ready_timeout)
+        result["ready_quiescent"] = settled
+        result["ready_alive"] = bool(proc.isalive())
+        before = snapshot("01-resumed")
+        if not settled or not proc.isalive():
+            result["checks"]["session_loaded"] = False
+            result["notes"].append("terminal never settled with the session up")
+        else:
+            result["checks"]["session_loaded"] = True
+
+        # Deliver the leaked report the way a terminal really emits one: a
+        # single write of the whole CSI-u report. `chars` splits it per byte and
+        # is kept only for comparison, because a lone ESC byte is not something
+        # a terminal ever sends on its own.
+        gaps: list[float] = []
+        last = time.monotonic()
+        if args.inject_mode == "atomic":
+            proc.write(LEAK)
+            gaps.append((time.monotonic() - last) * 1000.0)
+        else:
+            for char in LEAK:
+                if not proc.isalive():
+                    break
+                proc.write(char)
+                now = time.monotonic()
+                gaps.append((now - last) * 1000.0)
+                last = now
+                time.sleep(args.gap_ms / 1000.0)
+        result["gaps_ms"] = [round(g, 1) for g in gaps]
+        result["gap_max_ms"] = round(max(gaps), 1) if gaps else None
+        time.sleep(args.settle_s)
+        after_leak = snapshot("02-after-leak")
+        if not proc.isalive():
+            result["notes"].append("terminal exited while injecting the report")
+
+        result["checks"]["injection_within_burst_window"] = (
+            bool(gaps) and max(gaps) < MAX_INTERCHAR_GAP_MS)
+
+        # Positive control: ordinary typing must still reach the composer, so a
+        # clean screen is evidence of stripping and not of a dead input path.
+        for ch in POSITIVE:
+            if not proc.isalive():
+                break
+            proc.write(ch)
+            time.sleep(args.gap_ms / 1000.0)
+        time.sleep(args.settle_s)
+        after_positive = snapshot("03-after-positive")
+
+        stream = cap.text()
+        (run_dir / "pty-stream.txt").write_text(stream, encoding="utf-8")
+        log_text = collect_log(home, run_dir / "app-log.txt")
+
+        result["checks"]["leak_absent_after_injection"] = LEAK_TEXT not in after_leak
+        result["checks"]["leak_absent_at_end"] = LEAK_TEXT not in after_positive
+        result["checks"]["positive_control_present"] = POSITIVE in after_positive
+        result["checks"]["log_skipped_kitty_reporting"] = (
+            "kitty keyboard reporting is incompatible with the Windows console input decoder"
+            in log_text)
+        result["checks"]["scrub_logged_report_as_text"] = (
+            f'Stripped a keyboard-protocol report that arrived as text: "[{LEAK_TEXT}u"' in log_text)
+        result["checks"]["stream_emits_stack_neutral_clear"] = "\x1b[=0u" in stream
+        result["checks"]["stream_decoded_losslessly"] = "\ufffd" not in stream
+
+        result["screen_head"] = after_positive[:800]
+        result["pty_closed_early"] = not proc.isalive()
+    finally:
+        cap.alive = False
+        try:
+            proc.terminate(force=True)
+        except Exception:
+            pass
+
+    checks = result["checks"]
+    if args.expect_bug:
+        # Negative control: the harness must be able to SEE the bug. Green here
+        # means "the leak was reproduced", which is what makes the fixed run's
+        # clean screen meaningful.
+        ok = (not checks.get("leak_absent_after_injection", True)) and checks.get(
+            "positive_control_present", False)
+        result["verdict"] = "BUG_REPRODUCED" if ok else "HARNESS_BLIND"
+    else:
+        ok = all(checks.values())
+        result["verdict"] = "GREEN" if ok else "RED"
+
+    (run_dir / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    print(json.dumps({k: result[k] for k in ("label", "verdict", "checks", "gap_max_ms")}, indent=2))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
