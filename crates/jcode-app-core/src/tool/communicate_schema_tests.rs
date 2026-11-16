@@ -98,16 +98,7 @@ fn spawning_actions_cannot_bypass_worker_model_policy() {
         swarm_model_allowlist: vec!["claude:claude-opus-4-8".to_string()],
         ..Default::default()
     };
-    for action in [
-        "spawn",
-        "assign_task",
-        "assign_next",
-        "fill_slots",
-        "run_plan",
-        "launch",
-        "retry",
-        "resume",
-    ] {
+    for action in ["spawn", "assign_task", "assign_next", "retry", "resume"] {
         let input: CommunicateInput = serde_json::from_value(json!({
             "action": action, "model": "claude:claude-opus-4-8"
         }))
@@ -168,14 +159,9 @@ fn schema_requires_a_nonblank_label_for_spawn() {
     );
     assert!(schema["properties"]["action"].get("description").is_none());
 
-    let branches = schema["anyOf"]
-        .as_array()
-        .expect("swarm schema should declare action-specific branches");
-    let spawn_branch = branches
-        .iter()
-        .find(|branch| branch["properties"]["action"]["enum"] == json!(["spawn"]))
-        .expect("spawn schema branch");
-    assert_eq!(spawn_branch["required"], json!(["action", "label"]));
+    // Spawn's conditional requirement is enforced by required_spawn_label,
+    // not by paying for a repeated action enum in root combiners.
+    assert!(schema.get("anyOf").is_none());
     let prompt_description = schema["properties"]["prompt"]["description"]
         .as_str()
         .expect("prompt description");
@@ -187,38 +173,27 @@ fn schema_requires_a_nonblank_label_for_spawn() {
             .expect("label description")
             .contains("source of truth")
     );
-
-    let non_spawn_branch = branches
-        .iter()
-        .find(|branch| {
-            branch["properties"]["action"]["enum"]
-                .as_array()
-                .is_some_and(|actions| !actions.contains(&json!("spawn")))
-        })
-        .expect("non-spawn schema branch");
-    assert_eq!(non_spawn_branch["required"], json!(["action"]));
 }
 
 #[test]
-fn schema_branches_only_require_properties_they_declare() {
-    // Gemini rejects the entire request when a `required` entry names a property
-    // the same object does not define, which made every tool-enabled Gemini call
-    // fail on this tool's spawn branch (issue #655).
+fn schema_advertises_only_canonical_spawn_and_target_fields() {
     let schema = CommunicateTool::new().parameters_schema();
-    for branch in schema["anyOf"].as_array().expect("schema branches") {
-        let declared = branch["properties"]
-            .as_object()
-            .expect("branch properties")
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        for required in branch["required"].as_array().expect("branch required") {
-            let name = required.as_str().expect("required name");
-            assert!(
-                declared.iter().any(|known| known == name),
-                "branch requires '{name}' without declaring it: {branch}"
-            );
-        }
+    let props = schema["properties"].as_object().unwrap();
+    for canonical in ["to_session", "prompt"] {
+        assert!(props.contains_key(canonical), "{canonical}");
+    }
+    for alias in ["target_session", "initial_message"] {
+        assert!(!props.contains_key(alias), "advertised alias {alias}");
+    }
+    let gemini =
+        jcode_schema_dialect::dialect::apply(&schema, &jcode_schema_dialect::registry::GEMINI);
+    let errors = jcode_schema_dialect::must_not_contain_unsupported_constructs(
+        &gemini,
+        &jcode_schema_dialect::registry::GEMINI,
+    );
+    assert!(errors.is_empty(), "{errors:?}");
+    for required in schema["required"].as_array().unwrap() {
+        assert!(props.contains_key(required.as_str().unwrap()));
     }
 }
 
@@ -312,13 +287,7 @@ fn existing_tool_keeps_prompt_while_new_tool_loads_edit() {
 
 #[test]
 fn spawning_action_inputs_preserve_requested_model() {
-    for action in [
-        "spawn",
-        "assign_task",
-        "assign_next",
-        "fill_slots",
-        "run_plan",
-    ] {
+    for action in ["spawn", "assign_task", "assign_next"] {
         for model in [
             "z-ai/glm-5.2:free",
             "openai-api:gpt-5.5",
@@ -339,13 +308,7 @@ fn spawning_action_inputs_preserve_requested_model() {
 
 #[test]
 fn spawning_action_inputs_allow_omitted_or_null_model() {
-    for action in [
-        "spawn",
-        "assign_task",
-        "assign_next",
-        "fill_slots",
-        "run_plan",
-    ] {
+    for action in ["spawn", "assign_task", "assign_next"] {
         let without_model: CommunicateInput =
             serde_json::from_value(json!({"action": action, "label": "reviewer"})).unwrap();
         assert!(without_model.model.is_none());
@@ -438,7 +401,6 @@ fn schema_advertises_a_lean_lane_first_action_set() {
         .filter_map(|a| a.as_str())
         .collect();
     for kept in [
-        "launch",
         "spawn",
         "message",
         "status",
@@ -463,6 +425,7 @@ fn schema_advertises_a_lean_lane_first_action_set() {
         "reject_plan",
         "assign_task",
         "assign_next",
+        "launch",
         "fill_slots",
         "run_plan",
         "resync_plan",
@@ -482,21 +445,19 @@ fn schema_advertises_a_lean_lane_first_action_set() {
     for kept in [
         "message",
         "to_session",
-        "target_session",
         "channel",
         "label",
         "phase",
         "prompt",
         "session_ids",
-        "background",
-        "concurrency_limit",
-        "retain_agents",
         "delivery",
         "wake",
     ] {
         assert!(props.contains_key(kept), "{kept} param should be offered");
     }
     for dropped in [
+        "target_session",
+        "initial_message",
         "status",
         "validation",
         "follow_up",

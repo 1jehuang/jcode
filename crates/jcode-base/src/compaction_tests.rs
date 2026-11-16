@@ -47,7 +47,8 @@ fn make_text_message(role: Role, text: &str) -> Message {
         content: vec![ContentBlock::Text {
             text: text.to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }
@@ -559,7 +560,8 @@ fn test_safe_cutoff_preserves_tool_pairs() {
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -569,7 +571,8 @@ fn test_safe_cutoff_preserves_tool_pairs() {
                 tool_use_id: "tool_1".to_string(),
                 content: "file1.txt\nfile2.txt".to_string(),
                 is_error: Some(false),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -610,7 +613,8 @@ fn test_safe_cutoff_handles_chained_tool_dependencies_without_rescan() {
                 name: "read".to_string(),
                 input: serde_json::json!({"file": "a.txt"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -629,7 +633,8 @@ fn test_safe_cutoff_handles_chained_tool_dependencies_without_rescan() {
                     input: serde_json::json!({"pattern": "foo"}),
                     thought_signature: None,
                 },
-            ],
+            ]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -639,7 +644,8 @@ fn test_safe_cutoff_handles_chained_tool_dependencies_without_rescan() {
                 tool_use_id: "tool_b".to_string(),
                 content: "foo".to_string(),
                 is_error: Some(false),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -668,7 +674,8 @@ fn test_emergency_truncate_large_tool_results() {
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "cat bigfile"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -678,7 +685,8 @@ fn test_emergency_truncate_large_tool_results() {
                 tool_use_id: "tool_1".to_string(),
                 content: big_result.clone(),
                 is_error: Some(false),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -715,7 +723,8 @@ fn test_emergency_truncate_skips_small_results() {
             tool_use_id: "tool_1".to_string(),
             content: "small output".to_string(),
             is_error: Some(false),
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -981,6 +990,133 @@ fn test_persisted_state_round_trip_preserves_compacted_view() {
     }
 }
 
+#[test]
+fn persisted_state_restore_and_exports_share_encrypted_body() {
+    let body: Arc<str> = "encrypted-body-".repeat(128 * 1024).into();
+    let state = crate::session::StoredCompactionState {
+        summary_text: "summary".into(),
+        openai_encrypted_content: Some(body.clone()),
+        covers_up_to_turn: 3,
+        original_turn_count: 7,
+        compacted_count: 2,
+    };
+    let before = serde_json::to_vec(&state).unwrap();
+    let mut manager = CompactionManager::new();
+    manager.restore_persisted_state(&state, 10);
+    assert!(Arc::ptr_eq(
+        &body,
+        manager
+            .active_summary
+            .as_ref()
+            .unwrap()
+            .openai_encrypted_content
+            .as_ref()
+            .unwrap()
+    ));
+    let mut exported = manager.persisted_state().unwrap();
+    let second_export = manager.persisted_state().unwrap();
+    assert!(Arc::ptr_eq(
+        &body,
+        exported.openai_encrypted_content.as_ref().unwrap()
+    ));
+    assert!(Arc::ptr_eq(
+        &body,
+        second_export.openai_encrypted_content.as_ref().unwrap()
+    ));
+    assert_eq!(serde_json::to_vec(&exported).unwrap(), before);
+    exported.summary_text.push_str(" changed");
+    assert!(Arc::ptr_eq(
+        &body,
+        exported.openai_encrypted_content.as_ref().unwrap()
+    ));
+    exported.openai_encrypted_content = None;
+    assert!(manager.persisted_state_matches(Some(&state)));
+    assert_eq!(
+        serde_json::to_vec(&manager.persisted_state().unwrap()).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn test_persisted_state_matches_is_exact_for_every_field_and_absence() {
+    let mut manager = CompactionManager::new();
+    assert!(manager.persisted_state_matches(None));
+    let state = crate::session::StoredCompactionState {
+        summary_text: "summary".into(),
+        openai_encrypted_content: Some("encrypted".repeat(128 * 1024).into()),
+        covers_up_to_turn: 3,
+        original_turn_count: 7,
+        compacted_count: 2,
+    };
+    assert!(!manager.persisted_state_matches(Some(&state)));
+    manager.restore_persisted_state(&state, 10);
+    assert!(!manager.persisted_state_matches(None));
+    assert!(manager.persisted_state_matches(Some(&state)));
+    let mut variants = vec![state.clone(); 6];
+    variants[0].summary_text.push('!');
+    variants[1].openai_encrypted_content = Some(
+        format!(
+            "{}!",
+            variants[1].openai_encrypted_content.as_ref().unwrap()
+        )
+        .into(),
+    );
+    variants[2].openai_encrypted_content = None;
+    variants[3].covers_up_to_turn += 1;
+    variants[4].original_turn_count += 1;
+    variants[5].compacted_count += 1;
+    for candidate in variants.iter().chain(std::iter::once(&state)) {
+        assert_eq!(
+            manager.persisted_state_matches(Some(candidate)),
+            manager.persisted_state().as_ref() == Some(candidate),
+        );
+    }
+    // Restoration may clamp the compacted count. Compare the exported view,
+    // not the original input or just the summary text.
+    manager.restore_persisted_state(&state, 1);
+    assert!(!manager.persisted_state_matches(Some(&state)));
+    assert!(manager.persisted_state_matches(manager.persisted_state().as_ref()));
+    let mut text_only = state;
+    text_only.openai_encrypted_content = None;
+    manager.restore_persisted_state(&text_only, 10);
+    assert!(manager.persisted_state_matches(Some(&text_only)));
+}
+
+#[test]
+#[ignore = "optional large-payload comparison timing probe, not RSS"]
+fn persisted_state_comparison_probe() {
+    let state = crate::session::StoredCompactionState {
+        summary_text: "summary".into(),
+        openai_encrypted_content: Some("encrypted".repeat(1024 * 1024).into()),
+        covers_up_to_turn: 3,
+        original_turn_count: 7,
+        compacted_count: 2,
+    };
+    let mut manager = CompactionManager::new();
+    manager.restore_persisted_state(&state, 10);
+    let iterations = 128;
+    let start = std::time::Instant::now();
+    for _ in 0..iterations {
+        assert_eq!(
+            std::hint::black_box(manager.persisted_state()).as_ref(),
+            Some(&state)
+        );
+    }
+    let owned_us = start.elapsed().as_micros();
+    let start = std::time::Instant::now();
+    for _ in 0..iterations {
+        assert!(manager.persisted_state_matches(Some(std::hint::black_box(&state))));
+    }
+    let borrowed_us = start.elapsed().as_micros();
+    eprintln!(
+        "payload_bytes={} comparisons={} owned_export_us={} borrowed_exact_us={}",
+        state.openai_encrypted_content.as_ref().unwrap().len(),
+        iterations,
+        owned_us,
+        borrowed_us
+    );
+}
+
 // ── context_usage accuracy ──────────────────────────────────────
 
 #[test]
@@ -1096,7 +1232,8 @@ fn test_recover_within_budget_truncates_when_tail_still_too_large() {
                 name: "bash".to_string(),
                 input: serde_json::json!({ "command": "cat big.log" }),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         });
@@ -1107,7 +1244,8 @@ fn test_recover_within_budget_truncates_when_tail_still_too_large() {
                 tool_use_id: id,
                 content: format!("huge {} {}", i, "y".repeat(20_000)),
                 is_error: Some(false),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         });
@@ -1267,3 +1405,85 @@ fn max_context_tokens_applies_at_construction_and_reloads_before_requests() {
 
 #[path = "compaction_native_usage_tests.rs"]
 mod native_usage;
+
+#[test]
+fn compaction_summary_rejects_refusals_and_empty_text_issue_2089() {
+    for bad in [
+        "",
+        "   ",
+        "I'm sorry, but I cannot assist with that request.",
+        "I\u{2019}m sorry, but I can\u{2019}t help with that.",
+        "I can't assist with that.",
+    ] {
+        assert!(
+            validate_compaction_summary(bad.to_string()).is_err(),
+            "{bad:?}"
+        );
+    }
+    let real = "## Task\nThe user is fixing compaction. Earlier the assistant said \"I can't help with that\" about a deploy, then continued. ".repeat(4);
+    assert!(validate_compaction_summary(real).is_ok());
+}
+
+struct RefusingSummaryProvider;
+
+#[async_trait::async_trait]
+impl Provider for RefusingSummaryProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        Ok(Box::pin(futures::stream::iter(vec![
+            Ok(crate::message::StreamEvent::TextDelta(
+                "I'm sorry, but I cannot assist with that request.".into(),
+            )),
+            Ok(crate::message::StreamEvent::MessageEnd {
+                stop_reason: Some("content_filter".into()),
+            }),
+        ])))
+    }
+
+    fn name(&self) -> &str {
+        "refusing"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(RefusingSummaryProvider)
+    }
+}
+
+#[tokio::test]
+async fn refused_compaction_keeps_original_messages_issue_2089() {
+    let messages: Vec<Message> = (0..28)
+        .map(|i| {
+            make_text_message(
+                if i % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                &format!("turn {i}"),
+            )
+        })
+        .collect();
+    let err =
+        generate_compaction_artifact(Arc::new(RefusingSummaryProvider), messages.clone(), None)
+            .await
+            .err()
+            .expect("refused summary must fail");
+    assert!(format!("{err:#}").contains("guardrail"), "{err:#}");
+
+    let mut manager = CompactionManager::new().with_budget(1_000);
+    manager.seed_restored_messages(messages.len());
+    manager.update_observed_input_tokens(10_000);
+    let _ = manager.force_compact_with(&messages, Arc::new(RefusingSummaryProvider));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while manager.is_compacting() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        manager.check_and_apply_compaction_with(&messages);
+    }
+    assert_eq!(manager.compacted_count(), 0);
+    assert_eq!(manager.summary_chars(), 0);
+}

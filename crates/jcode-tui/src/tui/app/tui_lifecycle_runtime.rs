@@ -19,6 +19,19 @@ impl App {
         app.is_remote = false;
         app.is_replay = true;
         app.runtime_mode = AppRuntimeMode::Replay;
+        // The saved session supplies metadata only. Transcript state must enter
+        // exclusively through historical events, never through today's startup.
+        app.display_messages.clear();
+        app.session.messages.clear();
+        app.auto_poke_incomplete_todos = false;
+        app.auto_poke_default_on = false;
+        app.overnight_auto_poke = None;
+        app.queued_messages.clear();
+        app.queued_commands.clear();
+        app.hidden_queued_system_messages.clear();
+        app.status_notice = None;
+        // Historical replay must never show today's on-disk todo state.
+        app.pinned_todos_payload = None;
         let model_name = app.session.model.clone().unwrap_or_default();
         let session_name = app.session.short_name.clone().unwrap_or_default();
 
@@ -206,6 +219,49 @@ impl App {
             .is_some_and(|mtime| mtime > startup_mtime)
     }
 
+    /// Event-driven hot reload for every client kind (local, attached, `--ssh`).
+    /// Triggered by `binary_watch` when a build is published. Waits for an idle
+    /// moment (no turn in flight, not mid-typing) and re-execs onto the newer
+    /// binary with input preserved. Deferred attempts re-arm and retry on tick.
+    pub(super) fn maybe_hot_reload_onto_new_binary(&mut self) -> bool {
+        super::binary_watch::ensure_started();
+        if !super::binary_watch::take_pending() {
+            return false;
+        }
+        if self.is_replay_runtime() || self.reload_requested.is_some() || self.should_quit {
+            return false;
+        }
+        const TYPING_QUIET: std::time::Duration = std::time::Duration::from_millis(1200);
+        let typing = self
+            .last_user_interaction
+            .is_some_and(|at| at.elapsed() < TYPING_QUIET);
+        if self.is_processing || typing {
+            super::binary_watch::rearm();
+            return false;
+        }
+        if !self.has_newer_binary() {
+            return false;
+        }
+        let session_id = if self.is_remote {
+            self.reload_handoff_session_id()
+        } else {
+            self.session.provider_session_id = self.provider_session_id.clone();
+            self.session
+                .set_status(crate::session::SessionStatus::Reloaded);
+            if let Err(error) = self.session.save() {
+                crate::logging::warn(&format!(
+                    "Failed to save session during TUI lifecycle: {error}"
+                ));
+            }
+            self.session.id.clone()
+        };
+        self.append_reload_message("Newer jcode build published; hot reloading client...");
+        self.save_input_for_reload(&session_id);
+        self.reload_requested = Some(session_id);
+        self.should_quit = true;
+        true
+    }
+
     /// After an in-process server reload (e.g. `self-dev build-reload`), the
     /// server PID is unchanged and connected clients never disconnect, so they
     /// keep running their old binary and client-side changes never take effect.
@@ -213,7 +269,7 @@ impl App {
     /// client is idle, re-exec onto the new binary so TUI-side changes apply too.
     /// Returns true when a client reload was requested.
     pub(super) fn maybe_self_reload_after_server_reload(&mut self) -> bool {
-        if !self.is_remote || crate::tui::is_ssh_remote() {
+        if !self.is_remote {
             return false;
         }
         let is_selfdev_session = self.remote_is_canary.unwrap_or(self.session.is_canary);

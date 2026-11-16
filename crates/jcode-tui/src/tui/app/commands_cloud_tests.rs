@@ -1,5 +1,7 @@
 use super::*;
 
+#[path = "commands_cloud_tests/account_onboarding.rs"]
+mod account_onboarding;
 #[path = "commands_cloud_tests/auto_recovery.rs"]
 mod auto_recovery;
 
@@ -1255,6 +1257,18 @@ fn parses_cloud_commands() {
     assert_eq!(
         parse_cloud_command("/cloud status"),
         Some(CloudCommand::Where)
+    );
+    assert_eq!(
+        parse_cloud_command("/cloud reload"),
+        Some(CloudCommand::Reload { force: false })
+    );
+    assert_eq!(
+        parse_cloud_command("/cloud reload --force"),
+        Some(CloudCommand::Reload { force: true })
+    );
+    assert_eq!(
+        parse_cloud_command("/cloud reload now"),
+        Some(CloudCommand::MoveUsage)
     );
     assert_eq!(
         parse_cloud_command("/cloud cancel"),

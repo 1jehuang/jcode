@@ -5,6 +5,7 @@ use std::time::Instant;
 
 #[derive(Default)]
 struct RemoteAccounts {
+    generation: u64,
     received: Option<Instant>,
     anthropic: Vec<jcode_protocol::AccountUsageSnapshot>,
     openai: Vec<jcode_protocol::AccountUsageSnapshot>,
@@ -26,10 +27,26 @@ fn try_remote_lock(
 }
 
 /// Enter daemon-only mode without claiming that a response has arrived.
-pub fn clear_remote_account_usage() {
+pub fn clear_remote_account_usage() -> u64 {
     if let Ok(mut state) = REMOTE.get_or_init(Mutex::default).lock() {
-        *state = RemoteAccounts::default();
+        let generation = state.generation.wrapping_add(1);
+        *state = RemoteAccounts {
+            generation,
+            ..Default::default()
+        };
+        generation
+    } else {
+        0
     }
+}
+
+/// Capture the current connection generation before reading advisory disk data.
+pub(super) fn remote_account_usage_generation() -> u64 {
+    REMOTE
+        .get_or_init(Mutex::default)
+        .lock()
+        .map(|state| state.generation)
+        .unwrap_or(0)
 }
 
 /// An empty authoritative response is received; an initial reset is not.
@@ -57,10 +74,41 @@ pub(super) fn set_remote_account_usage_with_age(
 ) {
     if let Ok(mut state) = REMOTE.get_or_init(Mutex::default).lock() {
         *state = RemoteAccounts {
+            generation: state.generation.wrapping_add(1),
             received: Instant::now().checked_sub(age),
             anthropic,
             openai,
         };
+    }
+}
+
+pub(super) fn import_remote_account_usage(
+    generation: u64,
+    anthropic: Vec<jcode_protocol::AccountUsageSnapshot>,
+    openai: Vec<jcode_protocol::AccountUsageSnapshot>,
+    age: std::time::Duration,
+) -> bool {
+    let Ok(mut state) = REMOTE.get_or_init(Mutex::default).lock() else {
+        return false;
+    };
+    state.import_snapshot(generation, anthropic, openai, age)
+}
+
+impl RemoteAccounts {
+    fn import_snapshot(
+        &mut self,
+        generation: u64,
+        anthropic: Vec<jcode_protocol::AccountUsageSnapshot>,
+        openai: Vec<jcode_protocol::AccountUsageSnapshot>,
+        age: std::time::Duration,
+    ) -> bool {
+        if self.generation != generation || self.received.is_some() {
+            return false;
+        }
+        self.received = Instant::now().checked_sub(age);
+        self.anthropic = anthropic;
+        self.openai = openai;
+        true
     }
 }
 
@@ -71,6 +119,7 @@ pub fn remote_account_list() -> Option<(Vec<AccountUsageSnapshot>, Vec<AccountUs
     let convert = |list: &[jcode_protocol::AccountUsageSnapshot]| {
         list.iter()
             .map(|data| AccountUsageSnapshot {
+                additional_windows: data.additional_windows.clone(),
                 label: data.label.clone(),
                 email: data.email.clone(),
                 exhausted: data.exhausted,
@@ -116,6 +165,7 @@ impl RemoteAccounts {
         };
         let data = accounts.iter().find(|data| data.label == label.trim())?;
         Some(AccountUsageSnapshot {
+            additional_windows: data.additional_windows.clone(),
             label: data.label.clone(),
             email: data.email.clone(),
             exhausted: data.exhausted,
@@ -156,6 +206,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn delayed_snapshot_cannot_overwrite_live_or_reconnected_usage() {
+        let mut state = RemoteAccounts {
+            generation: 7,
+            ..Default::default()
+        };
+        let age = std::time::Duration::from_secs(20);
+        assert!(!state.import_snapshot(6, Vec::new(), Vec::new(), age));
+        assert!(state.received.is_none());
+        assert!(state.import_snapshot(7, Vec::new(), Vec::new(), age));
+        assert!(state.received.unwrap().elapsed() >= age);
+        // Even an empty live response is authoritative over a startup hint.
+        state.received = Some(Instant::now());
+        assert!(!state.import_snapshot(7, Vec::new(), Vec::new(), age));
+        state.generation = 8;
+        state.received = None;
+        assert!(!state.import_snapshot(7, Vec::new(), Vec::new(), age));
+        assert!(state.import_snapshot(8, Vec::new(), Vec::new(), age));
+    }
+
+    #[test]
     fn connection_reset_is_not_an_empty_authoritative_response() {
         clear_remote_account_usage();
         assert!(!remote_account_usage_received());
@@ -182,6 +252,11 @@ mod tests {
                 .is_none()
         );
         state.openai.push(jcode_protocol::AccountUsageSnapshot {
+            additional_windows: vec![jcode_protocol::AccountUsageWindow {
+                label: "Future monthly".into(),
+                usage_ratio: 0.23,
+                resets_at: None,
+            }],
             label: "remote".into(),
             email: None,
             exhausted: false,
@@ -201,6 +276,13 @@ mod tests {
                 .unwrap()
                 .five_hour_ratio,
             Some(0.4)
+        );
+        assert_eq!(
+            state
+                .lookup(MultiAccountProviderKind::OpenAI, "remote", now)
+                .unwrap()
+                .additional_windows,
+            state.openai[0].additional_windows,
         );
         assert!(
             state

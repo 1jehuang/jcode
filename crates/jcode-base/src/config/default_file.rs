@@ -154,8 +154,13 @@ timeout_secs = 90
 # Copilot-key push-to-talk in `jcode companion` (Linux). List keyboard evdev
 # nodes to watch, e.g. ["/dev/input/by-id/usb-Foo-event-kbd"]. Holding the key
 # while a Jcode terminal is focused sends the transcript to that session, even
-# without Jcode Desktop. Empty disables it.
+# without Jcode Desktop. Empty falls back to the keyboards picked in Jcode
+# Desktop ([desktop.voice] global_devices), and disables it if there are none.
 # global_devices = []
+
+# Show live voice input inside the input box: a waveform row above the prompt
+# and the transcript streaming in as ghost text. false uses the status line.
+# composer_preview = true
 
 [display]
 # Diff display mode: "off", "inline" (default), "full-inline", or "file"
@@ -266,6 +271,21 @@ prompt_entry_animation = true
 # disconnected SDK client, since the server cannot observe OS windows directly.
 # resume_recent_close_seconds = 30
 
+# What Resume does when the picked session is already open in another local
+# jcode window (default: "off"). Linux only.
+#   "off":     attach a second client, leave the other window alone
+#   "move":    bring the existing window to the current workspace and focus it
+#              (niri). Falls back to "replace" when the window cannot be moved.
+#   "replace": resume as usual and close the other window's client
+# resume_open_elsewhere = "off"
+
+# Which time Resume shows as "x ago" and sorts by (default: "message").
+#   "message":  newest message of any role (prompts, replies, tool results)
+#   "activity": newest of the last message and the last open/resume
+#   "opened":   last time the session was opened, resumed, or attached
+#   "created":  when the session was created
+# resume_time = "message"
+
 # Disable specific animation variants by name.
 # Examples: ["donut"] or ["donut", "orbit_rings"]
 # Legacy aliases such as "three_rings" and "gyroscope" are still accepted.
@@ -291,6 +311,7 @@ prompt_entry_animation = true
 # copy_badge_alt_label = ""
 
 # Color theme: "auto" (query the terminal background), "dark", or "light".
+# Auto follows light/dark changes during the session (refreshes every 5 seconds).
 # theme = "auto"
 
 # Per-role color overrides. Every color the TUI renders is configurable: the
@@ -429,8 +450,8 @@ browser_handoff = false
 # This does not kill tools or change their own execution timeouts.
 auto_background_timeout_ms = 3000
 # Controls which built-in tools are sent to the model.
-# Profiles: "full" (default), "acp", "minimal"/"lite", or "none".
-# acp keeps core coding tools plus batch for generic ACP clients.
+# Profiles: "full" (default), "minimal"/"lite", or "none".
+# "acp" is a legacy name for "full".
 # minimal keeps core coding tools only: bash, read, write, edit, multiedit,
 # apply_patch, patch, agentgrep, glob, grep, and ls.
 profile = "full"
@@ -480,7 +501,8 @@ proactive_floor_tokens = 150000
 profile = "standard"
 # Tool profile requested when `jcode acp` starts the daemon itself.
 # Existing daemons keep their current server-wide tool config.
-tool_profile = "acp"
+# ACP clients get the same tools as the TUI. Use "minimal" to cut them down.
+tool_profile = "full"
 
 [provider]
 # Default model (optional, uses provider default if not set)
@@ -516,8 +538,23 @@ preserve_reasoning_context = true
 # countdown = 3-second countdown before retrying on another provider; press Esc to cancel (default)
 # manual = show a notice and let you switch yourself
 # cross_provider_failover = "manual"
+# Switch immediately only for definitive usage exhaustion (default: true).
+# False preserves the countdown. Manual mode always disables automatic switching.
+exhausted_usage_immediate_failover = true
+# Retry short recoverable Anthropic throttles on the same account (default: true).
+# False yields immediately to the account router when other pool members exist.
+anthropic_retry_recoverable_rate_limits = true
 # Try another account on the same provider before switching providers (default: true)
 # same_provider_account_failover = false
+# Automatically spend earned OpenAI banked resets at an exhausted weekly limit.
+# Retries the waiting request automatically. Never buys credits. Default: true.
+# Set false to disable automatic redemption.
+# openai_auto_banked_reset = false
+# Opt in separately to earned Anthropic Fable weekly resets. Never buys credits.
+# anthropic_auto_fable_reset = true
+# Preserve earned resets while another approved pool route is ready (default: true).
+# Set false to redeem before account/provider failover instead.
+# auto_reset_only_when_no_routes = true
 cross_provider_failover = "countdown"
 # Copilot premium mode: "normal" (default), "one" (first msg only), "zero" (all free)
 # Set to "zero" if you have premium Copilot and want free requests
@@ -843,6 +880,29 @@ prevent_sleep_while_streaming = true
 # sudoers rule for /usr/bin/pmset (skipped otherwise). Original settings are
 # saved to ~/.jcode/lid_override.json and restored afterwards, even after a crash.
 block_lid_close = true
+
+[companion]
+# `jcode companion` is a per-login helper that handles desktop effects for the
+# shared server. Toggles apply when the companion starts. Restart it
+# (`systemctl --user restart jcode-companion`, or kill it and relaunch Jcode)
+# after changing them.
+# Start it in the background when a Jcode client launches and none is running.
+autostart = true
+# Copilot-key push-to-talk (Linux). Also needs [dictation] global_devices.
+voice = true
+# Live waveform and transcript in the focused Jcode CLI while recording.
+voice_waveform = true
+# Desktop notifications for voice state. When off, recording still needs the
+# waveform to be shown in a Jcode CLI as its visible indicator.
+voice_notifications = true
+# Open URLs and files for the server. Off: clients use their own opener.
+open = true
+# Open new terminal windows for the server. Off: clients launch locally.
+spawn_terminal = true
+# Lid-close override while agents work (macOS/Windows, see [power]).
+lid = true
+# Hourly browser bridge auto-update.
+browser_updates = true
 
 [menubar]
 # macOS only: show the jcode session count in the menu bar. Set to false to

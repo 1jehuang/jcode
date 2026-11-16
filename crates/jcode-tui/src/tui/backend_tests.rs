@@ -1,6 +1,89 @@
 use super::*;
 use std::time::Duration;
 
+#[test]
+fn recent_history_negotiation_preserves_local_verified_prefix() {
+    let base = HistoryBase {
+        count: 7,
+        fingerprint: 123,
+        images_fingerprint: Some(456),
+        recent_messages: None,
+    };
+    let local = subscribe_history_base(Some(base), false).unwrap();
+    assert_eq!(local.count, 7);
+    assert_eq!(local.fingerprint, 123);
+    let remote = subscribe_history_base(Some(base), true).unwrap();
+    assert_eq!(remote.count, 0);
+    assert_eq!(remote.recent_messages, Some(128));
+    assert!(subscribe_history_base(None, false).is_none());
+    assert_eq!(
+        subscribe_history_base(None, true).unwrap().recent_messages,
+        Some(128)
+    );
+}
+
+#[tokio::test]
+async fn recent_history_page_request_explicitly_selects_normal_transcript() {
+    let mut remote = RemoteConnection::dummy();
+    let id = remote.get_compacted_history(192, true).await.unwrap();
+    let peer = remote._dummy_peer.as_ref().unwrap();
+    peer.readable().await.unwrap();
+    let mut bytes = [0; 256];
+    let count = peer.try_read(&mut bytes).unwrap();
+    assert!(
+        matches!(serde_json::from_slice::<Request>(&bytes[..count]).unwrap(),
+        Request::GetCompactedHistory { id: actual, visible_messages: 192, recent_history: true } if actual == id)
+    );
+}
+
+#[tokio::test]
+async fn slow_usage_hydration_does_not_block_subscribe_or_async_runtime() {
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let hydration = RemoteConnection::spawn_usage_hydration(move || {
+        started_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        false
+    });
+    started_rx.await.unwrap();
+    let remote = RemoteConnection::dummy();
+    let peer = remote._dummy_peer.as_ref().unwrap();
+    let start = Instant::now();
+    let result = tokio::time::timeout(Duration::from_millis(250), async {
+        remote
+            .send_request(Request::GetHistory { id: 9 })
+            .await
+            .unwrap();
+        let mut bytes = [0; 256];
+        peer.readable().await.unwrap();
+        let count = peer.try_read(&mut bytes).unwrap();
+        assert!(matches!(
+            serde_json::from_slice::<Request>(&bytes[..count]).unwrap(),
+            Request::GetHistory { id: 9 }
+        ));
+    })
+    .await;
+    let elapsed = start.elapsed();
+    release_tx.send(()).unwrap();
+    hydration.await.unwrap();
+    result.expect("quota disk reads must not delay bootstrap requests");
+    eprintln!(
+        "bootstrap while snapshot read blocked: {}us",
+        elapsed.as_micros()
+    );
+}
+
+#[test]
+fn measure_local_quota_hydration_cost() {
+    let socket = server::socket_path();
+    let started = Instant::now();
+    let imported = crate::usage::hydrate_remote_account_usage(&socket);
+    eprintln!(
+        "local quota hydration: {}us, imported={imported}",
+        started.elapsed().as_micros()
+    );
+}
+
 #[tokio::test]
 async fn ssh_readiness_waits_for_daemon_and_preserves_buffered_events() {
     let mut remote = RemoteConnection::dummy();
@@ -203,15 +286,39 @@ async fn cloud_expiry_revokes_without_midturn_protocol_write() {
 #[test]
 fn account_usage_poll_is_immediate_then_throttled() {
     let now = Instant::now();
-    assert!(account_usage_poll_due(None, now));
-    assert!(!account_usage_poll_due(Some(now), now));
+    let focused = account_usage_poll_interval(true);
+    assert!(account_usage_poll_due(None, now, focused));
+    assert!(!account_usage_poll_due(Some(now), now, focused));
     assert!(!account_usage_poll_due(
         Some(now),
-        now + Duration::from_secs(29)
+        now + Duration::from_secs(29),
+        focused
     ));
     assert!(account_usage_poll_due(
         Some(now),
-        now + Duration::from_secs(30)
+        now + Duration::from_secs(30),
+        focused
+    ));
+}
+
+#[test]
+fn account_usage_poll_is_slow_unfocused_and_catches_up_on_focus() {
+    let now = Instant::now();
+    let unfocused = account_usage_poll_interval(false);
+    // A window that has never polled still gets its first snapshot.
+    assert!(account_usage_poll_due(None, now, unfocused));
+    let later = now + Duration::from_secs(120);
+    assert!(!account_usage_poll_due(Some(now), later, unfocused));
+    // The same elapsed time is overdue the moment the window is focused.
+    assert!(account_usage_poll_due(
+        Some(now),
+        later,
+        account_usage_poll_interval(true)
+    ));
+    assert!(account_usage_poll_due(
+        Some(now),
+        now + Duration::from_secs(300),
+        unfocused
     ));
 }
 
@@ -722,4 +829,73 @@ fn remote_protocol_frame_limit_rejects_oversize_and_overflow() {
         1,
     ));
     assert!(remote_protocol_frame_exceeds_limit(usize::MAX, 1));
+}
+
+#[tokio::test]
+async fn request_send_does_not_block_ui_when_server_stops_reading() {
+    // Regression: the TUI awaited socket writes inline, so when the daemon's
+    // receive buffer filled while it was blocked writing to us, the UI loop
+    // stopped reading and both ends deadlocked (frozen session).
+    let mut remote = RemoteConnection::dummy();
+    let writer = remote.writer();
+    let _guard = writer.lock().await;
+
+    let result = tokio::time::timeout(Duration::from_secs(1), async {
+        for _ in 0..64 {
+            remote.request_todos().await.expect("queued");
+        }
+    })
+    .await;
+    assert!(
+        result.is_ok(),
+        "request sends must not wait on the socket writer"
+    );
+}
+
+#[tokio::test]
+async fn focus_is_reported_once_per_change_and_only_to_servers_that_accept_it() {
+    let mut remote = RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().unwrap();
+    let (reader, _writer) = peer.into_split();
+    let mut reader = BufReader::new(reader);
+
+    // An older server never advertises the capability and would answer the
+    // request with an error, so nothing may be sent to it.
+    remote.sync_focus(false, false).await;
+    remote.note_server_capabilities(&["session_tools".to_string()]);
+    remote.sync_focus(false, false).await;
+    // Stream keepalive Pongs carry no capabilities and must not unset support.
+    remote.note_server_capabilities(&[crate::protocol::CLIENT_FOCUS_CAPABILITY.to_string()]);
+    remote.note_server_capabilities(&[]);
+
+    remote.sync_focus(false, false).await;
+    remote.sync_focus(false, false).await;
+    // Going out of sight is a change worth one report, and so is coming back.
+    remote.sync_focus(false, true).await;
+    remote.sync_focus(false, true).await;
+    remote.sync_focus(false, false).await;
+    remote.sync_focus(true, false).await;
+    // A focused window is never reported hidden, whatever a stale probe says.
+    remote.sync_focus(true, true).await;
+    let marker = remote.request_todos().await.unwrap();
+
+    let mut seen = Vec::new();
+    loop {
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line))
+            .await
+            .expect("request arrives")
+            .unwrap();
+        match serde_json::from_str::<Request>(&line).unwrap() {
+            Request::ClientFocus {
+                focused, hidden, ..
+            } => seen.push((focused, hidden)),
+            Request::GetTodos { id } if id == marker => break,
+            other => panic!("unexpected request {other:?}"),
+        }
+    }
+    assert_eq!(
+        seen,
+        vec![(false, false), (false, true), (false, false), (true, false)]
+    );
 }

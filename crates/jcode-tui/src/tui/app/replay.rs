@@ -1,8 +1,9 @@
 use super::{App, DisplayMessage, ProcessingStatus, RunResult};
 use crate::replay::{PaneReplayInput, ReplayEvent, TimelineEvent};
 use crate::tui::backend::{RemoteEventState, ReplayRemoteState};
+use crate::tui::terminal_events::EventStream;
 use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use ratatui::{
     DefaultTerminal, Frame, Terminal, backend::TestBackend, buffer::Buffer, layout::Rect,
@@ -447,6 +448,9 @@ pub(super) fn apply_replay_event(
             title,
             content,
         } => {
+            if role == "todos" {
+                app.restore_replay_todos_json(content);
+            }
             if role == "swarm" {
                 app.swarm_enabled = true;
             }
@@ -474,6 +478,17 @@ pub(super) fn apply_replay_event(
             app.swarm_plan_items = items.clone();
         }
         ReplayEvent::Server(server_event) => {
+            if let crate::protocol::ServerEvent::ToolDone {
+                name,
+                output,
+                error,
+                ..
+            } = server_event
+                && name == "todo"
+                && error.is_none()
+            {
+                app.restore_replay_todos_json(output);
+            }
             if let crate::protocol::ServerEvent::TextDelta { text } = server_event {
                 if !text.is_empty() {
                     app.append_streaming_text(text);

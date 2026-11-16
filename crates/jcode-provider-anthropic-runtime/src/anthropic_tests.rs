@@ -243,6 +243,45 @@ fn message_start_warns_when_server_substitutes_a_different_model() {
 }
 
 #[test]
+fn resolved_model_uses_upstream_alias_target_and_deduplicates_metadata() {
+    let mut state = SseStreamState {
+        requested_model_base: "claude-alias".into(),
+        ..Default::default()
+    };
+    let event = SseEvent {
+        event_type: "message_start".into(),
+        data: serde_json::json!({"message": {"model": "claude-actual-20260101"}}).to_string(),
+    };
+    let events = process_sse_event(&event, &mut state, false);
+    assert!(events.iter().any(|event| matches!(event,
+        StreamEvent::ResolvedModel { model } if model == "claude-actual-20260101")));
+    assert!(
+        !process_sse_event(&event, &mut state, false)
+            .iter()
+            .any(|event| matches!(event, StreamEvent::ResolvedModel { .. }))
+    );
+}
+
+#[test]
+fn resolved_model_does_not_infer_missing_or_empty_metadata() {
+    for message in [serde_json::json!({}), serde_json::json!({"model": " "})] {
+        let mut state = SseStreamState {
+            requested_model_base: "claude-alias".into(),
+            ..Default::default()
+        };
+        let event = SseEvent {
+            event_type: "message_start".into(),
+            data: serde_json::json!({"message": message}).to_string(),
+        };
+        assert!(
+            !process_sse_event(&event, &mut state, false)
+                .iter()
+                .any(|event| matches!(event, StreamEvent::ResolvedModel { .. }))
+        );
+    }
+}
+
+#[test]
 fn test_anthropic_thinking_sse_events() {
     let mut state = SseStreamState::default();
     let start = SseEvent {
@@ -361,7 +400,8 @@ async fn live_anthropic_reasoning_smoke() -> Result<()> {
         content: vec![ContentBlock::Text {
             text: prompt,
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -397,7 +437,8 @@ async fn test_dangling_tool_use_repair() {
             content: vec![ContentBlock::Text {
                 text: "Hello".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -420,7 +461,8 @@ async fn test_dangling_tool_use_repair() {
                     input: serde_json::json!({"file_path": "/tmp/test"}),
                     thought_signature: None,
                 },
-            ],
+            ]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -469,9 +511,9 @@ async fn test_orphaned_tool_result_is_rewritten_as_text() {
     // repair answered it, then a late result for a tool_use that is not in the
     // transcript was persisted right after. Anthropic 400s on that orphan.
     let provider = AnthropicProvider::new();
-    let msg = |role, content| Message {
+    let msg = |role, content: Vec<ContentBlock>| Message {
         role,
-        content,
+        content: content.into(),
         timestamp: None,
         tool_duration_ms: None,
     };
@@ -565,9 +607,9 @@ async fn test_displaced_tool_result_still_answers_tool_use_in_place() {
     // rewrite turns the late result into text, so tool_x would otherwise be
     // left without a tool_result right after it (HTTP 400).
     let provider = AnthropicProvider::new();
-    let msg = |role, content| Message {
+    let msg = |role, content: Vec<ContentBlock>| Message {
         role,
-        content,
+        content: content.into(),
         timestamp: None,
         tool_duration_ms: None,
     };
@@ -634,7 +676,8 @@ async fn test_no_repair_when_tool_results_present() {
             content: vec![ContentBlock::Text {
                 text: "Hello".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -645,7 +688,8 @@ async fn test_no_repair_when_tool_results_present() {
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -655,7 +699,8 @@ async fn test_no_repair_when_tool_results_present() {
                 tool_use_id: "tool_123".to_string(),
                 content: "file1.txt\nfile2.txt".to_string(),
                 is_error: Some(false),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -707,7 +752,8 @@ async fn test_parallel_image_tool_results_stay_contiguous() {
                 ),
                 cache_control: None,
             },
-        ],
+        ]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     };
@@ -734,7 +780,8 @@ async fn test_parallel_image_tool_results_stay_contiguous() {
                     input: serde_json::json!({"file_path": "c.png"}),
                     thought_signature: None,
                 },
-            ],
+            ]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -1264,7 +1311,8 @@ async fn test_sanitize_tool_ids_with_dots() {
             content: vec![ContentBlock::Text {
                 text: "Hello".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -1275,7 +1323,8 @@ async fn test_sanitize_tool_ids_with_dots() {
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -1285,7 +1334,8 @@ async fn test_sanitize_tool_ids_with_dots() {
                 tool_use_id: "chatcmpl-BF2xX.tool_call.0".to_string(),
                 content: "file1.txt".to_string(),
                 is_error: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -1319,7 +1369,8 @@ async fn test_sanitize_dangling_tool_ids_with_dots() {
             content: vec![ContentBlock::Text {
                 text: "Hello".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -1330,7 +1381,8 @@ async fn test_sanitize_dangling_tool_ids_with_dots() {
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "crash"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },

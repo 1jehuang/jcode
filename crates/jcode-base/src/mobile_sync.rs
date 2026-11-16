@@ -4,11 +4,15 @@
 //! session transcripts to the Jcode account API so the iOS app can show them.
 //! Local sessions and sessions running on Jcode Cloud machines both upload with
 //! the account API key. Uploads are incremental: per-session high-water marks
-//! (message count + snapshot mtime) live in `~/.jcode/mobile_sync.json`.
+//! (message count + snapshot/journal revisions) live in `~/.jcode/mobile_sync.json`.
+//! Successful session persistence wakes a debounced incremental pass. A 20s
+//! reconciliation also catches saves made by other processes and retries.
 //!
 //! Only user-visible text is uploaded: user/assistant text, tool calls as a
-//! one-line summary, and tool results truncated. Hidden reasoning, images and
-//! provider-native blobs are never sent.
+//! one-line summary, and tool results truncated. Assistant markdown images in
+//! the generated-image store and visible image attachments become bounded
+//! thumbnails. Hidden reasoning, arbitrary local files and provider-native
+//! blobs are never sent.
 
 use crate::session::Session;
 use crate::storage;
@@ -16,22 +20,111 @@ use crate::subscription_api;
 use anyhow::{Context, Result};
 use jcode_message_types::{ContentBlock, Role};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+// Only compile-time labels enter timing records. Never include session IDs,
+// endpoints, credentials, payloads, or error strings here. Drop also covers
+// early returns, propagated errors and cancellation without changing budgets.
+struct SyncTiming {
+    stage: &'static str,
+    outcome: &'static str,
+    started: Instant,
+}
+
+impl SyncTiming {
+    fn new(stage: &'static str) -> Self {
+        Self {
+            stage,
+            outcome: "incomplete",
+            started: Instant::now(),
+        }
+    }
+
+    fn record(&self) -> String {
+        format!(
+            "mobile_sync stage={} outcome={} duration_ms={}",
+            self.stage,
+            self.outcome,
+            self.started.elapsed().as_millis()
+        )
+    }
+}
+
+impl Drop for SyncTiming {
+    fn drop(&mut self) {
+        crate::logging::info(&self.record());
+    }
+}
 
 pub const SYNC_INTERVAL: Duration = Duration::from_secs(20);
 const MAX_MESSAGES_PER_UPLOAD: usize = 200;
 const MAX_TOOL_RESULT_CHARS: usize = 4_000;
 const MAX_TEXT_CHARS: usize = 100_000;
+const MAX_STRUCTURED_TOOLS: usize = 32;
+const MAX_TOOL_INPUT_BYTES: usize = 8 * 1024;
+const MAX_TOOL_ID_BYTES: usize = 256;
+const MAX_STRUCTURED_BYTES: usize = 240 * 1024;
+// Bump when existing cloud rows need replaying, even if snapshot bytes and
+// visible-message fingerprints are unchanged. Missing versions deserialize as 0.
+const WIRE_VERSION: u32 = 2;
 /// Only sessions touched within this window are synced on enable.
 const BACKFILL_WINDOW: Duration = Duration::from_secs(14 * 24 * 3600);
-const MAX_SESSIONS_PER_PASS: usize = 200;
+const SYNC_DEBOUNCE: Duration = Duration::from_millis(150);
+// Also bounded when no background worker runs or mobile sync is disabled.
+// Evicted hints are recovered by the periodic snapshot/journal reconciliation.
+const MAX_DIRTY_SESSIONS: usize = 1024;
+static PERSISTED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+static DIRTY_SESSIONS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+static SYNC_PASS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Called only after a durable session write, never after sync-state writes.
+/// Notify retains a permit while an upload is running. The set also retains
+/// same-millisecond writes which the reconciliation mtime cannot distinguish.
+pub(crate) fn notify_session_persisted(id: &str) {
+    mark_dirty(id);
+    PERSISTED.notify_one();
+}
+
+fn mark_dirty(id: &str) {
+    if !valid_session_id(id) {
+        return;
+    }
+    let mut dirty = DIRTY_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    if dirty.len() == MAX_DIRTY_SESSIONS && !dirty.contains(id) {
+        dirty.pop_first();
+    }
+    dirty.insert(id.to_owned());
+}
+
+fn state_lock() -> Result<std::fs::File> {
+    let dir = storage::jcode_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("mobile_sync.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    file.lock()?;
+    Ok(file)
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct MobileSyncState {
     #[serde(default)]
     pub enabled: bool,
+    /// Fences uploads started before a disable/re-enable cycle.
+    #[serde(default)]
+    pub generation: u64,
+    /// The user turned off messages from the phone to sessions running here
+    /// (`jcode mobile messages off`). Transcript sync is unaffected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub phone_messages_off: bool,
     /// session id -> progress
     #[serde(default)]
     pub sessions: BTreeMap<String, SessionProgress>,
@@ -39,19 +132,124 @@ pub struct MobileSyncState {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct SessionProgress {
+    /// Wire schema successfully uploaded for this snapshot. Independent of file
+    /// revisions so representation upgrades cannot take the unchanged fast path.
+    #[serde(default)]
+    pub wire_version: u32,
     /// Number of transcript entries already uploaded.
     pub uploaded: usize,
     /// Snapshot+journal mtime (unix ms) at the last successful pass.
     pub mtime_ms: u64,
+    /// Snapshot and journal (nanosecond mtime, byte length). Older state files
+    /// omit this and receive one full reconciliation on upgrade.
+    #[serde(default)]
+    pub revision: Option<[u64; 4]>,
+    /// Hash of previously uploaded visible entries. Rewrites below the count
+    /// high-water mark must be replayed, not mistaken for metadata-only saves.
+    #[serde(default)]
+    pub fingerprint: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Hash)]
 pub struct WireMessage {
     pub seq: usize,
     pub role: &'static str,
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_text: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<WireToolCall>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tool_results: Vec<WireToolResult>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<WireImage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Hash)]
+pub struct WireToolCall {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Hash)]
+pub struct WireToolResult {
+    pub tool_use_id: String,
+    pub content: String,
+    pub is_error: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Hash)]
+pub struct WireImage {
+    pub media_type: String,
+    pub data: String,
+}
+
+/// Session metadata returned by the account's mobile transcript API.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncedSession {
+    pub session_id: String,
+    pub title: Option<String>,
+    pub source: String,
+    pub host: Option<String>,
+    pub cwd: Option<String>,
+    pub updated_at: Option<String>,
+    pub created_at: Option<String>,
+}
+
+/// Bounded account inventory read for UI background workers.
+pub async fn discover_cloud_sessions() -> Result<Vec<SyncedSession>> {
+    let client = reqwest::Client::new();
+    tokio::time::timeout(Duration::from_secs(8), list_cloud_sessions(&client))
+        .await
+        .context("mobile session discovery timed out")?
+}
+
+/// List cloud sessions synced to the configured Jcode account.
+pub async fn list_cloud_sessions(client: &reqwest::Client) -> Result<Vec<SyncedSession>> {
+    let api_key = crate::subscription_catalog::configured_api_key()
+        .context("no Jcode account credential is configured")?;
+    list_cloud_sessions_with_endpoint(client, &subscription_api::configured_api_base(), &api_key)
+        .await
+}
+
+async fn list_cloud_sessions_with_endpoint(
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
+) -> Result<Vec<SyncedSession>> {
+    let mut timing = SyncTiming::new("http_list");
+    timing.outcome = "error";
+    #[derive(Deserialize)]
+    struct SessionsResponse {
+        sessions: Vec<SyncedSession>,
+    }
+
+    let response = client
+        .get(format!(
+            "{}/mobile/sessions",
+            api_base.trim_end_matches('/')
+        ))
+        .query(&[("limit", "500")])
+        .bearer_auth(api_key)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .context("mobile session listing failed")?
+        .error_for_status()
+        .context("mobile session listing returned an error")?;
+    let response: SessionsResponse = response
+        .json()
+        .await
+        .context("invalid mobile session listing response")?;
+    timing.outcome = "success";
+    Ok(response
+        .sessions
+        .into_iter()
+        .filter(|session| session.source == "cloud" && valid_session_id(&session.session_id))
+        .collect())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -71,28 +269,131 @@ fn state_path() -> Result<PathBuf> {
 }
 
 pub fn load_state() -> MobileSyncState {
-    let state = (|| -> Result<MobileSyncState> {
+    (*load_state_snapshot()).clone()
+}
+
+// One path and at most 1 MiB of source text are retained, never metadata-only
+// authorization. Every caller reads the current file before comparing bytes.
+const MAX_CACHED_STATE_BYTES: usize = 1024 * 1024;
+struct ParsedState {
+    path: PathBuf,
+    contents: String,
+    state: Arc<MobileSyncState>,
+}
+static PARSED_STATE: Mutex<Option<ParsedState>> = Mutex::new(None);
+
+fn load_state_snapshot() -> Arc<MobileSyncState> {
+    let state = (|| -> Result<Arc<MobileSyncState>> {
         let path = state_path()?;
         if !path.exists() {
-            return Ok(MobileSyncState::default());
+            return Ok(Arc::new(MobileSyncState::default()));
         }
-        storage::read_json(&path)
+        let contents = std::fs::read_to_string(&path)?;
+        {
+            let cached = PARSED_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(cached) = cached.as_ref()
+                && cached.path == path
+                && cached.contents == contents
+            {
+                return Ok(Arc::clone(&cached.state));
+            }
+        }
+        // Invalid schemas must take the original recovery/logging path. Do not
+        // cache failures or a recovered backup under the invalid primary bytes.
+        let parsed = match serde_json::from_str::<MobileSyncState>(&contents) {
+            Ok(parsed) => Arc::new(parsed),
+            Err(_) => return storage::read_json(&path).map(Arc::new),
+        };
+        let mut cached = PARSED_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        *cached = (contents.len() <= MAX_CACHED_STATE_BYTES).then(|| ParsedState {
+            path,
+            contents,
+            state: Arc::clone(&parsed),
+        });
+        Ok(parsed)
     })();
     match state {
         Ok(state) => state,
         Err(error) => {
             crate::logging::warn(&format!("Could not load mobile sync state: {error:#}"));
-            MobileSyncState::default()
+            Arc::new(MobileSyncState::default())
         }
     }
 }
 
 pub fn save_state(state: &MobileSyncState) -> Result<()> {
-    storage::write_json_secret(&state_path()?, state)
+    let _lock = state_lock()?;
+    // Opt-in/out is authoritative, but an enable based on a stale read must
+    // not discard progress committed by another daemon in the meantime.
+    let mut next = load_state();
+    if next.enabled != state.enabled {
+        next.generation = next.generation.wrapping_add(1);
+    }
+    next.enabled = state.enabled;
+    if state.enabled {
+        if next.generation == state.generation {
+            merge_progress(&mut next, &state.sessions);
+        }
+    } else {
+        next.sessions.clear();
+    }
+    storage::write_json_secret(&state_path()?, &next)
+}
+
+/// Allow or refuse messages from the phone to sessions running here.
+/// `save_state` never changes this, so a sync pass working from an older read
+/// cannot undo the user's choice.
+pub fn set_phone_messages_off(off: bool) -> Result<MobileSyncState> {
+    let _lock = state_lock()?;
+    let mut next = load_state();
+    next.phone_messages_off = off;
+    storage::write_json_secret(&state_path()?, &next)?;
+    Ok(next)
+}
+
+fn merge_progress(
+    state: &mut MobileSyncState,
+    updates: &BTreeMap<String, SessionProgress>,
+) -> bool {
+    let mut changed = false;
+    for (id, progress) in updates {
+        let version = |p: &SessionProgress| {
+            p.revision
+                .map(|r| r[0].max(r[2]))
+                .unwrap_or(p.mtime_ms.saturating_mul(1_000_000))
+        };
+        if state.sessions.get(id).is_none_or(|old| {
+            old != progress
+                && (version(old) < version(progress)
+                    || (version(old) == version(progress) && old.uploaded <= progress.uploaded))
+        }) {
+            state.sessions.insert(id.clone(), progress.clone());
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn commit_progress(generation: u64, updates: &BTreeMap<String, SessionProgress>) -> Result<()> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let _lock = state_lock()?;
+    let mut current = load_state();
+    if current.enabled && current.generation == generation && merge_progress(&mut current, updates)
+    {
+        storage::write_json_secret(&state_path()?, &current)?;
+    }
+    Ok(())
 }
 
 pub fn is_enabled() -> bool {
-    load_state().enabled
+    load_state_snapshot().enabled
+}
+
+fn sync_still_enabled(generation: u64) -> bool {
+    let state = load_state_snapshot();
+    state.enabled && state.generation == generation
 }
 
 /// `cloud` when running on a Jcode Cloud machine, `local` otherwise.
@@ -108,7 +409,7 @@ pub fn session_source() -> &'static str {
     }
 }
 
-fn host_name() -> Option<String> {
+pub(crate) fn host_name() -> Option<String> {
     std::env::var_os("HOSTNAME")
         .map(|value| value.to_string_lossy().into_owned())
         .or_else(|| match std::fs::read_to_string("/etc/hostname") {
@@ -124,15 +425,60 @@ fn host_name() -> Option<String> {
 }
 
 fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    let mut out: String = text.chars().take(max).collect();
-    out.push_str("\n… (truncated)");
-    out
+    let mut out = BoundedText::new(max);
+    out.push(text);
+    out.text
 }
 
-fn tool_summary(name: &str, input: &serde_json::Value) -> String {
+/// Assemble the exact prefix of joined blocks without visiting or copying their
+/// discarded tails. Keep checking block kinds separately for role selection.
+struct BoundedText {
+    text: String,
+    remaining: usize,
+    truncated: bool,
+}
+
+impl BoundedText {
+    fn new(max: usize) -> Self {
+        Self {
+            text: String::new(),
+            remaining: max,
+            truncated: false,
+        }
+    }
+
+    fn push(&mut self, text: &str) {
+        if self.truncated {
+            return;
+        }
+        // Byte length is an inexpensive upper bound on the scalar count. Most
+        // small blocks fit immediately, without a scalar-by-scalar walk.
+        if text.len() <= self.remaining {
+            self.remaining -= text.chars().count();
+            self.text.push_str(text);
+            return;
+        }
+        // Count a bounded byte prefix with str's optimized scalar counter,
+        // then inspect only the few additional scalars needed for Unicode.
+        let mut prefix_end = self.remaining;
+        while !text.is_char_boundary(prefix_end) {
+            prefix_end -= 1;
+        }
+        let prefix_chars = text[..prefix_end].chars().count();
+        let mut chars = text[prefix_end..].char_indices();
+        if let Some((end, _)) = chars.nth(self.remaining - prefix_chars) {
+            self.text.push_str(&text[..prefix_end + end]);
+            self.text.push_str("\n… (truncated)");
+            self.remaining = 0;
+            self.truncated = true;
+        } else {
+            self.remaining -= text.chars().count();
+            self.text.push_str(text);
+        }
+    }
+}
+
+fn append_tool_summary(out: &mut BoundedText, name: &str, input: &serde_json::Value) {
     let detail = input
         .get("intent")
         .or_else(|| input.get("command"))
@@ -140,11 +486,123 @@ fn tool_summary(name: &str, input: &serde_json::Value) -> String {
         .or_else(|| input.get("query"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    if detail.is_empty() {
-        format!("🔧 {name}")
-    } else {
-        format!("🔧 {name}: {}", truncate(detail, 200))
+    out.push("🔧 ");
+    out.push(name);
+    if !detail.is_empty() {
+        out.push(": ");
+        if !out.truncated {
+            out.push(&truncate(detail, 200));
+        }
     }
+}
+
+/// Bound serialization work as well as the retained input. Large inputs become
+/// a valid JSON string preview, never an invalid/truncated JSON object.
+fn bounded_tool_input(input: &serde_json::Value) -> serde_json::Value {
+    struct Preview(Vec<u8>);
+    impl std::io::Write for Preview {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let available = MAX_TOOL_INPUT_BYTES.saturating_sub(self.0.len());
+            self.0
+                .extend_from_slice(&bytes[..bytes.len().min(available)]);
+            if bytes.len() > available {
+                Err(std::io::Error::other("tool input preview full"))
+            } else {
+                Ok(bytes.len())
+            }
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut preview = Preview(Vec::new());
+    if serde_json::to_writer(&mut preview, input).is_ok() {
+        serde_json::from_slice(&preview.0).unwrap_or_default()
+    } else {
+        serde_json::Value::String(format!(
+            "{}\n… (truncated)",
+            String::from_utf8_lossy(&preview.0)
+        ))
+    }
+}
+
+fn structured_tools(
+    blocks: &[ContentBlock],
+) -> Option<(String, Vec<WireToolCall>, Vec<WireToolResult>)> {
+    if !blocks.iter().any(|block| {
+        matches!(
+            block,
+            ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. }
+        )
+    }) {
+        return None;
+    }
+    let mut prose = BoundedText::new(MAX_TEXT_CHARS);
+    let mut has_prose = false;
+    let mut calls = Vec::new();
+    let mut results = Vec::new();
+    for block in blocks {
+        match block {
+            ContentBlock::Text { text, .. }
+                if !text.trim_start().is_empty()
+                    && !text.trim_start().starts_with("<system-reminder>") =>
+            {
+                if has_prose {
+                    prose.push("\n\n");
+                }
+                prose.push(text);
+                has_prose = true;
+            }
+            ContentBlock::ToolUse {
+                id, name, input, ..
+            } => {
+                // Fall back to the existing summaries as a whole if identities
+                // cannot be represented safely. Never truncate IDs into aliases.
+                if calls.len() == MAX_STRUCTURED_TOOLS
+                    || id.is_empty()
+                    || id.len() > MAX_TOOL_ID_BYTES
+                    || name.is_empty()
+                {
+                    return None;
+                }
+                calls.push(WireToolCall {
+                    id: id.clone(),
+                    name: name.chars().take(128).collect(),
+                    input: bounded_tool_input(input),
+                });
+            }
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                if results.len() == MAX_STRUCTURED_TOOLS
+                    || tool_use_id.is_empty()
+                    || tool_use_id.len() > MAX_TOOL_ID_BYTES
+                {
+                    return None;
+                }
+                results.push(WireToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    content: truncate(content, MAX_TOOL_RESULT_CHARS),
+                    is_error: is_error.unwrap_or(false),
+                });
+            }
+            // Reasoning, signatures, images and hidden reminders are not wire prose.
+            _ => {}
+        }
+    }
+    if calls.is_empty() && results.is_empty() {
+        return None;
+    }
+    // Backend limits are UTF-16 code units for prose and 256 KiB serialized
+    // metadata. Reserve room for the JSON property names/envelope.
+    if prose.text.encode_utf16().count() > 200_000
+        || serde_json::to_vec(&(&calls, &results)).ok()?.len() > MAX_STRUCTURED_BYTES
+    {
+        return None;
+    }
+    Some((prose.text, calls, results))
 }
 
 /// Convert stored messages into the mobile wire format. One stored message
@@ -157,27 +615,58 @@ pub fn wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
         .enumerate()
         .skip(start)
         .filter_map(|(seq, message)| {
-            let mut parts: Vec<String> = Vec::new();
+            // Match desktop history visibility, including images accompanying
+            // model-only generated-image visual context reminders.
+            if message
+                .content
+                .iter()
+                .find_map(|block| match block {
+                    ContentBlock::Text { text, .. } => Some(text.trim_start()),
+                    _ => None,
+                })
+                .is_some_and(|text| text.starts_with("<system-reminder>"))
+            {
+                return None;
+            }
+            let mut images = attached_images(&message.content);
+            let mut text = BoundedText::new(MAX_TEXT_CHARS);
+            let mut has_parts = false;
             let mut is_tool_result = false;
             for block in &message.content {
-                match block {
+                // Even after the text limit, later tool results change the role.
+                if matches!(block, ContentBlock::ToolResult { .. }) {
+                    is_tool_result = true;
+                }
+                if text.truncated {
+                    continue;
+                }
+                let part = match block {
                     ContentBlock::Text { text, .. }
-                        if !text.trim().is_empty()
+                        if !text.trim_start().is_empty()
                             && !text.trim_start().starts_with("<system-reminder>") =>
                     {
-                        parts.push(text.clone())
+                        std::borrow::Cow::Borrowed(text.as_str())
                     }
                     ContentBlock::ToolUse { name, input, .. } => {
-                        parts.push(tool_summary(name, input))
+                        if has_parts {
+                            text.push("\n\n");
+                        }
+                        append_tool_summary(&mut text, name, input);
+                        has_parts = true;
+                        continue;
                     }
                     ContentBlock::ToolResult { content, .. } => {
-                        is_tool_result = true;
-                        parts.push(truncate(content, MAX_TOOL_RESULT_CHARS));
+                        std::borrow::Cow::Owned(truncate(content, MAX_TOOL_RESULT_CHARS))
                     }
-                    _ => {}
+                    _ => continue,
+                };
+                if has_parts {
+                    text.push("\n\n");
                 }
+                text.push(&part);
+                has_parts = true;
             }
-            if parts.is_empty() {
+            if !has_parts && images.is_empty() {
                 return None;
             }
             let role = if is_tool_result {
@@ -190,14 +679,183 @@ pub fn wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
                     Role::Assistant => "assistant",
                 }
             };
+            let structured = structured_tools(&message.content);
+            let (display_text, tool_calls, tool_results) = match structured {
+                Some((prose, calls, results)) => (Some(prose), calls, results),
+                None => (None, Vec::new(), Vec::new()),
+            };
+            if role == "assistant" && images.len() < 4 {
+                images.extend(
+                    generated_images(&text.text)
+                        .into_iter()
+                        .take(4 - images.len()),
+                );
+            }
             Some(WireMessage {
                 seq,
                 role,
-                text: truncate(&parts.join("\n\n"), MAX_TEXT_CHARS),
+                display_text,
+                tool_calls,
+                tool_results,
+                images,
+                text: text.text,
                 created_at: message.timestamp.map(|t| t.to_rfc3339()),
             })
         })
         .collect()
+}
+
+fn message_chunks(messages: &[WireMessage]) -> Vec<&[WireMessage]> {
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut bytes = 0;
+    for (index, message) in messages.iter().enumerate() {
+        let size = serde_json::to_vec(message).map_or(0, |v| v.len());
+        if index > start
+            && (bytes + size > 3 * 1024 * 1024 || index - start >= MAX_MESSAGES_PER_UPLOAD)
+        {
+            chunks.push(&messages[start..index]);
+            start = index;
+            bytes = 0;
+        }
+        bytes += size;
+    }
+    if start < messages.len() {
+        chunks.push(&messages[start..]);
+    }
+    chunks
+}
+
+// Only explicit markdown image destinations under the generated-image store
+// are eligible. Canonicalization rejects traversal and symlink escapes.
+fn generated_images(text: &str) -> Vec<WireImage> {
+    let Ok(root) =
+        storage::jcode_dir().and_then(|p| Ok(p.join("generated-images").canonicalize()?))
+    else {
+        return Vec::new();
+    };
+    let mut seen = BTreeSet::new();
+    let mut images = Vec::new();
+    for fragment in text.split("![").skip(1).take(64) {
+        let Some((_, destination)) = fragment.split_once("](") else {
+            continue;
+        };
+        let Some((destination, _)) = destination.split_once(')') else {
+            continue;
+        };
+        let path = Path::new(destination.trim().trim_start_matches("file://"));
+        let Ok(path) = path.canonicalize() else {
+            continue;
+        };
+        if !path.starts_with(&root) || !seen.insert(path.clone()) {
+            continue;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Do not follow a file swapped to a symlink after canonicalization,
+            // and never let a special file block the transcript sync worker.
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let Ok(file) = options.open(&path) else {
+            continue;
+        };
+        let Ok(meta) = file.metadata() else {
+            continue;
+        };
+        if !meta.is_file() || meta.len() > 16 * 1024 * 1024 {
+            continue;
+        }
+        if let Some(thumbnail) = image_thumbnail(std::io::BufReader::new(file)) {
+            images.push(thumbnail);
+        }
+        if images.len() == 4 {
+            break;
+        }
+    }
+    images
+}
+
+// ToolOutput images are persisted as Image blocks following their ToolResult,
+// exactly like user attachments. Never resolve attachment data as a local path.
+fn attached_images(blocks: &[ContentBlock]) -> Vec<WireImage> {
+    use base64::Engine;
+    let mut images = Vec::new();
+    for block in blocks {
+        let ContentBlock::Image { media_type, data } = block else {
+            continue;
+        };
+        if !matches!(
+            media_type.as_str(),
+            "image/jpeg" | "image/png" | "image/webp" | "image/gif"
+        ) || data.len() > 4 * (16 * 1024 * 1024_usize).div_ceil(3)
+        {
+            continue;
+        }
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
+            continue;
+        };
+        if bytes.len() > 16 * 1024 * 1024 {
+            continue;
+        }
+        if let Some(image) = image_thumbnail(std::io::Cursor::new(bytes)) {
+            images.push(image);
+            if images.len() == 4 {
+                break;
+            }
+        }
+    }
+    images
+}
+
+fn image_thumbnail(reader: impl std::io::BufRead + std::io::Seek) -> Option<WireImage> {
+    use base64::Engine;
+    let mut reader = image::ImageReader::new(reader).with_guessed_format().ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(8192);
+    limits.max_image_height = Some(8192);
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    reader.limits(limits);
+    let mut thumbnail = reader.decode().ok()?.thumbnail(1024, 1024).to_rgb8();
+    loop {
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 75)
+            .encode_image(&thumbnail)
+            .ok()?;
+        if bytes.len() <= 256 * 1024 {
+            return Some(WireImage {
+                media_type: "image/jpeg".into(),
+                data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            });
+        }
+        thumbnail = image::imageops::thumbnail(
+            &thumbnail,
+            (thumbnail.width() / 2).max(1),
+            (thumbnail.height() / 2).max(1),
+        );
+    }
+}
+
+fn wire_fingerprint(messages: &[WireMessage], end: usize) -> u64 {
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    for message in messages.iter().take_while(|message| message.seq < end) {
+        message.hash(&mut hash);
+    }
+    hash.finish()
+}
+
+fn incremental_messages(session: &Session, progress: &SessionProgress) -> (Vec<WireMessage>, u64) {
+    let mut messages = wire_messages(session, 0);
+    let fingerprint = wire_fingerprint(&messages, session.messages.len());
+    let unchanged_prefix = progress.wire_version == WIRE_VERSION
+        && progress.uploaded <= session.messages.len()
+        && progress.fingerprint == Some(wire_fingerprint(&messages, progress.uploaded));
+    if unchanged_prefix {
+        messages.retain(|message| message.seq >= progress.uploaded);
+    }
+    (messages, fingerprint)
 }
 
 fn mtime_ms(path: &Path) -> u64 {
@@ -221,6 +879,34 @@ fn session_mtime_ms(snapshot: &Path) -> u64 {
     mtime_ms(snapshot).max(mtime_ms(
         &crate::session::session_journal_path_from_snapshot(snapshot),
     ))
+}
+
+fn session_revision(snapshot: &Path) -> [u64; 4] {
+    fn stamp(path: &Path) -> (u64, u64) {
+        let Ok(meta) = std::fs::metadata(path) else {
+            return (0, 0);
+        };
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos().min(u64::MAX as u128) as u64)
+            .unwrap_or(0);
+        (modified, meta.len())
+    }
+    let (snapshot_time, snapshot_len) = stamp(snapshot);
+    let (journal_time, journal_len) = stamp(&crate::session::session_journal_path_from_snapshot(
+        snapshot,
+    ));
+    // Version the visible wire representation without changing mtime ordering.
+    // Epoch 1 (bit 63) added generated images. Epoch 2 (bits 63+62) also
+    // reconciles unchanged stored sessions with structured tool metadata.
+    [
+        snapshot_time,
+        snapshot_len ^ (3_u64 << 62),
+        journal_time,
+        journal_len,
+    ]
 }
 
 /// Candidate sessions: real (non-debug) snapshots modified since the window.
@@ -248,7 +934,6 @@ fn candidate_sessions(since_ms: u64) -> Result<Vec<(String, PathBuf, u64)>> {
         }
     }
     out.sort_by(|a, b| b.2.cmp(&a.2));
-    out.truncate(MAX_SESSIONS_PER_PASS);
     Ok(out)
 }
 
@@ -266,6 +951,8 @@ async fn upload(
     session_id: &str,
     body: &UploadBody<'_>,
 ) -> Result<()> {
+    let mut timing = SyncTiming::new("http_upload");
+    timing.outcome = "error";
     let url = format!(
         "{}/mobile/sessions/{}",
         api_base.trim_end_matches('/'),
@@ -281,18 +968,53 @@ async fn upload(
         .context("mobile sync upload failed")?;
     let status = response.status();
     if !status.is_success() {
-        let text = response.text().await.with_context(|| {
-            format!("mobile sync upload returned {status}, response body unreadable")
-        })?;
-        anyhow::bail!(
-            "mobile sync upload returned {status}: {}",
-            text.chars().take(300).collect::<String>()
-        );
+        timing.outcome = "http_error";
+        // Response bodies can echo private content or credentials.
+        anyhow::bail!("mobile sync upload returned {status}");
     }
+    // Dropping an unread HTTP/1 body closes the pooled connection. HTTP/2
+    // streams can be cancelled without sacrificing their shared connection.
+    if matches!(
+        response.version(),
+        reqwest::Version::HTTP_10 | reqwest::Version::HTTP_11
+    ) {
+        drain_upload_response(response).await;
+    }
+    timing.outcome = "success";
     Ok(())
 }
 
-fn valid_session_id(id: &str) -> bool {
+const UPLOAD_RESPONSE_DRAIN_LIMIT: usize = 64 * 1024;
+const UPLOAD_RESPONSE_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
+
+async fn drain_upload_response(mut response: reqwest::Response) -> &'static str {
+    let mut timing = SyncTiming::new("http_upload_body");
+    // The server has already accepted the upload. A broken, oversized or slow
+    // acknowledgment must not turn success into a retry of accepted messages.
+    timing.outcome = match tokio::time::timeout(UPLOAD_RESPONSE_DRAIN_TIMEOUT, async {
+        let mut bytes = 0usize;
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    bytes = bytes.saturating_add(chunk.len());
+                    if bytes > UPLOAD_RESPONSE_DRAIN_LIMIT {
+                        return "size_limit";
+                    }
+                }
+                Ok(None) => return "success",
+                Err(_) => return "read_error",
+            }
+        }
+    })
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(_) => "timeout",
+    };
+    timing.outcome
+}
+
+pub(crate) fn valid_session_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
         && id
@@ -302,8 +1024,23 @@ fn valid_session_id(id: &str) -> bool {
 
 /// One incremental sync pass. Safe to call repeatedly.
 pub async fn sync_once(client: &reqwest::Client) -> Result<SyncReport> {
-    let mut state = load_state();
+    sync_pass(client, true).await
+}
+
+async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncReport> {
+    let mut queue = SyncTiming::new("queue_wait");
+    let _pass = SYNC_PASS.lock().await;
+    queue.outcome = "acquired";
+    drop(queue);
+    let mut timing = SyncTiming::new(if reconcile {
+        "pass_reconcile"
+    } else {
+        "pass_incremental"
+    });
+    timing.outcome = "error";
+    let state = load_state();
     if !state.enabled {
+        timing.outcome = "skipped_disabled";
         return Ok(SyncReport::default());
     }
     let api_key = crate::subscription_catalog::configured_api_key()
@@ -317,8 +1054,27 @@ pub async fn sync_once(client: &reqwest::Client) -> Result<SyncReport> {
     let host = host_name();
     let source = session_source();
     let mut report = SyncReport::default();
+    let mut candidates = if reconcile {
+        candidate_sessions(since)?
+    } else {
+        Vec::new()
+    };
+    let dirty = std::mem::take(&mut *DIRTY_SESSIONS.lock().unwrap_or_else(|e| e.into_inner()));
+    for id in &dirty {
+        if valid_session_id(id) && !candidates.iter().any(|(candidate, _, _)| candidate == id) {
+            let path = storage::jcode_dir()?
+                .join("sessions")
+                .join(format!("{id}.json"));
+            candidates.push((id.clone(), path.clone(), session_mtime_ms(&path)));
+        }
+    }
+    candidates.sort_by_key(|(id, _, _)| !dirty.contains(id));
 
-    for (id, path, mtime) in candidate_sessions(since)? {
+    let candidate_count = candidates.len();
+    let mut unchanged_count = 0;
+    let mut updates = BTreeMap::new();
+    let mut candidates = candidates.into_iter();
+    while let Some((id, path, mtime)) = candidates.next() {
         if !valid_session_id(&id) {
             continue;
         }
@@ -328,34 +1084,59 @@ pub async fn sync_once(client: &reqwest::Client) -> Result<SyncReport> {
             .get(&id)
             .cloned()
             .unwrap_or_else(SessionProgress::default);
-        if progress.mtime_ms >= mtime {
+        let revision = session_revision(&path);
+        if progress.wire_version == WIRE_VERSION
+            && progress.revision == Some(revision)
+            && !dirty.contains(&id)
+        {
+            unchanged_count += 1;
             continue;
+        }
+        // Unchanged candidates cannot upload or mutate progress. Do not reload
+        // the entire state for each one. Keep uncached generation fences for
+        // changed sessions and, crucially, immediately before every request.
+        let mut upload_timing = SyncTiming::new("upload");
+        if !sync_still_enabled(state.generation) {
+            upload_timing.outcome = "skipped_disabled";
+            break;
         }
         let session = match Session::load_from_path(&path) {
             Ok(s) => s,
-            Err(_) => continue,
+            Err(_) => {
+                upload_timing.outcome = "load_error";
+                mark_dirty(&id);
+                continue;
+            }
         };
         if session.is_debug || session.messages.is_empty() {
-            state.sessions.insert(
+            upload_timing.outcome = "skipped_empty_or_debug";
+            updates.insert(
                 id,
                 SessionProgress {
+                    wire_version: WIRE_VERSION,
                     uploaded: progress.uploaded,
                     mtime_ms: mtime,
+                    revision: Some(revision),
+                    fingerprint: progress.fingerprint,
                 },
             );
             continue;
         }
-        let start = progress.uploaded.min(session.messages.len());
-        let messages = wire_messages(&session, start);
+        let (messages, fingerprint) = incremental_messages(&session, &progress);
         let title = session.custom_title.as_deref().or(session.title.as_deref());
         let mut ok = true;
         // Always send at least one request so metadata (title, updated_at) refreshes.
         let chunks: Vec<&[WireMessage]> = if messages.is_empty() {
             vec![&[]]
         } else {
-            messages.chunks(MAX_MESSAGES_PER_UPLOAD).collect()
+            message_chunks(&messages)
         };
         for chunk in chunks {
+            if !sync_still_enabled(state.generation) {
+                upload_timing.outcome = "skipped_disabled";
+                ok = false;
+                break;
+            }
             let body = UploadBody {
                 title,
                 source,
@@ -366,8 +1147,11 @@ pub async fn sync_once(client: &reqwest::Client) -> Result<SyncReport> {
                 updated_at: session.updated_at.to_rfc3339(),
                 messages: chunk,
             };
-            if let Err(err) = upload(client, &api_base, &api_key, &id, &body).await {
-                crate::logging::debug(&format!("mobile sync {id}: {err:#}"));
+            if upload(client, &api_base, &api_key, &id, &body)
+                .await
+                .is_err()
+            {
+                upload_timing.outcome = "error";
                 report.errors += 1;
                 ok = false;
                 break;
@@ -375,26 +1159,64 @@ pub async fn sync_once(client: &reqwest::Client) -> Result<SyncReport> {
             report.messages_uploaded += chunk.len();
         }
         if ok {
+            upload_timing.outcome = "success";
             report.sessions_uploaded += 1;
-            state.sessions.insert(
+            updates.insert(
                 id,
                 SessionProgress {
+                    wire_version: WIRE_VERSION,
                     uploaded: session.messages.len(),
                     mtime_ms: mtime,
+                    revision: Some(revision),
+                    fingerprint: Some(fingerprint),
                 },
             );
+        } else {
+            mark_dirty(&id);
+        }
+        if reconcile
+            && !DIRTY_SESSIONS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+        {
+            // Finish this session, commit its progress, then let the event pass
+            // handle fresh saves. Unvisited backlog remains discoverable on the
+            // next periodic reconciliation. Preserve any consumed dirty hints.
+            for (id, _, _) in candidates {
+                if dirty.contains(&id) {
+                    mark_dirty(&id);
+                }
+            }
+            break;
         }
     }
-    // Reload `enabled` so a concurrent `jcode mobile disable` wins.
-    state.enabled = load_state().enabled;
-    if state.enabled {
-        save_state(&state)?;
-    }
+    // Merge under a cross-process lock, never write a stale enabled flag or
+    // overwrite another process's unrelated session progress.
+    let mut commit = SyncTiming::new("progress_commit");
+    commit.outcome = "error";
+    commit_progress(state.generation, &updates)?;
+    commit.outcome = if updates.is_empty() {
+        "skipped_unchanged"
+    } else {
+        "success"
+    };
+    crate::logging::info(&format!(
+        "mobile_sync candidates={candidate_count} unchanged={unchanged_count} progress_updates={}",
+        updates.len()
+    ));
+    timing.outcome = if report.errors == 0 {
+        "success"
+    } else {
+        "partial_failure"
+    };
     Ok(report)
 }
 
 /// Delete everything this account has stored for mobile.
 pub async fn wipe_remote(client: &reqwest::Client) -> Result<()> {
+    let mut timing = SyncTiming::new("http_wipe");
+    timing.outcome = "error";
     let api_key = crate::subscription_catalog::configured_api_key()
         .context("no Jcode account credential is configured")?;
     let url = format!(
@@ -408,104 +1230,44 @@ pub async fn wipe_remote(client: &reqwest::Client) -> Result<()> {
         .send()
         .await?;
     if !response.status().is_success() {
+        timing.outcome = "http_error";
         anyhow::bail!("server returned {}", response.status());
     }
+    timing.outcome = "success";
     Ok(())
 }
 
 /// Background loop used by the jcode server daemon.
 pub fn spawn_background_sync() {
-    tokio::spawn(async move {
-        let client = reqwest::Client::new();
-        let mut ticks = tokio::time::interval(SYNC_INTERVAL);
-        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            ticks.tick().await;
-            if !is_enabled() {
-                continue;
+    tokio::spawn(background_sync());
+}
+
+async fn background_sync() {
+    let client = reqwest::Client::new();
+    let mut ticks = tokio::time::interval(SYNC_INTERVAL);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let reconcile = tokio::select! {
+            _ = ticks.tick() => true,
+            _ = PERSISTED.notified() => {
+                // A bounded coalescing window, not a trailing debounce:
+                // continuous token saves cannot postpone sync forever.
+                let mut debounce = SyncTiming::new("debounce_wait");
+                tokio::time::sleep(SYNC_DEBOUNCE).await;
+                debounce.outcome = "success";
+                false
             }
-            if let Err(err) = sync_once(&client).await {
-                crate::logging::debug(&format!("mobile sync pass failed: {err:#}"));
-            }
+        };
+        // sync_pass records failures and disabled skips without error text.
+        if sync_pass(&client, reconcile).await.is_err() {
+            crate::logging::debug("mobile sync pass failed (see stage timing)");
         }
-    });
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use jcode_session_types::StoredMessage;
-
-    fn msg(role: Role, content: Vec<ContentBlock>) -> StoredMessage {
-        StoredMessage {
-            id: "m".into(),
-            role,
-            content,
-            display_role: None,
-            timestamp: None,
-            tool_duration_ms: None,
-            token_usage: None,
-        }
-    }
-
-    #[test]
-    fn wire_messages_keep_visible_text_and_skip_hidden() {
-        let mut session = Session::create_with_id("s1".into(), None, None);
-        session.messages = vec![
-            msg(
-                Role::User,
-                vec![ContentBlock::Text {
-                    text: "hi".into(),
-                    cache_control: None,
-                }],
-            ),
-            msg(
-                Role::Assistant,
-                vec![ContentBlock::Reasoning {
-                    text: "secret".into(),
-                }],
-            ),
-            msg(
-                Role::Assistant,
-                vec![
-                    ContentBlock::Text {
-                        text: "running".into(),
-                        cache_control: None,
-                    },
-                    ContentBlock::ToolUse {
-                        id: "t".into(),
-                        name: "bash".into(),
-                        input: serde_json::json!({"command": "ls"}),
-                        thought_signature: None,
-                    },
-                ],
-            ),
-            msg(
-                Role::User,
-                vec![ContentBlock::ToolResult {
-                    tool_use_id: "t".into(),
-                    content: "x".repeat(MAX_TOOL_RESULT_CHARS + 10),
-                    is_error: None,
-                }],
-            ),
-        ];
-        let wire = wire_messages(&session, 0);
-        assert_eq!(
-            wire.iter().map(|m| m.seq).collect::<Vec<_>>(),
-            vec![0, 2, 3]
-        );
-        assert_eq!(wire[0].role, "user");
-        assert_eq!(wire[1].text, "running\n\n🔧 bash: ls");
-        assert_eq!(wire[2].role, "tool");
-        assert!(wire[2].text.ends_with("(truncated)"));
-        assert!(!wire.iter().any(|m| m.text.contains("secret")));
-        assert_eq!(wire_messages(&session, 3).len(), 1);
-    }
-
-    #[test]
-    fn session_ids_are_validated() {
-        assert!(valid_session_id("session_abc-123.x"));
-        assert!(!valid_session_id("bad id"));
-        assert!(!valid_session_id(""));
-    }
-}
+#[path = "mobile_sync_http_tests.rs"]
+mod http_tests;
+#[cfg(test)]
+#[path = "mobile_sync_tests.rs"]
+mod tests;

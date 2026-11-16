@@ -588,6 +588,19 @@ pub struct HistoryMessage {
     /// "user" | "assistant" | "tool".
     pub role: String,
     pub content: String,
+    /// On "tool" rows: the call this result answers, so clients can rebuild
+    /// tool cards after a reload. `content` is the tool output. Absent from
+    /// older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<HistoryTool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HistoryTool {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub input: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

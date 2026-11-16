@@ -137,6 +137,10 @@ fn run_main() -> Result<()> {
         return jcode::cli::hibernate_wait::run();
     }
 
+    // Clients exec-reload too: reap git probes and other children a previous
+    // image left running, before this image spawns anything of its own.
+    jcode::inherited_children::start();
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;

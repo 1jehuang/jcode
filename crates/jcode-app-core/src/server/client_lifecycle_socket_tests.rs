@@ -279,6 +279,43 @@ async fn sdk_socket_cancel_workflow(
         identity_capability,
         "bootstrap must be negotiated"
     );
+    {
+        // A stored todo change reaches the attached client without a
+        // `get_todos` request, and tells it that polling is unnecessary.
+        let session_id = sessions.read().await.keys().next().unwrap().clone();
+        let todos: Vec<crate::todo::TodoItem> = serde_json::from_value(json!([
+            {"id":"pushed","content":"Pushed without a poll","priority":"high","status":"in_progress"}
+        ]))
+        .unwrap();
+        crate::todo::save_todos(&session_id, &todos).unwrap();
+        let pushed = until(&mut client_reader, |event| {
+            matches!(event, ServerEvent::Todos { .. })
+        })
+        .await;
+        assert!(
+            matches!(&pushed, ServerEvent::Todos { session_id: id, payload, pushes: true }
+                if *id == session_id && payload.contains("Pushed without a poll")),
+            "unexpected todo push: {pushed:?}"
+        );
+        // Another session's write must not reach this client. Bus events are
+        // delivered in order, so a leaked push would arrive before the push
+        // for the write to this session that follows it.
+        crate::todo::save_todos("some-other-session", &todos).unwrap();
+        let second: Vec<crate::todo::TodoItem> = serde_json::from_value(json!([
+            {"id":"pushed","content":"Second push","priority":"high","status":"completed"}
+        ]))
+        .unwrap();
+        crate::todo::save_todos(&session_id, &second).unwrap();
+        let next = until(&mut client_reader, |event| {
+            matches!(event, ServerEvent::Todos { .. })
+        })
+        .await;
+        assert!(
+            matches!(&next, ServerEvent::Todos { session_id: id, payload, .. }
+                if *id == session_id && payload.contains("Second push")),
+            "expected only this session's second write, got: {next:?}"
+        );
+    }
     if catalog_failure {
         let session_id = sessions.read().await.keys().next().unwrap().clone();
         terminal_provider
@@ -710,6 +747,25 @@ async fn sdk_socket_cancel_workflow(
     // An existing session, not an empty panel: empty untitled sessions are
     // never written to disk and get a 30s reconnect grace on disconnect.
     other_session.title = Some("sdk other session".into());
+    for index in 0..8 {
+        other_session.append_stored_message(crate::session::StoredMessage {
+            id: format!("history-{index}"),
+            role: if index % 2 == 0 {
+                crate::message::Role::User
+            } else {
+                crate::message::Role::Assistant
+            },
+            content: vec![ContentBlock::Text {
+                text: format!("history {index}"),
+                cache_control: None,
+            }]
+            .into(),
+            display_role: None,
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        });
+    }
     other_session.save().unwrap();
     assert!(crate::session::session_exists("sdk_other_session"));
     let other_registry = Registry::new(provider_template.clone()).await;
@@ -722,6 +778,68 @@ async fn sdk_socket_cancel_workflow(
             None,
         ))),
     );
+    if identity_capability && terminal_race {
+        // Exercise actual dispatch, not just the history handlers. A subsequent
+        // Subscribe is authoritative and clears an earlier opt-in for legacy clients.
+        let (history_task, history_stream) = connect();
+        let (reader, mut writer) = history_stream.into_split();
+        let mut reader = BufReader::new(reader);
+        for recent in [None, Some(2), None, Some(3)] {
+            let mut subscribe =
+                json!({"type":"subscribe","id":101,"working_dir":home._home.path()});
+            if let Some(size) = recent {
+                // Deliberately stale prefix state must not leak into later requests.
+                subscribe["history_base"] =
+                    json!({"count":4,"fingerprint":123,"recent_messages":size});
+            }
+            send(&mut writer, subscribe).await;
+            until(&mut reader, |e| matches!(e, ServerEvent::Done { id: 101 })).await;
+            send(
+                &mut writer,
+                json!({"type":"resume_session","id":102,"session_id":"sdk_other_session"}),
+            )
+            .await;
+            let event = until(&mut reader, |e| {
+                matches!(e, ServerEvent::History { id: 102, .. })
+            })
+            .await;
+            let expected = recent.map_or(8, |size| size + 1);
+            let ServerEvent::History {
+                messages,
+                messages_base_count,
+                ..
+            } = event
+            else {
+                unreachable!()
+            };
+            assert_eq!(messages.len(), expected, "resume recent={recent:?}");
+            assert_eq!(messages_base_count, None);
+            assert_eq!(messages.last().unwrap().content, "history 7");
+            until(&mut reader, |e| matches!(e, ServerEvent::Done { id: 102 })).await;
+            send(&mut writer, json!({"type":"get_history","id":103})).await;
+            let event = until(&mut reader, |e| {
+                matches!(e, ServerEvent::History { id: 103, .. })
+            })
+            .await;
+            let ServerEvent::History {
+                messages,
+                messages_base_count,
+                ..
+            } = event
+            else {
+                unreachable!()
+            };
+            assert_eq!(messages.len(), expected, "get_history recent={recent:?}");
+            assert_eq!(messages_base_count, None);
+        }
+        drop(writer);
+        drop(reader);
+        tokio::time::timeout(Duration::from_secs(10), history_task)
+            .await
+            .expect("history client disconnect")
+            .unwrap()
+            .unwrap();
+    }
     send(
         &mut observer_writer,
         json!({"type":"resume_session","id":23,"session_id":"sdk_other_session"}),

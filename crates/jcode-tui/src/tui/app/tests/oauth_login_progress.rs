@@ -214,19 +214,19 @@ fn oauth_login_progress_real_frame_has_clickable_link_and_expand_button() {
         crate::tui::ui::oauth_login_link_message_from_screen(link_col + 2, link_row),
         Some(index)
     );
-    let (col, row) = find(&terminal, "▸ expand");
+    let (col, row) = find(&terminal, "⊞");
     assert!(app.try_toggle_swarm_expand_at(col + 2, row));
     let expanded = render_and_snap(&app, &mut terminal);
     assert!(expanded.contains("client_id=jcode-fixture"));
     println!("Observed expanded login frame:\n{expanded}");
-    let (col, row) = find(&terminal, "▾ collapse");
+    let (col, row) = find(&terminal, "⊟");
     assert!(app.try_toggle_swarm_expand_at(col + 2, row));
     let collapsed = render_and_snap(&app, &mut terminal);
     assert!(!collapsed.contains("client_id=jcode-fixture"));
     app.handle_debug_command("login-progress-success-fixture");
     let success = render_and_snap(&app, &mut terminal);
     assert!(success.contains("OpenAI login complete"));
-    assert!(!success.contains("▸ expand"));
+    assert!(!success.contains("⊞"));
     assert!(!success.contains("Open OpenAI sign-in"));
     assert!(!success.contains("Login only:"));
     println!("Observed successful login frame:\n{success}");

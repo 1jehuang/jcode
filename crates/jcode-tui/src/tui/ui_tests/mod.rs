@@ -1,9 +1,10 @@
 use super::*;
 
 mod cloud_directories;
+mod codemode_preview;
 mod preview_redraw_schedule;
+mod queued_reminders;
 mod resume_parity;
-mod stable_status;
 use crate::tui::session_picker;
 use crate::tui::ui::tools_ui;
 
@@ -130,14 +131,12 @@ struct TestState {
     display_messages: Vec<DisplayMessage>,
     messages_version: u64,
     streaming_text: String,
+    streaming_tools: Vec<ToolCall>,
     batch_progress: Option<crate::bus::BatchProgress>,
     queued_messages: Vec<String>,
     pending_soft_interrupts: Vec<String>,
     interleave_message: Option<String>,
     status: ProcessingStatus,
-    status_elapsed: Option<Duration>,
-    status_rate_limit: Option<Duration>,
-    status_background: Vec<crate::tui::BackgroundTaskRow>,
     queue_mode: bool,
     active_skill: Option<String>,
     centered_mode: bool,
@@ -145,6 +144,8 @@ struct TestState {
     anim_elapsed: f32,
     now_ms: u64,
     time_since_activity: Option<Duration>,
+    /// `Some(pending)` overrides the trait's conservative default.
+    stream_reveal_pending: Option<bool>,
     remote_startup_phase_active: bool,
     inline_view_state: Option<crate::tui::InlineViewState>,
     inline_interactive_state: Option<crate::tui::InlineInteractiveState>,
@@ -273,10 +274,10 @@ impl crate::tui::TuiState for TestState {
         None
     }
     fn streaming_tool_calls(&self) -> Vec<ToolCall> {
-        Vec::new()
+        self.streaming_tools.clone()
     }
     fn elapsed(&self) -> Option<Duration> {
-        self.status_elapsed
+        None
     }
     fn status(&self) -> ProcessingStatus {
         self.status.clone()
@@ -295,6 +296,9 @@ impl crate::tui::TuiState for TestState {
     }
     fn time_since_activity(&self) -> Option<Duration> {
         self.time_since_activity
+    }
+    fn stream_reveal_pending(&self) -> bool {
+        self.stream_reveal_pending.unwrap_or(true)
     }
     fn total_session_tokens(&self) -> Option<(u64, u64)> {
         None
@@ -366,10 +370,7 @@ impl crate::tui::TuiState for TestState {
         self.anim_elapsed
     }
     fn rate_limit_remaining(&self) -> Option<Duration> {
-        self.status_rate_limit
-    }
-    fn background_task_rows(&self) -> &[crate::tui::BackgroundTaskRow] {
-        &self.status_background
+        None
     }
     fn queue_mode(&self) -> bool {
         self.queue_mode

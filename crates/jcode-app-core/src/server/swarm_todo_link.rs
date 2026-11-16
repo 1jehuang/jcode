@@ -19,6 +19,56 @@
 use crate::plan::PlanItem;
 use crate::todo::TodoItem;
 
+/// Bounded handoff snapshot from the worker's canonical, lane-synced todos.
+/// Include incomplete tasks even when the worker's runtime status is ready.
+pub(super) fn completion_lane_plan(todos: &[TodoItem]) -> Option<String> {
+    if todos.is_empty() {
+        return None;
+    }
+    let refs: Vec<_> = todos.iter().collect();
+    let mut lines = Vec::new();
+    for stage in crate::todo::stages::stage_layout(&refs) {
+        for lane in stage.lanes {
+            if lines.len() >= 48 {
+                lines.push("… additional lanes omitted (see plan_status)".to_string());
+                return Some(lines.join("\n"));
+            }
+            let completed = lane
+                .items
+                .iter()
+                .filter(|&&i| todos[i].status == "completed")
+                .count();
+            let phase = stage
+                .number
+                .map(|n| format!("Phase {n} · "))
+                .unwrap_or_default();
+            lines.push(format!(
+                "{phase}{}: {completed}/{} completed",
+                jcode_swarm_core::truncate_detail(lane.group.as_deref().unwrap_or("Tasks"), 80),
+                lane.items.len()
+            ));
+            for &index in lane.items.iter().take(12) {
+                let todo = &todos[index];
+                lines.push(format!(
+                    "- [{}] {}",
+                    todo.status,
+                    jcode_swarm_core::truncate_detail(
+                        &todo.content.replace(['\n', '\r'], " "),
+                        180
+                    )
+                ));
+            }
+            if lane.items.len() > 12 {
+                lines.push(format!(
+                    "- … {} more tasks (see plan_status)",
+                    lane.items.len() - 12
+                ));
+            }
+        }
+    }
+    Some(lines.join("\n"))
+}
+
 fn is_open(todo: &TodoItem) -> bool {
     !matches!(todo.status.as_str(), "completed" | "cancelled")
 }
@@ -414,6 +464,25 @@ pub(crate) async fn resync_plan_after_todo_save(
         return None;
     }
     let mut plans = swarm_plans.write().await;
+    // Worker-owned lanes are dispatched without a launch call, so the first
+    // save that has one seeds the lane plan that status views read.
+    let wants_plan = todos.iter().any(crate::todo::stages::lane_requests_worker);
+    if wants_plan
+        && plans
+            .get(&swarm_id)
+            .is_none_or(|plan| plan.items.is_empty())
+    {
+        let items = plan_items_from_todos(todos);
+        if !items.is_empty() {
+            let plan = plans
+                .entry(swarm_id.clone())
+                .or_insert_with(super::VersionedPlan::new);
+            plan.replace_items(items);
+            plan.participants.insert(session_id.to_string());
+            plan.version += 1;
+            return Some(swarm_id);
+        }
+    }
     let plan = plans.get_mut(&swarm_id)?;
     let items = resync_lane_plan(todos, &plan.items)?;
     plan.replace_items(items);
@@ -440,6 +509,34 @@ mod tests {
         let mut item = todo(id, "pending", Some(stage));
         item.group = Some(group.to_string());
         item
+    }
+
+    #[test]
+    fn completion_lane_snapshot_preserves_incomplete_and_cancelled_tasks() {
+        let mut completed = laned("offline", 1, "security");
+        completed.status = "completed".into();
+        let mut cancelled = laned("obsolete", 1, "security");
+        cancelled.status = "cancelled".into();
+        let snapshot = completion_lane_plan(&[
+            completed,
+            laned("live acceptance", 1, "security"),
+            cancelled,
+        ])
+        .unwrap();
+        assert!(snapshot.contains("Phase 1 · security: 1/3 completed"));
+        assert!(snapshot.contains("- [completed] task offline"));
+        assert!(snapshot.contains("- [pending] task live acceptance"));
+        assert!(snapshot.contains("- [cancelled] task obsolete"));
+        assert_eq!(completion_lane_plan(&[]), None);
+    }
+
+    #[test]
+    fn completion_lane_snapshot_bounds_tasks_and_preserves_total() {
+        let todos: Vec<_> = (0..30).map(|i| laned(&i.to_string(), 2, "tests")).collect();
+        let snapshot = completion_lane_plan(&todos).unwrap();
+        assert!(snapshot.contains("0/30 completed"));
+        assert!(snapshot.contains("18 more tasks"));
+        assert_eq!(snapshot.lines().count(), 14);
     }
 
     fn deps(items: &[PlanItem]) -> Vec<(String, Vec<String>)> {

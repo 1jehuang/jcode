@@ -191,7 +191,7 @@ pub fn wrap_line(
                 &mut pending_repeated_prefix,
             );
             for piece in &token.word {
-                current_spans.push(Span::styled(piece.text.clone(), piece.style));
+                push_merged_span(&mut current_spans, &piece.text, piece.style);
             }
             let width_before = current_width;
             current_width += token.word_width;
@@ -321,7 +321,7 @@ fn append_token_spaces(
         return;
     }
     for piece in &token.spaces {
-        current_spans.push(Span::styled(piece.text.clone(), piece.style));
+        push_merged_span(current_spans, &piece.text, piece.style);
     }
     let width_before = *current_width;
     *current_width += token.space_width;
@@ -430,6 +430,19 @@ fn tokenize_balanced_wrap(line: &Line<'static>) -> Option<Vec<WrapToken>> {
     Some(tokens)
 }
 
+/// Append text, extending the previous span when its style matches. Wrapping
+/// splits text into word and space tokens; emitting one span per token made
+/// wrapped prose and diff rows cost ~56 bytes of span struct per word.
+fn push_merged_span(spans: &mut Vec<Span<'static>>, text: &str, style: Style) {
+    if let Some(last) = spans.last_mut()
+        && last.style == style
+    {
+        last.content.to_mut().push_str(text);
+        return;
+    }
+    spans.push(Span::styled(text.to_string(), style));
+}
+
 fn push_piece_char(pieces: &mut Vec<StyledPiece>, ch: char, style: Style) {
     if let Some(last) = pieces.last_mut()
         && last.style == style
@@ -513,11 +526,11 @@ fn build_balanced_line_spans(tokens: &[WrapToken]) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     for (idx, token) in tokens.iter().enumerate() {
         for piece in &token.word {
-            spans.push(Span::styled(piece.text.clone(), piece.style));
+            push_merged_span(&mut spans, &piece.text, piece.style);
         }
         if idx + 1 < tokens.len() {
             for piece in &token.spaces {
-                spans.push(Span::styled(piece.text.clone(), piece.style));
+                push_merged_span(&mut spans, &piece.text, piece.style);
             }
         }
     }

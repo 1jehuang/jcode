@@ -1,3 +1,4 @@
+use super::state_ui_history_marker::parse_compacted_history_marker;
 use super::state_ui_storage::{
     compact_display_message_tool_data, compact_display_messages_for_storage,
 };
@@ -7,7 +8,6 @@ use std::time::{Duration, Instant};
 
 const COMPACTED_HISTORY_CHUNK_MESSAGES: usize = 64;
 const COMPACTED_HISTORY_LOAD_SCROLL_THRESHOLD: usize = 2;
-const COMPACTED_HISTORY_MARKER_PREFIX: &str = "Earlier conversation compacted - ";
 const OVERNIGHT_CARD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 #[cfg(test)]
@@ -21,8 +21,8 @@ fn display_message_from_stored_message(
     if text.trim().is_empty() {
         return None;
     }
-    if is_background_task_lifecycle_message(&text) {
-        return None;
+    if matches!(message.role, Role::User) && is_background_task_lifecycle_message(&text) {
+        return Some(DisplayMessage::background_task(text));
     }
     if !matches!(message.role, Role::Assistant)
         && let Some(swarm) = super::remote_notifications::swarm_delivery_display_message(&text)
@@ -30,8 +30,14 @@ fn display_message_from_stored_message(
         return Some(swarm);
     }
     match message.display_role {
+        Some(crate::session::StoredDisplayRole::FileActivity) => {
+            super::remote_notifications::typed_file_activity_display_message(&text)
+                .or_else(|| Some(DisplayMessage::system(text)))
+        }
         Some(crate::session::StoredDisplayRole::System) => Some(DisplayMessage::system(text)),
-        Some(crate::session::StoredDisplayRole::BackgroundTask) => None,
+        Some(crate::session::StoredDisplayRole::BackgroundTask) => {
+            Some(DisplayMessage::background_task(text))
+        }
         None => match message.role {
             Role::User => {
                 if crate::session::is_scheduled_task_message(message) {
@@ -126,7 +132,11 @@ impl App {
 
     pub fn push_display_message(&mut self, mut message: DisplayMessage) {
         if is_background_task_lifecycle_message(&message.content) {
-            return;
+            if matches!(message.role.as_str(), "user" | "system") {
+                message.role = "background_task".to_string();
+            } else if message.role != "background_task" && message.role != "assistant" {
+                return;
+            }
         }
         if message.role == "tool" && message.duration_secs.is_none() {
             message.duration_secs = DisplayMessage::tool_duration_from_output(&message.content);
@@ -163,7 +173,15 @@ impl App {
     }
 
     pub(super) fn replace_display_messages(&mut self, mut messages: Vec<DisplayMessage>) {
-        messages.retain(|message| !is_background_task_lifecycle_message(&message.content));
+        messages.retain_mut(|message| {
+            if !is_background_task_lifecycle_message(&message.content) {
+                return true;
+            }
+            if matches!(message.role.as_str(), "user" | "system") {
+                message.role = "background_task".to_string();
+            }
+            matches!(message.role.as_str(), "background_task" | "assistant")
+        });
         for message in &mut messages {
             if message.role == "tool" && message.duration_secs.is_none() {
                 message.duration_secs = DisplayMessage::tool_duration_from_output(&message.content);
@@ -248,11 +266,19 @@ impl App {
         &self.background_task_rows
     }
 
-    /// User-only blockers and live waits suppress all automatic continuations.
+    /// Todos awaiting user authorization and live waits suppress automatic
+    /// continuations, as does a goal declared impossible to complete.
     /// Disk state survives a TUI reload and overrides stale retained UI rows.
     pub(super) fn todo_is_paused_for_auto_followup(&self, todo: &crate::todo::TodoItem) -> bool {
-        crate::todo::todo_completely_blocked(todo)
-            || crate::todo::todo_has_external_blocker(todo)
+        let session_id = self
+            .remote_session_id
+            .as_deref()
+            .unwrap_or(&self.session.id);
+        crate::todo::todo_requires_user_auth(todo)
+            || crate::todo::todo_goal_cannot_complete(
+                todo,
+                &crate::todo::load_goals(session_id).unwrap_or_default(),
+            )
             || crate::todo::todo_waits_on_running_task(todo, |task_id| {
                 self.running_todo_await_dependency(task_id)
                     || self.running_todo_background_dependency(task_id).is_some()
@@ -727,6 +753,10 @@ impl App {
         remaining_messages: usize,
         hidden_user_prompts: usize,
     ) {
+        let recent_history = self.recent_history_window_active();
+        // A load that arrives while the reader follows the tail (the Alt+E
+        // prompt-history backfill) must not pull them up to the old history.
+        let following_tail = !self.auto_scroll_paused && self.pending_history_anchor.is_none();
         compact_display_messages_for_storage(&mut messages);
         carry_over_tool_durations(&self.display_messages, &mut messages);
         self.display_messages = messages;
@@ -739,6 +769,11 @@ impl App {
             hidden_user_prompts,
             pending_request_visible: None,
         };
+        if recent_history {
+            // Once the current transcript is fully visible, its original
+            // compaction marker (if any) becomes the next lazy history source.
+            self.sync_compacted_history_lazy_from_display_messages();
+        }
         self.auto_scroll_paused = true;
         // Older messages are prepended above the current view. If the reader had
         // an anchor captured (they scrolled up to trigger this load), leave the
@@ -747,6 +782,9 @@ impl App {
         // fall back to the top when there is no anchor to honor.
         if self.pending_history_anchor.is_none() {
             self.scroll_offset = 0;
+        }
+        if following_tail {
+            self.auto_scroll_paused = false;
         }
         self.bump_display_messages_version();
         self.note_runtime_memory_event_force(
@@ -897,6 +935,9 @@ impl App {
     }
 
     pub(super) fn maybe_queue_compacted_history_load_with_overshoot(&mut self, overshoot: usize) {
+        if self.recent_history_paging.request.is_some() {
+            return;
+        }
         if !self.auto_scroll_paused {
             return;
         }
@@ -935,7 +976,7 @@ impl App {
         if self.is_remote {
             self.compacted_history_lazy.pending_request_visible = Some(next_visible);
             self.set_status_notice(format!(
-                "Loading older compacted history… {} of {}",
+                "Loading older history… {} of {}",
                 next_visible, self.compacted_history_lazy.total_messages
             ));
         } else {
@@ -943,8 +984,132 @@ impl App {
         }
     }
 
+    /// The expanded prompt history (Alt+E) lists the last few prompts above
+    /// the viewport. A lazily loaded transcript may hold only one or two of
+    /// them, which makes the toggle look dead, so pull older history in until
+    /// the list is full. Returns true when a load was started.
+    pub(super) fn maybe_backfill_expanded_prompt_history(&mut self) -> bool {
+        const MAX_LOADS_PER_TOGGLE: u8 = 8;
+        if !crate::tui::ui::viewport::prompt_history_expanded()
+            || self.compacted_history_lazy.remaining_messages == 0
+            || self
+                .compacted_history_lazy
+                .pending_request_visible
+                .is_some()
+            || self.recent_history_paging.request.is_some()
+            || self.pending_history_anchor.is_some()
+            || self.prompt_history_backfill.1 >= MAX_LOADS_PER_TOGGLE
+        {
+            return false;
+        }
+        // Wait for a frame that includes the previous load before asking again.
+        let total = crate::tui::ui::last_total_wrapped_lines();
+        if self.prompt_history_backfill.0 == Some(total) {
+            return false;
+        }
+        let scroll = crate::tui::ui::last_resolved_chat_scroll();
+        let offscreen_prompts = crate::tui::ui::last_chat_frame().map_or(0, |frame| {
+            frame
+                .wrapped_user_prompt_starts
+                .partition_point(|line| *line < scroll)
+        });
+        if offscreen_prompts >= crate::tui::ui::viewport::EXPANDED_PROMPT_PREVIEW_COUNT {
+            return false;
+        }
+        let next_visible = self
+            .compacted_history_lazy
+            .visible_messages
+            .saturating_add(COMPACTED_HISTORY_CHUNK_MESSAGES)
+            .min(self.compacted_history_lazy.total_messages);
+        if next_visible <= self.compacted_history_lazy.visible_messages {
+            return false;
+        }
+        self.prompt_history_backfill = (Some(total), self.prompt_history_backfill.1 + 1);
+        if self.auto_scroll_paused {
+            self.capture_history_anchor(0);
+        }
+        if self.is_remote {
+            self.compacted_history_lazy.pending_request_visible = Some(next_visible);
+        } else {
+            self.apply_local_compacted_history_window(next_visible);
+        }
+        true
+    }
+
     pub(super) fn take_pending_compacted_history_load(&mut self) -> Option<usize> {
+        if self
+            .recent_history_paging
+            .retry_at
+            .is_some_and(|deadline| Instant::now() < deadline)
+        {
+            return None;
+        }
+        self.recent_history_paging.retry_at = None;
         self.compacted_history_lazy.pending_request_visible.take()
+    }
+
+    pub(super) fn recent_history_window_active(&self) -> bool {
+        self.display_messages.first().is_some_and(|message| {
+            message.role == "system"
+                && message
+                    .content
+                    .starts_with(crate::protocol::RECENT_HISTORY_MARKER_PREFIX)
+        })
+    }
+
+    /// A response computed before a live append or rewind must not discard it.
+    /// Retry against the new generation while retaining the viewport anchor.
+    pub(super) fn accept_recent_history_response(&mut self, id: u64) -> bool {
+        let Some((expected, version, visible)) = self.recent_history_paging.request else {
+            return !self.recent_history_window_active();
+        };
+        if id != expected {
+            return false;
+        }
+        self.recent_history_paging.request = None;
+        if version != self.display_messages_version {
+            if self.recent_history_window_active() {
+                self.restore_pending_compacted_history_load(visible);
+                self.recent_history_paging.retry_at =
+                    Some(Instant::now() + Duration::from_millis(250));
+            }
+            return false;
+        }
+        true
+    }
+
+    pub(super) fn recent_history_page_contains_visible_tail(
+        &mut self,
+        messages: &mut [DisplayMessage],
+        visible: usize,
+    ) -> bool {
+        if !self.recent_history_window_active() {
+            return true;
+        }
+        compact_display_messages_for_storage(messages);
+        // A busy agent may supply a persisted snapshot. Generation fencing
+        // alone cannot detect a snapshot already stale when we sent the request.
+        // Require its real transcript tail to include the rows on screen, while
+        // ignoring local status notices which are never part of server history.
+        let meaningful = |role: &str| matches!(role, "user" | "assistant" | "tool");
+        let current: Vec<_> = self
+            .display_messages
+            .iter()
+            .filter(|m| meaningful(&m.role))
+            .collect();
+        let incoming: Vec<_> = messages.iter().filter(|m| meaningful(&m.role)).collect();
+        let matches = current.is_empty()
+            || incoming.windows(current.len()).any(|window| {
+                window
+                    .iter()
+                    .zip(&current)
+                    .all(|(new, old)| new.role == old.role && new.content == old.content)
+            });
+        if !matches {
+            self.restore_pending_compacted_history_load(visible);
+            self.recent_history_paging.retry_at = Some(Instant::now() + Duration::from_millis(250));
+        }
+        matches
     }
 
     /// Whether there are older compacted-history messages not yet loaded into the
@@ -1064,63 +1229,4 @@ fn carry_over_tool_durations(previous: &[DisplayMessage], incoming: &mut [Displa
             message.duration_secs = Some(*seconds);
         }
     }
-}
-
-fn parse_compacted_history_marker(message: &DisplayMessage) -> Option<CompactedHistoryLazyState> {
-    if message.role != "system" {
-        return None;
-    }
-    let rest = message
-        .content
-        .strip_prefix(COMPACTED_HISTORY_MARKER_PREFIX)?;
-
-    if let Some(rest) = rest.strip_prefix("showing all ") {
-        let (total, _) = parse_leading_usize(rest)?;
-        return Some(CompactedHistoryLazyState {
-            total_messages: total,
-            visible_messages: total,
-            remaining_messages: 0,
-            hidden_user_prompts: 0,
-            pending_request_visible: None,
-        });
-    }
-
-    let (first, after_first) = parse_leading_usize(rest)?;
-    if after_first.starts_with(" older historical messages hidden. Showing ") {
-        let showing = after_first.strip_prefix(" older historical messages hidden. Showing ")?;
-        let (visible, after_visible) = parse_leading_usize(showing)?;
-        let after_visible = after_visible.strip_prefix(" of ")?;
-        let (total, _) = parse_leading_usize(after_visible)?;
-        return Some(CompactedHistoryLazyState {
-            total_messages: total,
-            visible_messages: visible,
-            remaining_messages: first,
-            hidden_user_prompts: 0,
-            pending_request_visible: None,
-        });
-    }
-
-    if after_first.starts_with(" historical messages hidden") {
-        return Some(CompactedHistoryLazyState {
-            total_messages: first,
-            visible_messages: 0,
-            remaining_messages: first,
-            hidden_user_prompts: 0,
-            pending_request_visible: None,
-        });
-    }
-
-    None
-}
-
-fn parse_leading_usize(text: &str) -> Option<(usize, &str)> {
-    let end = text
-        .char_indices()
-        .take_while(|(_, ch)| ch.is_ascii_digit())
-        .map(|(idx, ch)| idx + ch.len_utf8())
-        .last()?;
-    let Ok(value) = text[..end].parse() else {
-        return None;
-    };
-    Some((value, &text[end..]))
 }

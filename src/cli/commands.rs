@@ -1454,7 +1454,32 @@ pub async fn run_transcript_command(
     }
 }
 
-pub async fn run_companion_command(status: bool, no_voice: bool) -> Result<()> {
+/// `jcode companion --no-*` flags. Each turns a feature off on top of the
+/// `[companion]` config. A flag can never turn on something config disables.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CompanionFlags {
+    pub no_voice: bool,
+    pub no_voice_waveform: bool,
+    pub no_voice_notifications: bool,
+    pub no_open: bool,
+    pub no_spawn_terminal: bool,
+    pub no_lid: bool,
+    pub no_browser_updates: bool,
+}
+
+impl CompanionFlags {
+    pub fn apply(self, options: &mut jcode_companion::CompanionOptions) {
+        options.voice &= !self.no_voice;
+        options.voice_waveform &= !self.no_voice_waveform;
+        options.voice_notifications &= !self.no_voice_notifications;
+        options.open &= !self.no_open;
+        options.spawn_terminal &= !self.no_spawn_terminal;
+        options.lid &= !self.no_lid;
+        options.browser_updates &= !self.no_browser_updates;
+    }
+}
+
+pub async fn run_companion_command(status: bool, flags: CompanionFlags) -> Result<()> {
     use crate::companion_client::{CompanionRequest, request_async};
     if status {
         match request_async(CompanionRequest::Status, std::time::Duration::from_secs(2)).await {
@@ -1470,11 +1495,9 @@ pub async fn run_companion_command(status: bool, no_voice: bool) -> Result<()> {
             Err(error) => anyhow::bail!("{error}"),
         }
     }
-    jcode_companion::run(jcode_companion::CompanionOptions {
-        voice: !no_voice,
-        ..Default::default()
-    })
-    .await
+    let mut options = jcode_companion::CompanionOptions::from_config();
+    flags.apply(&mut options);
+    jcode_companion::run(options).await
 }
 
 pub async fn run_dictate_command(type_output: bool) -> Result<()> {
@@ -2836,8 +2859,8 @@ fn run_command_auto_poke_limit_reached(turns_completed: usize, max_turns: Option
 mod todo_followup;
 use todo_followup::{
     RunAutoPokeFollowUp, build_run_auto_poke_follow_up_from_todos, prepare_run_todo_follow_up,
-    run_actionable_poke_message, run_blocked_notice, run_completely_blocked_notice,
-    run_external_blocker_notice, run_todos, take_run_gate_digest_if_turn_ended,
+    run_actionable_poke_message, run_blocked_notice, run_cannot_complete_notice, run_goals,
+    run_todos, run_user_auth_notice, take_run_gate_digest_if_turn_ended,
 };
 #[cfg(test)]
 use todo_followup::{run_actionable_todos, take_run_gate_digest};
@@ -2875,7 +2898,7 @@ async fn run_single_message_command_plain_with_auto_poke(
         if todos.iter().any(crate::todo::is_incomplete_todo)
             && !actionable_todos.iter().any(crate::todo::is_incomplete_todo)
         {
-            eprintln!("{}", run_blocked_notice(&todos).unwrap_or_else(||
+            eprintln!("{}", run_blocked_notice(&todos, &run_goals(agent.session_id())).unwrap_or_else(||
                 "Stopped at the turn limit with unfinished todos waiting on background dependencies.".into()
             ));
             break;
@@ -2993,7 +3016,7 @@ async fn run_single_message_command_capture_with_auto_poke(
         if todos.iter().any(crate::todo::is_incomplete_todo)
             && !actionable_todos.iter().any(crate::todo::is_incomplete_todo)
         {
-            eprintln!("{}", run_blocked_notice(&todos).unwrap_or_else(||
+            eprintln!("{}", run_blocked_notice(&todos, &run_goals(agent.session_id())).unwrap_or_else(||
                 "Stopped at the turn limit with unfinished todos waiting on background dependencies.".into()
             ));
             break;
@@ -3180,11 +3203,10 @@ async fn run_single_message_command_ndjson(
                 &serde_json::json!({
                     "type": "auto_poke_stopped",
                     "session_id": session_id,
-                    "reason": if run_completely_blocked_notice(&todos).is_some() { "completely_blocked" } else if run_external_blocker_notice(&todos).is_some() { "external_blocker" } else { "turn_limit" },
-                    "message": run_blocked_notice(&todos),
-                    "completely_blocked": todos.iter().any(crate::todo::todo_completely_blocked),
+                    "reason": if run_user_auth_notice(&todos).is_some() { "requires_user_auth" } else if run_cannot_complete_notice(&todos, &run_goals(&session_id)).is_some() { "cannot_complete" } else { "turn_limit" },
+                    "message": run_blocked_notice(&todos, &run_goals(&session_id)),
+                    "requires_user_auth": todos.iter().any(crate::todo::todo_requires_user_auth),
                     "waiting_on_background": todos.iter().any(|todo| !todo.waiting_on.is_empty()),
-                    "waiting_on_external": todos.iter().any(crate::todo::todo_has_external_blocker),
                     "max_turns": max_turns,
                 }),
             )?;

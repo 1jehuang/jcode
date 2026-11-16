@@ -23,6 +23,12 @@ use crate::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
+mod timing;
+#[cfg(test)]
+mod timing_tests;
+#[cfg(test)]
+mod transport_tests;
+
 /// Production control plane.
 pub const DEFAULT_API_BASE: &str = "https://api.jcode.sh/v1";
 /// How long [`CloudClient::wait_for_host`] waits for a host to provision.
@@ -35,6 +41,10 @@ pub struct Account {
     pub api_key: String,
     #[serde(default)]
     pub email: Option<String>,
+    #[serde(default)]
+    pub given_name: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(default = "default_base")]
     pub api_base: String,
 }
@@ -242,8 +252,51 @@ impl CloudClient {
         Account {
             api_key: reply.api_key,
             email: reply.email,
+            given_name: reply.given_name,
+            name: reply.name,
             api_base: self.api_base.clone(),
         }
+    }
+
+    /// Refresh profile names using the account's API endpoint and credentials.
+    /// Missing or null names from older servers preserve the cached values.
+    pub fn refresh_account_profile(&self, account: &Account) -> Result<Account> {
+        #[derive(Deserialize)]
+        struct Profile {
+            #[serde(default)]
+            given_name: Option<String>,
+            #[serde(default)]
+            name: Option<String>,
+        }
+        let client = Self {
+            api_base: account.api_base.trim_end_matches('/').to_string(),
+            ..self.clone()
+        };
+        let (status, body) = client.send_raw(
+            "GET",
+            "/auth/verify",
+            Some(&account.api_key),
+            serde_json::Value::Null,
+        )?;
+        if !(200..300).contains(&status) {
+            let err = &body["error"];
+            return Err(describe(
+                status,
+                err["code"].as_str().unwrap_or(""),
+                err["message"].as_str().unwrap_or(""),
+            ));
+        }
+        let profile: Profile = serde_json::from_value(body).map_err(|e| {
+            Error::new(
+                ErrorKind::UnexpectedReply,
+                format!("Unexpected reply from jcode.sh: {e}"),
+            )
+        })?;
+        Ok(Account {
+            given_name: profile.given_name.or_else(|| account.given_name.clone()),
+            name: profile.name.or_else(|| account.name.clone()),
+            ..account.clone()
+        })
     }
 
     /// Email a 6-digit code. Returns the login token for [`Self::verify_email_login`].
@@ -287,11 +340,13 @@ impl CloudClient {
             serde_json::json!({"device_code": login.device_code}),
         )?;
         if (200..300).contains(&status) {
-            let r: LoginReply = serde_json::from_value(body).map_err(|e| {
-                Error::new(
-                    ErrorKind::UnexpectedReply,
-                    format!("Unexpected reply from jcode.sh: {e}"),
-                )
+            let r: LoginReply = timing::measured("reply_decode", "device_poll", || {
+                serde_json::from_value(body).map_err(|e| {
+                    Error::new(
+                        ErrorKind::UnexpectedReply,
+                        format!("Unexpected reply from jcode.sh: {e}"),
+                    )
+                })
             })?;
             return Ok(Some(self.account(r)));
         }
@@ -367,29 +422,51 @@ impl CloudClient {
         progress: &dyn Fn(&str),
         cancelled: &dyn Fn() -> bool,
     ) -> Result<CloudTarget> {
-        let deadline = Instant::now() + PROVISION_DEADLINE;
-        let mut last = String::new();
-        loop {
-            let reply = self.request_host_connect(account, public_key_openssh)?;
-            if reply.ready {
-                return CloudTarget::from_reply(&reply);
+        self.wait_for_host_until(
+            account,
+            public_key_openssh,
+            progress,
+            cancelled,
+            Instant::now() + PROVISION_DEADLINE,
+        )
+    }
+
+    fn wait_for_host_until(
+        &self,
+        account: &Account,
+        public_key_openssh: &str,
+        progress: &dyn Fn(&str),
+        cancelled: &dyn Fn() -> bool,
+        deadline: Instant,
+    ) -> Result<CloudTarget> {
+        timing::measured("total", "wait_for_host", || {
+            let mut last = String::new();
+            loop {
+                let reply = timing::measured("poll", "wait_for_host", || {
+                    self.request_host_connect(account, public_key_openssh)
+                })?;
+                if reply.ready {
+                    return CloudTarget::from_reply(&reply);
+                }
+                let message = reply
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| format!("Jcode Cloud machine is {}…", reply.state));
+                if message != last {
+                    progress(&message);
+                    last = message;
+                }
+                if Instant::now() >= deadline {
+                    return Err(Error::new(
+                        ErrorKind::StartupTimeout,
+                        "Jcode Cloud did not become ready in time. Retry to keep waiting.",
+                    ));
+                }
+                timing::measured("poll_wait", "wait_for_host", || {
+                    sleep_unless(self.poll_interval, cancelled)
+                })?;
             }
-            let message = reply
-                .message
-                .clone()
-                .unwrap_or_else(|| format!("Jcode Cloud machine is {}…", reply.state));
-            if message != last {
-                progress(&message);
-                last = message;
-            }
-            if Instant::now() >= deadline {
-                return Err(Error::new(
-                    ErrorKind::StartupTimeout,
-                    "Jcode Cloud did not become ready in time. Retry to keep waiting.",
-                ));
-            }
-            sleep_unless(self.poll_interval, cancelled)?;
-        }
+        })
     }
 
     /// Register this device's APNs token so the account's jcode servers can
@@ -412,12 +489,21 @@ impl CloudClient {
 
     /// Reset the account's unread badge (the app came to the foreground).
     pub fn reset_push_badge(&self, account: &Account) -> Result<()> {
-        self.account_call(account, "POST", "/push/badge", serde_json::json!({"count": 0}))
+        self.account_call(
+            account,
+            "POST",
+            "/push/badge",
+            serde_json::json!({"count": 0}),
+        )
     }
 
     /// Ask the control plane to push `notification` to every device on the
     /// account. Servers call this with their own account key.
-    pub fn send_push(&self, account: &Account, notification: &PushNotification) -> Result<PushReceipt> {
+    pub fn send_push(
+        &self,
+        account: &Account,
+        notification: &PushNotification,
+    ) -> Result<PushReceipt> {
         let client = Self {
             api_base: account.api_base.trim_end_matches('/').to_string(),
             ..self.clone()
@@ -451,7 +537,26 @@ impl CloudClient {
     }
 
     fn agent(&self) -> ureq::Agent {
-        ureq::Agent::config_builder()
+        // Mobile creates short-lived CloudClients while polling a waking host.
+        // Keep the transport, not account state, across those calls so every
+        // poll does not repeat TCP/TLS setup. ureq pools sockets by origin.
+        // Neither credentials nor response bodies enter this bounded cache.
+        type Agents = std::collections::VecDeque<(String, Duration, ureq::Agent)>;
+        static AGENTS: std::sync::Mutex<Agents> =
+            std::sync::Mutex::new(std::collections::VecDeque::new());
+        let mut agents = AGENTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(index) = agents
+            .iter()
+            .position(|(name, timeout, _)| name == &self.client_name && *timeout == self.timeout)
+        {
+            let entry = agents.remove(index).unwrap();
+            let agent = entry.2.clone();
+            agents.push_back(entry);
+            return agent;
+        }
+        let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(self.timeout))
             .http_status_as_error(false)
             .user_agent(format!(
@@ -460,7 +565,12 @@ impl CloudClient {
                 env!("CARGO_PKG_VERSION")
             ))
             .build()
-            .into()
+            .into();
+        if agents.len() >= 8 {
+            agents.pop_front();
+        }
+        agents.push_back((self.client_name.clone(), self.timeout, agent.clone()));
+        agent
     }
 
     fn post_raw(
@@ -479,6 +589,8 @@ impl CloudClient {
         api_key: Option<&str>,
         body: serde_json::Value,
     ) -> Result<(u16, serde_json::Value)> {
+        let operation = timing::operation(method, path);
+        let send_started = Instant::now();
         let mut req = ureq::http::Request::builder()
             .method(method)
             .uri(self.url(path))
@@ -486,24 +598,43 @@ impl CloudClient {
         if let Some(k) = api_key {
             req = req.header("Authorization", format!("Bearer {k}"));
         }
-        let req = req
-            .body(body.to_string())
-            .map_err(|e| Error::new(ErrorKind::Transport, e.to_string()))?;
-        let mut resp = self.agent().run(req).map_err(|e| {
+        let req = req.body(body.to_string()).map_err(|e| {
+            timing::record("http_send", operation, "error", send_started.elapsed());
+            Error::new(ErrorKind::Transport, e.to_string())
+        })?;
+        let response = self.agent().run(req);
+        let outcome = match &response {
+            Ok(resp) if resp.status().is_success() => "success",
+            Ok(_) => "error",
+            Err(ureq::Error::Timeout(_)) => "timeout",
+            Err(_) => "error",
+        };
+        timing::record("http_send", operation, outcome, send_started.elapsed());
+        let mut resp = response.map_err(|e| {
             Error::new(
                 ErrorKind::ConnectFailed,
                 format!("Could not reach jcode.sh: {e}"),
             )
         })?;
         let status = resp.status().as_u16();
-        let text = resp
-            .body_mut()
-            .read_to_string()
-            .map_err(|e| Error::new(ErrorKind::Transport, e.to_string()))?;
-        Ok((
-            status,
-            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
-        ))
+        let start = Instant::now();
+        let text = resp.body_mut().read_to_string();
+        timing::record(
+            "http_body",
+            operation,
+            timing::http_outcome(&text),
+            start.elapsed(),
+        );
+        let text = text.map_err(|e| Error::new(ErrorKind::Transport, e.to_string()))?;
+        let start = Instant::now();
+        let decoded = serde_json::from_str(&text);
+        timing::record(
+            "http_decode",
+            operation,
+            if decoded.is_ok() { "success" } else { "error" },
+            start.elapsed(),
+        );
+        Ok((status, decoded.unwrap_or(serde_json::Value::Null)))
     }
 
     fn post<T: for<'de> Deserialize<'de>>(
@@ -514,11 +645,13 @@ impl CloudClient {
     ) -> Result<T> {
         let (status, body) = self.post_raw(path, api_key, body)?;
         if (200..300).contains(&status) {
-            return serde_json::from_value(body).map_err(|e| {
-                Error::new(
-                    ErrorKind::UnexpectedReply,
-                    format!("Unexpected reply from jcode.sh: {e}"),
-                )
+            return timing::measured("reply_decode", timing::operation("POST", path), || {
+                serde_json::from_value(body).map_err(|e| {
+                    Error::new(
+                        ErrorKind::UnexpectedReply,
+                        format!("Unexpected reply from jcode.sh: {e}"),
+                    )
+                })
             });
         }
         let err = &body["error"];
@@ -535,6 +668,10 @@ struct LoginReply {
     api_key: String,
     #[serde(default)]
     email: Option<String>,
+    #[serde(default)]
+    given_name: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 fn sleep_unless(total: Duration, cancelled: &dyn Fn() -> bool) -> Result<()> {
@@ -634,7 +771,9 @@ mod tests {
     }
 
     /// Minimal one-shot HTTP server for flow tests.
-    fn serve(replies: Vec<(u16, &'static str)>) -> (String, std::sync::mpsc::Receiver<String>) {
+    pub(super) fn serve(
+        replies: Vec<(u16, &'static str)>,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -679,7 +818,10 @@ mod tests {
     fn email_login_sends_client_name_and_returns_account() {
         let (base, seen) = serve(vec![
             (200, r#"{"login_token":"lt"}"#),
-            (200, r#"{"api_key":"k","email":"a@b"}"#),
+            (
+                200,
+                r#"{"api_key":"k","email":"a@b","given_name":"Ada","name":"Ada Lovelace"}"#,
+            ),
         ]);
         let cloud = CloudClient::new("jcode-test").with_api_base(base.clone());
         assert_eq!(cloud.start_email_login("a@b").unwrap(), "lt");
@@ -694,6 +836,8 @@ mod tests {
             Account {
                 api_key: "k".into(),
                 email: Some("a@b".into()),
+                given_name: Some("Ada".into()),
+                name: Some("Ada Lovelace".into()),
                 api_base: base
             }
         );
@@ -727,6 +871,113 @@ mod tests {
     }
 
     #[test]
+    fn account_legacy_persistence_and_profile_roundtrip() {
+        let legacy: Account =
+            serde_json::from_str(r#"{"api_key":"legacy","email":"a@b"}"#).unwrap();
+        assert_eq!(legacy.api_base, DEFAULT_API_BASE);
+        assert_eq!(legacy.given_name, None);
+        assert_eq!(legacy.name, None);
+        let account = Account {
+            given_name: Some("Ada".into()),
+            name: Some("Ada Lovelace".into()),
+            ..legacy
+        };
+        let encoded = serde_json::to_value(&account).unwrap();
+        assert_eq!(encoded["given_name"], "Ada");
+        assert_eq!(encoded["name"], "Ada Lovelace");
+        assert_eq!(serde_json::from_value::<Account>(encoded).unwrap(), account);
+    }
+
+    #[test]
+    fn device_login_propagates_profile_names() {
+        let (base, _seen) = serve(vec![(
+            200,
+            r#"{"api_key":"k","given_name":"Ada","name":"Ada Lovelace"}"#,
+        )]);
+        let mut login = DeviceLogin {
+            device_code: "d".into(),
+            verification_uri_complete: "u".into(),
+            interval: 5,
+            expires_in: 0,
+        };
+        let account = CloudClient::new("t")
+            .with_api_base(base)
+            .poll_device_login(&mut login)
+            .unwrap()
+            .unwrap();
+        assert_eq!(account.given_name.as_deref(), Some("Ada"));
+        assert_eq!(account.name.as_deref(), Some("Ada Lovelace"));
+    }
+
+    #[test]
+    fn refresh_profile_uses_account_endpoint_and_preserves_legacy_names() {
+        let (base, seen) = serve(vec![
+            (
+                200,
+                r#"{"valid":true,"given_name":"Ada","name":"Ada Lovelace"}"#,
+            ),
+            (200, r#"{"valid":true}"#),
+            (200, r#"{"valid":true,"given_name":null,"name":null}"#),
+            (200, r#"{"given_name":"Augusta"}"#),
+        ]);
+        let original: Account = serde_json::from_value(serde_json::json!({
+            "api_key": "secret", "email": "a@b", "api_base": format!("{base}/")
+        }))
+        .unwrap();
+        let cloud = CloudClient::new("t").with_api_base("http://127.0.0.1:1");
+        let refreshed = cloud.refresh_account_profile(&original).unwrap();
+        assert_eq!(refreshed.given_name.as_deref(), Some("Ada"));
+        assert_eq!(refreshed.name.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(refreshed.api_key, original.api_key);
+        assert_eq!(refreshed.email, original.email);
+        assert_eq!(refreshed.api_base, original.api_base);
+        assert_eq!(original.given_name, None);
+        assert_eq!(
+            cloud.refresh_account_profile(&refreshed).unwrap(),
+            refreshed
+        );
+        assert_eq!(
+            cloud.refresh_account_profile(&refreshed).unwrap(),
+            refreshed
+        );
+        let partial = cloud.refresh_account_profile(&refreshed).unwrap();
+        assert_eq!(partial.given_name.as_deref(), Some("Augusta"));
+        assert_eq!(partial.name, refreshed.name);
+        for request in seen.iter().take(4) {
+            assert!(request.starts_with("GET /auth/verify HTTP/1.1"));
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer secret")
+            );
+        }
+    }
+
+    #[test]
+    fn refresh_profile_rejects_auth_errors_and_malformed_profiles() {
+        let (base, _seen) = serve(vec![
+            (401, r#"{"error":{"code":"unauthorized"}}"#),
+            (200, r#"{"given_name":123}"#),
+            (200, "not json"),
+        ]);
+        let account: Account =
+            serde_json::from_value(serde_json::json!({"api_key":"k","api_base":base})).unwrap();
+        let cloud = CloudClient::new("t");
+        assert_eq!(
+            cloud.refresh_account_profile(&account).unwrap_err().kind,
+            ErrorKind::CloudAuth
+        );
+        assert_eq!(
+            cloud.refresh_account_profile(&account).unwrap_err().kind,
+            ErrorKind::UnexpectedReply
+        );
+        assert_eq!(
+            cloud.refresh_account_profile(&account).unwrap_err().kind,
+            ErrorKind::UnexpectedReply
+        );
+    }
+
+    #[test]
     fn host_connect_polls_until_ready_with_bearer_auth() {
         let (base, seen) = serve(vec![
             (200, r#"{"state":"provisioning","ready":false}"#),
@@ -740,6 +991,8 @@ mod tests {
         let account = Account {
             api_key: "secret".into(),
             email: None,
+            given_name: None,
+            name: None,
             api_base: base,
         };
         let progress = std::sync::Mutex::new(Vec::new());
@@ -766,12 +1019,17 @@ mod tests {
             (200, r#"{"ok":true}"#),
             (200, r#"{"sent":1,"devices":1}"#),
             (200, r#"{"ok":true}"#),
-            (401, r#"{"error":{"code":"unauthorized","message":"revoked"}}"#),
+            (
+                401,
+                r#"{"error":{"code":"unauthorized","message":"revoked"}}"#,
+            ),
         ]);
         let cloud = CloudClient::new("t");
         let account = Account {
             api_key: "k".into(),
             email: None,
+            given_name: None,
+            name: None,
             api_base: base,
         };
         let device = PushDevice {
@@ -798,7 +1056,13 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(receipt, PushReceipt { sent: 1, devices: 1 });
+        assert_eq!(
+            receipt,
+            PushReceipt {
+                sent: 1,
+                devices: 1
+            }
+        );
         assert!(seen.recv().unwrap().contains(r#""kind":"turn_done""#));
 
         cloud.unregister_push_device(&account, "ab01").unwrap();
@@ -817,6 +1081,8 @@ mod tests {
         let account = Account {
             api_key: "k".into(),
             email: None,
+            given_name: None,
+            name: None,
             api_base: base,
         };
         let err = CloudClient::new("t")

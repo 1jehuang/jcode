@@ -598,6 +598,14 @@ impl BridgeState {
                     "supports_server_failover": true,
                     "supports_turn_identity": true,
                 });
+                // Mobile sockets disappear when the OS suspends the app or
+                // changes networks. The daemon must own their session lifetime.
+                // Preserve the existing desktop and unknown SDK client policy.
+                if self.client_name.as_deref().is_some_and(|name| {
+                    matches!(name.split('/').next(), Some("jcode-ios" | "jcode-android"))
+                }) {
+                    subscribe["continue_on_disconnect"] = json!(true);
+                }
                 if self.crash_on_disconnect {
                     subscribe["crash_on_disconnect"] = json!(true);
                 }
@@ -1393,6 +1401,17 @@ impl BridgeState {
                 },
             ))],
         }
+    }
+
+    /// Tool identity of a daemon `tool` history row, if it carries one.
+    fn history_tool(message: &Value) -> Option<jcode_harness_api::HistoryTool> {
+        let data = &message["tool_data"];
+        let id = data["id"].as_str().filter(|id| !id.is_empty())?;
+        (message["role"] == "tool").then(|| jcode_harness_api::HistoryTool {
+            id: id.to_string(),
+            name: data["name"].as_str().unwrap_or("").to_string(),
+            input: data["input"].clone(),
+        })
     }
 
     fn attachment_recovery(event: &Value) -> Option<ServerFrame> {
@@ -2307,6 +2326,7 @@ impl BridgeState {
                                     .unwrap_or(None),
                                 role: m["role"].as_str().unwrap_or("").to_string(),
                                 content: m["content"].as_str().unwrap_or("").to_string(),
+                                tool: Self::history_tool(m),
                             })
                             .collect()
                     })
@@ -3466,6 +3486,7 @@ impl BridgeState {
                     response_stats: None,
                     role: role.to_string(),
                     content,
+                    tool: None,
                 })
             })
             .take(limit)

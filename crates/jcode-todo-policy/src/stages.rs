@@ -134,6 +134,13 @@ pub fn validate_lane_dependencies(todos: &[TodoItem]) -> Result<(), String> {
     }
     for (phase, stage) in stages.iter().enumerate() {
         for lane in &stage.lanes {
+            if let Some(owner) = todos[lane.items[0]].lane_owner.as_deref()
+                && !matches!(owner, "worker" | "self")
+            {
+                return Err(format!(
+                    "lane owner must be \"worker\" or \"self\", got {owner:?}"
+                ));
+            }
             let expected = &todos[lane.items[0]].lane_after;
             if lane.items.iter().any(|&i| &todos[i].lane_after != expected) {
                 return Err("lane_after must be consistent across every lane member".into());
@@ -164,6 +171,30 @@ pub fn validate_lane_dependencies(todos: &[TodoItem]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Whether this todo's lane asked for a dedicated auto-spawned swarm worker.
+pub fn lane_requests_worker(todo: &TodoItem) -> bool {
+    todo.lane_owner.as_deref() == Some(crate::LANE_OWNER_WORKER)
+}
+
+/// Make `lane_owner` lane-wide: every member takes the value of the lane's
+/// first member that sets one, so adding an item to a worker lane keeps it a
+/// worker lane and a single-item edit flips the whole lane.
+pub fn normalize_lane_owners(todos: &mut [TodoItem]) {
+    let mut owners: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    for todo in todos.iter() {
+        let entry = owners.entry(lane_id(todo)).or_insert(None);
+        if entry.is_none() {
+            *entry = todo.lane_owner.clone();
+        }
+    }
+    for todo in todos.iter_mut() {
+        let owner = owners.get(&lane_id(todo)).cloned().flatten();
+        // `self` is the default; store only the meaningful value.
+        todo.lane_owner = owner.filter(|owner| owner != "self");
+    }
 }
 
 #[cfg(test)]
@@ -231,7 +262,7 @@ pub fn lane_todos_for_worker(coordinator_todos: &[TodoItem], lane: &str) -> Vec<
         .map(|todo| TodoItem {
             assigned_to: None,
             blocked_by: Vec::new(),
-            external_blocker: None,
+            waiting_reason: None,
             waiting_on: Vec::new(),
             ..todo.clone()
         })
@@ -258,6 +289,9 @@ pub fn canonicalize_worker_lane(
             stage: template.stage,
             group: template.group.clone(),
             lane_after: template.lane_after.clone(),
+            // Inside a worker's own list the lane is the worker's: it must
+            // never re-dispatch it, so ownership stays coordinator-side.
+            lane_owner: None,
             ..todo.clone()
         })
         .collect()
@@ -290,19 +324,21 @@ pub fn merge_worker_lane(
             item.stage = template.stage;
             item.group = template.group.clone();
             item.lane_after = template.lane_after.clone();
+            item.lane_owner = template.lane_owner.clone();
             item.assigned_to = Some(link.worker.clone());
             if other_ids.contains(item.id.as_str()) {
                 item.id = format!("{}:{}", link.worker, item.id);
             }
             // Background task IDs belong to the destination session, not the
             // worker. New items get no references from the source session.
-            item.waiting_on = match coordinator_todos
+            // The reason describes those IDs, so it travels with them.
+            (item.waiting_on, item.waiting_reason) = match coordinator_todos
                 .iter()
                 .find(|old| lane_id(old) == link.lane && old.id == item.id)
             {
-                Some(old) => old.waiting_on.clone(),
+                Some(old) => (old.waiting_on.clone(), old.waiting_reason.clone()),
                 // A newly introduced worker item cannot inherit another session's waits.
-                None => Vec::new(),
+                None => (Vec::new(), None),
             };
             item
         })
@@ -495,8 +531,10 @@ pub fn default_phase(todos: &[TodoItem]) -> Option<u32> {
 /// Ensure the coordinator's todo list has a lane named `lane` in `phase` for a
 /// spawned worker, returning the updated list and the lane id. An existing
 /// lane with that group in that phase is adopted as is; otherwise one item is
-/// appended from `title` / `details`. Every spawned worker therefore owns
-/// exactly one lane, and that lane is all it syncs.
+/// appended, named `title` with `details` as its body. Todo names must be
+/// unique within a plan, so a `title` already in use gets a numeric suffix.
+/// Every spawned worker therefore owns exactly one lane, and that lane is all
+/// it syncs.
 pub fn ensure_spawn_lane(
     todos: &[TodoItem],
     lane: &str,
@@ -519,13 +557,16 @@ pub fn ensure_spawn_lane(
     }
     let mut todos = todos.to_vec();
     let title = title.trim();
+    let base = if title.is_empty() { lane } else { title };
+    let mut content = base.to_string();
+    let mut suffix = 2;
+    while todos.iter().any(|todo| todo.content == content) {
+        content = format!("{base} ({suffix})");
+        suffix += 1;
+    }
     todos.push(TodoItem {
         id: id_hint.to_string(),
-        content: if title.is_empty() {
-            lane.to_string()
-        } else {
-            title.to_string()
-        },
+        content,
         status: "pending".to_string(),
         priority: "high".to_string(),
         group: Some(lane.to_string()),
@@ -590,5 +631,38 @@ mod spawn_lane_tests {
         let (out, id) = ensure_spawn_lane(&todos, "fix", None, "Fix it", None, "s1");
         assert_eq!(id, "lane::fix");
         assert_eq!(out.last().unwrap().stage, None);
+    }
+
+    /// Regression test (#2151): the spawn call site passes the derived
+    /// label as the title. Verify that the title becomes the todo's
+    /// `content` and the prompt becomes `details`.
+    #[test]
+    fn spawn_lane_title_becomes_content_prompt_becomes_details() {
+        let todos: Vec<TodoItem> = vec![];
+        let title = "fix parser error";
+        let prompt = "Review the diff\nand fix the bug";
+        let (out, id) = ensure_spawn_lane(&todos, "fix parser", None, title, Some(prompt), "s1");
+        assert_eq!(id, "lane::fix parser");
+        let added = out.last().unwrap();
+        // content must be the derived label, NOT the prompt's first line.
+        assert_eq!(added.content, "fix parser error");
+        assert_ne!(added.content, "Review the diff");
+        // details carries the full prompt.
+        assert_eq!(
+            added.details.as_deref(),
+            Some("Review the diff\nand fix the bug")
+        );
+    }
+
+    /// A label reused in another phase, or equal to an existing todo's name,
+    /// must not create a duplicate name: the todo tool rejects those plans.
+    #[test]
+    fn spawn_lane_name_stays_unique_within_the_plan() {
+        let todos = vec![item("docs", "completed", Some(1), Some("docs"))];
+        let (out, id) = ensure_spawn_lane(&todos, "docs", Some(2), "docs", None, "s1");
+        assert_eq!(id, "lane:2:docs");
+        assert_eq!(out.last().unwrap().content, "docs (2)");
+        let (out, _) = ensure_spawn_lane(&out, "docs", Some(3), "docs", None, "s2");
+        assert_eq!(out.last().unwrap().content, "docs (3)");
     }
 }

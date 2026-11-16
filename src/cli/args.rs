@@ -261,6 +261,11 @@ pub(crate) enum Command {
         #[arg(long)]
         no_validate: bool,
 
+        /// OpenAI only: sign in by entering a short code at auth.openai.com/codex/device
+        /// instead of a localhost callback. Suited to remote and cloud machines.
+        #[arg(long, conflicts_with_all = ["callback_url", "auth_code"])]
+        device_code: bool,
+
         #[command(flatten)]
         google: GoogleLoginArgs,
 
@@ -410,6 +415,30 @@ pub(crate) enum Command {
         /// Do not run the global push-to-talk listener
         #[arg(long)]
         no_voice: bool,
+
+        /// Do not show the live waveform in the focused Jcode CLI
+        #[arg(long)]
+        no_voice_waveform: bool,
+
+        /// Do not show desktop notifications for push-to-talk
+        #[arg(long)]
+        no_voice_notifications: bool,
+
+        /// Do not handle open/reveal requests (clients open locally)
+        #[arg(long)]
+        no_open: bool,
+
+        /// Do not open terminal windows (clients launch locally)
+        #[arg(long)]
+        no_spawn_terminal: bool,
+
+        /// Do not apply the lid-close override (macOS/Windows)
+        #[arg(long)]
+        no_lid: bool,
+
+        /// Do not auto-update the browser bridge
+        #[arg(long)]
+        no_browser_updates: bool,
     },
 
     /// Run configured dictation: send to last-focused jcode client or type raw text
@@ -648,6 +677,12 @@ pub(crate) enum TelemetryCommand {
     Disable,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MobileMessagesState {
+    On,
+    Off,
+}
+
 #[derive(Subcommand, Debug)]
 pub(crate) enum MobileCommand {
     /// Turn on transcript sync to your Jcode account (requires a subscription)
@@ -658,6 +693,12 @@ pub(crate) enum MobileCommand {
     Status,
     /// Run one sync pass now
     Sync,
+    /// Allow or stop messages from the phone to sessions running on this
+    /// computer (on by default while mobile sync is enabled)
+    Messages {
+        #[arg(value_enum)]
+        state: MobileMessagesState,
+    },
     /// Run sessions started or continued from the phone on this machine
     /// (Jcode Cloud machines do this automatically)
     Runner {
@@ -693,6 +734,11 @@ pub(crate) enum ServerCommand {
     #[cfg(unix)]
     #[command(hide = true)]
     Stdio,
+
+    /// Internal: serve workspace tool calls over stdin/stdout for a runtime
+    /// that runs elsewhere (`JCODE_EXEC_WORKER`). Holds no model credentials.
+    #[command(hide = true)]
+    ExecWorker,
 
     /// Start the background server if it is not already running.
     Start {
@@ -1049,6 +1095,9 @@ pub(crate) enum CloudMachineAction {
     Status,
     Wake,
     Stop,
+    /// Internal: prepare local managed SSH credentials without contacting cloud.
+    #[value(hide = true)]
+    PrepareSsh,
 }
 
 #[derive(Parser, Debug, Clone, Default)]

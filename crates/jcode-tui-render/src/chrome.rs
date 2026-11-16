@@ -2,10 +2,21 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 pub fn clear_area(frame: &mut Frame, area: Rect) {
-    for x in area.left()..area.right() {
-        for y in area.top()..area.bottom() {
-            frame.buffer_mut()[(x, y)].reset();
-        }
+    let buffer = frame.buffer_mut();
+    let area = area.intersection(buffer.area);
+    if area.is_empty() {
+        return;
+    }
+    let width = usize::from(area.width);
+    // Full-width areas are one contiguous run of cells.
+    if area.left() == buffer.area.left() && area.width == buffer.area.width {
+        let start = buffer.index_of(area.left(), area.top());
+        buffer.reset_range(start..start + width * usize::from(area.height));
+        return;
+    }
+    for y in area.top()..area.bottom() {
+        let start = buffer.index_of(area.left(), y);
+        buffer.reset_range(start..start + width);
     }
 }
 
@@ -87,5 +98,37 @@ pub fn align_if_unset(line: Line<'static>, align: Alignment) -> Line<'static> {
         line
     } else {
         line.alignment(align)
+    }
+}
+
+#[cfg(test)]
+mod clear_area_tests {
+    use super::clear_area;
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+
+    /// A tmux pane squeezed to one row still gets bands laid out below row 0.
+    /// Clearing them must clip to the buffer instead of indexing outside it.
+    #[test]
+    fn clear_area_clips_to_a_one_row_buffer() {
+        let mut terminal = Terminal::new(TestBackend::new(54, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                for x in 0..54 {
+                    frame.buffer_mut()[(x, 0)].set_symbol("x");
+                }
+                // Entirely below the buffer: the reported panic was (1, 1) in 54x1.
+                clear_area(frame, Rect::new(1, 1, 53, 3));
+                assert_eq!(frame.buffer_mut()[(1, 0)].symbol(), "x");
+                // Partly inside: only the visible cells are cleared.
+                clear_area(frame, Rect::new(1, 0, 10, 5));
+                clear_area(frame, Rect::new(50, 0, 40, 1));
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row: String = (0..54).map(|x| buffer[(x, 0)].symbol()).collect();
+        assert_eq!(
+            row,
+            format!("x{}{}{}", " ".repeat(10), "x".repeat(39), " ".repeat(4))
+        );
     }
 }

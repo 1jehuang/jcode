@@ -898,13 +898,16 @@ fn compacted_history_app_with_remaining(turns: usize) -> App {
         }],
     );
     let compacted_count = turns * 2;
-    app.session.compaction = Some(crate::session::StoredCompactionState {
-        summary_text: "older turns".to_string(),
-        openai_encrypted_content: None,
-        covers_up_to_turn: turns,
-        original_turn_count: turns,
-        compacted_count,
-    });
+    app.session.compaction = Some(
+        crate::session::StoredCompactionState {
+            summary_text: "older turns".to_string(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: turns,
+            original_turn_count: turns,
+            compacted_count,
+        }
+        .into(),
+    );
 
     let (rendered_messages, _images, _info) =
         crate::session::render_messages_and_images_with_compacted_history(&app.session, 0);
@@ -1505,7 +1508,7 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
         "collapsed card must show the tldr:\n{collapsed}"
     );
     assert!(
-        collapsed.contains("▸ expand"),
+        collapsed.contains("⊞"),
         "collapsed card must show the expand badge:\n{collapsed}"
     );
     assert!(
@@ -1522,7 +1525,7 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
         for col in 0..area.width {
             line.push_str(buf[(col, row)].symbol());
         }
-        if let Some(byte) = line.find("▸ expand") {
+        if let Some(byte) = line.find("⊞") {
             let col = line[..byte].chars().count() as u16;
             badge = Some((col, row));
             break 'rows;
@@ -1566,7 +1569,7 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
         "expanded card must show the body:\n{expanded}"
     );
     assert!(
-        expanded.contains("▾ collapse"),
+        expanded.contains("⊟"),
         "expanded card must show the collapse badge:\n{expanded}"
     );
 
@@ -1579,7 +1582,7 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
         for col in 0..area.width {
             line.push_str(buf[(col, row)].symbol());
         }
-        if let Some(byte) = line.find("▾ collapse") {
+        if let Some(byte) = line.find("⊟") {
             let col = line[..byte].chars().count() as u16;
             collapse_badge = Some((col, row));
             break 'rows2;

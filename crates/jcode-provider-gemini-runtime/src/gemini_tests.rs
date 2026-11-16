@@ -51,7 +51,8 @@ fn build_contents_replays_thought_signature_on_function_call() {
                 name: "read".to_string(),
                 input: json!({"path":"README.md"}),
                 thought_signature: Some("SIGNATURE_ABC".to_string()),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -62,7 +63,8 @@ fn build_contents_replays_thought_signature_on_function_call() {
                 name: "bash".to_string(),
                 input: json!({"command":"ls"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -100,7 +102,8 @@ fn build_contents_replays_every_signature_across_multi_tool_history() {
                 name: "bash".to_string(),
                 input: json!({ "command": format!("echo {idx}") }),
                 thought_signature: Some(sig.to_string()),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         });
@@ -110,7 +113,8 @@ fn build_contents_replays_every_signature_across_multi_tool_history() {
                 tool_use_id: format!("call_{idx}"),
                 content: format!("out {idx}"),
                 is_error: Some(false),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         });
@@ -160,7 +164,8 @@ fn build_contents_carries_first_signature_onto_unsigned_same_turn_siblings() {
                 input: json!({ "path": "a.txt", "content": "hi" }),
                 thought_signature: None,
             },
-        ],
+        ]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -196,7 +201,8 @@ fn build_contents_carries_signature_forward_across_turns_for_unsigned_calls() {
                 name: "read".to_string(),
                 input: json!({ "path": "README.md" }),
                 thought_signature: Some("SIG_TURN_1".to_string()),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -206,7 +212,8 @@ fn build_contents_carries_signature_forward_across_turns_for_unsigned_calls() {
                 tool_use_id: "turn1".to_string(),
                 content: "ok".to_string(),
                 is_error: Some(false),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -217,7 +224,8 @@ fn build_contents_carries_signature_forward_across_turns_for_unsigned_calls() {
                 name: "bash".to_string(),
                 input: json!({ "command": "ls" }),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -247,7 +255,8 @@ fn build_contents_leaves_unsigned_calls_unsigned_when_no_prior_signature_exists(
             name: "bash".to_string(),
             input: json!({ "command": "ls" }),
             thought_signature: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -269,7 +278,8 @@ fn build_contents_preserves_tool_calls_and_results() {
                 name: "read".to_string(),
                 input: json!({"path":"README.md"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -279,7 +289,8 @@ fn build_contents_preserves_tool_calls_and_results() {
                 tool_use_id: "call_1".to_string(),
                 content: "ok".to_string(),
                 is_error: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -312,7 +323,8 @@ fn build_contents_normalizes_non_object_tool_call_args_for_gemini_struct() {
             name: "read".to_string(),
             input: json!(20),
             thought_signature: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -697,7 +709,8 @@ fn unsigned_tool_history() -> Vec<Message> {
                 name: "bash".to_string(),
                 input: json!({ "command": "ls" }),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -707,7 +720,8 @@ fn unsigned_tool_history() -> Vec<Message> {
                 tool_use_id: "call1".to_string(),
                 content: "total 0".to_string(),
                 is_error: Some(false),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },

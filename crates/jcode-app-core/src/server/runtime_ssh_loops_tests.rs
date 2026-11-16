@@ -75,12 +75,18 @@ fn blockers_and_running_tasks_pause_without_consuming_retry_budget() {
     }
     snapshot.running_background_tasks.clear();
     assert!(next_followup(&mut state, &snapshot).follow_up.is_some());
-    snapshot.todos[0].external_blocker = Some(todo::TodoExternalBlocker {
-        reason: "Owner must provide access".into(),
-        review_at: chrono::Utc::now() + chrono::Duration::hours(1),
+    snapshot.todos[0].requires_user_auth = Some(todo::TodoUserAuth {
+        reason: "Owner must approve access".into(),
     });
     assert!(next_followup(&mut state, &snapshot).follow_up.is_none());
-    snapshot.todos[0].external_blocker = None;
+    snapshot.todos[0].requires_user_auth = None;
+    assert!(next_followup(&mut state, &snapshot).follow_up.is_some());
+    snapshot.goals = vec![todo::TodoGoal {
+        cannot_complete: Some("Target host was decommissioned".into()),
+        ..Default::default()
+    }];
+    assert!(next_followup(&mut state, &snapshot).follow_up.is_none());
+    snapshot.goals.clear();
     assert!(next_followup(&mut state, &snapshot).follow_up.is_some());
 }
 

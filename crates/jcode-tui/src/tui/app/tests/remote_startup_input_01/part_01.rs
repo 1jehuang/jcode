@@ -17,6 +17,7 @@ fn test_finish_turn_does_not_duplicate_existing_poke_followup() {
             &app.session.id,
             &[crate::todo::TodoItem {
                 lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -29,8 +30,8 @@ fn test_finish_turn_does_not_duplicate_existing_poke_followup() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
-                external_blocker: None,
-                completely_blocked: None,
+                waiting_reason: None,
+                requires_user_auth: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -247,13 +248,16 @@ fn test_prepare_review_spawned_session_uses_visible_transcript_for_judge_session
                 Some(title.to_string()),
             );
             child.replace_messages(parent.messages.clone());
-            child.compaction = Some(crate::session::StoredCompactionState {
-                summary_text: "stale compaction".to_string(),
-                openai_encrypted_content: None,
-                covers_up_to_turn: 1,
-                original_turn_count: 1,
-                compacted_count: 1,
-            });
+            child.compaction = Some(
+                crate::session::StoredCompactionState {
+                    summary_text: "stale compaction".to_string(),
+                    openai_encrypted_content: None,
+                    covers_up_to_turn: 1,
+                    original_turn_count: 1,
+                    compacted_count: 1,
+                }
+                .into(),
+            );
             child.save().expect("save child session");
 
             super::commands::prepare_review_spawned_session(
@@ -516,7 +520,8 @@ fn test_new_for_remote_fresh_spawn_restores_local_transcript() {
             content: vec![crate::message::ContentBlock::Text {
                 text: "persisted transcript should be restored locally".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,
@@ -583,7 +588,8 @@ fn test_new_for_remote_restores_display_history_without_retaining_session_transc
             content: vec![crate::message::ContentBlock::Text {
                 text: "persisted transcript should render once".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,
@@ -617,7 +623,8 @@ fn test_remote_startup_restores_swarm_delivery_as_compact_card() {
             content: vec![crate::message::ContentBlock::Text {
                 text: format!("DM from hatchling: {body}"),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: Some(crate::session::StoredDisplayRole::System),
             timestamp: None,
             tool_duration_ms: None,

@@ -8,8 +8,9 @@ use crate::message::{
     format_background_task_notification_markdown,
 };
 use crate::session::StoredDisplayRole;
+use crate::tui::terminal_events::EventStream;
 use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyEventKind};
+use crossterm::event::{Event, KeyEventKind};
 use ratatui::DefaultTerminal;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast::Receiver;
@@ -80,6 +81,8 @@ pub(super) async fn process_turn_with_input(
 
 pub(super) fn handle_tick(app: &mut App) -> bool {
     let reset_redraw = app.poll_usage_reset() | app.poll_cloud_job();
+    app.expire_presumed_focus();
+    crate::tui::window_visibility::poll(app.client_focused(), app.is_processing);
     app.refresh_terminal_title_metrics();
     app.sync_herdr_agent_state();
     // Liveness breadcrumb: if the UI loop wedges, the watchdog reports this as
@@ -90,7 +93,9 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     // draw site. Excluding it here instead would mean animation ticks request
     // no paint at all, which drops the animation to whatever unrelated events
     // happen to trigger (~4fps in practice).
-    let mut needs_redraw = reset_redraw | crate::tui::periodic_redraw_required(app);
+    let mut needs_redraw = reset_redraw
+        | crate::tui::periodic_redraw_required(app)
+        | crate::tui::terminal_events::theme_redraw_pending();
     needs_redraw |= app.poll_oauth_account_telemetry();
     needs_redraw |= app.retire_expired_status_notice();
     needs_redraw |= app.flush_pending_resize_redraw();
@@ -105,6 +110,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.update_pinned_images_auto_hide();
     // Dissolve stale (off-screen) reasoning traces with zero visible motion.
     needs_redraw |= app.gc_offscreen_reasoning_traces();
+    needs_redraw |= app.maybe_backfill_expanded_prompt_history();
     // Adopt the resolved scroll position once a frame containing newly loaded
     // older history has rendered, so manual scrolling resumes seamlessly.
     needs_redraw |= app.reconcile_history_anchor();
@@ -157,6 +163,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.check_stable_version();
     needs_redraw |= app.refresh_keybindings_if_config_reloaded();
     needs_redraw |= app.maybe_finish_background_client_reload();
+    needs_redraw |= app.maybe_hot_reload_onto_new_binary();
     if app.pending_migration.is_some() && !app.is_processing && !app.cloud_handoff_blocks_work() {
         app.execute_migration();
         needs_redraw = true;
@@ -189,11 +196,10 @@ pub(super) fn handle_terminal_event(
     let mut needs_redraw = apply_terminal_event(app, terminal, event)?;
     const MAX_DRAINED_EVENTS_PER_WAKE: usize = 32;
     for _ in 0..MAX_DRAINED_EVENTS_PER_WAKE {
-        if !crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
-            break;
-        }
-        if let Ok(event) = crossterm::event::read() {
+        if let Ok(Some(event)) = crate::tui::terminal_events::try_read() {
             needs_redraw |= apply_terminal_event(app, terminal, Some(Ok(event)))?;
+        } else {
+            break;
         }
     }
     Ok(needs_redraw)
@@ -238,6 +244,7 @@ pub(super) fn handle_bus_event(
         }
         Ok(BusEvent::MermaidRenderCompleted) => true,
         Ok(BusEvent::GitInfoRefreshed) => true,
+        Ok(BusEvent::ClientBinaryChanged) => app.maybe_hot_reload_onto_new_binary(),
         Ok(BusEvent::UsageReport(results)) => {
             app.handle_usage_report(results);
             true
@@ -459,6 +466,8 @@ fn apply_terminal_event(
             let key = jcode_tui_core::korean_input::normalize_key_event(key);
             crate::tui::ui::note_key_event_read();
             app.note_client_interaction();
+            let before_release =
+                (key.kind == KeyEventKind::Release).then(|| app.key_release_visible_state());
             app.update_copy_badge_key_event(key);
             app.observe_voice_key_release(&key);
             if app.handle_voice_key_event(&key) {
@@ -466,7 +475,7 @@ fn apply_terminal_event(
             } else if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                 app.handle_key_press_event(key)?;
             }
-            Ok(true)
+            Ok(before_release.is_none_or(|before| before != app.key_release_visible_state()))
         }
         Some(Ok(Event::Paste(text))) => {
             app.note_client_interaction();
@@ -507,12 +516,14 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
     app.set_status_notice(background_task_status_notice(&task));
 
     if !app.is_processing {
+        app.push_display_message(DisplayMessage::background_task(notification.clone()));
         app.add_provider_message(Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
                 text: notification,
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         });
@@ -567,12 +578,14 @@ fn handle_background_task_stalled(app: &mut App, task: crate::bus::BackgroundTas
     ));
 
     if !app.is_processing {
+        app.push_display_message(DisplayMessage::background_task(notification.clone()));
         app.add_provider_message(Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
                 text: notification.clone(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         });

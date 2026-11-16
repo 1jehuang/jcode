@@ -369,6 +369,21 @@ fn auth_issue_lan_openai_compatible_bases_are_valid_for_local_model_servers() {
         Some("http://hsv.local:11434/v1")
     );
     assert_eq!(normalize_api_base("http://example.com/v1"), None);
+    // Any IP literal is valid over plaintext http, private or public.
+    assert_eq!(
+        normalize_api_base("http://203.0.113.10:8000/v1").as_deref(),
+        Some("http://203.0.113.10:8000/v1")
+    );
+    assert_eq!(
+        normalize_api_base("http://[2001:db8::1]:8000/v1").as_deref(),
+        Some("http://[2001:db8::1]:8000/v1")
+    );
+    // A bare IP is a direct endpoint on one machine, so it needs no key by
+    // default, like loopback.
+    assert!(api_base_uses_localhost("http://127.0.0.1:11434/v1"));
+    assert!(api_base_uses_localhost("http://10.15.15.53:8080/v1"));
+    assert!(api_base_uses_localhost("http://203.0.113.10:8080/v1"));
+    assert!(!api_base_uses_localhost("https://api.openai.com/v1"));
 }
 
 #[test]

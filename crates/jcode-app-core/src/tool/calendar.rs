@@ -264,14 +264,14 @@ impl Tool for CalendarTool {
                 "action": {
                     "type": "string",
                     "enum": ["calendars", "list", "get", "create", "quick_add", "update", "delete"],
-                    "description": "Action. list defaults to the next 7 days. quick_add parses text like 'Lunch tomorrow 1pm'."
+                    "description": "list covers the next 7 days by default. quick_add parses text like 'Lunch tomorrow 1pm'."
                 },
                 "calendar_id": {
                     "type": "string",
-                    "description": "Calendar ID from 'calendars'. Default: primary."
+                    "description": "From 'calendars'. Default primary."
                 },
                 "event_id": { "type": "string" },
-                "summary": { "type": "string", "description": "Event title." },
+                "summary": { "type": "string", "description": "Title." },
                 "description": { "type": "string" },
                 "location": { "type": "string" },
                 "start": {
@@ -280,11 +280,11 @@ impl Tool for CalendarTool {
                 },
                 "end": {
                     "type": "string",
-                    "description": "Same formats as start. Default: 30 minutes after start, or the next day for all-day."
+                    "description": "Same formats. Default 30 minutes after start, or next day for all-day."
                 },
                 "time_zone": {
                     "type": "string",
-                    "description": "IANA zone for local start/end, e.g. America/Los_Angeles."
+                    "description": "IANA zone for local start/end."
                 },
                 "attendees": {
                     "type": "array",
@@ -294,17 +294,17 @@ impl Tool for CalendarTool {
                 "reminder_minutes": {
                     "type": "array",
                     "items": { "type": "integer" },
-                    "description": "Popup reminders, minutes before start. 0 = at start. [] = no reminders. Omit for calendar defaults."
+                    "description": "Popup reminders, minutes before start. [] for none; omit for calendar defaults."
                 },
                 "send_updates": {
                     "type": "string",
                     "enum": ["none", "all", "externalOnly"],
-                    "description": "Email guests about the change. Default none. Anything else needs confirmed: true."
+                    "description": "Email guests. Default none; anything else needs confirmed."
                 },
-                "time_min": { "type": "string", "description": "List window start. Default now." },
-                "time_max": { "type": "string", "description": "List window end. Default 7 days after time_min." },
-                "query": { "type": "string", "description": "Free-text search for list." },
-                "text": { "type": "string", "description": "Text for quick_add." },
+                "time_min": { "type": "string", "description": "List start. Default now." },
+                "time_max": { "type": "string", "description": "List end. Default 7 days later." },
+                "query": { "type": "string", "description": "Search text for list." },
+                "text": { "type": "string", "description": "For quick_add." },
                 "max_results": { "type": "integer" },
                 "confirmed": {
                     "type": "boolean",

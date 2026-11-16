@@ -159,8 +159,8 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
             priority: "high".to_string(),
             confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
             completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
-            external_blocker: None,
-            completely_blocked: None,
+            waiting_reason: None,
+            requires_user_auth: None,
             waiting_on: Vec::new(),
             confidence_history: vec![
                 crate::todo::ConfidenceState::Validated,
@@ -340,5 +340,39 @@ fn peer_auto_poke_is_shown_and_suppresses_duplicate_local_poke() {
             !app.schedule_auto_poke_followup_if_needed(),
             "this window must not re-poke the same open work a peer already poked"
         );
+    });
+}
+
+#[test]
+fn stale_incomplete_todo_poke_is_dropped_once_todos_are_done() {
+    with_temp_jcode_home(|| {
+        let app = create_test_app();
+        let done = crate::todo::TodoItem {
+            id: "todo-1".to_string(),
+            content: "Ship it".to_string(),
+            status: "completed".to_string(),
+            priority: "high".to_string(),
+            ..Default::default()
+        };
+        crate::todo::save_todos(&app.session.id, &[done.clone()]).expect("save");
+        let mut pending = done.clone();
+        pending.status = "pending".to_string();
+        let poke = crate::todo::build_actionable_poke_message(&[pending]);
+
+        let mut queued = vec![poke.clone(), "real follow-up".to_string()];
+        super::commands::drop_stale_incomplete_todo_pokes(&app, &mut queued);
+        assert_eq!(queued, vec!["real follow-up".to_string()]);
+
+        let mut gated = vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()];
+        super::commands::drop_stale_incomplete_todo_pokes(&app, &mut gated);
+        assert_eq!(gated.len(), 1, "non incomplete-todo continuations are kept");
+
+        crate::todo::save_todos(&app.session.id, &[done]).expect("save");
+        let mut open_case = vec![poke];
+        let mut todo = crate::todo::load_todos(&app.session.id).unwrap();
+        todo[0].status = "in_progress".to_string();
+        crate::todo::save_todos(&app.session.id, &todo).expect("save");
+        super::commands::drop_stale_incomplete_todo_pokes(&app, &mut open_case);
+        assert_eq!(open_case.len(), 1, "poke is kept while todos are open");
     });
 }

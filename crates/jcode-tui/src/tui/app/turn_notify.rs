@@ -417,6 +417,7 @@ mod tests {
     fn todo_named(content: &str, status: &str, blocked_by: &[&str]) -> TodoItem {
         TodoItem {
             lane_after: None,
+            lane_owner: None,
             content: content.to_string(),
             status: status.to_string(),
             priority: "medium".to_string(),
@@ -425,8 +426,8 @@ mod tests {
             confidence: None,
             completion_confidence: None,
             confidence_history: Vec::new(),
-            external_blocker: None,
-            completely_blocked: None,
+            waiting_reason: None,
+            requires_user_auth: None,
             waiting_on: Vec::new(),
             blocked_by: blocked_by.iter().map(|s| s.to_string()).collect(),
             assigned_to: None,

@@ -11,6 +11,63 @@ use std::sync::mpsc;
 use std::time::Duration;
 use tempfile::TempDir;
 
+#[test]
+fn cache_breakpoint_preserves_shared_payload_when_already_marked() {
+    let original = Message {
+        role: Role::User,
+        content: vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "large-output".into(),
+                content: "x".repeat(1024 * 1024),
+                is_error: None,
+            },
+            ContentBlock::Text {
+                text: "continue".into(),
+                cache_control: Some(CacheControl::ephemeral(Some("1h".into()))),
+            },
+        ]
+        .into(),
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let mut request = vec![original.clone()];
+    let before = serde_json::to_vec(&request).unwrap();
+    assert!(add_cache_breakpoint(&mut request));
+    assert!(request[0].content.shares_storage_with(&original.content));
+    assert_eq!(serde_json::to_vec(&request).unwrap(), before);
+}
+
+#[test]
+fn cache_breakpoint_detaches_only_when_a_marker_is_missing() {
+    let original = Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "continue".into(),
+            cache_control: None,
+        }]
+        .into(),
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let mut request = vec![original.clone()];
+    assert!(add_cache_breakpoint(&mut request));
+    assert!(!request[0].content.shares_storage_with(&original.content));
+    assert!(matches!(
+        &original.content[0],
+        ContentBlock::Text {
+            cache_control: None,
+            ..
+        }
+    ));
+    let marked = request[0].clone();
+    assert!(add_cache_breakpoint(&mut request));
+    assert!(request[0].content.shares_storage_with(&marked.content));
+    assert!(!add_cache_breakpoint(&mut [Message {
+        role: Role::Assistant,
+        ..original
+    }]));
+}
+
 pub(crate) struct SharedEnvLock;
 
 pub(crate) static ENV_LOCK: SharedEnvLock = SharedEnvLock;
@@ -375,7 +432,8 @@ fn deepseek_image_input_captured_requests_preserve_only_allowed_pixels() {
                 media_type: "image/png".to_string(),
                 data: pixels.to_string(),
             },
-        ],
+        ]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -473,7 +531,8 @@ fn direct_deepseek_profile_omits_image_url_parts() {
                 media_type: "image/png".to_string(),
                 data: "aW1hZ2U=".to_string(),
             },
-        ],
+        ]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -542,7 +601,8 @@ fn interrupted_reasoning_only_assistant_message_is_not_sent_empty() {
             content: vec![ContentBlock::Text {
                 text: "do a thing".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -552,7 +612,8 @@ fn interrupted_reasoning_only_assistant_message_is_not_sent_empty() {
             role: Role::Assistant,
             content: vec![ContentBlock::Reasoning {
                 text: "thinking about the request".to_string(),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -561,7 +622,8 @@ fn interrupted_reasoning_only_assistant_message_is_not_sent_empty() {
             content: vec![ContentBlock::Text {
                 text: "actually do this instead".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -635,7 +697,8 @@ fn interrupted_reasoning_only_assistant_message_keeps_reasoning_with_content() {
             content: vec![ContentBlock::Text {
                 text: "do a thing".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -643,7 +706,8 @@ fn interrupted_reasoning_only_assistant_message_keeps_reasoning_with_content() {
             role: Role::Assistant,
             content: vec![ContentBlock::Reasoning {
                 text: "thinking about the request".to_string(),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -652,7 +716,8 @@ fn interrupted_reasoning_only_assistant_message_keeps_reasoning_with_content() {
             content: vec![ContentBlock::Text {
                 text: "actually do this instead".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -729,7 +794,8 @@ fn kimi_for_coding_tool_call_message_includes_reasoning_content() {
             content: vec![ContentBlock::Text {
                 text: "list the files".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -742,7 +808,8 @@ fn kimi_for_coding_tool_call_message_includes_reasoning_content() {
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -752,7 +819,8 @@ fn kimi_for_coding_tool_call_message_includes_reasoning_content() {
                 tool_use_id: "call_1".to_string(),
                 content: "a.txt\nb.txt".to_string(),
                 is_error: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -823,7 +891,8 @@ fn direct_compatible_deepseek_tool_call_replays_reasoning_content() {
             content: vec![ContentBlock::Text {
                 text: "list the files".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -839,7 +908,8 @@ fn direct_compatible_deepseek_tool_call_replays_reasoning_content() {
                     input: serde_json::json!({"command": "ls"}),
                     thought_signature: None,
                 },
-            ],
+            ]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -849,7 +919,8 @@ fn direct_compatible_deepseek_tool_call_replays_reasoning_content() {
                 tool_use_id: "call_1".to_string(),
                 content: "a.txt\nb.txt".to_string(),
                 is_error: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -1550,7 +1621,8 @@ fn openrouter_chat_request_sends_unified_reasoning_effort() {
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1662,7 +1734,8 @@ async fn live_openrouter_unified_reasoning_smoke() -> Result<()> {
             content: vec![ContentBlock::Text {
                 text: "Live smoke test: answer exactly OK.".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         }];
@@ -1715,7 +1788,8 @@ fn direct_deepseek_chat_request_sends_reasoning_effort() {
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1771,7 +1845,8 @@ fn sol_compatible_request_sends_low_reasoning_effort() {
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1823,7 +1898,8 @@ fn direct_openai_compatible_chat_request_preserves_max_reasoning_effort() {
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -3450,7 +3526,8 @@ model_catalog = false
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];

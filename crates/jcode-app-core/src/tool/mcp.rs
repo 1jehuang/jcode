@@ -644,7 +644,7 @@ impl Tool for McpManagementTool {
                 },
                 "transport": {
                     "type": "string",
-                    "enum": ["stdio", "http", "streamable-http", "sse"],
+                    "enum": ["stdio", "http", "sse"],
                     "description": "Ad hoc transport. Remote URLs default to Streamable HTTP with legacy SSE fallback."
                 }
             },
@@ -931,7 +931,7 @@ impl McpManagementTool {
 
         // Connect
         let manager = self.manager.read().await;
-        match manager.connect(&server_name, &config).await {
+        match crate::mcp::interactive_connect(manager.connect(&server_name, &config)).await {
             Ok(()) => {
                 let tools = manager.all_tools().await;
                 let connected = manager.connected_servers().await;

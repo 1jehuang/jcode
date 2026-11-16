@@ -10,7 +10,7 @@ impl Agent {
             .try_read()
             .map_err(|_| anyhow::anyhow!("compaction state is busy"))?;
         anyhow::ensure!(!manager.is_compacting(), "compaction is still running");
-        self.session.compaction = manager.persisted_state();
+        self.session.compaction = manager.persisted_state().map(Arc::new);
         // Prepared blank sessions also have externally visible IDs. Ordinary
         // save intentionally skips these until the first user message.
         self.session.save_prepared()?;

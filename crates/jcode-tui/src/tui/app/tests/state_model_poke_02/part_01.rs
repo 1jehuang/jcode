@@ -1189,6 +1189,7 @@ fn test_context_command_reports_session_context_snapshot() {
             &app.session.id,
             &[crate::todo::TodoItem {
                 lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -1201,8 +1202,8 @@ fn test_context_command_reports_session_context_snapshot() {
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(77)),
                 completion_confidence: None,
                 confidence_history: Vec::new(),
-                external_blocker: None,
-                completely_blocked: None,
+                waiting_reason: None,
+                requires_user_auth: None,
                 waiting_on: Vec::new(),
             }],
         )

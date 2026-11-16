@@ -23,13 +23,13 @@ pub struct BackgroundTaskRow {
     pub label: String,
     pub percent: Option<f32>,
     pub status: BackgroundTaskRowStatus,
-    /// When a successful task stopped being actionable. Running and failed
-    /// tasks remain visible until their state changes or the session closes.
+    /// When a successful task stopped being actionable, retained until session closure.
     pub completed_at: Option<std::time::Instant>,
 }
 
 pub mod backend;
 mod cloud_git;
+mod cloud_latency;
 mod cloud_status;
 pub(crate) mod color_support;
 mod core;
@@ -41,6 +41,7 @@ mod info_widget_cloud_directories;
 // `jcode-terminal-image` crate (shared with the `read` tool). Re-exported here
 // so existing `crate::tui::image` paths keep working.
 pub use jcode_terminal_image::display as image;
+mod focus_carryover;
 pub mod info_widget;
 mod info_widget_layout;
 mod info_widget_overview;
@@ -59,9 +60,9 @@ mod redraw_schedule;
 #[allow(unused_imports)]
 pub(crate) use redraw_schedule::{
     REDRAW_DEEP_IDLE, REDRAW_DEEP_IDLE_AFTER, REDRAW_IDLE, REDRAW_PASSIVE_LIVENESS,
-    REDRAW_REMOTE_STARTUP, REDRAW_SWARM_SPINNER, current_full_frame_redraw_reason,
-    idle_donut_active, last_full_frame_redraw_reason, periodic_redraw_required,
-    periodic_redraw_required_excluding_idle_animation, redraw_interval,
+    REDRAW_REMOTE_STARTUP, REDRAW_STATIC_STREAM, REDRAW_SWARM_SPINNER,
+    current_full_frame_redraw_reason, idle_donut_active, last_full_frame_redraw_reason,
+    periodic_redraw_required, periodic_redraw_required_excluding_idle_animation, redraw_interval,
     redraw_interval_with_policy,
 };
 mod remote_diff;
@@ -69,6 +70,7 @@ pub mod screenshot;
 pub(crate) mod session_facts;
 pub mod session_picker;
 mod stream_buffer;
+mod terminal_events;
 pub mod terminal_setup;
 pub mod test_harness;
 pub mod theme_detect;
@@ -76,6 +78,7 @@ mod ui;
 mod ui_diff;
 pub mod usage_overlay;
 pub mod visual_debug;
+pub(crate) mod window_visibility;
 pub mod workspace_client;
 pub use jcode_tui_workspace::workspace_map;
 pub use jcode_tui_workspace::workspace_map_widget;
@@ -734,6 +737,11 @@ pub trait TuiState {
     /// Version counter for display_messages (monotonic, increments on mutation)
     fn display_messages_version(&self) -> u64;
     fn streaming_text(&self) -> &str;
+    /// Content signature for the prepare cache. Views without tracked mutations
+    /// hash on demand so even same-length replacements invalidate correctly.
+    fn streaming_text_hash(&self) -> u64 {
+        ui::hash_text_for_cache(self.streaming_text())
+    }
     /// JSON payload for the pinned todo band rendered at the top of the chat
     /// viewport when `display.pin_todos` is enabled. `None` when the feature
     /// is off or the session has no todos.
@@ -931,6 +939,10 @@ pub trait TuiState {
     fn voice_input_status(&self) -> Option<(bool, String)> {
         None
     }
+    /// Voice input rendered in the composer instead of the status line.
+    fn voice_composer_preview(&self) -> Option<VoiceComposerPreview> {
+        None
+    }
     /// How long since the user last pressed a key, scrolled, or pasted, or
     /// `None` when they have not interacted yet.
     ///
@@ -960,6 +972,15 @@ pub trait TuiState {
     /// Whether mouse-wheel smoothing has queued lines to animate.
     fn has_pending_mouse_scroll_animation(&self) -> bool {
         false
+    }
+    /// Whether the paced stream buffer still holds text that later ticks will
+    /// reveal. While streamed text sits on screen with no backlog (e.g. the
+    /// model is thinking or running a tool after emitting text), nothing in the
+    /// transcript changes per tick, so the animation cadence is pure waste.
+    /// Defaults to true so state impls that do not track a backlog keep the
+    /// conservative fast cadence.
+    fn stream_reveal_pending(&self) -> bool {
+        true
     }
     /// Optional configured keybinding label for external dictation.
     fn dictation_key_label(&self) -> Option<String>;
@@ -1047,6 +1068,12 @@ pub trait TuiState {
     /// Render streaming text using incremental markdown renderer
     /// This is more efficient than re-rendering on every frame
     fn render_streaming_markdown(&self, width: usize) -> Vec<Line<'static>>;
+    /// `(generation, count)` of the leading lines of the last
+    /// `render_streaming_markdown` result that are unchanged for as long as
+    /// the generation is. `(0, 0)` when nothing is known to be stable.
+    fn streaming_markdown_stable_prefix(&self) -> (u64, usize) {
+        (0, 0)
+    }
     /// Whether centered mode is enabled
     fn centered_mode(&self) -> bool;
     /// Authentication status for all supported providers
@@ -1160,6 +1187,11 @@ pub trait TuiState {
     /// Current git branch of the working directory, if in a repo.
     fn git_branch(&self) -> Option<String> {
         None
+    }
+    /// Remote machine this session runs on (SSH host or cloud VM), shown on
+    /// the status line. Embedded views override it with their own host.
+    fn remote_machine(&self) -> Option<String> {
+        ssh_remote_host()
     }
     /// Monotonic clock for viewport animations
     fn now_millis(&self) -> u64;
@@ -1398,6 +1430,19 @@ pub enum PickerKind {
     Account,
     Login,
     Usage,
+}
+
+/// Live voice input shown inside the composer: a waveform row above the
+/// prompt and the in-progress transcript as ghost text after the cursor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VoiceComposerPreview {
+    pub recording: bool,
+    pub elapsed_secs: u64,
+    /// Recent RMS levels, oldest first.
+    pub levels: Vec<f32>,
+    pub live: String,
+    /// Trailing key hint, e.g. `Ctrl+Space send · Esc cancel`.
+    pub hint: String,
 }
 
 /// Render snapshot of the Ctrl+R reverse prompt-history search overlay.

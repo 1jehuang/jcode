@@ -24,6 +24,24 @@ pub(super) fn side_panel_for_client(
     snapshot
 }
 
+/// The session's stored todo card state (todos, plan, goals) as a wire event.
+/// `pushes` tells the client this daemon sends the event on every change.
+pub(super) fn todos_snapshot_event(session_id: &str) -> ServerEvent {
+    let payload = serde_json::json!({
+        "todos": crate::todo::load_todos(session_id).unwrap_or_else(|error| {
+            crate::logging::warn(&format!("Failed to load todos for {session_id}: {error}"));
+            Vec::new()
+        }),
+        "plan": crate::todo::load_plan(session_id).unwrap_or_default(),
+        "goals": crate::todo::load_goals(session_id).unwrap_or_default(),
+    });
+    ServerEvent::Todos {
+        session_id: session_id.to_owned(),
+        payload: payload.to_string(),
+        pushes: true,
+    }
+}
+
 pub(super) async fn write_direct_event(
     writer: &Arc<Mutex<crate::transport::WriteHalf>>,
     event: &ServerEvent,

@@ -7,6 +7,106 @@ use super::state_ui::RestoredReloadInput;
 use super::*;
 use crate::tui::{backend, keybind};
 
+#[cfg(test)]
+mod terminal_retry_tests {
+    use super::*;
+
+    #[test]
+    fn recovered_images_keep_stable_markers_with_existing_attachments() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let old = ("image/png".to_string(), "old-image".to_string());
+        let newer = ("image/png".to_string(), "newer-image".to_string());
+        for has_newer_draft in [true, false] {
+            let mut app = super::super::tests::create_test_app();
+            app.pending_images = vec![newer.clone(), old.clone()];
+            if has_newer_draft {
+                app.input = "New draft [image 1]".to_string();
+            }
+            let payload = super::super::FallbackResendPayload {
+                content: "Old [image 1] and [image 2]".to_string(),
+                images: vec![old.clone(), newer.clone()],
+                is_system: false,
+                system_reminder: None,
+                auto_retry: true,
+                retry_attempts: 1,
+                raw_input: None,
+            };
+            app.restore_failover_payload(payload.clone());
+            app.sync_model_picker_preview_from_input();
+            let expected = if has_newer_draft {
+                "New draft [image 1] [image 2]"
+            } else {
+                "Old [image 2] and [image 1]"
+            };
+            assert_eq!(app.input, expected);
+            assert_eq!(app.pending_images, vec![newer.clone(), old.clone()]);
+            app.restore_failover_payload(payload);
+            app.sync_model_picker_preview_from_input();
+            assert_eq!(app.input, expected, "repeated restoration is idempotent");
+            assert_eq!(app.pending_images, vec![newer.clone(), old.clone()]);
+        }
+    }
+
+    #[test]
+    fn terminal_remote_retry_stops_preserve_user_attachments() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        for stop in ["budget", "pause", "credential"] {
+            let mut app = super::super::tests::create_test_app();
+            let image = ("image/png".to_string(), "original-image".to_string());
+            app.last_submitted_input = Some("Inspect this screenshot".to_string());
+            app.rate_limit_pending_message = Some(PendingRemoteMessage {
+                content: "Expanded screenshot instructions".to_string(),
+                images: vec![image.clone()],
+                is_system: false,
+                system_reminder: None,
+                auto_retry: true,
+                retry_attempts: App::AUTO_RETRY_MAX_ATTEMPTS,
+                retry_at: Some(Instant::now()),
+            });
+            app.rate_limit_reset = Some(Instant::now());
+            match stop {
+                "budget" => assert!(!app.schedule_pending_remote_retry("interrupted")),
+                "pause" => app.pause_exhausted_auto_resume("Paused".to_string(), "Paused"),
+                "credential" => app.trip_credential_failure_breaker("401 unauthorized"),
+                _ => unreachable!(),
+            }
+            assert_eq!(app.input, "Inspect this screenshot [image 1]", "{stop}");
+            assert_eq!(app.pending_images, vec![image], "{stop}");
+            assert!(app.rate_limit_pending_message.is_none(), "{stop}");
+            assert!(app.rate_limit_reset.is_none(), "{stop}");
+        }
+    }
+
+    #[test]
+    fn terminal_remote_retry_preserves_draft_and_deduplicates_images() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = super::super::tests::create_test_app();
+        let image = ("image/png".to_string(), "original-image".to_string());
+        app.input = "Keep my new draft [image 1]".to_string();
+        app.last_submitted_input = Some("Failed prompt".to_string());
+        app.pending_images.push(image.clone());
+        app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            content: "Expanded failed prompt".to_string(),
+            images: vec![image.clone()],
+            is_system: false,
+            system_reminder: None,
+            auto_retry: true,
+            retry_attempts: App::AUTO_RETRY_MAX_ATTEMPTS,
+            retry_at: None,
+        });
+        app.pause_exhausted_auto_resume("Paused".to_string(), "Paused");
+        assert_eq!(app.input, "Keep my new draft [image 1]");
+        assert_eq!(app.pending_images, vec![image]);
+        assert!(app.display_messages().iter().any(|message| {
+            message.content.contains("Failed prompt")
+                && message.content.contains("draft text is preserved")
+        }));
+    }
+}
+
 impl App {
     pub(super) async fn begin_remote_send(
         &mut self,
@@ -45,10 +145,20 @@ impl App {
         force: bool,
     ) -> bool {
         let Some(pending) = self.rate_limit_pending_message.as_mut() else {
+            self.log_recovery_event(
+                crate::logging::LogLevel::Warn,
+                "RECOVERY_NETWORK_WAIT_SKIPPED",
+                "no_pending_turn",
+            );
             return false;
         };
         if force {
             if pending.retry_attempts >= Self::AUTO_RETRY_MAX_ATTEMPTS {
+                self.log_recovery_event(
+                    crate::logging::LogLevel::Warn,
+                    "RECOVERY_NETWORK_WAIT_STOPPED",
+                    "retry_budget_exhausted",
+                );
                 return false;
             }
             pending.retry_attempts = pending.retry_attempts.saturating_add(1);
@@ -57,6 +167,11 @@ impl App {
             if force {
                 pending.auto_retry = true;
             } else {
+                self.log_recovery_event(
+                    crate::logging::LogLevel::Info,
+                    "RECOVERY_NETWORK_WAIT_SKIPPED",
+                    "auto_retry_disabled",
+                );
                 return false;
             }
         }
@@ -70,6 +185,15 @@ impl App {
             listener: plan.listener_summary.clone(),
         };
         self.status_detail = Some("offline; waiting for network before retry".to_string());
+        self.log_recovery_event(
+            crate::logging::LogLevel::Info,
+            "RECOVERY_NETWORK_WAIT_ARMED",
+            if force {
+                "provider_network_failure"
+            } else {
+                "offline_probe"
+            },
+        );
 
         let content = format!(
             "📡 Network appears offline - waiting to retry automatically. {} - {}",
@@ -105,9 +229,19 @@ impl App {
         max_attempts: u8,
     ) -> bool {
         let Some(pending) = self.rate_limit_pending_message.as_mut() else {
+            self.log_recovery_event(
+                crate::logging::LogLevel::Warn,
+                "RECOVERY_RETRY_SKIPPED",
+                "no_pending_turn",
+            );
             return false;
         };
         if !pending.auto_retry {
+            self.log_recovery_event(
+                crate::logging::LogLevel::Info,
+                "RECOVERY_RETRY_SKIPPED",
+                "auto_retry_disabled",
+            );
             return false;
         }
         let outcome = {
@@ -126,6 +260,12 @@ impl App {
 
         match outcome {
             Err(current_attempts) => {
+                self.log_recovery_event(
+                    crate::logging::LogLevel::Warn,
+                    "RECOVERY_RETRY_STOPPED",
+                    "retry_budget_exhausted",
+                );
+                self.restore_terminal_remote_retry_input();
                 self.rate_limit_pending_message = None;
                 self.rate_limit_reset = None;
                 self.push_display_message(DisplayMessage::error(format!(
@@ -138,6 +278,11 @@ impl App {
             }
             Ok((retry_attempts, backoff_secs, retry_at)) => {
                 self.rate_limit_reset = Some(retry_at);
+                self.log_recovery_event(
+                    crate::logging::LogLevel::Info,
+                    "RECOVERY_RETRY_ARMED",
+                    "transient_failure",
+                );
                 let content = format!(
                     "⚡ Connection lost - retrying (attempt {}/{}, in {}s) - {}",
                     retry_attempts,
@@ -190,10 +335,15 @@ impl App {
     /// the same loop again at turn end), puts the user's prompt back in the
     /// input box, and explains why the turn paused.
     pub(super) fn pause_exhausted_auto_resume(&mut self, message: String, notice: &str) {
+        self.log_recovery_event(
+            crate::logging::LogLevel::Warn,
+            "RECOVERY_AUTO_RESUME_STOPPED",
+            "retry_budget_exhausted",
+        );
+        self.restore_terminal_remote_retry_input();
         self.clear_pending_remote_retry();
         super::commands::disable_auto_poke(self);
         self.overnight_auto_poke = None;
-        self.restore_failed_input_to_box();
         self.push_display_message(DisplayMessage::system(format!("🛑 {message}")));
         self.set_status_notice(notice);
     }
@@ -229,7 +379,13 @@ impl App {
     /// auto-poke/queued-retry loops logged thousands of 401s in a single
     /// session (one failed turn per resend) until the user noticed.
     pub(super) fn trip_credential_failure_breaker(&mut self, message: &str) {
+        self.log_recovery_event(
+            crate::logging::LogLevel::Warn,
+            "RECOVERY_CREDENTIAL_BREAKER_STOPPED",
+            "repeated_auth_failure",
+        );
         let failures = self.consecutive_credential_failures;
+        self.restore_terminal_remote_retry_input();
         self.clear_pending_remote_retry();
         let cleared_pokes = if self.auto_poke_incomplete_todos {
             super::commands::disable_auto_poke(self)
@@ -256,7 +412,6 @@ impl App {
             }
         )));
         self.set_status_notice("Stopped: repeated auth failures");
-        self.restore_failed_input_to_box();
         self.consecutive_credential_failures = 0;
     }
 
@@ -332,6 +487,7 @@ impl App {
             display_edit_line_counts: (0, 0),
             terminal_title: RefCell::new(terminal_title::TerminalTitleState::default()),
             compacted_history_lazy: CompactedHistoryLazyState::default(),
+            recent_history_paging: Default::default(),
             pending_history_anchor: None,
             pending_resize_anchor: None,
             input: String::new(),
@@ -373,6 +529,7 @@ impl App {
             remote_interrupt_ack_deadline: None,
             pending_reload_reconnect_status: None,
             scheduled_reload_recoveries: HashSet::new(),
+            reload_recovery_dispatch_pending: false,
             status: ProcessingStatus::default(),
             subagent_status: None,
             batch_progress: None,
@@ -397,6 +554,8 @@ impl App {
             consecutive_guardrail_stops: 0,
             overnight_auto_poke: None,
             pending_provider_failover: None,
+            automatic_failover_targets: Vec::new(),
+            automatic_failover_stopped: false,
             pending_fallback_offer: None,
             pending_fallback_resend: None,
             pending_merge_offer: None,
@@ -438,6 +597,8 @@ impl App {
             cloud_recovery_auto_attempted: Default::default(),
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
+            detached_images: Default::default(),
+            prompt_history_backfill: (None, 0),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,
             startup_submit_deferred_reason: None,
@@ -525,6 +686,8 @@ impl App {
             side_pane_images_signature_cache: std::cell::Cell::new(None),
             remote_swarm_members: Vec::new(),
             remote_swarm_members_received_at: None,
+            swarm_last_message_at: std::collections::HashMap::new(),
+            file_activity_stack: None,
             swarm_plan_items: Vec::new(),
             swarm_plan_version: None,
             swarm_plan_swarm_id: None,
@@ -582,6 +745,7 @@ impl App {
             todos_view_rendered_hash: 0,
             remote_todos_payload: None,
             remote_todos_requested_at: None,
+            remote_todos_pushed: false,
             todo_card_rendered_hash: 0,
             todo_completion_report: Default::default(),
             pinned_todos_payload: None,
@@ -617,6 +781,7 @@ impl App {
             pending_route_selection: None,
             pending_automatic_failover_route: None,
             pending_automatic_failover_request_id: None,
+            pending_automatic_failover_started: None,
             pending_reasoning_effort: None,
             remote_model_switch_in_flight: false,
             pending_prompt_after_model_switch: None,
@@ -637,6 +802,7 @@ impl App {
             voice_input_key: keybind::load_voice_input_key(),
             voice_input: None,
             voice_input_last_press: None,
+            external_voice: None,
             fallback_switch_key: keybind::load_fallback_switch_key(),
             scroll_keys: keybind::load_scroll_keys(),
             keybindings_config_generation: crate::config::config_reload_generation(),
@@ -667,6 +833,8 @@ impl App {
             interleave_images: Vec::new(),
             pending_soft_interrupts: Vec::new(),
             pending_soft_interrupt_requests: Vec::new(),
+            sent_soft_interrupts: Vec::new(),
+            soft_interrupt_recovery: None,
             autoreview_after_current_turn: false,
             autojudge_after_current_turn: false,
             pending_split_startup_message: None,
@@ -685,7 +853,8 @@ impl App {
             tab_completion_state: None,
             command_suggestion_selected: 0,
             app_started: Instant::now(),
-            client_focused: true,
+            client_focused: crate::tui::focus_carryover::initial_focus(),
+            client_focus_confirmed: crate::tui::focus_carryover::initial_confirmed(),
             runtime_memory_log,
             idle_heap_release: Default::default(),
             idle_hibernation: Default::default(),
@@ -838,6 +1007,7 @@ impl App {
             display_edit_line_counts: (0, 0),
             terminal_title: RefCell::new(terminal_title::TerminalTitleState::default()),
             compacted_history_lazy: CompactedHistoryLazyState::default(),
+            recent_history_paging: Default::default(),
             pending_history_anchor: None,
             pending_resize_anchor: None,
             input: String::new(),
@@ -879,6 +1049,7 @@ impl App {
             remote_interrupt_ack_deadline: None,
             pending_reload_reconnect_status: None,
             scheduled_reload_recoveries: HashSet::new(),
+            reload_recovery_dispatch_pending: false,
             status: ProcessingStatus::default(),
             subagent_status: None,
             batch_progress: None,
@@ -903,6 +1074,8 @@ impl App {
             consecutive_guardrail_stops: 0,
             overnight_auto_poke: None,
             pending_provider_failover: None,
+            automatic_failover_targets: Vec::new(),
+            automatic_failover_stopped: false,
             pending_fallback_offer: None,
             pending_fallback_resend: None,
             pending_merge_offer: None,
@@ -944,6 +1117,8 @@ impl App {
             cloud_recovery_auto_attempted: Default::default(),
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
+            detached_images: Default::default(),
+            prompt_history_backfill: (None, 0),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,
             startup_submit_deferred_reason: None,
@@ -1031,6 +1206,8 @@ impl App {
             side_pane_images_signature_cache: std::cell::Cell::new(None),
             remote_swarm_members: Vec::new(),
             remote_swarm_members_received_at: None,
+            swarm_last_message_at: std::collections::HashMap::new(),
+            file_activity_stack: None,
             swarm_plan_items: Vec::new(),
             swarm_plan_version: None,
             swarm_plan_swarm_id: None,
@@ -1088,6 +1265,7 @@ impl App {
             todos_view_rendered_hash: 0,
             remote_todos_payload: None,
             remote_todos_requested_at: None,
+            remote_todos_pushed: false,
             todo_card_rendered_hash: 0,
             todo_completion_report: Default::default(),
             pinned_todos_payload: None,
@@ -1123,6 +1301,7 @@ impl App {
             pending_route_selection: None,
             pending_automatic_failover_route: None,
             pending_automatic_failover_request_id: None,
+            pending_automatic_failover_started: None,
             pending_reasoning_effort: None,
             remote_model_switch_in_flight: false,
             pending_prompt_after_model_switch: None,
@@ -1143,6 +1322,7 @@ impl App {
             voice_input_key: keybind::load_voice_input_key(),
             voice_input: None,
             voice_input_last_press: None,
+            external_voice: None,
             fallback_switch_key: keybind::load_fallback_switch_key(),
             scroll_keys: keybind::load_scroll_keys(),
             keybindings_config_generation: crate::config::config_reload_generation(),
@@ -1173,6 +1353,8 @@ impl App {
             interleave_images: Vec::new(),
             pending_soft_interrupts: Vec::new(),
             pending_soft_interrupt_requests: Vec::new(),
+            sent_soft_interrupts: Vec::new(),
+            soft_interrupt_recovery: None,
             autoreview_after_current_turn: false,
             autojudge_after_current_turn: false,
             pending_split_startup_message: None,
@@ -1191,7 +1373,8 @@ impl App {
             tab_completion_state: None,
             command_suggestion_selected: 0,
             app_started: Instant::now(),
-            client_focused: true,
+            client_focused: crate::tui::focus_carryover::initial_focus(),
+            client_focus_confirmed: crate::tui::focus_carryover::initial_confirmed(),
             runtime_memory_log,
             idle_heap_release: Default::default(),
             idle_hibernation: Default::default(),
@@ -1624,6 +1807,9 @@ impl App {
         }
 
         app.resume_session_id = resume_session;
+        // Paint persisted todos with the first frame, not a throttled tick after
+        // the server has finished loading the resumed conversation.
+        app.refresh_pinned_todos_now();
         // After `resume_session_id`: the hint needs to know whether this is a
         // new session (configured effort applies) or a resumed one.
         app.apply_remote_header_hint();

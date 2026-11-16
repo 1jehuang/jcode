@@ -6,8 +6,11 @@ pub mod auth_test;
 pub mod cloud_ephemeral;
 pub mod cloud_managed;
 pub mod cloud_move;
+#[cfg(unix)]
+pub mod cloud_mux;
 pub mod cloud_runtime;
 pub mod commands;
+pub mod companion_autostart;
 pub mod compatible_runtime;
 pub mod debug;
 pub mod dispatch;

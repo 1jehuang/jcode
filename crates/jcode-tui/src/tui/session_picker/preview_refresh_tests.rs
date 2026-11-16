@@ -152,6 +152,7 @@ fn deliver(picker: &mut SessionPicker, messages: Vec<PreviewMessage>) {
     sender
         .send(Some(LoadedSessionPreview {
             messages,
+            search: None,
             extras: PreviewExtras {
                 hidden_prompts: 7,
                 ..Default::default()
@@ -280,4 +281,79 @@ fn genuinely_empty_completed_preview_remains_loaded_and_removed_sessions_release
     assert!(render(&mut picker).contains("(empty session)"));
     picker.reseed_grouped(vec![], vec![]);
     assert!(picker.preview_extras.is_empty());
+}
+
+#[test]
+fn resume_time_modes_pick_expected_timestamp() {
+    use super::super::time_labels::session_resume_time_for;
+    use crate::config::ResumeTimeMode;
+    use chrono::Duration;
+
+    let now = chrono::Utc::now();
+    let mut session = fixture();
+    session.created_at = now - Duration::days(3);
+    session.last_message_time = now - Duration::hours(2);
+    session.last_active_at = Some(now - Duration::minutes(5));
+
+    let at = |s: &SessionInfo, mode| session_resume_time_for(s, mode);
+    // Opening without working must not refresh the default label.
+    assert_eq!(
+        at(&session, ResumeTimeMode::Message),
+        now - Duration::hours(2)
+    );
+    assert_eq!(
+        at(&session, ResumeTimeMode::Activity),
+        now - Duration::minutes(5)
+    );
+    assert_eq!(
+        at(&session, ResumeTimeMode::Opened),
+        now - Duration::minutes(5)
+    );
+    assert_eq!(
+        at(&session, ResumeTimeMode::Created),
+        now - Duration::days(3)
+    );
+
+    // Long run after opening: message and activity follow the newest message.
+    session.last_message_time = now - Duration::minutes(1);
+    assert_eq!(
+        at(&session, ResumeTimeMode::Message),
+        now - Duration::minutes(1)
+    );
+    assert_eq!(
+        at(&session, ResumeTimeMode::Activity),
+        now - Duration::minutes(1)
+    );
+    assert_eq!(
+        at(&session, ResumeTimeMode::Opened),
+        now - Duration::minutes(5)
+    );
+}
+
+#[test]
+fn running_session_shows_spinner_state_instead_of_age() {
+    let session = fixture();
+    let mut picker = SessionPicker::new(vec![session.clone()]);
+    let text = |picker: &SessionPicker| {
+        picker
+            .render_session_item_lines_at_frame(&session, false, 0)
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
+            .collect::<String>()
+    };
+    assert!(text(&picker).contains("ago"));
+
+    picker.live_presence.insert(
+        session.id.clone(),
+        crate::session::SessionPresence {
+            session_id: session.id.clone(),
+            pid: 1,
+            streaming: true,
+            streaming_since: None,
+            internal: false,
+        },
+    );
+    let running = text(&picker);
+    assert!(running.contains("running"), "row: {running}");
+    assert!(!running.contains("ago"), "row: {running}");
 }

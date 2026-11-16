@@ -99,10 +99,7 @@ fn oauth_schedule_wakeup_forwards_the_real_schedule_schema() {
         "fabricated schema leaked back in: {props:?}"
     );
     assert_eq!(
-        formatted
-            .iter()
-            .filter(|t| t.name == "schedule")
-            .count(),
+        formatted.iter().filter(|t| t.name == "schedule").count(),
         1,
         "schedule must not be advertised twice"
     );
