@@ -4227,6 +4227,7 @@ dependencies = [
  "jcode-provider-core",
  "jcode-provider-openai",
  "reqwest 0.12.28",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
