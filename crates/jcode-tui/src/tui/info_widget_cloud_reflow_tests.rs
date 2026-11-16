@@ -22,6 +22,8 @@ fn cloud_overview_reflows_when_git_loading_finishes_in_short_viewport() {
             state: CloudProbeState::Ready,
             machine: None,
             last_transfer_at: None,
+            directories: None,
+            directories_stale: false,
         }),
         dual_git_info: Some(DualGitInfo::default()),
         ..Default::default()

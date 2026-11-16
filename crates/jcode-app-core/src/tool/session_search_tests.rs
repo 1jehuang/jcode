@@ -113,6 +113,83 @@ fn tool_use_input_is_hidden_by_default_and_searchable_when_requested() {
 }
 
 #[test]
+fn tool_intents_are_searchable_by_default_without_raw_arguments() {
+    with_temp_home(|home| {
+        save_test_session(
+            "todo-intent-session",
+            vec![(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "todo-1".to_string(),
+                    name: "todo".to_string(),
+                    input: json!({
+                        "intent": "Investigate marmalade synchronization",
+                        "plan": {"user_intention": "hiddenrawneedle"}
+                    }),
+                    thought_signature: None,
+                }],
+            )],
+        );
+        let options = SearchOptions::for_test("current-session");
+        let results = run_search(home, "marmalade synchronization", &options);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].snippet.contains("marmalade"));
+        assert!(!results[0].snippet.contains("hiddenrawneedle"));
+        assert!(run_search(home, "hiddenrawneedle", &options).is_empty());
+    });
+}
+
+#[test]
+fn todo_task_names_and_descriptions_are_searchable_by_default() {
+    with_temp_home(|home| {
+        let inputs = [
+            json!({"phases": [{"lanes": [{"items": [{"name": "plannameprobe", "description": "plandescriptionprobe", "priority": "hiddenpriorityprobe"}]}]}]}),
+            json!({"add": [{"name": "addnameprobe", "description": "adddescriptionprobe"}]}),
+            json!({"update": [{"name": "updatenameprobe", "rename_to": "renamednameprobe", "description": "updatedescriptionprobe"}]}),
+        ];
+        save_test_session(
+            "todo-tasks-session",
+            inputs
+                .into_iter()
+                .enumerate()
+                .map(|(i, input)| {
+                    (
+                        Role::Assistant,
+                        vec![ContentBlock::ToolUse {
+                            id: format!("todo-{i}"),
+                            name: "todo".to_string(),
+                            input,
+                            thought_signature: None,
+                        }],
+                    )
+                })
+                .collect(),
+        );
+        let options = SearchOptions::for_test("current-session");
+        for query in [
+            "plannameprobe",
+            "plandescriptionprobe",
+            "addnameprobe",
+            "adddescriptionprobe",
+            "updatenameprobe",
+            "renamednameprobe",
+            "updatedescriptionprobe",
+        ] {
+            let results = run_search(home, query, &options);
+            assert_eq!(results.len(), 1, "expected default match for {query}");
+            assert!(results[0].snippet.contains(query));
+        }
+        assert!(run_search(home, "hiddenpriorityprobe", &options).is_empty());
+        let mut raw_options = options;
+        raw_options.include_tools = true;
+        assert_eq!(
+            run_search(home, "hiddenpriorityprobe", &raw_options).len(),
+            1
+        );
+    });
+}
+
+#[test]
 fn journal_entries_are_searchable() {
     with_temp_home(|home| {
         let mut session = Session::create_with_id("journal-session".to_string(), None, None);

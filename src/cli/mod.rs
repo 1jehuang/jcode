@@ -3,6 +3,7 @@ pub mod acp;
 pub mod args;
 pub mod auth_import;
 pub mod auth_test;
+pub mod cloud_ephemeral;
 pub mod cloud_managed;
 pub mod cloud_move;
 pub mod commands;

@@ -20,8 +20,10 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def preflight(layers):
     required = {"bash", "git", "python3"}
-    if "cli" in layers or "agent" in layers:
+    if any(layer in layers for layer in ("cli", "agent", "group")):
         required.add("bwrap")
+    if "group" in layers:
+        required.update(("setsid", "rg", "timeout"))
     if "tui" in layers:
         required.update(("ssh", "sshd", "ssh-keygen", "tmux", "unshare", "mount"))
     missing = sorted(name for name in required if not shutil.which(name))
@@ -32,7 +34,7 @@ def preflight(layers):
     probes = []
     if "tui" in layers:
         probes.append(["unshare", "--user", "--map-root-user", "--mount", "true"])
-    if "cli" in layers or "agent" in layers:
+    if any(layer in layers for layer in ("cli", "agent", "group")):
         probes.append(["bwrap", "--ro-bind", "/", "/", "--unshare-pid", "--proc", "/proc", "true"])
     for probe in probes:
         result = subprocess.run(probe, text=True, capture_output=True, timeout=10)
@@ -76,8 +78,8 @@ def write_report(path, results, binary, version):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", default=os.environ.get("JCODE_BIN"), required=not os.environ.get("JCODE_BIN"))
-    parser.add_argument("--layers", nargs="+", choices=("cli", "agent", "credentials", "tui"),
-                        default=["cli", "agent", "credentials", "tui"])
+    parser.add_argument("--layers", nargs="+", choices=("cli", "agent", "credentials", "group", "tui"),
+                        default=["cli", "agent", "credentials", "group", "tui"])
     parser.add_argument("--scenario", choices=tuple(SCENARIOS), help="Run one TUI scenario (with --layers tui)")
     parser.add_argument("--repeat", type=int, default=1, help="Repeat each selected stage to expose state leakage")
     parser.add_argument("--artifacts", type=Path, help="New directory for retained logs, homes and reports")
@@ -130,6 +132,7 @@ def main():
                            "JCODE_NO_AUTO_UPDATE": "1", "JCODE_NO_TELEMETRY": "1"}
                     script = {"cli": "scripts/test_cloud_move_e2e.sh",
                               "agent": "scripts/test_cloud_move_agent_e2e.sh",
+                              "group": "scripts/test_cloud_group_e2e.sh",
                               "credentials": "tests/test_cloud_credentials.py"}[layer]
                     command = ([sys.executable, script, binary] if layer == "credentials"
                                else ["bash", script])

@@ -1,7 +1,8 @@
 //! #1454 acceptance tests: the opt-in tool row time badge. When
 //! `display.show_tool_timestamp` is enabled, completed tool rows carry an
-//! " · HH:MM:SS" stamp after the token count (and any duration badge),
-//! honoring `display.timestamp_tz`; the clock span is always neutral.
+//! HH:MM:SS stamp in the LEFT prefix, before the tool name, so every stamp
+//! starts at the same column (a fixed clock column the eye can scan).
+//! Honors `display.timestamp_tz`; the clock span is always neutral.
 
 use super::*;
 
@@ -38,31 +39,39 @@ fn rendered_first_row(msg: &DisplayMessage, width: u16) -> String {
         .unwrap_or_default()
 }
 
-/// The opt-in stamp renders HH:MM:SS after the token count (and the duration
-/// badge) through the real render_tool_message pipeline.
+/// The opt-in stamp renders HH:MM:SS in the left prefix, before the tool
+/// name, through the real render_tool_message pipeline.
 #[test]
 fn test_tool_row_stamp_renders_when_enabled() {
     let _lock = viewport_snapshot_test_lock();
-    let _config = isolate_config_home_with("[display]\nshow_tool_timestamp = true\n");
+    // Pin the zone so the expected stamp text does not depend on the
+    // machine's local timezone.
+    let _config = isolate_config_home_with(
+        "[display]\nshow_tool_timestamp = true\ntimestamp_tz = \"UTC+0\"\n",
+    );
     let stamp = chrono::DateTime::parse_from_rfc3339("2026-09-23T20:23:35Z")
         .expect("parse stamp")
         .with_timezone(&chrono::Utc);
     let msg = time_tool_msg(Some(stamp), Some(48_300));
 
     let row = rendered_first_row(&msg, 200);
-    let expected = stamp
-        .with_timezone(&chrono::Local)
-        .format("%H:%M:%S")
-        .to_string();
+    // timestamp_tz = "UTC+0" pins the rendered stamp regardless of the
+    // machine's local timezone.
+    let expected = "20:23:35".to_string();
     assert!(row.contains(&expected), "stamp missing from row: {row}");
     assert!(row.contains("48.3s"), "duration badge missing: {row}");
     assert!(row.contains("tok"), "token badge must stay: {row}");
     let tok_pos = row.find("tok").expect("tokens present");
     let dur_pos = row.find("48.3s").expect("duration present");
     let stamp_pos = row.find(&expected).expect("stamp present");
+    let name_pos = row.find("bash").expect("tool name present");
     assert!(
-        tok_pos < dur_pos && dur_pos < stamp_pos,
-        "order must be token -> duration -> stamp: {row}"
+        stamp_pos < name_pos,
+        "stamp must lead the row, before the tool name: {row}"
+    );
+    assert!(
+        tok_pos < dur_pos,
+        "right suffix order stays token -> duration: {row}"
     );
 }
 
@@ -132,7 +141,11 @@ fn test_tool_row_utc3_exact_offset_arithmetic_across_day_boundary() {
 #[test]
 fn test_tool_row_stamp_stays_neutral_for_any_duration_severity() {
     let _lock = viewport_snapshot_test_lock();
-    let _config = isolate_config_home_with("[display]\nshow_tool_timestamp = true\n");
+    // Pin the zone so the expected stamp text does not depend on the
+    // machine's local timezone.
+    let _config = isolate_config_home_with(
+        "[display]\nshow_tool_timestamp = true\ntimestamp_tz = \"UTC+0\"\n",
+    );
     let stamp = chrono::DateTime::parse_from_rfc3339("2026-09-23T20:15:42Z")
         .expect("parse stamp")
         .with_timezone(&chrono::Utc);
@@ -155,8 +168,8 @@ fn test_tool_row_stamp_stays_neutral_for_any_duration_severity() {
     }
 }
 
-/// The stamp survives narrow widths as part of the preserved suffix: summary
-/// truncates first, token badge, duration badge and stamp all stay.
+/// The stamp survives narrow widths as part of the reserved prefix: summary
+/// truncates first; the stamp, tool name, token and duration badges stay.
 #[test]
 fn test_tool_row_stamp_survives_narrow_width() {
     let _lock = viewport_snapshot_test_lock();
@@ -182,11 +195,11 @@ fn test_tool_row_stamp_survives_narrow_width() {
             "duration lost at width {width}: {row}"
         );
         assert!(row.contains("tok"), "tokens lost at width {width}: {row}");
-        let tok_pos = row.find("tok").expect("tokens present");
         let stamp_pos = row.find("23:15:42").expect("stamp present");
+        let name_pos = row.find("bash").expect("tool name present");
         assert!(
-            tok_pos < stamp_pos,
-            "stamp must trail the token badge at width {width}: {row}"
+            stamp_pos < name_pos,
+            "stamp must lead the row at width {width}: {row}"
         );
     }
 }

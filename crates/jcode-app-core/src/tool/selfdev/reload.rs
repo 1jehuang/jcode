@@ -102,10 +102,17 @@ impl ReloadContext {
     ) -> String {
         let task_info = self.task_info_suffix();
         let turns_note = restored_turns
-            .map(|turns| format!(" Session restored with {} turns.", turns))
+            .map(|turns| format!("\nSession restored with {} turns.", turns))
             .unwrap_or_default();
         format!(
-            "Reload succeeded ({} → {}).{}{}{} Continue immediately from where you left off. Do not ask the user what to do next. Do not summarize the reload.",
+            "Reload complete. Resuming your task.\n\n\
+             Continue the user's latest request from the last unfinished step, using the restored conversation and todo list. \
+             The reload itself is complete, not the user's task. Do not stop to announce or summarize the reload, \
+             and do not ask what to do next unless genuinely blocked.\n\n\
+             Before retrying any interrupted tool call, check whether it already completed or is still running. \
+             Do not repeat completed work or duplicate running background tasks. \
+             Validate the new behavior when relevant, then finish the original request.\n\n\
+             Build: {} → {}.{}{}{}",
             self.version_before, self.version_after, task_info, background_task_note, turns_note
         )
     }
@@ -187,8 +194,9 @@ pub fn persisted_background_tasks_note(session_id: &str) -> String {
             .join(", ");
 
         notes.push_str(&format!(
-            "\nPersisted background task(s) for this session are still running: {}. Do not rerun those commands. Check them first with the `bg` tool (`bg action=\"list\"`, `bg action=\"status\" task_id=...`, or `bg action=\"output\" task_id=...`).",
-            task_list
+            "\nPersisted background task(s) for this session are still running: {}. Do not rerun those commands.\n{}",
+            task_list,
+            crate::tool::BACKGROUND_WAIT_GUIDANCE
         ));
     }
 
@@ -278,6 +286,7 @@ impl SelfDevTool {
         execution_mode: ToolExecutionMode,
         working_dir: Option<&std::path::Path>,
     ) -> Result<ToolOutput> {
+        let test_mode = SelfDevTool::is_test_session();
         let repo_dir = resolve_selfdev_reload_repo_dir(working_dir)
             .ok_or_else(|| anyhow::anyhow!("Could not find jcode repository directory"))?;
 
@@ -289,7 +298,7 @@ impl SelfDevTool {
         // a local debug/selfdev checkout may not have target/release/jcode).
         // Skipping it lets the reload-signal/ack contract be exercised
         // deterministically regardless of which profile was built locally.
-        if !SelfDevTool::is_test_session() && !target_binary.exists() {
+        if !test_mode && !target_binary.exists() {
             return Ok(ToolOutput::new(
                 format!(
                     "No binary found at {}.\n\
@@ -300,7 +309,7 @@ impl SelfDevTool {
             ));
         }
 
-        let source = if SelfDevTool::is_test_session() {
+        let source = if test_mode {
             build::SourceState {
                 repo_scope: "test-repo-scope".to_string(),
                 worktree_scope: "test-worktree-scope".to_string(),
@@ -316,14 +325,14 @@ impl SelfDevTool {
         };
         let hash = source.version_label.clone();
         let version_before = jcode_build_meta::version().to_string();
-        let published = if SelfDevTool::is_test_session() {
+        let published = if test_mode {
             None
         } else {
             Some(build::publish_local_current_build_for_source(
                 &repo_dir, &source,
             )?)
         };
-        let previous_shared_server_version = if SelfDevTool::is_test_session() {
+        let previous_shared_server_version = if test_mode {
             None
         } else {
             let published_build = published.as_ref().ok_or_else(|| {
@@ -335,25 +344,27 @@ impl SelfDevTool {
             build::read_shared_server_version()?
         };
 
-        // Update manifest - track what we're testing
-        let mut manifest = build::BuildManifest::load()?;
-        manifest.canary = Some(hash.clone());
-        manifest.canary_status = Some(build::CanaryStatus::Testing);
-        manifest.set_pending_activation(build::PendingActivation {
-            session_id: session_id.to_string(),
-            new_version: hash.clone(),
-            previous_current_version: published
-                .as_ref()
-                .and_then(|published| published.previous_current_version.clone()),
-            previous_shared_server_version,
-            source_fingerprint: Some(source.fingerprint.clone()),
-            requested_at: chrono::Utc::now(),
-        })?;
-        manifest.save()?;
+        // Synthetic builds must never publish activation state, even when
+        // JCODE_HOME is unset and storage resolves to the production home.
+        if !test_mode {
+            // Update manifest - track what we're testing
+            let mut manifest = build::BuildManifest::load()?;
+            manifest.canary = Some(hash.clone());
+            manifest.canary_status = Some(build::CanaryStatus::Testing);
+            manifest.set_pending_activation(build::PendingActivation {
+                session_id: session_id.to_string(),
+                new_version: hash.clone(),
+                previous_current_version: published
+                    .as_ref()
+                    .and_then(|published| published.previous_current_version.clone()),
+                previous_shared_server_version,
+                source_fingerprint: Some(source.fingerprint.clone()),
+                requested_at: chrono::Utc::now(),
+            })?;
+            manifest.save()?;
+        }
 
-        if !SelfDevTool::is_test_session()
-            && let Err(error) = build::update_shared_server_symlink(&hash)
-        {
+        if !test_mode && let Err(error) = build::update_shared_server_symlink(&hash) {
             let _ = build::rollback_pending_activation_for_session(session_id);
             return Err(error);
         }
@@ -372,7 +383,9 @@ impl SelfDevTool {
         ));
         if let Err(e) = reload_ctx.save() {
             crate::logging::error(&format!("Failed to save reload context: {}", e));
-            let _ = build::rollback_pending_activation_for_session(session_id);
+            if !test_mode {
+                let _ = build::rollback_pending_activation_for_session(session_id);
+            }
             return Err(e);
         }
         crate::logging::info("Reload context saved successfully");
@@ -390,7 +403,9 @@ impl SelfDevTool {
         let ack = server::wait_for_reload_ack(&request_id, timeout)
             .await
             .map_err(|error| {
-                let _ = build::rollback_pending_activation_for_session(session_id);
+                if !test_mode {
+                    let _ = build::rollback_pending_activation_for_session(session_id);
+                }
                 anyhow::anyhow!(
                     "Timed out waiting for the server to begin reload after {}s: {}. The reload signal may not have been picked up; check that the connected server is running a build with unified self-dev reload support and try restarting the shared server.",
                     timeout.as_secs(),
@@ -408,7 +423,7 @@ impl SelfDevTool {
 
         match execution_mode {
             ToolExecutionMode::Direct => {
-                if SelfDevTool::is_test_session() {
+                if test_mode {
                     return Ok(ToolOutput::new(format!(
                         "Reload acknowledged for build {}. Server is restarting now.",
                         ack.hash

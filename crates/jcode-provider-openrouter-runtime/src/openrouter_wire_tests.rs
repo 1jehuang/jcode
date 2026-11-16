@@ -56,20 +56,34 @@ fn spawn_header_capturing_server() -> (std::net::SocketAddr, std::sync::mpsc::Re
     let addr = listener.local_addr().expect("addr");
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .expect("read timeout");
-        let mut buf = vec![0u8; 65536];
-        let n = stream.read(&mut buf).unwrap_or(0);
-        let _ = tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
-        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        let _ = stream.write_all(response.as_bytes());
+        loop {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout");
+            let mut buf = vec![0u8; 65536];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            // Chat preflight may fetch model/pricing metadata. Return the actual
+            // Grok catalog shape rather than treating GET /models as an SSE chat.
+            if String::from_utf8_lossy(&buf[..n]).starts_with("GET /v1/models ") {
+                let body = r#"{"data":[{"model":"grok-4.6","context_window":500000}]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                continue;
+            }
+            let _ = tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
+            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+            break;
+        }
     });
     (addr, rx)
 }
@@ -125,6 +139,72 @@ fn opencode_session_header_is_sent_on_the_wire_only_to_opencode_hosts() {
 }
 
 #[test]
+fn issue_2020_explicit_none_respects_compatible_profile_opt_in_on_wire() {
+    let _lock = ENV_LOCK.lock();
+    for (profile_id, model, support, reasoning, expected) in [
+        (
+            "litellm",
+            "deepseek-reasoner",
+            Some(true),
+            true,
+            Some("none"),
+        ),
+        ("litellm", "gpt-5", Some(true), true, Some("none")),
+        ("litellm", "deepseek-reasoner", Some(false), true, None),
+        ("litellm", "deepseek-reasoner", Some(true), false, None),
+        ("deepseek", "deepseek-reasoner", None, true, None),
+        ("zai", "glm-5", None, true, None),
+        ("custom", "gpt-5", None, true, None),
+    ] {
+        let (api_base, captured) = spawn_single_response_chat_server();
+        let profile = jcode_base::config::NamedProviderConfig {
+            base_url: api_base,
+            api_key: Some("test-key".into()),
+            default_model: Some(model.into()),
+            supports_reasoning_effort: support,
+            models: vec![jcode_base::config::NamedProviderModelConfig {
+                id: model.into(),
+                reasoning: Some(reasoning),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let provider =
+            OpenRouterProvider::new_named_openai_compatible(profile_id, &profile).unwrap();
+        if expected.is_some() {
+            provider.set_reasoning_effort("none").unwrap();
+        } else {
+            // Unsupported routes must not leak even a previously stored effort.
+            *provider.reasoning_effort.try_write().unwrap() = Some("none".into());
+        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut stream = provider
+                .complete(&[Message::user("hello")], &[], "test", None)
+                .await
+                .unwrap();
+            while let Some(event) = stream.next().await {
+                event.unwrap();
+            }
+        });
+        let raw = captured.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(raw.starts_with("POST /v1/chat/completions "), "{raw}");
+        let body: serde_json::Value =
+            serde_json::from_str(raw.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["model"], model);
+        assert_eq!(
+            body.get("reasoning_effort").and_then(|v| v.as_str()),
+            expected,
+            "profile={profile_id} model={model} support={support:?} reasoning={reasoning}: {body}"
+        );
+        assert!(body.get("reasoning").is_none(), "{body}");
+    }
+}
+
+#[test]
 fn configured_swarm_root_effort_covers_all_wire_formats() {
     let unified = make_provider();
     let deepseek = OpenRouterProvider {
@@ -135,7 +215,8 @@ fn configured_swarm_root_effort_covers_all_wire_formats() {
         profile_id: Some("zai".into()),
         ..make_custom_compatible_provider()
     };
-    for mode in ["swarm"] {
+    {
+        let mode = "swarm";
         for (provider, strict, field, max) in [
             (&unified, false, "reasoning", "xhigh"),
             (&deepseek, false, "reasoning_effort", "max"),
@@ -557,7 +638,8 @@ fn configured_swarm_root_effort_reads_real_config() {
         );
         return;
     }
-    for (mode, expected) in [("swarm", "low")] {
+    {
+        let (mode, expected) = ("swarm", "low");
         let (api_base, request_rx) = spawn_single_response_chat_server();
         let provider = OpenRouterProvider {
             api_base,

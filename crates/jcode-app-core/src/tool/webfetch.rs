@@ -17,15 +17,11 @@ const MAX_URL_CHARS: usize = 300;
 const DEFAULT_TIMEOUT: u64 = 30;
 const MAX_TIMEOUT: u64 = 120;
 
-pub struct WebFetchTool {
-    client: reqwest::Client,
-}
+pub struct WebFetchTool;
 
 impl WebFetchTool {
     pub fn new() -> Self {
-        Self {
-            client: crate::provider::shared_http_client(),
-        }
+        Self
     }
 }
 
@@ -71,7 +67,9 @@ impl Tool for WebFetchTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        let client =
+            super::session_http::client(&ctx.session_id, super::session_http::Profile::Shared)?;
         let params: WebFetchInput = serde_json::from_value(input)?;
 
         // Validate URL
@@ -82,8 +80,7 @@ impl Tool for WebFetchTool {
         let timeout = params.timeout.unwrap_or(DEFAULT_TIMEOUT).min(MAX_TIMEOUT);
         let format = params.format.as_deref().unwrap_or("markdown");
 
-        let response = self
-            .client
+        let response = client
             .get(&params.url)
             .header(
                 reqwest::header::USER_AGENT,
@@ -91,7 +88,8 @@ impl Tool for WebFetchTool {
             )
             .timeout(Duration::from_secs(timeout))
             .send()
-            .await?;
+            .await
+            .map_err(super::session_http::transport_error)?;
 
         let status = response.status();
         if !status.is_success() {
@@ -120,7 +118,7 @@ impl Tool for WebFetchTool {
         let mut truncated = false;
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
+            let chunk = chunk.map_err(super::session_http::transport_error)?;
             let remaining = MAX_SIZE.saturating_sub(body_bytes.len());
             if chunk.len() > remaining {
                 body_bytes.extend_from_slice(&chunk[..remaining]);

@@ -60,6 +60,12 @@ SERVER COMMANDS (server: prefix or no prefix):
   server:info              - Server identity, health, uptime
   swarm                    - List swarm members + status (alias: swarm:members)
   swarm:help               - Full swarm command reference
+  group_transfer:inspect:<selection JSON> - Expand full swarms + selected sessions (idle daemon)
+  group_transfer:prepare:<request JSON>   - Check expected bundle, checkpoint, fence and evict source
+  group_transfer:abort:<bundle JSON>      - Cancel pending prepare and restore prior source leases
+  group_transfer:reserve:<bundle JSON>    - Fence destination before installing incoming files
+  group_transfer:import:<bundle JSON>     - Install only selected topology, keep pending leases
+  group_transfer:check_import:<bundle JSON> - Validate destination topology without changes
   create_session                - Create headless session
   create_session:<path>         - Create session with working dir
   create_session:selfdev:<path> - Create headless self-dev session

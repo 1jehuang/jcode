@@ -19,6 +19,9 @@ pub async fn run() -> Result<()> {
     // Parse once, before startup side effects. Invalid arguments and --help
     // must not harden credential files or create configuration/telemetry state.
     let args = Args::parse();
+    // Data belongs to the executable, not to the application/TUI dependency
+    // chain. Every entrypoint using this startup path gets version-matched docs.
+    crate::register_bundled_docs();
     // Interactive login prompts (masked secrets, QR codes) are a terminal
     // concern. The shared auth flows reach them through this presenter.
     super::login::install_terminal_login_presenter();
@@ -496,7 +499,7 @@ fn should_spawn_background_update_check_with_config(args: &Args, check_updates: 
         && !args.no_update
         && !matches!(
             args.command,
-            Some(Command::Update)
+            Some(Command::Update { .. })
                 | Some(Command::Serve { .. })
                 | Some(Command::Server { .. })
                 | Some(Command::Acp)
@@ -747,7 +750,7 @@ mod tests {
     #[test]
     fn update_command_still_skips_background_check_before_auto_install_logic() {
         let args = parse_args(&["jcode", "update"]);
-        assert!(matches!(args.command, Some(Command::Update)));
+        assert!(matches!(args.command, Some(Command::Update { .. })));
         assert!(!should_spawn_background_update_check(&args));
         assert!(should_auto_install_update(&args));
     }

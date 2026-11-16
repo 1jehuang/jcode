@@ -54,7 +54,7 @@ fn render_tool_message_shows_gmail_draft_card() {
 }
 
 #[test]
-fn render_gmail_draft_card_marks_failures_and_empty_fields() {
+fn render_gmail_draft_failure_keeps_normal_header_without_redundant_card() {
     let msg = gmail_draft_message(
         "Error: Gmail draft creation failed",
         serde_json::json!({ "action": "draft", "body": "" }),
@@ -67,10 +67,12 @@ fn render_gmail_draft_card_marks_failures_and_empty_fields() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("Gmail draft failed"), "{plain}");
-    assert!(plain.contains("(recipient missing)"), "{plain}");
-    assert!(plain.contains("(no subject)"), "{plain}");
-    assert!(plain.contains("(empty body)"), "{plain}");
+    assert_eq!(lines.len(), 2, "{plain}");
+    assert!(plain.contains("✗ gmail draft"), "{plain}");
+    assert!(plain.contains("╰─Gmail draft creation failed"), "{plain}");
+    assert!(!plain.contains("(recipient missing)"), "{plain}");
+    assert!(!plain.contains("(no subject)"), "{plain}");
+    assert!(!plain.contains("(empty body)"), "{plain}");
 }
 
 #[test]

@@ -661,7 +661,7 @@ mod tests {
                 channel: None,
                 tldr: None,
             },
-            "🐝 **Swarm await finished**\n\nAll members done. All 2 members are done: fox, wolf\n\nMember statuses:\n  ✓ fox (completed)\n  ✓ wolf (completed)\n\nCompletion reports:\n\n--- fox (completed) ---\nParser tests pass.",
+            "🐝 **Swarm await finished**\n\nAll members done. All 2 members are done: fox, wolf\n\nMember statuses:\n  ✓ fox (completed)\n  ✓ wolf (completed)\n\nRecent outputs:\n\n--- fox (completed) ---\nParser tests pass.",
             false,
         );
 

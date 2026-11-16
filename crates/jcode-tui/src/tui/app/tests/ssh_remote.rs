@@ -136,14 +136,22 @@ fn ssh_remote_subscribe_keeps_remote_only_id_and_filters_control_done() {
             crate::server::set_socket_path(socket.to_str().unwrap());
             #[allow(unused_mut)]
             let mut listener = crate::transport::Listener::bind(&socket).unwrap();
-            let mut connection = crate::tui::backend::RemoteConnection::connect_with_session(
+            let connecting = tokio::spawn(async { crate::tui::backend::RemoteConnection::connect_with_session(
                 Some("remote-only-session"), Some("ssh-client"), true, None, false,
                 Some("/remote/project"),
-            ).await.unwrap();
+            ).await.unwrap() });
             let (stream, _) = listener.accept().await.unwrap();
             let (reader, mut writer) = stream.into_split();
             let mut reader = BufReader::new(reader);
             let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let crate::protocol::Request::Ping { id: ping_id } = serde_json::from_str(&line).unwrap() else {
+                panic!("SSH bootstrap must verify daemon readiness before Subscribe");
+            };
+            assert!(!connecting.is_finished());
+            writer.write_all(format!("{{\"type\":\"pong\",\"id\":{ping_id},\"native_ssh_protocol\":1}}\n").as_bytes()).await.unwrap();
+            let mut connection = connecting.await.unwrap();
+            line.clear();
             reader.read_line(&mut line).await.unwrap();
             let request: crate::protocol::Request = serde_json::from_str(&line).unwrap();
             let id = match request {

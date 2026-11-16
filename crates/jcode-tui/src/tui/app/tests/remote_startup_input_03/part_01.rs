@@ -365,7 +365,7 @@ fn test_paste_again_expands_matching_placeholder_not_newer_same_sized_paste() {
     assert_eq!(app.cursor_pos, first.len());
     let visible_input = app.input().to_string();
     assert_eq!(
-        crate::tui::app::input::expand_paste_placeholders(&mut app, &visible_input),
+        crate::tui::app::input::expand_paste_placeholders(&app, &visible_input),
         format!("{first} {second}")
     );
     assert_eq!(app.pasted_contents, vec![second]);

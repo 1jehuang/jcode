@@ -108,22 +108,33 @@ fn checkpoint_refuses_queue_write_failure_instead_of_losing_accepted_input() {
     assert_eq!(agent.soft_interrupt_queue().lock().unwrap().len(), 1);
 }
 
-#[tokio::test]
-async fn busy_agent_checkpoint_never_waits_and_idle_index_stays_reserved() {
+#[test]
+fn busy_agent_checkpoint_never_waits_and_idle_index_stays_reserved() {
     let _env = crate::storage::lock_test_env();
-    let _home = TestHome::new();
-    let agent = Arc::new(Mutex::new(idle_agent()));
-    let sessions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::from([
-        ("idle".into(), agent.clone()),
-    ])));
-    let busy = agent.lock().await;
-    assert!(checkpoint_sessions(&sessions).is_err());
-    drop(busy);
-    let checkpoint = checkpoint_sessions(&sessions).unwrap();
-    assert!(agent.try_lock().is_err());
-    assert!(sessions.try_write().is_err());
-    drop(checkpoint);
-    assert!(agent.try_lock().is_ok());
+    // Serialize process-wide environment outside the asynchronous runtime.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(async {
+            let _home = TestHome::new();
+            let agent = Arc::new(Mutex::new(idle_agent()));
+            let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+                std::collections::HashMap::from([("idle".into(), agent.clone())]),
+            ));
+            let busy = agent.lock().await;
+            assert!(checkpoint_sessions(&sessions).is_err());
+            drop(busy);
+            let checkpoint = checkpoint_sessions(&sessions).unwrap();
+            assert!(agent.try_lock().is_err());
+            {
+                let write = sessions.write_for_test();
+                tokio::pin!(write);
+                assert!(futures::poll!(&mut write).is_pending());
+            }
+            drop(checkpoint);
+            assert!(agent.try_lock().is_ok());
+        });
 }
 
 fn candidate() -> (tempfile::TempDir, PathBuf, FileIdentity) {
@@ -262,7 +273,9 @@ async fn invalid_native_upgrade_returns_status_without_exec_or_agent() {
     use tokio::io::AsyncBufReadExt;
     let (client, server) = crate::transport::stream_pair().unwrap();
     let (_, write) = server.into_split();
-    let sessions = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        std::collections::HashMap::new(),
+    ));
     handle(7, "relative-jcode", &Arc::new(Mutex::new(write)), &sessions)
         .await
         .unwrap();

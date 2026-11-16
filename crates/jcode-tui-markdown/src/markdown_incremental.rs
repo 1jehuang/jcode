@@ -1,5 +1,26 @@
 use super::*;
 
+#[cfg(test)]
+#[test]
+fn link_urls_setting_invalidates_unchanged_incremental_text() {
+    let mut renderer = IncrementalMarkdownRenderer::new(Some(120));
+    let markdown = "[docs](https://example.com)";
+    renderer.update(markdown);
+    let renders = thread_render_count();
+    renderer.update(markdown);
+    assert_eq!(thread_render_count(), renders);
+
+    // Simulate cached lines from the opposite setting without changing the
+    // process-wide config hook, which would race parallel renderer tests.
+    renderer.rendered_show_link_urls = !config_snapshot().show_link_urls;
+    renderer.update(markdown);
+    assert_eq!(thread_render_count(), renders + 1);
+    assert_eq!(
+        renderer.rendered_show_link_urls,
+        config_snapshot().show_link_urls
+    );
+}
+
 pub struct IncrementalMarkdownRenderer {
     /// Previously rendered lines
     rendered_lines: Vec<Line<'static>>,
@@ -19,6 +40,8 @@ pub struct IncrementalMarkdownRenderer {
     /// Deferred-render epoch observed just before `rendered_lines` was
     /// rendered.
     rendered_mermaid_epoch: u64,
+    /// Link destination visibility used for the cached lines.
+    rendered_show_link_urls: bool,
     /// Width constraint
     max_width: Option<usize>,
 }
@@ -33,6 +56,7 @@ impl IncrementalMarkdownRenderer {
             checkpoint_needs_separator: false,
             rendered_mermaid_pending: false,
             rendered_mermaid_epoch: 0,
+            rendered_show_link_urls: config_snapshot().show_link_urls,
             max_width,
         }
     }
@@ -61,11 +85,13 @@ impl IncrementalMarkdownRenderer {
     }
 
     fn update_internal(&mut self, full_text: &str) -> Vec<Line<'static>> {
+        let show_link_urls = config_snapshot().show_link_urls;
         // Fast path: text unchanged. Not taken while a deferred mermaid
         // placeholder is baked into the cached lines and the deferred render
         // epoch has advanced: the background render finished, so re-render to
         // pick up the completed diagram.
         if full_text == self.rendered_text
+            && self.rendered_show_link_urls == show_link_urls
             && !(self.rendered_mermaid_pending
                 && mermaid::deferred_render_epoch() != self.rendered_mermaid_epoch)
         {
@@ -90,6 +116,7 @@ impl IncrementalMarkdownRenderer {
             .iter()
             .any(line_is_mermaid_pending_placeholder);
         self.rendered_mermaid_epoch = mermaid_epoch_before;
+        self.rendered_show_link_urls = show_link_urls;
 
         // Find checkpoint for next incremental update
         self.refresh_checkpoint(full_text, true);

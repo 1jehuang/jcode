@@ -119,7 +119,7 @@ pub struct CuratedModel {
 }
 
 pub const CURATED_MODELS: &[CuratedModel] = &[
-    // Only supported Claude 5.5 and GPT 6.1 models are offered.
+    // Preserve existing selections while also accepting exact deployed router IDs.
     CuratedModel {
         id: "claude-opus-5-5",
         display_name: "Claude Opus 5.5",
@@ -165,6 +165,20 @@ pub const CURATED_MODELS: &[CuratedModel] = &[
         routing_policy: UpstreamRoutingPolicy::ServerManaged,
         min_tier: JcodeTier::Plus,
         note: "Frontier model; routed server-side to OpenAI by the jcode router.",
+    },
+    CuratedModel {
+        id: "claude-sonnet-4-6",
+        display_name: "Claude Sonnet 4.6",
+        aliases: &[
+            "claude-sonnet-4-6",
+            "sonnet-4-6",
+            "sonnet 4.6",
+            "claude sonnet 4.6",
+        ],
+        default_enabled: false,
+        routing_policy: UpstreamRoutingPolicy::ServerManaged,
+        min_tier: JcodeTier::Plus,
+        note: "Deployed managed model; routed server-side to Anthropic by the jcode router.",
     },
 ];
 
@@ -390,6 +404,7 @@ mod tests {
         "claude-sonnet-5-5",
         "claude-haiku-5-5",
         "gpt-6.1-sol",
+        "claude-sonnet-4-6",
     ];
 
     #[test]
@@ -415,13 +430,43 @@ mod tests {
     }
 
     #[test]
+    fn deployed_sonnet_id_is_preserved_for_managed_selection() {
+        for selection in [
+            "claude-sonnet-4-6",
+            "sonnet 4.6",
+            "Claude Sonnet 4.6",
+            "claude-sonnet-4-6@anthropic",
+            "claude-sonnet-4-6[1m]",
+        ] {
+            assert_eq!(canonical_model_id(selection), Some("claude-sonnet-4-6"));
+            assert!(is_model_allowed_for_current_tier(selection));
+        }
+        let model = find_curated_model("claude-sonnet-4-6").unwrap();
+        assert_eq!(model.routing_policy, UpstreamRoutingPolicy::ServerManaged);
+        assert_eq!(model.min_tier, JcodeTier::Plus);
+        let route = crate::provider::ModelRoute {
+            model: model.id.to_string(),
+            provider: JCODE_PROVIDER_DISPLAY_NAME.to_string(),
+            api_method: JCODE_ROUTE_API_METHOD.to_string(),
+            available: true,
+            detail: routing_policy_detail(model),
+            usage: None,
+            cheapness: None,
+        };
+        let selection = jcode_provider_core::RouteSelection::from_model_route(&route);
+        assert_eq!(selection.routed_model_spec(), "claude-sonnet-4-6");
+        assert_eq!(
+            selection.runtime_key,
+            jcode_provider_core::RuntimeKey::JcodeSubscription
+        );
+    }
+
+    #[test]
     fn retired_models_and_unsupported_generations_are_not_curated() {
         for model in [
             "claude-opus-4-8",
             "opus 4.8",
             "claude-opus-5",
-            "claude-sonnet-4-6",
-            "sonnet 4.6",
             "claude-fable-5",
             "gpt-5.4",
             "gpt-5.5",
@@ -499,7 +544,7 @@ mod tests {
                 .iter()
                 .all(|model| model.min_tier != JcodeTier::Flagship)
         );
-        assert_eq!(CURATED_MODELS.len(), 4);
+        assert_eq!(CURATED_MODELS.len(), 5);
         assert!(find_curated_model("magistral-small-1.2").is_none());
         assert!(find_curated_model("gemma-3-27b").is_none());
         assert!(find_curated_model("llama-4-maverick").is_none());

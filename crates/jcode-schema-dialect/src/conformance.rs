@@ -219,14 +219,12 @@ fn check_required(
     path: &str,
     errors: &mut Vec<ConformanceError>,
 ) {
-    let Some(Value::Object(properties)) = map.get("properties") else {
-        return;
-    };
+    let properties = map.get("properties").and_then(Value::as_object);
     let Some(names) = required.as_array() else {
         return;
     };
     for name in names.iter().filter_map(Value::as_str) {
-        if !properties.contains_key(name) {
+        if !properties.is_some_and(|properties| properties.contains_key(name)) {
             errors.push(ConformanceError {
                 path: path.to_string(),
                 message: format!("`required` names `{name}`, which this object does not declare"),

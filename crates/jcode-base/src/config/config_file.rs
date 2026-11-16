@@ -14,6 +14,13 @@ static TRUSTED_EXTERNAL_AUTH_MEMO: std::sync::Mutex<
 > = std::sync::Mutex::new(None);
 
 impl Config {
+    /// Persist only the update preference, without baking in environment overrides.
+    pub fn set_update_channel(channel: UpdateChannel) -> anyhow::Result<()> {
+        let mut config = Self::load_for_update()?;
+        config.features.update_channel = channel;
+        config.save()
+    }
+
     /// Get the config file path
     pub fn path() -> Option<PathBuf> {
         jcode_dir().ok().map(|d| d.join("config.toml"))
@@ -832,6 +839,31 @@ mod issue_1056_tests {
             }
             Config::invalidate_cache();
         }
+    }
+
+    #[test]
+    fn update_channel_save_is_persistent_and_preserves_unrelated_preferences() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("JCODE_HOME", home.path());
+        let _channel = EnvGuard::set("JCODE_UPDATE_CHANNEL", "main");
+        let path = home.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[features]\nmemory = false\n[display]\ncentered = true\n",
+        )
+        .unwrap();
+        Config::set_update_channel(super::UpdateChannel::Preview).unwrap();
+        let saved: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.features.update_channel, super::UpdateChannel::Preview);
+        assert!(!saved.features.memory);
+        assert!(saved.display.centered);
+        Config::set_update_channel(super::UpdateChannel::Stable).unwrap();
+        let saved: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.features.update_channel, super::UpdateChannel::Stable);
+        std::fs::write(&path, "[broken").unwrap();
+        assert!(Config::set_update_channel(super::UpdateChannel::Preview).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[broken");
     }
 
     #[test]

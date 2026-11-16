@@ -52,7 +52,10 @@ fn auto_pick_with_only_busy_workers_reports_no_target_for_spawn_fallback() {
         err.starts_with("No ready or completed swarm agents are available"),
         "unexpected error: {err}"
     );
-    assert!(err.contains("Skipped 1 worker(s)"), "unexpected error: {err}");
+    assert!(
+        err.contains("Skipped 1 worker(s)"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]
@@ -108,7 +111,9 @@ async fn assign_task_does_not_stack_on_busy_worker() {
     let requester = "coord";
     let busy_worker = "worker-busy-solo";
     let (client_tx, mut client_rx) = mpsc::unbounded_channel();
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
     let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));
     let swarm_members = Arc::new(RwLock::new(HashMap::from([

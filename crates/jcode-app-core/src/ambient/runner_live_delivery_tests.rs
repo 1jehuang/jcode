@@ -6,6 +6,15 @@ use crate::server::{Client, Server};
 // including the daemon's background tasks. No shared daemon or credentials are used.
 #[test]
 fn scheduled_live_delivery_reaches_subscribed_client() {
+    scheduled_live_delivery_case(false);
+}
+
+#[test]
+fn external_blocker_review_reaches_live_client_without_completing_todo() {
+    scheduled_live_delivery_case(true);
+}
+
+fn scheduled_live_delivery_case(todo_review: bool) {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("isolated server directory");
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
@@ -56,13 +65,39 @@ fn scheduled_live_delivery_reaches_subscribed_client() {
                 .await
                 .expect("observer subscription ready");
             let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
+            let blocker = crate::todo::TodoExternalBlocker {
+                reason: "Coordinator acceptance pending".to_string(),
+                review_at: chrono::Utc::now() - chrono::Duration::seconds(1),
+            };
+            if todo_review {
+                crate::todo::save_todos(
+                    &session.id,
+                    &[crate::todo::TodoItem {
+                        id: "acceptance".to_string(),
+                        content: "Wait for acceptance".to_string(),
+                        status: "pending".into(),
+                        completely_blocked: None,
+                        external_blocker: Some(blocker.clone()),
+                        ..Default::default()
+                    }],
+                )
+                .expect("save blocked todo");
+            }
             let item = ScheduledItem {
                 id: "scheduled-live-regression".to_string(),
                 scheduled_for: chrono::Utc::now(),
                 context: "Report scheduled live output".to_string(),
                 priority: Priority::Normal,
-                target: ScheduleTarget::Session {
-                    session_id: session.id.clone(),
+                target: if todo_review {
+                    ScheduleTarget::TodoReview {
+                        session_id: session.id.clone(),
+                        todo_id: "acceptance".to_string(),
+                        blocker,
+                    }
+                } else {
+                    ScheduleTarget::Session {
+                        session_id: session.id.clone(),
+                    }
                 },
                 created_by_session: session.id.clone(),
                 created_at: chrono::Utc::now(),
@@ -95,6 +130,16 @@ fn scheduled_live_delivery_reaches_subscribed_client() {
                 saw_text,
                 "live attachment must receive the scheduled response"
             );
+            if todo_review {
+                let todos = crate::todo::load_todos(&session.id).expect("load blocked todo");
+                assert_eq!(todos[0].status, "pending");
+                assert!(todos[0].external_blocker.is_some());
+                crate::todo::save_todos(&session.id, &[]).expect("clear todo");
+                runner
+                    .deliver_scheduled_direct_item(&provider, &item)
+                    .await
+                    .expect("stale review is silently dropped without another provider turn");
+            }
             let error = runner
                 .notify_live_session("missing-scheduled-target", "not delivered")
                 .await

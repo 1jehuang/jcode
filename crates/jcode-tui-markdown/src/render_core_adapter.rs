@@ -136,7 +136,16 @@ fn role_color(role: StyleRole, kind: &BlockKind) -> ratatui::style::Color {
 
 /// Parse markdown and render it to ratatui lines through the shared core.
 pub fn render_markdown_via_core(text: &str) -> Vec<Line<'static>> {
-    document_to_lines_with_width(&jcode_render_core::parse_markdown(text), None)
+    document_to_lines_with_width(&parse_markdown_for_tui(text), None)
+}
+
+fn parse_markdown_for_tui(text: &str) -> Document {
+    jcode_render_core::parse_markdown_with_options(
+        text,
+        jcode_render_core::MarkdownParseOptions {
+            show_link_urls: crate::config_snapshot().show_link_urls,
+        },
+    )
 }
 
 /// Like [`document_to_lines`] but lays out width-dependent blocks (tables,
@@ -201,7 +210,7 @@ fn rule_width(width: Option<usize>) -> usize {
 /// reflowed with the authoritative legacy wrapper (which keeps words intact
 /// across span boundaries and repeats code/quote gutters).
 pub fn render_markdown_via_core_wrapped(text: &str, width: usize) -> Vec<Line<'static>> {
-    let doc = jcode_render_core::parse_markdown(text);
+    let doc = parse_markdown_for_tui(text);
     let lines = document_to_lines_with_width(&doc, Some(width));
     crate::wrap_lines(lines, width)
 }

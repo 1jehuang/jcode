@@ -6,6 +6,10 @@ use super::paths::{lock_path, state_path};
 use super::{AmbientCycleResult, AmbientState, AmbientStatus, CycleStatus, ScheduledItem};
 use crate::storage;
 
+#[cfg(test)]
+#[path = "queue_transaction_tests.rs"]
+mod queue_transaction_tests;
+
 // ---------------------------------------------------------------------------
 // AmbientState persistence
 // ---------------------------------------------------------------------------
@@ -69,80 +73,90 @@ impl ScheduledQueue {
         Self { items, path }
     }
 
-    pub fn save(&self) -> Result<()> {
-        storage::write_json(&self.path, &self.items)
+    /// Lock a separate stable inode: atomic JSON replacement must not replace
+    /// the inode carrying the lock. Reload under lock, and publish only after
+    /// the entire mutation was durably saved. Never write a cached snapshot.
+    pub(super) fn transact<T>(
+        &mut self,
+        update: impl FnOnce(&mut Vec<ScheduledItem>) -> Result<T>,
+    ) -> Result<T> {
+        if let Some(parent) = self.path.parent() {
+            storage::ensure_dir(parent)?;
+        }
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.path.with_extension("json.lock"))?;
+        lock.lock()?;
+        let mut latest = if self.path.exists() {
+            storage::read_json::<Vec<ScheduledItem>>(&self.path)?
+        } else {
+            Vec::new()
+        };
+        let before = latest.clone();
+        let result = update(&mut latest)?;
+        if latest != before {
+            storage::write_json(&self.path, &latest)?;
+        }
+        self.items = latest;
+        Ok(result)
+    }
+
+    pub fn try_push(&mut self, item: ScheduledItem) -> Result<()> {
+        self.transact(|items| {
+            items.push(item);
+            Ok(())
+        })
     }
 
     pub fn push(&mut self, item: ScheduledItem) {
-        self.items.push(item);
-        let _ = self.save();
+        if let Err(error) = self.try_push(item) {
+            crate::logging::warn(&format!("Failed to persist scheduled item: {error:#}"));
+        }
     }
 
-    /// Remove a scheduled item by ID, persisting the queue when found.
     pub fn remove_by_id(&mut self, id: &str) -> Result<Option<ScheduledItem>> {
-        let Some(index) = self.items.iter().position(|item| item.id == id) else {
-            return Ok(None);
-        };
-
-        let item = self.items.remove(index);
-        self.save()?;
-        Ok(Some(item))
+        self.transact(|items| {
+            Ok(items
+                .iter()
+                .position(|item| item.id == id)
+                .map(|index| items.remove(index)))
+        })
     }
 
-    /// Pop items whose `scheduled_for` is in the past, sorted by priority
-    /// (highest first) then by time (earliest first).
+    fn take_ready(&mut self, direct_only: bool) -> Result<Vec<ScheduledItem>> {
+        self.transact(|items| {
+            let now = Utc::now();
+            let (mut ready, remaining): (Vec<_>, Vec<_>) =
+                std::mem::take(items).into_iter().partition(|item| {
+                    item.scheduled_for <= now && (!direct_only || item.target.is_direct_delivery())
+                });
+            *items = remaining;
+            ready.sort_by(|a, b| {
+                b.priority
+                    .cmp(&a.priority)
+                    .then_with(|| a.scheduled_for.cmp(&b.scheduled_for))
+            });
+            Ok(ready)
+        })
+    }
+
     pub fn pop_ready(&mut self) -> Vec<ScheduledItem> {
-        let now = Utc::now();
-        let (ready, remaining): (Vec<_>, Vec<_>) =
-            self.items.drain(..).partition(|i| i.scheduled_for <= now);
-
-        self.items = remaining;
-
-        let mut ready = ready;
-        // Sort: highest priority first, then earliest scheduled_for
-        ready.sort_by(|a, b| {
-            b.priority
-                .cmp(&a.priority)
-                .then_with(|| a.scheduled_for.cmp(&b.scheduled_for))
-        });
-
-        if !ready.is_empty() {
-            let _ = self.save();
-        }
-
-        ready
+        self.take_ready(false).unwrap_or_else(|error| {
+            crate::logging::warn(&format!("Failed to claim scheduled items: {error:#}"));
+            Vec::new()
+        })
     }
 
-    /// Remove and return ready items targeted at a specific direct-delivery session,
-    /// leaving ambient-targeted queue items intact for the ambient agent to process.
     pub fn take_ready_direct_items(&mut self) -> Vec<ScheduledItem> {
-        let now = Utc::now();
-        let mut ready_direct = Vec::new();
-        let mut remaining = Vec::with_capacity(self.items.len());
-
-        for item in self.items.drain(..) {
-            let is_ready = item.scheduled_for <= now;
-            let is_direct_target = item.target.is_direct_delivery();
-            if is_ready && is_direct_target {
-                ready_direct.push(item);
-            } else {
-                remaining.push(item);
-            }
-        }
-
-        self.items = remaining;
-
-        if !ready_direct.is_empty() {
-            let _ = self.save();
-        }
-
-        ready_direct.sort_by(|a, b| {
-            b.priority
-                .cmp(&a.priority)
-                .then_with(|| a.scheduled_for.cmp(&b.scheduled_for))
-        });
-
-        ready_direct
+        self.take_ready(true).unwrap_or_else(|error| {
+            crate::logging::warn(&format!(
+                "Failed to claim direct scheduled items: {error:#}"
+            ));
+            Vec::new()
+        })
     }
 
     pub fn peek_next(&self) -> Option<&ScheduledItem> {

@@ -13,9 +13,9 @@
 //! `Done`/`Error` event (id 0) so attached clients can settle the externally
 //! started turn in their UI.
 
-use super::turn_failover::process_locked_message_with_server_failover;
+use super::turn_failover::process_reserved_locked_message_with_server_failover;
 use super::{
-    SwarmEvent, SwarmMember, session_event_fanout_sender, truncate_detail, update_member_status,
+    SwarmEvent, SwarmMember, truncate_detail, update_member_status,
     update_member_status_with_report,
 };
 use crate::agent::Agent;
@@ -24,9 +24,11 @@ use futures::FutureExt;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
+#[cfg(test)]
+use tokio::sync::Mutex;
+use tokio::sync::{OwnedMutexGuard, RwLock, broadcast};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+use super::SessionAgents;
 
 /// Swarm bookkeeping handles needed to keep member status accurate around a
 /// server-initiated turn.
@@ -108,9 +110,21 @@ pub(super) async fn spawn_tracked_live_turn(
     status_detail: Option<String>,
     swarm: LiveTurnSwarmContext,
 ) -> bool {
-    let Ok(_admission) = crate::runtime_activity::global().try_enter() else {
+    let Ok(_admission) = crate::runtime_activity::global().try_enter_session(session_id) else {
         return false;
     };
+    let Ok(turn_lease) = agent.claim_server_turn() else {
+        return false;
+    };
+    if swarm
+        .members
+        .read()
+        .await
+        .get(session_id)
+        .is_some_and(|member| member.report_back_to_session_id.is_some())
+    {
+        agent.set_inline_output_tap(true);
+    }
     update_member_status(
         session_id,
         "running",
@@ -123,15 +137,23 @@ pub(super) async fn spawn_tracked_live_turn(
     )
     .await;
 
-    let event_tx = session_event_fanout_sender(session_id.to_string(), Arc::clone(&swarm.members));
+    let (fallback, _) = tokio::sync::mpsc::unbounded_channel();
+    let events = super::state::TurnEventChannel::new(
+        session_id.to_string(),
+        Arc::clone(&swarm.members),
+        fallback,
+        &turn_lease,
+    );
+    let event_tx = events.sender();
     let session_id = session_id.to_string();
-    crate::runtime_activity::spawn(async move {
+    crate::runtime_activity::spawn_session(&session_id.clone(), async move {
         let start_message_index = agent.message_count();
         let pending_queue = agent.soft_interrupt_queue();
         let (result, stop_reason) = catch_live_turn_panic(async {
             if let Some(display_role) = display_role {
                 agent
-                    .run_once_streaming_mpsc_with_display_role(
+                    .run_reserved_streaming_mpsc(
+                        &turn_lease,
                         &message,
                         vec![],
                         system_reminder,
@@ -140,8 +162,9 @@ pub(super) async fn spawn_tracked_live_turn(
                     )
                     .await
             } else {
-                process_locked_message_with_server_failover(
+                process_reserved_locked_message_with_server_failover(
                     &mut agent,
+                    &turn_lease,
                     &message,
                     vec![],
                     system_reminder,
@@ -151,16 +174,13 @@ pub(super) async fn spawn_tracked_live_turn(
             }
         })
         .await;
-        let completion_report = result
-            .is_ok()
-            .then(|| agent.latest_assistant_text_after(start_message_index))
-            .flatten();
+        let completion_report = agent.recent_assistant_output_tail_after(start_message_index);
         // Keep the reservation until after the terminal status is published.
         // Releasing it earlier lets a follow-up wake reserve the agent and
         // publish `running`, which this turn's later `ready`/`failed` would
         // then overwrite, hiding the newer turn and suppressing its
         // coordinator completion notification.
-        let reservation = agent;
+        let mut reservation = agent;
         let pending = pending_queue.lock().map(|queue| queue.len()).unwrap_or(0);
         if pending > 0 {
             let _ = event_tx.send(ServerEvent::SoftInterruptQueue { pending });
@@ -182,14 +202,22 @@ pub(super) async fn spawn_tracked_live_turn(
                 let _ = event_tx.send(ServerEvent::Done { id: 0 });
             }
             Err(error) => {
+                let message = crate::util::format_error_chain(&error);
+                if let Err(persist_error) = reservation.persist_turn_error(&message) {
+                    crate::logging::error(&format!(
+                        "Could not persist failed live turn for {}: {:#}",
+                        session_id, persist_error
+                    ));
+                }
                 crate::logging::error(&format!(
                     "Server-initiated turn failed for live session {}: {}",
                     session_id, error
                 ));
-                update_member_status(
+                update_member_status_with_report(
                     &session_id,
                     "failed",
                     Some(truncate_detail(&error.to_string(), 120)),
+                    completion_report,
                     &swarm.members,
                     &swarm.swarms_by_id,
                     Some(&swarm.event_history),
@@ -199,17 +227,19 @@ pub(super) async fn spawn_tracked_live_turn(
                 .await;
                 let _ = event_tx.send(ServerEvent::TurnStopped {
                     reason: stop_reason,
-                    message: crate::util::format_error_chain(&error),
+                    message: message.clone(),
                     provider_stop_reason: None,
                 });
                 let _ = event_tx.send(ServerEvent::Error {
                     id: 0,
-                    message: crate::util::format_error_chain(&error),
+                    message,
                     retry_after_secs: None,
                 });
             }
         }
         drop(reservation);
+        events.finish().await;
+        drop(turn_lease);
     })
     .is_some()
 }
@@ -307,5 +337,188 @@ mod stop_reason_tests {
         assert_eq!(reason, TurnStopReason::Failure);
         assert!(result.is_err());
         assert!(catch_live_turn_panic(async { Ok(()) }).await.0.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod durable_error_tests {
+    use super::*;
+    use crate::message::{Message, ToolDefinition};
+    use crate::provider::{EventStream, Provider};
+    use crate::session::Session;
+    use crate::tool::Registry;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+    use tokio::sync::mpsc;
+
+    const FAILURE: &str = "invalid_request_error: No tool call found for function call output with call_id call_missing";
+
+    #[derive(Default)]
+    struct FailingProvider(AtomicU64);
+
+    #[async_trait::async_trait]
+    impl Provider for FailingProvider {
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<EventStream> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow::anyhow!(FAILURE).context("mock HTTP 400"))
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self::default())
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn failed_wake_error_is_durable_before_live_terminal_event() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => crate::env::set_var("JCODE_HOME", value),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+            }
+        }
+        let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", home.path());
+        let provider = Arc::new(FailingProvider::default());
+        let mut agent = Agent::new(provider.clone(), Registry::empty());
+        agent.set_memory_enabled(false);
+        let session_id = agent.session_id().to_string();
+        let agent = Arc::new(Mutex::new(agent));
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let member = SwarmMember {
+            session_id: session_id.clone(),
+            event_tx,
+            event_txs: HashMap::new(),
+            working_dir: None,
+            swarm_id: None,
+            swarm_enabled: true,
+            status: "ready".into(),
+            detail: None,
+            friendly_name: Some("failing-worker".into()),
+            report_back_to_session_id: None,
+            latest_completion_report: None,
+            role: "agent".into(),
+            joined_at: Instant::now(),
+            last_status_change: Instant::now(),
+            is_headless: true,
+            output_tail: None,
+            todo_progress: None,
+            todo_items: Vec::new(),
+            runtime: crate::protocol::SwarmMemberRuntime::default(),
+            task_label: None,
+        };
+        let members = Arc::new(RwLock::new(HashMap::from([(session_id.clone(), member)])));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+        let event_history = Arc::new(RwLock::new(VecDeque::new()));
+        let event_counter = Arc::new(AtomicU64::new(0));
+        let (swarm_event_tx, _) = broadcast::channel(16);
+        let swarm = LiveTurnSwarmContext::new(
+            &members,
+            &swarms_by_id,
+            &event_history,
+            &event_counter,
+            &swarm_event_tx,
+        );
+        let accepted = agent.lock().await.claim_server_turn().unwrap();
+        assert!(
+            !spawn_tracked_live_turn(
+                &session_id,
+                agent.clone().lock_owned().await,
+                "must not compete".into(),
+                None,
+                Some(crate::session::StoredDisplayRole::System),
+                None,
+                swarm.clone(),
+            )
+            .await,
+            "system display-role path must respect the accepted turn"
+        );
+        assert_eq!(provider.0.load(Ordering::SeqCst), 0);
+        drop(accepted);
+        assert!(
+            spawn_tracked_live_turn(
+                &session_id,
+                agent.clone().lock_owned().await,
+                "wake worker".into(),
+                None,
+                None,
+                None,
+                swarm,
+            )
+            .await
+        );
+
+        let mut stopped = false;
+        let error_message = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let event = event_rx.recv().await.expect("live turn event stream");
+                let payload = match event {
+                    ServerEvent::TurnEvent { event, .. } => *event,
+                    event => event,
+                };
+                match payload {
+                    ServerEvent::TurnStopped {
+                        reason, message, ..
+                    } => {
+                        assert_eq!(reason, crate::protocol::TurnStopReason::Failure);
+                        assert!(message.contains(FAILURE));
+                        stopped = true;
+                    }
+                    ServerEvent::Error { id, message, .. } => {
+                        assert_eq!(id, 0);
+                        break message;
+                    }
+                    ServerEvent::Done { .. } => panic!("failed live turn emitted Done"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("failed live turn must terminate");
+        assert!(stopped);
+        assert_eq!(error_message, format!("mock HTTP 400: {FAILURE}"));
+        assert_eq!(provider.0.load(Ordering::SeqCst), 1);
+        assert_eq!(members.read().await[&session_id].status, "failed");
+
+        // Loading as soon as Error arrives must already show the error. This
+        // exercises the actual spawn path, not only the persistence helper.
+        let loaded = Session::load(&session_id).unwrap();
+        assert_eq!(loaded.replay_events.len(), 1);
+        assert!(
+            !serde_json::to_string(&loaded.messages)
+                .unwrap()
+                .contains(FAILURE)
+        );
+        let history = crate::session::render_messages(&loaded);
+        let failure = history
+            .iter()
+            .position(|message| message.role == "error")
+            .unwrap();
+        assert_eq!(history[failure].content, error_message);
+        assert_eq!(history[failure - 1].content, "wake worker");
+        assert_eq!(
+            history
+                .iter()
+                .filter(|message| message.role == "error")
+                .count(),
+            1
+        );
+        // Join the agent reservation before dropping the isolated test home.
+        drop(agent.lock().await);
     }
 }

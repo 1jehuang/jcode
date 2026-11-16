@@ -9,6 +9,11 @@
     "crates/jcode-app-core/src/agent.rs": {
       "dot_ok": 3,
       "let_underscore": 0,
+      "unwrap_or_default": 0
+    },
+    "crates/jcode-app-core/src/agent/cache_request.rs": {
+      "dot_ok": 0,
+      "let_underscore": 0,
       "unwrap_or_default": 2
     },
     "crates/jcode-app-core/src/agent/environment.rs": {
@@ -193,7 +198,7 @@
     },
     "crates/jcode-app-core/src/server/client_lifecycle.rs": {
       "dot_ok": 0,
-      "let_underscore": 53,
+      "let_underscore": 32,
       "unwrap_or_default": 1
     },
     "crates/jcode-app-core/src/server/client_lifecycle_logging.rs": {
@@ -204,6 +209,11 @@
     "crates/jcode-app-core/src/server/client_lightweight_control.rs": {
       "dot_ok": 0,
       "let_underscore": 5,
+      "unwrap_or_default": 0
+    },
+    "crates/jcode-app-core/src/server/client_processing.rs": {
+      "dot_ok": 0,
+      "let_underscore": 21,
       "unwrap_or_default": 0
     },
     "crates/jcode-app-core/src/server/client_session.rs": {
@@ -753,8 +763,13 @@
     },
     "crates/jcode-base/src/auth/oauth.rs": {
       "dot_ok": 4,
-      "let_underscore": 13,
+      "let_underscore": 1,
       "unwrap_or_default": 3
+    },
+    "crates/jcode-base/src/auth/oauth_callback_io.rs": {
+      "dot_ok": 0,
+      "let_underscore": 12,
+      "unwrap_or_default": 0
     },
     "crates/jcode-base/src/auth/refresh_state.rs": {
       "dot_ok": 0,
@@ -1412,9 +1427,14 @@
       "unwrap_or_default": 3
     },
     "crates/jcode-harness-api-server/src/translate.rs": {
-      "dot_ok": 24,
+      "dot_ok": 20,
       "let_underscore": 5,
-      "unwrap_or_default": 47
+      "unwrap_or_default": 46
+    },
+    "crates/jcode-harness-api-server/src/translate/session_files.rs": {
+      "dot_ok": 4,
+      "let_underscore": 0,
+      "unwrap_or_default": 1
     },
     "crates/jcode-harness-api/examples/harness_repl.rs": {
       "dot_ok": 0,
@@ -1768,7 +1788,12 @@
     },
     "crates/jcode-sdk/src/client.rs": {
       "dot_ok": 7,
-      "let_underscore": 7,
+      "let_underscore": 6,
+      "unwrap_or_default": 0
+    },
+    "crates/jcode-sdk/src/client/global_session_workers.rs": {
+      "dot_ok": 0,
+      "let_underscore": 1,
       "unwrap_or_default": 0
     },
     "crates/jcode-sdk/src/launch.rs": {
@@ -2124,7 +2149,12 @@
     "crates/jcode-tui/src/tui/app/auth_account_picker.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
-      "unwrap_or_default": 10
+      "unwrap_or_default": 8
+    },
+    "crates/jcode-tui/src/tui/app/auth_account_picker/account_center.rs": {
+      "dot_ok": 0,
+      "let_underscore": 0,
+      "unwrap_or_default": 2
     },
     "crates/jcode-tui/src/tui/app/auth_account_picker_saved_accounts.rs": {
       "dot_ok": 0,
@@ -2308,8 +2338,13 @@
     },
     "crates/jcode-tui/src/tui/app/remote/key_handling.rs": {
       "dot_ok": 0,
-      "let_underscore": 17,
+      "let_underscore": 15,
       "unwrap_or_default": 10
+    },
+    "crates/jcode-tui/src/tui/app/remote/key_handling/key_events.rs": {
+      "dot_ok": 0,
+      "let_underscore": 2,
+      "unwrap_or_default": 0
     },
     "crates/jcode-tui/src/tui/app/remote/reconnect.rs": {
       "dot_ok": 4,
@@ -2317,9 +2352,14 @@
       "unwrap_or_default": 3
     },
     "crates/jcode-tui/src/tui/app/remote/server_events.rs": {
-      "dot_ok": 8,
+      "dot_ok": 7,
       "let_underscore": 1,
       "unwrap_or_default": 4
+    },
+    "crates/jcode-tui/src/tui/app/remote/server_events/history_fingerprint.rs": {
+      "dot_ok": 1,
+      "let_underscore": 0,
+      "unwrap_or_default": 0
     },
     "crates/jcode-tui/src/tui/app/remote/session_persistence.rs": {
       "dot_ok": 0,
@@ -2547,9 +2587,14 @@
       "unwrap_or_default": 4
     },
     "crates/jcode-tui/src/tui/session_picker/loading.rs": {
-      "dot_ok": 33,
+      "dot_ok": 28,
       "let_underscore": 1,
-      "unwrap_or_default": 21
+      "unwrap_or_default": 18
+    },
+    "crates/jcode-tui/src/tui/session_picker/loading/pi_sessions.rs": {
+      "dot_ok": 5,
+      "let_underscore": 0,
+      "unwrap_or_default": 3
     },
     "crates/jcode-tui/src/tui/session_picker/render.rs": {
       "dot_ok": 0,

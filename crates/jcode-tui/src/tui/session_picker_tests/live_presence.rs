@@ -43,7 +43,7 @@ fn test_active_filter_shows_only_live_sessions_ready_before_working() {
 }
 
 #[test]
-fn test_active_rows_render_working_and_ready_badges() {
+fn test_active_rows_render_age_without_status_badges() {
     let live_working = make_session("session_working", "alpha", false, SessionStatus::Active);
     let live_ready = make_session("session_ready", "beta", false, SessionStatus::Closed);
     let mut picker = SessionPicker::new(vec![live_working, live_ready]);
@@ -70,10 +70,8 @@ fn test_active_rows_render_working_and_ready_badges() {
         .map(line_text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(
-        working_text.contains("working 1m"),
-        "expected working badge with duration, got: {working_text}"
-    );
+    assert!(working_text.contains("ago"), "{working_text}");
+    assert!(!working_text.contains("working"), "{working_text}");
 
     let first_frame = picker
         .render_session_item_lines_at_frame(&working, false, 0)
@@ -87,9 +85,8 @@ fn test_active_rows_render_working_and_ready_badges() {
         .map(line_text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(first_frame.contains('⠋'));
-    assert!(second_frame.contains('⠙'));
-    assert_ne!(first_frame, second_frame, "running glyph should animate");
+    assert!(!first_frame.contains('⠋'));
+    assert!(!second_frame.contains('⠙'));
     assert!(picker.has_visible_running_sessions());
 
     let ready_lines = picker.render_session_item_lines(&ready, false);
@@ -99,14 +96,20 @@ fn test_active_rows_render_working_and_ready_badges() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        ready_text.contains("ready"),
-        "expected ready badge, got: {ready_text}"
+        !ready_text.contains("ready"),
+        "unexpected ready badge: {ready_text}"
     );
     // Live presence overrides the stale persisted "closed" status.
     assert!(
         !ready_text.contains("closed"),
         "live session must not render as closed: {ready_text}"
     );
+    for row in [working_lines[1].to_string(), ready_lines[1].to_string()] {
+        for status in ["✓", "●", "▶", "active", "ready", "working"] {
+            assert!(!row.contains(status), "unexpected {status}: {row}");
+        }
+        assert!(row.contains("ago"), "{row}");
+    }
 }
 
 #[test]
@@ -121,6 +124,89 @@ fn test_current_session_row_is_labeled() {
         text.contains("current"),
         "expected current label, got: {text}"
     );
+}
+
+#[test]
+fn test_recent_window_close_boosts_old_transcript_above_newer_messages_and_saved_rows() {
+    let mut old = make_session("closure_old", "old", false, SessionStatus::Active);
+    old.last_message_time = Utc::now() - ChronoDuration::days(10);
+    old.saved = true;
+    let newer = make_session("closure_new", "newer", false, SessionStatus::Closed);
+    let mut picker = SessionPicker::new(vec![newer, old]);
+    picker
+        .recent_window_closures
+        .insert("closure_old".into(), Utc::now());
+    picker
+        .live_presence
+        .insert("closure_old".into(), live_presence("closure_old", true));
+    picker.rebuild_items();
+    let ids: Vec<_> = picker
+        .visible_session_iter()
+        .map(|s| s.id.as_str())
+        .collect();
+    assert_eq!(ids, ["closure_old", "closure_new"]);
+    let closed = picker.visible_session_iter().next().unwrap();
+    let text = picker
+        .render_session_item_lines(closed, false)
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!text.contains("just closed"), "{text}");
+    assert!(text.contains("ago"), "{text}");
+    assert!(!picker.session_recently_closed(picker.visible_session_iter().nth(1).unwrap()));
+}
+
+#[test]
+fn test_recent_window_close_promotes_orphan_above_server_group_without_duplicates() {
+    let grouped = make_session("closure_group", "group", false, SessionStatus::Closed);
+    let old = make_session(
+        "closure_orphan",
+        "orphan",
+        false,
+        SessionStatus::Crashed { message: None },
+    );
+    let mut picker = SessionPicker::new_grouped(
+        vec![ServerGroup {
+            name: "server".into(),
+            icon: "server".into(),
+            version: "v1".into(),
+            git_hash: String::new(),
+            is_running: true,
+            sessions: vec![grouped],
+        }],
+        vec![old],
+    );
+    picker
+        .recent_window_closures
+        .insert("closure_orphan".into(), Utc::now());
+    picker.rebuild_items();
+    let ids: Vec<_> = picker
+        .visible_session_iter()
+        .map(|s| s.id.as_str())
+        .collect();
+    assert_eq!(ids, ["closure_orphan", "closure_group"]);
+}
+
+#[test]
+fn test_recent_window_close_expires_and_rejects_future_timestamps_and_current_session() {
+    let session = make_session("closure_expiry", "expiry", false, SessionStatus::Closed);
+    let mut picker = SessionPicker::new(vec![session.clone()]);
+    for time in [
+        Utc::now() - ChronoDuration::seconds(31),
+        Utc::now() + ChronoDuration::seconds(10),
+    ] {
+        picker
+            .recent_window_closures
+            .insert(session.id.clone(), time);
+        assert!(!picker.session_recently_closed(&session));
+    }
+    picker
+        .recent_window_closures
+        .insert(session.id.clone(), Utc::now());
+    assert!(picker.session_recently_closed(&session));
+    picker.set_current_session_id(Some(session.id.clone()));
+    assert!(!picker.session_recently_closed(&session));
 }
 
 #[test]

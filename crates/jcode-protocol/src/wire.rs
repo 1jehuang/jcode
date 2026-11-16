@@ -31,7 +31,7 @@ pub struct SessionToolConfig {
 }
 
 /// Client request to server
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {
     #[serde(rename = "configure_tools")]
@@ -121,6 +121,10 @@ pub enum Request {
     #[serde(rename = "state")]
     GetState { id: u64 },
 
+    /// Fetch the attached session's todo card without locking its agent.
+    #[serde(rename = "get_todos")]
+    GetTodos { id: u64 },
+
     /// Execute a debug command (debug socket only)
     #[serde(rename = "debug_command")]
     DebugCommand {
@@ -156,6 +160,9 @@ pub enum Request {
         /// pool-approved account and retries the turn itself.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         supports_server_failover: bool,
+        /// Accept runtime-generation and turn-scoped events. Legacy readers get flat events.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        supports_turn_identity: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         working_dir: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -328,6 +335,14 @@ pub enum Request {
     #[serde(rename = "set_model")]
     SetModel { id: u64, model: String },
 
+    /// Set a session context budget override. Null or zero clears the override.
+    #[serde(rename = "set_context_cap")]
+    SetContextCap {
+        id: u64,
+        session_id: String,
+        max_context_tokens: Option<usize>,
+    },
+
     /// Set the active model by structured route identity.
     #[serde(rename = "set_route")]
     SetRoute {
@@ -422,6 +437,13 @@ pub enum Request {
         id: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
+    },
+
+    /// Replace the active session's process-local environment overlay.
+    #[serde(rename = "set_session_env")]
+    SetSessionEnv {
+        id: u64,
+        env: std::collections::HashMap<String, String>,
     },
 
     /// Bookmark (`saved: true`, optional label) or unbookmark the active
@@ -663,6 +685,9 @@ pub enum Request {
     CommSpawn {
         id: u64,
         session_id: String,
+        /// Exact coordinator todo lane to seed before the worker starts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lane_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         working_dir: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -865,4 +890,40 @@ pub enum Request {
 }
 
 mod events;
-pub use events::{AccountUsageSnapshot, ServerEvent};
+pub use events::{AccountUsageSnapshot, ServerEvent, TurnIdentity};
+
+impl std::fmt::Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Self::SetSessionEnv { id, .. } = self {
+            return f
+                .debug_struct("SetSessionEnv")
+                .field("id", id)
+                .field("env", &"[REDACTED]")
+                .finish();
+        }
+        match serde_json::to_value(self) {
+            Ok(value) => std::fmt::Debug::fmt(&value, f),
+            Err(_) => f.write_str("Request([unavailable])"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod session_env_tests {
+    use super::*;
+
+    #[test]
+    fn session_environment_roundtrips_without_debug_secrets() {
+        let request = Request::SetSessionEnv {
+            id: 42,
+            env: [("TOKEN".into(), "private-secret".into())].into(),
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["type"], "set_session_env");
+        assert_eq!(json["env"]["TOKEN"], "private-secret");
+        let decoded: Request = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.id(), 42);
+        assert!(!format!("{decoded:?}").contains("private-secret"));
+        assert!(!format!("{decoded:?}").contains("TOKEN"));
+    }
+}

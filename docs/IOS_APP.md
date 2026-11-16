@@ -11,8 +11,25 @@ The phone renders conversations and drives sessions; all heavy lifting (LLM
 calls, tools, git, files, MCP) stays on the server. Reachability is assumed to
 be Tailscale (or LAN); the app never talks to LLM providers directly.
 
-Design identity: dark, calm, terminal-native without being retro. Mint accent
-(`#4DD9A6`) for live/connected state. Dense information in touchable cards.
+Design identity: shared with Jcode Desktop. The palette mirrors Desktop's
+default "Warm neutral" theme (`jcode-desktop-ui/src/theme.rs`): charcoal and
+stone surfaces, ivory type, a restrained sandstone accent (`#B6A08A`), and
+Desktop's OK/WARN/ERROR semantic colors. The conversation is a raised page
+(`PANEL_BG #25221F`) on the canvas tone (`BG #1C1A18`).
+
+Transcript presentation follows Desktop, adapted for touch:
+
+- User prompts are numbered cards tinted by the CLI prompt rainbow in reverse
+  hue order (newest violet), fading exponentially into card paper.
+- Assistant replies sit on the page with no role caption or bubble.
+- Reasoning is inline, smaller, and muted with no label or border (clamped to
+  three lines, tap to expand).
+- Tool calls are inline rows, not cards: a monochrome glyph whose color carries
+  status (warn running, ok done, error failed), then intent/name/subject.
+  Expanding shows output on the code background.
+- Activity uses Desktop's eight-dot spinner with Thinking / Running tools /
+  Responding labels. Reduce Motion gets a static marker.
+- The brand mark is the canonical halftone donut from Desktop/website.
 
 ## Architecture decision: pure Swift
 

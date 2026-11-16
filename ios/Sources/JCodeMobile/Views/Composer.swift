@@ -1,6 +1,11 @@
+import JCodeKit
 import SwiftUI
 
 /// Message composer with send/interrupt.
+///
+/// Submit behavior (which draft sends, which queues, which is ignored) lives in
+/// `ComposerRules` so it is unit tested without a UI. This view only handles
+/// focus, the Return key, and rendering.
 struct Composer: View {
     @Environment(\.compactEdgePads) private var edgePads
     @FocusState private var isFocused: Bool
@@ -20,15 +25,27 @@ struct Composer: View {
             .lineLimit(1...6)
             .font(.body)
             .foregroundStyle(Theme.textPrimary)
-            .tint(Theme.mint)
             .focused($isFocused)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 11)
-            .background(Theme.surface)
-            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.bubble, style: .continuous))
+            .submitLabel(.send)
+            // Hardware keyboards (and iPad/Mac) fire onSubmit for Return.
+            .onSubmit(submit)
+            // A vertical-axis TextField inserts "\n" for Return on the software
+            // keyboard instead of firing onSubmit, so treat a trailing newline
+            // as a submit. Pasted multi-line text is unaffected (only a
+            // *trailing* newline counts).
+            .onChange(of: draft) { _, newValue in
+                guard ComposerRules.isReturnKeySubmit(newValue) else { return }
+                draft = ComposerRules.normalize(newValue)
+                submit()
+            }
+            .tint(Theme.textPrimary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Theme.background)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: Theme.Radius.bubble, style: .continuous)
-                    .stroke(isFocused ? Theme.mint.opacity(0.45) : Theme.border, lineWidth: 1)
+                RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
+                    .stroke(isFocused ? Theme.borderFocus : Theme.border, lineWidth: 1)
             )
             .animation(.easeOut(duration: 0.15), value: isFocused)
 
@@ -50,21 +67,13 @@ struct Composer: View {
                 .transition(.scale.combined(with: .opacity))
             }
 
-            Button(action: onSend) {
-                Image(systemName: isProcessing ? "arrow.up.to.line" : "arrow.up")
-                    .font(.subheadline.weight(.bold))
-                    .foregroundStyle(canSend ? Color.black : Theme.textTertiary)
-                    .frame(width: 40, height: 40)
-                    .background {
-                        if canSend {
-                            Circle().fill(Theme.mintGradient)
-                        } else {
-                            Circle().fill(Theme.surfaceElevated)
-                        }
-                    }
-                    .overlay(
-                        Circle().stroke(canSend ? .clear : Theme.border, lineWidth: 1)
-                    )
+            Button(action: submit) {
+                Image(systemName: "arrow.up")
+                    .font(.body.weight(.bold))
+                    .foregroundStyle(canSend ? Theme.onAccent : Theme.textTertiary)
+                    .frame(width: 36, height: 36)
+                    .background(canSend ? Theme.accent : Theme.surfaceElevated)
+                    .clipShape(Circle())
                     .frame(width: 44, height: 44)
                     .contentShape(Circle())
             }
@@ -77,16 +86,24 @@ struct Composer: View {
         .padding(.vertical, 10)
         .padding(.bottom, edgePads.bottom)
         .background(alignment: .top) {
-            ZStack(alignment: .top) {
-                Theme.background
-                Hairline()
-            }
-            .ignoresSafeArea(edges: .bottom)
+            Theme.surface
+                .ignoresSafeArea(edges: .bottom)
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isProcessing)
     }
 
+    /// Send if the rules allow it, keeping the keyboard up for the next message.
+    private func submit() {
+        guard canSend else {
+            // Return on an all-whitespace draft: clear it rather than leaving
+            // stray newlines behind.
+            if !draft.isEmpty, ComposerRules.normalize(draft).isEmpty { draft = "" }
+            return
+        }
+        onSend()
+    }
+
     private var canSend: Bool {
-        isConnected && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        ComposerRules.canSubmit(draft: draft, isConnected: isConnected)
     }
 }

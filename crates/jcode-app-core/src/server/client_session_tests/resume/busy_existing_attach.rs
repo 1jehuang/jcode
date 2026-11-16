@@ -36,10 +36,12 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
         Vec::new(),
     )));
 
-    let sessions = Arc::new(RwLock::new(HashMap::from([
-        (target_session_id.to_string(), Arc::clone(&existing_agent)),
-        (temp_session_id.to_string(), Arc::clone(&new_agent)),
-    ])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([
+            (target_session_id.to_string(), Arc::clone(&existing_agent)),
+            (temp_session_id.to_string(), Arc::clone(&new_agent)),
+        ]),
+    ));
     let shutdown_signals = Arc::new(RwLock::new(HashMap::<String, InterruptSignal>::new()));
     let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
     let now = Instant::now();
@@ -136,6 +138,7 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
         &event_counter,
         &swarm_event_tx,
         false,
+        false,
     )
     .await?;
 
@@ -169,6 +172,8 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
             &event_history,
             &event_counter,
             &swarm_event_tx,
+            &sessions,
+            &soft_interrupt_queues,
         ),
     )
     .await

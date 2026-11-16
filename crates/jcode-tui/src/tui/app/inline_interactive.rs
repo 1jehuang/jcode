@@ -1,3 +1,5 @@
+#[path = "inline_interactive/cache_signature.rs"]
+mod cache_signature;
 use super::*;
 use crate::tui::session_picker::{self, OverlayAction, PickerResult, ResumeTarget, SessionPicker};
 use crate::tui::{
@@ -1049,56 +1051,6 @@ impl App {
         self.model_picker_catalog_revision = self.model_picker_catalog_revision.wrapping_add(1);
         self.pending_model_picker_load = None;
         self.model_picker_load_request_id = self.model_picker_load_request_id.wrapping_add(1);
-    }
-
-    fn model_route_cache_marker(route: &crate::provider::ModelRoute) -> String {
-        format!(
-            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
-            route.model, route.provider, route.api_method, route.available, route.detail
-        )
-    }
-
-    fn model_picker_cache_signature(
-        &self,
-        current_model: &str,
-        config_default_model: Option<String>,
-        config_default_provider: Option<String>,
-        current_effort: Option<String>,
-        available_efforts: &[&str],
-    ) -> ModelPickerCacheSignature {
-        ModelPickerCacheSignature {
-            is_remote: self.is_remote,
-            provider_name: if self.is_remote {
-                self.remote_provider_name
-                    .clone()
-                    .unwrap_or_else(|| "remote".to_string())
-            } else {
-                self.provider.name().to_string()
-            },
-            current_model: current_model.to_string(),
-            config_default_model,
-            config_default_provider,
-            reasoning_effort: current_effort,
-            available_efforts: available_efforts
-                .iter()
-                .map(|effort| (*effort).to_string())
-                .collect(),
-            simplified_model_picker: crate::perf::tui_policy().simplified_model_picker,
-            catalog_revision: self.model_picker_catalog_revision,
-            remote_provider_name: self.remote_provider_name.clone(),
-            remote_available_len: self.remote_available_entries.len(),
-            remote_available_first: self.remote_available_entries.first().cloned(),
-            remote_available_last: self.remote_available_entries.last().cloned(),
-            remote_routes_len: self.remote_model_options.len(),
-            remote_routes_first: self
-                .remote_model_options
-                .first()
-                .map(Self::model_route_cache_marker),
-            remote_routes_last: self
-                .remote_model_options
-                .last()
-                .map(Self::model_route_cache_marker),
-        }
     }
 
     fn open_cached_model_picker_if_fresh(
@@ -2590,30 +2542,32 @@ impl App {
         }
     }
 
-    fn handle_account_picker_selection(&mut self, action: AccountPickerAction) {
+    pub(super) fn handle_account_picker_selection(&mut self, action: AccountPickerAction) {
+        if (self.is_remote || crate::tui::is_ssh_remote())
+            && matches!(&action, AccountPickerAction::Switch { .. })
+        {
+            if let AccountPickerAction::Switch { provider_id, label } = action {
+                self.set_status_notice(format!(
+                    "Account switch queued: {} ({})",
+                    label, provider_id
+                ));
+                self.pending_account_picker_action =
+                    Some(AccountPickerAction::Switch { provider_id, label });
+            }
+            return;
+        }
         if super::commands_dispatch::ssh_local_action_blocked(self, "Local account selection") {
             return;
         }
         match action {
-            AccountPickerAction::Switch { provider_id, label } => {
-                if self.is_remote {
-                    self.pending_account_picker_action = Some(AccountPickerAction::Switch {
-                        provider_id: provider_id.clone(),
-                        label: label.clone(),
-                    });
-                    self.set_status_notice(format!("Account → {} ({})", label, provider_id));
-                    return;
-                }
-
-                match provider_id.as_str() {
-                    "claude" => self.switch_account(&label),
-                    "openai" => self.switch_openai_account(&label),
-                    _ => self.push_display_message(DisplayMessage::error(format!(
-                        "Provider `{}` does not support account switching.",
-                        provider_id
-                    ))),
-                }
-            }
+            AccountPickerAction::Switch { provider_id, label } => match provider_id.as_str() {
+                "claude" => self.switch_account(&label),
+                "openai" => self.switch_openai_account(&label),
+                _ => self.push_display_message(DisplayMessage::error(format!(
+                    "Provider `{}` does not support account switching.",
+                    provider_id
+                ))),
+            },
             AccountPickerAction::Add { provider_id } => match provider_id.as_str() {
                 "claude" => match crate::auth::claude::next_account_label() {
                     Ok(label) => self.start_claude_login_for_account(&label),
@@ -2653,22 +2607,15 @@ impl App {
             return;
         }
         let current_dir = self.session.working_dir.clone();
-        let (mut picker, status) = if let Some((server_groups, orphan_sessions)) =
-            session_picker::load_cached_sessions_grouped()
-        {
-            (
-                SessionPicker::new_grouped(server_groups, orphan_sessions),
-                "Refreshing sessions...",
-            )
-        } else {
-            (SessionPicker::loading(), "Loading sessions...")
-        };
+        // Even the cached list can contain tens of MB of search text. Never
+        // deserialize it on the input thread before showing the overlay.
+        let mut picker = SessionPicker::loading();
         picker.set_current_dir(current_dir);
         picker.set_current_session_id(Some(super::commands::active_session_id(self)));
         picker.apply_resume_project_scope_default();
         self.session_picker_overlay = Some(RefCell::new(picker));
         self.session_picker_mode = SessionPickerMode::Resume;
-        self.set_status_notice(status);
+        self.set_status_notice("Loading sessions...");
         self.start_session_picker_load();
     }
 
@@ -2681,22 +2628,13 @@ impl App {
             return;
         }
         let current_dir = self.session.working_dir.clone();
-        let (mut picker, status) = if let Some((server_groups, orphan_sessions)) =
-            session_picker::load_cached_sessions_grouped()
-        {
-            (
-                SessionPicker::new_grouped(server_groups, orphan_sessions),
-                "Refreshing active sessions...",
-            )
-        } else {
-            (SessionPicker::loading(), "Loading active sessions...")
-        };
+        let mut picker = SessionPicker::loading();
         picker.set_current_dir(current_dir);
         picker.set_current_session_id(Some(super::commands::active_session_id(self)));
         picker.activate_active_filter();
         self.session_picker_overlay = Some(RefCell::new(picker));
         self.session_picker_mode = SessionPickerMode::ActiveSessions;
-        self.set_status_notice(status);
+        self.set_status_notice("Loading active sessions...");
         self.start_session_picker_load();
     }
 
@@ -2730,8 +2668,7 @@ impl App {
         self.pending_session_picker_load = Some(super::PendingSessionPickerLoad { receiver: rx });
 
         tokio::task::spawn_blocking(move || {
-            let result = session_picker::load_sessions_grouped();
-            let _ = tx.send(result);
+            session_picker::send_session_list_updates(tx);
         });
     }
 
@@ -2835,14 +2772,22 @@ impl App {
             );
 
         match recv_result {
-            Ok(Ok((server_groups, orphan_sessions))) => {
+            Ok(session_picker::SessionListUpdate::Cached((server_groups, orphan_sessions))) => {
+                if picker_active {
+                    let changed = self.apply_loaded_session_picker(server_groups, orphan_sessions);
+                    self.set_status_notice("Refreshing sessions...");
+                    return changed;
+                }
+                false
+            }
+            Ok(session_picker::SessionListUpdate::Fresh(Ok((server_groups, orphan_sessions)))) => {
                 self.pending_session_picker_load = None;
                 if picker_active {
                     return self.apply_loaded_session_picker(server_groups, orphan_sessions);
                 }
                 false
             }
-            Ok(Err(e)) => {
+            Ok(session_picker::SessionListUpdate::Fresh(Err(e))) => {
                 self.pending_session_picker_load = None;
                 if picker_active {
                     self.session_picker_overlay = None;
@@ -2884,19 +2829,8 @@ impl App {
             return;
         }
 
-        // Show the picker overlay immediately (using the cached list when
-        // available) and load the full session list off-thread. This keeps the
-        // live TUI responsive instead of blocking on a multi-hundred-ms scan of
-        // every historical session.
-        let mut picker = if let Some((server_groups, orphan_sessions)) =
-            session_picker::load_cached_sessions_grouped()
-        {
-            let mut picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
-            picker.activate_catchup_filter();
-            picker
-        } else {
-            SessionPicker::loading()
-        };
+        // Both cached and fresh lists arrive off-thread, just like /resume.
+        let mut picker = SessionPicker::loading();
         // Ensure the filter is applied even on the loading placeholder so the
         // refreshed list lands in the catch-up view.
         picker.activate_catchup_filter();
@@ -3127,6 +3061,46 @@ impl App {
             )));
             return;
         };
+
+        // Ownership takes precedence even over the picker entry labelled current:
+        // its local transcript may have moved while this client was open.
+        if let Some(lease) = crate::storage::read_session_lease(&session_id)
+            && let Some(host) = lease.away_host
+        {
+            if self.is_processing
+                || self.pending_turn
+                || self.cloud_job.is_some()
+                || self.cloud_handoff_blocks_work()
+                || self.should_quit
+            {
+                self.push_display_message(DisplayMessage::error(
+                    "Wait for the current turn or cloud handoff to finish before attaching to a cloud session.".to_string(),
+                ));
+                return;
+            }
+            // A picker selection consumes no composer command. In particular,
+            // a typed `/cloud` is still an unsent draft, not an accepted command.
+            if !self.input.trim().is_empty() {
+                self.push_display_message(DisplayMessage::error(
+                    "Cloud attach blocked: send or save the composer draft first. Nothing was removed.".to_string(),
+                ));
+                return;
+            }
+            // Reuse the cloud handoff guard before quitting this client. This
+            // covers attachments, queues and unacknowledged interrupts.
+            if !super::commands_cloud::check_cloud_handoff_input(self, "/cloud") {
+                return;
+            }
+            self.cloud_handoff_requested = Some(CloudHandoff::RemoteResume {
+                session_id,
+                host,
+                working_dir: lease.repo_root,
+            });
+            self.session_picker_overlay = None;
+            self.session_picker_mode = SessionPickerMode::Resume;
+            self.should_quit = true;
+            return;
+        }
 
         // Selecting the session we are already in (visible in the Active view,
         // labeled "current") should simply close the picker, not re-resume.
@@ -3513,6 +3487,17 @@ impl App {
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Result<()> {
+        if self
+            .inline_interactive_state
+            .as_ref()
+            .is_some_and(|picker| picker.kind == PickerKind::Account)
+            && (matches!(code, KeyCode::Char('[' | ']'))
+                || (modifiers.contains(KeyModifiers::CONTROL)
+                    && key_char_eq_ignore_ascii_case(code, 'r')))
+        {
+            self.edit_selected_account_priority(code)?;
+            return Ok(());
+        }
         // `/agents` pickers: Ctrl+G switches between editing this session and
         // the global default, then reopens the same view in the other scope.
         if modifiers.contains(KeyModifiers::CONTROL)
@@ -3767,6 +3752,7 @@ impl App {
                     && !matches!(
                         entry.action,
                         PickerAction::Model
+                            | PickerAction::Account(AccountPickerAction::Switch { .. })
                             | PickerAction::Usage { .. }
                             | PickerAction::RemoteLogin { .. }
                             | PickerAction::RemoteImportDecision { .. }
@@ -4206,3 +4192,7 @@ impl App {
 #[cfg(test)]
 #[path = "inline_interactive_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "inline_interactive/cloud_resume_tests.rs"]
+mod cloud_resume_tests;

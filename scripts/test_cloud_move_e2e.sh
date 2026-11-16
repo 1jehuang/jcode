@@ -231,7 +231,7 @@ check "local edit kept (same file, other hunk)" grep -q "edited locally" "$REPO/
 check "local-only file kept" test -f "$REPO/local.txt"
 check "ignored build output untouched" test -f "$REPO/target/big.bin"
 check "local lease is home again" lease_is_here "$JCODE_HOME/session_leases/$SID.json"
-check "cloud lease no longer owns" grep -q '"away_host": "returned"' "$CLOUD_ROOT/home/.jcode/session_leases/$SID.json"
+check "cloud lease no longer owns" grep -q '"away_host": "returned-complete"' "$CLOUD_ROOT/home/.jcode/session_leases/$SID.json"
 python3 - "$JCODE_HOME/sessions/$SID.json" <<'PY' || fail "returned transcript"
 import json, sys
 s = json.load(open(sys.argv[1]))

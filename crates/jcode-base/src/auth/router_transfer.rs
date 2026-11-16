@@ -362,6 +362,13 @@ fn merge_pool(source: &str, destination: Option<&str>) -> Result<String, RouterT
             merged.excluded.push(excluded);
         }
     }
+    for (key, priority) in destination.priorities {
+        // Source-owned accounts use the source override (or its automatic
+        // default). Only preserve overrides for accounts local to destination.
+        if !source.members.contains(&key) && !source.excluded.contains(&key) {
+            merged.priorities.entry(key).or_insert(priority);
+        }
+    }
     serde_json::to_string_pretty(&merged).map_err(|_| RouterTransferError::Malformed)
 }
 
@@ -433,6 +440,20 @@ pub fn import_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pool_merge_keeps_destination_only_priorities_and_source_auto_resets() {
+        let merged = merge_pool(
+            r#"{"members":["openai:personal","openai:work"],"excluded":["antigravity"],"priorities":{"openai:work":1}}"#,
+            Some(r#"{"members":["cloud-only","openai:personal","openai:work"],"priorities":{"cloud-only":4,"openai:personal":9,"openai:work":0,"antigravity":0}}"#),
+        ).unwrap();
+        let pool: AccountPool = serde_json::from_str(&merged).unwrap();
+        assert_eq!(pool.priorities.get("cloud-only"), Some(&4));
+        assert_eq!(pool.priorities.get("openai:work"), Some(&1));
+        assert!(!pool.priorities.contains_key("openai:personal"));
+        assert!(!pool.priorities.contains_key("antigravity"));
+        assert!(pool.excluded.contains(&"antigravity".to_owned()));
+    }
 
     #[cfg(unix)]
     fn assert_mode(path: &std::path::Path, want: u32) {

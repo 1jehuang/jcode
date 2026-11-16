@@ -14,7 +14,7 @@ impl App {
             self.set_diff_pane_focus(false);
         }
         self.sync_diagram_fit_context();
-        self.set_status_notice("Side panel: OFF");
+        self.set_status_notice(crate::tui::ui::SIDE_PANEL_DISMISSED_HINT);
     }
 
     pub(in crate::tui::app) fn toggle_side_panel(&mut self) {
@@ -39,7 +39,7 @@ impl App {
             self.pinned_images_auto_hide_deadline = None;
             self.set_diff_pane_focus(false);
             self.sync_diagram_fit_context();
-            self.set_status_notice("Image side panel: OFF");
+            self.set_status_notice(crate::tui::ui::SIDE_PANEL_DISMISSED_HINT);
             return;
         }
 

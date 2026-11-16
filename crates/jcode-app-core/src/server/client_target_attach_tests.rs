@@ -52,6 +52,7 @@ fn subscribe(target: &str) -> Request {
         supports_pdf_panels: false,
         supports_user_response: false,
         supports_server_failover: false,
+        supports_turn_identity: false,
         id: 71,
         working_dir: None,
         target_session_id: Some(target.into()),
@@ -82,7 +83,9 @@ async fn target_subscribe_uses_live_unsaved_root_without_changing_it() {
     let _home = Home::new();
     let id = "session_live_empty_attach";
     let agent = live_agent(id, "/workspace/live-original").await;
-    let sessions = Arc::new(RwLock::new(HashMap::from([(id.into(), agent.clone())])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(id.into(), agent.clone())]),
+    ));
     let members = Arc::new(RwLock::new(HashMap::new()));
     let mut request = subscribe(id);
     resolve_target_subscribe_working_dir(&mut request, &sessions, &members)
@@ -109,7 +112,7 @@ async fn target_subscribe_uses_persisted_root_when_no_live_agent_exists() {
     let mut request = subscribe(&session.id);
     resolve_target_subscribe_working_dir(
         &mut request,
-        &Arc::new(RwLock::new(HashMap::new())),
+        &Arc::new(crate::server::session_manager::SessionManager::new()),
         &Arc::new(RwLock::new(HashMap::new())),
     )
     .await
@@ -128,7 +131,9 @@ async fn target_subscribe_live_root_wins_over_stale_persisted_root() {
     session.working_dir = Some("/workspace/stale".into());
     session.save().unwrap();
     let agent = live_agent(&session.id, "/workspace/live").await;
-    let sessions = Arc::new(RwLock::new(HashMap::from([(session.id.clone(), agent)])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session.id.clone(), agent)]),
+    ));
     let mut request = subscribe(&session.id);
     resolve_target_subscribe_working_dir(
         &mut request,
@@ -149,7 +154,9 @@ async fn target_subscribe_busy_live_agent_uses_member_root_without_waiting() {
     let _home = Home::new();
     let id = "session_busy_empty_attach";
     let agent = live_agent(id, "/workspace/busy-original").await;
-    let sessions = Arc::new(RwLock::new(HashMap::from([(id.into(), agent.clone())])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(id.into(), agent.clone())]),
+    ));
     let (event_tx, _) = mpsc::unbounded_channel();
     let now = std::time::Instant::now();
     let members = Arc::new(RwLock::new(HashMap::from([(
@@ -199,7 +206,7 @@ async fn target_subscribe_unknown_target_never_uses_process_working_dir() {
     let mut request = subscribe("session_missing");
     let error = resolve_target_subscribe_working_dir(
         &mut request,
-        &Arc::new(RwLock::new(HashMap::new())),
+        &Arc::new(crate::server::session_manager::SessionManager::new()),
         &Arc::new(RwLock::new(HashMap::new())),
     )
     .await
@@ -227,7 +234,7 @@ async fn target_subscribe_reports_corrupt_persisted_state_without_using_process_
     let mut request = subscribe(&session.id);
     let error = resolve_target_subscribe_working_dir(
         &mut request,
-        &Arc::new(RwLock::new(HashMap::new())),
+        &Arc::new(crate::server::session_manager::SessionManager::new()),
         &Arc::new(RwLock::new(HashMap::new())),
     )
     .await
@@ -245,7 +252,7 @@ async fn target_subscribe_preserves_explicit_directory_and_its_validation() {
     }
     resolve_target_subscribe_working_dir(
         &mut request,
-        &Arc::new(RwLock::new(HashMap::new())),
+        &Arc::new(crate::server::session_manager::SessionManager::new()),
         &Arc::new(RwLock::new(HashMap::new())),
     )
     .await
@@ -259,7 +266,7 @@ async fn target_subscribe_preserves_explicit_directory_and_its_validation() {
     }
     resolve_target_subscribe_working_dir(
         &mut request,
-        &Arc::new(RwLock::new(HashMap::new())),
+        &Arc::new(crate::server::session_manager::SessionManager::new()),
         &Arc::new(RwLock::new(HashMap::new())),
     )
     .await

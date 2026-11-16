@@ -23,10 +23,12 @@ async fn handle_resume_session_allows_multiple_live_tui_attach() -> Result<()> {
         Vec::new(),
     )));
 
-    let sessions = Arc::new(RwLock::new(HashMap::from([
-        (target_session_id.to_string(), Arc::clone(&existing_agent)),
-        (temp_session_id.to_string(), Arc::clone(&new_agent)),
-    ])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([
+            (target_session_id.to_string(), Arc::clone(&existing_agent)),
+            (temp_session_id.to_string(), Arc::clone(&new_agent)),
+        ]),
+    ));
     let shutdown_signals = Arc::new(RwLock::new(HashMap::<String, InterruptSignal>::new()));
     let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
     let now = Instant::now();
@@ -121,6 +123,7 @@ async fn handle_resume_session_allows_multiple_live_tui_attach() -> Result<()> {
         &event_history,
         &event_counter,
         &swarm_event_tx,
+        false,
         false,
     )
     .await?;

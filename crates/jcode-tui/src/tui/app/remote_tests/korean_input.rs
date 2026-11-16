@@ -4,6 +4,42 @@ use ratatui::{Terminal, backend::TestBackend};
 use super::create_test_app;
 
 #[test]
+fn disconnected_submission_wakes_backoff_but_editing_and_empty_enter_do_not() {
+    let mut app = create_test_app();
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    // An existing queued prompt must not make automatic retries spin.
+    app.queued_messages.push("previous prompt".into());
+    let before = app.queued_messages.len();
+    for code in [KeyCode::Enter, KeyCode::Char('x')] {
+        super::super::handle_terminal_event_while_disconnected(
+            &mut app,
+            &mut terminal,
+            Some(Ok(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))),
+        )
+        .unwrap();
+        assert!(!super::reconnect::submitted_during_backoff(
+            before,
+            app.queued_messages.len()
+        ));
+    }
+    super::super::handle_terminal_event_while_disconnected(
+        &mut app,
+        &mut terminal,
+        Some(Ok(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )))),
+    )
+    .unwrap();
+    assert!(super::reconnect::submitted_during_backoff(
+        before,
+        app.queued_messages.len()
+    ));
+    assert_eq!(app.queued_messages, ["previous prompt", "x"]);
+    assert!(app.input().is_empty());
+}
+
+#[test]
 fn local_korean_jamo_ctrl_chord_runs_the_latin_shortcut() {
     let mut app = create_test_app();
     app.set_input_for_test("hello world again");

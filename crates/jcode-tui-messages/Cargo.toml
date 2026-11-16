@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+jcode-logging = { path = "../jcode-logging" }
 jcode-config-types = { path = "../jcode-config-types" }
 jcode-message-types = { path = "../jcode-message-types" }
 jcode-session-types = { path = "../jcode-session-types" }

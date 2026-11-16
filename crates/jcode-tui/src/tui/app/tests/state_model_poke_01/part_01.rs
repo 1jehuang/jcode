@@ -142,6 +142,62 @@ fn test_rewind_undo_restores_truncated_messages() {
     );
 }
 
+/// Regression for the Greptile "rewind removes tool badges" finding: the rows
+/// RETAINED by /rewind N must keep their stored wall-clock timestamp and
+/// measured duration (rendered through the same mapper /rewind undo uses).
+#[test]
+fn test_rewind_retained_tool_rows_keep_timing_fields() {
+    let mut app = create_test_app();
+    app.session.replace_messages(Vec::new());
+
+    // user prompt -> tool result (real ToolResult block) -> user prompt -> tool result.
+    for idx in 1..=2 {
+        app.session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!("msg-{}", idx),
+                cache_control: None,
+            }],
+        );
+        let call_id = format!("call-{}", idx);
+        app.session.add_message(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: call_id.clone(),
+                name: "bash".to_string(),
+                input: serde_json::json!({ "command": "echo ok" }),
+                thought_signature: None,
+            }],
+        );
+        app.session.add_message_with_duration(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: call_id,
+                content: format!(
+                    "[tool timing: start=21:51:28Z duration=48.3s] result-{}",
+                    idx
+                ),
+                is_error: Some(false),
+            }],
+            Some(48_300),
+        );
+    }
+
+    app.input = "/rewind 2".to_string();
+    app.submit_input();
+    // Two rewind targets survive: the two user prompts.
+    assert_eq!(app.session.rewind_target_count(), 2);
+
+    // The retained turn's rendered tool row keeps both timing fields.
+    let rebuilt = app.display_messages();
+    let timed_row = rebuilt
+        .iter()
+        .find(|m| m.role == "tool" && m.content.contains("result-1"))
+        .expect("retained tool row present");
+    assert_eq!(timed_row.tool_duration_ms, Some(48_300));
+    assert!(timed_row.timestamp.is_some(), "timestamp must survive rewind");
+}
+
 #[test]
 fn test_rewind_lists_visible_messages_when_initial_session_context_is_hidden() {
     let mut app = create_test_app();
@@ -163,6 +219,29 @@ fn test_rewind_lists_visible_messages_when_initial_session_context_is_hidden() {
     assert!(last.content.contains("Conversation history:"));
     assert!(last.content.contains("1 👤 User - msg-1"));
     assert!(last.content.contains("2 👤 User - msg-2"));
+    assert_eq!(last.title.as_deref(), Some("Rewind"));
+    let rows: Vec<String> =
+        crate::tui::ui::render_system_message(last, 100, crate::config::DiffDisplayMode::default())
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+    let first = rows
+        .iter()
+        .position(|row| row.contains("1 👤 User - msg-1"))
+        .expect("first entry visible");
+    let second = rows
+        .iter()
+        .position(|row| row.contains("2 👤 User - msg-2"))
+        .expect("second entry visible");
+    assert!(
+        first < second,
+        "rewind entries must occupy separate ordered rows: {rows:?}"
+    );
     assert!(!last.content.contains("Session Context"));
     assert!(!last.content.contains("No messages in conversation"));
 }
@@ -1350,33 +1429,5 @@ fn test_mouse_scroll_over_tool_side_panel_scrolls_shared_right_pane_without_chan
     assert!(!app.diff_pane_auto_scroll);
 }
 
-#[test]
-fn test_side_pane_scroll_by_clamps_to_rendered_extent() {
-    let _render_lock = scroll_render_test_lock();
-    let mut app = create_test_app();
-
-    // Simulate a rendered frame: 30 content lines in a 20-line viewport.
-    crate::tui::ui::set_pinned_pane_total_lines(30);
-    crate::tui::ui::set_last_diff_pane_max_scroll(10);
-    crate::tui::ui::set_last_diff_pane_effective_scroll(10);
-
-    // Follow-bottom sentinel resolves to the on-screen position before moving.
-    app.diff_pane_scroll = usize::MAX;
-    assert!(app.side_pane_scroll_by(-3));
-    assert_eq!(app.diff_pane_scroll, 7);
-    assert!(!app.diff_pane_auto_scroll);
-
-    // Downward motion clamps at the rendered max instead of accumulating
-    // phantom offset past the bottom.
-    app.diff_pane_scroll = 9;
-    assert!(app.side_pane_scroll_by(3));
-    assert_eq!(app.diff_pane_scroll, 10);
-    assert!(!app.side_pane_scroll_by(3), "already at the bottom");
-    assert_eq!(app.diff_pane_scroll, 10);
-
-    // A stale stored offset beyond the rendered extent snaps back so the very
-    // next upward scroll moves the visible view immediately.
-    app.diff_pane_scroll = 25;
-    assert!(app.side_pane_scroll_by(-3));
-    assert_eq!(app.diff_pane_scroll, 7);
-}
+#[path = "part_01/side_pane_extent.rs"]
+mod side_pane_extent;

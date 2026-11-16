@@ -90,6 +90,44 @@ fn test_tool_row_without_duration_has_no_badge() {
     assert!(!row.contains(" ·  "), "no empty separator pair: {row}");
 }
 
+/// Regression for the Greptile "elapsed time appears twice" finding: when the
+/// usage label already folds the call's elapsed time in before the token
+/// count (live `duration_secs` or a stored "[tool timing: ...]" header), the
+/// suffix must not append a second duration badge.
+#[test]
+fn test_tool_row_duration_badge_suppressed_when_usage_label_has_time() {
+    let _lock = viewport_snapshot_test_lock();
+    enable_tool_duration_opt_in();
+
+    // Live row: the runner measured duration lands on duration_secs.
+    let mut live = duration_tool_msg(Some(48_300));
+    live.duration_secs = Some(48.3);
+    let lines = messages::render_tool_message(&live, 200, crate::config::DiffDisplayMode::Off);
+    let row: String = lines
+        .first()
+        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+        .unwrap_or_default();
+    // The usage label renders the measured time once ("48s, 0 tok"); the
+    // suffix must not append its own " · 48.3s" badge on top of it.
+    assert_eq!(row.matches(" · ").count(), 1, "one separator: {row}");
+    assert!(row.contains("48s"), "usage label carries the time: {row}");
+    assert!(!row.contains(" · 48.3s"), "no suffix duplicate: {row}");
+
+    // Restored row: elapsed time lives in the stored [tool timing:] header.
+    let mut stored = duration_tool_msg(Some(48_300));
+    stored.content = "[tool timing: start=21:51:28Z duration=48.3s] ok".to_string();
+    let lines = messages::render_tool_message(&stored, 200, crate::config::DiffDisplayMode::Off);
+    reset_tool_duration_opt_in();
+    let row: String = lines
+        .first()
+        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+        .unwrap_or_default();
+    assert!(
+        !row.contains(" · 48.3s"),
+        "suffix badge must not duplicate the header timing: {row}"
+    );
+}
+
 /// Duration severity colors the badge: 48.3s is Warning-range amber. The
 /// same span keeps neutral blue-grey below the warning threshold.
 #[test]
