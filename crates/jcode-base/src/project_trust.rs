@@ -269,8 +269,23 @@ fn main_checkout_of(worktree: &Path, dot_git_file: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Store key for a project root. Lossless: valid UTF-8 paths are used as is,
+/// others are hex encoded behind a NUL prefix (which no path can contain), so
+/// distinct paths never share a key.
 fn key(root: &Path) -> String {
-    root.to_string_lossy().into_owned()
+    match root.to_str() {
+        Some(text) => text.to_string(),
+        None => {
+            #[cfg(unix)]
+            let bytes = {
+                use std::os::unix::ffi::OsStrExt;
+                root.as_os_str().as_bytes().to_vec()
+            };
+            #[cfg(not(unix))]
+            let bytes = root.to_string_lossy().into_owned().into_bytes();
+            format!("\0non-utf8:{}", hex::encode(bytes))
+        }
+    }
 }
 
 /// Recursively sorted, compact JSON. `serde_json` already orders object keys
