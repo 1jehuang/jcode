@@ -1390,7 +1390,11 @@ impl Agent {
                     NoToolCallOutcome::Break => {
                         if saw_message_end
                             && self
-                                .stop_hook_continues_mpsc(&text_content, &stop_reason, &event_tx)
+                                .stop_hook_continues_mpsc(
+                                    &text_content,
+                                    &stop_reason,
+                                    event_tx.raw(),
+                                )
                                 .await?
                         {
                             continue;
