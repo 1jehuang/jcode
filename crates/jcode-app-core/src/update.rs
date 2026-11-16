@@ -63,6 +63,18 @@ pub fn is_release_build() -> bool {
     jcode_build_meta::is_release_build()
 }
 
+/// kcode ships from its own channel, so an upstream release must never be
+/// installed over it.
+///
+/// Deliberately a constant rather than a check on the version suffix or an
+/// environment variable: the hazard is that `0.99.1-k0.1.0` looks like an
+/// ordinary release to `version_is_newer`, and that any `JCODE_*` override or
+/// future version-naming choice could re-open the path. Every self-update entry
+/// point consults this one function.
+fn upstream_updates_disabled() -> bool {
+    true
+}
+
 fn current_update_semver() -> &'static str {
     jcode_build_meta::update_semver()
 }
@@ -103,6 +115,9 @@ fn source_build_repo_dir() -> Result<PathBuf> {
 }
 
 pub fn should_auto_update() -> bool {
+    if upstream_updates_disabled() {
+        return false;
+    }
     should_auto_update_with(
         std::env::var("JCODE_NO_AUTO_UPDATE").is_ok(),
         is_release_build(),
@@ -519,6 +534,11 @@ fn prepare_main_update_blocking() -> Result<PreparedUpdate> {
 }
 
 pub fn prepare_update_blocking() -> Result<PreparedUpdate> {
+    if upstream_updates_disabled() {
+        anyhow::bail!(
+            "kcode updates come from the kcode channel; upstream jcode releases are not installed over it"
+        );
+    }
     let channel = crate::config::config().features.update_channel;
     match channel {
         crate::config::UpdateChannel::Main => prepare_main_update_blocking(),
@@ -632,6 +652,10 @@ pub fn spawn_background_session_update(session_id: String) {
 }
 
 pub fn check_for_update_blocking() -> Result<Option<GitHubRelease>> {
+    if upstream_updates_disabled() {
+        crate::logging::info("update: upstream self-update disabled in this build (kcode channel)");
+        return Ok(None);
+    }
     check_for_update_with_channel_blocking(None)
 }
 
@@ -993,6 +1017,12 @@ pub fn download_and_install_blocking_with_progress(
     release: &GitHubRelease,
     mut on_progress: impl FnMut(DownloadProgress),
 ) -> Result<PathBuf> {
+    if upstream_updates_disabled() {
+        anyhow::bail!(
+            "refusing to install {} over this kcode build",
+            release.tag_name
+        );
+    }
     let started = Instant::now();
     let asset = platform_asset(release)?;
 

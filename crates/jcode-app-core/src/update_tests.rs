@@ -589,3 +589,14 @@ fn release_url_override_requires_sandboxed_home() {
     );
     assert_eq!(release_url_override_with(None, true), None);
 }
+
+/// kcode must never install an upstream release over itself, whatever the
+/// version suffix or environment says. Every self-update entry point is checked
+/// here so a later refactor cannot silently re-open one of them.
+#[test]
+fn upstream_self_update_is_disabled_for_kcode() {
+    assert!(upstream_updates_disabled());
+    assert!(!should_auto_update());
+    assert!(matches!(check_for_update_blocking(), Ok(None)));
+    assert!(prepare_update_blocking().is_err());
+}
