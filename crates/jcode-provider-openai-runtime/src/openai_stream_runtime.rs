@@ -3,6 +3,7 @@ use super::openai_stream_diagnostics::{
     StreamProgress, add_cache_comparison, reqwest_header_fields, tungstenite_header_fields,
 };
 use super::*;
+use jcode_provider_openai::websocket_health::WebsocketEventClassification;
 
 #[path = "openai_ws_cancel_recovery.rs"]
 mod openai_ws_cancel_recovery;
@@ -10,8 +11,16 @@ use openai_ws_cancel_recovery::{RecoverableAttempt, RecoveryPhase, has_unanswere
 
 // Inspect the wire error, not the parser's lossy message. Envelope metadata
 // must not hide an otherwise opaque rejection, but substantive details do.
+#[cfg(test)]
 fn opaque_ws_rejection(text: &str, response_started: &mut bool) -> bool {
-    let Ok(value) = serde_json::from_str::<Value>(text) else {
+    opaque_ws_rejection_event(&WebsocketEventClassification::parse(text), response_started)
+}
+
+fn opaque_ws_rejection_event(
+    event: &WebsocketEventClassification,
+    response_started: &mut bool,
+) -> bool {
+    let Some(value) = event.value() else {
         return false;
     };
     if value
@@ -65,6 +74,33 @@ fn opaque_ws_rejection(text: &str, response_started: &mut bool) -> bool {
         ));
     }
     recoverable
+}
+
+#[test]
+fn opaque_rejection_uses_validated_top_level_type() {
+    for data in [
+        r#"{"type":"ping","delta":"response.created"}"#,
+        r#"{"type":"ping","nested":{"type":"response.created"}}"#,
+        r#"{"type":"response.created","type":null}"#,
+        r#"{"type":"response.created"} trailing"#,
+        r#"{"type":"response.created","invalid":1e999}"#,
+    ] {
+        let mut started = false;
+        assert!(!opaque_ws_rejection(data, &mut started));
+        assert!(!started, "{data}");
+    }
+    let mut started = false;
+    assert!(!opaque_ws_rejection(
+        r#"{"type":"ping","ty\u0070e":"response.created"}"#,
+        &mut started
+    ));
+    assert!(started);
+    let mut started = false;
+    assert!(opaque_ws_rejection(
+        r#"{"type":"response.created","type":"error","error":{"type":"invalid_request_error","message":"Invalid request"}}"#,
+        &mut started
+    ));
+    assert!(!started);
 }
 
 #[test]
@@ -1152,14 +1188,11 @@ async fn continue_persistent_ws_locked(
         match result {
             Ok(WsMessage::Text(text)) => {
                 let text = text.to_string();
-                if text.contains("response.completed")
-                    && serde_json::from_str::<Value>(&text).is_ok_and(|event| {
-                        event.get("type").and_then(Value::as_str) == Some("response.completed")
-                    })
-                {
+                let classification = WebsocketEventClassification::parse(&text);
+                if classification.kind() == Some("response.completed") {
                     *recovery_phase = RecoveryPhase::Completed;
                 }
-                if opaque_ws_rejection(&text, &mut response_started) {
+                if opaque_ws_rejection_event(&classification, &mut response_started) {
                     return PersistentWsResult::OpaqueWsRejection;
                 }
                 if !logged_first_server_event {
@@ -1172,21 +1205,23 @@ async fn continue_persistent_ws_locked(
                     ));
                     logged_first_server_event = true;
                 }
-                if is_websocket_fallback_notice(&text) {
+                if classification.is_fallback_notice(&text) {
                     return PersistentWsResult::Failed("server requested fallback".to_string());
                 }
 
                 let mut made_api_activity = if saw_api_activity {
-                    is_websocket_activity_payload(&text)
+                    classification.is_activity()
                 } else {
-                    is_websocket_first_activity_payload(&text)
+                    classification.is_first_activity()
                 };
 
-                observe_ws_response_output(&text, &mut response_output);
+                if let Some(value) = classification.value() {
+                    observe_ws_response_output_event(value, &mut response_output);
+                }
 
                 // Extract response_id from response.created event
                 if new_response_id.is_none()
-                    && let Ok(val) = serde_json::from_str::<Value>(&text)
+                    && let Some(val) = classification.value()
                     && val.get("type").and_then(|t| t.as_str()) == Some("response.created")
                     && let Some(id) = val
                         .get("response")
@@ -1672,7 +1707,8 @@ async fn stream_response_websocket_authenticated(
             Ok(message) => match message {
                 WsMessage::Text(text) => {
                     let text = text.to_string();
-                    if opaque_ws_rejection(&text, &mut response_started) {
+                    let classification = WebsocketEventClassification::parse(&text);
+                    if opaque_ws_rejection_event(&classification, &mut response_started) {
                         return Err(OpenAIStreamFailure::OpaqueWsRejection);
                     }
                     if !logged_first_server_event {
@@ -1684,18 +1720,20 @@ async fn stream_response_websocket_authenticated(
                         ));
                         logged_first_server_event = true;
                     }
-                    if is_websocket_fallback_notice(&text) {
+                    if classification.is_fallback_notice(&text) {
                         return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
                             "{} reported by websocket stream",
                             WEBSOCKET_FALLBACK_NOTICE
                         )));
                     }
 
-                    observe_ws_response_output(&text, &mut response_output);
+                    if let Some(value) = classification.value() {
+                        observe_ws_response_output_event(value, &mut response_output);
+                    }
 
                     // Extract response_id from response.created event
                     if response_id.is_none()
-                        && let Ok(val) = serde_json::from_str::<Value>(&text)
+                        && let Some(val) = classification.value()
                         && val.get("type").and_then(|t| t.as_str()) == Some("response.created")
                         && let Some(id) = val
                             .get("response")
@@ -1717,9 +1755,9 @@ async fn stream_response_websocket_authenticated(
                     }
 
                     let mut made_api_activity = if saw_api_activity {
-                        is_websocket_activity_payload(&text)
+                        classification.is_activity()
                     } else {
-                        is_websocket_first_activity_payload(&text)
+                        classification.is_first_activity()
                     };
                     if let Some(mut event) = parse_openai_response_event(
                         &text,
