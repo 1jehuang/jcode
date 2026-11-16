@@ -18,6 +18,8 @@ pub struct CommandResult {
     pub exit_code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+    /// Stdout hit the runner's byte limit, so `stdout` is a cut-off prefix.
+    pub stdout_truncated: bool,
 }
 
 /// What a command asked for.
@@ -47,6 +49,7 @@ fn text(value: &Value, key: &str) -> Option<String> {
 /// Interpret a finished command. `hook_name` is used for the default reason.
 pub fn interpret(result: &CommandResult, hook_name: &str) -> Verdict {
     match result.exit_code {
+        Some(0) if result.stdout_truncated => interpret_truncated(&result.stdout, hook_name),
         Some(0) => interpret_stdout(&result.stdout, hook_name),
         Some(2) => {
             let reason = result.stderr.trim();
@@ -61,6 +64,22 @@ pub fn interpret(result: &CommandResult, hook_name: &str) -> Verdict {
         }
         _ => Verdict::default(),
     }
+}
+
+/// Stdout was cut off by the runner limit. A cut-off JSON document is never
+/// half-read or turned into context. For `user_prompt_submit` a structured
+/// response we cannot read may have been a block, so the prompt is rejected
+/// rather than silently let through. Other hooks fail open.
+fn interpret_truncated(stdout: &str, hook_name: &str) -> Verdict {
+    if hook_name == "user_prompt_submit" && stdout.trim_start().starts_with('{') {
+        return Verdict {
+            block: Some(format!(
+                "{hook_name} hook output exceeded the size limit and could not be read"
+            )),
+            ..Verdict::default()
+        };
+    }
+    Verdict::default()
 }
 
 fn interpret_stdout(stdout: &str, hook_name: &str) -> Verdict {
@@ -106,7 +125,28 @@ mod tests {
             exit_code: code,
             stdout: stdout.into(),
             stderr: stderr.into(),
+            stdout_truncated: false,
         }
+    }
+
+    #[test]
+    fn truncated_prompt_hook_json_blocks_instead_of_becoming_context() {
+        let mut r = result(Some(0), r#"{"decision":"block","reason":"aaaa"#, "");
+        r.stdout_truncated = true;
+        let v = interpret(&r, "user_prompt_submit");
+        assert!(v.block.is_some());
+        assert_eq!(v.plain_stdout, None);
+        assert_eq!(v.additional_context, None);
+    }
+
+    #[test]
+    fn truncated_plain_or_other_hook_output_is_dropped() {
+        let mut r = result(Some(0), "long plain text", "");
+        r.stdout_truncated = true;
+        assert_eq!(interpret(&r, "user_prompt_submit"), Verdict::default());
+        let mut r = result(Some(0), r#"{"decision":"block"#, "");
+        r.stdout_truncated = true;
+        assert_eq!(interpret(&r, "stop"), Verdict::default());
     }
 
     #[test]
