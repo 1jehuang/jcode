@@ -417,7 +417,14 @@ fn format_dropped_path(path: &std::path::Path, quote_for_batch: bool) -> String 
             .chars()
             .any(|ch| ch.is_whitespace() || matches!(ch, '\\' | '\'' | '"'))
     {
-        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+        // On Windows the backslash is the separator, not an escape, so doubling
+        // it would produce a path that no longer round-trips through the parser.
+        let escaped = if cfg!(windows) {
+            value.replace('"', "\\\"")
+        } else {
+            value.replace('\\', "\\\\").replace('"', "\\\"")
+        };
+        format!("\"{escaped}\"")
     } else {
         value.into_owned()
     }
@@ -491,11 +498,12 @@ pub(super) fn parse_dropped_paths(text: &str) -> Option<Vec<PathBuf>> {
     let mut token = String::new();
     let mut quote = None;
     let mut escaped = false;
-    for ch in trimmed.chars() {
+    let mut chars = trimmed.chars().peekable();
+    while let Some(ch) = chars.next() {
         if escaped {
             token.push(ch);
             escaped = false;
-        } else if ch == '\\' && quote != Some('\'') {
+        } else if ch == '\\' && quote != Some('\'') && backslash_escapes(chars.peek().copied()) {
             escaped = true;
         } else if matches!(ch, '\'' | '"') {
             if quote == Some(ch) {
@@ -534,6 +542,20 @@ pub(super) fn parse_dropped_paths(text: &str) -> Option<Vec<PathBuf>> {
             path.is_file().then_some(path)
         })
         .collect()
+}
+
+/// Whether a backslash at this position is an escape rather than a path separator.
+///
+/// On Windows `\` separates path components, so treating every one as an escape
+/// mangles `C:\Users\...` into `C:Users...`. Shells on Windows still escape a
+/// space that way (Git Bash, MSYS), so `\ ` is honoured and every other backslash
+/// stays literal. Elsewhere the backslash is an escape character as usual.
+fn backslash_escapes(next: Option<char>) -> bool {
+    if cfg!(windows) {
+        next == Some(' ')
+    } else {
+        true
+    }
 }
 
 pub(super) fn handle_text_paste(app: &mut App, text: String) {
