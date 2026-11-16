@@ -1,7 +1,7 @@
 //! Test-only temp directories that never inherit `TMPDIR`.
 //!
 //! The jcode bash tool exports `TMPDIR` pointing at its scratch dir
-//! (`~/.jcode/scratch`). `tempfile::tempdir()` honors `TMPDIR`, so a test that
+//! (`~/.kcode/scratch`). `tempfile::tempdir()` honors `TMPDIR`, so a test that
 //! does `set_var("JCODE_HOME", tempfile::tempdir()?.path())` ends up with a
 //! `JCODE_HOME` inside the live jcode tree: the test then reads and writes real
 //! scratch state, and maintenance passes can race it. Such tests pass in a
@@ -12,16 +12,26 @@
 
 use std::path::PathBuf;
 
-/// Root directory used for test temp dirs. Prefers the canonical `/private/tmp`
-/// (macOS) then `/tmp`, and only falls back to `env::temp_dir()` when neither
-/// exists (e.g. Windows).
+/// Root directory used for test temp dirs. On unix it prefers the canonical
+/// `/private/tmp` then `/tmp` and falls back to `env::temp_dir()`; on Windows it
+/// always uses `env::temp_dir()`, because a `/tmp` path there is drive-relative.
 pub fn root() -> PathBuf {
+    // On Windows `PathBuf::from("/tmp")` is drive-relative, not absolute, and
+    // `Path::is_absolute` says so. Returning it handed tests paths that the OS
+    // resolved against the current drive (`C:\tmp`) while every absolute-path
+    // check in the workspace rejected them. Use the real temp dir there.
+    #[cfg(windows)]
+    {
+        return std::env::temp_dir();
+    }
+    #[cfg(not(windows))]
     for candidate in ["/private/tmp", "/tmp"] {
         let path = PathBuf::from(candidate);
         if path.is_dir() {
             return path;
         }
     }
+    #[cfg(not(windows))]
     std::env::temp_dir()
 }
 
