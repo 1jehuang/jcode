@@ -188,6 +188,64 @@ Likewise, discovery returns that separately populate a retained cache are not
 automatically redundant clones. Those paths were classified rather than
 silently weakening caching or claiming the allocation was unnecessary.
 
+### Scoped catalog and diagnostic ownership followup (2026-11-16)
+
+Freshly parsed OpenAI/Anthropic catalog stores now transfer the selected scope
+into hydration rather than cloning it. Context-limit population consumes its
+owned map and moves new String keys into the cache. Account-scoped reasoning
+and service-tier reads likewise move their owned maps out of the parsed store,
+while preserving missing-versus-empty capability behavior and leaving disk
+bytes unchanged. Background OpenAI refresh persists its borrowed snapshot first,
+then transfers context limits and model IDs into the live caches. Hosted checks,
+all 3 catalog ownership tests, and an offline refresh-completion test passed.
+These are structural clone reductions, not measured CPU or RSS savings.
+
+The shared scoped catalog writer was then investigated with a concrete borrowed
+serialization overlay rather than dismissed for missing evidence. It retains
+the original HashMap insertion/iteration layout, drops the replaced owned
+scope, and serializes the replacement directly from borrowed collections. Exact
+compact and pretty legacy bytes passed for existing/new scopes and 0/1/32/2048
+models. Empty-input no-write behavior, timestamps, account isolation, and eight
+concurrent scope updates also passed; the original write lock remains intact.
+
+A hosted release experiment alternated old/new update-plus-serialization paths
+for nine rounds using per-thread CPU time. Median old/new nanoseconds were:
+
+| Fixture | Existing scope | New scope |
+|---|---:|---:|
+| Tiny, 1 model | 1,017 / 770 | 1,418 / 1,174 |
+| Small, 32 models | 55,967 / 47,347 | 61,026 / 52,325 |
+| Large, 2,048 models | 6,462,648 / 5,820,302 | 6,784,973 / 6,140,190 |
+
+This supported accepting the overlay: the tested medians improved about 9–24%
+while eliminating the temporary deep copy. This measures the in-memory operation,
+not end-to-end disk latency, production CPU, peak memory, or RSS. Five hosted
+catalog ownership/persistence tests passed with the optional CPU probe ignored;
+the explicitly requested release probe passed separately. Reproduce with
+`justrust test --release --locked -p jcode-base --lib scoped_writer_release_cpu_comparison -- --ignored --nocapture --test-threads=1`.
+
+Debug job summaries/status no longer explicitly clone strings and optional
+output/error fields before JSON serialization makes its required owned result.
+Both hosted regression tests passed, covering all job states, null/empty values,
+Unicode/escaping, large output, and source/result isolation. Provider doctor
+reports similarly removed 28 explicit cloned JSON inputs. Its hosted check and
+2 credential-free equality/source-ownership tests passed without running live
+provider probes or changing their opt-in gating. These changes eliminate
+transient intermediate copies, not the independent owned diagnostic response.
+Adjacent swarm diagnostics also borrow the friendly name and git-common path
+when building JSON, and transfer the consumed resolver path without cloning it.
+The existing isolated swarm-write regression and hosted app-core test-target
+check passed. A read-only `swarm:id` result was captured for comparison after
+activation; no real notification was sent as a runtime test.
+
+The bounded direct-JSON-input sweep also removed 13 explicit clones from
+OpenAI/OpenRouter/Copilot missing-tool-output construction and TUI remote status
+metadata. The resulting JSON still owns its values independently of the source.
+Hosted checks and 17 focused tests passed across those four areas, including
+multiple repaired tool outputs and null/empty/Unicode remote metadata. No live
+provider request or real session mutation was used as a test. Legacy-oracle
+clones in test code were deliberately retained.
+
 ### Schema, reranking, and retry ownership acceptance (2026-11-16)
 
 The MCP schema cache now shares immutable catalog backing between memoized
