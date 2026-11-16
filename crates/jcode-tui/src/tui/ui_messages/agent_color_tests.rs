@@ -18,7 +18,7 @@ fn collapsed_completion_lanes_match_pinned_todo_style() {
             assert!(rows[0].width() <= usize::from(width));
             if width == 100 {
                 let text = rows[0].to_string();
-                assert!(!text.contains(&format!("{done}/1")), "{text}");
+                assert!(text.contains(&format!("{done}/1")), "{text}");
                 assert!(text.contains(if done == 1 { "●" } else { "○" }), "{text}");
                 assert!(text.contains("Result retained."), "{text}");
                 assert!(
