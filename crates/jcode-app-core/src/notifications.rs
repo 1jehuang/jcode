@@ -316,9 +316,13 @@ async fn send_ntfy(
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "macos")]
-const MACOS_NOTIFICATION_BROKER_APP_NAME: &str = "Jcode Notifications.app";
+const MACOS_NOTIFICATION_BROKER_APP_NAME: &str = "KCode Notifications.app";
 #[cfg(target_os = "macos")]
-const MACOS_NOTIFICATION_BROKER_EXECUTABLE: &str = "jcode-notification-broker";
+const MACOS_NOTIFICATION_BROKER_EXECUTABLE: &str = "kcode-notification-broker";
+/// Broker bundle name written by builds before the KCode rename. Only ever read
+/// as a fallback so an install that has not been migrated yet keeps working.
+#[cfg(target_os = "macos")]
+const LEGACY_MACOS_NOTIFICATION_BROKER_APP_NAME: &str = "Jcode Notifications.app";
 
 impl MacosNotificationOrigin {
     /// Capture the terminal route for the local client which owns this process.
@@ -421,23 +425,33 @@ fn macos_notification_broker_app_path() -> Option<std::path::PathBuf> {
     if let Some(path) = std::env::var_os("JCODE_MACOS_NOTIFICATION_BROKER_APP") {
         return Some(path.into());
     }
-    let home = dirs::home_dir()?;
-    // Current location: hidden beside the inbox so Spotlight and Launchpad do
-    // not list the faceless helper as a second "Jcode" app. Older CLIs
-    // published it in ~/Applications; keep using that copy until the next
-    // interactive launch migrates it.
-    let current = home
-        .join(".jcode")
+    // Current location: hidden beside the inbox, under this product's own home,
+    // so Spotlight and Launchpad do not list the faceless helper as a second app.
+    // Older CLIs published it in ~/Applications; keep using that copy until the
+    // next interactive launch migrates it.
+    let product_home = crate::storage::jcode_dir().ok()?;
+    let current = product_home
         .join("notifications")
         .join("macos")
         .join(MACOS_NOTIFICATION_BROKER_APP_NAME);
     if current.is_dir() {
         return Some(current);
     }
-    let legacy = home
-        .join("Applications")
-        .join(MACOS_NOTIFICATION_BROKER_APP_NAME);
-    Some(if legacy.is_dir() { legacy } else { current })
+    let pre_rename = product_home
+        .join("notifications")
+        .join("macos")
+        .join(LEGACY_MACOS_NOTIFICATION_BROKER_APP_NAME);
+    if pre_rename.is_dir() {
+        return Some(pre_rename);
+    }
+    let legacy_applications = dirs::home_dir().map(|home| {
+        home.join("Applications")
+            .join(LEGACY_MACOS_NOTIFICATION_BROKER_APP_NAME)
+    });
+    Some(match legacy_applications {
+        Some(legacy) if legacy.is_dir() => legacy,
+        _ => current,
+    })
 }
 
 /// The durable inbox consumed by the bundled macOS broker.
@@ -445,9 +459,8 @@ pub fn macos_notification_inbox_dir() -> Option<std::path::PathBuf> {
     if let Some(path) = std::env::var_os("JCODE_MACOS_NOTIFICATION_INBOX") {
         return Some(path.into());
     }
-    dirs::home_dir().map(|home| {
-        home.join(".jcode")
-            .join("notifications")
+    crate::storage::jcode_dir().ok().map(|home| {
+        home.join("notifications")
             .join("macos")
             .join("inbox")
     })

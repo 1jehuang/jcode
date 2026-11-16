@@ -1029,7 +1029,9 @@ fn record(
             None => String::new(),
         }
     ));
-    let Some(dir) = dirs::home_dir().map(|h| h.join(".jcode").join("logs")) else {
+    // Product log directory, not a hardcoded `.jcode` path: the identity work
+    // moved the default home to `.kcode`, and this history must follow it.
+    let Ok(dir) = crate::storage::logs_dir() else {
         return;
     };
     if let Err(error) = std::fs::create_dir_all(&dir) {
