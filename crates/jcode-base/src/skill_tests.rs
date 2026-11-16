@@ -785,14 +785,18 @@ fn long_unquoted_description_containing_a_colon_still_loads() {
 #[test]
 fn lenient_frontmatter_handles_quotes_and_inline_tools() {
     let (frontmatter, _) = SkillRegistry::parse_frontmatter(
-        "---\nname: \"quoted\"\ndescription: first: part\n  continued line\nallowed-tools: bash, read\nbroken: [unclosed\n---\nbody",
+        "---\nname: \"quoted\"\ndescription: first: part\n  continued line\nallowed-tools: bash, read\narguments: [first, second]\nbroken: [unclosed\n---\nbody",
     )
     .unwrap();
     assert_eq!(frontmatter.name, "quoted");
+    assert_eq!(
+        frontmatter.arguments.map(ListValue::into_names),
+        Some(vec!["first".to_string(), "second".to_string()])
+    );
     assert_eq!(frontmatter.description, "first: part continued line");
     assert!(matches!(
         frontmatter.allowed_tools,
-        Some(AllowedTools::CommaDelimited(ref tools)) if tools == "bash, read"
+        Some(ListValue::Delimited(ref tools)) if tools == "bash, read"
     ));
 }
 

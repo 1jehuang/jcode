@@ -664,29 +664,30 @@ impl SkillRegistry {
 
         let name = scalar("name")?;
         let description = scalar("description")?;
-        let allowed_tools = entries
-            .iter()
-            .find(|(entry, _)| *entry == "allowed-tools")
-            .and_then(|(_, lines)| {
-                let inline = lines[0]
-                    .trim()
-                    .trim_start_matches('[')
-                    .trim_end_matches(']');
-                if !inline.is_empty() {
-                    return Some(AllowedTools::CommaDelimited(inline.to_string()));
-                }
-                let items: Vec<String> = lines[1..]
-                    .iter()
-                    .filter_map(|line| line.trim().strip_prefix('-'))
-                    .map(unquote)
-                    .filter(|item| !item.is_empty())
-                    .collect();
-                (!items.is_empty()).then_some(AllowedTools::Sequence(items))
-            });
+        let list = |key: &str| -> Option<ListValue> {
+            let (_, lines) = entries.iter().find(|(entry, _)| *entry == key)?;
+            let inline = lines[0]
+                .trim()
+                .trim_start_matches('[')
+                .trim_end_matches(']');
+            if !inline.is_empty() {
+                return Some(ListValue::Delimited(inline.to_string()));
+            }
+            let items: Vec<String> = lines[1..]
+                .iter()
+                .filter_map(|line| line.trim().strip_prefix('-'))
+                .map(unquote)
+                .filter(|item| !item.is_empty())
+                .collect();
+            (!items.is_empty()).then_some(ListValue::Sequence(items))
+        };
+        let allowed_tools = list("allowed-tools");
+        let arguments = list("arguments");
         Some(SkillFrontmatter {
             name,
             description,
             allowed_tools,
+            arguments,
         })
     }
 
