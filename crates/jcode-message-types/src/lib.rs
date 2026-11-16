@@ -851,6 +851,9 @@ pub enum StreamEvent {
         /// Provider-native compaction artifact, if one was emitted.
         openai_encrypted_content: Option<String>,
     },
+    /// Actual model identifier reported by the upstream response. This is
+    /// attribution metadata, not a request to change the selected model.
+    ResolvedModel { model: String },
     /// Upstream provider info (e.g., which provider OpenRouter routed to)
     UpstreamProvider { provider: String },
     /// Native tool call from a provider bridge that needs execution by jcode
@@ -1043,7 +1046,8 @@ mod tests {
                 ContentBlock::ReasoningTrace {
                     text: "history-only scratch".to_string(),
                 },
-            ].into(),
+            ]
+            .into(),
             timestamp: Some(chrono::Utc::now() + chrono::Duration::seconds(7)),
             tool_duration_ms: Some(42),
         };
