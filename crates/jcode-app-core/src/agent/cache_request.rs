@@ -18,7 +18,8 @@ fn stable_hash_json<T: serde::Serialize + ?Sized>(value: &T) -> u64 {
     stable_hash_str(&encode_json(value))
 }
 
-pub(super) fn stable_json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
+#[cfg(test)]
+fn stable_json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
     encode_json(value).len()
 }
 

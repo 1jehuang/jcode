@@ -180,8 +180,8 @@ async fn client() -> Result<Arc<Client>> {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&id);
-            if let Some(tx) = tx {
-                if tx
+            if let Some(tx) = tx
+                && tx
                     .send(match error {
                         Some(error) => Err(anyhow::anyhow!("{error}")),
                         None => Ok(ToolOutput {
@@ -199,11 +199,8 @@ async fn client() -> Result<Arc<Client>> {
                         }),
                     })
                     .is_err()
-                {
-                    crate::logging::debug(&format!(
-                        "Execution result receiver dropped for call {id}"
-                    ));
-                }
+            {
+                crate::logging::debug(&format!("Execution result receiver dropped for call {id}"));
             }
         }
         fail_all(&reader_pending, "execution worker disconnected");
