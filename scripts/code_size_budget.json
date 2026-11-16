@@ -7,7 +7,7 @@
     "crates/jcode-app-core/src/agent/turn_streaming_mpsc.rs": 1879,
     "crates/jcode-app-core/src/mobile_push.rs": 1393,
     "crates/jcode-app-core/src/overnight.rs": 1290,
-    "crates/jcode-app-core/src/server.rs": 2602,
+    "crates/jcode-app-core/src/server.rs": 2203,
     "crates/jcode-app-core/src/server/client_actions.rs": 1425,
     "crates/jcode-app-core/src/server/client_lifecycle.rs": 3657,
     "crates/jcode-app-core/src/server/client_lightweight_control.rs": 1208,
