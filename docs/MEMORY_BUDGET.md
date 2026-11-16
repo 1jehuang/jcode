@@ -1,7 +1,7 @@
 # Memory Regression Budget
 
 Status: active guardrail
-Updated: 2026-11-15
+Updated: 2026-11-16
 
 This document defines the current memory regression budget for jcode.
 
@@ -79,6 +79,90 @@ For an optimization round:
    disposition and any missing attribution or behavior/latency tradeoff. A wider
    redesign alone is not evidence that an opportunity is impossible. Do not
    reopen an unchanged inventory merely because theoretical potential exists.
+
+### Schema, reranking, and retry ownership acceptance (2026-11-16)
+
+The MCP schema cache now shares immutable catalog backing between memoized
+loads and snapshots. Updating or pruning one snapshot detaches its map while
+retaining unchanged servers' schema backing. A synthetic catalog with more
+than 1,000,000 serialized bytes verified shared backing, unchanged-entry sharing,
+mutation isolation, byte-identical legacy JSON, and memo invalidation on path
+and file changes. All 11 scoped MCP cache tests passed. The production cache
+file observed during investigation was 892,678 bytes, which is serialized size,
+not its heap usage or a production RAM saving.
+
+Memory reranking formats candidate contents through borrowed iterators rather
+than cloning full candidate IDs and contents before truncation. Concurrent
+consensus judges borrow the same prompt and sidecar instead of retaining one
+owned copy per vote. All 16 scoped reranking tests passed, including exact
+legacy prompt equality for empty, Unicode, multiline, and truncation-boundary
+inputs. Voting, parallelism, error handling, and selection policy are unchanged.
+
+Jev retries and concurrent voice hedges share immutable serialized bytes instead
+of copying the complete wire Vec per attempt. A backing-identity test verified
+that 16 transport bodies all reference the original 64 KiB allocation, including
+after the original Bytes handle is dropped. A separate loopback test verified
+byte-identical requests larger than 64 KiB across 503, 529, and successful
+responses. The existing 80 KiB context bound, retry budget, authentication,
+entitlement, and hedge timing remain unchanged. The scoped Jev suite passed
+51 tests with one ignored.
+
+These are ownership and exact-behavior results, not production RSS reductions
+or matched-workload latency measurements. Hosted admissions initially stalled
+with an absent build machine, so these suites used an explicit, documented
+justrust local fallback and a reused test harness. Supported hosted provisioning
+subsequently recovered. No allocator policy, history cap, delivery delay, cache
+TTL, or useful retained state was changed.
+
+The sidecar's owned OpenAI JSON and both Claude typed request wrappers now
+drop after eager serialization, before network/response waits. All 21 sidecar
+tests passed on the recovered hosted service, including loopback API/SSE
+success/error requests with exact JSON and authentication headers, and
+credential-free Claude body serialization after request-wrapper release.
+
+WebSocket prewarm jobs and their background tasks now share one immutable
+settings tree. A large tools/instructions fixture verified common backing,
+unchanged serialization, caller-mutation isolation, equivalent-request reuse,
+and replacement cancellation without making a network connection. Unchanged
+requests avoid even the new Arc allocation. The full hosted native runtime
+suite passed 237 tests with three ignored. Speculation, cancellation, the
+30-second TTL, and foreground behavior were not changed.
+
+Gmail integration requests release owned JSON after eager serialization, and
+successful Composio responses move their `data` out of the discarded envelope
+instead of cloning its tree. Thirteen hosted Gmail tests passed, including
+25 dummy-auth loopback exchanges for exact request JSON/headers, data shapes,
+missing/null data, and error precedence. No real email or external API was
+used. These lifecycle/move changes likewise have no measured production RSS
+or end-to-end latency claim.
+
+Mobile live-session heartbeats now serialize borrowed session views directly,
+without an intermediate Vec of JSON maps, copied session identifiers, or a
+second wrapper JSON tree. All ten hosted local-runner tests passed, including
+exact legacy wire bytes for empty, Unicode, and 90-session loopback reports.
+Polling intervals, report limits, and delivery behavior are unchanged.
+
+Telegram notification and long-poll parameters similarly use borrowed/stack
+serialization views instead of JSON maps. All four hosted tests passed.
+Exact byte comparisons cover empty and large Unicode messages after their
+source strings are dropped, omitted/present/negative offsets, and unchanged
+long-poll timeouts. Tests build requests only and send no real messages.
+
+The OpenAI-compatible embedding backend serializes its original input strings
+through a borrowed view, then releases those owned inputs before its blocking
+network wait. It no longer builds an additional owned JSON input tree or
+copies the model/key for a scoped thread. All six hosted backend tests passed
+with both default and no-default features. Loopback tests verify legacy bytes,
+headers, vector-index ordering, errors, and the no-network empty-input path.
+No model is downloaded and no external embedding request is made by tests.
+These are structural allocation/lifetime gains, not measured production RSS
+savings. Client/thread policy, timeout, output, and dimension checks are intact.
+
+The follow-up inventory also distinguished non-candidates: the memory graph
+cache helpers currently have no callers, so they do not establish live waste.
+The config reload cache returns static references and intentionally preserves
+old allocations; freeing them requires a sound ownership/API redesign, not an
+unsafe early drop. Neither finding proves that wider optimization is impossible.
 
 ### Native response-wait ownership acceptance (2026-11-15)
 
