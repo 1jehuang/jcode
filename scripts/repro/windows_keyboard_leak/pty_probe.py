@@ -139,6 +139,26 @@ def collect_log(home: Path, out: Path) -> str:
     return text
 
 
+def wait_for_text(cap: "Capture", needle: str, timeout_s: float) -> bool:
+    """Poll the VT screen for a marker. The session picker animates, so waiting for
+    output to go quiet there never returns; a visible marker is the honest signal."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if needle in cap.screen():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def wait_for_text_gone(cap: "Capture", needle: str, timeout_s: float) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if needle not in cap.screen():
+            return True
+        time.sleep(0.05)
+    return False
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -155,6 +175,16 @@ def main() -> int:
                     help="atomic = one write of the whole report, like a terminal; "
                          "chars = one byte at a time, kept for comparison")
     ap.add_argument("--resume-arg", default="mosquito")
+    ap.add_argument("--resume-menu", action="store_true",
+                    help="launch bare --resume so the session picker renders, instead of resuming by name")
+    ap.add_argument("--ready-marker", default="",
+                    help="wait for this text instead of for quiescence (required for the picker)")
+    ap.add_argument("--menu-pick", action="store_true",
+                    help="after the picker settles, press Enter to open the highlighted session")
+    ap.add_argument("--menu-prekeys", default="",
+                    help="keys sent before Enter in the picker, e.g. 's' to reveal debug sessions")
+    ap.add_argument("--cwd-dir", default="",
+                    help="cwd for the client; defaults to a scratch directory under the run")
     ap.add_argument("--rows", type=int, default=40)
     ap.add_argument("--cols", type=int, default=120)
     ap.add_argument("--ready-timeout", type=float, default=60.0)
@@ -168,7 +198,9 @@ def main() -> int:
     run_dir = Path(args.run_dir).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
     fixture = Path(args.fixture).resolve()
-    home, cwd = prepare_run(run_dir, fixture)
+    home, default_cwd = prepare_run(run_dir, fixture)
+    cwd = Path(args.cwd_dir).resolve() if args.cwd_dir else default_cwd
+    cwd.mkdir(parents=True, exist_ok=True)
     fixture_hash = sha256_file(home / "sessions" / fixture.name)
     (run_dir / "fixture.sha256").write_text(
         f"{fixture_hash}  {fixture.name}\n", encoding="utf-8")
@@ -185,7 +217,11 @@ def main() -> int:
         env.pop(leaky, None)
 
     argv = [args.binary, "--no-update", "--socket", str(home / "iso.sock"),
-            "-C", str(cwd), "--resume", args.resume_arg]
+            "-C", str(cwd)]
+    if args.resume_menu:
+        argv.append("--resume")
+    else:
+        argv += ["--resume", args.resume_arg]
 
     result: dict = {
         "label": args.label,
@@ -219,7 +255,9 @@ def main() -> int:
             print("=== alive:", proc.isalive())
             return 0
 
-        settled = cap.wait_quiescent(args.quiet_s, args.ready_timeout)
+        settled = (wait_for_text(cap, args.ready_marker, args.ready_timeout)
+                   if args.ready_marker
+                   else cap.wait_quiescent(args.quiet_s, args.ready_timeout))
         result["ready_quiescent"] = settled
         result["ready_alive"] = bool(proc.isalive())
         before = snapshot("01-resumed")
@@ -229,6 +267,26 @@ def main() -> int:
         else:
             result["checks"]["session_loaded"] = True
 
+        if args.menu_pick:
+            # Open the highlighted entry the way a user does. The default picker
+            # view hides debug/canary sessions, so a recorded debug session needs
+            # the filter toggled first.
+            if args.menu_prekeys:
+                for key in args.menu_prekeys:
+                    proc.write(key)
+                    time.sleep(0.4)
+                time.sleep(1.2)
+            proc.write("\r")
+            picked = wait_for_text_gone(cap, args.ready_marker, args.ready_timeout)
+            if picked:
+                picked = cap.wait_quiescent(args.quiet_s, args.ready_timeout)
+            result["menu_pick_settled"] = picked
+            before = snapshot("01b-after-menu-pick")
+            left_picker = "No session selected" not in before and "0 sessions" not in before
+            has_composer = any(line.startswith("2>") for line in before.splitlines())
+            result["checks"]["menu_resumed_session"] = bool(picked and left_picker and has_composer)
+            result["menu_screen"] = before[:800]
+
         # Deliver the leaked report the way a terminal really emits one: a
         # single write of the whole CSI-u report. `chars` splits it per byte and
         # is kept only for comparison, because a lone ESC byte is not something
@@ -236,8 +294,11 @@ def main() -> int:
         gaps: list[float] = []
         last = time.monotonic()
         if args.inject_mode == "atomic":
-            proc.write(LEAK)
-            gaps.append((time.monotonic() - last) * 1000.0)
+            if proc.isalive():
+                proc.write(LEAK)
+                gaps.append((time.monotonic() - last) * 1000.0)
+            else:
+                result["notes"].append("terminal was already gone before the report was sent")
         else:
             for char in LEAK:
                 if not proc.isalive():
@@ -282,6 +343,13 @@ def main() -> int:
         result["checks"]["stream_emits_stack_neutral_clear"] = "\x1b[=0u" in stream
         result["checks"]["stream_decoded_losslessly"] = "\ufffd" not in stream
 
+        if args.menu_pick:
+            # The picker hands off to a child client. Under an isolated socket that
+            # child does not outlive the handover here, so the composer cannot be
+            # probed; the load itself is still checkable from the server log.
+            result["checks"]["menu_loaded_session"] = (
+                f"handle_get_history: session={fixture.stem}" in log_text)
+
         result["screen_head"] = after_positive[:800]
         result["pty_closed_early"] = not proc.isalive()
     finally:
@@ -292,7 +360,17 @@ def main() -> int:
             pass
 
     checks = result["checks"]
-    if args.expect_bug:
+    if args.menu_pick:
+        # The picker hands the chosen session to a child client. In an isolated
+        # ConPTY that child does not outlive the handover, so the keyboard part of
+        # the scenario cannot be observed on this path. Say so instead of dressing
+        # a partial observation up as a pass or a failure.
+        result["verdict"] = (
+            "MENU_SELECTED" if checks.get("menu_loaded_session") else "MENU_NOT_OBSERVED")
+        result["notes"].append(
+            "menu path stops at the handover; the composer is not reachable here")
+        ok = result["verdict"] == "MENU_SELECTED"
+    elif args.expect_bug:
         # Negative control: the harness must be able to SEE the bug. Green here
         # means "the leak was reproduced", which is what makes the fixed run's
         # clean screen meaningful.

@@ -152,23 +152,56 @@ VHS is used as a second, independent driver, not as the assertion engine.
 - The evaluation is of the installed binary and pinned copies, not of a fresh `cargo build`
   of the branch head.
 
-## CI on the commit that carries this harness
+## The `--resume` menu path
 
-- `Build & Test (windows-latest)`: **pass**, 22m56s. The suite that covers the fixed code path
+Bare `--resume` does render the picker, but the frozen fixture is a debug session
+(`is_debug: true`), and the default picker view hides those: it shows
+`0 sessions all (s/S filter) (+1 hidden)`. Two facts had to be established before the menu
+could be driven at all:
+
+- `s` cycles the session *scope* (`all` -> `cloud`), not the debug toggle. The debug toggle is
+  `d` (`crates/jcode-tui/src/tui/session_picker.rs:1553`).
+- The picker animates, so waiting for output to go quiet never returns. Readiness has to watch
+  for a visible marker (`Search sessions`) instead.
+
+With `d` then Enter, the picker does select and load the intended session. From
+`runs/menu-run4/home/logs/jcode-2026-11-16.log`:
+
+```
+[TIMING] handle_get_history: session=session_mosquito_1794671874260_10867a3abffb9231, send_history=15ms
+```
+
+It then hands the session to a child client, and under an isolated socket that child does not
+outlive the handover: the PTY closes a second or two after the load, so the composer is never
+reachable and the report cannot be injected. The probe reports `MENU_SELECTED` or
+`MENU_NOT_OBSERVED` for this mode rather than a pass or a fail, because a partial observation
+should not be dressed up as either.
+
+So the menu path is covered as far as *selection and load*, and its keyboard behaviour remains
+covered only by the unit tests for the picker handover.
+
+## CI
+
+Measured before the branch was rebased onto master; the rebase rewrote the commits, so these are
+results rather than shas.
+
+- `Build & Test (windows-latest)`: **pass**, ~23 min. The suite that covers the fixed code path
   is green on the platform the leak belongs to.
-- `Build & Test (ubuntu-latest)`: 3683 passed, 3 failed. All three are pre-existing on this
-  branch and were already failing on PR #2184:
+- `Build & Test (ubuntu-latest)`: 3686 passed, 3 failed. All three fail on master too:
   `tui::app::tests::test_cancel_image_only_failover_restores_attachments`
   (`crates/jcode-tui/src/tui/app/tests/remote_failover_routes.rs:983`),
   `test_compacted_history_event_applies_expanded_window`
   (`.../remote_events_reload_03/part_02.rs:373`), and
   `test_definitive_exhaustion_immediate_switch_and_manual_safety`
-  (`.../support_failover/part_01.rs:682`). None of those files is touched by this branch.
-- `Security preflight (Linux)`: 3 rustsec advisories in dependencies. The seven commits on this
-  branch change no `Cargo.toml` or `Cargo.lock`; the diff is confined to `crates/jcode-tui`,
-  `src/cli` and `scripts/repro`, so the advisories are inherited.
-- `Format` and `Quality Guardrails`: red on the base commit and on every open PR, not from this
-  branch. `scripts/check_code_size_budget.py` locally reports only pre-existing Rust files.
+  (`.../support_failover/part_01.rs:682`). None of those files is touched by this branch, and a
+  rebase does not clear them: since the merge base, master changed those test directories once,
+  for an unrelated reason.
+- `Security preflight (Linux)`: 3 rustsec advisories in dependencies. The branch changes no
+  `Cargo.toml` or `Cargo.lock`; the diff is confined to `crates/jcode-tui`, `src/cli` and
+  `scripts/repro`, so the advisories are inherited.
+- `Format`: fails in `crates/jcode-provider-anthropic-runtime/src/usage_recording.rs:194`, a file
+  this branch never touches. `Quality Guardrails`: the code-size budget, on pre-existing Rust
+  files. Both are red on the base commit and on every open PR.
 
 ## Reproduce
 

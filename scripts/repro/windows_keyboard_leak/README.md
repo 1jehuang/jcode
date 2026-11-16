@@ -52,6 +52,12 @@ python run_matrix.py --out runs\matrix --runs 10 ^
 
 python check_counts.py runs\matrix
 
+rem bare --resume: the picker hides debug sessions, `d` reveals them, and marker-based
+rem readiness is required because the picker animates. Stops at the handover by design.
+python pty_probe.py --run-dir runs\menu ^
+  --fixture fixture\master\session_mosquito_<id>.json ^
+  --resume-menu --menu-pick --menu-prekeys d --ready-marker "Search sessions"
+
 rem recorded A/B through VHS
 set JCODE_REPRO_FIXED_BIN=path\to\jcode-fixed.exe
 set JCODE_REPRO_CONTROL_BIN=path\to\jcode-pre-fix.exe
