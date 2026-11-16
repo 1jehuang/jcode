@@ -24,10 +24,10 @@ pub(crate) struct PageLayout {
 
 pub(crate) fn compute_page_layout(
     data: &InfoWidgetData,
-    _inner_width: usize,
+    inner_width: usize,
     inner_height: u16,
 ) -> PageLayout {
-    let compact_height = compact_overview_height(data);
+    let compact_height = compact_overview_height(data, inner_width);
     if compact_height == 0 {
         return PageLayout {
             pages: Vec::new(),
@@ -151,13 +151,29 @@ fn compact_usage_height(data: &InfoWidgetData) -> u16 {
 
 /// Overview height. Status-line facts (model identity, context %, branch and
 /// counts) are not sections here, only the detail behind them.
-fn compact_overview_height(data: &InfoWidgetData) -> u16 {
+fn compact_overview_height(data: &InfoWidgetData, inner_width: usize) -> u16 {
     model_info_height(data)
         + compact_memory_height(data)
         + compact_background_height(data)
+        + compact_mcp_height(data, inner_width)
         + compact_usage_height(data)
         + changes_section_height(data)
         + u16::from(data.cloud_info.is_some())
+}
+
+/// Height of the MCP section in the compact overview. Mirrors
+/// `render_mcp_servers_line` exactly: one row when a joined line fits the
+/// width, otherwise a header row plus one row per server.
+fn compact_mcp_height(data: &InfoWidgetData, inner_width: usize) -> u16 {
+    if data.mcp_servers.is_empty() {
+        return 0;
+    }
+    u16::try_from(super::info_widget::render_mcp_servers_line(
+        &data.mcp_servers,
+        inner_width as u16,
+    )
+    .len())
+    .unwrap_or(u16::MAX)
 }
 
 fn expanded_memory_height(data: &InfoWidgetData) -> u16 {
@@ -186,6 +202,22 @@ mod tests {
     use super::{InfoPageKind, compute_page_layout};
     use crate::tui::info_widget::{InfoWidgetData, MemoryInfo};
     use std::collections::HashMap;
+
+    #[test]
+    fn mcp_section_height_mirrors_the_one_line_renderer() {
+        let data = InfoWidgetData {
+            model: Some("gpt-test".to_string()),
+            mcp_servers: vec![("filesystem".to_string(), 5), ("github".to_string(), 2)],
+            ..Default::default()
+        };
+        // Wide widget: the joined line fits, so the MCP section is one row.
+        let wide = compute_page_layout(&data, 60, 10);
+        assert_eq!(wide.max_page_height, 1, "model(0) + mcp(1) = 1");
+        // Narrow widget: neither the full nor the compact joined line fits,
+        // so the renderer falls back to a header plus one row per server.
+        let narrow = compute_page_layout(&data, 20, 10);
+        assert_eq!(narrow.max_page_height, 3, "mcp header + 2 servers = 3");
+    }
 
     #[test]
     fn compute_page_layout_falls_back_to_compact_page() {
