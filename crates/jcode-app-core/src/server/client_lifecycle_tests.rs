@@ -76,6 +76,9 @@ struct IsolatedReloadRecoveryEnv {
 #[path = "client_lifecycle_tests/control_requests.rs"]
 mod control_requests;
 
+#[path = "client_lifecycle_tests/decisions.rs"]
+mod decisions;
+
 impl IsolatedRuntimeDir {
     fn new() -> Self {
         let temp = tempfile::TempDir::new().expect("runtime dir");
@@ -457,6 +460,7 @@ fn subscribe_request(working_dir: Option<&str>) -> Request {
         supports_user_response: false,
         supports_server_failover: false,
         supports_turn_identity: false,
+        supports_decisions: false,
         id: 1,
         working_dir: working_dir.map(str::to_string),
         selfdev: None,
