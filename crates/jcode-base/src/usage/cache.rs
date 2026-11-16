@@ -27,6 +27,18 @@ pub(super) fn anthropic_usage_cache() -> &'static std::sync::Mutex<HashMap<Strin
     ANTHROPIC_USAGE_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// Clear the process-global Anthropic usage cache.
+///
+/// It is keyed by account label and shared by every caller in the process, so a
+/// test that primes one label can change the routing rank another test observes.
+/// Tests that assert on ordering must start from an empty cache.
+#[cfg(test)]
+pub(crate) fn clear_anthropic_usage_cache_for_tests() {
+    if let Ok(mut map) = anthropic_usage_cache().lock() {
+        map.clear();
+    }
+}
+
 pub(super) fn openai_usage_cache() -> &'static std::sync::Mutex<HashMap<String, OpenAIUsageData>> {
     OPENAI_ACCOUNT_USAGE_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
@@ -154,6 +166,35 @@ fn openai_known_exhausted(data: &OpenAIUsageData) -> bool {
 mod account_snapshot_tests {
     use super::*;
     use crate::usage::{MultiAccountProviderKind, OpenAIUsageWindow};
+
+    /// Isolate the usage cache: it is a process-global map mirrored on disk under
+    /// `JCODE_HOME`, so a test that asserts on ordering has to own both.
+    struct HermeticUsageHome(
+        std::sync::MutexGuard<'static, ()>,
+        Option<std::ffi::OsString>,
+        tempfile::TempDir,
+    );
+
+    impl HermeticUsageHome {
+        fn new() -> Self {
+            let lock = crate::storage::lock_test_env();
+            let previous = std::env::var_os("JCODE_HOME");
+            let dir = tempfile::tempdir().expect("temp usage home");
+            crate::env::set_var("JCODE_HOME", dir.path());
+            clear_anthropic_usage_cache_for_tests();
+            Self(lock, previous, dir)
+        }
+    }
+
+    impl Drop for HermeticUsageHome {
+        fn drop(&mut self) {
+            match self.1.take() {
+                Some(previous) => crate::env::set_var("JCODE_HOME", previous),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            clear_anthropic_usage_cache_for_tests();
+        }
+    }
 
     #[test]
     fn stale_samples_stay_exhausted_until_their_window_resets() {
@@ -326,6 +367,9 @@ mod account_snapshot_tests {
     #[test]
     fn pool_prefers_fresh_quota_within_priority_tier() {
         use crate::auth::account_pool::AccountPool;
+        // The usage cache is process-global in memory and mirrored on disk under
+        // JCODE_HOME, so ordering assertions need both isolated.
+        let _home = HermeticUsageHome::new();
         let unknown = "claude:quota-order-unknown".to_string();
         let healthy = "claude:quota-order-healthy".to_string();
         let lower = "claude:quota-order-lower".to_string();

@@ -502,6 +502,36 @@ impl AccountPool {
 mod tests {
     use super::*;
 
+    /// Rotation depends on routing rank, which reads the process-global usage
+    /// cache (memory plus a disk mirror under JCODE_HOME). A test that asserts on
+    /// order has to own both.
+    struct HermeticUsageHome(
+        std::sync::MutexGuard<'static, ()>,
+        Option<std::ffi::OsString>,
+        tempfile::TempDir,
+    );
+
+    impl HermeticUsageHome {
+        fn new() -> Self {
+            let lock = crate::storage::lock_test_env();
+            let previous = std::env::var_os("JCODE_HOME");
+            let dir = tempfile::tempdir().expect("temp usage home");
+            crate::env::set_var("JCODE_HOME", dir.path());
+            crate::usage::clear_anthropic_usage_cache_for_tests();
+            Self(lock, previous, dir)
+        }
+    }
+
+    impl Drop for HermeticUsageHome {
+        fn drop(&mut self) {
+            match self.1.take() {
+                Some(previous) => crate::env::set_var("JCODE_HOME", previous),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::usage::clear_anthropic_usage_cache_for_tests();
+        }
+    }
+
     #[test]
     fn subscription_tiers_are_conservative_and_overridable() {
         for plan in ["pro", "promax", " Pro "] {
@@ -737,6 +767,7 @@ mod tests {
 
     #[test]
     fn rotation_cycles_after_current_and_skips_excluded() {
+        let _home = HermeticUsageHome::new();
         let pool = AccountPool {
             members: vec![],
             excluded: vec!["openai:openai-fox".into()],
