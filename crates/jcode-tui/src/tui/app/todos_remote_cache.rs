@@ -22,15 +22,15 @@ pub(super) fn load(cache: &RefCell<Option<RemoteTodoCache>>, raw: Option<&str>) 
     }
     let parsed = raw.map(serde_json::from_str::<serde_json::Value>);
     let valid = parsed.as_ref().is_some_and(Result::is_ok);
-    let payload = parsed
-        .and_then(|result| {
-            result
-                .map_err(|error| {
-                    crate::logging::debug(&format!("Invalid remote todo snapshot: {error}"));
-                })
-                .ok()
-        })
-        .unwrap_or_default();
+    let payload = match parsed {
+        Some(Ok(payload)) => payload,
+        Some(Err(error)) => {
+            crate::logging::debug(&format!("Invalid remote todo snapshot: {error}"));
+            serde_json::Value::Null
+        }
+        // No remote snapshot yet is an ordinary empty state, not a parse error.
+        None => serde_json::Value::Null,
+    };
     let state = Arc::new((
         serde_json::from_value(payload["todos"].clone()).unwrap_or_else(|error| {
             crate::logging::debug(&format!("Invalid remote todos: {error}"));

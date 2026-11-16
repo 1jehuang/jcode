@@ -26,10 +26,10 @@ impl CompactionJsonBytesCache {
             *cached = None;
             return 0;
         };
-        if let Some((identity, bytes)) = cached.as_ref() {
-            if std::ptr::eq(identity.as_ptr(), Arc::as_ptr(state)) {
-                return *bytes;
-            }
+        if let Some((identity, bytes)) = cached.as_ref()
+            && std::ptr::eq(identity.as_ptr(), Arc::as_ptr(state))
+        {
+            return *bytes;
         }
         let bytes = estimate_json_bytes(state);
         *cached = Some((Arc::downgrade(state), bytes));
