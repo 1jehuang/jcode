@@ -118,6 +118,7 @@ pub(super) async fn spawn_tracked_live_turn(
     message: String,
     system_reminder: Option<String>,
     display_role: Option<crate::session::StoredDisplayRole>,
+    origin: crate::hooks::PromptOrigin,
     status_detail: Option<String>,
     swarm: LiveTurnSwarmContext,
 ) -> bool {
@@ -128,6 +129,7 @@ pub(super) async fn spawn_tracked_live_turn(
         Vec::new(),
         system_reminder,
         display_role,
+        origin,
         status_detail,
         swarm,
     )
