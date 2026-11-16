@@ -613,7 +613,13 @@ pub async fn start_openai_device_login_at(base: &str) -> Result<OpenAiDeviceCode
     // The server sends `interval` as a string ("5"); accept a number too.
     let interval = match body.interval {
         Some(serde_json::Value::Number(n)) => n.as_u64(),
-        Some(serde_json::Value::String(s)) => s.trim().parse().ok(),
+        Some(serde_json::Value::String(s)) => match s.trim().parse() {
+            Ok(interval) => Some(interval),
+            Err(error) => {
+                crate::logging::debug(&format!("Invalid device-code polling interval: {error}"));
+                None
+            }
+        },
         _ => None,
     }
     .unwrap_or(5)
@@ -621,7 +627,13 @@ pub async fn start_openai_device_login_at(base: &str) -> Result<OpenAiDeviceCode
     let expires_at_ms = body
         .expires_at
         .as_deref()
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .and_then(|s| match chrono::DateTime::parse_from_rfc3339(s) {
+            Ok(expires_at) => Some(expires_at),
+            Err(error) => {
+                crate::logging::debug(&format!("Invalid device-code expiry: {error}"));
+                None
+            }
+        })
         .map(|t| t.timestamp_millis())
         .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() + 15 * 60 * 1000);
     Ok(OpenAiDeviceCode {
@@ -1111,8 +1123,14 @@ pub async fn refresh_claude_tokens(refresh_token: &str) -> Result<OAuthTokens> {
 
 /// Stored Claude tokens for `label`, expressed as [`OAuthTokens`].
 fn stored_claude_tokens(label: &str) -> Option<OAuthTokens> {
-    let account = claude_auth::list_accounts()
-        .ok()?
+    let accounts = match claude_auth::list_accounts() {
+        Ok(accounts) => accounts,
+        Err(error) => {
+            crate::logging::debug(&format!("Cannot reload stored Claude accounts: {error}"));
+            return None;
+        }
+    };
+    let account = accounts
         .into_iter()
         .find(|account| account.label == label)?;
     Some(OAuthTokens {
@@ -1217,8 +1235,14 @@ pub async fn refresh_openai_tokens(refresh_token: &str) -> Result<OAuthTokens> {
 
 /// Stored OpenAI tokens for `label`, expressed as [`OAuthTokens`].
 fn stored_openai_tokens(label: &str) -> Option<OAuthTokens> {
-    let account = crate::auth::codex::list_accounts()
-        .ok()?
+    let accounts = match crate::auth::codex::list_accounts() {
+        Ok(accounts) => accounts,
+        Err(error) => {
+            crate::logging::debug(&format!("Cannot reload stored OpenAI accounts: {error}"));
+            return None;
+        }
+    };
+    let account = accounts
         .into_iter()
         .find(|account| account.label == label)?;
     Some(OAuthTokens {

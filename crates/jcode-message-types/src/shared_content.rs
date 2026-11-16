@@ -41,7 +41,11 @@ impl SharedContent {
     }
 
     pub(crate) fn record_serialized_json_bytes(&self, bytes: usize) {
-        let _ = self.1.json_bytes.set(bytes);
+        if let Err(competing_bytes) = self.1.json_bytes.set(bytes) {
+            // Immutable snapshots may race to record the same measurement.
+            // Keep the first value, but detect inconsistent measurements.
+            debug_assert_eq!(self.1.json_bytes.get(), Some(&competing_bytes));
+        }
     }
 
     pub(crate) fn cached_message_hash(

@@ -559,7 +559,13 @@ fn bounded_tool_input(input: &serde_json::Value) -> serde_json::Value {
     }
     let mut preview = Preview(Vec::new());
     if serde_json::to_writer(&mut preview, input).is_ok() {
-        serde_json::from_slice(&preview.0).unwrap_or_default()
+        match serde_json::from_slice(&preview.0) {
+            Ok(messages) => messages,
+            Err(error) => {
+                crate::logging::debug(&format!("Cannot decode mobile preview cache: {error}"));
+                serde_json::Value::Null
+            }
+        }
     } else {
         serde_json::Value::String(format!(
             "{}\n… (truncated)",
@@ -639,9 +645,17 @@ fn structured_tools(
     }
     // Backend limits are UTF-16 code units for prose and 256 KiB serialized
     // metadata. Reserve room for the JSON property names/envelope.
-    if prose.text.encode_utf16().count() > 200_000
-        || serde_json::to_vec(&(&calls, &results)).ok()?.len() > MAX_STRUCTURED_BYTES
-    {
+    if prose.text.encode_utf16().count() > 200_000 {
+        return None;
+    }
+    let structured_bytes = match serde_json::to_vec(&(&calls, &results)) {
+        Ok(bytes) => bytes.len(),
+        Err(error) => {
+            crate::logging::debug(&format!("Cannot serialize mobile tool metadata: {error}"));
+            return None;
+        }
+    };
+    if structured_bytes > MAX_STRUCTURED_BYTES {
         return None;
     }
     Some((prose.text, calls, results))
@@ -847,18 +861,33 @@ fn attached_images(blocks: &[ContentBlock]) -> Vec<WireImage> {
 
 fn image_thumbnail(reader: impl std::io::BufRead + std::io::Seek) -> Option<WireImage> {
     use base64::Engine;
-    let mut reader = image::ImageReader::new(reader).with_guessed_format().ok()?;
+    let mut reader = match image::ImageReader::new(reader).with_guessed_format() {
+        Ok(reader) => reader,
+        Err(error) => {
+            crate::logging::debug(&format!("Cannot identify mobile thumbnail format: {error}"));
+            return None;
+        }
+    };
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(8192);
     limits.max_image_height = Some(8192);
     limits.max_alloc = Some(128 * 1024 * 1024);
     reader.limits(limits);
-    let mut thumbnail = reader.decode().ok()?.thumbnail(1024, 1024).to_rgb8();
+    let mut thumbnail = match reader.decode() {
+        Ok(image) => image.thumbnail(1024, 1024).to_rgb8(),
+        Err(error) => {
+            crate::logging::debug(&format!("Cannot decode mobile thumbnail: {error}"));
+            return None;
+        }
+    };
     loop {
         let mut bytes = Vec::new();
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 75)
+        if let Err(error) = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 75)
             .encode_image(&thumbnail)
-            .ok()?;
+        {
+            crate::logging::debug(&format!("Cannot encode mobile thumbnail: {error}"));
+            return None;
+        }
         if bytes.len() <= 256 * 1024 {
             return Some(WireImage {
                 media_type: "image/jpeg".into(),
@@ -1018,7 +1047,7 @@ async fn upload(
         .timeout(Duration::from_secs(30))
         .send()
         .await
-        .map_err(|error| {
+        .inspect_err(|error| {
             timing.outcome = if error.is_timeout() {
                 "timeout"
             } else if error.is_connect() {
@@ -1026,7 +1055,6 @@ async fn upload(
             } else {
                 "transport_error"
             };
-            error
         })
         .context("mobile sync upload failed")?;
     let status = response.status();

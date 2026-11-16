@@ -645,7 +645,9 @@ impl CopilotApiProvider {
             };
             match stream_result {
                 Ok(()) => {
-                    let _ = attempt_guard.finish().await;
+                    // The attempt completed successfully. Only retry paths
+                    // need the replay-output flag returned by the guard.
+                    attempt_guard.finish().await;
                     return;
                 }
                 Err(e) => {

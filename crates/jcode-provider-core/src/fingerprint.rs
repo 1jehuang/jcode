@@ -120,7 +120,10 @@ fn canonical_fingerprints(
             if index > 0 {
                 encoded.push(b',');
             }
-            serde_json::to_writer(&mut encoded, key).ok()?;
+            if let Err(error) = serde_json::to_writer(&mut encoded, key) {
+                jcode_logging::debug(&format!("Cannot fingerprint request key: {error}"));
+                return None;
+            }
             encoded.push(b':');
             let start = encoded.len();
             if item_result.is_none()
@@ -135,13 +138,17 @@ fn canonical_fingerprints(
                         encoded.push(b',');
                     }
                     let item_start = encoded.len();
-                    serde_json::to_writer(&mut encoded, item).ok()?;
+                    if let Err(error) = serde_json::to_writer(&mut encoded, item) {
+                        jcode_logging::debug(&format!("Cannot fingerprint request item: {error}"));
+                        return None;
+                    }
                     hashes.push(stable_hash_bytes(&encoded[item_start..]));
                 }
                 encoded.push(b']');
                 item_result = Some((hashes, stable_hash_bytes(&encoded[start..])));
-            } else {
-                serde_json::to_writer(&mut encoded, value).ok()?;
+            } else if let Err(error) = serde_json::to_writer(&mut encoded, value) {
+                jcode_logging::debug(&format!("Cannot fingerprint request field: {error}"));
+                return None;
             }
             let matches_system = system_result.is_none()
                 && system.is_some_and(|system| std::ptr::eq(system, value) || system == value);

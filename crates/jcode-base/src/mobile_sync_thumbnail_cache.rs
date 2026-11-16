@@ -75,9 +75,13 @@ pub(super) fn attachment_thumbnail(data: &str) -> Option<WireImage> {
 
 fn decode_thumbnail(data: &str) -> Option<WireImage> {
     use base64::Engine;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(data)
-        .ok()?;
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(data) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            crate::logging::debug(&format!("Cannot decode mobile attachment base64: {error}"));
+            return None;
+        }
+    };
     if bytes.len() > 16 * 1024 * 1024 {
         return None;
     }

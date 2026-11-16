@@ -62,7 +62,15 @@ pub struct WebsocketEventClassification {
 impl WebsocketEventClassification {
     pub fn parse(data: &str) -> Self {
         Self {
-            value: serde_json::from_str(data).ok(),
+            value: match serde_json::from_str(data) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    // Plain-text control frames are valid too. Do not log the
+                    // payload, which may contain private model output.
+                    jcode_logging::debug(&format!("Non-JSON websocket frame: {error}"));
+                    None
+                }
+            },
         }
     }
 
