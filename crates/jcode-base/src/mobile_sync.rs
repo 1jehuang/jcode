@@ -833,7 +833,6 @@ fn generated_images(text: &str) -> Vec<WireImage> {
 // ToolOutput images are persisted as Image blocks following their ToolResult,
 // exactly like user attachments. Never resolve attachment data as a local path.
 fn attached_images(blocks: &[ContentBlock]) -> Vec<WireImage> {
-    use base64::Engine;
     let mut images = Vec::new();
     for block in blocks {
         let ContentBlock::Image { media_type, data } = block else {
@@ -846,13 +845,7 @@ fn attached_images(blocks: &[ContentBlock]) -> Vec<WireImage> {
         {
             continue;
         }
-        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
-            continue;
-        };
-        if bytes.len() > 16 * 1024 * 1024 {
-            continue;
-        }
-        if let Some(image) = image_thumbnail(std::io::Cursor::new(bytes)) {
+        if let Some(image) = thumbnail_cache::attachment_thumbnail(data) {
             images.push(image);
             if images.len() == 4 {
                 break;
@@ -1347,6 +1340,9 @@ async fn background_sync() {
         }
     }
 }
+
+#[path = "mobile_sync_thumbnail_cache.rs"]
+mod thumbnail_cache;
 
 #[cfg(test)]
 #[path = "mobile_sync_backoff_tests.rs"]
