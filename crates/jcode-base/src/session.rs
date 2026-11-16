@@ -462,10 +462,9 @@ impl Session {
         let replay_events_json_bytes: usize =
             self.replay_events.iter().map(estimate_json_bytes).sum();
         let compaction_json_bytes = self
-            .compaction
-            .as_ref()
-            .map(estimate_json_bytes)
-            .unwrap_or(0);
+            .memory_profile_cache
+            .compaction_json_bytes
+            .bytes(self.compaction.as_ref());
         let compaction_summary_bytes = self
             .compaction
             .as_ref()
@@ -709,6 +708,7 @@ impl Session {
         );
 
         self.memory_profile_cache = SessionMemoryProfileCache {
+            compaction_json_bytes: self.memory_profile_cache.compaction_json_bytes.clone(),
             messages_count: self.messages.len(),
             messages_json_bytes: self.messages.iter().map(stored_message_json_bytes).sum(),
             message_stats,
@@ -742,10 +742,9 @@ impl Session {
     pub fn memory_profile_snapshot(&mut self) -> SessionMemoryProfileSnapshot {
         self.ensure_memory_profile_cache();
         let compaction_json_bytes = self
-            .compaction
-            .as_ref()
-            .map(estimate_json_bytes)
-            .unwrap_or(0);
+            .memory_profile_cache
+            .compaction_json_bytes
+            .bytes(self.compaction.as_ref());
 
         SessionMemoryProfileSnapshot {
             message_count: self.memory_profile_cache.messages_count,
