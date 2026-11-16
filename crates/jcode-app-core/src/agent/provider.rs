@@ -263,6 +263,18 @@ impl Agent {
         self.session.provider_key = Some(selection.runtime_key.stable_id());
         self.session.route_api_method = Some(selection.api_method.clone());
         self.session.model = Some(self.provider_model());
+        // Same effort sync as `set_model_from_provider_state_event`: the
+        // picker uses this route path, and without it the persisted session
+        // effort would keep the previous model's level until resume
+        // reapplies it (greptile F7, PR 1879).
+        let effective_effort = self.provider.reasoning_effort();
+        if self.session.reasoning_effort != effective_effort {
+            self.session.reasoning_effort = effective_effort;
+            crate::session_effort::record_session_effort(
+                &self.session.id,
+                self.session.reasoning_effort.as_deref(),
+            );
+        }
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
         self.refresh_compaction_budget();
@@ -307,6 +319,19 @@ impl Agent {
             self.session.route_api_method = None;
         }
         self.session.model = Some(self.provider_model());
+        // A model switch can change or clear the effective reasoning effort
+        // (e.g. switching from a reasoning model to a plain one clears it;
+        // switching back restores the per-model configured default). Keep the
+        // persisted session effort and the deadlock-free side-table in sync so
+        // resume and server-side effort queries never serve a stale value.
+        let effective_effort = self.provider.reasoning_effort();
+        if self.session.reasoning_effort != effective_effort {
+            self.session.reasoning_effort = effective_effort;
+            crate::session_effort::record_session_effort(
+                &self.session.id,
+                self.session.reasoning_effort.as_deref(),
+            );
+        }
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
         self.refresh_compaction_budget();
