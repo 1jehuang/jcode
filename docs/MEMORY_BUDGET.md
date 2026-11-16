@@ -110,6 +110,13 @@ for every tier. The full hosted subscription API group passed all 12 tests,
 including builder-owned bytes after metadata leaves scope. No live login,
 billing, payment, or plan mutation was performed.
 
+OpenAI device-flow start and poll requests now serialize borrowed client/device
+metadata directly instead of allocating temporary JSON maps and copied strings.
+All 94 hosted serial OAuth tests passed. Added exact-byte and source-release
+coverage includes empty fields, Unicode, escaping, and control characters.
+Polling cadence, endpoints, timeouts, and error handling are unchanged. No real
+OAuth requests were sent by the new tests, and no RSS saving is inferred.
+
 ### Report request ownership acceptance (2026-11-16)
 
 Sponsor usage flushing moves its reports into a typed serialization view instead
