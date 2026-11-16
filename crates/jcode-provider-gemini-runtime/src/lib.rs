@@ -1119,7 +1119,8 @@ impl Provider for GeminiProvider {
     }
 
     fn model_routes(&self) -> Vec<jcode_provider_core::ModelRoute> {
-        self.available_models_display()
+        let mut routes: Vec<_> = self
+            .available_models_display()
             .into_iter()
             .map(|model| jcode_provider_core::ModelRoute {
                 model,
@@ -1129,8 +1130,11 @@ impl Provider for GeminiProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             })
-            .collect()
+            .collect();
+        jcode_provider_core::fill_served_reasoning_efforts(self, &mut routes);
+        routes
     }
 
     async fn prefetch_models(&self) -> Result<()> {

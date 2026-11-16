@@ -185,6 +185,7 @@ impl AuthUxStateSpaceProvider {
                 },
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             });
         }
         for model in self.models {
@@ -200,6 +201,7 @@ impl AuthUxStateSpaceProvider {
                 },
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             });
             if self.include_generic_profile_duplicate {
                 routes.push(crate::provider::ModelRoute {
@@ -214,6 +216,7 @@ impl AuthUxStateSpaceProvider {
                     },
                     usage: None,
                     cheapness: None,
+                    reasoning_efforts: None,
                 });
             }
         }
@@ -232,6 +235,7 @@ impl MixedModelRoutesProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
             crate::provider::ModelRoute {
                 model: "claude-opus-4-6".to_string(),
@@ -241,6 +245,7 @@ impl MixedModelRoutesProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
             crate::provider::ModelRoute {
                 model: "Qwen/Qwen3-Coder-480B-A35B-Instruct".to_string(),
@@ -250,6 +255,7 @@ impl MixedModelRoutesProvider {
                 detail: "https://llm.chutes.ai/v1".to_string(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
             crate::provider::ModelRoute {
                 model: "deepseek/deepseek-v4-pro".to_string(),
@@ -259,6 +265,7 @@ impl MixedModelRoutesProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
         ]
     }
@@ -514,6 +521,7 @@ impl Provider for CountingModelRoutesProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             })
             .collect()
     }
@@ -1656,6 +1664,7 @@ impl Provider for AzureLoginMockProvider {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         }]
     }
 

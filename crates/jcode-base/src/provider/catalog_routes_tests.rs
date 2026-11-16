@@ -44,6 +44,7 @@ fn saved_account_catalogs_keep_work_personal_and_named_accounts_separate() {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         },
     ]);
     assert!(routes.iter().any(|r| r.api_method == "claude-api"));

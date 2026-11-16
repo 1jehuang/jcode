@@ -469,6 +469,7 @@ impl Provider for SnapshotTestProvider {
             detail: "test route".to_string(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         }]
     }
 
@@ -516,6 +517,7 @@ fn route_selection_preserves_runtime_identity_from_model_route() {
         detail: "https://openrouter.ai/api/v1".to_string(),
         usage: None,
         cheapness: None,
+        reasoning_efforts: None,
     });
     assert_eq!(selection.model, "openrouter/owl-alpha");
     assert_eq!(selection.runtime_key, RuntimeKey::OpenRouter);
@@ -529,6 +531,7 @@ fn route_selection_preserves_runtime_identity_from_model_route() {
         detail: "https://integrate.api.nvidia.com/v1".to_string(),
         usage: None,
         cheapness: None,
+        reasoning_efforts: None,
     });
     assert_eq!(
         selection.runtime_key,
@@ -549,6 +552,7 @@ fn grok_build_route_selection_is_a_first_class_runtime() {
         detail: "Grok Build subscription via Jcode-managed ACP".to_string(),
         cheapness: None,
         usage: None,
+        reasoning_efforts: None,
     });
     assert_eq!(selection.runtime_key, RuntimeKey::GrokBuild);
     assert_eq!(selection.runtime_key.stable_id(), "grok-build");
@@ -562,6 +566,7 @@ fn grok_build_route_selection_is_a_first_class_runtime() {
         detail: String::new(),
         cheapness: None,
         usage: None,
+        reasoning_efforts: None,
     });
     assert_eq!(prefixed.routed_model_spec(), "grok-build:grok-4.6");
 }

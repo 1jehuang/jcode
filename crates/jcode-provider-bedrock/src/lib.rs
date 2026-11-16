@@ -1378,6 +1378,18 @@ impl Provider for BedrockProvider {
         )
     }
 
+    fn reasoning_efforts_for_model(&self, model: &str) -> Vec<&'static str> {
+        let model = self
+            .profile_route_for_model(model.trim())
+            .unwrap_or_else(|| model.trim().to_string());
+        // `reasoning_effort` only applies an effort to the default Opus model.
+        if Self::normalize_model_id(&model) == DEFAULT_MODEL {
+            vec!["low", "medium", "high", "xhigh", "max"]
+        } else {
+            Vec::new()
+        }
+    }
+
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
         let effort = effort.trim().to_ascii_lowercase();
         if !matches!(
@@ -1429,7 +1441,7 @@ impl Provider for BedrockProvider {
             .read()
             .map(|guard| guard.clone())
             .unwrap_or_default();
-        self.all_display_models()
+        let mut routes: Vec<_> = self.all_display_models()
             .into_iter()
             .map(|model| {
                 let info = Self::model_info(&model);
@@ -1480,9 +1492,12 @@ impl Provider for BedrockProvider {
                     },
                     usage: None,
                     cheapness: Self::route_pricing(&model),
+                    reasoning_efforts: None,
                 }
             })
-            .collect()
+            .collect();
+        jcode_provider_core::fill_served_reasoning_efforts(self, &mut routes);
+        routes
     }
 
     #[cfg(feature = "aws-sdk")]

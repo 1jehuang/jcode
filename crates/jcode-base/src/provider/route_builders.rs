@@ -130,6 +130,7 @@ pub fn build_anthropic_oauth_route(
         detail: detail.into(),
         usage: None,
         cheapness: cheapness_for_route(model, "Anthropic", "claude-oauth"),
+        reasoning_efforts: None,
     }
 }
 
@@ -158,6 +159,7 @@ pub fn build_chatgpt_web_route() -> ModelRoute {
         detail: "logged-in Firefox ChatGPT session".to_string(),
         usage: None,
         cheapness: None,
+        reasoning_efforts: None,
     }
 }
 
@@ -175,6 +177,7 @@ fn build_openai_route(
         detail: detail.into(),
         usage: None,
         cheapness: cheapness_for_route(model, "OpenAI", api_method),
+        reasoning_efforts: None,
     }
 }
 
@@ -187,6 +190,7 @@ pub fn build_copilot_route(model: &str, available: bool, detail: impl Into<Strin
         detail: detail.into(),
         usage: None,
         cheapness: cheapness_for_route(model, "Copilot", "copilot"),
+        reasoning_efforts: None,
     }
 }
 
@@ -203,6 +207,7 @@ pub fn build_openrouter_auto_route(
         detail: auto_detail.into(),
         usage: None,
         cheapness: cheapness_for_route(model, "auto", "openrouter"),
+        reasoning_efforts: None,
     }
 }
 
@@ -237,6 +242,7 @@ pub fn build_openrouter_endpoint_route(
                 endpoint.provider_name
             )),
         ),
+        reasoning_efforts: None,
     }
 }
 
@@ -253,6 +259,7 @@ pub fn build_openrouter_fallback_provider_route(
         detail: String::new(),
         usage: None,
         cheapness: cheapness_for_route(catalog_model, provider, "openrouter"),
+        reasoning_efforts: None,
     }
 }
 

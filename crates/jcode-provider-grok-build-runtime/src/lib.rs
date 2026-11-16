@@ -219,7 +219,8 @@ impl Provider for GrokBuildProvider {
     }
 
     fn model_routes(&self) -> Vec<ModelRoute> {
-        self.available_models_display()
+        let mut routes: Vec<_> = self
+            .available_models_display()
             .into_iter()
             .map(|model| ModelRoute {
                 model,
@@ -229,8 +230,11 @@ impl Provider for GrokBuildProvider {
                 detail: "Grok Build subscription via the Grok CLI chat proxy (HTTPS)".to_string(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             })
-            .collect()
+            .collect();
+        jcode_provider_core::fill_served_reasoning_efforts(self, &mut routes);
+        routes
     }
 
     async fn prefetch_models(&self) -> Result<()> {

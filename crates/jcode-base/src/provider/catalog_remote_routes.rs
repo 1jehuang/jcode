@@ -18,6 +18,7 @@ pub fn remote_model_routes_fallback(
                 detail: "jcode subscription routing · managed server-side".to_string(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             })
             .collect();
     }
@@ -49,6 +50,7 @@ pub fn remote_model_routes_fallback(
                 },
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             });
             continue;
         }
@@ -186,6 +188,7 @@ pub fn remote_model_routes_fallback(
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             });
             added_any = true;
         }
@@ -199,6 +202,7 @@ pub fn remote_model_routes_fallback(
                 detail: "no matching configured provider route".to_string(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             });
         }
     }
@@ -237,6 +241,7 @@ pub fn remote_model_routes_lightweight_fallback(
             },
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         });
     }
 
@@ -249,6 +254,7 @@ pub fn remote_model_routes_lightweight_fallback(
             detail: "refreshing model catalog…".to_string(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         });
     }
 
@@ -287,6 +293,7 @@ pub fn remote_current_openai_compatible_route_for_model(
         detail: resolved.api_base,
         usage: None,
         cheapness: None,
+        reasoning_efforts: None,
     })
 }
 
@@ -329,6 +336,7 @@ pub fn remote_openai_compatible_route_for_model(model: &str) -> Option<ModelRout
             detail,
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         });
     }
     named_provider_profile_route_for_model(model)
@@ -374,6 +382,7 @@ pub(super) fn named_provider_profile_route_for_model_in(
             detail,
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         });
     }
     None

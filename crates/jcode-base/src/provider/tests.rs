@@ -298,6 +298,78 @@ fn model_capabilities_refresh_forwards_only_active_present_openai() {
 }
 
 #[test]
+fn route_reasoning_efforts_come_from_the_runtime_that_applies_them() {
+    struct LadderMock;
+
+    #[async_trait::async_trait]
+    impl Provider for LadderMock {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<EventStream> {
+            unreachable!("ladder checks must not start a completion")
+        }
+
+        fn name(&self) -> &str {
+            "openai-ladder-mock"
+        }
+
+        fn model(&self) -> String {
+            "gpt-5.4".to_string()
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self)
+        }
+
+        fn reasoning_efforts_for_model(&self, model: &str) -> Vec<&'static str> {
+            if model == "gpt-5-pro" {
+                vec!["high", "swarm"]
+            } else {
+                vec!["low", "high", "swarm"]
+            }
+        }
+    }
+
+    with_clean_provider_test_env(|| {
+        let runtime = enter_test_runtime();
+        let _enter = runtime.enter();
+        let provider = test_multi_provider_with_openai();
+        *provider.openai.write().unwrap() = Some(Arc::new(LadderMock));
+        let efforts = |model: &str, api_method: &str| {
+            let route = ModelRoute {
+                model: model.to_string(),
+                provider: String::new(),
+                api_method: api_method.to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+                usage: None,
+                reasoning_efforts: None,
+            };
+            catalog_routes::route_reasoning_efforts(&provider, &route)
+        };
+        let strings = |efforts: &[&str]| efforts.iter().map(|e| e.to_string()).collect();
+
+        // Each route asks its runtime about its own model, not the selected one.
+        assert_eq!(
+            efforts("gpt-5-pro", "openai-api-key"),
+            Some(strings(&["high", "swarm"]))
+        );
+        assert_eq!(
+            efforts("gpt-5.6", "openai-oauth@work"),
+            Some(strings(&["low", "high", "swarm"]))
+        );
+        assert_eq!(efforts("claude-opus-4-6", "claude-oauth"), None);
+        assert_eq!(efforts("anthropic.claude", "bedrock"), Some(Vec::new()));
+        assert_eq!(efforts("gpt-5.4", "remote-catalog"), None);
+    });
+}
+
+#[test]
 fn openai_model_switch_prefixes_preserve_oauth_vs_api_state_space() {
     with_clean_provider_test_env(|| {
         let rt = enter_test_runtime();
@@ -904,6 +976,7 @@ impl Provider for StubExternalRuntime {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             })
             .collect()
     }

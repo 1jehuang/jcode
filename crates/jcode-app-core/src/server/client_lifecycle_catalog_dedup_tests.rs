@@ -32,6 +32,7 @@ fn catalog_dedup_key_ignores_age_drift_but_keeps_real_changes() {
         detail: detail.to_string(),
         usage: None,
         cheapness: None,
+        reasoning_efforts: None,
     };
     let event = |detail: &str| ServerEvent::AvailableModelsUpdated {
         provider_name: Some("OpenRouter".to_string()),
@@ -89,6 +90,7 @@ fn catalog_dedup_keeps_model_and_auth_route_changes() {
             detail: "cached 12m ago".into(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         }],
     };
     let key = available_models_dedup_key(&baseline);

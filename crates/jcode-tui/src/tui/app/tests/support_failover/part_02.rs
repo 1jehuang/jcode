@@ -458,6 +458,7 @@ impl Provider for AuthRefreshingMockProvider {
                     detail: String::new(),
                     usage: None,
                     cheapness: None,
+                    reasoning_efforts: None,
                 },
                 crate::provider::ModelRoute {
                     model: "grok-code-fast-1".to_string(),
@@ -467,6 +468,7 @@ impl Provider for AuthRefreshingMockProvider {
                     detail: String::new(),
                     usage: None,
                     cheapness: None,
+                    reasoning_efforts: None,
                 },
             ]
         } else {
@@ -478,6 +480,7 @@ impl Provider for AuthRefreshingMockProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             }]
         }
     }
@@ -585,6 +588,7 @@ impl Provider for AntigravityMockProvider {
                 detail: "cached catalog".to_string(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
             crate::provider::ModelRoute {
                 model: "gpt-oss-120b-medium".to_string(),
@@ -594,6 +598,7 @@ impl Provider for AntigravityMockProvider {
                 detail: "cached catalog".to_string(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
         ]
     }
@@ -659,6 +664,7 @@ impl Provider for LoginSmokeModelProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
             crate::provider::ModelRoute {
                 model: "gpt-5.4".to_string(),
@@ -668,6 +674,7 @@ impl Provider for LoginSmokeModelProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
             crate::provider::ModelRoute {
                 model: "openai/gpt-5.5".to_string(),
@@ -677,6 +684,7 @@ impl Provider for LoginSmokeModelProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
             crate::provider::ModelRoute {
                 model: "glm-51-nvfp4".to_string(),
@@ -686,6 +694,7 @@ impl Provider for LoginSmokeModelProvider {
                 detail: "recently added · https://llm.comtegra.cloud/v1".to_string(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
             crate::provider::ModelRoute {
                 model: "claude-opus-4.6".to_string(),
@@ -695,6 +704,7 @@ impl Provider for LoginSmokeModelProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
             crate::provider::ModelRoute {
                 model: "deepseek/deepseek-v4-pro".to_string(),
@@ -704,6 +714,7 @@ impl Provider for LoginSmokeModelProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
             crate::provider::ModelRoute {
                 model: "deepseek/deepseek-v4-pro".to_string(),
@@ -713,6 +724,7 @@ impl Provider for LoginSmokeModelProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
             crate::provider::ModelRoute {
                 model: "moonshotai/kimi-k2.5".to_string(),
@@ -722,6 +734,7 @@ impl Provider for LoginSmokeModelProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
         ]
     }
@@ -777,6 +790,7 @@ impl Provider for FailingModelSwitchProvider {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         }]
     }
 
@@ -910,6 +924,7 @@ impl Provider for DualMethodMockProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
             crate::provider::ModelRoute {
                 model: "claude-sonnet-4".to_string(),
@@ -919,6 +934,7 @@ impl Provider for DualMethodMockProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             },
         ]
     }
@@ -1044,6 +1060,7 @@ fn test_fallback_uses_remote_openai_credential_over_stale_route() {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             })
             .collect();
 

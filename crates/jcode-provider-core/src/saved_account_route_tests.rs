@@ -15,6 +15,7 @@ fn saved_account_routes_survive_serialization_and_restore_specs() {
                 detail: String::new(),
                 cheapness: None,
                 usage: None,
+                reasoning_efforts: None,
             };
             let selection = RouteSelection::from_model_route(&route);
             assert_eq!(selection.runtime_key, runtime);

@@ -1353,6 +1353,7 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         })
         .collect();
     app.remote_model_options.push(crate::provider::ModelRoute {
@@ -1363,6 +1364,7 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         detail: String::new(),
         usage: None,
         cheapness: None,
+        reasoning_efforts: None,
     });
     app.remote_model_options.push(crate::provider::ModelRoute {
         model: "claude-opus-4-8".to_string(),
@@ -1372,6 +1374,7 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         detail: String::new(),
         usage: None,
         cheapness: None,
+        reasoning_efforts: None,
     });
     for api_method in ["claude-oauth", "claude-api"] {
         app.remote_model_options.push(crate::provider::ModelRoute {
@@ -1382,6 +1385,7 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         });
     }
 }
@@ -1400,6 +1404,7 @@ fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
             detail: "→ Fireworks".to_string(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         },
         crate::provider::ModelRoute {
             model: "anthropic/claude-sonnet-4".to_string(),
@@ -1409,6 +1414,7 @@ fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         },
         crate::provider::ModelRoute {
             model: "anthropic/claude-sonnet-4".to_string(),
@@ -1418,6 +1424,7 @@ fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            reasoning_efforts: None,
         },
     ];
 }

@@ -67,6 +67,7 @@ impl JcodeProvider {
                 detail: crate::subscription_catalog::routing_policy_detail(model),
                 usage: None,
                 cheapness: None,
+                reasoning_efforts: None,
             })
             .collect()
     }
@@ -170,7 +171,9 @@ impl Provider for JcodeProvider {
 
     fn model_routes(&self) -> Vec<ModelRoute> {
         self.ensure_runtime_mode();
-        Self::model_routes_for(crate::subscription_catalog::effective_tier())
+        let mut routes = Self::model_routes_for(crate::subscription_catalog::effective_tier());
+        jcode_provider_core::fill_served_reasoning_efforts(self, &mut routes);
+        routes
     }
 
     async fn prefetch_models(&self) -> Result<()> {
@@ -197,6 +200,10 @@ impl Provider for JcodeProvider {
 
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
         self.inner.set_reasoning_effort(effort)
+    }
+
+    fn reasoning_efforts_for_model(&self, model: &str) -> Vec<&'static str> {
+        self.inner.reasoning_efforts_for_model(model)
     }
 
     fn available_efforts(&self) -> Vec<&'static str> {

@@ -662,6 +662,7 @@ fn model_route(model: &str, provider: &str, api_method: &str) -> crate::provider
         detail: String::new(),
         usage: None,
         cheapness: None,
+        reasoning_efforts: None,
     }
 }
 

@@ -548,6 +548,12 @@ pub struct ModelRouteInfo {
     /// Tracked turns and prior picker selections, when supplied by the runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::ModelUsage>,
+    /// Reasoning efforts `set_reasoning_effort` accepts after switching to
+    /// this route, in order. Empty means the route takes none; `None` means
+    /// the daemon did not report it, for example because the route's runtime
+    /// is not loaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_efforts: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

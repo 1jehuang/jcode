@@ -96,6 +96,7 @@ fn openai_oauth_route(model: &str) -> crate::provider::ModelRoute {
         detail: String::new(),
         usage: None,
         cheapness: None,
+        reasoning_efforts: None,
     }
 }
 
@@ -108,6 +109,7 @@ fn claude_oauth_route(model: &str) -> crate::provider::ModelRoute {
         detail: String::new(),
         usage: None,
         cheapness: None,
+        reasoning_efforts: None,
     }
 }
 
