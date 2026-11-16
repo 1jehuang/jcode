@@ -170,6 +170,21 @@ fn test_do_not_track() {
     jcode_core::env::remove_var("DO_NOT_TRACK");
 }
 
+/// This product's own opt-out spelling must work on its own, without relying on
+/// the jcode spelling, and it must show up as an environment opt-out.
+#[test]
+fn test_kcode_opt_out_env_var() {
+    let _guard = lock_test_env();
+    jcode_core::env::set_var("KCODE_NO_TELEMETRY", "1");
+    assert!(opt_out_forced_by_env());
+    assert!(!is_enabled());
+    assert_eq!(
+        opt_out_source(),
+        Some(TelemetryOptOutSource::Environment)
+    );
+    jcode_core::env::remove_var("KCODE_NO_TELEMETRY");
+}
+
 #[test]
 fn false_opt_out_values_keep_telemetry_enabled() {
     let _guard = lock_test_env();

@@ -553,7 +553,9 @@ pub fn opt_out_forced_by_env() -> bool {
             )
         })
     }
-    is_truthy("JCODE_NO_TELEMETRY") || is_truthy("DO_NOT_TRACK")
+    // `KCODE_NO_TELEMETRY` is this product's own spelling; the JCODE spelling
+    // stays honored so an existing shell profile or CI job keeps working.
+    is_truthy("KCODE_NO_TELEMETRY") || is_truthy("JCODE_NO_TELEMETRY") || is_truthy("DO_NOT_TRACK")
 }
 
 /// Persist the user's anonymous-usage telemetry choice. `enabled == false`
@@ -2783,11 +2785,12 @@ fn show_first_run_notice() {
         ("", "")
     };
     eprintln!("{dim}");
-    eprintln!("  jcode collects anonymous usage statistics (install count, version, OS,");
+    eprintln!("  kcode collects anonymous usage statistics (install count, version, OS,");
     eprintln!("  session activity, tool counts, and crash/exit reasons). No code, filenames,");
     eprintln!("  prompts, or personal data is sent.");
-    eprintln!("  To opt out: export JCODE_NO_TELEMETRY=1");
-    eprintln!("  Details: https://github.com/1jehuang/jcode/blob/master/TELEMETRY.md");
+    eprintln!("  To opt out: export KCODE_NO_TELEMETRY=1 (JCODE_NO_TELEMETRY also works)");
+    eprintln!("  Delivery still targets the upstream collector telemetry.jcode.sh;");
+    eprintln!("  see TELEMETRY.md in the KCode repository before enabling it.");
     eprintln!("{reset}");
 }
 
