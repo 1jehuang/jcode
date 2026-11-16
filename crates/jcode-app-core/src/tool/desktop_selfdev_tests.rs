@@ -132,6 +132,7 @@ fn test_and_inspection_commands_are_scoped_and_read_only() {
 }
 
 #[test]
+#[cfg(unix)]
 fn screenshot_uses_private_script_with_fresh_build_and_target_output() {
     let root = checkout();
     let spec = command_spec(root.path(), &input("screenshot"), "release", None).unwrap();
@@ -215,6 +216,7 @@ fn ambiguous_instances_and_foreign_executables_are_rejected() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn custom_test_executes_from_detected_repo_root() {
     let root = checkout();
     let output = DesktopSelfDevTool::new()
@@ -323,6 +325,7 @@ async fn unsafe_sockets_are_rejected_before_connecting() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn screenshot_execution_never_discovers_live_instances() {
     let root = checkout();
     std::fs::create_dir(root.path().join("scripts")).unwrap();
