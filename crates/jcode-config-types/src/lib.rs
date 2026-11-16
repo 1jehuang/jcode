@@ -430,6 +430,9 @@ pub struct NamedProviderConfig {
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub headers: std::collections::BTreeMap<String, String>,
     pub api_key_env: Option<String>,
+    /// Pool of key env names, one pinned per session. Takes precedence over api_key_env.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_key_envs: Vec<String>,
     pub api_key: Option<String>,
     pub env_file: Option<String>,
     pub default_model: Option<String>,
@@ -477,6 +480,7 @@ impl Default for NamedProviderConfig {
             auth_header: None,
             headers: std::collections::BTreeMap::new(),
             api_key_env: None,
+            api_key_envs: Vec::new(),
             api_key: None,
             env_file: None,
             default_model: None,

@@ -47,6 +47,14 @@ fn hash_prefix(digest: &[u8]) -> u64 {
     u64::from_be_bytes(bytes)
 }
 
+/// Index of the pool entry pinned to a session. Zero for no session or an empty pool.
+pub fn pool_index(session: Option<&str>, len: usize) -> usize {
+    match session {
+        Some(id) if !id.is_empty() && len > 0 => (stable_hash_str(id) % len as u64) as usize,
+        _ => 0,
+    }
+}
+
 pub fn stable_hash_json<T: Serialize + ?Sized>(value: &T) -> u64 {
     stable_json_fingerprint(value).0
 }
@@ -284,5 +292,22 @@ mod tests {
             stable_hash_json(&json!({"a": 1})),
             stable_hash_json(&json!({"a": 2}))
         );
+    }
+
+    #[test]
+    fn pool_index_pins_a_session_and_spreads_over_the_pool() {
+        assert_eq!(
+            pool_index(Some("session-a"), 5),
+            pool_index(Some("session-a"), 5)
+        );
+        for len in 2..=5 {
+            let used: std::collections::BTreeSet<usize> = (0..200)
+                .map(|n| pool_index(Some(format!("session-{n}").as_str()), len))
+                .collect();
+            assert_eq!(used.len(), len, "every entry of a {len}-key pool is used");
+        }
+        assert_eq!(pool_index(None, 5), 0);
+        assert_eq!(pool_index(Some(""), 5), 0);
+        assert_eq!(pool_index(Some("session-a"), 0), 0);
     }
 }
