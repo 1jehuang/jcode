@@ -7,6 +7,94 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
 
+#[cfg(test)]
+mod serialization_ownership_tests {
+    use super::*;
+
+    #[test]
+    fn debug_job_payload_preserves_legacy_fields_and_optional_values() {
+        for status in [
+            DebugJobStatus::Queued,
+            DebugJobStatus::Running,
+            DebugJobStatus::Completed,
+            DebugJobStatus::Failed,
+        ] {
+            for populated in [false, true] {
+                let created_at = Instant::now() - Duration::from_secs(3);
+                let job = DebugJob {
+                    id: "job-雪\"\\".into(),
+                    status: status.clone(),
+                    command: "message:hello\n世界".into(),
+                    session_id: populated.then(|| "session-🦀".into()),
+                    created_at,
+                    started_at: populated.then_some(created_at + Duration::from_secs(1)),
+                    finished_at: populated.then_some(created_at + Duration::from_secs(2)),
+                    output: populated.then(|| "output\n雪".into()),
+                    error: populated.then(String::new),
+                };
+                let payload = job.status_payload();
+                // Keep wall-clock values from this invocation while independently
+                // reproducing the legacy owned-field serialization contract.
+                let expected = serde_json::json!({
+                    "id": job.id.clone(),
+                    "status": job.status.as_str(),
+                    "command": job.command.clone(),
+                    "session_id": job.session_id.clone(),
+                    "elapsed_secs": payload["elapsed_secs"].clone(),
+                    "run_secs": payload["run_secs"].clone(),
+                    "total_secs": populated.then_some(2.0),
+                    "output": job.output.clone(),
+                    "error": job.error.clone(),
+                });
+                assert_eq!(payload, expected);
+                assert_eq!(
+                    serde_json::to_vec(&payload).unwrap(),
+                    serde_json::to_vec(&expected).unwrap()
+                );
+                assert!(payload["elapsed_secs"].as_f64().unwrap() >= 3.0);
+                assert_eq!(payload["run_secs"].is_null(), !populated);
+                if populated {
+                    assert!(payload["run_secs"].as_f64().unwrap() >= 2.0);
+                }
+                assert_eq!(job.id, "job-雪\"\\");
+                assert_eq!(job.command, "message:hello\n世界");
+            }
+        }
+    }
+
+    #[test]
+    fn debug_job_large_output_keeps_source_and_result_independent() {
+        let output = "large-output-雪\n".repeat(100_000);
+        let source = output.as_ptr();
+        let job = DebugJob {
+            id: "large".into(),
+            status: DebugJobStatus::Completed,
+            command: "message:fixture".into(),
+            session_id: None,
+            created_at: Instant::now(),
+            started_at: None,
+            finished_at: None,
+            output: Some(output),
+            error: None,
+        };
+        let mut payload = job.status_payload();
+        assert_eq!(payload["output"].as_str(), job.output.as_deref());
+        assert_eq!(job.output.as_ref().unwrap().as_ptr(), source);
+        payload["output"] = Value::String("modified diagnostic".into());
+        assert_eq!(
+            job.output.as_ref().unwrap().len(),
+            "large-output-雪\n".len() * 100_000
+        );
+        assert!(
+            job.output
+                .as_ref()
+                .unwrap()
+                .starts_with("large-output-雪\n")
+        );
+        assert!(job.summary_payload().get("output").is_none());
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) enum DebugJobStatus {
     Queued,
@@ -49,10 +137,10 @@ impl DebugJob {
             .map(|f| f.duration_since(self.created_at).as_secs_f64());
 
         serde_json::json!({
-            "id": self.id.clone(),
+            "id": self.id,
             "status": self.status.as_str(),
-            "command": self.command.clone(),
-            "session_id": self.session_id.clone(),
+            "command": self.command,
+            "session_id": self.session_id,
             "elapsed_secs": elapsed_secs,
             "run_secs": run_secs,
             "total_secs": total_secs,
@@ -62,8 +150,8 @@ impl DebugJob {
     pub(super) fn status_payload(&self) -> Value {
         let mut payload = self.summary_payload();
         if let Some(obj) = payload.as_object_mut() {
-            obj.insert("output".to_string(), serde_json::json!(self.output.clone()));
-            obj.insert("error".to_string(), serde_json::json!(self.error.clone()));
+            obj.insert("output".to_string(), serde_json::json!(self.output));
+            obj.insert("error".to_string(), serde_json::json!(self.error));
         }
         payload
     }
