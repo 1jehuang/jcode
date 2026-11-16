@@ -188,11 +188,21 @@ pub fn enable_keyboard_enhancement() -> bool {
         crate::logging::info("Keyboard enhancement request skipped: termination already started");
         return false;
     }
-    let result = enable_keyboard_enhancement_to(&mut std::io::stdout(), inside_tmux()).is_ok();
-    crate::logging::info(&format!(
-        "Keyboard enhancement request: {}",
-        if result { "sent" } else { "FAILED" }
-    ));
+    let outcome = enable_keyboard_enhancement_to(&mut std::io::stdout(), inside_tmux());
+    let result = outcome.is_ok();
+    // A decoder that cannot consume CSI-u is a supported configuration, not a
+    // failure: say which one happened so a capture does not read as breakage.
+    match &outcome {
+        Ok(()) => crate::logging::info("Keyboard enhancement request: sent"),
+        Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
+            crate::logging::info(&format!(
+                "Keyboard enhancement skipped: {error}; cleared inherited reporting instead"
+            ));
+        }
+        Err(error) => {
+            crate::logging::info(&format!("Keyboard enhancement request: FAILED: {error}"))
+        }
+    }
     if result {
         // Set while still holding the state lock so a signal cleanup cannot
         // observe the push write without the ownership flag.
