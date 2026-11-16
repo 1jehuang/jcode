@@ -491,6 +491,82 @@ fn test_remote_jcode_subscription_catalog_is_not_augmented_with_local_auth_route
 }
 
 #[test]
+fn test_remote_cursor_acp_catalog_is_not_augmented_with_local_credential_routes() {
+    with_temp_jcode_home(|| {
+        // Simulate local Anthropic/OpenAI/Gemini credentials being present.
+        // Without the ACP guard, the prefix-based extension would synthesize
+        // duplicate claude-api/openai-oauth/gemini routes for ACP-advertised
+        // foundation models.
+        let previous_anthropic_key = std::env::var_os("ANTHROPIC_API_KEY");
+        crate::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test-key");
+        let previous_openai_key = std::env::var_os("OPENAI_API_KEY");
+        crate::env::set_var("OPENAI_API_KEY", "sk-test-openai-key");
+        crate::auth::AuthStatus::invalidate_cache();
+
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some(crate::provider::external::CURSOR_ACP_RUNTIME.to_string());
+        app.remote_available_entries = vec![
+            "claude-opus-5[thinking=true,budget_tokens=10000]".to_string(),
+            "gpt-5.3-codex[]".to_string(),
+            "gemini-3.1-pro[]".to_string(),
+            "grok-4.5[...]".to_string(),
+            "default[]".to_string(),
+        ];
+        // Server-sent routes: all correctly labeled "Cursor ACP".
+        app.remote_model_options = app
+            .remote_available_entries
+            .iter()
+            .map(|model| crate::provider::ModelRoute {
+                model: model.clone(),
+                provider: "Cursor ACP".to_string(),
+                api_method: crate::provider::external::CURSOR_ACP_RUNTIME.to_string(),
+                available: true,
+                detail: "Cursor CLI ACP routing · managed server-side".to_string(),
+                cheapness: None,
+                usage: None,
+            })
+            .collect();
+
+        app.open_model_picker();
+
+        // Restore env.
+        match previous_anthropic_key {
+            Some(value) => crate::env::set_var("ANTHROPIC_API_KEY", value),
+            None => crate::env::remove_var("ANTHROPIC_API_KEY"),
+        }
+        match previous_openai_key {
+            Some(value) => crate::env::set_var("OPENAI_API_KEY", value),
+            None => crate::env::remove_var("OPENAI_API_KEY"),
+        }
+        crate::auth::AuthStatus::invalidate_cache();
+
+        // The picker should show exactly the 5 server-sent routes, all labeled
+        // "Cursor ACP", with no duplicate Anthropic/OpenAI/Gemini rows.
+        assert_eq!(
+            app.remote_model_options.len(),
+            5,
+            "ACP routes should not be augmented with local credential routes"
+        );
+        assert!(
+            app.remote_model_options.iter().all(|route| {
+                route.provider == "Cursor ACP"
+                    && route.api_method == crate::provider::external::CURSOR_ACP_RUNTIME
+            }),
+            "every route should remain Cursor ACP after opening the picker"
+        );
+        assert!(
+            !app.remote_model_options.iter().any(|route| {
+                route.provider == "Anthropic"
+                    || route.provider == "OpenAI"
+                    || route.provider == "Gemini"
+            }),
+            "no local credential routes should be synthesized for ACP models"
+        );
+    });
+}
+
+#[test]
 fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_providers() {
     // The route count asserted here depends on `AuthStatus::check_fast()`,
     // which reads real credentials from the environment. Without isolation the
