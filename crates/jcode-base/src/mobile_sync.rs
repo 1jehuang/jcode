@@ -10,8 +10,9 @@
 //!
 //! Only user-visible text is uploaded: user/assistant text, tool calls as a
 //! one-line summary, and tool results truncated. Assistant markdown images in
-//! the generated-image store become bounded thumbnails. Hidden reasoning,
-//! arbitrary local files and provider-native blobs are never sent.
+//! the generated-image store and visible image attachments become bounded
+//! thumbnails. Hidden reasoning, arbitrary local files and provider-native
+//! blobs are never sent.
 
 use crate::session::Session;
 use crate::storage;
@@ -69,7 +70,7 @@ const MAX_TOOL_ID_BYTES: usize = 256;
 const MAX_STRUCTURED_BYTES: usize = 240 * 1024;
 // Bump when existing cloud rows need replaying, even if snapshot bytes and
 // visible-message fingerprints are unchanged. Missing versions deserialize as 0.
-const WIRE_VERSION: u32 = 1;
+const WIRE_VERSION: u32 = 2;
 /// Only sessions touched within this window are synced on enable.
 const BACKFILL_WINDOW: Duration = Duration::from_secs(14 * 24 * 3600);
 const SYNC_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -614,6 +615,20 @@ pub fn wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
         .enumerate()
         .skip(start)
         .filter_map(|(seq, message)| {
+            // Match desktop history visibility, including images accompanying
+            // model-only generated-image visual context reminders.
+            if message
+                .content
+                .iter()
+                .find_map(|block| match block {
+                    ContentBlock::Text { text, .. } => Some(text.trim_start()),
+                    _ => None,
+                })
+                .is_some_and(|text| text.starts_with("<system-reminder>"))
+            {
+                return None;
+            }
+            let mut images = attached_images(&message.content);
             let mut text = BoundedText::new(MAX_TEXT_CHARS);
             let mut has_parts = false;
             let mut is_tool_result = false;
@@ -651,7 +666,7 @@ pub fn wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
                 text.push(&part);
                 has_parts = true;
             }
-            if !has_parts {
+            if !has_parts && images.is_empty() {
                 return None;
             }
             let role = if is_tool_result {
@@ -669,17 +684,20 @@ pub fn wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
                 Some((prose, calls, results)) => (Some(prose), calls, results),
                 None => (None, Vec::new(), Vec::new()),
             };
+            if role == "assistant" && images.len() < 4 {
+                images.extend(
+                    generated_images(&text.text)
+                        .into_iter()
+                        .take(4 - images.len()),
+                );
+            }
             Some(WireMessage {
                 seq,
                 role,
                 display_text,
                 tool_calls,
                 tool_results,
-                images: if role == "assistant" {
-                    generated_images(&text.text)
-                } else {
-                    Vec::new()
-                },
+                images,
                 text: text.text,
                 created_at: message.timestamp.map(|t| t.to_rfc3339()),
             })
@@ -711,7 +729,6 @@ fn message_chunks(messages: &[WireMessage]) -> Vec<&[WireMessage]> {
 // Only explicit markdown image destinations under the generated-image store
 // are eligible. Canonicalization rejects traversal and symlink escapes.
 fn generated_images(text: &str) -> Vec<WireImage> {
-    use base64::Engine;
     let Ok(root) =
         storage::jcode_dir().and_then(|p| Ok(p.join("generated-images").canonicalize()?))
     else {
@@ -751,46 +768,74 @@ fn generated_images(text: &str) -> Vec<WireImage> {
         if !meta.is_file() || meta.len() > 16 * 1024 * 1024 {
             continue;
         }
-        let Ok(mut reader) =
-            image::ImageReader::new(std::io::BufReader::new(file)).with_guessed_format()
-        else {
-            continue;
-        };
-        let mut limits = image::Limits::default();
-        limits.max_image_width = Some(8192);
-        limits.max_image_height = Some(8192);
-        limits.max_alloc = Some(128 * 1024 * 1024);
-        reader.limits(limits);
-        let Ok(image) = reader.decode() else {
-            continue;
-        };
-        let mut thumbnail = image.thumbnail(1024, 1024).to_rgb8();
-        loop {
-            let mut bytes = Vec::new();
-            if image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 75)
-                .encode_image(&thumbnail)
-                .is_err()
-            {
-                break;
-            }
-            if bytes.len() <= 256 * 1024 {
-                images.push(WireImage {
-                    media_type: "image/jpeg".into(),
-                    data: base64::engine::general_purpose::STANDARD.encode(bytes),
-                });
-                break;
-            }
-            thumbnail = image::imageops::thumbnail(
-                &thumbnail,
-                thumbnail.width() / 2,
-                thumbnail.height() / 2,
-            );
+        if let Some(thumbnail) = image_thumbnail(std::io::BufReader::new(file)) {
+            images.push(thumbnail);
         }
         if images.len() == 4 {
             break;
         }
     }
     images
+}
+
+// ToolOutput images are persisted as Image blocks following their ToolResult,
+// exactly like user attachments. Never resolve attachment data as a local path.
+fn attached_images(blocks: &[ContentBlock]) -> Vec<WireImage> {
+    use base64::Engine;
+    let mut images = Vec::new();
+    for block in blocks {
+        let ContentBlock::Image { media_type, data } = block else {
+            continue;
+        };
+        if !matches!(
+            media_type.as_str(),
+            "image/jpeg" | "image/png" | "image/webp" | "image/gif"
+        ) || data.len() > 4 * (16 * 1024 * 1024_usize).div_ceil(3)
+        {
+            continue;
+        }
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
+            continue;
+        };
+        if bytes.len() > 16 * 1024 * 1024 {
+            continue;
+        }
+        if let Some(image) = image_thumbnail(std::io::Cursor::new(bytes)) {
+            images.push(image);
+            if images.len() == 4 {
+                break;
+            }
+        }
+    }
+    images
+}
+
+fn image_thumbnail(reader: impl std::io::BufRead + std::io::Seek) -> Option<WireImage> {
+    use base64::Engine;
+    let mut reader = image::ImageReader::new(reader).with_guessed_format().ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(8192);
+    limits.max_image_height = Some(8192);
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    reader.limits(limits);
+    let mut thumbnail = reader.decode().ok()?.thumbnail(1024, 1024).to_rgb8();
+    loop {
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 75)
+            .encode_image(&thumbnail)
+            .ok()?;
+        if bytes.len() <= 256 * 1024 {
+            return Some(WireImage {
+                media_type: "image/jpeg".into(),
+                data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            });
+        }
+        thumbnail = image::imageops::thumbnail(
+            &thumbnail,
+            (thumbnail.width() / 2).max(1),
+            (thumbnail.height() / 2).max(1),
+        );
+    }
 }
 
 fn wire_fingerprint(messages: &[WireMessage], end: usize) -> u64 {
