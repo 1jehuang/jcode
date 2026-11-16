@@ -2427,7 +2427,10 @@ pub fn record_provider_usage_with_model_attribution(
     let requested_model = sanitize_telemetry_label(requested_model);
     let resolved_model = resolved_model
         .map(sanitize_telemetry_label)
-        .filter(|value| !value.is_empty());
+        // The ingestion contract bounds metadata by UTF-8 bytes. An oversized
+        // response label is unknown, not a truncated ID and not a poison event
+        // that would permanently block this response's durable usage delivery.
+        .filter(|value| !value.is_empty() && value.len() <= 120);
     let (schema_version, build_channel, git_checkout, ci, from_cargo) = telemetry_envelope();
     let event = UsageReportEvent {
         usage_contract_version: 2,
@@ -2442,7 +2445,8 @@ pub fn record_provider_usage_with_model_attribution(
         source: source.as_str(),
         provider: sanitize_telemetry_label(provider),
         model: resolved_model.as_ref().unwrap_or(&requested_model).clone(),
-        requested_model: Some(requested_model),
+        requested_model: (!requested_model.is_empty() && requested_model.len() <= 120)
+            .then_some(requested_model),
         resolved_model,
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,

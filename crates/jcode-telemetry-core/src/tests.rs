@@ -794,7 +794,15 @@ fn usage_report_is_attributed_to_caller_session_not_global_slot() {
 fn usage_report_preserves_requested_alias_and_observed_resolution() {
     let _guard = lock_telemetry_test_state();
     TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
-    for resolved in [Some("vendor/future-model-2030"), None, Some(" \n ")] {
+    let oversized = "a".repeat(121);
+    let oversized_unicode = "界".repeat(41);
+    for resolved in [
+        Some("vendor/future-model-2030"),
+        None,
+        Some(" \n "),
+        Some(oversized.as_str()),
+        Some(oversized_unicode.as_str()),
+    ] {
         record_provider_usage_with_model_attribution(
             Some("attribution-session"),
             "OpenRouter",
@@ -814,7 +822,7 @@ fn usage_report_preserves_requested_alias_and_observed_resolution() {
         .iter()
         .filter(|event| event["event"] == "usage_report")
         .collect();
-    assert_eq!(reports.len(), 3);
+    assert_eq!(reports.len(), 5);
     assert_eq!(reports[0]["model"], "vendor/future-model-2030");
     assert_eq!(reports[0]["requested_model"], "high");
     assert_eq!(reports[0]["resolved_model"], "vendor/future-model-2030");
