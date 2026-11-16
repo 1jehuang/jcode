@@ -43,3 +43,74 @@ fn every_interleave_send_path_carries_the_staged_images() {
          staged attachments, which silently drops them"
     );
 }
+
+#[test]
+fn remote_image_queue_keeps_complete_draft_for_both_enter_shortcuts() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for (queue_mode, modifiers) in [(true, KeyModifiers::NONE), (false, KeyModifiers::CONTROL)] {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.is_processing = true;
+        app.queue_mode = queue_mode;
+        app.input = "Compare [image 1] [pasted 2 lines]".to_string();
+        app.pasted_contents = vec!["detail one\ndetail two".to_string()];
+        app.cursor_pos = app.input.len();
+        let expected = input::expand_paste_placeholders(&app, &app.input);
+        let image = ("image/png".to_string(), "queued-image".to_string());
+        app.pending_images = vec![image.clone()];
+        let mut connection = crate::tui::backend::RemoteConnection::dummy();
+        let next_id = connection.next_request_id_for_test();
+        rt.block_on(remote::handle_remote_key(
+            &mut app,
+            KeyCode::Enter,
+            modifiers,
+            &mut connection,
+        ))
+        .unwrap();
+        assert!(
+            app.queued_messages.is_empty(),
+            "no image-less prompt may be queued"
+        );
+        assert_eq!(app.input, expected);
+        assert_eq!(app.cursor_pos, expected.len());
+        app.sync_model_picker_preview_from_input();
+        assert_eq!(app.pending_images, vec![image]);
+        assert_eq!(connection.next_request_id_for_test(), next_id);
+        assert!(
+            app.status_notice
+                .as_ref()
+                .is_some_and(|(notice, _)| { notice.contains("Images cannot be queued") })
+        );
+        assert!(app.display_messages().iter().any(|message| {
+            message.content.contains("Message not queued")
+                && message
+                    .content
+                    .contains("text and images are still in the input")
+        }));
+    }
+}
+
+#[test]
+fn remote_text_only_queue_still_accepts_both_enter_shortcuts() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for (queue_mode, modifiers) in [(true, KeyModifiers::NONE), (false, KeyModifiers::CONTROL)] {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.is_processing = true;
+        app.queue_mode = queue_mode;
+        app.input = "Queue this text".to_string();
+        app.cursor_pos = app.input.len();
+        let mut connection = crate::tui::backend::RemoteConnection::dummy();
+        rt.block_on(remote::handle_remote_key(
+            &mut app,
+            KeyCode::Enter,
+            modifiers,
+            &mut connection,
+        ))
+        .unwrap();
+        assert_eq!(app.queued_messages, vec!["Queue this text".to_string()]);
+        assert!(app.input.is_empty());
+    }
+}

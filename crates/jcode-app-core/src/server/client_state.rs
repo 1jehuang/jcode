@@ -762,16 +762,22 @@ fn session_interrupted_by_reload(session: &Session) -> bool {
         .map(|message| message.role == Role::User)
         .unwrap_or(false);
     let marker_active = crate::server::reload_marker_active(RELOAD_RESTORE_MARKER_MAX_AGE);
+    let pending_turn = last_is_user
+        || session
+            .messages
+            .last()
+            .is_some_and(super::client_session::last_message_has_pending_tool);
     let interrupted = matches!(session.status, SessionStatus::Crashed { .. })
-        || (matches!(session.status, SessionStatus::Active) && last_is_user && marker_active)
-        || (matches!(session.status, SessionStatus::Closed) && last_is_user && marker_active)
+        || (matches!(session.status, SessionStatus::Active) && pending_turn && marker_active)
+        || (matches!(session.status, SessionStatus::Closed) && pending_turn && marker_active)
         || persisted_session_has_reload_interruption_marker(session);
 
     crate::logging::info(&format!(
-        "history_reload_recovery_snapshot: fallback inspect session={} status={} last_is_user={} marker_active={} interrupted={}",
+        "history_reload_recovery_snapshot: fallback inspect session={} status={} last_is_user={} pending_turn={} marker_active={} interrupted={}",
         session_id,
         session.status.display(),
         last_is_user,
+        pending_turn,
         marker_active,
         interrupted
     ));

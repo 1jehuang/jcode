@@ -509,12 +509,28 @@ pub struct CodeAssistGenerateResponse {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VertexGenerateContentResponse {
+    /// Actual upstream model identifier, when supplied by the response.
+    #[serde(default)]
+    pub model_version: Option<String>,
     #[serde(default)]
     pub candidates: Option<Vec<GeminiCandidate>>,
     #[serde(default)]
     pub prompt_feedback: Option<GeminiPromptFeedback>,
     #[serde(default)]
     pub usage_metadata: Option<GeminiUsageMetadata>,
+}
+
+impl CodeAssistGenerateResponse {
+    /// Never infer attribution from a requested model or a catalog alias.
+    pub fn resolved_model_event(&self) -> Option<jcode_message_types::StreamEvent> {
+        let model = self.response.as_ref()?.model_version.as_ref()?;
+        if model.trim().is_empty() {
+            return None;
+        }
+        Some(jcode_message_types::StreamEvent::ResolvedModel {
+            model: model.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -721,6 +737,28 @@ pub fn choose_onboard_tier(res: &LoadCodeAssistResponse) -> GeminiUserTier {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resolved_model_only_uses_returned_model_version() {
+        use jcode_message_types::StreamEvent;
+        let response: super::CodeAssistGenerateResponse = serde_json::from_value(
+            serde_json::json!({"response": {"modelVersion": "gemini-actual-001"}}),
+        )
+        .unwrap();
+        assert!(matches!(response.resolved_model_event(),
+            Some(StreamEvent::ResolvedModel { model }) if model == "gemini-actual-001"));
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"response": {}}),
+            serde_json::json!({"response": {"model": "request-alias"}}),
+            serde_json::json!({"response": {"modelVersion": null}}),
+            serde_json::json!({"response": {"modelVersion": " "}}),
+        ] {
+            let response: super::CodeAssistGenerateResponse =
+                serde_json::from_value(value).unwrap();
+            assert!(response.resolved_model_event().is_none());
+        }
+    }
+
     use super::*;
     use serde_json::json;
 

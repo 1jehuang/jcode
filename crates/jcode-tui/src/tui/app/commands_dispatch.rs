@@ -366,10 +366,13 @@ mod tests {
         app.open_login_picker_inline();
         app.open_agents_picker();
         app.handle_new_terminal_hotkey();
-        app.toggle_next_prompt_new_session_routing();
         assert!(app.session_picker_overlay.is_none());
         assert!(app.pending_session_picker_load.is_none());
         assert!(app.inline_interactive_state.is_none());
+        // The fork hotkey is served by the remote daemon, so it stays usable.
+        app.toggle_next_prompt_new_session_routing();
+        assert!(app.route_next_prompt_to_new_session);
+        app.toggle_next_prompt_new_session_routing();
         assert!(!app.route_next_prompt_to_new_session);
 
         let image = tempfile::Builder::new().suffix(".png").tempfile().unwrap();

@@ -15,7 +15,8 @@ fn text_msg(role: Role, text: &str) -> Message {
         content: vec![ContentBlock::Text {
             text: text.to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }
@@ -74,7 +75,8 @@ fn dangling_tool_use_repair_already_ends_on_user_and_is_not_double_patched() {
                 name: "bash".to_string(),
                 input: json!({"command": "ls"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },

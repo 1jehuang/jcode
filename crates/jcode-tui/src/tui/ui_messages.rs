@@ -3,6 +3,9 @@ mod gmail_drafts;
 use gmail_drafts::*;
 #[path = "ui_messages/todo_completion.rs"]
 mod todo_completion;
+#[cfg(test)]
+#[path = "ui_messages/todo_payload_cache_tests.rs"]
+mod todo_payload_cache_tests;
 #[path = "ui_todo_stages.rs"]
 mod todo_stages;
 pub(crate) use todo_stages::TodoCardAgent;
@@ -808,7 +811,47 @@ fn todo_confidence_color() -> Color {
     rgb(135, 155, 180)
 }
 
+// Cache data only: time-sensitive blocker policy and width/style rendering
+// remain live on every draw. One bounded entry retains no transcript history.
+const MAX_CACHED_TODO_PAYLOAD_BYTES: usize = 256 * 1024;
+
+#[derive(Default)]
+struct TodoPayloadCache {
+    entry: Option<(String, Option<std::sync::Arc<TodoCardPayload>>)>,
+}
+
+impl TodoPayloadCache {
+    fn get(&mut self, content: &str) -> Option<std::sync::Arc<TodoCardPayload>> {
+        if let Some((source, parsed)) = &self.entry
+            && source == content
+        {
+            return parsed.clone();
+        }
+        let parsed = serde_json::from_str::<TodoCardPayload>(content)
+            .ok()
+            .map(std::sync::Arc::new);
+        self.entry = (content.len() <= MAX_CACHED_TODO_PAYLOAD_BYTES)
+            .then(|| (content.to_owned(), parsed.clone()));
+        parsed
+    }
+}
+
+thread_local! {
+    static TODO_PAYLOAD_CACHE: std::cell::RefCell<TodoPayloadCache> =
+        std::cell::RefCell::new(TodoPayloadCache::default());
+}
+
+fn cached_todo_payload(content: &str) -> Option<std::sync::Arc<TodoCardPayload>> {
+    TODO_PAYLOAD_CACHE.with_borrow_mut(|cache| cache.get(content))
+}
+
 impl TodoCardPayload {
+    fn todos(&self) -> &[crate::todo::TodoItem] {
+        match self {
+            Self::Current { todos, .. } | Self::Legacy(todos) => todos,
+        }
+    }
+
     fn into_parts(
         self,
     ) -> (
@@ -912,7 +955,7 @@ fn parse_todo_tool_output(content: &str) -> Option<ParsedTodoToolOutput> {
     })
 }
 
-fn strip_todo_tool_output_headers(content: &str) -> &str {
+pub(crate) fn strip_todo_tool_output_headers(content: &str) -> &str {
     let mut content = content.trim_start();
     // Remote clients prefix outputs with the tool name, while restored history
     // may independently prefix timing metadata. Accept either order without
@@ -968,48 +1011,79 @@ pub(crate) fn render_todos_message(
     render_todos_message_with_cap(msg, width, diff_mode, true)
 }
 
-/// Dedicated composer chrome, one non-wrapping row per live blocker.
+/// Dedicated composer chrome, one non-wrapping row per todo awaiting the
+/// user's authorization and per goal declared impossible.
 pub(super) fn todo_blocker_footer(payload: Option<&str>, width: u16) -> Vec<Line<'static>> {
-    let Some(payload) = payload.and_then(|p| serde_json::from_str::<TodoCardPayload>(p).ok())
-    else {
+    let Some(payload) = payload.and_then(cached_todo_payload) else {
         return Vec::new();
     };
-    let (todos, ..) = payload.into_parts();
-    todos
+    render_todo_blocker_footer(&payload, width)
+}
+
+fn render_todo_blocker_footer(payload: &TodoCardPayload, width: u16) -> Vec<Line<'static>> {
+    let row = |text: String| {
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        super::truncate_line_with_ellipsis_to_width(
+            &Line::styled(text, Style::default().fg(todo_warning_color())),
+            usize::from(width),
+        )
+    };
+    let todos = payload.todos();
+    let goals = match payload {
+        TodoCardPayload::Current { goals, .. } => goals.as_slice(),
+        TodoCardPayload::Legacy(_) => &[],
+    };
+    let mut lines: Vec<Line<'static>> = todos
         .iter()
         .filter(|todo| crate::todo::is_incomplete_todo(todo))
         .filter_map(|todo| {
-            let reason = if crate::todo::todo_completely_blocked(todo) {
-                todo.completely_blocked.as_ref().map(|b| b.reason.clone())
-            } else if crate::todo::todo_has_external_blocker(todo) {
-                todo.external_blocker.as_ref().map(|b| b.reason.clone())
+            if crate::todo::todo_requires_user_auth(todo) {
+                let reason = &todo.requires_user_auth.as_ref()?.reason;
+                Some(row(format!("✋ Needs you · {}: {}", todo.content, reason)))
             } else if !todo.blocked_by.is_empty() {
-                Some(format!("waiting on {}", todo.blocked_by.join(", ")))
+                Some(row(format!(
+                    "Blocked · {}: waiting on {}",
+                    todo.content,
+                    todo.blocked_by.join(", ")
+                )))
             } else {
                 None
-            }?;
-            let text = format!("Blocked · {}: {}", todo.content, reason)
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            Some(super::truncate_line_with_ellipsis_to_width(
-                &Line::styled(text, Style::default().fg(todo_warning_color())),
-                usize::from(width),
-            ))
+            }
         })
-        .collect()
+        .collect();
+    // A goal declared impossible stops its todos, so say so once per goal
+    // while any of that goal's work is still open.
+    for goal in goals {
+        let Some(reason) = crate::todo::goal_cannot_complete(goal) else {
+            continue;
+        };
+        let open = todos.iter().any(|todo| {
+            crate::todo::is_incomplete_todo(todo)
+                && crate::todo::todo_goal_cannot_complete(todo, std::slice::from_ref(goal))
+        });
+        if open {
+            let label = goal
+                .group
+                .as_deref()
+                .map(str::trim)
+                .filter(|group| !group.is_empty())
+                .unwrap_or("goal");
+            lines.push(row(format!("Cannot complete · {label}: {reason}")));
+        }
+    }
+    lines
 }
 
 /// Full blocker prose belongs below the response, outside the pinned chrome.
 pub(super) fn todo_blocker_notes(payload: Option<&str>) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if let Some(payload) = payload
-        && let Ok(payload) = serde_json::from_str::<TodoCardPayload>(payload)
+        && let Some(payload) = cached_todo_payload(payload)
     {
-        let (todos, ..) = payload.into_parts();
-        for todo in todos
+        for todo in payload
+            .todos()
             .iter()
-            .filter(|todo| crate::todo::todo_completely_blocked(todo))
+            .filter(|todo| crate::todo::todo_requires_user_auth(todo))
         {
             if lines.is_empty() {
                 lines.push(Line::raw(""));
@@ -1197,7 +1271,7 @@ fn render_todos_message_with_cap(
 
     for todo in todos
         .iter()
-        .filter(|todo| cap_width && crate::todo::todo_completely_blocked(todo))
+        .filter(|todo| cap_width && crate::todo::todo_requires_user_auth(todo))
     {
         for chunk in wrap_todo_detail(
             &format!(
@@ -1417,14 +1491,14 @@ fn push_todo_status_pips<'a>(
         .filter(|todo| {
             todo.status == "in_progress"
                 && todo.assigned_to.as_deref() == Some("@self")
-                && !crate::todo::todo_completely_blocked(todo)
+                && !crate::todo::todo_requires_user_auth(todo)
         })
         .count();
     let mut max_pips = max_pips;
     // The two-cell hand takes priority over ordinary progress at narrow widths.
     for _ in todos
         .iter()
-        .filter(|todo| crate::todo::todo_completely_blocked(todo))
+        .filter(|todo| crate::todo::todo_requires_user_auth(todo))
     {
         if max_pips < 2 {
             break;
@@ -1437,7 +1511,7 @@ fn push_todo_status_pips<'a>(
     }
     let (completed, in_progress, total) = todos
         .into_iter()
-        .filter(|todo| !crate::todo::todo_completely_blocked(todo))
+        .filter(|todo| !crate::todo::todo_requires_user_auth(todo))
         .fold((0usize, 0usize, 0usize), |counts, todo| {
             (
                 counts.0 + usize::from(todo.status == "completed"),
@@ -1445,6 +1519,17 @@ fn push_todo_status_pips<'a>(
                 counts.2 + 1,
             )
         });
+    push_todo_count_pips(spans, completed, in_progress, self_active, total, max_pips);
+}
+
+fn push_todo_count_pips(
+    spans: &mut Vec<Span<'static>>,
+    completed: usize,
+    in_progress: usize,
+    self_active: usize,
+    total: usize,
+    max_pips: usize,
+) {
     if total == 0 || max_pips == 0 {
         return;
     }
@@ -1531,7 +1616,7 @@ fn push_todo_item_lines(
             inner_width,
         ));
     }
-    todo_stages::push_lane_status_lines(lines, todos, agents, base_indent, inner_width);
+    todo_stages::push_lane_status_lines_below_rows(lines, todos, agents, base_indent, inner_width);
 }
 
 fn wrap_todo_detail(value: &str, width: usize) -> Vec<String> {
@@ -1964,6 +2049,16 @@ fn render_todo_goal_updates(
                 ),
                 crate::todo::TodoGoalField::FeedbackLoop
                 | crate::todo::TodoGoalField::StoppingEvidence => unreachable!(),
+                crate::todo::TodoGoalField::CannotComplete => push_todo_text_update(
+                    &mut lines,
+                    "Cannot complete",
+                    update
+                        .after
+                        .as_ref()
+                        .and_then(|goal| goal.cannot_complete.as_deref()),
+                    base_indent,
+                    inner_width,
+                ),
             }
         }
     }
@@ -2084,11 +2179,29 @@ fn render_todo_item_line_with_background(
     inner_width: usize,
 ) -> Line<'static> {
     let dependencies = todo_running_dependencies(todo, tasks);
-    if dependencies.is_empty() || crate::todo::todo_completely_blocked(todo) {
-        return render_todo_item_line(todo, agents, base_indent, inner_width);
+    let wait_note = todo_stages::todo_wait_note(todo, agents);
+    if dependencies.is_empty() || crate::todo::todo_requires_user_auth(todo) {
+        let mut line = render_todo_item_line(todo, agents, base_indent, inner_width);
+        if let Some(note) = wait_note {
+            line.spans.push(Span::styled(
+                format!("  ◷ {note}"),
+                Style::default().fg(todo_warning_color()),
+            ));
+            line = super::truncate_line_with_ellipsis_to_width(
+                &line,
+                inner_width.saturating_add(base_indent.width()),
+            );
+        }
+        return line;
     }
     let mut spans = todo_card_item_spans(todo, false);
     spans[1] = Span::styled("◷ ", Style::default().fg(todo_warning_color()));
+    if let Some(note) = wait_note {
+        spans.push(Span::styled(
+            format!("  {note}"),
+            Style::default().fg(todo_warning_color()),
+        ));
+    }
     let title_width = spans.iter().map(|span| span.content.width()).sum::<usize>();
     let progress = todo_dependency_progress(
         &dependencies,
@@ -2176,10 +2289,8 @@ fn todo_dependency_progress(tasks: &[&TodoCardBackgroundTask], width: usize) -> 
 /// Spans for one todo row: two-cell gutter, status glyph, content, and
 /// (optionally) the confidence suffix. Callers own indent and truncation.
 fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> Vec<Span<'static>> {
-    let external_blocked = crate::todo::todo_has_external_blocker(todo);
-    let blocked =
-        crate::todo::is_incomplete_todo(todo) && (external_blocked || !todo.blocked_by.is_empty());
-    let is_completely_blocked = crate::todo::todo_completely_blocked(todo);
+    let blocked = crate::todo::is_incomplete_todo(todo) && !todo.blocked_by.is_empty();
+    let is_completely_blocked = crate::todo::todo_requires_user_auth(todo);
     let (glyph, glyph_color) = if is_completely_blocked {
         ("✋", rgb(225, 165, 90))
     } else if blocked {
@@ -2207,19 +2318,15 @@ fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> 
         Span::styled(todo.content.clone(), Style::default().fg(text_color)),
     ];
     if crate::todo::is_incomplete_todo(todo)
-        && let Some(blocker) = &todo.external_blocker
+        && !todo.waiting_on.is_empty()
+        && let Some(reason) = todo
+            .waiting_reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
     {
         spans.push(Span::styled(
-            format!(
-                " · {}: {} · review {}",
-                if external_blocked {
-                    "blocked"
-                } else {
-                    "review due"
-                },
-                blocker.reason,
-                blocker.review_at.format("%Y-%m-%d %H:%M UTC")
-            ),
+            format!(" · waiting: {reason}"),
             Style::default().fg(todo_warning_color()),
         ));
     }
@@ -2235,10 +2342,10 @@ fn todo_card_item_spans(todo: &crate::todo::TodoItem, with_confidence: bool) -> 
 /// Single-line chrome is normalized before width fitting. Full reasons are
 /// rendered as wrapped detail text in the card, not squeezed into its gutter.
 pub(super) fn todo_complete_blocker_detail(todo: &crate::todo::TodoItem) -> String {
-    todo.completely_blocked
+    todo.requires_user_auth
         .as_ref()
         .map(|blocker| {
-            format!("Completely blocked: {}", blocker.reason)
+            format!("Needs your login: {}", blocker.reason)
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ")
@@ -3151,9 +3258,42 @@ pub(crate) fn compact_swarm_await_summary(message: &str) -> String {
         .strip_prefix("🐝 **Swarm await finished**")
         .map(str::trim)
         .unwrap_or_else(|| message.trim());
+    // Preserve wait-level recovery/timeout results independently of member
+    // statuses. Recovery deduplicates workers, so member counts cannot stand in
+    // for the number of waits recovered after a restart.
+    let header = body
+        .lines()
+        .take_while(|line| {
+            !matches!(
+                line.trim(),
+                "Member statuses:" | "Recent outputs:" | "Completion reports:"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let recovered = header
+        .split_once("Recovered ")
+        .and_then(|(_, rest)| rest.split_once(" swarm wait(s) after restart: "))
+        .and_then(|(count, rest)| {
+            let count = count.parse::<usize>().ok()?;
+            let (completed, rest) = rest.split_once(" completed, ")?;
+            let completed = completed.parse::<usize>().ok()?;
+            let (timed_out, _) = rest.split_once(" timed out.")?;
+            let timed_out = timed_out.parse::<usize>().ok()?;
+            Some(format!(
+                "recovered {count} waits · {completed} completed, {timed_out} timed out"
+            ))
+        });
+    let wait_outcome = recovered.or_else(|| {
+        header
+            .contains("Timed out.")
+            .then(|| "timed out".to_string())
+    });
     let mut done = 0usize;
     let mut total = 0usize;
     let mut in_statuses = false;
+    // A checkmark means the await target matched, not that the worker succeeded.
+    let mut outcomes = std::collections::BTreeMap::<&str, usize>::new();
 
     for line in body.lines() {
         let line = line.trim();
@@ -3171,22 +3311,40 @@ pub(crate) fn compact_swarm_await_summary(message: &str) -> String {
         if !in_statuses || line.is_empty() {
             continue;
         }
-        if line.starts_with('✓') {
-            done += 1;
+        if line.starts_with('✓') || line.starts_with('✗') {
             total += 1;
-        } else if line.starts_with('✗') {
-            total += 1;
+            let status = line
+                .rsplit_once(" (")
+                .and_then(|(_, status)| status.strip_suffix(')'))
+                .unwrap_or("unknown");
+            let status = match status {
+                "completed" | "ready" | "failed" | "stopped" | "running" | "busy" | "pending"
+                | "blocked" | "cancelled" => status,
+                _ => "unknown",
+            };
+            // Old recovered notifications incorrectly checkmarked unknown
+            // workers. Do not perpetuate that false match in persisted history.
+            done += usize::from(line.starts_with('✓') && status != "unknown");
+            *outcomes.entry(status).or_default() += 1;
         }
     }
 
-    if total > 0 {
-        if done == total {
-            format!("✓ {done}/{total}")
-        } else {
-            format!("{done}/{total} finished")
-        }
+    let member_outcome = if total > 0 {
+        let outcomes = outcomes
+            .into_iter()
+            .map(|(status, count)| format!("{count} {status}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{done}/{total} matched · {outcomes}")
     } else {
-        "finished".to_string()
+        "outcome unknown".to_string()
+    };
+    match wait_outcome {
+        Some(wait_outcome) if total == 0 => {
+            format!("{wait_outcome} · member outcome unknown")
+        }
+        Some(wait_outcome) => format!("{wait_outcome} · {member_outcome}"),
+        None => member_outcome,
     }
 }
 
@@ -3202,6 +3360,28 @@ pub(crate) fn encode_swarm_agent_snapshot(
     }
 }
 
+/// Stable, theme-aware identity accent shared by every prose delivery from an
+/// agent. Hash the memorable name, not the restart-specific storage ID or the
+/// notification kind, so live, expanded and restored transcripts agree.
+fn swarm_agent_color(sender: &str) -> Color {
+    use jcode_tui_style::{Role, role_color};
+    const ACCENTS: [Role; 7] = [
+        Role::Ai,
+        Role::Warning,
+        Role::System,
+        Role::Accent,
+        Role::User,
+        Role::HeaderIcon,
+        Role::Asap,
+    ];
+    let sender = sender.trim();
+    let name = crate::id::extract_session_name(sender).unwrap_or(sender);
+    let hash = name.bytes().fold(0x811c9dc5_u32, |hash, byte| {
+        (hash ^ u32::from(byte.to_ascii_lowercase())).wrapping_mul(0x01000193)
+    });
+    role_color(ACCENTS[hash as usize % ACCENTS.len()])
+}
+
 struct CompactSwarmNotification<'a> {
     sender: &'a str,
     marker: String,
@@ -3211,37 +3391,39 @@ struct CompactSwarmNotification<'a> {
 }
 
 fn compact_swarm_notification(title: &str) -> Option<CompactSwarmNotification<'_>> {
-    let (sender, marker, marker_before_icon, text_color, file_activity) =
+    let (sender, marker, marker_before_icon, file_activity) =
         if let Some(sender) = title.strip_prefix("DM from ") {
-            (sender, String::new(), false, rgb(130, 130, 140), false)
+            (sender, String::new(), false, false)
         } else if let Some(sender) = title.strip_prefix("Task · ") {
-            (sender, String::new(), false, rgb(220, 236, 255), false)
+            (sender, String::new(), false, false)
         } else if let Some((channel, sender)) = title
             .strip_prefix('#')
             .and_then(|rest| rest.rsplit_once(" · "))
         {
-            (
-                sender,
-                format!("#{channel} · "),
-                false,
-                rgb(214, 247, 244),
-                false,
-            )
+            (sender, format!("#{channel} · "), false, false)
         } else if let Some(sender) = title.strip_prefix("Broadcast · ") {
-            (sender, "📣 ".to_string(), false, rgb(255, 240, 214), false)
+            (sender, "📣 ".to_string(), false, false)
         } else if let Some(sender) = title.strip_prefix("Shared context · ") {
-            (sender, "🧠 ".to_string(), false, rgb(221, 247, 232), false)
+            (sender, "🧠 ".to_string(), false, false)
         } else if let Some(sender) = title.strip_prefix("File activity · ") {
-            (sender, "✎ ".to_string(), false, dim_color(), true)
+            (sender, "✎ ".to_string(), false, true)
         } else if title == "File activity" {
-            ("", "✎ ".to_string(), false, dim_color(), true)
+            ("", "✎ ".to_string(), false, true)
         } else if let Some(sender) = title.strip_prefix("File conflict · ") {
-            (sender, "⚠ ".to_string(), true, rgb(255, 190, 150), true)
+            (sender, "⚠ ".to_string(), true, true)
         } else {
             let sender = title.strip_prefix("Swarm · ")?;
-            (sender, String::new(), false, rgb(225, 225, 235), false)
+            (sender, String::new(), false, false)
         };
     let sender = sender.trim();
+    let sender = crate::id::extract_session_name(sender).unwrap_or(sender);
+    let text_color = if title.starts_with("File conflict") {
+        rgb(255, 190, 150)
+    } else if file_activity {
+        dim_color()
+    } else {
+        swarm_agent_color(sender)
+    };
     (!sender.is_empty() || title == "File activity").then_some(CompactSwarmNotification {
         sender,
         marker,
@@ -3249,6 +3431,127 @@ fn compact_swarm_notification(title: &str) -> Option<CompactSwarmNotification<'_
         text_color,
         file_activity,
     })
+}
+
+/// Interpret only the structured completion envelope, leaving agent-authored
+/// markdown (including code blocks and report prose) on the normal path.
+fn render_completion_lane_body(
+    body: &str,
+    width: usize,
+    prose_color: Color,
+) -> Option<Vec<Line<'static>>> {
+    render_completion_lanes(body, width, prose_color, false)
+}
+
+fn render_completion_lanes(
+    body: &str,
+    width: usize,
+    prose_color: Color,
+    first_lane_only: bool,
+) -> Option<Vec<Line<'static>>> {
+    let (intro, rest) = body.split_once("\n\nLane plan:\n")?;
+    let (plan, report) = rest.split_once("\n\nFinal response:\n")?;
+    if !intro
+        .lines()
+        .last()
+        .is_some_and(|line| line.starts_with("Agent "))
+    {
+        return None;
+    }
+    let render = |text: &str| {
+        markdown::render_markdown_with_width_and_prose_color(text.trim(), Some(width), prose_color)
+    };
+    let mut lines = Vec::new();
+    let plan_lines: Vec<_> = plan.lines().collect();
+    let mut found_lane = false;
+    for (index, raw) in plan_lines.iter().enumerate() {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let header = raw
+            .strip_prefix("Phase ")
+            .and_then(|line| line.split_once(" · ").map(|(_, lane)| lane))
+            .unwrap_or(raw);
+        if let Some((label, counts)) = header.rsplit_once(": ")
+            && let Some(counts) = counts.strip_suffix(" completed")
+            && let Some((done, total)) = counts.split_once('/')
+            && let (Ok(done), Ok(total)) = (done.parse::<usize>(), total.parse::<usize>())
+        {
+            found_lane = true;
+            let active = plan_lines[index + 1..]
+                .iter()
+                .take_while(|line| line.trim().is_empty() || line.trim().starts_with("- ["))
+                .filter(|line| line.trim().starts_with("- [in_progress]"))
+                .count();
+            let label_width = width.saturating_sub(total.min(12).saturating_add(2));
+            let mut spans = super::truncate_line_with_ellipsis_to_width(
+                &Line::from(Span::styled(
+                    label.to_string(),
+                    Style::default().fg(todo_group_color()).bold(),
+                )),
+                label_width,
+            )
+            .spans;
+            spans.push(Span::raw("  "));
+            let used: usize = spans.iter().map(|span| span.content.width()).sum();
+            push_todo_count_pips(
+                &mut spans,
+                done.min(total),
+                active.min(total.saturating_sub(done)),
+                0,
+                total,
+                width.saturating_sub(used),
+            );
+            lines.push(super::truncate_line_with_ellipsis_to_width(
+                &Line::from(spans),
+                width,
+            ));
+            if first_lane_only {
+                return Some(lines);
+            }
+        } else if let Some(task) = raw
+            .strip_prefix("- [")
+            .and_then(|line| line.split_once("] "))
+        {
+            let (status, text) = task;
+            let mut spans = Vec::new();
+            push_todo_count_pips(
+                &mut spans,
+                usize::from(status == "completed"),
+                usize::from(status == "in_progress"),
+                0,
+                1,
+                1,
+            );
+            spans.push(Span::styled(
+                format!(" {text}"),
+                Style::default().fg(prose_color),
+            ));
+            lines.push(super::truncate_line_with_ellipsis_to_width(
+                &Line::from(spans),
+                width,
+            ));
+        } else {
+            lines.extend(render(raw));
+        }
+    }
+    if !found_lane {
+        return None;
+    }
+    if report.trim() == "No report captured."
+        || report.trim() == "No final assistant response was captured."
+    {
+        lines.push(Line::from(Span::styled(
+            "No report captured.",
+            Style::default()
+                .fg(jcode_tui_style::role_color(jcode_tui_style::Role::Dim))
+                .dim(),
+        )));
+    } else {
+        lines.extend(render(report));
+    }
+    Some(lines)
 }
 
 fn render_compact_agent_notification(
@@ -3295,11 +3598,7 @@ fn render_compact_agent_notification(
         body
     };
     let text_color = notification.text_color;
-    let icon_style = Style::default().fg(if title.starts_with("File activity") {
-        dim_color()
-    } else {
-        rgb(255, 200, 100)
-    });
+    let icon_style = Style::default().fg(text_color);
     let body_style = Style::default().fg(text_color);
     let max_width = centered_wrap_width(width, markdown::center_code_blocks(), 96);
 
@@ -3324,11 +3623,12 @@ fn render_compact_agent_notification(
         // the preview wins rather than letting a badge force a second row.
         // Short plain notes stay clean: usage only appears on collapsible
         // messages or when the time since this agent's last message is known.
-        let usage_text = (badge.is_some() || since_last_secs.is_some())
-            .then(|| swarm_notification_usage_label(content, since_last_secs))
-            .flatten()
-            .map(|usage| format!("  {usage}"))
-            .filter(|usage| usage.width() + 8 < max_width);
+        let usage_text = (!notification.file_activity
+            && (badge.is_some() || since_last_secs.is_some()))
+        .then(|| swarm_notification_usage_label(content, since_last_secs))
+        .flatten()
+        .map(|usage| format!("  {usage}"))
+        .filter(|usage| usage.width() + 8 < max_width);
         let usage_width = usage_text
             .as_deref()
             .map(UnicodeWidthStr::width)
@@ -3340,7 +3640,20 @@ fn render_compact_agent_notification(
             .as_deref()
             .map(UnicodeWidthStr::width)
             .unwrap_or(0);
-        prefix.push(Span::styled(preview, body_style));
+        let completion_lane = collapsible
+            .filter(|_| !notification.file_activity)
+            .and_then(|parsed| {
+                render_completion_lanes(parsed.body.trim(), max_width, text_color, true)
+            })
+            .and_then(|rows| rows.into_iter().next());
+        if let Some(lane) = completion_lane {
+            prefix.extend(lane.spans);
+            if let Some((_, detail)) = preview.split_once(" · ") {
+                prefix.push(Span::styled(format!(" · {detail}"), body_style));
+            }
+        } else {
+            prefix.push(Span::styled(preview, body_style));
+        }
         let mut line = super::truncate_line_with_ellipsis_to_width(
             &Line::from(prefix),
             max_width.saturating_sub(badge_width + usage_width).max(1),
@@ -3370,8 +3683,16 @@ fn render_compact_agent_notification(
     let body_width = max_width.saturating_sub(3).max(1);
     let mut rendered_body = if body.is_empty() {
         vec![Line::from(Span::styled(String::new(), body_style))]
-    } else {
+    } else if notification.file_activity {
         markdown::render_markdown_with_width(&body, Some(body_width))
+    } else {
+        render_completion_lane_body(&body, body_width, text_color).unwrap_or_else(|| {
+            markdown::render_markdown_with_width_and_prose_color(
+                &body,
+                Some(body_width),
+                text_color,
+            )
+        })
     };
     if rendered_body.is_empty() {
         rendered_body.push(Line::from(Span::styled(body, body_style)));
@@ -3442,13 +3763,24 @@ fn render_compact_swarm_await(
     if title != "🐝 Swarm await" {
         return None;
     }
-    let mut lines = vec![Line::from(vec![
-        Span::styled("🐝 ", Style::default().fg(rgb(255, 200, 100))),
-        Span::styled(
-            content.trim().to_string(),
-            Style::default().fg(rgb(225, 225, 235)),
-        ),
-    ])];
+    if width == 0 {
+        return Some(Vec::new());
+    }
+    // Older persisted notifications may contain only a checkmark and a count.
+    let content = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let content = if content.starts_with('✓') || content == "finished" {
+        "outcome unknown".to_string()
+    } else {
+        content
+    };
+    let line = Line::from(vec![
+        Span::styled("🐝 Swarm await · ", Style::default().fg(rgb(255, 200, 100))),
+        Span::styled(content, Style::default().fg(rgb(225, 225, 235))),
+    ]);
+    let mut lines = vec![super::truncate_line_with_ellipsis_to_width(
+        &line,
+        width as usize,
+    )];
     if markdown::center_code_blocks() {
         left_pad_lines_for_centered_mode(&mut lines, width);
     }
@@ -4161,6 +4493,7 @@ pub(crate) fn render_tool_message(
     );
     let rendered_tool_line_text = super::line_plain_text(&rendered_tool_line);
     lines.push(rendered_tool_line);
+    lines.extend(tools_ui::codemode_preview(tc, row_width));
     if is_error && (tc.name != "batch" || batch_counts.is_none()) {
         lines.push(render_tool_failure_reason(&msg.content, row_width, 2));
         if centered {
@@ -4537,6 +4870,10 @@ fn tool_output_token_badge(content: &str) -> ToolOutputTokenBadge {
         color,
     }
 }
+
+#[cfg(test)]
+#[path = "ui_messages/agent_color_tests.rs"]
+mod agent_color_tests;
 
 #[cfg(test)]
 #[path = "ui_messages/tests.rs"]

@@ -1,6 +1,22 @@
 use super::*;
 
 #[test]
+fn openai_invalid_image_data_triggers_recovery() {
+    assert!(is_image_rejection_error(
+        "invalid_request_error (invalid_value): The image data you provided does not represent a valid image. Please check your input and try again."
+    ));
+    assert!(is_image_rejection_error(
+        "HTTP 400: The image data you provided does not represent a valid image."
+    ));
+    assert!(!is_image_rejection_error(
+        "The image data you provided does not represent a valid image."
+    ));
+    assert!(!is_image_rejection_error(
+        "503: The image data you provided does not represent a valid image."
+    ));
+}
+
+#[test]
 fn strip_all_images_replaces_every_image_with_a_note() {
     let mut a = vec![
         ContentBlock::Text {

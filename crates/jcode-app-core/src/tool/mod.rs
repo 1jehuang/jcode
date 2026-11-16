@@ -12,7 +12,6 @@ mod browser;
 mod calendar;
 mod codemode;
 mod communicate;
-mod compile_remote;
 #[cfg(target_os = "macos")]
 mod computer;
 mod config_edit_notice;
@@ -33,6 +32,7 @@ pub mod applet;
 mod goal;
 pub mod inflight;
 mod jcode_docs;
+pub(crate) mod load_tools;
 pub use jcode_docs::{BundledDocs, bundled_docs, register_bundled_docs};
 pub mod mcp;
 mod memory;
@@ -41,6 +41,7 @@ mod open;
 mod panel;
 mod patch;
 mod read;
+pub mod remote_exec;
 pub(crate) mod sdk;
 pub mod selfdev;
 pub(crate) mod serde_coerce;
@@ -271,19 +272,81 @@ pub(crate) fn session_mcp_alias_is_allowed(
 /// models routinely stringify booleans, but anything else (including `1`) is
 /// treated as absent: accidentally spending the remaining context window should
 /// take an unambiguous yes.
-#[cfg(test)]
-pub(crate) fn accept_large_output_schema_property_for_test() -> Value {
-    jcode_tool_core::accept_large_output_schema_property()
-}
-
 fn accepts_large_output(input: &Value) -> bool {
-    // Same key the schema advertises, so the documented flag and the honored
-    // flag cannot drift apart.
+    // The key is not in any schema (that would cost tokens on every request);
+    // the refusal message names it.
     match input.get(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY) {
         Some(Value::Bool(accepted)) => *accepted,
         Some(Value::String(raw)) => raw.trim().eq_ignore_ascii_case("true"),
         _ => false,
     }
+}
+
+/// Leading text of the message that replaces a withheld result.
+const OUTPUT_WITHHELD_MARKER: &str = "⚠️ OUTPUT WITHHELD";
+
+/// The call each session most recently had withheld, so repeating it accepts
+/// the cost.
+///
+/// Strict-schema providers cannot send a key the schema does not declare, so
+/// the flag alone would leave them with no way to opt in. An immediate,
+/// identical repeat is an equally unambiguous yes and needs no schema.
+static WITHHELD_CALLS: LazyLock<StdRwLock<HashMap<String, Vec<u64>>>> =
+    LazyLock::new(|| StdRwLock::new(HashMap::new()));
+
+/// Withheld calls remembered per session. A batch can have several sub-calls
+/// withheld at once, so one slot is not enough.
+const WITHHELD_CALLS_PER_SESSION: usize = 8;
+
+/// Identity of a call for repeat detection. `intent` is a display label the
+/// model rewords freely, so it is not part of the identity.
+fn withheld_call_key(tool: &str, input: &Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut input = input.clone();
+    if let Some(object) = input.as_object_mut() {
+        object.remove("intent");
+        object.remove(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY);
+        object.retain(|_, value| !value.is_null());
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    tool.hash(&mut hasher);
+    input.to_string().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// True when this call repeats one that was withheld for the session. The
+/// record is consumed, so each refusal buys exactly one accepted repeat.
+fn take_repeated_withheld_call(session_id: &str, key: u64) -> bool {
+    let mut calls = WITHHELD_CALLS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(keys) = calls.get_mut(session_id) else {
+        return false;
+    };
+    let Some(position) = keys.iter().position(|seen| *seen == key) else {
+        return false;
+    };
+    keys.remove(position);
+    if keys.is_empty() {
+        calls.remove(session_id);
+    }
+    true
+}
+
+fn remember_withheld_call(session_id: &str, key: u64) {
+    let mut calls = WITHHELD_CALLS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Bound the map so abandoned sessions cannot grow it without limit.
+    if calls.len() >= 4096 && !calls.contains_key(session_id) {
+        calls.clear();
+    }
+    let keys = calls.entry(session_id.to_string()).or_default();
+    keys.retain(|seen| *seen != key);
+    if keys.len() >= WITHHELD_CALLS_PER_SESSION {
+        keys.remove(0);
+    }
+    keys.push(key);
 }
 
 /// Aliases are surface-dependent, but policy follows original identities for
@@ -439,14 +502,14 @@ impl Registry {
                 apply_patch::ApplyPatchTool::new,
             );
             Self::insert_tool_timed(&mut m, &mut timings, "bash", bash::BashTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "browser", browser::BrowserTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "open", open::OpenTool::new);
             Self::insert_tool_timed(
                 &mut m,
                 &mut timings,
-                "compile_remote",
-                compile_remote::CompileRemoteTool::new,
+                load_tools::LOAD_TOOLS_NAME,
+                load_tools::LoadToolsTool::new,
             );
-            Self::insert_tool_timed(&mut m, &mut timings, "browser", browser::BrowserTool::new);
-            Self::insert_tool_timed(&mut m, &mut timings, "open", open::OpenTool::new);
             #[cfg(target_os = "macos")]
             Self::insert_tool_timed(
                 &mut m,
@@ -955,7 +1018,7 @@ impl Registry {
             0.0
         };
         format!(
-            "⚠️ OUTPUT WITHHELD: this result is ~{output}k tokens ({percent:.0}% of the \
+            "{OUTPUT_WITHHELD_MARKER}: this result is ~{output}k tokens ({percent:.0}% of the \
              {budget}k context budget, of which {used}k is already used), so it was not \
              returned. Nothing was added to the context except this message.\n\n\
              Narrow the request first: add or tighten `path`, `glob`, or `type`, set \
@@ -963,8 +1026,9 @@ impl Registry {
              read a specific line range. A targeted query is almost always the better \
              answer than a truncated dump.\n\n\
              If you genuinely need this output and accept the token cost, repeat the same \
-             call with `\"accept_large_output\": true`. That returns the first ~{affordable}k \
-             tokens and permanently spends them from this session's context.",
+             call unchanged as your next call (or add `\"accept_large_output\": true`). That \
+             returns the first ~{affordable}k tokens and permanently spends them from this \
+             session's context.",
             output = output_tokens as f32 / 1000.0,
             percent = percent_of_budget,
             budget = budget / 1000,
@@ -1118,7 +1182,13 @@ impl Registry {
         );
 
         let started_at = std::time::Instant::now();
-        let result = tool.execute(input.clone(), ctx.clone()).await;
+        // Hooks, policy, telemetry and the context guard stay in the runtime.
+        // Only the workspace side effect moves to the execution environment.
+        let result = if !is_custom && remote_exec::routes(resolved_name) {
+            remote_exec::execute(resolved_name, input.clone(), &ctx).await
+        } else {
+            tool.execute(input.clone(), ctx.clone()).await
+        };
         let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
         crate::telemetry::record_tool_execution(resolved_name, &input, result.is_ok(), latency_ms);
@@ -1152,9 +1222,15 @@ impl Registry {
         Self::apply_post_tool_feedback(resolved_name, &input, &ctx, latency_ms, &mut output).await;
 
         // Context overflow guard: check if this output would push us over the limit
-        output = self
-            .guard_context_overflow(name, output, accepts_large_output(&input))
-            .await;
+        // Opt in with the flag, or by repeating a call that was just withheld.
+        let call_key = withheld_call_key(resolved_name, &input);
+        let accepted =
+            accepts_large_output(&input) | take_repeated_withheld_call(&ctx.session_id, call_key);
+        let already_marked = output.output.starts_with(OUTPUT_WITHHELD_MARKER);
+        output = self.guard_context_overflow(name, output, accepted).await;
+        if !already_marked && output.output.starts_with(OUTPUT_WITHHELD_MARKER) {
+            remember_withheld_call(&ctx.session_id, call_key);
+        }
 
         let mut fields = Self::tool_lifecycle_fields("done", name, resolved_name, &input, &ctx);
         fields.push(("elapsed_ms".to_string(), latency_ms.to_string()));

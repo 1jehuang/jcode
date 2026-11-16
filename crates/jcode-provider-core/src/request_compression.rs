@@ -295,10 +295,15 @@ pub fn json_body<T: serde::Serialize + ?Sized>(
     let builder = builder.header(reqwest::header::CONTENT_TYPE, "application/json");
     let raw_len = raw.len();
     let (builder, wire) = match (compressed, encoding) {
-        (Some(bytes), Some(encoding)) => (
-            builder.header(reqwest::header::CONTENT_ENCODING, encoding.header_value()),
-            bytes,
-        ),
+        (Some(bytes), Some(encoding)) => {
+            // Compression decisions are final. The raw allocation is no longer
+            // needed while handing off the wire body.
+            drop(raw);
+            (
+                builder.header(reqwest::header::CONTENT_ENCODING, encoding.header_value()),
+                bytes,
+            )
+        }
         _ => (builder, raw),
     };
     if raw_len >= MIN_COMPRESS_BYTES {

@@ -21,7 +21,7 @@ fn stripped_metadata_save_preserves_authoritative_compaction() -> anyhow::Result
         original_turn_count: 1,
         compacted_count: 1,
     };
-    session.compaction = Some(compaction.clone());
+    session.compaction = Some(compaction.clone().into());
     session.save()?;
 
     let mut remote = Session::load(id)?;
@@ -30,7 +30,7 @@ fn stripped_metadata_save_preserves_authoritative_compaction() -> anyhow::Result
     remote.save()?;
 
     let restored = Session::load(id)?;
-    assert_eq!(restored.compaction, Some(compaction));
+    assert_eq!(restored.compaction, Some(compaction.into()));
     assert_eq!(restored.messages.len(), 1);
     Ok(())
 }

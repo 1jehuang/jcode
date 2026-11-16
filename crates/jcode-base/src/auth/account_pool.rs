@@ -398,7 +398,7 @@ impl AccountPool {
             }
         }
         members.extend(last);
-        members.sort_by_cached_key(|key| self.priority(key));
+        members.sort_by_cached_key(|key| self.routing_rank(key));
         (members, others)
     }
 
@@ -455,13 +455,46 @@ impl AccountPool {
         }
         // Cycle only within a tier. A lower-priority metered account must not
         // jump ahead of a ready subscription merely because it follows current.
-        members.sort_by_cached_key(|key| self.priority(key));
+        members.sort_by_cached_key(|key| self.routing_rank(key));
         let prefix = format!("{provider}:");
         members
             .into_iter()
             .filter(|key| Some(key) != current_key.as_ref())
             .filter_map(|key| key.strip_prefix(&prefix).map(str::to_string))
             .collect()
+    }
+}
+
+impl AccountPool {
+    /// Local-only routing preference. Unknown quota remains eligible, but a
+    /// healthy fresh report wins within the same user-selected priority tier.
+    fn routing_rank(&self, key: &str) -> (u32, bool) {
+        let known_available = key
+            .split_once(':')
+            .and_then(|(provider, label)| {
+                let kind = match provider {
+                    "claude" => crate::usage::MultiAccountProviderKind::Anthropic,
+                    "openai" => crate::usage::MultiAccountProviderKind::OpenAI,
+                    _ => return None,
+                };
+                crate::usage::cached_account_usage_snapshot(kind, label)
+            })
+            .is_some_and(|usage| {
+                !usage.exhausted
+                    && [usage.five_hour_ratio, usage.seven_day_ratio]
+                        .into_iter()
+                        .flatten()
+                        .any(|ratio| ratio.is_finite() && ratio < 0.99)
+            });
+        (self.priority(key), !known_available)
+    }
+
+    /// Explicit pool members in effective priority and quota-health order.
+    pub fn ordered_members(&self) -> Vec<String> {
+        let mut members = self.members.clone();
+        members.retain(|key| !self.excluded.contains(key));
+        members.sort_by_cached_key(|key| self.routing_rank(key));
+        members
     }
 }
 
