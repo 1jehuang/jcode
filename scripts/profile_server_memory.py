@@ -7,6 +7,10 @@ Example:
 
 Only the server PID is measured, never its process tree. Credentials are copied
 into a disposable private home, never symlinked, and config is not borrowed.
+Artifacts include raw smaps and smaps_rollup, build/version metadata and all
+debug memory responses. Startup waits three seconds for asynchronous refreshes.
+Add --heap-profile with a jemalloc-prof build to sample from process exec and
+save a heap dump at each post-session stage (dumps themselves perturb memory).
 Artifacts may contain model output and working-directory paths. No credentials
 or environment dump are recorded. Real model turns may incur provider charges.
 """
@@ -29,12 +33,20 @@ AUTH_FILES = ("auth.json", "anthropic-auth.json", "openai-auth.json",
               "gemini_oauth.json", "antigravity_oauth.json")
 
 
-def isolated_env(root: Path, inherited: dict[str, str]) -> dict[str, str]:
+HEAP_MALLOC_CONF = "prof:true,prof_active:true,prof_accum:true,lg_prof_sample:16"
+
+
+def isolated_env(root: Path, inherited: dict[str, str], heap_profile: bool = False) -> dict[str, str]:
     env = {k: v for k, v in inherited.items() if not k.startswith("JCODE_")}
     env.update(JCODE_HOME=str(root / "home"), JCODE_RUNTIME_DIR=str(root / "run"),
                JCODE_TEST_SESSION="1", JCODE_TEMP_SERVER="1",
                JCODE_SERVER_OWNER_PID=str(os.getpid()), JCODE_NO_TELEMETRY="1",
-               JCODE_DEBUG_CONTROL="1")
+               JCODE_DEBUG_CONTROL="1", TMPDIR=str(root / "tmp"),
+               TMP=str(root / "tmp"), TEMP=str(root / "tmp"))
+    if heap_profile:
+        # Replace inherited settings so sampling starts at process exec.
+        env["MALLOC_CONF"] = HEAP_MALLOC_CONF
+        env["_RJEM_MALLOC_CONF"] = HEAP_MALLOC_CONF
     return env
 
 
@@ -104,6 +116,11 @@ def smaps(pid: int) -> dict:
     return {"pid": pid, "scope": "server_only", "raw": raw, "values_kib": kb}
 
 
+def full_smaps(pid: int) -> dict:
+    return {"pid": pid, "scope": "server_only",
+            "raw": Path(f"/proc/{pid}/smaps").read_text()}
+
+
 def save(path: Path, value) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n")
 
@@ -113,16 +130,29 @@ def run(args) -> None:
     output.mkdir(mode=0o700)  # Refuse to overwrite a prior run.
     result = {"schema_version": 1, "binary": str(args.binary), "cwd": str(args.cwd),
               "turns": args.turns, "prompt": args.prompt, "model": args.model,
-              "settle_seconds": args.settle_seconds, "scope": "server_only",
+              "settle_seconds": args.settle_seconds,
+              "startup_settle_seconds": args.startup_settle_seconds,
+              "heap_profile": args.heap_profile,
+              "heap_malloc_conf": HEAP_MALLOC_CONF if args.heap_profile else None,
+              "heap_dump_timing": "after stage memory snapshots, post-session stages only",
+              "measurement_note": "debug memory reports and heap dumps allocate memory and may perturb later samples",
+              "scope": "server_only",
               "config": "fresh defaults, no borrowed config", "stages": [], "status": "running"}
     save(output / "profile.json", result)
     try:
         with tempfile.TemporaryDirectory(prefix="jcode-memory-") as temp:
             root = Path(temp)
-            for name in ("home", "run"):
+            for name in ("home", "run", "tmp"):
                 (root / name).mkdir(mode=0o700)
             result["copied_auth_files"] = copy_auth(args.auth_from, root / "home")
-            env = isolated_env(root, os.environ)
+            env = isolated_env(root, os.environ, args.heap_profile)
+            result["isolation"] = {"private_home": True, "private_runtime": True,
+                                   "private_tmpdir": True, "test_session": True}
+            version = subprocess.run([str(args.binary), "--version"], env=env,
+                                     cwd=args.cwd, capture_output=True, text=True,
+                                     timeout=args.timeout, check=True)
+            result["binary_version"] = version.stdout.strip()
+            save(output / "profile.json", result)
             sock = root / "run" / "profile-debug.sock"
             with (output / "server.log").open("w") as log:
                 server = subprocess.Popen(
@@ -155,6 +185,9 @@ def run(args) -> None:
                         validate_population(sample["server_info"]["parsed"],
                                             sample["members"]["parsed"], sid)
                         sample["smaps_rollup"] = smaps(server.pid)
+                        sample["smaps"] = full_smaps(server.pid)
+                        save(output / f"{stage}.json", sample)
+                        result["server_build"] = sample["server_info"]["parsed"]
                         for key, command in (("server_memory", "server:memory"),
                                              ("allocator", "allocator"),
                                              ("agent_memory", "agent:memory")):
@@ -169,11 +202,18 @@ def run(args) -> None:
                             raw = cmd(command, sid)
                             sample[key] = {"raw": raw, "parsed": json.loads(raw)}
                             save(output / f"{stage}.json", sample)
+                        if args.heap_profile and sid is not None:
+                            heap_path = output / f"{stage}.heap"
+                            raw = cmd(f"allocator:profile:dump {heap_path}", sid)
+                            sample["heap_profile_dump"] = {"raw": raw, "path": str(heap_path)}
+                            if not heap_path.is_file():
+                                raise RuntimeError(f"heap profile dump missing: {heap_path}")
                         save(output / f"{stage}.json", sample)
                         save(output / "profile.json", result)
                         print(f"{stage}: server PSS {sample['smaps_rollup']['values_kib']['Pss']} KiB",
                               flush=True)
 
+                    time.sleep(args.startup_settle_seconds)
                     started = time.monotonic()
                     capture("startup")
                     created = cmd(f"create_session:{args.cwd}")
@@ -221,6 +261,10 @@ def main() -> int:
                         help="copy known auth files from this directory, never config")
     parser.add_argument("--model", help="explicit provider/model selector")
     parser.add_argument("--prompt", default="Reply with exactly the word: done. Do not use tools.")
+    parser.add_argument("--startup-settle-seconds", type=float, default=3,
+                        help="wait after debug socket readiness before startup baseline (default: 3)")
+    parser.add_argument("--heap-profile", action="store_true",
+                        help="enable startup jemalloc sampling and post-session dumps (requires jemalloc-prof build)")
     parser.add_argument("--settle-seconds", type=float, default=10)
     parser.add_argument("--timeout", type=float, default=600)
     args = parser.parse_args()
@@ -230,7 +274,9 @@ def main() -> int:
         parser.error("--binary must be an executable file")
     if not args.cwd.is_dir() or args.turns < 0:
         parser.error("--cwd must be a directory and --turns must be nonnegative")
-    if not math.isfinite(args.settle_seconds) or args.settle_seconds < 0 or not math.isfinite(args.timeout) or args.timeout <= 0:
+    if (not math.isfinite(args.startup_settle_seconds) or args.startup_settle_seconds < 0 or
+            not math.isfinite(args.settle_seconds) or args.settle_seconds < 0 or
+            not math.isfinite(args.timeout) or args.timeout <= 0):
         parser.error("settle seconds must be finite/nonnegative and timeout finite/positive")
     try:
         run(args)
