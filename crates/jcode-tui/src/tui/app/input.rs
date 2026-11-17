@@ -814,6 +814,14 @@ pub(super) fn pasted_newline_in_progress() -> bool {
     paste_guard::ctrl_enter_is_pasted_newline()
 }
 
+/// Test hook: close the pasted-newline window, so the next `Ctrl+Enter` is read as
+/// the deliberate chord. Tests drive keys microseconds apart, which is indistinguishable
+/// from a paste burst without this.
+#[cfg(test)]
+pub(super) fn expire_char_press_for_test() {
+    paste_guard::clear_char_press();
+}
+
 pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
     if app.append_ssh_login_input(text) {
         return true;
