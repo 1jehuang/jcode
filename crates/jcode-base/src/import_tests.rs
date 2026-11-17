@@ -138,7 +138,8 @@ fn imported_history_is_bounded_for_fast_initial_render() {
             content: vec![ContentBlock::Text {
                 text: format!("message {index} {}", "x".repeat(4096)),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,
@@ -473,7 +474,8 @@ fn cached_imported_session_preserves_existing_history_verbatim() {
             name: "legacy:tool".to_string(),
             input: serde_json::json!({"value": 1}),
             thought_signature: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -486,7 +488,8 @@ fn cached_imported_session_preserves_existing_history_verbatim() {
             tool_use_id: "legacy/call".to_string(),
             content: "done".to_string(),
             is_error: Some(false),
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -498,7 +501,8 @@ fn cached_imported_session_preserves_existing_history_verbatim() {
         content: vec![ContentBlock::Text {
             text: "continued inside jcode".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -1042,7 +1046,8 @@ fn test_reimporting_claude_session_preserves_jcode_continuation() {
         content: vec![ContentBlock::Text {
             text: "jcode-only follow up".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,

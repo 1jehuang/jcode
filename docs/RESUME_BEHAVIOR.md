@@ -45,8 +45,9 @@ resume_open_elsewhere = "move"   # "off" (default), "move", or "replace"
 ```
 
 - `off`: attach a second client and leave the other window alone.
-- `move`: bring the existing window to the focused workspace and focus it, and
-  do not attach again. A standalone picker window (`jcode --resume`) then exits.
+- `move`: bring the existing window to the focused workspace, place its column
+  right beside the one you are on (rather than scrolling you to wherever it
+  was), focus it, and do not attach again. A standalone picker window (`jcode --resume`) then exits.
   Requires niri. When the window cannot be identified unambiguously (no niri,
   or one terminal process hosting several windows) it behaves like `replace`.
 - `replace`: resume as usual and close the other window's client. The closed

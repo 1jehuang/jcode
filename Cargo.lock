@@ -68,7 +68,7 @@ dependencies = [
 [[package]]
 name = "agentgrep"
 version = "0.2.0"
-source = "git+https://github.com/1jehuang/agentgrep.git?tag=v0.2.0#a2c52bbfea9fbcf1d7e89d74ef607c6d1fb4ba14"
+source = "git+https://github.com/1jehuang/agentgrep.git?rev=ff7ba82913f4c3a1d69062767d7661de7de80e4b#ff7ba82913f4c3a1d69062767d7661de7de80e4b"
 dependencies = [
  "clap",
  "globset",
@@ -233,7 +233,7 @@ dependencies = [
  "objc2-foundation",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.60.2",
+ "windows-sys 0.52.0",
  "x11rb",
 ]
 
@@ -3406,6 +3406,9 @@ checksum = "e6506c6c10786659413faa717ceebcb8f70731c0a60cbae39795fdf114519c1a"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
+ "color_quant",
+ "gif",
+ "image-webp",
  "moxcms",
  "num-traits",
  "png 0.18.1",
@@ -3586,7 +3589,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "jcode"
-version = "0.99.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3761,6 +3764,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
+ "bytes",
  "chrono",
  "dirs",
  "flate2",
@@ -4226,6 +4230,7 @@ dependencies = [
  "jcode-provider-core",
  "jcode-provider-openai",
  "reqwest 0.12.28",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -4680,6 +4685,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
+ "clap",
  "crossterm",
  "dirs",
  "futures",
@@ -6930,9 +6936,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.18"
+version = "0.11.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9746dbde176634f4f2f1faf2404e30a31b2bc1e9cafb5329c95d8177a18c9fc"
+checksum = "0e750cca55fe4f0439a15d0bb529da9651e79993e8e72c61a899a36d462befbe"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -6953,16 +6959,16 @@ dependencies = [
 
 [[package]]
 name = "quinn-udp"
-version = "0.5.14"
+version = "0.5.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "addec6a0dcad8a8d96a771f815f0eaf55f9d1805756410b39f5fa81332574cbd"
+checksum = "af66907df18639dcf4db56ca65490cabc4b27a97dbadd96f2926cca73298f016"
 dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

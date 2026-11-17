@@ -11,7 +11,7 @@ pub use anchor::{
 };
 pub use cache::{
     MessageCacheContext, centered_wrap_width, clear_message_cache, get_cached_message_lines,
-    left_pad_lines_for_centered_mode,
+    left_pad_lines_for_centered_mode, project_cached_message_lines,
 };
 pub use message::{
     DisplayMessage, TranscriptPreviewLabels, display_messages_from_rendered_messages,

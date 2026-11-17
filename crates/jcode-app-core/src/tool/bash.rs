@@ -82,6 +82,17 @@ fn timeout_message(timeout_ms: u64) -> String {
     msg
 }
 
+/// Timeout applied to a background command.
+///
+/// An explicit timeout is honored as given. The 10 minute cap only bounds how
+/// long a foreground call may hold the turn; a background task has no such
+/// limit (and none at all when `timeout` is omitted), so clamping a requested
+/// 30 minutes down to 10 killed long test runs early with a misleading
+/// "timed out after 600000ms".
+fn background_timeout_ms(requested: Option<u64>) -> Option<u64> {
+    requested
+}
+
 fn progress_ratio_regex() -> Result<&'static regex::Regex> {
     static REGEX: LazyLock<Result<regex::Regex, regex::Error>> = LazyLock::new(|| {
         regex::Regex::new(
@@ -1241,7 +1252,7 @@ impl BashTool {
         // Capture before handing work to the manager. Its closure can start
         // after a caller has already replaced or cleared these overrides.
         let session_environment = crate::session_env::session_env(&ctx.session_id);
-        let timeout_ms = params.timeout.map(|timeout| timeout.min(600000));
+        let timeout_ms = background_timeout_ms(params.timeout);
         let timeout_duration = timeout_ms.map(Duration::from_millis);
 
         let wake = params.wake;

@@ -88,7 +88,7 @@ pub(crate) fn hoist_late_tool_results(messages: &[Message]) -> Vec<Message> {
             .collect();
         if !content.is_empty() {
             out.push(Message {
-                content,
+                content: content.into(),
                 ..msg.clone()
             });
         }
@@ -97,7 +97,7 @@ pub(crate) fn hoist_late_tool_results(messages: &[Message]) -> Vec<Message> {
             // when there is one, keeping the results first.
             out.push(Message {
                 role: Role::User,
-                content: results,
+                content: results.into(),
                 timestamp: msg.timestamp,
                 tool_duration_ms: None,
             });
@@ -522,7 +522,7 @@ pub(crate) fn repair_dangling_anthropic_server_tools(messages: &[Message]) -> Ve
 
         if !content.is_empty() {
             let mut repaired_message = message.clone();
-            repaired_message.content = content;
+            repaired_message.content = content.into();
             repaired.push(repaired_message);
         }
     }

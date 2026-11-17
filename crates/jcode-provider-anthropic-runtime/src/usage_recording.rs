@@ -194,6 +194,13 @@ mod tests {
                             })
                             .unwrap();
                         if request.len() >= end + 4 + length {
+                            let body: serde_json::Value =
+                                serde_json::from_slice(&request[end + 4..end + 4 + length])
+                                    .unwrap();
+                            assert_eq!(body["model"], "unpriced-requested-alias");
+                            assert_eq!(body["max_tokens"], 1024);
+                            assert_eq!(body["messages"], serde_json::json!([]));
+                            assert_eq!(body["stream"], true);
                             break;
                         }
                     }
@@ -236,11 +243,12 @@ mod tests {
                     service_tier: None,
                     stream: true,
                 };
+                let original_request = serde_json::to_value(&request).unwrap();
                 let result = stream_response(
                     Client::builder().no_proxy().build().unwrap(),
                     "token".into(),
                     label.is_some(),
-                    request,
+                    &request,
                     tx,
                     "unpriced-requested-alias",
                     "test-session",
@@ -249,6 +257,9 @@ mod tests {
                     label,
                 )
                 .await;
+                // An attempt borrows the payload, leaving the owner's request
+                // intact for retry reshaping after either success or failure.
+                assert_eq!(serde_json::to_value(&request).unwrap(), original_request);
                 if limited {
                     assert!(result.unwrap_err().to_string().contains("429"));
                 } else {

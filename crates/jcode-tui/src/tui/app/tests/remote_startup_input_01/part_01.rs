@@ -80,36 +80,6 @@ fn test_review_prefers_openai_oauth_gpt_5_4_when_available() {
 }
 
 #[test]
-fn test_pending_split_launch_shows_processing_status_in_ui() {
-    let mut app = create_test_app();
-    app.is_remote = true;
-    app.pending_split_started_at = Some(Instant::now());
-
-    assert!(app.is_processing());
-    assert!(crate::tui::TuiState::is_processing(&app));
-    assert!(matches!(
-        crate::tui::TuiState::status(&app),
-        ProcessingStatus::Sending
-    ));
-    assert!(crate::tui::TuiState::elapsed(&app).is_some());
-}
-
-#[test]
-fn test_expired_pending_split_launch_no_longer_shows_processing_status() {
-    let mut app = create_test_app();
-    app.is_remote = true;
-    app.pending_split_started_at = Some(Instant::now() - Duration::from_millis(400));
-
-    assert!(!app.is_processing());
-    assert!(!crate::tui::TuiState::is_processing(&app));
-    assert!(matches!(
-        crate::tui::TuiState::status(&app),
-        ProcessingStatus::Idle
-    ));
-    assert!(crate::tui::TuiState::elapsed(&app).is_none());
-}
-
-#[test]
 fn test_pending_remote_dispatch_counts_as_processing_for_tui_state() {
     let mut app = create_test_app();
     app.is_remote = true;
@@ -248,13 +218,16 @@ fn test_prepare_review_spawned_session_uses_visible_transcript_for_judge_session
                 Some(title.to_string()),
             );
             child.replace_messages(parent.messages.clone());
-            child.compaction = Some(crate::session::StoredCompactionState {
-                summary_text: "stale compaction".to_string(),
-                openai_encrypted_content: None,
-                covers_up_to_turn: 1,
-                original_turn_count: 1,
-                compacted_count: 1,
-            });
+            child.compaction = Some(
+                crate::session::StoredCompactionState {
+                    summary_text: "stale compaction".to_string(),
+                    openai_encrypted_content: None,
+                    covers_up_to_turn: 1,
+                    original_turn_count: 1,
+                    compacted_count: 1,
+                }
+                .into(),
+            );
             child.save().expect("save child session");
 
             super::commands::prepare_review_spawned_session(
@@ -517,7 +490,8 @@ fn test_new_for_remote_fresh_spawn_restores_local_transcript() {
             content: vec![crate::message::ContentBlock::Text {
                 text: "persisted transcript should be restored locally".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,
@@ -584,7 +558,8 @@ fn test_new_for_remote_restores_display_history_without_retaining_session_transc
             content: vec![crate::message::ContentBlock::Text {
                 text: "persisted transcript should render once".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,
@@ -618,7 +593,8 @@ fn test_remote_startup_restores_swarm_delivery_as_compact_card() {
             content: vec![crate::message::ContentBlock::Text {
                 text: format!("DM from hatchling: {body}"),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: Some(crate::session::StoredDisplayRole::System),
             timestamp: None,
             tool_duration_ms: None,
@@ -1196,3 +1172,6 @@ fn test_model_picker_remote_falls_back_to_current_model_when_catalog_empty() {
 }
 
 include!("detailed_catalog.rs");
+
+#[path = "part_01_additional_tests.rs"]
+mod additional_test_pending_split_launch_shows_processing_status_in_ui;

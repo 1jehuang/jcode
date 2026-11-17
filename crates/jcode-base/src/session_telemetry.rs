@@ -12,7 +12,7 @@ pub struct SessionTelemetry {
     /// Normalized prompt size for one provider request, excluding output.
     pub context_tokens: u64,
     pub context_limit: Option<usize>,
-    pub compaction: Option<jcode_session_types::StoredCompactionState>,
+    pub compaction: Option<std::sync::Arc<jcode_session_types::StoredCompactionState>>,
     #[serde(default)]
     pub route_api_method: Option<String>,
     #[serde(default)]

@@ -1,48 +1,6 @@
 use super::*;
 
 #[test]
-fn pinned_dependency_label_uses_available_width_and_palette() {
-    let task = TodoCardBackgroundTask {
-        task_id: "resume".into(),
-        label: "Resume lint validation".into(),
-        percent: Some(38.0),
-    };
-    let line = todo_dependency_progress(&[&task], 60);
-    assert!(line.to_string().contains(&task.label));
-    assert_eq!(line.spans[0].style.fg, Some(todo_meta_color()));
-    for width in 0..100 {
-        assert!(todo_dependency_progress(&[&task], width).width() <= width);
-    }
-}
-
-#[test]
-fn expanded_diff_rows_preserve_source_and_align_continuations() {
-    let source = "    let result = compute(\"界界 e\u{301}\", argument);";
-    let parsed = ParsedDiffLine {
-        kind: DiffLineKind::Add,
-        prefix: "9+ ".into(),
-        content: source.into(),
-        file_path: None,
-    };
-    let rows = expanded_diff_row(&parsed, Some("rs"), 3, 24);
-    assert!(rows.len() > 1);
-    assert!(extract_line_text(&rows[0]).starts_with("│   9 +     let"));
-    let mut reconstructed = String::new();
-    for (index, row) in rows.iter().enumerate() {
-        assert!(row.width() <= 24, "{row:?}");
-        assert_eq!(row.alignment, Some(Alignment::Left));
-        if index > 0 {
-            assert!(extract_line_text(row).starts_with("│     ↪ "));
-        }
-        for span in row.spans.iter().skip(if index == 0 { 2 } else { 1 }) {
-            reconstructed.push_str(&span.content);
-        }
-    }
-    assert_eq!(reconstructed, source);
-    assert_eq!(rows[0].spans[1].style.fg, Some(diff_add_color()));
-}
-
-#[test]
 fn expanded_diff_rows_fit_narrow_widths_and_expand_tabs() {
     let parsed = ParsedDiffLine {
         kind: DiffLineKind::Del,
@@ -3013,14 +2971,14 @@ fn render_swarm_message_collapsed_shows_tldr_and_expand_badge_only() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("fixed the flaky test"), "{plain}");
-    assert!(plain.contains(super::SWARM_EXPAND_BADGE), "{plain}");
+    assert!(!plain.contains("fixed the flaky test"), "{plain}");
+    assert!(plain.contains("tok"), "{plain}");
     let preview = lines
         .iter()
         .flat_map(|line| &line.spans)
-        .find(|span| span.content.contains("fixed the flaky test"))
-        .expect("DM preview span");
-    assert_eq!(preview.style.fg, Some(rgb(130, 130, 140)));
+        .find(|span| span.content.contains("tok"))
+        .expect("DM token count span");
+    assert_eq!(preview.style.fg, Some(rgb(118, 118, 118)));
     assert!(
         !plain.contains("race in the setup helper"),
         "collapsed card must hide the full body: {plain}"
@@ -3746,3 +3704,6 @@ fn provider_card_status_uses_shared_limit_colors() {
         assert!(header.contains("9% left"), "{header}");
     }
 }
+
+#[path = "tests_additional_tests.rs"]
+mod additional_pinned_dependency_label_uses_available_width_and_palette;

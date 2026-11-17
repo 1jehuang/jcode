@@ -125,7 +125,7 @@ pub(super) async fn run_stream_with_retries(
             auth.clone(),
             send_openrouter_headers,
             &conversation_id,
-            request.clone(),
+            &request,
             azure_responses,
             attempt_tx,
             Arc::clone(&provider_pin),
@@ -195,7 +195,7 @@ async fn stream_response(
     auth: ProviderAuth,
     send_openrouter_headers: bool,
     conversation_id: &str,
-    request: Value,
+    request: &Value,
     azure_responses: bool,
     tx: mpsc::Sender<Result<StreamEvent>>,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
@@ -243,7 +243,7 @@ async fn stream_response(
     req = apply_grok_cli_turn_headers(req, &auth, &model, conversation_id);
 
     let response = jcode_provider_core::transport::send_with_initial_response_timeout(
-        req.json(&request),
+        req.json(request),
         stream_idle_timeout,
     )
     .await
@@ -487,6 +487,21 @@ fn parsed_http_status(error_str: &str) -> Option<u16> {
     }
 }
 
+/// Whether a (lowercased) 429 body says the account's allowance is used up,
+/// as opposed to asking the client to slow down.
+fn is_exhausted_quota_error(error_str: &str) -> bool {
+    [
+        "freeusagelimiterror",
+        "free usage limit",
+        "insufficient_quota",
+        "insufficient quota",
+        "exceeded your current quota",
+        "billing",
+    ]
+    .iter()
+    .any(|marker| error_str.contains(marker))
+}
+
 fn is_retryable_error(error_str: &str) -> bool {
     // Explicit non-retryable HTTP statuses take precedence over the loose
     // substring heuristics below. These are deterministic client-side failures
@@ -498,6 +513,10 @@ fn is_retryable_error(error_str: &str) -> bool {
         // 429 rate limit, and every 5xx: the server answered but is overloaded
         // or failing on its side. This includes non-standard codes such as the
         // 529 "overloaded" some OpenAI-compatible providers send (#1596).
+        // A 429 that reports an exhausted allowance is not a rate limit: the
+        // same request fails identically until the plan changes. Retrying it
+        // left `jcode run` silent for minutes on a free-tier limit.
+        Some(429) if is_exhausted_quota_error(error_str) => return false,
         Some(429 | 500..=599) => return true,
         _ => {}
     }
@@ -581,6 +600,19 @@ mod tests {
             {\"error\":{\"message\":\"this request requires more credits, or fewer \
             max_tokens. you requested up to 65536 tokens, but can only afford 34424\"}}";
         assert!(!is_retryable_error(err));
+    }
+
+    /// Field report: OpenCode Zen free models answer 429 FreeUsageLimitError.
+    /// That was retried 8 times with backoff, so `jcode run` printed nothing.
+    #[test]
+    fn exhausted_quota_429_fails_fast_but_rate_limit_429_retries() {
+        let quota = "openai-compatible chat request failed\n  status: 429 Too Many Requests\n  response: {\"type\":\"error\",\"error\":{\"type\":\"FreeUsageLimitError\",\"message\":\"Free usage limit reached.\"}}"
+            .to_lowercase();
+        assert!(!is_retryable_error(&quota));
+        let openai = "status: 429 too many requests\n  response: {\"error\":{\"code\":\"insufficient_quota\"}}";
+        assert!(!is_retryable_error(openai));
+        let rate = "status: 429 too many requests\n  response: {\"error\":{\"message\":\"rate limit exceeded, retry in 2s\"}}";
+        assert!(is_retryable_error(rate));
     }
 
     #[test]

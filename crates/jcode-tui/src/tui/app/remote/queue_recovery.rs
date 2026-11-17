@@ -121,13 +121,27 @@ impl App {
         self.soft_interrupt_recovery = None;
         let mut recovered = Vec::new();
         let mut accepted = 0usize;
-        for (client_id, was_queued) in cancelled
+        // Server verdicts are grouped by outcome, not submission order. Both
+        // groups can contain recoverable prompts when an unacknowledged send
+        // never reached the server. Preserve send order so corrections cannot
+        // overtake the prompts they correct.
+        let verdicts: Vec<_> = self
+            .sent_soft_interrupts
             .iter()
-            .map(|id| (id, true))
-            .chain(not_queued.iter().map(|id| (id, false)))
-        {
+            .filter_map(|(request, _)| {
+                let client_id = crate::tui::backend::soft_interrupt_client_id(*request);
+                if cancelled.contains(&client_id) {
+                    Some((client_id, true))
+                } else if not_queued.contains(&client_id) {
+                    Some((client_id, false))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for (client_id, was_queued) in verdicts {
             let Some(index) = self.sent_soft_interrupts.iter().position(|(request, _)| {
-                &crate::tui::backend::soft_interrupt_client_id(*request) == client_id
+                crate::tui::backend::soft_interrupt_client_id(*request) == client_id
             }) else {
                 continue;
             };
@@ -153,10 +167,13 @@ impl App {
             }
         }
         crate::logging::info(&format!(
-            "REMOTE_SOFT_INTERRUPT_RECOVERY_RESULT id={} requeued={} already_accepted={}",
+            "RECOVERY_SOFT_INTERRUPT_RESULT request_id={} requeued={} already_accepted={} session_id={:?} queued={} pending_messages={}",
             id,
             recovered.len(),
-            accepted
+            accepted,
+            self.remote_session_id,
+            self.queued_messages.len(),
+            self.pending_soft_interrupts.len()
         ));
         if !recovered.is_empty() {
             recovered.append(&mut self.queued_messages);
@@ -269,10 +286,14 @@ fn recover_queued_continuation(app: &mut App, reason: &str, rejected: bool) -> b
     };
     app.rate_limit_reset = None;
     crate::logging::info(&format!(
-        "Recovering in-flight queued continuation into queued follow-ups after {} (content_chars={}, has_reminder={})",
+        "RECOVERY_CONTINUATION_REQUEUED reason={:?} content_chars={} has_reminder={} session_id={:?} request_id={:?} queued_before={} images={}",
         reason,
         pending.content.chars().count(),
-        pending.system_reminder.is_some()
+        pending.system_reminder.is_some(),
+        app.remote_session_id,
+        app.current_message_id,
+        app.queued_messages.len(),
+        pending.images.len()
     ));
     if let Some(reminder) = pending.system_reminder {
         app.hidden_queued_system_messages.insert(0, reminder);
@@ -292,8 +313,12 @@ pub(super) fn recover_local_interleave_to_queue(app: &mut App, reason: &str) -> 
     }
 
     crate::logging::info(&format!(
-        "Recovering unsent interleave into queued follow-ups after {}",
-        reason
+        "RECOVERY_INTERLEAVE_REQUEUED reason={:?} session_id={:?} request_id={:?} content_bytes={} queued_before={}",
+        reason,
+        app.remote_session_id,
+        app.current_message_id,
+        interleave.len(),
+        app.queued_messages.len()
     ));
     app.queued_messages.insert(0, interleave);
     true
@@ -314,11 +339,37 @@ pub(super) async fn recover_stranded_soft_interrupts(
     // a pending interrupt: one that reaches an idle session starts its own
     // turn. Ask which are still queued and requeue only those. Blind requeueing
     // sent the same prompt twice and drew "Already processing a message".
-    let unanswered = app.soft_interrupt_recovery.take().is_some();
+    let previous_recovery = app.soft_interrupt_recovery.take();
+    let unanswered = previous_recovery.is_some();
+    if let Some((id, started)) = previous_recovery {
+        crate::logging::info(&format!(
+            "RECOVERY_SOFT_INTERRUPT_TIMEOUT session_id={:?} request_id={} elapsed_ms={} pending_messages={} queued={}",
+            app.remote_session_id,
+            id,
+            started.elapsed().as_millis(),
+            app.pending_soft_interrupts.len(),
+            app.queued_messages.len()
+        ));
+    }
     if !unanswered && let Some(client_ids) = app.pending_soft_interrupt_client_ids() {
         match remote.cancel_soft_interrupts_by_id(client_ids).await {
-            Ok(id) => app.soft_interrupt_recovery = Some((id, Instant::now())),
+            Ok(id) => {
+                crate::logging::info(&format!(
+                    "RECOVERY_SOFT_INTERRUPT_REQUESTED session_id={:?} request_id={} pending_messages={} queued={}",
+                    app.remote_session_id,
+                    id,
+                    app.pending_soft_interrupts.len(),
+                    app.queued_messages.len()
+                ));
+                app.soft_interrupt_recovery = Some((id, Instant::now()));
+            }
             Err(err) => {
+                crate::logging::info(&format!(
+                    "RECOVERY_SOFT_INTERRUPT_FAILED session_id={:?} request_id=unassigned phase=cancel_by_id pending_messages={} queued={} action=preserve_pending",
+                    app.remote_session_id,
+                    app.pending_soft_interrupts.len(),
+                    app.queued_messages.len()
+                ));
                 app.push_display_message(DisplayMessage::error(format!(
                     "Failed to recover queued interleave message: {}",
                     err
@@ -335,6 +386,12 @@ pub(super) async fn recover_stranded_soft_interrupts(
     }
 
     if let Err(err) = remote.cancel_soft_interrupts().await {
+        crate::logging::info(&format!(
+            "RECOVERY_SOFT_INTERRUPT_FAILED session_id={:?} request_id=unassigned phase=cancel_all pending_messages={} queued={} action=restore_pending",
+            app.remote_session_id,
+            recovered_interrupts.len(),
+            app.queued_messages.len()
+        ));
         app.pending_soft_interrupts = recovered_interrupts;
         app.push_display_message(DisplayMessage::error(format!(
             "Failed to recover queued interleave message: {}",
@@ -345,8 +402,12 @@ pub(super) async fn recover_stranded_soft_interrupts(
     }
 
     crate::logging::info(&format!(
-        "Recovering {} stranded soft interrupt(s) into queued follow-ups after turn boundary",
-        recovered_interrupts.len()
+        "RECOVERY_SOFT_INTERRUPT_REQUEUED recovered={} session_id={:?} request_id={:?} queued_before={} timed_out={}",
+        recovered_interrupts.len(),
+        app.remote_session_id,
+        previous_recovery.map(|(id, _)| id),
+        app.queued_messages.len(),
+        unanswered
     ));
     app.pending_soft_interrupt_requests.clear();
     app.sent_soft_interrupts.clear();

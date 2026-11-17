@@ -160,7 +160,7 @@ pub(super) fn compute_prompt_preview_line_count(
 }
 
 /// Number of previous prompts shown when the expanded prompt history (Alt+E) is on.
-pub(super) const EXPANDED_PROMPT_PREVIEW_COUNT: usize = 6;
+pub(crate) const EXPANDED_PROMPT_PREVIEW_COUNT: usize = 6;
 
 static PROMPT_HISTORY_EXPANDED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);

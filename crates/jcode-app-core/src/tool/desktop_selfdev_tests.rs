@@ -69,6 +69,21 @@ fn builds_both_desktop_packages_with_matching_profile() {
 }
 
 #[test]
+fn schema_advertises_only_one_desktop_rebuild_and_reload_action() {
+    let schema = DesktopSelfDevTool::new().parameters_schema();
+    let actions = schema["properties"]["action"]["enum"].as_array().unwrap();
+    assert!(actions.contains(&json!("reload")));
+    assert!(!actions.contains(&json!("build-reload")));
+    assert!(
+        schema["properties"]["action"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("reload rebuilds/reloads Desktop")
+    );
+    assert_eq!(input("build-reload").action, "build-reload");
+}
+
+#[test]
 fn reload_actions_never_route_to_cli_or_subprocess() {
     for action in ["reload", "build-reload"] {
         assert!(command_spec(Path::new("/desktop"), &input(action), "debug", None).is_err());

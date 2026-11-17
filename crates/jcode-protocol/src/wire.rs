@@ -125,6 +125,21 @@ pub enum Request {
     #[serde(rename = "get_todos")]
     GetTodos { id: u64 },
 
+    /// Report whether this client's window has focus. Sent only to servers
+    /// that advertise [`crate::CLIENT_FOCUS_CAPABILITY`]; never acknowledged.
+    ///
+    /// `hidden` says an unfocused window is known to be out of sight (another
+    /// workspace, a background multiplexer window, the display off), which
+    /// lets the server batch its stream more coarsely. Absent means not known
+    /// to be hidden, so older clients and servers interoperate unchanged.
+    #[serde(rename = "client_focus")]
+    ClientFocus {
+        id: u64,
+        focused: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        hidden: bool,
+    },
+
     /// Execute a debug command (debug socket only)
     #[serde(rename = "debug_command")]
     DebugCommand {

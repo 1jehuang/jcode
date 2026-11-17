@@ -199,9 +199,8 @@ impl App {
         &mut self,
         manager: &crate::compaction::CompactionManager,
     ) {
-        let new_state = manager.persisted_state();
-        if self.session.compaction != new_state {
-            self.session.compaction = new_state;
+        if !manager.persisted_state_matches(self.session.compaction.as_deref()) {
+            self.session.compaction = manager.persisted_state().map(Arc::new);
             if let Err(err) = self.session.save() {
                 crate::logging::error(&format!(
                     "Failed to persist compaction state for session {}: {}",
@@ -236,13 +235,13 @@ impl App {
             };
         let state = crate::session::StoredCompactionState {
             summary_text,
-            openai_encrypted_content,
+            openai_encrypted_content: openai_encrypted_content.map(Into::into),
             covers_up_to_turn: compacted_count,
             original_turn_count: compacted_count,
             compacted_count,
         };
 
-        self.session.compaction = Some(state.clone());
+        self.session.compaction = Some(Arc::new(state.clone()));
         let provider_messages = self.materialized_provider_messages();
         let context_budget = self.context_limit as usize;
         let compaction = self.registry.compaction();
@@ -734,14 +733,14 @@ impl App {
                 };
                 let inserted_message = Message {
                     role: Role::User,
-                    content: vec![tool_block.clone()],
+                    content: vec![tool_block.clone()].into(),
                     timestamp: None,
                     tool_duration_ms: None,
                 };
                 let stored_message = crate::session::StoredMessage {
                     id: id::new_id("message"),
                     role: Role::User,
-                    content: vec![tool_block],
+                    content: vec![tool_block].into(),
                     display_role: None,
                     timestamp: Some(chrono::Utc::now()),
                     tool_duration_ms: None,
@@ -820,7 +819,7 @@ impl App {
             }
             self.add_provider_message(Message {
                 role: role.clone(),
-                content: kept_blocks.clone(),
+                content: kept_blocks.clone().into(),
                 timestamp: None,
                 tool_duration_ms: None,
             });

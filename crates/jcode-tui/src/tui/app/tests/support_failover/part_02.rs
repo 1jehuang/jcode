@@ -89,7 +89,7 @@ fn test_restore_failover_payload_keeps_existing_draft_and_raw_request() {
     assert_eq!(app.input, "next request");
     assert_eq!(app.cursor_pos, 3);
     let recovery = &app.display_messages.last().unwrap().content;
-    assert!(recovery.contains("Your draft is unchanged"));
+    assert!(recovery.contains("Your draft text is preserved"));
     assert!(recovery.contains("original @file request"));
 }
 
@@ -126,7 +126,7 @@ fn test_restore_failover_payload_preserves_images_without_duplicates() {
     let mut payload = failover_test_payload(None);
     payload.images = vec![existing.clone(), failed.clone(), failed.clone()];
     app.restore_failover_payload(payload);
-    assert_eq!(app.input, "expanded failed request");
+    assert_eq!(app.input, "expanded failed request [image 1] [image 2]");
     assert_eq!(app.pending_images, vec![existing, failed]);
 }
 

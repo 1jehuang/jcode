@@ -3,6 +3,7 @@ use super::openai_stream_diagnostics::{
     StreamProgress, add_cache_comparison, reqwest_header_fields, tungstenite_header_fields,
 };
 use super::*;
+use jcode_provider_openai::websocket_health::WebsocketEventClassification;
 
 #[path = "openai_ws_cancel_recovery.rs"]
 mod openai_ws_cancel_recovery;
@@ -10,8 +11,16 @@ use openai_ws_cancel_recovery::{RecoverableAttempt, RecoveryPhase, has_unanswere
 
 // Inspect the wire error, not the parser's lossy message. Envelope metadata
 // must not hide an otherwise opaque rejection, but substantive details do.
+#[cfg(test)]
 fn opaque_ws_rejection(text: &str, response_started: &mut bool) -> bool {
-    let Ok(value) = serde_json::from_str::<Value>(text) else {
+    opaque_ws_rejection_event(&WebsocketEventClassification::parse(text), response_started)
+}
+
+fn opaque_ws_rejection_event(
+    event: &WebsocketEventClassification,
+    response_started: &mut bool,
+) -> bool {
+    let Some(value) = event.value() else {
         return false;
     };
     if value
@@ -68,6 +77,33 @@ fn opaque_ws_rejection(text: &str, response_started: &mut bool) -> bool {
 }
 
 #[test]
+fn opaque_rejection_uses_validated_top_level_type() {
+    for data in [
+        r#"{"type":"ping","delta":"response.created"}"#,
+        r#"{"type":"ping","nested":{"type":"response.created"}}"#,
+        r#"{"type":"response.created","type":null}"#,
+        r#"{"type":"response.created"} trailing"#,
+        r#"{"type":"response.created","invalid":1e999}"#,
+    ] {
+        let mut started = false;
+        assert!(!opaque_ws_rejection(data, &mut started));
+        assert!(!started, "{data}");
+    }
+    let mut started = false;
+    assert!(!opaque_ws_rejection(
+        r#"{"type":"ping","ty\u0070e":"response.created"}"#,
+        &mut started
+    ));
+    assert!(started);
+    let mut started = false;
+    assert!(opaque_ws_rejection(
+        r#"{"type":"response.created","type":"error","error":{"type":"invalid_request_error","message":"Invalid request"}}"#,
+        &mut started
+    ));
+    assert!(!started);
+}
+
+#[test]
 fn opaque_rejection_requires_exact_shape_and_no_response_activity() {
     let generic = serde_json::json!({"type":"error","error":{"type":"invalid_request_error","message":"Invalid request"}});
     assert!(opaque_ws_rejection(&generic.to_string(), &mut false));
@@ -113,7 +149,7 @@ fn opaque_rejection_requires_exact_shape_and_no_response_activity() {
 pub(super) async fn recover_opaque_ws_rejection(
     credentials: Arc<RwLock<CodexCredentials>>,
     account_label: Option<String>,
-    request: Value,
+    request: &Value,
     tx: &mpsc::Sender<Result<StreamEvent>>,
 ) {
     emit_status_detail(tx, "opaque websocket rejection: trying HTTPS once").await;
@@ -914,11 +950,9 @@ async fn continue_persistent_ws_locked(
         object.remove("background");
     }
 
-    let continuation_tools = continuation_request
-        .get("tools")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!([]));
-    let continuation_instructions = continuation_request.get("instructions").cloned();
+    let empty_tools = serde_json::json!([]);
+    let continuation_tools = continuation_request.get("tools").unwrap_or(&empty_tools);
+    let continuation_instructions = continuation_request.get("instructions");
     let continuation_tool_count = continuation_tools
         .as_array()
         .map(|tools| tools.len())
@@ -956,8 +990,8 @@ async fn continue_persistent_ws_locked(
         },
         &continuation_payload,
         &incremental_items,
-        continuation_instructions.as_ref(),
-        Some(&continuation_tools),
+        continuation_instructions,
+        Some(continuation_tools),
         Some(continuation_tool_count),
         &[
             (
@@ -1019,6 +1053,11 @@ async fn continue_persistent_ws_locked(
             ),
         ],
     );
+
+    // These duplicate JSON trees exist only for synchronous fingerprinting.
+    // The actual continuation request owns the input needed for serialization.
+    drop(continuation_payload);
+    drop(incremental_items);
 
     let request_text = match serde_json::to_string(&continuation_request) {
         Ok(t) => t,
@@ -1085,6 +1124,10 @@ async fn continue_persistent_ws_locked(
     let mut logged_first_server_event = false;
     let mut response_started = false;
     let ws_completion_timeout_secs = effective_ws_completion_timeout_secs(&continuation_request);
+    // The frame has been sent and timeout policy is now owned. Keep the retry
+    // owner's original request, not these transformed wire-only copies, while
+    // waiting for a potentially long response.
+    drop(continuation_request);
 
     loop {
         // Only inactivity ends the stream. A wall-clock cap here used to kill
@@ -1145,14 +1188,11 @@ async fn continue_persistent_ws_locked(
         match result {
             Ok(WsMessage::Text(text)) => {
                 let text = text.to_string();
-                if text.contains("response.completed")
-                    && serde_json::from_str::<Value>(&text).is_ok_and(|event| {
-                        event.get("type").and_then(Value::as_str) == Some("response.completed")
-                    })
-                {
+                let classification = WebsocketEventClassification::parse(&text);
+                if classification.kind() == Some("response.completed") {
                     *recovery_phase = RecoveryPhase::Completed;
                 }
-                if opaque_ws_rejection(&text, &mut response_started) {
+                if opaque_ws_rejection_event(&classification, &mut response_started) {
                     return PersistentWsResult::OpaqueWsRejection;
                 }
                 if !logged_first_server_event {
@@ -1165,21 +1205,23 @@ async fn continue_persistent_ws_locked(
                     ));
                     logged_first_server_event = true;
                 }
-                if is_websocket_fallback_notice(&text) {
+                if classification.is_fallback_notice(&text) {
                     return PersistentWsResult::Failed("server requested fallback".to_string());
                 }
 
                 let mut made_api_activity = if saw_api_activity {
-                    is_websocket_activity_payload(&text)
+                    classification.is_activity()
                 } else {
-                    is_websocket_first_activity_payload(&text)
+                    classification.is_first_activity()
                 };
 
-                observe_ws_response_output(&text, &mut response_output);
+                if let Some(value) = classification.value() {
+                    observe_ws_response_output_event(value, &mut response_output);
+                }
 
                 // Extract response_id from response.created event
                 if new_response_id.is_none()
-                    && let Ok(val) = serde_json::from_str::<Value>(&text)
+                    && let Some(val) = classification.value()
                     && val.get("type").and_then(|t| t.as_str()) == Some("response.created")
                     && let Some(id) = val
                         .get("response")
@@ -1603,6 +1645,9 @@ async fn stream_response_websocket_authenticated(
     let mut logged_first_server_event = false;
     let mut response_started = false;
     let ws_completion_timeout_secs = effective_ws_completion_timeout_secs(&request_event);
+    // Retry ownership lives in the caller. This transformed wire payload is no
+    // longer needed once the frame is sent and its timeout policy is captured.
+    drop(request_event);
 
     loop {
         // Only inactivity ends the stream (see the persistent path above):
@@ -1662,7 +1707,8 @@ async fn stream_response_websocket_authenticated(
             Ok(message) => match message {
                 WsMessage::Text(text) => {
                     let text = text.to_string();
-                    if opaque_ws_rejection(&text, &mut response_started) {
+                    let classification = WebsocketEventClassification::parse(&text);
+                    if opaque_ws_rejection_event(&classification, &mut response_started) {
                         return Err(OpenAIStreamFailure::OpaqueWsRejection);
                     }
                     if !logged_first_server_event {
@@ -1674,18 +1720,20 @@ async fn stream_response_websocket_authenticated(
                         ));
                         logged_first_server_event = true;
                     }
-                    if is_websocket_fallback_notice(&text) {
+                    if classification.is_fallback_notice(&text) {
                         return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
                             "{} reported by websocket stream",
                             WEBSOCKET_FALLBACK_NOTICE
                         )));
                     }
 
-                    observe_ws_response_output(&text, &mut response_output);
+                    if let Some(value) = classification.value() {
+                        observe_ws_response_output_event(value, &mut response_output);
+                    }
 
                     // Extract response_id from response.created event
                     if response_id.is_none()
-                        && let Ok(val) = serde_json::from_str::<Value>(&text)
+                        && let Some(val) = classification.value()
                         && val.get("type").and_then(|t| t.as_str()) == Some("response.created")
                         && let Some(id) = val
                             .get("response")
@@ -1707,9 +1755,9 @@ async fn stream_response_websocket_authenticated(
                     }
 
                     let mut made_api_activity = if saw_api_activity {
-                        is_websocket_activity_payload(&text)
+                        classification.is_activity()
                     } else {
-                        is_websocket_first_activity_payload(&text)
+                        classification.is_first_activity()
                     };
                     if let Some(mut event) = parse_openai_response_event(
                         &text,
@@ -1910,115 +1958,10 @@ async fn stream_response_websocket_authenticated(
     Ok(())
 }
 
-fn should_refresh_token(status: StatusCode, body: &str) -> bool {
-    if status == StatusCode::UNAUTHORIZED {
-        return true;
-    }
-    if status == StatusCode::FORBIDDEN {
-        let lower = body.to_lowercase();
-        return lower.contains("token")
-            || lower.contains("expired")
-            || lower.contains("unauthorized");
-    }
-    false
-}
-
-fn maybe_record_runtime_model_unavailable_from_stream_error(
-    catalog_scope: &str,
-    model: &str,
-    message: &str,
-) {
-    let reason = classify_unavailable_model_error(StatusCode::BAD_REQUEST, message)
-        .or_else(|| classify_unavailable_model_error(StatusCode::FORBIDDEN, message));
-
-    if let Some(reason) = reason {
-        jcode_base::provider::record_model_unavailable_for_scope(catalog_scope, model, &reason);
-        jcode_base::logging::warn(&format!(
-            "Recorded OpenAI model '{}' as unavailable from stream error: {}",
-            model, reason
-        ));
-    }
-}
-
-fn classify_unavailable_model_error(status: StatusCode, body: &str) -> Option<String> {
-    let lower = body.to_ascii_lowercase();
-
-    let mentions_model = lower.contains("model")
-        || lower.contains("slug")
-        || lower.contains("engine")
-        || lower.contains("deployment");
-    let unavailable = lower.contains("not available")
-        || lower.contains("unavailable")
-        || lower.contains("does not have access")
-        || lower.contains("not enabled")
-        || lower.contains("not found")
-        || lower.contains("unknown model")
-        || lower.contains("unsupported model")
-        || lower.contains("invalid model");
-
-    if !mentions_model || !unavailable {
-        return None;
-    }
-
-    if status == StatusCode::NOT_FOUND
-        || status == StatusCode::FORBIDDEN
-        || status == StatusCode::BAD_REQUEST
-        || status == StatusCode::UNPROCESSABLE_ENTITY
-    {
-        let trimmed = body.trim();
-        let reason = if trimmed.is_empty() {
-            format!("model denied by OpenAI API (status {})", status)
-        } else {
-            format!(
-                "model denied by OpenAI API (status {}): {}",
-                status, trimmed
-            )
-        };
-        return Some(reason);
-    }
-
-    None
-}
-
-/// Check if an error is transient and should be retried
-pub(super) fn is_retryable_error(error_str: &str) -> bool {
-    // Shared transport-layer classifier used by every other provider. This
-    // covers transient TLS/network faults (connection reset/closed/refused/
-    // aborted, broken pipe, timeouts, unexpected EOF, error decoding/reading,
-    // TLS BadRecordMac / fatal-alert, TLS handshake EOF, DNS/route failures,
-    // and HTTP/2 stream/protocol faults). Keeping the OpenAI path delegated
-    // here ensures retry behavior is unified across providers (issue #338).
-    jcode_provider_core::is_transient_transport_error(error_str)
-        // OpenAI-specific transport wrapper.
-        || error_str.contains("failed to send request to openai api")
-        // Stream/decode errors specific to the OpenAI streaming runtime.
-        || error_str.contains("incomplete message")
-        || error_str.contains("stream disconnected before completion")
-        || error_str.contains("ended before message completion marker")
-        || error_str.contains("falling back from websockets to https transport")
-        // Server errors (5xx)
-        || error_str.contains("500 internal server error")
-        || error_str.contains("502 bad gateway")
-        || error_str.contains("503 service unavailable")
-        || error_str.contains("504 gateway timeout")
-        || error_str.contains("overloaded")
-        // Rate limiting (429): transient, recovers on retry. Unified with the
-        // other providers (Anthropic/Copilot) which already retry these.
-        || error_str.contains("429 too many requests")
-        || error_str.contains("rate limit")
-        || error_str.contains("rate_limit")
-        // API-level server errors
-        || error_str.contains("api_error")
-        || error_str.contains("server_error")
-        || error_str.contains("internal server error")
-        || error_str.contains("an error occurred while processing your request")
-        || error_str.contains("please include the request id")
-        // Auth: we just force-refreshed the OpenAI token in place and want the
-        // retry loop to reconnect with the fresh credentials.
-        || error_str.contains("openai token refreshed, retrying")
-        || error_str.contains("openai credentials changed before request, retrying")
-}
-
+#[path = "openai_stream_runtime_model_errors.rs"]
+mod model_errors;
+pub(super) use model_errors::is_retryable_error;
+use model_errors::*;
 #[cfg(test)]
 #[path = "openai_stream_runtime/stream_runtime_tests.rs"]
 mod stream_runtime_tests;

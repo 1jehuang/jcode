@@ -518,6 +518,43 @@ pub fn fuzzy_score_tokens(needle: &str, haystack: &str) -> Option<i32> {
     PreparedTokenQuery::new(needle).score(haystack)
 }
 
+/// Prose search allows nearby spelling errors, not arbitrary subsequences.
+/// The latter are useful for command pickers but create accidental matches in
+/// almost every sufficiently long transcript. Ignore surrounding punctuation,
+/// then bound insertions, deletions, substitutions and adjacent transpositions.
+pub fn search_word_is_close(needle: &str, word: &str) -> bool {
+    let word = word.trim_matches(|c: char| !c.is_alphanumeric());
+    let pattern: Vec<char> = needle.chars().flat_map(char::to_lowercase).collect();
+    if pattern.len() < 4 || pattern.len() > 128 {
+        return false;
+    }
+    let budget = usize::from(error_budget(pattern.len()));
+    if word.len() > (pattern.len() + budget) * 4 {
+        return false;
+    }
+    let candidate: Vec<char> = word.chars().flat_map(char::to_lowercase).collect();
+    if candidate.len() > 128 || pattern.len().abs_diff(candidate.len()) > budget {
+        return false;
+    }
+    let mut previous2 = [0usize; 129];
+    let mut previous = std::array::from_fn::<_, 129, _>(|i| i);
+    let mut current = [0usize; 129];
+    for (i, &letter) in pattern.iter().enumerate() {
+        current[0] = i + 1;
+        for (j, &other) in candidate.iter().enumerate() {
+            current[j + 1] = (previous[j + 1] + 1)
+                .min(current[j] + 1)
+                .min(previous[j] + usize::from(letter != other));
+            if i > 0 && j > 0 && letter == candidate[j - 1] && pattern[i - 1] == other {
+                current[j + 1] = current[j + 1].min(previous2[j - 1] + 1);
+            }
+        }
+        std::mem::swap(&mut previous2, &mut previous);
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[candidate.len()] <= budget
+}
+
 /// A parsed multi-word query prepared once and scored against many entries.
 ///
 /// Picker filters call the matcher once per entry per keystroke, so the
@@ -536,6 +573,29 @@ fn search_text_tolerates_typos_without_dropping_query_words() {
     assert!(!PreparedTokenQuery::new("clodu todo").matches_search_text("cloud acceptance"));
     assert!(!PreparedTokenQuery::new("api").matches_search_text("apt"));
     assert!(PreparedTokenQuery::new("café").matches_search_text("café deployment"));
+}
+
+#[test]
+fn prose_search_rejects_scattered_letters_but_keeps_near_typos() {
+    for word in ["basten", "bastem", "bastne", "bastens", "(BASTEN),"] {
+        assert!(search_word_is_close("basten", word), "{word}");
+    }
+    for word in [
+        "based",
+        "standstill",
+        "bookkeeping",
+        "basement",
+        "bastioned",
+    ] {
+        assert!(!search_word_is_close("basten", word), "{word}");
+        assert!(
+            !PreparedTokenQuery::new("basten").matches_search_text(word),
+            "{word}"
+        );
+    }
+    assert!(PreparedTokenQuery::new("conifg").matches_search_text("config"));
+    assert!(PreparedTokenQuery::new("clodu").matches_search_text("cloud"));
+    assert!(PreparedTokenQuery::new("café").matches_search_text("cafe"));
 }
 
 struct PreparedWord {
@@ -586,6 +646,7 @@ impl PreparedTokenQuery {
                     && haystack.split_whitespace().any(|token| {
                         // Bound DP work for pasted URLs and minified data.
                         token.chars().count() <= 128
+                            && search_word_is_close(&literal, token)
                             && score_prepared_word(word, token, &mut scratch).is_some()
                     }))
         })

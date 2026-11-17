@@ -16,14 +16,21 @@ set -euo pipefail
 #   scripts/quick-release.sh --prepare-fast-macos v0.5.5
 #   scripts/quick-release.sh --fast-macos-local v0.5.5
 #   scripts/quick-release.sh --remote v0.5.5      # green CI, then tag
+#   scripts/quick-release.sh --remote --source-commit <full-sha> v0.5.5
 #   scripts/quick-release.sh v0.5.5               # local Linux + macOS draft
 #   scripts/quick-release.sh --dry-run v0.5.5     # standard local build only
 
 MODE="standard"
 DRY_RUN=false
+PINNED_COMMIT=""
 while [[ "${1:-}" == --* ]]; do
     case "$1" in
         --dry-run) DRY_RUN=true ;;
+        --source-commit)
+            [[ $# -ge 2 && -z "$PINNED_COMMIT" && "${2:-}" =~ ^[0-9a-f]{40}$ ]] || { echo "Error: --source-commit requires one full commit SHA." >&2; exit 1; }
+            PINNED_COMMIT="$2"
+            shift
+            ;;
         --fast|--fast-local)
             [[ "$MODE" == "standard" ]] || { echo "Error: release modes cannot be combined." >&2; exit 1; }
             MODE="fast-local"
@@ -50,7 +57,7 @@ while [[ "${1:-}" == --* ]]; do
             ;;
         *)
             echo "Error: Unknown option: $1" >&2
-            echo "Usage: scripts/quick-release.sh [--prepare-fast | --fast-local | --prepare-fast-macos | --fast-macos-local | --remote | --dry-run] <version> [title]" >&2
+            echo "Usage: scripts/quick-release.sh [--prepare-fast | --fast-local | --prepare-fast-macos | --fast-macos-local | --remote | --dry-run] [--source-commit <full-sha>] <version> [title]" >&2
             exit 1
             ;;
     esac
@@ -62,7 +69,14 @@ if $DRY_RUN && [[ "$MODE" == "remote" ]]; then
     exit 1
 fi
 
-VERSION="${1:?Usage: scripts/quick-release.sh [--prepare-fast | --fast-local | --prepare-fast-macos | --fast-macos-local | --remote | --dry-run] <version> [title]}"
+if [[ -n "$PINNED_COMMIT" ]]; then
+    [[ "$MODE" == "remote" && "$PINNED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+        echo "Error: --source-commit requires --remote and a full 40-character commit SHA." >&2
+        exit 1
+    }
+fi
+
+VERSION="${1:?Usage: scripts/quick-release.sh [--prepare-fast | --fast-local | --prepare-fast-macos | --fast-macos-local | --remote | --dry-run] [--source-commit <full-sha>] <version> [title]}"
 TITLE="${2:-$VERSION}"
 VERSION_NUM="${VERSION#v}"
 
@@ -73,6 +87,14 @@ fi
 
 cd "$(git rev-parse --show-toplevel)"
 RELEASE_COMMIT="$(git rev-parse HEAD)"
+if [[ -n "$PINNED_COMMIT" ]]; then
+    RELEASE_COMMIT="$(git rev-parse --verify "$PINNED_COMMIT^{commit}")"
+    [[ "$RELEASE_COMMIT" == "$PINNED_COMMIT" ]] || { echo "Error: --source-commit must identify a commit, not a tag object." >&2; exit 1; }
+    git merge-base --is-ancestor "$RELEASE_COMMIT" HEAD || {
+        echo "Error: pinned release source must be an ancestor of HEAD." >&2
+        exit 1
+    }
+fi
 
 # Ad-hoc sign a macOS binary with a stable code-signing identifier. The linker
 # signature otherwise uses cargo's hashed output name, which macOS Tahoe treats
@@ -135,7 +157,7 @@ if [[ -n "$working_tree_changes" ]]; then
             exit 1
             ;;
         remote)
-            echo "Warning: working-tree changes are not included; only committed HEAD will be tagged."
+            echo "Warning: working-tree changes are not included; only committed release source will be tagged."
             ;;
     esac
 fi
@@ -168,7 +190,10 @@ elapsed() {
 
 tag_and_push() {
     local head_commit remote_tags remote_commit local_commit repository origin_url package_version
-    head_commit="$(git rev-parse HEAD)"
+    head_commit="$RELEASE_COMMIT"
+    if [[ -z "$PINNED_COMMIT" ]]; then
+        head_commit="$(git rev-parse HEAD)"
+    fi
     [[ "$head_commit" == "$RELEASE_COMMIT" ]] || {
         echo "Error: HEAD changed during release preparation. Start again at the intended release commit." >&2
         exit 1
@@ -212,7 +237,7 @@ tag_and_push() {
         echo "Error: release blocked. Push this commit to main/master and wait for all CI checks to succeed, then retry." >&2
         exit 1
     fi
-    [[ "$(git rev-parse HEAD)" == "$head_commit" ]] || {
+    [[ -n "$PINNED_COMMIT" || "$(git rev-parse HEAD)" == "$head_commit" ]] || {
         echo "Error: HEAD changed during CI preflight. No tag was pushed." >&2
         exit 1
     }

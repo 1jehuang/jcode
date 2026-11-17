@@ -6,6 +6,10 @@ use super::{
     parse_rate_limit_error, remote_notifications::present_swarm_notification,
     spawn_in_new_terminal,
 };
+#[path = "remote_followups.rs"]
+mod followups;
+pub(super) use followups::process_remote_followups;
+
 use crate::bus::BusEvent;
 use crate::message::ToolCall;
 use crate::protocol::{ServerEvent, TranscriptMode};
@@ -100,6 +104,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         ));
     }
     app.expire_presumed_focus();
+    crate::tui::window_visibility::poll(app.client_focused(), app.is_processing);
     app.refresh_terminal_title_metrics();
     app.sync_herdr_agent_state();
     crate::tui::ui::set_frame_input_attribution(crate::tui::ui::FrameInputAttribution {
@@ -195,6 +200,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.update_pinned_images_auto_hide();
     // Dissolve stale (off-screen) reasoning traces with zero visible motion.
     needs_redraw |= app.gc_offscreen_reasoning_traces();
+    needs_redraw |= app.maybe_backfill_expanded_prompt_history();
     needs_redraw |= dispatch_compacted_history_load(app, remote).await;
     // Adopt the resolved scroll position once a frame containing newly loaded
     // older history has rendered, so manual scrolling resumes seamlessly.
@@ -346,56 +352,8 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         }
     }
 
-    if let Some(reset_time) = app.rate_limit_reset
-        && Instant::now() >= reset_time
-    {
-        app.rate_limit_reset = None;
-        if !app.is_processing
-            && let Some(pending) = app.rate_limit_pending_message.clone()
-        {
-            if matches!(app.status, ProcessingStatus::WaitingForNetwork { .. })
-                && !crate::network_retry::is_probably_online().await
-            {
-                app.schedule_pending_remote_network_wait("network probe still failing");
-                return true;
-            }
-            if matches!(app.status, ProcessingStatus::WaitingForNetwork { .. }) {
-                app.status = ProcessingStatus::Idle;
-                app.status_detail = None;
-            }
-            let status = if pending.auto_retry {
-                format!(
-                    "✓ Retrying continuation...{}",
-                    if pending.is_system {
-                        " (system message)"
-                    } else {
-                        ""
-                    }
-                )
-            } else {
-                format!(
-                    "✓ Rate limit reset. Retrying...{}",
-                    if pending.is_system {
-                        " (system message)"
-                    } else {
-                        ""
-                    }
-                )
-            };
-            app.push_display_message(DisplayMessage::system(status));
-            let _ = begin_remote_send(
-                app,
-                remote,
-                pending.content,
-                pending.images,
-                pending.is_system,
-                pending.system_reminder,
-                pending.auto_retry,
-                pending.retry_attempts,
-            )
-            .await;
-            return true;
-        }
+    if dispatch_due_remote_retry(app, remote).await {
+        return true;
     }
 
     if app
@@ -436,6 +394,10 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
         let combined = messages.join("\n\n");
         let auto_retry = reminder.is_some() && messages.is_empty();
+        if !messages.is_empty() && !super::commands::queued_messages_are_only_pokes(&messages) {
+            app.automatic_failover_targets.clear();
+            app.automatic_failover_stopped = false;
+        }
         crate::logging::info(&format!(
             "Sending queued continuation message ({} chars)",
             combined.len()
@@ -524,6 +486,116 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.maybe_finish_background_client_reload();
     needs_redraw |= app.maybe_hot_reload_onto_new_binary();
     needs_redraw
+}
+
+/// Dispatch a held turn only after bootstrap and any competing turn settle.
+/// Keep its deadline armed while blocked, and re-arm on a failed socket write.
+pub(super) async fn dispatch_due_remote_retry(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+) -> bool {
+    if !app
+        .rate_limit_reset
+        .is_some_and(|deadline| Instant::now() >= deadline)
+    {
+        return false;
+    }
+    let blocker = if !remote.has_loaded_history() {
+        Some("history_not_loaded")
+    } else if app.is_processing {
+        Some("active_turn")
+    } else if app.remote_model_switch_in_flight {
+        Some("model_switch_unconfirmed")
+    } else if app.awaiting_remote_interrupt_ack() {
+        Some("interrupt_ack_pending")
+    } else {
+        None
+    };
+    if let Some(reason) = blocker {
+        crate::logging::event_rate_limited(
+            crate::logging::LogLevel::Info,
+            &format!("retry_blocked:{}:{reason}", app.session.id),
+            Duration::from_secs(30),
+            "RECOVERY_RETRY_BLOCKED",
+            app.recovery_log_fields(reason),
+        );
+        return false;
+    }
+    let Some(pending) = app.rate_limit_pending_message.clone() else {
+        app.log_recovery_event(
+            crate::logging::LogLevel::Warn,
+            "RECOVERY_RETRY_DISARMED",
+            "deadline_without_pending_turn",
+        );
+        app.rate_limit_reset = None;
+        return false;
+    };
+    app.rate_limit_reset = None;
+    if matches!(app.status, ProcessingStatus::WaitingForNetwork { .. })
+        && !crate::network_retry::is_probably_online().await
+    {
+        app.schedule_pending_remote_network_wait("network probe still failing");
+        return true;
+    }
+    if matches!(app.status, ProcessingStatus::WaitingForNetwork { .. }) {
+        app.status = ProcessingStatus::Idle;
+        app.status_detail = None;
+    }
+    let status = if pending.auto_retry {
+        "✓ Retrying continuation..."
+    } else {
+        "✓ Rate limit reset. Retrying..."
+    };
+    let suffix = if pending.is_system {
+        " (system message)"
+    } else {
+        ""
+    };
+    app.push_display_message(DisplayMessage::system(format!("{status}{suffix}")));
+    app.log_recovery_event(
+        crate::logging::LogLevel::Info,
+        "RECOVERY_RETRY_DISPATCH",
+        "deadline_elapsed",
+    );
+    if let Err(error) = begin_remote_send(
+        app,
+        remote,
+        pending.content,
+        pending.images,
+        pending.is_system,
+        pending.system_reminder,
+        pending.auto_retry,
+        pending.retry_attempts,
+    )
+    .await
+    {
+        app.log_recovery_event(
+            crate::logging::LogLevel::Warn,
+            "RECOVERY_RETRY_SEND_FAILED",
+            "transport_write_failed",
+        );
+        // User turns held by a rate limit were explicitly scheduled for retry
+        // even if their initial send was not auto-retry.
+        if let Some(pending) = app.rate_limit_pending_message.as_mut() {
+            pending.auto_retry = true;
+        }
+        let reason = format!("Failed to resend held turn: {error}");
+        if !app.schedule_pending_remote_retry(&reason) {
+            app.pause_exhausted_auto_resume(
+                format!(
+                    "{reason}. Automatic retry limit reached. Reconnect and resend your message."
+                ),
+                "Retry send failed",
+            );
+        }
+    } else {
+        app.log_recovery_event(
+            crate::logging::LogLevel::Info,
+            "RECOVERY_RETRY_SENT",
+            "transport_write_succeeded",
+        );
+    }
+    true
 }
 
 /// Forward the reasoning-effort variant staged by a model-picker selection
@@ -763,6 +835,50 @@ async fn dispatch_compacted_history_load(app: &mut App, remote: &mut RemoteConne
 #[cfg(test)]
 #[path = "remote_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn borrowed_remote_status_fields_match_legacy_and_retain_sources() {
+    for value in [None, Some(String::new()), Some("fixture 🦀".to_string())] {
+        let mut provider_name = value.clone();
+        let mut connection_type = value.clone();
+        let mut remote_transport = value.clone();
+        let mut server_version = value;
+        let legacy = serde_json::json!({
+            "provider_name": provider_name.clone(),
+            "connection_type": connection_type.clone(),
+            "remote_transport": remote_transport.clone(),
+            "server_version": server_version.clone(),
+        });
+        let evidence = serde_json::json!({
+            "provider_name": provider_name,
+            "connection_type": connection_type,
+            "remote_transport": remote_transport,
+            "server_version": server_version,
+        });
+        assert_eq!(evidence, legacy);
+        assert_eq!(evidence.to_string(), legacy.to_string());
+        assert_eq!(provider_name.as_deref(), legacy["provider_name"].as_str());
+        assert_eq!(
+            connection_type.as_deref(),
+            legacy["connection_type"].as_str()
+        );
+        assert_eq!(
+            remote_transport.as_deref(),
+            legacy["remote_transport"].as_str()
+        );
+        assert_eq!(server_version.as_deref(), legacy["server_version"].as_str());
+        for source in [
+            &mut provider_name,
+            &mut connection_type,
+            &mut remote_transport,
+            &mut server_version,
+        ] {
+            *source = Some("changed after serialization".to_string());
+        }
+        assert_eq!(evidence, legacy);
+    }
+}
 
 pub(super) async fn handle_bus_event(
     app: &mut App,
@@ -1144,14 +1260,35 @@ pub(super) fn debug_command_needs_current_frame(command: &str) -> bool {
     )
 }
 
+fn restore_unconfirmed_model_switch_prompts(app: &mut App) {
+    if let Some(payload) = app.pending_fallback_resend.take() {
+        app.restore_failover_payload(payload);
+    }
+    if let Some(prepared) = app.pending_prompt_after_model_switch.take() {
+        app.restore_failover_payload(super::FallbackResendPayload {
+            content: prepared.expanded,
+            images: prepared.images,
+            is_system: false,
+            system_reminder: None,
+            auto_retry: false,
+            retry_attempts: 0,
+            raw_input: Some(prepared.raw_input),
+        });
+    }
+}
+
 fn fail_pending_automatic_failover(app: &mut App, reason: &str) {
+    app.log_recovery_event(
+        crate::logging::LogLevel::Warn,
+        "RECOVERY_FALLBACK_STOPPED",
+        "route_confirmation_failed",
+    );
+    app.automatic_failover_stopped = true;
     app.pending_automatic_failover_request_id = None;
     app.pending_automatic_failover_started = None;
     app.pending_automatic_failover_route = None;
     app.remote_model_switch_in_flight = false;
-    if let Some(payload) = app.pending_fallback_resend.take() {
-        app.restore_failover_payload(payload);
-    }
+    restore_unconfirmed_model_switch_prompts(app);
     app.push_display_message(DisplayMessage::error(format!(
         "Fallback switch stopped: {}",
         App::compact_provider_failure(reason)
@@ -1168,6 +1305,22 @@ pub(super) fn handle_disconnect(
     // lost. Never wait on an old connection's request ID or blindly resend.
     if app.pending_automatic_failover_request_id.is_some() {
         fail_pending_automatic_failover(app, "Connection lost before route confirmation");
+    } else if app.remote_model_switch_in_flight {
+        app.log_recovery_event(
+            crate::logging::LogLevel::Warn,
+            "RECOVERY_MODEL_SWITCH_STOPPED",
+            "disconnected_before_confirmation",
+        );
+        // Manual switches have no automatic-failover request ID. Their
+        // acknowledgement is just as connection-scoped: keeping this flag
+        // would park every later prompt forever after reconnect. Do not send
+        // a prompt intended for a route whose switch was never confirmed.
+        app.remote_model_switch_in_flight = false;
+        restore_unconfirmed_model_switch_prompts(app);
+        app.push_display_message(DisplayMessage::error(
+            "Connection lost before model switch confirmation. Any waiting prompt was restored instead of sent on an unconfirmed route. Check /model after reconnecting.".to_string(),
+        ));
+        app.set_status_notice("Model switch unconfirmed; check /model");
     }
     app.revoke_cloud_environment();
     let detail = if state.server_reload_in_progress {
@@ -1452,389 +1605,6 @@ async fn dispatch_pending_server_reload(app: &mut App, remote: &mut RemoteConnec
     }
 }
 
-pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteConnection) {
-    if app
-        .remote_queue_retry_not_before
-        .is_some_and(|deadline| Instant::now() < deadline)
-    {
-        return;
-    }
-    app.remote_queue_retry_not_before = None;
-    if app.prepare_cloud_environment(remote).await.is_err() {
-        app.revoke_cloud_environment();
-        return;
-    }
-    if app.cloud_handoff_blocks_work() {
-        return;
-    }
-    if app.pending_provider_failover.is_some()
-        || app.pending_automatic_failover_route.is_some()
-        || app.pending_automatic_failover_request_id.is_some()
-        || (app.pending_route_selection.is_some() && app.pending_fallback_resend.is_some())
-        || (app.remote_model_switch_in_flight && app.pending_fallback_resend.is_some())
-    {
-        return;
-    }
-    // A pending *server* reload must be dispatched even when the bootstrap
-    // History payload was intentionally deferred. The runtime-identity /
-    // stale-binary guard in the History handler sets `pending_server_reload =
-    // true` and returns WITHOUT marking history as loaded, by design: we want to
-    // reload the server before applying any session state. If the
-    // `has_loaded_history` gate below ran first, the reload would never fire,
-    // history would stay unloaded forever, and every typed prompt would be stuck
-    // behind "Loading session..." until the user restarted (server/client binary
-    // mismatch reload-handoff stall).
-    if app.pending_server_reload && !app.is_processing {
-        dispatch_pending_server_reload(app, remote).await;
-        return;
-    }
-
-    // Drain Subscribe's History before sending the staged startup prompt.
-    // Both directions can carry large image payloads: awaiting a prompt write
-    // here would prevent this event loop from reading History while the server
-    // is still writing it, deadlocking both peers on socket backpressure.
-    if !remote.has_loaded_history() {
-        note_startup_submit_deferred(app, "remote history not loaded yet");
-        return;
-    }
-
-    // Esc redirected to a pending prompt: the server sends Done before
-    // Interrupted. Sending now would let the late Interrupted end the new turn.
-    if app.awaiting_remote_interrupt_ack() {
-        return;
-    }
-
-    let _ = recover_stranded_soft_interrupts(app, remote).await;
-    if app.soft_interrupt_recovery_in_flight() {
-        return;
-    }
-
-    if app.pending_queued_dispatch {
-        note_startup_submit_deferred(app, "pending_queued_dispatch in progress");
-        return;
-    }
-
-    if !app.remote_model_switch_in_flight
-        && !app.is_processing
-        && let Some(payload) = app.pending_fallback_resend.take()
-    {
-        // A fallback offer was accepted and the server confirmed the route
-        // switch: resend the failed turn's payload on the new route. The
-        // original user message is already in the transcript from the failed
-        // attempt, so do not echo it again; just clear the input box if the
-        // error path restored the prompt there.
-        if let Some(raw_input) = payload.raw_input.as_deref()
-            && app.input == raw_input
-        {
-            app.input.clear();
-            app.cursor_pos = 0;
-        }
-        app.last_submitted_input = payload.raw_input.clone();
-        crate::logging::info("Resending failed turn after accepted fallback route switch");
-        let recovery_payload = payload.clone();
-        if let Err(error) = begin_remote_send(
-            app,
-            remote,
-            payload.content,
-            payload.images,
-            payload.is_system,
-            payload.system_reminder,
-            payload.auto_retry,
-            payload.retry_attempts.saturating_add(1),
-        )
-        .await
-        {
-            app.restore_failover_payload(recovery_payload);
-            app.push_display_message(DisplayMessage::error(format!(
-                "Failed to resend after fallback switch: {}",
-                error
-            )));
-            app.set_status_notice("Fallback resend failed");
-        }
-        return;
-    }
-
-    if !app.remote_model_switch_in_flight
-        && !app.auth_catalog_refresh_pending
-        && !app.is_processing
-        && let Some(prepared) = app.pending_prompt_after_model_switch.take()
-    {
-        if let Err(error) = submit_prepared_remote_input(app, remote, prepared).await {
-            app.push_display_message(DisplayMessage::error(format!(
-                "Failed to submit prompt after model switch: {}",
-                error
-            )));
-            app.set_status_notice("Queued prompt failed");
-        }
-        return;
-    }
-
-    // Now that history is loaded (guaranteed by the gate above), dispatch any
-    // prompt that the user submitted during the pre-history window. Submitting
-    // it earlier would have been clobbered by the bootstrap History payload's
-    // `session_changed` clear; deferring here fixes the intermittent
-    // "first prompt vanishes / weird render" bug.
-    if !app.is_processing
-        && let Some(prepared) = app.pending_prompt_before_history.take()
-    {
-        crate::logging::info(
-            "Dispatching prompt that was held until remote history finished loading",
-        );
-        if let Err(error) = submit_prepared_remote_input(app, remote, prepared).await {
-            app.push_display_message(DisplayMessage::error(format!(
-                "Failed to submit prompt after session load: {}",
-                error
-            )));
-            app.set_status_notice("Prompt failed");
-        }
-        return;
-    }
-
-    let synthetic_startup_dispatch = app.is_processing
-        // Only a locally staged send is synthetic. A resumed/external turn
-        // has no request id either, and its resume marker is cleared as soon
-        // as live stream events arrive. Never demote that running turn just
-        // because a follow-up is queued.
-        && matches!(app.status, ProcessingStatus::Sending)
-        && app.current_message_id.is_none()
-        && app.remote_resume_activity.is_none()
-        && (app.submit_input_on_startup
-            || !app.queued_messages.is_empty()
-            || !app.hidden_queued_system_messages.is_empty());
-
-    if synthetic_startup_dispatch {
-        crate::logging::info(
-            "Dispatching restored startup/queued followup without active remote message id",
-        );
-        app.is_processing = false;
-        app.status = ProcessingStatus::Idle;
-        app.processing_started = None;
-        app.clear_visible_turn_started();
-        app.replay_processing_started_ms = None;
-        app.replay_elapsed_override = None;
-    }
-
-    if app.submit_input_on_startup && !app.is_processing {
-        app.submit_input_on_startup = false;
-        app.startup_submit_deferred_reason = None;
-        if !app.input.is_empty() || !app.pending_images.is_empty() {
-            crate::logging::info(&format!(
-                "Startup auto-submit firing: input_chars={} pending_images={}",
-                app.input.chars().count(),
-                app.pending_images.len(),
-            ));
-            let prepared = input::take_prepared_input(app);
-            if let Err(error) = submit_prepared_remote_input(app, remote, prepared).await {
-                crate::logging::warn(&format!("Startup auto-submit failed: {error}"));
-                app.push_display_message(DisplayMessage::error(format!(
-                    "Failed to submit startup prompt: {}",
-                    error
-                )));
-                app.set_status_notice("Startup prompt failed");
-            }
-            return;
-        } else {
-            crate::logging::warn(
-                "Startup auto-submit skipped: submit flag was set but input and pending images are both empty",
-            );
-        }
-    } else if app.submit_input_on_startup && app.is_processing {
-        note_startup_submit_deferred(app, "session still processing (is_processing=true)");
-    }
-
-    if app.pending_background_client_reload.is_some() && !app.is_processing {
-        app.maybe_finish_background_client_reload();
-        return;
-    }
-
-    if app.pending_split_request && !app.is_processing {
-        app.pending_split_request = false;
-        let flow_label = app
-            .pending_split_label
-            .clone()
-            .unwrap_or_else(|| "Split".to_string());
-        begin_remote_split_launch(app, &flow_label);
-        if let Err(error) = remote.split().await {
-            finish_remote_split_launch(app);
-            let had_startup = app.pending_split_startup_message.take().is_some();
-            app.pending_split_parent_session_id = None;
-            let had_prompt = app.pending_split_prompt.take().is_some();
-            let label = app.pending_split_label.take();
-            app.pending_split_model_override = None;
-            app.pending_split_provider_key_override = None;
-            let flow_label = label.unwrap_or(flow_label);
-            app.push_display_message(DisplayMessage::error(format!(
-                "Failed to launch {} session: {}",
-                flow_label.to_lowercase(),
-                error
-            )));
-            if had_startup || had_prompt {
-                app.set_status_notice(format!("{} launch failed", flow_label));
-            }
-        }
-        return;
-    }
-
-    if app.pending_transfer_request && !app.is_processing {
-        app.pending_transfer_request = false;
-        let flow_label = app
-            .pending_split_label
-            .clone()
-            .unwrap_or_else(|| "Transfer".to_string());
-        begin_remote_split_launch(app, &flow_label);
-        if let Err(error) = remote.transfer().await {
-            finish_remote_split_launch(app);
-            let label = app.pending_split_label.take().unwrap_or(flow_label);
-            app.push_display_message(DisplayMessage::error(format!(
-                "Failed to launch {} session: {}",
-                label.to_lowercase(),
-                error
-            )));
-            app.set_status_notice(format!("{} launch failed", label));
-        }
-        return;
-    }
-
-    if app.is_processing {
-        if let Some(interleave_msg) = app.interleave_message.take()
-            && !interleave_msg.trim().is_empty()
-        {
-            let interleave_images = std::mem::take(&mut app.interleave_images);
-            let msg_clone = interleave_msg.clone();
-            match remote
-                .soft_interrupt(interleave_msg, interleave_images, false)
-                .await
-            {
-                Err(e) => {
-                    app.push_display_message(DisplayMessage::error(format!(
-                        "Failed to queue soft interrupt: {}",
-                        e
-                    )));
-                }
-                Ok(request_id) => {
-                    app.track_pending_soft_interrupt(request_id, msg_clone);
-                }
-            }
-        }
-        return;
-    }
-
-    if !app.queued_commands.is_empty() {
-        run_next_queued_remote_command(app, remote).await;
-        return;
-    }
-
-    if let Some(interleave_msg) = app.interleave_message.take() {
-        // Carry the staged attachments through. A local revert of #627 had this
-        // passing `vec![]`, which silently dropped every image on an interleaved
-        // send while still compiling, so the comment marks why the take matters.
-        let interleave_images = std::mem::take(&mut app.interleave_images);
-        if !interleave_msg.trim().is_empty() {
-            app.push_display_message(DisplayMessage {
-                role: "user".to_string(),
-                content: interleave_msg.clone(),
-                tool_calls: vec![],
-                duration_secs: None,
-                title: None,
-                tool_data: None,
-            });
-            if let Err(e) = begin_remote_send(
-                app,
-                remote,
-                interleave_msg,
-                interleave_images,
-                false,
-                None,
-                false,
-                0,
-            )
-            .await
-            {
-                app.push_display_message(DisplayMessage::error(format!(
-                    "Failed to send message: {}",
-                    e
-                )));
-            }
-        }
-    } else if !app.queued_messages.is_empty() && !app.reload_recovery_blocks_queue() {
-        let mut queued_messages = std::mem::take(&mut app.queued_messages);
-        super::commands::drop_stale_incomplete_todo_pokes(app, &mut queued_messages);
-        let hidden_reminders = std::mem::take(&mut app.hidden_queued_system_messages);
-        let (messages, reminder, display_system_messages) =
-            super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
-        if messages.is_empty() && reminder.is_none() {
-            return;
-        }
-        let combined = messages.join("\n\n");
-        let preserve_visible_turn = super::commands::queued_messages_are_only_pokes(&messages);
-        let auto_retry = reminder.is_some() && messages.is_empty();
-        for msg in display_system_messages {
-            app.push_display_message(DisplayMessage::system(msg));
-        }
-        for msg in &messages {
-            if !super::commands::is_poke_message(msg) {
-                app.push_display_message(DisplayMessage::user(msg.clone()));
-            }
-        }
-        if !combined.is_empty() {
-            if preserve_visible_turn {
-                app.visible_turn_started.get_or_insert_with(Instant::now);
-            } else {
-                app.visible_turn_started = Some(Instant::now());
-            }
-        }
-        if begin_remote_send(
-            app,
-            remote,
-            combined.clone(),
-            vec![],
-            true,
-            reminder.clone(),
-            auto_retry,
-            0,
-        )
-        .await
-        .is_err()
-        {
-            // Do not drop a dequeued follow-up whose send never reached the
-            // server (issue #391); restore it for redispatch after reconnect.
-            crate::logging::error(
-                "Failed to send queued continuation message; restoring it to the queue",
-            );
-            if let Some(reminder) = reminder {
-                app.hidden_queued_system_messages.insert(0, reminder);
-            }
-            if !combined.is_empty() {
-                app.queued_messages.insert(0, combined);
-            }
-        }
-    } else if !app.hidden_queued_system_messages.is_empty() || app.has_pending_cloud_recovery() {
-        let reminders = std::mem::take(&mut app.hidden_queued_system_messages);
-        app.reload_recovery_dispatch_pending = false;
-        let combined = reminders.join("\n\n");
-        if begin_remote_send(
-            app,
-            remote,
-            String::new(),
-            vec![],
-            true,
-            Some(combined.clone()),
-            true,
-            0,
-        )
-        .await
-        .is_err()
-        {
-            crate::logging::error(
-                "Failed to send hidden continuation reminder; restoring it to the queue",
-            );
-            if !combined.is_empty() {
-                app.hidden_queued_system_messages.insert(0, combined);
-            }
-        }
-    }
-}
-
 /// Run the oldest command queued with Ctrl+Enter through the same path as a
 /// plain Enter, so it behaves exactly as if the user typed it now. One per
 /// call: if it starts a turn, the rest wait for that turn to end.
@@ -2054,10 +1824,10 @@ async fn handle_debug_command(app: &mut App, cmd: &str, remote: &mut RemoteConne
             "scroll_offset": app.scroll_offset,
             "queued_messages": app.queued_messages.len(),
             "provider_session_id": app.provider_session_id,
-            "provider_name": app.remote_provider_name.clone(),
+            "provider_name": app.remote_provider_name,
             "model": app.remote_provider_model.as_deref().unwrap_or(app.provider.name()),
-            "connection_type": app.connection_type.clone(),
-            "remote_transport": app.remote_transport.clone(),
+            "connection_type": app.connection_type,
+            "remote_transport": app.remote_transport,
             "diagram_mode": format!("{:?}", app.diagram_mode),
             "diagram_focus": app.diagram_focus,
             "diagram_index": app.diagram_index,
@@ -2068,7 +1838,7 @@ async fn handle_debug_command(app: &mut App, cmd: &str, remote: &mut RemoteConne
             "diagram_zoom": app.diagram_zoom,
             "diagram_count": crate::tui::mermaid::get_active_diagrams().len(),
             "remote": true,
-            "server_version": app.remote_server_version.clone(),
+            "server_version": app.remote_server_version,
             "server_has_update": app.remote_server_has_update,
             "version": jcode_build_meta::version(),
             "diagram_mode": format!("{:?}", app.diagram_mode),
