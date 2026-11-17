@@ -243,7 +243,6 @@ thread_local! {
     static TEST_LAST_RESOLVED_CHAT_SCROLL: Cell<usize> = const { Cell::new(0) };
     static TEST_TAIL_CATCHUP_ACTIVE: Cell<bool> = const { Cell::new(false) };
     static TEST_TAIL_FOLLOW_SNAP_PENDING: Cell<bool> = const { Cell::new(false) };
-    static TEST_LAST_LAYOUT: RefCell<Option<LayoutSnapshot>> = const { RefCell::new(None) };
     static TEST_LAST_CHAT_FRAME: RefCell<Option<Arc<PreparedChatFrame>>> = const { RefCell::new(None) };
     static TEST_LAST_STATUS_AREA: RefCell<Option<Rect>> = const { RefCell::new(None) };
     static TEST_VISIBLE_COPY_TARGETS: RefCell<Vec<VisibleCopyTarget>> = RefCell::new(Vec::new());
@@ -1676,21 +1675,12 @@ pub(crate) use frame_metrics::{
     clear_slow_frame_history_for_tests, record_flicker_frame_sample, record_slow_frame_sample,
 };
 
-#[derive(Clone, Copy, Debug)]
-pub struct LayoutSnapshot {
-    pub messages_area: Rect,
-    pub diagram_area: Option<Rect>,
-    pub diff_pane_area: Option<Rect>,
-    pub input_area: Option<Rect>,
-    /// The pinned session status line below the input, when the frame had room
-    /// for it. Consumers outside `draw` need this to address that row: it is
-    /// not always the last row of the frame, because the compact status bar is
-    /// drawn underneath it once the chat area is wide enough.
-    pub overscroll_area: Option<Rect>,
-}
-
-#[cfg(not(test))]
-static LAST_LAYOUT: OnceLock<Mutex<Option<LayoutSnapshot>>> = OnceLock::new();
+#[path = "ui_layout_snapshot.rs"]
+pub(crate) mod layout_snapshot;
+#[cfg(test)]
+pub(crate) use layout_snapshot::clear_layout_snapshot_for_tests;
+pub use layout_snapshot::record_overscroll_status_area;
+pub use layout_snapshot::{last_layout_snapshot, record_layout_snapshot};
 
 /// The prepared transcript frame the renderer last drew. The retained frame
 /// *is* the published geometry: it carries per-item row ranges and totals, so
@@ -1701,93 +1691,6 @@ static LAST_CHAT_FRAME: OnceLock<Mutex<Option<Arc<PreparedChatFrame>>>> = OnceLo
 #[cfg(not(test))]
 fn last_chat_frame_state() -> &'static Mutex<Option<Arc<PreparedChatFrame>>> {
     LAST_CHAT_FRAME.get_or_init(|| Mutex::new(None))
-}
-
-#[cfg(not(test))]
-fn last_layout_state() -> &'static Mutex<Option<LayoutSnapshot>> {
-    LAST_LAYOUT.get_or_init(|| Mutex::new(None))
-}
-
-pub fn record_layout_snapshot(
-    messages_area: Rect,
-    diagram_area: Option<Rect>,
-    diff_pane_area: Option<Rect>,
-    input_area: Option<Rect>,
-) {
-    if secondary_render_active() {
-        return;
-    }
-    #[cfg(test)]
-    {
-        TEST_LAST_LAYOUT.with(|snapshot| {
-            *snapshot.borrow_mut() = Some(LayoutSnapshot {
-                messages_area,
-                diagram_area,
-                diff_pane_area,
-                input_area,
-                overscroll_area: None,
-            });
-        });
-        return;
-    }
-    #[cfg(not(test))]
-    {
-        if let Ok(mut snapshot) = last_layout_state().lock() {
-            *snapshot = Some(LayoutSnapshot {
-                messages_area,
-                diagram_area,
-                diff_pane_area,
-                input_area,
-                overscroll_area: None,
-            });
-        }
-    }
-}
-
-/// Record the pinned status line's row for the frame being drawn.
-///
-/// A separate call site from [`record_layout_snapshot`] because the status line
-/// is laid out and drawn after the snapshot is published. It only fills in the
-/// field; the snapshot itself stays owned by the messages/input recorder.
-pub fn record_overscroll_status_area(area: Rect) {
-    if secondary_render_active() {
-        return;
-    }
-    fn apply(snapshot: &mut Option<LayoutSnapshot>, area: Rect) {
-        if let Some(snapshot) = snapshot.as_mut() {
-            snapshot.overscroll_area = Some(area);
-        }
-    }
-    #[cfg(test)]
-    {
-        TEST_LAST_LAYOUT.with(|snapshot| apply(&mut snapshot.borrow_mut(), area));
-        return;
-    }
-    #[cfg(not(test))]
-    {
-        if let Ok(mut snapshot) = last_layout_state().lock() {
-            apply(&mut snapshot, area);
-        }
-    }
-}
-
-/// Row geometry of the pinned status line in the last drawn frame.
-pub fn last_overscroll_status_area() -> Option<Rect> {
-    last_layout_snapshot().and_then(|snapshot| snapshot.overscroll_area)
-}
-
-pub fn last_layout_snapshot() -> Option<LayoutSnapshot> {
-    #[cfg(test)]
-    {
-        return TEST_LAST_LAYOUT.with(|snapshot| *snapshot.borrow());
-    }
-    #[cfg(not(test))]
-    {
-        last_layout_state()
-            .lock()
-            .ok()
-            .and_then(|snapshot| *snapshot)
-    }
 }
 
 /// First post-clear line while following the tail. Keep the full prepared
@@ -1935,9 +1838,7 @@ fn clear_test_render_state_locked() {
     // notification line to subsequent renders, shifting every layout-sensitive
     // assertion (click mapping, snapshot rows).
     frame_metrics::clear_flicker_frame_history_for_tests();
-    TEST_LAST_LAYOUT.with(|snapshot| {
-        *snapshot.borrow_mut() = None;
-    });
+    clear_layout_snapshot_for_tests();
     TEST_LAST_CHAT_FRAME.with(|slot| {
         *slot.borrow_mut() = None;
     });

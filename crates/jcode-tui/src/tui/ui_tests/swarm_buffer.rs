@@ -424,7 +424,7 @@ fn overscroll_line_row(state: &TestState, width: u16) -> String {
     // Read the row the renderer published for the pinned status line. Picking
     // the last non-blank row instead would silently grab the compact status bar,
     // which is drawn underneath it on wide frames.
-    let area = crate::tui::ui::last_overscroll_status_area()
+    let area = crate::tui::ui::layout_snapshot::last_overscroll_status_area()
         .expect("status line area published by the frame");
     rows.get(area.y as usize).cloned().unwrap_or_default()
 }
@@ -532,7 +532,7 @@ fn overscroll_model_is_pink() {
             .map(|x| buf[(x, y)].symbol().to_string())
             .collect()
     };
-    let y = crate::tui::ui::last_overscroll_status_area()
+    let y = crate::tui::ui::layout_snapshot::last_overscroll_status_area()
         .expect("status line area published by the frame")
         .y;
     let row = row_at(y);

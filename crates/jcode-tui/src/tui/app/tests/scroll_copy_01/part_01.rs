@@ -1345,23 +1345,18 @@ fn retained_frame_row_matches_the_rendered_screen() {
     );
 }
 
-/// Real App: the session status line is always pinned as the last row, with
-/// a pink model, and scrolling (up or down, at the bottom or not) never hides
-/// it or shows an elastic countdown.
+/// Real App: the status line stays pinned with a pink model, and no scroll
+/// direction or position hides it or shows an elastic countdown.
 #[test]
 fn status_line_is_always_pinned_with_pink_model_on_real_app() {
     let _lock = scroll_render_test_lock();
     for width in [120u16, 60] {
         let (mut app, mut terminal) = create_scroll_test_app(width, 30, 0, 36);
         let pink = ratatui::style::Color::Rgb(255, 135, 200);
-        // The pinned status line is published by the renderer; the compact
-        // status bar can sit underneath it, so the frame's last row is not a
-        // reliable address for it.
         let status_line_pink_cells = |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>| {
             let buf = terminal.backend().buffer();
-            let y = crate::tui::ui::last_overscroll_status_area()
-                .expect("status line area published by the frame")
-                .y;
+            let y = crate::tui::ui::layout_snapshot::last_overscroll_status_area()
+                .expect("status line area").y;
             (0..buf.area.width)
                 .filter(|&x| buf[(x, y)].fg == pink && buf[(x, y)].symbol().trim() != "")
                 .count()

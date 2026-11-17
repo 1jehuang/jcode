@@ -1714,15 +1714,7 @@ fn older_server_history_repairs_stale_shared_server_channel_end_to_end() {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(crate::build::binary_name());
         std::fs::write(&path, format!("bin {version}")).unwrap();
-        // Windows refuses FILE_WRITE_ATTRIBUTES on a read-only handle, so open
-        // for write instead of using `File::open`.
-        std::fs::File::options()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .unwrap()
-            .set_modified(mtime)
-            .unwrap();
+        crate::test_temp::set_mtime(&path, mtime).unwrap();
     };
     let old = "0.14.6";
     let new = "0.22.0";

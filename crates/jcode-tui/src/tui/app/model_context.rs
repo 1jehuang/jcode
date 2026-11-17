@@ -501,14 +501,7 @@ impl App {
                     self.set_status_notice("Paused: automatic failover stopped");
                     return;
                 }
-                // Only the first switch gets the fast path. An exhausted
-                // fallback must not create an instantaneous account loop.
-                //
-                // The fast path is for *definitive* exhaustion only: a rate
-                // limit or a transient 429 is ambiguous, so it keeps the
-                // countdown and its cancel key. Skipping the check here made
-                // `exhausted_usage_immediate_failover` bypass the countdown for
-                // every failure, which is not what the setting promises.
+                // Only definitive exhaustion skips the countdown; a 429/503 keeps it.
                 let immediate = config.exhausted_usage_immediate_failover
                     && self.automatic_failover_targets.is_empty()
                     && jcode_provider_core::is_definitive_usage_exhaustion(&prompt.reason);
