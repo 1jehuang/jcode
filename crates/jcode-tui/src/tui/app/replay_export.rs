@@ -9,6 +9,12 @@ use ratatui::{
 use serde_json::{Value, json};
 
 impl App {
+    /// Expand the pinned plan for an offline export, without changing saved state.
+    pub fn with_expanded_replay_todos(mut self) -> Self {
+        self.pinned_todos_expanded = true;
+        self
+    }
+
     pub(super) fn restore_replay_todos_json(&mut self, output: &str) {
         if let Some(payload) = todo_snapshot_from_output(output) {
             self.pinned_todos_payload = Some(payload);
