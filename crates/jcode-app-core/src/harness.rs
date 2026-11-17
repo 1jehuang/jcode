@@ -249,6 +249,11 @@ pub fn policy_block(session: &str) -> String {
         let mut lines = vec![
             "<harness_execution_policy>".to_string(),
             CORE_INVARIANT.to_string(),
+            "Never call load_tools for tools already listed in Active Tools. Mutating tool schemas mid-session breaks prompt KV caching and triggers CAP-WASTE.".to_string(),
+            "Execute standard workflow scripts (such as ship.sh and sync-skills.sh) directly. Do not read their source code or create todo checklists unless a script fails.".to_string(),
+            "Surface concise [VERIFIED] command/result evidence directly in your final response.".to_string(),
+            "Never post GitHub PR comments (gh pr comment) just to record verification output.".to_string(),
+            "Never create external logs or artifacts just to record verification output; concise inline [VERIFIED] lines are sufficient for the Turn-Completion Gate after actual tool use.".to_string(),
         ];
         if !s.active_skills.is_empty() {
             lines.push(format!(
@@ -284,6 +289,8 @@ pub fn policy_block(session: &str) -> String {
 
 /// Turn-completion gate. Returns the correction to append when a text-only
 /// stop must be intercepted; bumps the intervention counter.
+/// Checks tool telemetry, not evidence storage: inline results need no external
+/// artifact, and a [VERIFIED] label alone does not replace actual tool use.
 pub fn stop_intervention(session: &str) -> Option<String> {
     with(session, |s| {
         let t = &mut s.turn;
@@ -464,6 +471,70 @@ pub fn check_tool_call(session: &str, name: &str, input: &Value) -> Result<(), S
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn inline_evidence_rules_are_global_and_survive_compaction() {
+        for session in ["harness-policy-new", "harness-policy-active"] {
+            reset(session);
+            if session.ends_with("active") {
+                with(session, |s| {
+                    s.active_skills.insert("test-skill".into());
+                    s.constraints.insert(
+                        "test-skill".into(),
+                        vec!["skill constraint".into(); MAX_CONSTRAINT_LINES + 1],
+                    );
+                });
+            }
+            for compacted in [false, true] {
+                if compacted {
+                    on_compaction(session);
+                }
+                let policy = policy_block(session);
+                for rule in [
+                    "Surface concise [VERIFIED] command/result evidence directly in your final response.",
+                    "Never post GitHub PR comments (gh pr comment) just to record verification output.",
+                    "Never create external logs or artifacts just to record verification output; concise inline [VERIFIED] lines are sufficient for the Turn-Completion Gate after actual tool use.",
+                ] {
+                    assert_eq!(policy.matches(rule).count(), 1, "{session}: {policy}");
+                }
+            }
+            reset(session);
+        }
+    }
+
+    #[test]
+    fn cache_workflow_rules_are_global() {
+        for session in ["harness-workflow-fresh", "harness-workflow-active"] {
+            reset(session);
+            let active = session.ends_with("active");
+            if active {
+                with(session, |s| {
+                    s.active_skills.insert("test-skill".into());
+                    s.constraints.insert(
+                        "test-skill".into(),
+                        vec!["skill constraint".into(); MAX_CONSTRAINT_LINES + 1],
+                    );
+                });
+            }
+            for compacted in [false, true] {
+                if compacted {
+                    on_compaction(session);
+                }
+                let policy = policy_block(session);
+                for rule in [
+                    "Never call load_tools for tools already listed in Active Tools. Mutating tool schemas mid-session breaks prompt KV caching and triggers CAP-WASTE.",
+                    "Execute standard workflow scripts (such as ship.sh and sync-skills.sh) directly. Do not read their source code or create todo checklists unless a script fails.",
+                ] {
+                    assert_eq!(policy.matches(rule).count(), 1, "{session}: {policy}");
+                }
+                assert_eq!(
+                    policy.matches("- skill constraint").count(),
+                    if active { MAX_CONSTRAINT_LINES } else { 0 },
+                );
+            }
+            reset(session);
+        }
+    }
 
     #[test]
     fn constraints_come_from_the_trailing_section_only() {

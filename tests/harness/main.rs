@@ -152,13 +152,14 @@ async fn agent(env: &Env, provider: &Scripted) -> Agent {
 async fn routes_skill_injects_policy_once_and_gates_premature_stop() -> Result<()> {
     let (_g, env) = env()?;
     let p = Scripted::default();
-    p.text("Contacts lack addresses because of the import."); // premature guess
+    let evidence = "[VERIFIED] codemode return 1 -> 1";
+    p.text(evidence); // A verification label alone cannot replace tool use.
     p.tool(
         "t1",
         "codemode",
         json!({"code": "return 1", "phase": "discover_bridge"}),
     );
-    p.text("Verified via tools.");
+    p.text(evidence);
     let mut a = agent(&env, &p).await;
     let out = a
         .run_once_capture("why do contacts in CRM have no address?")
@@ -192,15 +193,15 @@ async fn routes_skill_injects_policy_once_and_gates_premature_stop() -> Result<(
     let second: String = reqs[1].iter().map(text_of).collect();
     assert!(second.contains("[HARNESS INTERVENTION]"));
     assert!(
-        !second.contains("because of the import"),
+        !second.contains(evidence),
         "premature text suppressed"
     );
-    assert_eq!(out, "Verified via tools.");
+    assert_eq!(out, evidence, "inline evidence needs no external artifact");
 
     let t = jcode::harness::turn(&sid);
     assert_eq!(t.auto_routed_skills, vec!["crm-audit"]);
     assert_eq!(t.stop_interventions, 1);
-    assert_eq!(t.tools_called, vec!["codemode"]);
+    assert_eq!(t.tools_called, vec!["codemode"], "no artifact-writing tool");
 
     // Policy is request-only: next turn's history carries no stale copies.
     p.text("ok");
