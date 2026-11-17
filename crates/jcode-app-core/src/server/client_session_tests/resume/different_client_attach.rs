@@ -1,4 +1,6 @@
-#[tokio::test]
+// The server runs on a multi-thread runtime; on a current-thread one this attach
+// path parks its own helper tasks and the test hangs instead of failing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn handle_resume_session_allows_attach_from_different_client_instance() -> Result<()> {
     let _guard = crate::storage::lock_test_env();
     let (_runtime, prev_runtime) = setup_runtime_dir()?;
@@ -98,7 +100,7 @@ async fn handle_resume_session_allows_attach_from_different_client_instance() ->
     let mut client_selfdev = false;
     let mut client_session_id = temp_session_id.to_string();
 
-    handle_resume_session(
+    let resume = handle_resume_session(
         45,
         target_session_id.to_string(),
         None,
@@ -135,8 +137,10 @@ async fn handle_resume_session_allows_attach_from_different_client_instance() ->
         &swarm_event_tx,
         false,
         false,
-    )
-    .await?;
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(10), resume)
+        .await
+        .expect("resume handler must not park while attaching a second client")?;
     assert_peer_history_for(&mut peer_frames, target_session_id).await?;
 
     let events = collect_events_until_done(&mut client_event_rx, 45).await;

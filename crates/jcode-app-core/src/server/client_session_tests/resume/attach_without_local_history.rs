@@ -1,4 +1,5 @@
-#[tokio::test]
+// Multi-thread to match the server runtime; a current-thread one parks this attach.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn handle_resume_session_allows_attach_without_local_history() -> Result<()> {
     let _guard = crate::storage::lock_test_env();
     let (_runtime, prev_runtime) = setup_runtime_dir()?;

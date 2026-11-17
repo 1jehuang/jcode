@@ -1,4 +1,5 @@
-#[tokio::test]
+// Multi-thread to match the server runtime; a current-thread one parks this attach.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn handle_resume_session_allows_same_client_instance_takeover_without_local_history()
 -> Result<()> {
     let _guard = crate::storage::lock_test_env();

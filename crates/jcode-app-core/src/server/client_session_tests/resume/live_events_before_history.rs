@@ -1,9 +1,11 @@
-#[tokio::test]
+// Multi-thread to match the server runtime; a current-thread one parks this attach.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn handle_resume_session_registers_live_events_before_history_replay() -> Result<()> {
     restored_resume_with_history_backpressure(false).await
 }
 
-#[tokio::test]
+// Multi-thread to match the server runtime; a current-thread one parks this attach.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restored_resume_finishes_when_recovery_turn_owns_agent() -> Result<()> {
     restored_resume_with_history_backpressure(true).await
 }
