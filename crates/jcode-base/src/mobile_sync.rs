@@ -574,6 +574,29 @@ fn bounded_tool_input(input: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+// Use the same serializer as the wire representation without allocating and
+// copying a JSON buffer that would immediately be discarded.
+fn serialized_byte_len(value: &impl Serialize) -> serde_json::Result<usize> {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value)?;
+    Ok(counter.0)
+}
+
+#[cfg(test)]
+#[path = "mobile_sync_byte_count_tests.rs"]
+mod byte_count_tests;
+
 fn structured_tools(
     blocks: &[ContentBlock],
 ) -> Option<(String, Vec<WireToolCall>, Vec<WireToolResult>)> {
@@ -648,8 +671,8 @@ fn structured_tools(
     if prose.text.encode_utf16().count() > 200_000 {
         return None;
     }
-    let structured_bytes = match serde_json::to_vec(&(&calls, &results)) {
-        Ok(bytes) => bytes.len(),
+    let structured_bytes = match serialized_byte_len(&(&calls, &results)) {
+        Ok(bytes) => bytes,
         Err(error) => {
             crate::logging::debug(&format!("Cannot serialize mobile tool metadata: {error}"));
             return None;

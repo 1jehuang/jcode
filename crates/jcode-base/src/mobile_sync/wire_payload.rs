@@ -1,5 +1,9 @@
 use super::*;
 
+#[cfg(test)]
+#[path = "wire_payload_tests.rs"]
+mod tests;
+
 /// Convert stored messages into the mobile wire format. One stored message
 /// becomes at most one wire message; `seq` is the stored index so uploads are
 /// stable and idempotent.
@@ -105,7 +109,7 @@ pub(super) fn message_chunks(messages: &[WireMessage]) -> Vec<&[WireMessage]> {
     let mut start = 0;
     let mut bytes = 0;
     for (index, message) in messages.iter().enumerate() {
-        let size = serde_json::to_vec(message).map_or(0, |v| v.len());
+        let size = serialized_byte_len(message).unwrap_or(0);
         if index > start
             && (bytes + size > 3 * 1024 * 1024 || index - start >= MAX_MESSAGES_PER_UPLOAD)
         {
@@ -124,6 +128,12 @@ pub(super) fn message_chunks(messages: &[WireMessage]) -> Vec<&[WireMessage]> {
 // Only explicit markdown image destinations under the generated-image store
 // are eligible. Canonicalization rejects traversal and symlink escapes.
 pub(super) fn generated_images(text: &str) -> Vec<WireImage> {
+    let mut fragments = text.split("![").skip(1).take(64).peekable();
+    // No destination means no filesystem work, even for long prose histories.
+    // Reuse this iterator so the text prefix is not scanned a second time.
+    if fragments.peek().is_none() {
+        return Vec::new();
+    }
     let Ok(root) =
         storage::jcode_dir().and_then(|p| Ok(p.join("generated-images").canonicalize()?))
     else {
@@ -131,7 +141,7 @@ pub(super) fn generated_images(text: &str) -> Vec<WireImage> {
     };
     let mut seen = BTreeSet::new();
     let mut images = Vec::new();
-    for fragment in text.split("![").skip(1).take(64) {
+    for fragment in fragments {
         let Some((_, destination)) = fragment.split_once("](") else {
             continue;
         };
@@ -213,7 +223,7 @@ pub(super) fn image_thumbnail(reader: impl std::io::BufRead + std::io::Seek) -> 
     limits.max_alloc = Some(128 * 1024 * 1024);
     reader.limits(limits);
     let mut thumbnail = match reader.decode() {
-        Ok(image) => image.thumbnail(1024, 1024).to_rgb8(),
+        Ok(image) => image.thumbnail(1024, 1024).into_rgb8(),
         Err(error) => {
             crate::logging::debug(&format!("Cannot decode mobile thumbnail: {error}"));
             return None;
