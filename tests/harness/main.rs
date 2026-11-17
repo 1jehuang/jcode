@@ -1,4 +1,4 @@
-//! Two-tier harness suite: outer agent loop (routing, ephemeral policy,
+//! Two-tier harness suite: outer agent loop (routing, append-only policy,
 //! turn-completion gate) and inner tool gates (phase/prerequisite checks for
 //! native `codemode` and MCP). Real `Agent` and tool `Registry`; only the
 //! provider is scripted, and it records every request it receives.
@@ -148,6 +148,73 @@ async fn agent(env: &Env, provider: &Scripted) -> Agent {
 
 // ------------------------------------------------------------ outer loop
 
+async fn check_policy_request_prefix(streaming: bool) -> Result<()> {
+    let (_g, env) = env()?;
+    let p = Scripted::default();
+    p.tool(
+        "load",
+        "skill_manage",
+        json!({"action": "load", "name": "crm-audit"}),
+    );
+    p.tool(
+        "query",
+        "codemode",
+        json!({"code": "return 1", "phase": "discover_bridge"}),
+    );
+    p.text("[VERIFIED] codemode return 1 -> 1");
+    let mut a = agent(&env, &p).await;
+    let prompt = "Inspect the available data using the appropriate skill and tools";
+    if streaming {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        a.run_once_streaming_mpsc(prompt, vec![], None, tx).await?;
+    } else {
+        a.run_once_capture(prompt).await?;
+    }
+    p.text("ok");
+    if streaming {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        a.run_once_streaming_mpsc("thanks", vec![], None, tx)
+            .await?;
+    } else {
+        a.run_once_capture("thanks").await?;
+    }
+    let requests = p.requests();
+    assert_eq!(requests.len(), 4, "load, query, final, next user turn");
+    for pair in requests.windows(2) {
+        let previous = serde_json::to_value(&pair[0])?;
+        let next = serde_json::to_value(&pair[1])?;
+        assert!(
+            next.as_array()
+                .unwrap()
+                .starts_with(previous.as_array().unwrap()),
+            "request history must remain an exact prefix after a tool round or new turn"
+        );
+    }
+    assert_eq!(count_policy(&requests[0]), 1);
+    for request in &requests[1..] {
+        assert_eq!(count_policy(request), 2, "append only the changed policy");
+        let latest = request
+            .iter()
+            .rev()
+            .find(|m| text_of(m).contains(POLICY_TAG))
+            .unwrap();
+        assert!(text_of(latest).starts_with("<system-reminder>\n"));
+        assert!(text_of(latest).contains("crm-audit"));
+    }
+    jcode::harness::reset(a.session_id());
+    Ok(())
+}
+
+#[tokio::test]
+async fn blocking_policy_preserves_request_prefix() -> Result<()> {
+    check_policy_request_prefix(false).await
+}
+
+#[tokio::test]
+async fn streaming_policy_preserves_request_prefix() -> Result<()> {
+    check_policy_request_prefix(true).await
+}
+
 #[tokio::test]
 async fn routes_skill_injects_policy_once_and_gates_premature_stop() -> Result<()> {
     let (_g, env) = env()?;
@@ -192,10 +259,7 @@ async fn routes_skill_injects_policy_once_and_gates_premature_stop() -> Result<(
     // Intervention reached the model; the guess never did.
     let second: String = reqs[1].iter().map(text_of).collect();
     assert!(second.contains("[HARNESS INTERVENTION]"));
-    assert!(
-        !second.contains(evidence),
-        "premature text suppressed"
-    );
+    assert!(!second.contains(evidence), "premature text suppressed");
     assert_eq!(out, evidence, "inline evidence needs no external artifact");
 
     let t = jcode::harness::turn(&sid);
@@ -203,7 +267,7 @@ async fn routes_skill_injects_policy_once_and_gates_premature_stop() -> Result<(
     assert_eq!(t.stop_interventions, 1);
     assert_eq!(t.tools_called, vec!["codemode"], "no artifact-writing tool");
 
-    // Policy is request-only: next turn's history carries no stale copies.
+    // An unchanged policy snapshot is reused on the next turn.
     p.text("ok");
     a.run_once_capture("thanks").await?;
     let last = p.requests().pop().unwrap();

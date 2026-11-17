@@ -7,8 +7,8 @@ impl Agent {
     /// Latest real user prompt (text, not a tool result) in the transcript.
     fn latest_user_prompt(&self) -> String {
         self.session
-            .messages
-            .iter()
+            .visible_conversation_messages()
+            .into_iter()
             .rev()
             .find(|m| {
                 m.role == Role::User
@@ -46,10 +46,45 @@ impl Agent {
         }
     }
 
-    /// The one request-only policy message. Never persisted.
-    pub(super) fn harness_policy_message(&self) -> Option<Message> {
-        crate::harness::enabled()
-            .then(|| Message::user(&crate::harness::policy_block(&self.session.id)))
+    /// Keep policy changes append-only so later requests retain their cached prefix.
+    pub(super) fn append_harness_policy(&mut self, messages: &mut Vec<Message>) {
+        if !crate::harness::enabled() {
+            return;
+        }
+        let policy = format!(
+            "<system-reminder>\n{}\n</system-reminder>",
+            crate::harness::policy_block(&self.session.id)
+        );
+        // Search the active request, since compaction may have removed the last snapshot.
+        let latest = messages.iter().rev().find_map(|message| {
+            if message.role != Role::User {
+                return None;
+            }
+            match message.content.as_slice() {
+                [ContentBlock::Text { text, .. }]
+                    if text.starts_with("<system-reminder>\n<harness_execution_policy>\n") =>
+                {
+                    Some(text)
+                }
+                _ => None,
+            }
+        });
+        if latest == Some(&policy) {
+            return;
+        }
+        self.add_message_with_display_role(
+            Role::User,
+            Message::user(&policy).content,
+            Some(crate::session::StoredDisplayRole::System),
+        );
+        messages.push(
+            self.session
+                .messages
+                .last()
+                .expect("policy appended")
+                .to_message(),
+        );
+        self.persist_session_best_effort("harness policy snapshot");
     }
 
     /// Turn-completion gate. On a premature text-only stop, drops the

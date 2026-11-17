@@ -243,7 +243,7 @@ pub fn record_tool_call(session: &str, name: &str) {
     with(session, |s| s.turn.tools_called.push(name.to_string()));
 }
 
-/// The single ephemeral block sent before the latest message on every request.
+/// Current policy snapshot; the agent appends it to history only when it changes.
 pub fn policy_block(session: &str) -> String {
     with(session, |s| {
         let mut lines = vec![

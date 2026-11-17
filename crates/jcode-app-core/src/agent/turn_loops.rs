@@ -100,7 +100,7 @@ impl Agent {
             self.provider
                 .prewarm(&tools, &split_prompt.static_part)
                 .await;
-            let (messages, compaction_event) = self.messages_for_provider();
+            let (mut messages, compaction_event) = self.messages_for_provider();
             if let Some(event) = compaction_event {
                 // Reset cache tracker and tool lock on compaction since the message history changes
                 self.cache_tracker.reset();
@@ -124,6 +124,7 @@ impl Agent {
                 split_prompt = self.build_system_prompt_split(None);
             }
 
+            self.append_harness_policy(&mut messages);
             let messages: std::sync::Arc<[Message]> = messages.into();
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_pending =
@@ -185,10 +186,6 @@ impl Agent {
                 crate::subscription_notice::show_upgrade_card(&notice, &self.session.id);
                 messages_with_memory.push(Message::user(&Self::plan_limit_reminder(&notice)));
             }
-            if let Some(policy) = self.harness_policy_message() {
-                messages_with_memory.push(policy);
-            }
-
             logging::info(&format!(
                 "API call starting: {} messages, {} tools",
                 messages_with_memory.len(),
