@@ -110,7 +110,10 @@ fn resumed_long_session_matches_live_transcript_and_numbered_composer() {
         external_path: None,
         todo_statuses: Vec::new(),
     };
-    for width in [40, 80, 120] {
+    // Below 60x20 the picker deliberately collapses to a one-line title
+    // (`render_inner`), so there is no preview pane to compare against. 60 is
+    // the narrowest frame that still renders the side-by-side layout.
+    for width in [60, 80, 120] {
         let height = 40;
         let state = TestState {
             display_messages: messages.clone(),
@@ -125,7 +128,18 @@ fn resumed_long_session_matches_live_transcript_and_numbered_composer() {
         live.draw(|f| draw(f, &state)).unwrap();
         let live_status = last_status_area().expect("live draw records its activity row");
         assert_eq!(live_status.height, 1);
-        assert_eq!(live_status.y, height - 3);
+        // The activity row sits directly above the composer. Deriving it from
+        // the published input area keeps this stable across the frames where the
+        // compact status bar appears below the composer (chat area >= 80 cols)
+        // and shifts the whole stack up by one row.
+        let input_area = crate::tui::ui::last_layout_snapshot()
+            .and_then(|layout| layout.input_area)
+            .expect("live draw records its input area");
+        assert_eq!(
+            live_status.y + 1,
+            input_area.y,
+            "w={width}: the activity row must sit directly above the composer"
+        );
         let mut picker = SessionPicker::new(vec![session.clone()]);
         preview.draw(|f| picker.render(f)).unwrap();
         // The compact card is confined to the right half. Compare all visible

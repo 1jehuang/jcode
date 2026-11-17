@@ -426,6 +426,25 @@ pub(super) fn active_file_diff_context(
     })
 }
 
+/// Last two path segments for the diff pane title, e.g. `crates/jcode-tui/demo.rs`
+/// becomes `jcode-tui/demo.rs`.
+///
+/// Splits on both separators: a Windows path used to be one segment, so the
+/// title carried the whole absolute path and the rail clipped away the file
+/// name, leaving no way to tell which file the pane was showing.
+fn diff_pane_short_path(file_path: &str) -> String {
+    let normalized = file_path.replace('\\', "/");
+    normalized
+        .rsplit('/')
+        .filter(|segment| !segment.is_empty())
+        .take(2)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 pub(super) fn draw_file_diff_view(
     frame: &mut Frame,
     area: Rect,
@@ -521,14 +540,7 @@ pub(super) fn draw_file_diff_view(
         )
     };
 
-    let short_path = file_path
-        .rsplit('/')
-        .take(2)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("/");
+    let short_path = diff_pane_short_path(file_path);
 
     let mut title_parts = vec![
         Span::styled(" ", Style::default().fg(dim_color())),
@@ -612,4 +624,23 @@ pub(super) fn draw_file_diff_view(
 
     let paragraph = Paragraph::new(visible_lines);
     frame.render_widget(paragraph, inner);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::diff_pane_short_path;
+
+    #[test]
+    fn diff_title_keeps_the_last_two_segments_on_either_separator() {
+        assert_eq!(
+            diff_pane_short_path("crates/jcode-tui/src/main.rs"),
+            "src/main.rs"
+        );
+        assert_eq!(
+            diff_pane_short_path(r"C:\Users\me\AppData\Local\Temp\.tmpX\demo.rs"),
+            ".tmpX/demo.rs"
+        );
+        assert_eq!(diff_pane_short_path("demo.rs"), "demo.rs");
+        assert_eq!(diff_pane_short_path(""), "");
+    }
 }

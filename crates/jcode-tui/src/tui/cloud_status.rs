@@ -38,8 +38,13 @@ pub struct CloudDirectoryEntry {
     pub busy: usize,
 }
 
+// The only production caller lives in `gather`, which is `cfg(not(test))`, and
+// the end-to-end test that reaches it is unix-only. A Windows test build
+// therefore has no live reference; that is expected, not stale code.
+#[cfg_attr(all(test, windows), allow(dead_code))]
 const DIRECTORIES_PROBE: &str = include_str!("cloud_directories_probe.py");
 
+#[cfg_attr(all(test, windows), allow(dead_code))]
 fn directories_script(session_id: Option<&str>) -> String {
     let hint = session_id.unwrap_or("").replace('\'', "'\\''");
     format!(
@@ -485,6 +490,13 @@ mod tests {
     }
 
     #[tokio::test]
+    // The directory script is a POSIX `sh` program and every production caller
+    // passes a host (SSH). The `None` branch runs the same script through a
+    // local `sh`, which on Windows is only whatever MSYS shell happens to be on
+    // PATH, and MSYS cannot `cd` into a `C:\...` path or agree with the Rust
+    // side about `$HOME`. Asserting the wire response there would test MSYS path
+    // translation, not the jcode script, so the end-to-end check is unix-only.
+    #[cfg(unix)]
     async fn directory_script_runs_through_real_shell_transport() {
         let home = tempfile::tempdir().unwrap();
         let project = home.path().join("project ' 雲");

@@ -461,12 +461,25 @@ fn reapply_terminal_modes_after_focus_to(
 }
 
 #[cfg(test)]
+/// Wire-level tests for the Kitty keyboard / tmux extended-key sequences.
+///
+/// Windows reads key input through `ReadConsoleInputW`, so jcode deliberately
+/// negotiates no CSI-u reporting there: `keyboard_protocol::write_mode` returns
+/// `Unsupported` for a push and writes nothing for set/pop (see that module's
+/// doc for #1064 / #1527 / #1812). The tests below assert the sequences a
+/// CSI-u-capable terminal receives, so they are scoped to the platforms that
+/// use that decoder. The Windows half is covered by
+/// `keyboard_protocol::tests`, which parameterizes the decoder choice instead.
 mod terminal_mode_tests {
     use super::{
-        disable_keyboard_enhancement_to, enable_keyboard_enhancement_to,
-        kitty_keyboard_push_active, reapply_keyboard_enhancement_to,
-        reapply_terminal_modes_after_focus_to, reapply_terminal_modes_to,
+        kitty_keyboard_push_active, reapply_terminal_modes_to,
         reset_keyboard_enhancement_ownership_for_test,
+    };
+    // Only the CSI-u byte tests below reach these; see the module doc.
+    #[cfg(not(windows))]
+    use super::{
+        disable_keyboard_enhancement_to, enable_keyboard_enhancement_to,
+        reapply_keyboard_enhancement_to, reapply_terminal_modes_after_focus_to,
     };
 
     #[test]
@@ -487,6 +500,7 @@ mod terminal_mode_tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn disable_pops_kitty_entry_exactly_once_then_ownership_is_released() {
         let _guard = super::TERMINAL_OWNERSHIP_TEST_LOCK
             .lock()
@@ -518,6 +532,7 @@ mod terminal_mode_tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn adopt_records_inherited_entry_without_pushing() {
         let _guard = super::TERMINAL_OWNERSHIP_TEST_LOCK
             .lock()
@@ -577,6 +592,7 @@ mod terminal_mode_tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn tmux_keyboard_lifecycle_requests_and_resets_extended_keys() {
         let mut output = Vec::new();
         enable_keyboard_enhancement_to(&mut output, true).unwrap();
@@ -592,6 +608,7 @@ mod terminal_mode_tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn outside_tmux_keyboard_lifecycle_keeps_kitty_protocol_only() {
         let mut output = Vec::new();
         enable_keyboard_enhancement_to(&mut output, false).unwrap();
@@ -614,6 +631,7 @@ mod terminal_mode_tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn reapply_omits_mouse_sequences_when_capture_is_disabled() {
         let mut output = Vec::new();
         reapply_terminal_modes_to(&mut output, false, true, true).unwrap();
@@ -625,6 +643,7 @@ mod terminal_mode_tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn reapply_emits_configured_idempotent_modes_without_keyboard_push() {
         let mut output = Vec::new();
         reapply_terminal_modes_to(&mut output, true, true, true).unwrap();
@@ -641,6 +660,7 @@ mod terminal_mode_tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn focus_reapply_preserves_other_modes_without_rearming_focus_reporting() {
         for mouse_capture in [false, true] {
             for keyboard_enhanced in [false, true] {
@@ -2568,8 +2588,11 @@ mod tests {
         let flags = keyboard_enhancement_flags();
 
         assert!(flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
-        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
-        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
+        // Press/release events and alternate keys are deliberately off: hosts
+        // that only half-support the protocol (herdr/ConPTY panes) leak the
+        // release events into the prompt as raw `[<code>;1:3u` text.
+        assert!(!flags.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
+        assert!(!flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
         assert!(!flags.contains(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES));
     }
 }
