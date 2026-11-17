@@ -666,7 +666,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 .remote_provider_model
                 .clone()
                 .unwrap_or_else(|| app.provider.model());
-            let context_window = app.provider.context_window();
+            let context_window = app.context_limit;
             let effort_raw = app.remote_reasoning_effort_hint();
             let effort = effort_raw
                 .as_deref()
