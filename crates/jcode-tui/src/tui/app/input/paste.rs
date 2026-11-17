@@ -64,13 +64,9 @@ fn expand_matching_paste(app: &mut App, text: &str) -> bool {
     true
 }
 
-/// Alt+X: expand the paste placeholder closest before the cursor back into its
-/// raw multi-line text. Returns false when the composer holds no paste.
-pub(in crate::tui::app) fn expand_paste_at_cursor(app: &mut App) -> bool {
-    if app.pasted_contents.is_empty() {
-        return false;
-    }
-
+/// The paste placeholder closest before the cursor, as `(byte_start, index)`
+/// into `pasted_contents`.
+fn placeholder_before_cursor(app: &App) -> Option<(usize, usize)> {
     let mut target: Option<(usize, usize)> = None;
     for (index, content) in app.pasted_contents.iter().enumerate() {
         let placeholder = paste_placeholder(index + 1, content);
@@ -84,8 +80,59 @@ pub(in crate::tui::app) fn expand_paste_at_cursor(app: &mut App) -> bool {
             }
         }
     }
+    target
+}
 
-    let Some((start, content_index)) = target else {
+/// True when Alt+X has a collapsed paste it can expand right now.
+pub(in crate::tui::app) fn has_paste_to_expand_at_cursor(app: &App) -> bool {
+    placeholder_before_cursor(app).is_some()
+}
+
+/// Alt+X chord shared by every dispatcher: Alt with the `x` key, including the
+/// Option+X Unicode forms some macOS terminals insert, but not Ctrl+Alt+X or
+/// other command chords that dispatch elsewhere.
+fn is_alt_x_chord(
+    code: crossterm::event::KeyCode,
+    modifiers: crossterm::event::KeyModifiers,
+) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    if !modifiers.contains(KeyModifiers::ALT)
+        || modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::META)
+    {
+        return false;
+    }
+    matches!(code, KeyCode::Char('x'))
+        || crate::tui::keybind::shortcut_char_for_macos_option_key(code, modifiers) == Some('x')
+}
+
+/// Contextual Alt+X expansion shared by the local and remote dispatchers.
+///
+/// The todo-card toggle is bound to Alt+X by default and runs before the
+/// generic Alt handler in both paths. A collapsed paste placeholder sitting
+/// before the cursor is the more specific target, so it claims the chord;
+/// with no placeholder this returns false and the toggle keeps working.
+/// Returns true when the key was consumed.
+pub(in crate::tui::app) fn try_expand_paste_on_alt_x(
+    app: &mut App,
+    code: crossterm::event::KeyCode,
+    modifiers: crossterm::event::KeyModifiers,
+) -> bool {
+    if !is_alt_x_chord(code, modifiers) || !has_paste_to_expand_at_cursor(app) {
+        return false;
+    }
+    expand_paste_at_cursor(app);
+    true
+}
+
+/// Alt+X: expand the paste placeholder closest before the cursor back into its
+/// raw multi-line text. Returns false when the composer holds no paste.
+pub(in crate::tui::app) fn expand_paste_at_cursor(app: &mut App) -> bool {
+    if app.pasted_contents.is_empty() {
+        return false;
+    }
+
+    let Some((start, content_index)) = placeholder_before_cursor(app) else {
         app.set_status_notice("No paste placeholder before the cursor to expand");
         return true;
     };

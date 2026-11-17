@@ -306,7 +306,9 @@ pub(in crate::tui::app) mod newline;
 mod paste;
 mod paste_guard;
 use paste::expand_paste_placeholders_with;
-pub(super) use paste::{expand_paste_at_cursor, expand_paste_placeholders, handle_text_paste};
+pub(super) use paste::{
+    expand_paste_at_cursor, expand_paste_placeholders, handle_text_paste, try_expand_paste_on_alt_x,
+};
 #[cfg(test)]
 pub(in crate::tui::app) use paste_guard::expire_for_test as paste_guard_expire_for_test;
 use paste_guard::load_dropped_image;
@@ -2385,6 +2387,13 @@ pub(super) fn handle_pre_control_shortcuts(
             "Info widget: OFF"
         };
         app.set_status_notice(status);
+        return true;
+    }
+    // A collapsed paste placeholder before the cursor claims Alt+X, which the
+    // todo-card toggle below otherwise consumes on every platform. Expansion is
+    // the more specific, contextual action; without a placeholder the toggle
+    // still runs.
+    if try_expand_paste_on_alt_x(app, code, modifiers) {
         return true;
     }
     if app.toggle_keys.todo_card.matches(code, modifiers) {

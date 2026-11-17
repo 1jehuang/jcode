@@ -346,6 +346,12 @@ pub(super) async fn handle_remote_key_internal(
         app.toggle_typing_scroll_lock();
         return Ok(());
     }
+    // Keep the remote path aligned with the local dispatcher: a collapsed
+    // paste placeholder before the cursor expands on Alt+X instead of the
+    // todo-card toggle that shares the chord.
+    if input::try_expand_paste_on_alt_x(app, code, modifiers) {
+        return Ok(());
+    }
     if app.toggle_keys.todo_card.matches(code, modifiers) {
         app.toggle_todo_card();
         if crate::tui::is_ssh_remote() {
