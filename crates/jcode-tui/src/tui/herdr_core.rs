@@ -81,9 +81,9 @@ static TRACKER: Mutex<Tracker> = Mutex::new(Tracker {
 
 fn enabled_from(get: impl Fn(&str) -> Option<String>) -> bool {
     let set = |key: &str| get(key).is_some_and(|value| !value.trim().is_empty());
-    if get("JCODE_HERDR_OSC").is_some_and(|value| {
-        matches!(value.trim(), "0" | "false" | "off" | "no")
-    }) {
+    if get("JCODE_HERDR_OSC")
+        .is_some_and(|value| matches!(value.trim(), "0" | "false" | "off" | "no"))
+    {
         return false;
     }
     set("HC_TERMINAL_ID")
@@ -163,11 +163,13 @@ pub fn sync(state: State, title: &str, msg: &str) {
         msg: clean(msg, 200),
     };
     let mut tracker = TRACKER.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(sequence) = next_sequence(&mut tracker, report)
-        && !write_raw(&sequence)
-    {
-        // Let the next tick retry.
-        tracker.last = None;
+    let summary = format!("{} {:?}", report.state.as_str(), report.msg);
+    if let Some(sequence) = next_sequence(&mut tracker, report) {
+        crate::logging::debug(&format!("herdr-core: report {summary}"));
+        if !write_raw(&sequence) {
+            // Let the next tick retry.
+            tracker.last = None;
+        }
     }
 }
 
@@ -219,10 +221,7 @@ mod tests {
             encode(&report(State::Blocked(BlockedKind::Question), "", "hello")),
             "\x1b]7501;state=blocked:app=jcode:kind=question:msg=aGVsbG8=\x07"
         );
-        assert!(
-            encode(&report(State::Blocked(BlockedKind::Auth), "", ""))
-                .contains(":kind=auth")
-        );
+        assert!(encode(&report(State::Blocked(BlockedKind::Auth), "", "")).contains(":kind=auth"));
     }
 
     #[test]
