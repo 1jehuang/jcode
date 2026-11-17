@@ -43,6 +43,7 @@ include!("tests/scroll_copy_01/part_01.rs");
 include!("tests/scroll_copy_01/part_02.rs");
 include!("tests/scroll_copy_02/part_01.rs");
 include!("tests/scroll_copy_02/part_02.rs");
+include!("tests/link_click_tests.rs");
 include!("tests/scroll_copy_03.rs");
 include!("tests/resize_viewport.rs");
 include!("tests/issue_1642_panel_dismiss.rs");
