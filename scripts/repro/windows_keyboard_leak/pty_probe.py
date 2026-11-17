@@ -27,6 +27,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import threading
@@ -376,6 +377,13 @@ def main() -> int:
             # probed; the load itself is still checkable from the server log.
             result["checks"]["menu_loaded_session"] = (
                 f"handle_get_history: session={fixture.stem}" in log_text)
+            # The picker initialises a terminal and then hands it to a child client.
+            # The composer is out of reach after that handover, but the property the
+            # defect came from is still observable: the handover must leave nothing
+            # armed. No keyboard-protocol push may reach the stream, and the
+            # stack-neutral clear must be present so an inherited mode is dropped.
+            result["checks"]["menu_left_terminal_unpolluted"] = (
+                not re.search(r"\x1b\[>[\d;]*u", stream) and "\x1b[=0u" in stream)
 
         result["screen_head"] = after_positive[:800]
         result["pty_closed_early"] = not proc.isalive()
@@ -392,11 +400,16 @@ def main() -> int:
         # ConPTY that child does not outlive the handover, so the keyboard part of
         # the scenario cannot be observed on this path. Say so instead of dressing
         # a partial observation up as a pass or a failure.
-        result["verdict"] = (
-            "MENU_SELECTED" if checks.get("menu_loaded_session") else "MENU_NOT_OBSERVED")
+        if checks.get("menu_loaded_session"):
+            result["verdict"] = "MENU_SELECTED"
+        elif checks.get("menu_left_terminal_unpolluted"):
+            result["verdict"] = "MENU_TERMINAL_CLEAN"
+        else:
+            result["verdict"] = "MENU_NOT_OBSERVED"
         result["notes"].append(
-            "menu path stops at the handover; the composer is not reachable here")
-        ok = result["verdict"] == "MENU_SELECTED"
+            "menu path stops at the handover; the composer is not reachable here, so "
+            "typing after a menu pick is not verified")
+        ok = result["verdict"] in ("MENU_SELECTED", "MENU_TERMINAL_CLEAN")
     elif args.expect_bug:
         # Negative control: the harness must be able to SEE the bug. Green here
         # means "the leak was reproduced", which is what makes the fixed run's
