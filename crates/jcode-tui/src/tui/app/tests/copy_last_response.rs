@@ -210,7 +210,7 @@ fn copy_last_response_pending_sequence_beats_fallback_offer() {
 
 #[test]
 fn copy_last_response_pending_sequence_is_fed_before_offers() {
-    let local = include_str!("../input.rs");
+    let local = include_str!("../input_key_dispatch.rs");
     let remote = include_str!("../remote/key_handling/key_events.rs");
     for (name, src) in [("local", local), ("remote", remote)] {
         let pending = src
@@ -317,12 +317,18 @@ fn copy_last_response_prefix_drops_on_a_key_that_cannot_continue_it() {
         crate::tui::keybind::SequenceMatch::Prefix
     );
 
-    seq.abandon_unless_continues(KeyCode::Modifier(crossterm::event::ModifierKeyCode::LeftControl), KeyModifiers::CONTROL);
+    seq.abandon_unless_continues(
+        KeyCode::Modifier(crossterm::event::ModifierKeyCode::LeftControl),
+        KeyModifiers::CONTROL,
+    );
     assert!(seq.is_pending(), "a bare modifier press keeps the prefix");
     seq.abandon_unless_continues(KeyCode::Char('y'), KeyModifiers::CONTROL);
     assert!(seq.is_pending(), "the next step keeps the prefix");
     seq.abandon_unless_continues(KeyCode::Char('x'), KeyModifiers::CONTROL);
-    assert!(seq.is_pending(), "the first step restarts, so it keeps the prefix");
+    assert!(
+        seq.is_pending(),
+        "the first step restarts, so it keeps the prefix"
+    );
 
     seq.abandon_unless_continues(KeyCode::Esc, KeyModifiers::empty());
     assert!(!seq.is_pending(), "any other key drops the prefix");
