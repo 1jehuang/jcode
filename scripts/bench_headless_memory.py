@@ -168,8 +168,9 @@ def run_jcode(sessions: int, turns: int, cwd: str, model: str, memory: bool) -> 
         try:
             hist = json.loads(debug_cmd(dbg_sock, "history", ids[0], timeout=30))
             checks["history_messages"] = len(hist) if isinstance(hist, list) else None
-            blob = json.dumps(hist)
-            checks["tool_uses"] = blob.count('"tool_use"') + blob.count('"ToolUse"') + blob.count('"tool_calls"')
+            # Rendered history emits one role="tool" row per executed tool call.
+            checks["tool_uses"] = sum(1 for m in hist if isinstance(m, dict) and m.get("role") == "tool") \
+                if isinstance(hist, list) else None
             checks["last_response"] = debug_cmd(dbg_sock, "last_response", ids[0], timeout=30)[:200]
         except Exception as exc:  # noqa: BLE001
             checks["error"] = str(exc)[:200]
