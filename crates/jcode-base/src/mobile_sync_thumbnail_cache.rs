@@ -56,24 +56,34 @@ impl ThumbnailCache {
             .unwrap_or(0)
     }
 
-    fn get(&mut self, key: &[u8; 32]) -> Option<Option<WireImage>> {
+    // Return the touched entry's new position without copying its image.
+    fn touch(&mut self, key: &[u8; 32]) -> Option<usize> {
         let index = self.entries.iter().position(|entry| &entry.0 == key)?;
         self.consecutive_hits = (self.consecutive_hits + 1).min(MAX_ENTRIES * 2);
         self.observe(key);
         let entry = self.entries.remove(index)?;
-        let image = entry.1.clone();
         self.entries.push_back(entry);
-        Some(image)
+        Some(self.entries.len() - 1)
     }
 
+    fn get(&mut self, key: &[u8; 32]) -> Option<Option<WireImage>> {
+        let index = self.touch(key)?;
+        Some(self.entries[index].1.clone())
+    }
+
+    #[cfg(test)]
     fn insert(&mut self, key: [u8; 32], image: Option<WireImage>) {
-        let bytes = retained_bytes(&image);
+        self.insert_borrowed(key, &image);
+    }
+
+    fn insert_borrowed(&mut self, key: [u8; 32], image: &Option<WireImage>) {
+        let bytes = retained_bytes(image);
         if bytes > MAX_BYTES {
             return;
         }
         // Another caller may have finished the same thumbnail while the cache
         // mutex was released. Keep at most one entry for each content digest.
-        if self.get(&key).is_some() {
+        if self.touch(&key).is_some() {
             return;
         }
         // A long all-hit run signals a stable working set. Its first miss may
@@ -108,7 +118,7 @@ impl ThumbnailCache {
             self.bytes -= retained_bytes(&evicted);
         }
         self.bytes += bytes;
-        self.entries.push_back((key, image));
+        self.entries.push_back((key, image.clone()));
     }
 }
 
@@ -129,7 +139,7 @@ pub(super) fn attachment_thumbnail(data: &str) -> Option<WireImage> {
     CACHE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(key, image.clone());
+        .insert_borrowed(key, &image);
     image
 }
 
@@ -149,10 +159,14 @@ fn decode_thumbnail(data: &str) -> Option<WireImage> {
 }
 
 #[cfg(test)]
+#[path = "mobile_sync_thumbnail_cache_clone_tests.rs"]
+mod clone_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    fn image(bytes: usize) -> Option<WireImage> {
+    pub(super) fn image(bytes: usize) -> Option<WireImage> {
         Some(WireImage {
             media_type: "image/jpeg".into(),
             data: "x".repeat(bytes),
