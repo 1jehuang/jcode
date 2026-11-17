@@ -70,11 +70,27 @@ class ProfileTests(unittest.TestCase):
         self.assertIn("Size:", full["raw"])
         self.assertGreater(sample["values_kib"]["Pss"], 0)
 
+    def test_pricing_cache_artifact_preserves_prices_and_counts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home, output = root / "home", root / "output"
+            output.mkdir()
+            self.assertEqual(profile.capture_pricing_cache(home, output), {"available": False})
+            (home / "cache").mkdir(parents=True)
+            cache = {"cached_at_unix_secs": 123, "providers": {
+                "future-provider": {"future-model": {"input_usd_per_mtok": 1.25}},
+                "other": {"one": {}, "two": {}}}}
+            profile.save(home / "cache" / "models_dev_pricing.json", cache)
+            self.assertEqual(profile.capture_pricing_cache(home, output), {
+                "available": True, "providers": 2, "models": 3, "cached_at_unix_secs": 123})
+            self.assertEqual(json.loads((output / "pricing_catalog.json").read_text()), cache)
+
     def test_failure_preserves_manifest_and_stops_server(self):
         with tempfile.TemporaryDirectory() as temp:
             args = argparse.Namespace(output=Path(temp) / "artifacts", binary=Path("/fake/jcode"),
                                       cwd=Path(temp), turns=1, prompt="done", model=None,
                                       settle_seconds=0, startup_settle_seconds=0, heap_profile=False,
+                                      require_pricing_refresh=False,
                                       timeout=1, auth_from=Path(temp) / "noauth")
             proc = MagicMock(pid=99999999)
             with patch.object(profile.subprocess, "run", return_value=MagicMock(stdout="jcode test-hash")), \
@@ -90,11 +106,35 @@ class ProfileTests(unittest.TestCase):
             kill.assert_called_once()
             proc.wait.assert_called_once()
 
+    def test_required_pricing_refresh_timeout_stops_server_before_sampling(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args = argparse.Namespace(output=Path(temp) / "artifacts", binary=Path("/fake/jcode"),
+                                      cwd=Path(temp), turns=0, prompt="done", model=None,
+                                      settle_seconds=0, startup_settle_seconds=0, heap_profile=False,
+                                      require_pricing_refresh=True,
+                                      timeout=1, auth_from=Path(temp) / "noauth")
+            proc = MagicMock(pid=99999999)
+            proc.poll.return_value = None
+            with patch.object(profile.subprocess, "run", return_value=MagicMock(stdout="jcode test")), \
+                 patch.object(profile.subprocess, "Popen", return_value=proc), \
+                 patch.object(profile, "debug_cmd") as command, \
+                 patch.object(profile.Path, "exists", return_value=True), \
+                 patch.object(profile.time, "monotonic", side_effect=[0, 10, 12]), \
+                 patch.object(profile.os, "killpg") as kill:
+                with self.assertRaisesRegex(TimeoutError, "fresh pricing catalog not published"):
+                    profile.run(args)
+            manifest = json.loads((args.output / "profile.json").read_text())
+            self.assertEqual(manifest["status"], "failed")
+            self.assertEqual(manifest["stages"], [])
+            command.assert_not_called()
+            kill.assert_called_once()
+
     def test_stages_and_explicit_purge_order(self):
         with tempfile.TemporaryDirectory() as temp:
             args = argparse.Namespace(output=Path(temp) / "artifacts", binary=Path("/fake/jcode"),
                                       cwd=Path(temp), turns=2, prompt="done", model=None,
                                       settle_seconds=0, startup_settle_seconds=0, heap_profile=True,
+                                      require_pricing_refresh=False,
                                       timeout=1, auth_from=Path(temp) / "noauth")
             calls = []
             created = False

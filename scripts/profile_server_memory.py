@@ -125,6 +125,18 @@ def save(path: Path, value) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n")
 
 
+def capture_pricing_cache(home: Path, output: Path) -> dict:
+    path = home / "cache" / "models_dev_pricing.json"
+    if not path.is_file():
+        return {"available": False}
+    cache = json.loads(path.read_text())
+    providers = cache["providers"]
+    save(output / "pricing_catalog.json", cache)
+    return {"available": True, "providers": len(providers),
+            "models": sum(len(models) for models in providers.values()),
+            "cached_at_unix_secs": cache["cached_at_unix_secs"]}
+
+
 def run(args) -> None:
     output = args.output.resolve()
     output.mkdir(mode=0o700)  # Refuse to overwrite a prior run.
@@ -133,6 +145,7 @@ def run(args) -> None:
               "settle_seconds": args.settle_seconds,
               "startup_settle_seconds": args.startup_settle_seconds,
               "heap_profile": args.heap_profile,
+              "require_pricing_refresh": args.require_pricing_refresh,
               "heap_malloc_conf": HEAP_MALLOC_CONF if args.heap_profile else None,
               "heap_dump_timing": "after stage memory snapshots, post-session stages only",
               "measurement_note": "debug memory reports and heap dumps allocate memory and may perturb later samples",
@@ -140,7 +153,7 @@ def run(args) -> None:
               "config": "fresh defaults, no borrowed config", "stages": [], "status": "running"}
     save(output / "profile.json", result)
     try:
-        with tempfile.TemporaryDirectory(prefix="jcode-memory-") as temp:
+        with tempfile.TemporaryDirectory(prefix="runtime-", dir=output) as temp:
             root = Path(temp)
             for name in ("home", "run", "tmp"):
                 (root / name).mkdir(mode=0o700)
@@ -208,12 +221,22 @@ def run(args) -> None:
                             sample["heap_profile_dump"] = {"raw": raw, "path": str(heap_path)}
                             if not heap_path.is_file():
                                 raise RuntimeError(f"heap profile dump missing: {heap_path}")
+                        sample["pricing_cache"] = capture_pricing_cache(root / "home", output)
                         save(output / f"{stage}.json", sample)
                         save(output / "profile.json", result)
                         print(f"{stage}: server PSS {sample['smaps_rollup']['values_kib']['Pss']} KiB",
                               flush=True)
 
                     time.sleep(args.startup_settle_seconds)
+                    if args.require_pricing_refresh:
+                        deadline = time.monotonic() + args.timeout
+                        cache_path = root / "home" / "cache" / "models_dev_pricing.json"
+                        while not cache_path.is_file():
+                            if server.poll() is not None:
+                                raise RuntimeError("server exited while waiting for pricing refresh")
+                            if time.monotonic() >= deadline:
+                                raise TimeoutError("fresh pricing catalog not published")
+                            time.sleep(0.05)
                     started = time.monotonic()
                     capture("startup")
                     created = cmd(f"create_session:{args.cwd}")
@@ -265,6 +288,8 @@ def main() -> int:
                         help="wait after debug socket readiness before startup baseline (default: 3)")
     parser.add_argument("--heap-profile", action="store_true",
                         help="enable startup jemalloc sampling and post-session dumps (requires jemalloc-prof build)")
+    parser.add_argument("--require-pricing-refresh", action="store_true",
+                        help="wait for the cold pricing refresh before measuring, fail if it never succeeds")
     parser.add_argument("--settle-seconds", type=float, default=10)
     parser.add_argument("--timeout", type=float, default=600)
     args = parser.parse_args()
