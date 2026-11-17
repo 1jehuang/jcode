@@ -5,6 +5,7 @@ mod inventory;
 pub(super) use inventory::fit_account_row;
 use inventory::inventory_lines;
 use inventory::load_inventory;
+#[cfg(test)]
 use inventory::remaining_bars;
 use inventory::remote_inventory_lines;
 

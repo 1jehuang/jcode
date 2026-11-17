@@ -1,5 +1,3 @@
-use super::*;
-
 #[cfg(any(target_os = "linux", test))]
 pub(super) fn is_file_controlled_debug_client() -> bool {
     std::env::var_os("JCODE_DEBUG_CMD_PATH").is_some()
