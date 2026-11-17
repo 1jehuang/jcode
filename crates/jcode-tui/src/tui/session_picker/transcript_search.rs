@@ -4,7 +4,6 @@
 use super::loading::search_query_tokens;
 #[path = "transcript_search_shard_search.rs"]
 mod shard_search;
-use shard_search::search_shard;
 
 use super::{ResumeTarget, SessionInfo};
 use serde::de::DeserializeSeed;

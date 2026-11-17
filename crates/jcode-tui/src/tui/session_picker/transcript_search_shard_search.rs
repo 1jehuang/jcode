@@ -3,7 +3,7 @@
 use super::*;
 
 /// Rank one shard of candidates, cheapest evidence first.
-pub(super) fn search_shard(
+fn search_shard(
     candidates: Vec<(Candidate, SearchRank)>,
     query: &str,
     tokens: &[String],
