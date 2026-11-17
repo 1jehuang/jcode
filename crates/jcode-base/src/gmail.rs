@@ -764,7 +764,7 @@ impl<'a> Recipients<'a> {
 mod mime_helpers;
 use mime_helpers::build_raw_mime;
 #[cfg(test)]
-use mime_helpers::{encode_header_value, guess_mime_type};
+use mime_helpers::encode_header_value;
 /// Build the request body for Composio's `proxy-execute` endpoint, which makes
 /// an authenticated HTTP call to the connected toolkit (Gmail) on our behalf.
 fn build_composio_proxy_payload(
@@ -1022,8 +1022,6 @@ pub struct DraftFull {
 
 #[path = "gmail/message_formatting.rs"]
 mod message_formatting;
-#[cfg(test)]
-use message_formatting::format_size;
 pub use message_formatting::{
     format_attachment_lines, format_message_full, format_message_summary, format_recipient_lines,
 };

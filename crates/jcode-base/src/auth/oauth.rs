@@ -454,8 +454,6 @@ pub async fn exchange_claude_code(
 
 #[path = "oauth/openai_login_helpers.rs"]
 mod openai_login_helpers;
-#[cfg(test)]
-use openai_login_helpers::exchange_openai_code_at_url;
 pub use openai_login_helpers::{
     callback_listener_available, exchange_openai_callback_input, exchange_openai_code,
     finish_openai_device_login, finish_openai_device_login_at, login_openai, openai_auth_url,

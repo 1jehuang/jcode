@@ -524,8 +524,6 @@ fn client_builder_for(bypass_proxy: bool) -> reqwest::ClientBuilder {
 
 #[path = "jev/route_resolution.rs"]
 mod route_resolution;
-#[cfg(test)]
-use route_resolution::resolve_providers;
 use route_resolution::{resolve_voice_with, resolve_with, trusted_gateway_base};
 #[cfg(test)]
 fn request_body(

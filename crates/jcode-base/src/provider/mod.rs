@@ -189,11 +189,10 @@ pub fn stores_reasoning_content_for_context(provider_name: &str) -> bool {
 #[path = "direct_profile_routes.rs"]
 mod direct_profile_routes;
 #[cfg(test)]
+pub(crate) use direct_profile_routes::OPENAI_COMPATIBLE_PROFILE_CATALOG_SOFT_REFRESH_SECS;
+pub(crate) use direct_profile_routes::cached_live_models_for_openai_compatible_profile;
+#[cfg(test)]
 use direct_profile_routes::openai_compatible_profile_catalog_cache_is_stale;
-pub(crate) use direct_profile_routes::{
-    OPENAI_COMPATIBLE_PROFILE_CATALOG_SOFT_REFRESH_SECS,
-    cached_live_models_for_openai_compatible_profile,
-};
 use direct_profile_routes::{
     configured_standard_openrouter_profile_routes, direct_openai_compatible_profile_routes,
     standard_openrouter_profile_configured,

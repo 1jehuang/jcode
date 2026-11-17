@@ -253,8 +253,6 @@ pub fn format_account_model_availability_detail(
 
 #[path = "models/model_catalog_state.rs"]
 mod model_catalog_state;
-#[cfg(test)]
-pub(crate) use model_catalog_state::config_context_limit_cache_keys;
 pub(crate) use model_catalog_state::normalize_model_id;
 pub use model_catalog_state::{
     anthropic_catalog_scope_for_route, cached_anthropic_model_ids,
@@ -279,12 +277,8 @@ use model_catalog_state::{
 };
 #[cfg(test)]
 use model_catalog_state::{
-    current_claude_account_scope, hydrate_catalog_cache_from_disk, is_openai_api_key_catalog_scope,
-    live_catalog_model_ids, load_anthropic_catalog_from_disk, load_openai_catalog_from_disk,
-    load_persisted_model_catalog_store, model_catalog_cache_path, model_exposes_1m_alias,
-    model_ids_with_context_aliases, normalize_provider_id, observed_at_unix_secs,
-    openai_account_scope_from_label, openai_api_key_catalog_scope,
-    openai_api_profile_cached_model_ids, persist_scoped_model_catalog,
+    hydrate_catalog_cache_from_disk, load_persisted_model_catalog_store, model_catalog_cache_path,
+    model_ids_with_context_aliases, observed_at_unix_secs, persist_scoped_model_catalog,
     save_persisted_model_catalog_store, system_time_from_unix_secs,
 };
 /// Test-only: clear the process-global in-memory model catalogs. The catalog

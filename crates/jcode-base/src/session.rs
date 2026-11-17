@@ -62,8 +62,6 @@ pub use {jcode_session_types::prompt_title, persistence::drain_saves_for_shutdow
 
 #[path = "session/message_helpers.rs"]
 mod message_helpers;
-#[cfg(test)]
-use message_helpers::is_internal_system_reminder_message;
 pub use message_helpers::{derive_session_provider_key, is_scheduled_task_message};
 use message_helpers::{
     is_visible_conversation_message, message_has_tool_image, stored_messages_to_messages,

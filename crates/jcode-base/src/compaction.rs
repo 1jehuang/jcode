@@ -1744,7 +1744,7 @@ impl Default for CompactionManager {
 mod summary_generation;
 use summary_generation::generate_compaction_artifact;
 #[cfg(test)]
-use summary_generation::{looks_like_refusal, validate_compaction_summary};
+use summary_generation::validate_compaction_summary;
 
 #[path = "compaction_transfer.rs"]
 mod transfer;
