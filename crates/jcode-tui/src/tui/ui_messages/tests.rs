@@ -2971,13 +2971,13 @@ fn render_swarm_message_collapsed_shows_tldr_and_expand_badge_only() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("fixed the flaky test"), "{plain}");
-    assert!(plain.contains(super::SWARM_EXPAND_BADGE), "{plain}");
+    assert!(!plain.contains("fixed the flaky test"), "{plain}");
+    assert!(plain.contains("tok"), "{plain}");
     let preview = lines
         .iter()
         .flat_map(|line| &line.spans)
-        .find(|span| span.content.contains("fixed the flaky test"))
-        .expect("DM preview span");
+        .find(|span| span.content.contains("tok"))
+        .expect("DM token count span");
     assert_eq!(preview.style.fg, Some(swarm_agent_color("sheep")));
     assert!(
         !plain.contains("race in the setup helper"),

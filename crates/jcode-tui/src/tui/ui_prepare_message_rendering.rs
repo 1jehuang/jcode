@@ -262,8 +262,28 @@ pub(super) fn render_message_into(
         }
         "swarm" => {
             let content_width = width.saturating_sub(4);
-            let cached =
-                get_cached_message_lines(msg, content_width, diff_mode, render_swarm_message);
+            let cached = if super::super::messages::is_collapsed_agent_dm(msg) {
+                let previous_is_dm = msg_global_idx
+                    .checked_sub(1)
+                    .and_then(|idx| ctx.messages.get(idx))
+                    .is_some_and(super::super::messages::is_collapsed_agent_dm);
+                if previous_is_dm {
+                    Vec::new()
+                } else {
+                    let run_len = ctx.messages[msg_global_idx..]
+                        .iter()
+                        .take_while(|message| {
+                            super::super::messages::is_collapsed_agent_dm(message)
+                        })
+                        .count();
+                    vec![super::super::messages::render_agent_dm_run(
+                        &ctx.messages[msg_global_idx..msg_global_idx + run_len],
+                        content_width,
+                    )]
+                }
+            } else {
+                get_cached_message_lines(msg, content_width, diff_mode, render_swarm_message)
+            };
             for line in cached {
                 let line = align_if_unset(line, align);
                 let plain = ui::line_plain_text(&line);

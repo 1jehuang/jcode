@@ -90,7 +90,10 @@ fn test_render_direct_message_as_compact_agent_row() {
     let lines = render_swarm_message(&msg, 80, crate::config::DiffDisplayMode::Off);
     let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
 
-    assert_eq!(rendered, vec!["🦊 Can you take parser tests?"]);
+    assert_eq!(rendered.len(), 1);
+    assert!(rendered[0].starts_with("🦊 "));
+    assert!(rendered[0].contains("tok"));
+    assert!(!rendered[0].contains("parser tests"));
     assert!(
         rendered
             .iter()

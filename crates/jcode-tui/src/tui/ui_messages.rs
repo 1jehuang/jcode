@@ -3570,6 +3570,50 @@ fn render_completion_lanes(
     Some(lines)
 }
 
+pub(crate) fn is_collapsed_agent_dm(msg: &DisplayMessage) -> bool {
+    msg.effective_role() == "swarm"
+        && msg
+            .title
+            .as_deref()
+            .is_some_and(|title| title.starts_with("DM from "))
+        && !jcode_tui_messages::parse_collapsible_swarm_content(&msg.content)
+            .is_some_and(|parsed| parsed.expanded)
+}
+
+pub(crate) fn render_agent_dm_run(messages: &[DisplayMessage], width: u16) -> Line<'static> {
+    let mut spans = Vec::new();
+    for msg in messages {
+        let sender = msg
+            .title
+            .as_deref()
+            .unwrap_or_default()
+            .trim_start_matches("DM from ");
+        let sender = crate::id::extract_session_name(sender).unwrap_or(sender);
+        if !spans.is_empty() {
+            spans.push(Span::styled(" · ", Style::default().fg(dim_color())));
+        }
+        spans.push(Span::styled(
+            format!(
+                "{} {}  {}",
+                crate::id::session_icon(sender),
+                swarm_notification_usage_label(&msg.content, None)
+                    .unwrap_or_else(|| "0 tok".to_string()),
+                SWARM_EXPAND_BADGE,
+            ),
+            Style::default().fg(swarm_agent_color(sender)),
+        ));
+    }
+    let max_width = centered_wrap_width(width, markdown::center_code_blocks(), 96);
+    let mut lines = vec![super::truncate_line_with_ellipsis_to_width(
+        &Line::from(spans),
+        max_width,
+    )];
+    if markdown::center_code_blocks() {
+        left_pad_lines_for_centered_mode(&mut lines, width);
+    }
+    lines.remove(0)
+}
+
 fn render_compact_agent_notification(
     title: &str,
     content: &str,
@@ -3621,6 +3665,10 @@ fn render_compact_agent_notification(
     // Collapsed (or plain) content is always exactly one row: the preview is
     // truncated with an ellipsis so the badge stays the trailing token.
     let expanded = collapsible.is_some_and(|parsed| parsed.expanded);
+    if title.starts_with("DM from ") && !expanded {
+        let msg = DisplayMessage::swarm(title, content);
+        return Some(vec![render_agent_dm_run(&[msg], width)]);
+    }
     if !expanded {
         let preview = jcode_tui_messages::swarm_preview_line(&body, usize::MAX);
         let mut prefix = if notification.marker_before_icon {

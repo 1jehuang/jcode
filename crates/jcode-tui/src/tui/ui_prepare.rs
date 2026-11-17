@@ -1701,6 +1701,11 @@ pub(super) fn matching_prefix_len(base: &PreparedMessages, messages: &[DisplayMe
     while k < limit && base.message_boundaries[k].msg_hash == messages[k].stable_cache_hash() {
         k += 1;
     }
+    // A DM row depends on its entire adjacent run, including newly appended
+    // messages. Rebuild from the start of that run rather than reuse stale text.
+    while k > 0 && super::messages::is_collapsed_agent_dm(&messages[k - 1]) {
+        k -= 1;
+    }
     k
 }
 
@@ -1717,6 +1722,10 @@ pub(super) fn matching_suffix_len(base: &PreparedMessages, messages: &[DisplayMe
             == messages[msg_n - 1 - s].stable_cache_hash()
     {
         s += 1;
+    }
+    // Never splice into the middle of a row shared by multiple messages.
+    while s > 0 && super::messages::is_collapsed_agent_dm(&messages[msg_n - s]) {
+        s -= 1;
     }
     s
 }
@@ -1746,6 +1755,12 @@ pub(super) fn suffix_reuse_compatible(
     drop_msgs: usize,
     base_prompt_offset: usize,
 ) -> bool {
+    if messages
+        .get(head_count)
+        .is_some_and(super::messages::is_collapsed_agent_dm)
+    {
+        return false;
+    }
     if drop_msgs == 0 || drop_msgs >= base.message_boundaries.len() {
         return false;
     }

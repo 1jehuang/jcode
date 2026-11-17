@@ -252,7 +252,18 @@ impl App {
         if message.role != "swarm" && !oauth {
             return false;
         }
-        let normalized = jcode_tui_messages::collapse_long_swarm_content(&message.content);
+        let mut normalized = jcode_tui_messages::collapse_long_swarm_content(&message.content);
+        if message
+            .title
+            .as_deref()
+            .is_some_and(|title| title.starts_with("DM from "))
+            && jcode_tui_messages::parse_collapsible_swarm_content(&normalized).is_none()
+        {
+            normalized = jcode_tui_messages::encode_collapsible_swarm_content(
+                "Direct message",
+                &message.content,
+            );
+        }
         let Some(toggled) = jcode_tui_messages::toggle_collapsible_swarm_content(&normalized)
         else {
             return false;

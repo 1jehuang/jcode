@@ -1486,8 +1486,8 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
 
     let collapsed = render_and_snap(&app, &mut terminal);
     assert!(
-        collapsed.contains("fixed the flaky test"),
-        "collapsed card must show the tldr:\n{collapsed}"
+        collapsed.contains("tok") && !collapsed.contains("fixed the flaky test"),
+        "collapsed DM must show only token usage:\n{collapsed}"
     );
     assert!(
         collapsed.contains("⊞"),
@@ -1581,6 +1581,50 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
             .is_some_and(|parsed| !parsed.expanded),
         "collapse badge click must fold the card back down"
     );
+}
+
+#[test]
+fn test_grouped_dm_badges_expand_the_selected_message() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.display_messages = vec![
+        DisplayMessage::user("hi"),
+        DisplayMessage::swarm("DM from sheep", jcode_tui_messages::encode_collapsible_swarm_content(
+            "First preview", "First private agent message.")),
+        DisplayMessage::swarm("DM from fox", "Second private agent message."),
+    ];
+    app.bump_display_messages_version();
+    app.scroll_offset = 0;
+    app.auto_scroll_paused = false;
+    app.is_processing = false;
+    app.status = ProcessingStatus::Idle;
+    app.session.short_name = Some("test".to_string());
+    let backend = ratatui::backend::TestBackend::new(90, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    let collapsed = render_and_snap(&app, &mut terminal);
+    assert!(!collapsed.contains("private agent message"), "{collapsed}");
+
+    let buffer = terminal.backend().buffer();
+    let area = *buffer.area();
+    let mut badges = Vec::new();
+    for row in 0..area.height {
+        for col in 0..area.width {
+            if buffer[(col, row)].symbol() == "⊞" {
+                badges.push((col, row));
+            }
+        }
+    }
+    assert_eq!(badges.len(), 2, "{collapsed}");
+    assert_eq!(badges[0].1, badges[1].1, "adjacent DMs share a row");
+    let (column, row) = badges[1];
+    assert!(app.try_toggle_swarm_expand_at(column, row));
+    assert!(jcode_tui_messages::parse_collapsible_swarm_content(&app.display_messages[1].content)
+        .is_some_and(|parsed| !parsed.expanded));
+    assert!(jcode_tui_messages::parse_collapsible_swarm_content(&app.display_messages[2].content)
+        .is_some_and(|parsed| parsed.expanded));
+    let expanded = render_and_snap(&app, &mut terminal);
+    assert!(expanded.contains("Second private agent message"), "{expanded}");
+    assert!(!expanded.contains("First private agent message"), "{expanded}");
 }
 
 #[cfg(test)]
