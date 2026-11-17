@@ -94,6 +94,16 @@ impl SearchSelection {
     pub(super) fn expire_for_test(&mut self) {
         self.follow_until = Some(std::time::Instant::now());
     }
+
+    /// Hold the auto-focus window open for the rest of the test.
+    ///
+    /// The real window is one second, so a test that asserts on the
+    /// "finding best match" chrome fails whenever its first render happens to
+    /// take longer than that on a loaded host.
+    #[cfg(test)]
+    pub(super) fn hold_for_test(&mut self) {
+        self.follow_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(600));
+    }
 }
 
 #[cfg(test)]

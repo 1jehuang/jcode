@@ -913,6 +913,7 @@ fn pending_search_visually_distinguishes_auto_focus_from_user_control() {
     let backend = ratatui::backend::TestBackend::new(100, 12);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
     picker.search_selection.show_busy_for_test();
+    picker.search_selection.hold_for_test();
     let mut render = |picker: &mut SessionPicker| {
         terminal
             .draw(|frame| picker.render_session_list_impl(frame, frame.area(), true))

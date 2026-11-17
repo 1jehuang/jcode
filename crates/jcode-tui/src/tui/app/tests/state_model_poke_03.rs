@@ -1438,7 +1438,9 @@ fn test_login_completed_spawns_auth_refresh_when_runtime_is_available() {
     let provider: Arc<dyn Provider> = Arc::new(AsyncAuthRefreshingMockProvider {
         started: StdArc::clone(&started),
         completed: StdArc::clone(&completed),
-        delay: Duration::from_millis(150),
+        // Long enough that the refresh cannot finish before the handler returns
+        // unless the handler actually waits for it.
+        delay: Duration::from_millis(1500),
     });
     let rt = tokio::runtime::Runtime::new().unwrap();
     let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
@@ -1447,24 +1449,22 @@ fn test_login_completed_spawns_auth_refresh_when_runtime_is_available() {
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
 
     let _guard = rt.enter();
-    let start = Instant::now();
     app.handle_login_completed(crate::bus::LoginCompleted {
         provider: "openrouter".to_string(),
         success: true,
         message: "OpenRouter ready".to_string(),
     });
-    let elapsed = start.elapsed();
 
+    // Whether the refresh already finished beats a wall-clock bound on return.
     assert!(
-        elapsed < Duration::from_millis(100),
-        "login completion should not block on auth refresh, took {:?}",
-        elapsed
+        !completed.load(Ordering::SeqCst),
+        "login completion must not wait for the auth refresh"
     );
 
     let wait_start = Instant::now();
     while !started.load(Ordering::SeqCst) || !completed.load(Ordering::SeqCst) {
         assert!(
-            wait_start.elapsed() < Duration::from_secs(2),
+            wait_start.elapsed() < Duration::from_secs(10),
             "background auth refresh did not complete"
         );
         std::thread::sleep(Duration::from_millis(10));

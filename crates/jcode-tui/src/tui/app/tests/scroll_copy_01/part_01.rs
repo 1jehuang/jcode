@@ -1,5 +1,4 @@
 // Scroll testing with rendering verification
-// ====================================================================
 
 /// Extract plain text from a TestBackend buffer after rendering.
 fn buffer_to_text(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
@@ -651,9 +650,10 @@ fn test_notification_file_activity_repaint_does_not_leave_trailing_digit_artifac
     let backend = ratatui::backend::TestBackend::new(140, 20);
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
 
+    // A notice retires after STATUS_NOTICE_TTL (3s); a future stamp cannot expire.
     app.status_notice = Some((
         "File activity · /home/jeremy/jcode/src/lib.rs · read lines 1-9999".to_string(),
-        std::time::Instant::now(),
+        std::time::Instant::now() + std::time::Duration::from_secs(60),
     ));
     let first = render_and_snap(&app, &mut terminal);
     assert!(
@@ -663,7 +663,7 @@ fn test_notification_file_activity_repaint_does_not_leave_trailing_digit_artifac
 
     app.status_notice = Some((
         "File activity · /home/jeremy/jcode/src/lib.rs · read lines 1-9".to_string(),
-        std::time::Instant::now(),
+        std::time::Instant::now() + std::time::Duration::from_secs(60),
     ));
     let second = render_and_snap(&app, &mut terminal);
 

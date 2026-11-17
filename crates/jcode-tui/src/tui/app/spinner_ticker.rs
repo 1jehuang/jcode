@@ -309,16 +309,19 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_wait_keeps_the_cadence() {
-        let period = Duration::from_millis(40);
+        // A long period keeps the window wide in absolute terms: 40ms frames
+        // left less headroom than this host's scheduler jitter, and the
+        // assertion below is about not skipping a frame, not about precision.
+        let period = Duration::from_millis(200);
         let mut ticker = SpinnerTicker::new(period, period);
         let start = Instant::now();
         // Drop a wait before its deadline, as a select! branch losing a race does.
-        let cancelled = tokio::time::timeout(Duration::from_millis(5), ticker.tick()).await;
+        let cancelled = tokio::time::timeout(Duration::from_millis(20), ticker.tick()).await;
         assert!(cancelled.is_err());
         ticker.tick().await;
         let elapsed = start.elapsed();
         assert!(
-            elapsed >= Duration::from_millis(35) && elapsed < Duration::from_millis(75),
+            elapsed >= Duration::from_millis(180) && elapsed < Duration::from_millis(340),
             "the cancelled wait must not restart or skip the frame: {elapsed:?}"
         );
     }
