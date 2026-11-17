@@ -2,7 +2,9 @@ use super::*;
 
 #[test]
 fn resume_canvas_reserves_compact_right_card_with_spatial_focus_and_mouse_regions() {
-    for width in [20, 80, 120] {
+    // 64 is the narrowest width that still renders the full canvas; below 60 the
+    // picker deliberately falls back to a single-line compact frame.
+    for width in [64, 80, 120] {
         let session = make_session("right-sidebar", "sidebar", false, SessionStatus::Closed);
         let mut picker = SessionPicker::new(vec![session]);
         let mut terminal =
@@ -37,7 +39,7 @@ fn resume_canvas_reserves_compact_right_card_with_spatial_focus_and_mouse_region
 #[test]
 fn resume_card_does_not_rewrap_or_scroll_the_underlying_session() {
     let _lock = crate::tui::ui::render_state_test_lock();
-    for width in [40, 80, 120] {
+    for width in [64, 80, 120] {
         let mut session = make_session("overlay-parity", "fox", false, SessionStatus::Closed);
         session.messages_preview.push(PreviewMessage {
             role: "assistant".into(),

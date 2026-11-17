@@ -26,3 +26,5 @@ pub use jcode_app_core::*;
 pub mod swarm_compose;
 pub mod tui;
 pub mod video_export;
+#[cfg(test)]
+mod test_python;

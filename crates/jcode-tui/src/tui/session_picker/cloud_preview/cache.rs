@@ -219,11 +219,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("preview");
         write(&path, b"old").unwrap();
+        // Only the Unix branch reads through the handle.
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut original = File::open(&path).unwrap();
-        write(&path, b"new").unwrap();
-        let mut previous = Vec::new();
-        original.read_to_end(&mut previous).unwrap();
-        assert_eq!(previous, b"old");
+        // Both platforms promise the reader keeps seeing the old bytes, but only
+        // Unix can replace a file that still has an open handle. Windows refuses
+        // the rename while the handle is open, so the replacement has to wait for
+        // the reader to drop it.
+        #[cfg(unix)]
+        {
+            write(&path, b"new").unwrap();
+            let mut previous = Vec::new();
+            original.read_to_end(&mut previous).unwrap();
+            assert_eq!(previous, b"old");
+        }
+        #[cfg(not(unix))]
+        {
+            assert!(
+                write(&path, b"new").is_err(),
+                "Windows must refuse to replace a file with an open reader"
+            );
+            drop(original);
+            write(&path, b"new").unwrap();
+        }
         assert_eq!(read(&path).unwrap(), b"new");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
         #[cfg(unix)]

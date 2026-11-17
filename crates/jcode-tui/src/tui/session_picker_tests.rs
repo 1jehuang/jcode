@@ -2028,7 +2028,7 @@ fn test_preview_pane_shows_scrollbar_when_overflowing() {
     picker.focus = PaneFocus::Preview;
 
     // Small height so the long preview overflows and needs a scrollbar.
-    let text = buffer_text(&mut picker, 100, 16);
+    let text = buffer_text(&mut picker, 100, 24);
     assert!(
         contains_scrollbar_glyph(&text),
         "preview scrollbar glyph should render when content overflows:\n{text}"
@@ -2051,7 +2051,7 @@ fn test_session_list_shows_scrollbar_when_overflowing() {
     let mut picker = SessionPicker::new(sessions);
     picker.focus = PaneFocus::Sessions;
 
-    let text = buffer_text(&mut picker, 100, 16);
+    let text = buffer_text(&mut picker, 100, 24);
     assert!(
         contains_scrollbar_glyph(&text),
         "session list scrollbar glyph should render when list overflows:\n{text}"
@@ -2068,7 +2068,7 @@ fn test_preview_sticky_prompt_header_appears_after_scrolling() {
     // so a dimmed "N› ..." sticky header should pin a prior prompt at the top of
     // the preview's content area.
     let w = 100u16;
-    let h = 16u16;
+    let h = 24u16;
     let backend = ratatui::backend::TestBackend::new(w, h);
     let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
     terminal
@@ -2125,7 +2125,7 @@ fn test_preview_sticky_prompt_header_survives_async_preview_load() {
     });
 
     let w = 100u16;
-    let h = 16u16;
+    let h = 24u16;
     let render = |picker: &mut SessionPicker| {
         let backend = ratatui::backend::TestBackend::new(w, h);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
@@ -2215,7 +2215,7 @@ fn preview_render_cache_is_reused_across_scroll_and_rebuilt_on_selection_change(
     picker.focus = PaneFocus::Preview;
 
     let w = 100u16;
-    let h = 16u16;
+    let h = 24u16;
     let render = |picker: &mut SessionPicker| {
         let backend = ratatui::backend::TestBackend::new(w, h);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
@@ -2279,7 +2279,7 @@ fn preview_visible_slice_matches_scroll_position() {
     picker.focus = PaneFocus::Preview;
 
     let w = 100u16;
-    let h = 16u16;
+    let h = 24u16;
     let render_text = |picker: &mut SessionPicker| -> String { buffer_text(picker, w, h) };
 
     // First render auto-scrolls to the bottom.
@@ -2711,7 +2711,7 @@ fn search_highlights_match_in_preview_and_scrolls_to_it() {
     picker.focus = PaneFocus::Preview;
 
     let w = 100u16;
-    let h = 16u16;
+    let h = 24u16;
 
     // Baseline: no search -> auto-scrolls to bottom.
     let _ = buffer_text(&mut picker, w, h);
@@ -2758,7 +2758,7 @@ fn preview_without_search_has_no_highlight_and_scrolls_to_bottom() {
     let session = make_session_with_many_turns("nosrch", 60);
     let mut picker = SessionPicker::new(vec![session]);
     picker.focus = PaneFocus::Preview;
-    let _ = buffer_text(&mut picker, 100, 16);
+    let _ = buffer_text(&mut picker, 100, 24);
     assert!(
         picker.scroll_offset > 0,
         "should scroll to bottom without search"

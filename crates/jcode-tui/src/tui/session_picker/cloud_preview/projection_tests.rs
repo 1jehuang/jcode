@@ -168,7 +168,7 @@ for malformed in (b'{', b'[', b'{"x":"unterminated}', b'["escaped\\"', b'{]', b'
     else:
         raise AssertionError(repr(malformed))
 "#;
-    let mut child = std::process::Command::new("python3")
+    let mut child = std::process::Command::new(crate::test_python::python_executable())
         .arg("-")
         .stdin(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -197,7 +197,7 @@ fn run_projection(home: &std::path::Path, mode: &str, id: &str) -> std::process:
 }
 
 fn projection_output(home: &std::path::Path, mode: &str, id: &str) -> std::process::Output {
-    let mut child = std::process::Command::new("python3")
+    let mut child = std::process::Command::new(crate::test_python::python_executable())
         .args(["-", mode, id])
         .env("JCODE_HOME", home)
         .env_remove("JCODE_RUNTIME_DIR")

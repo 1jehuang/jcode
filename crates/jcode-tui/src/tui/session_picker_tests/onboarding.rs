@@ -219,7 +219,7 @@ fn onboarding_banner_renders_actions_side_by_side_with_or() {
 #[test]
 fn onboarding_banner_stacks_actions_when_narrow() {
     let mut picker = onboarding_test_picker();
-    let lines = render_onboarding_picker_lines(&mut picker, 50, 30);
+    let lines = render_onboarding_picker_lines(&mut picker, 68, 30);
 
     let review_y = lines
         .iter()

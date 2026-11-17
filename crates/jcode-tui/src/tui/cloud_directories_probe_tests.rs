@@ -9,7 +9,7 @@ fn cloud_directories_probe_metadata_regressions() {
         .expect("write synthetic probe copy");
     std::fs::write(&tests, include_str!("cloud_directories_probe_test.py"))
         .expect("write synthetic probe tests");
-    let output = std::process::Command::new("python3")
+    let output = std::process::Command::new(crate::test_python::python_executable())
         .arg(&tests)
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .output()

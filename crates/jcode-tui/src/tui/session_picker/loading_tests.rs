@@ -792,7 +792,7 @@ fn load_sessions_includes_claude_code_sessions_from_external_home() {
                 "\"projectPath\":\"/tmp/demo-project\"",
                 "}}]}}"
             ),
-            transcript_path.display()
+            transcript_path.to_string_lossy().replace('\\', "/")
         ),
     )
     .expect("write index");
@@ -851,7 +851,7 @@ fn load_sessions_hides_external_sessions_when_opted_out() {
                 "\"projectPath\":\"/tmp/demo-project\"",
                 "}}]}}"
             ),
-            transcript_path.display()
+            transcript_path.to_string_lossy().replace('\\', "/")
         ),
     )
     .expect("write index");
@@ -909,7 +909,7 @@ fn load_claude_code_preview_reads_transcript_messages() {
                 "\"modified\":\"2026-04-04T12:05:00Z\"",
                 "}}]}}"
             ),
-            transcript_path.display()
+            transcript_path.to_string_lossy().replace('\\', "/")
         ),
     )
     .expect("write index");
