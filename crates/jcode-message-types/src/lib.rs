@@ -405,22 +405,19 @@ pub fn extend_stable_hash(acc: u64, next: u64) -> u64 {
 }
 
 impl Message {
-    fn metadata_only(&self) -> Self {
-        Self {
-            role: self.role.clone(),
-            content: SharedContent::default(),
-            timestamp: self.timestamp,
-            tool_duration_ms: self.tool_duration_ms,
-        }
+    fn metadata_only(&self) -> impl serde::Serialize + '_ {
+        message_metadata::Metadata::new(self)
     }
 
     /// Exact JSON length without rescanning a shared immutable payload.
     pub fn serialized_json_bytes(&self) -> usize {
-        serde_json::to_vec(&self.metadata_only())
-            .map(|metadata| metadata.len().saturating_sub(2) + self.content.serialized_json_bytes())
+        message_metadata::json_bytes(&self.metadata_only())
+            .map(|metadata| metadata.saturating_sub(2) + self.content.serialized_json_bytes())
             .unwrap_or(0)
     }
 }
+
+mod message_metadata;
 
 pub fn stable_message_hash(message: &Message) -> u64 {
     let metadata = match serde_json::to_vec(&message.metadata_only()) {
