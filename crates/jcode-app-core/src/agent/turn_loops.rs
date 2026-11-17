@@ -69,6 +69,7 @@ impl Agent {
         let mut turn_tool_calls = 0usize;
         let mut todo_nudge_sent = false;
         let mut consecutive_malformed_tool_rounds = 0u32;
+        self.harness_begin_turn();
 
         loop {
             // Do not start another provider request once a cancel has been
@@ -105,6 +106,7 @@ impl Agent {
                 self.cache_tracker.reset();
                 self.kv_cache_monitor.reset();
                 self.locked_tools = None;
+                crate::harness::on_compaction(&self.session.id);
                 if print_output {
                     let tokens_str = event
                         .pre_tokens
@@ -182,6 +184,9 @@ impl Agent {
             {
                 crate::subscription_notice::show_upgrade_card(&notice, &self.session.id);
                 messages_with_memory.push(Message::user(&Self::plan_limit_reminder(&notice)));
+            }
+            if let Some(policy) = self.harness_policy_message() {
+                messages_with_memory.push(policy);
             }
 
             logging::info(&format!(
@@ -1017,6 +1022,9 @@ impl Agent {
                 )? {
                     continue;
                 }
+                if self.harness_intercept_stop()? {
+                    continue;
+                }
                 if self.maybe_continue_empty_post_tool_response(
                     visible_text_is_empty,
                     prompt_has_recent_tool_result,
@@ -1055,6 +1063,7 @@ impl Agent {
                     println!();
                 }
                 final_text = text_content;
+                self.harness_end_turn();
                 break;
             }
 

@@ -1106,6 +1106,18 @@ impl Registry {
                 return Err(anyhow::anyhow!("Tool '{}' is disabled", resolved_name));
             }
         }
+        if crate::harness::enabled() {
+            crate::harness::record_tool_call(&ctx.session_id, resolved_name);
+            if let Err(reason) =
+                crate::harness::check_tool_call(&ctx.session_id, resolved_name, &input)
+            {
+                let mut fields =
+                    Self::tool_lifecycle_fields("blocked", name, resolved_name, &input, &ctx);
+                fields.push(("block_reason".to_string(), reason.clone()));
+                crate::logging::event_warn("TOOL_LIFECYCLE", fields);
+                return Err(anyhow::anyhow!(reason));
+            }
+        }
         let tool: Arc<dyn Tool> = if is_custom {
             Arc::new(sdk::CallbackTool(resolved_name.into()))
         } else {

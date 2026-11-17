@@ -17,6 +17,10 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub allowed_tools: Option<Vec<String>>,
+    /// Prompt phrases that auto-activate this skill (`triggers` + `tags`).
+    pub triggers: Vec<String>,
+    /// Tools bound into the session when this skill activates.
+    pub required_tools: Vec<String>,
     pub content: String,
     pub path: PathBuf,
     /// Normalized search text, built on first use. Normalizing every skill
@@ -31,6 +35,12 @@ struct SkillFrontmatter {
     description: String,
     #[serde(rename = "allowed-tools")]
     allowed_tools: Option<AllowedTools>,
+    #[serde(default)]
+    triggers: Option<AllowedTools>,
+    #[serde(default)]
+    tags: Option<AllowedTools>,
+    #[serde(default, alias = "required-tools")]
+    required_tools: Option<AllowedTools>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -517,19 +527,30 @@ impl SkillRegistry {
             name,
             description,
             allowed_tools,
+            triggers,
+            tags,
+            required_tools,
         } = frontmatter;
 
-        let allowed_tools = allowed_tools.map(|tools| match tools {
-            AllowedTools::CommaDelimited(tools) => tools
-                .split(',')
-                .map(|tool| tool.trim().to_string())
-                .collect(),
-            AllowedTools::Sequence(tools) => tools,
-        });
+        let list = |tools: AllowedTools| -> Vec<String> {
+            match tools {
+                AllowedTools::CommaDelimited(tools) => tools
+                    .split(',')
+                    .map(|tool| tool.trim().to_string())
+                    .filter(|tool| !tool.is_empty())
+                    .collect(),
+                AllowedTools::Sequence(tools) => tools,
+            }
+        };
+        let allowed_tools = allowed_tools.map(list);
+        let mut triggers: Vec<String> = triggers.map(list).unwrap_or_default();
+        triggers.extend(tags.map(list).unwrap_or_default());
         Ok(Skill {
             name,
             description,
             allowed_tools,
+            triggers,
+            required_tools: required_tools.map(list).unwrap_or_default(),
             content: body,
             path: path.to_path_buf(),
             search_text: std::sync::OnceLock::new(),

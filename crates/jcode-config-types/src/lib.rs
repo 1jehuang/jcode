@@ -1208,6 +1208,10 @@ pub struct FeatureConfig {
     /// classified as misses. Harness changes without a documented cause raise a
     /// warning, while explained misses are informational (default: true).
     pub kv_cache_miss_notices: bool,
+    /// Harness execution enforcement: pre-turn skill routing, the ephemeral
+    /// `<harness_execution_policy>` block, the turn-completion gate, and
+    /// phase/prerequisite tool gates (default: true)
+    pub harness_enforcement: bool,
     /// Update channel: "stable" (default), "preview" (v1 previews), or "main" (latest commits).
     pub update_channel: UpdateChannel,
 }
@@ -1225,6 +1229,7 @@ impl Default for FeatureConfig {
             message_timestamps: true,
             persist_memory_injections: false,
             kv_cache_miss_notices: true,
+            harness_enforcement: true,
             update_channel: UpdateChannel::default(),
         }
     }

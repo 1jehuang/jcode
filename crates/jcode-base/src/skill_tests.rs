@@ -5,6 +5,8 @@ fn test_skill(name: &str, description: &str, content: &str) -> Skill {
         name: name.to_string(),
         description: description.to_string(),
         allowed_tools: None,
+        triggers: Vec::new(),
+        required_tools: Vec::new(),
         content: content.to_string(),
         path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
         search_text: std::sync::OnceLock::from(build_skill_search_text(name, description, content)),

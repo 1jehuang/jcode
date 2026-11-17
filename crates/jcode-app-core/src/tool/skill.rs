@@ -84,7 +84,7 @@ impl Tool for SkillTool {
 
         match params.action.as_str() {
             "load" => {
-                self.load_skill(params.name, ctx.working_dir.as_deref())
+                self.load_skill(params.name, ctx.working_dir.as_deref(), &ctx.session_id)
                     .await
             }
             "list" => self.list_skills(ctx.working_dir.as_deref()).await,
@@ -114,6 +114,7 @@ impl SkillTool {
         &self,
         name: Option<String>,
         working_dir: Option<&std::path::Path>,
+        session_id: &str,
     ) -> Result<ToolOutput> {
         let name = normalize_skill_name(name, "load")?;
 
@@ -150,13 +151,34 @@ impl SkillTool {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| ".".to_string());
 
+        if crate::harness::enabled() && crate::harness::note_skill_load(session_id, skill) {
+            return Ok(ToolOutput::new(format!(
+                "Skill '{}' is already active; proceed directly with execution.",
+                skill.name
+            ))
+            .with_title(format!("skill: {} (active)", skill.name)));
+        }
+        let bound = if skill.required_tools.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n**Bound tools**: {}", skill.required_tools.join(", "))
+        };
+        // Only deferrable names may be referenced; eager tools are already callable.
+        let references: Vec<&String> = skill
+            .required_tools
+            .iter()
+            .filter(|n| super::load_tools::is_rarely_used(n) || n.starts_with("mcp__"))
+            .collect();
+
         Ok(ToolOutput::new(format!(
-            "## Skill: {}\n\n**Base directory**: {}\n\n{}",
+            "## Skill: {}\n\n**Base directory**: {}{}\n\n{}",
             skill.name,
             base_dir,
+            bound,
             skill.get_prompt()
         ))
-        .with_title(format!("skill: {}", skill.name)))
+        .with_title(format!("skill: {}", skill.name))
+        .with_metadata(serde_json::json!({ "tool_references": references })))
     }
 
     async fn list_skills(&self, working_dir: Option<&std::path::Path>) -> Result<ToolOutput> {

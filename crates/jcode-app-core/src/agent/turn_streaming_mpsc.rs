@@ -41,6 +41,7 @@ impl Agent {
         let mut empty_post_tool_continuations = 0u32;
         let mut fable_guardrail_reconsiderations = 0u32;
         let mut consecutive_malformed_tool_rounds = 0u32;
+        self.harness_begin_turn();
 
         loop {
             // Never open a new provider request after a cancel. Several paths
@@ -80,6 +81,7 @@ impl Agent {
                 self.cache_tracker.reset();
                 self.kv_cache_monitor.reset();
                 self.locked_tools = None;
+                crate::harness::on_compaction(&self.session.id);
                 logging::info(&format!(
                     "Context compacted ({}{})",
                     event.trigger,
@@ -174,6 +176,10 @@ impl Agent {
                 let reminder = Message::user(&Self::plan_limit_reminder(&notice));
                 ephemeral_signature_messages.push(reminder.clone());
                 messages_with_memory.push(reminder);
+            }
+            if let Some(policy) = self.harness_policy_message() {
+                ephemeral_signature_messages.push(policy.clone());
+                messages_with_memory.push(policy);
             }
 
             logging::info(&format!(
@@ -1359,6 +1365,9 @@ impl Agent {
                 {
                     continue;
                 }
+                if saw_message_end && self.harness_intercept_stop()? {
+                    continue;
+                }
                 // Retry transient empty responses (dropped/empty upstream
                 // streams) before surfacing anything, matching the
                 // non-streaming loop's recovery behavior (issue #672).
@@ -1409,6 +1418,7 @@ impl Agent {
                                 message: notice,
                             });
                         }
+                        self.harness_end_turn();
                         break;
                     }
                     NoToolCallOutcome::ContinueWithoutEvent => continue,

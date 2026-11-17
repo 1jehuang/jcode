@@ -371,6 +371,8 @@ todo_gate_digest = false
 todo_gate_diagnostics = false
 # Inject timestamps into user messages and tool results sent to the model
 message_timestamps = true
+# Harness enforcement: auto-route skills, per-request policy block, stop gate, tool phase gates
+harness_enforcement = true
 # Persist memory injections into session history instead of sending them as request-only ephemeral context
 persist_memory_injections = false
 # Show an in-chat warning when a request misses the KV cache for a harness-caused

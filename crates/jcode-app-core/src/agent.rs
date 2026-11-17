@@ -5,6 +5,7 @@ mod cache_monitor_tests;
 mod compaction;
 mod conversation_reset;
 mod environment;
+mod harness_glue;
 mod idle_hibernation;
 mod inline_tail;
 mod interrupts;

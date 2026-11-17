@@ -391,6 +391,11 @@ impl Config {
                 self.features.message_timestamps = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_HARNESS_ENFORCEMENT") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.features.harness_enforcement = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_PERSIST_MEMORY_INJECTIONS") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.features.persist_memory_injections = parsed;

@@ -29,7 +29,8 @@ const MAX_REPORT_CHARS: usize = 60_000;
 const DESCRIPTION: &str = "Run sandboxed JavaScript to chain, filter, or parallelize tool calls, including MCP. Supply an async function body using await/return; only returned values and console.log reach the conversation.\n\
 tools.<name>(args) or callTool(name, args) takes normal tool arguments; JSON output becomes objects, and failures throw. Use Promise.all for independent calls.\n\
 listTools(filter?) and describeTool(name) give names and schemas. store(key, value), load(key), storedKeys() persist JSON for the session.\n\
-No direct filesystem, network, timers, or modules. Limits: 64 MB heap, 300 s, 2000 tool calls.";
+No direct filesystem, network, timers, or modules. Limits: 64 MB heap, 300 s, 2000 tool calls.\n\
+Data work: set phase and target; execute_query needs inspect_schema first.";
 
 pub struct CodemodeTool {
     registry: WeakRegistry,
@@ -194,6 +195,11 @@ impl Tool for CodemodeTool {
                 "code": {
                     "type": "string",
                     "description": "Body of an async JavaScript function. Use await and return."
+                },
+                "phase": crate::harness::phase_schema(),
+                "target": {
+                    "type": "string",
+                    "description": "Table, server, or resource for the phase."
                 }
             }
         })
