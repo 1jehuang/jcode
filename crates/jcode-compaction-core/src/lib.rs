@@ -391,7 +391,7 @@ pub fn estimate_compaction_tokens(
 /// Best-effort context size (tokens) from a provider usage report.
 ///
 /// Providers disagree on what `input_tokens` means:
-/// - **Split accounting** (Anthropic-style): `input_tokens` is only the
+/// - **Split accounting** (Anthropic/Bedrock Converse): `input_tokens` is only the
 ///   *uncached* remainder; cache reads/writes are separate counters, so the
 ///   real context size is `input + cache_read + cache_creation`.
 /// - **Subset accounting** (OpenAI-style): `input_tokens` (`prompt_tokens`)
@@ -419,6 +419,7 @@ pub fn effective_context_tokens_from_usage(
 
     let split_cache_accounting = provider_name.contains("anthropic")
         || provider_name.contains("claude")
+        || provider_name == "bedrock"
         || cache_creation > 0
         || cache_read > input_tokens;
 
@@ -450,7 +451,11 @@ pub fn reusable_cache_tokens_from_usage(
     if provider.contains("openai") || provider.contains("codex") {
         return input_tokens;
     }
-    if provider.contains("anthropic") || provider.contains("claude") || effective > input_tokens {
+    if provider.contains("anthropic")
+        || provider.contains("claude")
+        || provider == "bedrock"
+        || effective > input_tokens
+    {
         cache_read_input_tokens
             .unwrap_or(0)
             .saturating_add(cache_creation_input_tokens.unwrap_or(0))

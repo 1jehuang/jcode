@@ -198,6 +198,60 @@ fn effective_context_split_accounting_adds_cache_counters() {
 }
 
 #[test]
+fn bedrock_context_includes_disjoint_cache_counters() {
+    for provider in ["bedrock", "Bedrock"] {
+        for (input, read, write, expected) in [
+            (110_000, Some(90_000), Some(0), 200_000),
+            (110_000, Some(90_000), None, 200_000),
+            (90_000, Some(90_000), None, 180_000),
+            (110_000, None, None, 110_000),
+            (110_000, Some(90_000), Some(5_000), 205_000),
+            (u64::MAX - 1, Some(2), None, u64::MAX),
+        ] {
+            assert_eq!(
+                effective_context_tokens_from_usage(provider, input, read, write),
+                expected,
+                "{provider}: input={input}, read={read:?}, write={write:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn bedrock_reusable_cache_excludes_uncached_input() {
+    for provider in ["bedrock", "Bedrock"] {
+        for (input, read, write, expected) in [
+            (110_000, Some(90_000), Some(0), 90_000),
+            (110_000, Some(90_000), None, 90_000),
+            (90_000, Some(90_000), None, 90_000),
+            (110_000, None, None, 0),
+            (110_000, Some(90_000), Some(5_000), 95_000),
+            (u64::MAX, Some(u64::MAX), Some(1), u64::MAX),
+        ] {
+            assert_eq!(
+                reusable_cache_tokens_from_usage(provider, input, read, write),
+                expected,
+                "{provider}: input={input}, read={read:?}, write={write:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn other_provider_accounting_is_unchanged() {
+    for provider in ["openai", "codex", "openai-compatible:bedrock", "unknown"] {
+        assert_eq!(
+            effective_context_tokens_from_usage(provider, 110_000, Some(90_000), None),
+            110_000
+        );
+        assert_eq!(
+            reusable_cache_tokens_from_usage(provider, 110_000, Some(90_000), None),
+            110_000
+        );
+    }
+}
+
+#[test]
 fn effective_context_subset_accounting_does_not_double_count() {
     // OpenAI-style: prompt_tokens already includes cached tokens.
     assert_eq!(
