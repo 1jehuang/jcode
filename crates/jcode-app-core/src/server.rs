@@ -793,7 +793,8 @@ impl Server {
         // now, off the async workers, so the storm only sees cache hits.
         if !temporary_server {
             std::thread::spawn(|| {
-                let _ = crate::background::global().persisted_detached_running_tasks_for_session("");
+                let _ =
+                    crate::background::global().persisted_detached_running_tasks_for_session("");
             });
         }
         let registry_info = self.build_registry_info();
