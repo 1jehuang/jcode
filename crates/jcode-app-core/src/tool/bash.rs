@@ -31,7 +31,7 @@ const CHECKPOINT_MARKER_PREFIX: &str = "JCODE_CHECKPOINT ";
 const BASH_TOOL_DESCRIPTION: &str =
     "Run bash. Prefer agentgrep/rg. Include hidden/ignored with --hidden --no-ignore.";
 const WINDOWS_SHELL_TOOL_DESCRIPTION: &str =
-    "Run a Windows cmd.exe command (compatibility name `bash`). Use cmd.exe syntax, not Bash.";
+    "Run a Windows cmd.exe command (the `bash` name is a compatibility alias).";
 
 #[cfg(unix)]
 fn shell_single_quote(value: &str) -> String {

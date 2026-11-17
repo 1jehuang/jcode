@@ -705,6 +705,12 @@ async fn print_tool_definition_token_report() {
 #[tokio::test]
 async fn tool_descriptions_stay_under_token_cap() {
     const DESCRIPTION_TOKEN_CAP: usize = 20;
+    // The cap covers jcode's own descriptions. An isolated home keeps the
+    // developer's MCP servers (registered from ~/.kcode/mcp.json) out of the
+    // registry, since their descriptions are not ours to budget.
+    let _env_lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
+    let _home_guard = TestHomeGuard::new(home.path());
     // integration_tools keeps a deliberate second sentence explaining that catalog
     // entries integrate directly with the agent.
     // swarm appends the user-tunable swarm-prompt.md by design.
@@ -734,6 +740,9 @@ async fn tool_descriptions_stay_under_token_cap() {
         .await
         .into_iter()
         .filter(|def| !EXEMPT.contains(&def.name.as_str()))
+        // MCP-provided tools are named `<server tool>_mcp` and their descriptions
+        // come from the server, not from jcode, so they are not ours to budget.
+        .filter(|def| !def.name.ends_with("_mcp"))
         .filter(|def| def.description_token_estimate() > DESCRIPTION_TOKEN_CAP)
         .map(|def| {
             format!(
@@ -1956,7 +1965,9 @@ fn touched_paths_include_patch_headers_and_path_keys() {
     });
     let paths: Vec<String> = Registry::touched_paths(&input, &ctx)
         .into_iter()
-        .map(|(key, path)| format!("{key}:{}", path.display()))
+        // Paths are joined with the platform separator, so normalise it rather
+        // than pinning POSIX spellings.
+        .map(|(key, path)| format!("{key}:{}", path.display().to_string().replace('\\', "/")))
         .collect();
     assert_eq!(
         paths,
