@@ -24,6 +24,24 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 const REPORT_BURST_WINDOW: Duration = Duration::from_secs(2);
 
+/// Say what the platform decoder made of the enhancement request.
+///
+/// A decoder that cannot consume CSI-u is a supported configuration, not a
+/// failure, so a captured session must not read it as breakage.
+pub(super) fn log_enable_outcome(outcome: &io::Result<()>) {
+    match outcome {
+        Ok(()) => crate::logging::info("Keyboard enhancement request: sent"),
+        Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+            crate::logging::info(&format!(
+                "Keyboard enhancement skipped: {error}; cleared inherited reporting instead"
+            ));
+        }
+        Err(error) => {
+            crate::logging::info(&format!("Keyboard enhancement request: FAILED: {error}"))
+        }
+    }
+}
+
 /// Largest pause allowed inside a single report.
 #[cfg(windows)]
 const REPORT_MAX_GAP: Duration = Duration::from_millis(750);
@@ -149,7 +167,12 @@ fn is_report_fragment(fragment: &str) -> bool {
                 return false;
             }
             if index == 0 {
-                first_code = code.parse::<u32>().ok();
+                // `is_decimal` above already proved these are digits, so the error
+                // arm is unreachable; naming it keeps the failure from being
+                // silently discarded if that guard ever changes.
+                if let Ok(parsed) = code.parse::<u32>() {
+                    first_code = Some(parsed);
+                }
             }
         }
         // A release/repeat report always carries `:event`. A modified key may
@@ -431,5 +454,55 @@ mod leaked_report_tests {
         let mut input = String::from("[119;1:3u");
         let mut cursor = input.len();
         assert!(scrub_matching_report(&mut input, &mut cursor, &burst("[97;1;3u", 20)).is_none());
+    }
+}
+
+/// The resume and reload handoff is the path where the reported leak got worse
+/// (issue #224): the client inherits a terminal the previous process already
+/// armed, adopts the entry instead of pushing a new one, and must therefore
+/// clear reporting rather than re-arm it on the Windows decoder.
+#[cfg(all(test, windows))]
+mod resume_keyboard_tests {
+    use crate::tui::{
+        TERMINAL_OWNERSHIP_TEST_LOCK, adopt_keyboard_enhancement_ownership,
+        disable_keyboard_enhancement_if_owned_to, kitty_keyboard_push_active,
+        reapply_terminal_modes_after_focus_to, reset_keyboard_enhancement_ownership_for_test,
+    };
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn resume_handoff_clears_instead_of_rearming_keyboard_reporting() {
+        let _guard = TERMINAL_OWNERSHIP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        reset_keyboard_enhancement_ownership_for_test();
+
+        // Handoff: the inherited entry becomes ours; no push is attempted.
+        adopt_keyboard_enhancement_ownership();
+        assert!(kitty_keyboard_push_active().load(Ordering::Acquire));
+
+        let mut focus = Vec::new();
+        reapply_terminal_modes_after_focus_to(&mut focus, false, true).expect("focus reapply");
+        let text = String::from_utf8_lossy(&focus);
+        let keyboard_writes: Vec<&str> = text
+            .split("\x1b[")
+            .filter(|part| part.ends_with('u'))
+            .collect();
+        assert_eq!(
+            keyboard_writes,
+            vec!["=0u"],
+            "a resumed client may only write the stack-neutral clear, got {text:?}"
+        );
+
+        // Teardown of an adopted entry is the same stack-neutral clear.
+        let mut teardown = Vec::new();
+        assert!(disable_keyboard_enhancement_if_owned_to(
+            &mut teardown,
+            false
+        ));
+        assert_eq!(teardown, b"\x1b[=0u".as_slice());
+        assert!(!kitty_keyboard_push_active().load(Ordering::Acquire));
+
+        reset_keyboard_enhancement_ownership_for_test();
     }
 }

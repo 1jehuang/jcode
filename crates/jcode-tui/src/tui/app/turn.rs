@@ -199,13 +199,7 @@ impl App {
                                 // in the primary handler. Without this arm the
                                 // terminal's focus-in byte leaks into the catch-all
                                 // and the app stays stuck in "unfocused" mode.
-                                crate::tui::reapply_configured_terminal_modes_after_focus();
-                                self.note_client_focus(true);
-                                let _ = self.set_client_focused(true);
-                                // Repaint every row: a ConPTY host may have
-                                // moved the pane while unfocused (#1812).
-                                #[cfg(windows)]
-                                self.force_viewport_repaint_after_shift();
+                                self.handle_client_focus_gained();
                             }
                             Some(Ok(Event::FocusLost)) => {
                                 self.set_client_focused(false);
@@ -522,13 +516,7 @@ impl App {
                                 // this arm the focus-in byte leaks into the
                                 // catch-all and the app stays stuck in
                                 // "unfocused" mode for the rest of the stream.
-                                crate::tui::reapply_configured_terminal_modes_after_focus();
-                                self.note_client_focus(true);
-                                let _ = self.set_client_focused(true);
-                                // Repaint every row: a ConPTY host may have
-                                // moved the pane while unfocused (#1812).
-                                #[cfg(windows)]
-                                self.force_viewport_repaint_after_shift();
+                                self.handle_client_focus_gained();
                             }
                             Some(Ok(Event::FocusLost)) => {
                                 self.set_client_focused(false);
@@ -1539,13 +1527,7 @@ impl App {
                                     // terminal. Without this arm the focus-in
                                     // byte leaks into the catch-all and the app
                                     // stays stuck in "unfocused" mode.
-                                    crate::tui::reapply_configured_terminal_modes_after_focus();
-                                    self.note_client_focus(true);
-                                    let _ = self.set_client_focused(true);
-                                    // Repaint every row: a ConPTY host may have
-                                    // moved the pane while unfocused (#1812).
-                                    #[cfg(windows)]
-                                    self.force_viewport_repaint_after_shift();
+                                    self.handle_client_focus_gained();
                                 }
                                 Some(Ok(Event::FocusLost)) => {
                                     self.set_client_focused(false);
