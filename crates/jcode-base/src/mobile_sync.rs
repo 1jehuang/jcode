@@ -584,6 +584,13 @@ fn serialized_byte_len(value: &impl Serialize) -> serde_json::Result<usize> {
             Ok(bytes.len())
         }
 
+        fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            // This sink always consumes a complete slice and cannot return
+            // Interrupted or WriteZero. Avoid the generic partial-write loop.
+            self.0 += bytes.len();
+            Ok(())
+        }
+
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
@@ -596,6 +603,10 @@ fn serialized_byte_len(value: &impl Serialize) -> serde_json::Result<usize> {
 #[cfg(test)]
 #[path = "mobile_sync_byte_count_tests.rs"]
 mod byte_count_tests;
+
+#[cfg(test)]
+#[path = "mobile_sync_direct_count_tests.rs"]
+mod direct_count_tests;
 
 fn structured_tools(
     blocks: &[ContentBlock],
