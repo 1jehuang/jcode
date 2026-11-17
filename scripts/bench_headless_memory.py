@@ -5,8 +5,12 @@ Swarm workers run headless, so this measures what matters for swarms: total
 PSS of every process involved after N concurrent headless sessions have each
 completed K real model turns (including tool calls).
 
+By default, jcode is benchmarked with memory disabled so the numbers reflect
+normal user configuration. Pass `jcode_memory_on` explicitly to measure the
+extra resident footprint of the optional memory stack.
+
 jcode:  one isolated `jcode serve` daemon, N headless sessions created over the
-        debug socket, turns sent with `message:` commands.
+debug socket, turns sent with `message:` commands.
 Claude: N persistent `claude -p --input-format stream-json` processes, turns
         sent as stream-json user messages.
 
@@ -174,7 +178,7 @@ def run_jcode(sessions: int, turns: int, cwd: str, model: str, memory: bool) -> 
             checks["last_response"] = debug_cmd(dbg_sock, "last_response", ids[0], timeout=30)[:200]
         except Exception as exc:  # noqa: BLE001
             checks["error"] = str(exc)[:200]
-        return {"tool": "jcode" + ("" if memory else " (memory off)"), "sessions": sessions,
+        return {"tool": "jcode (memory on)" if memory else "jcode", "sessions": sessions,
                 "samples": samples, "errors": errors, "version": version, "checks": checks}
     finally:
         terminate_pgroup(pgid)
@@ -611,6 +615,8 @@ def run_all(args, results: list, homes: dict[str, dict[str, str]]) -> int:
     for n in args.sessions:
         for tool in args.tools:
             if tool == "jcode":
+                results.append(run_jcode(n, args.turns, args.cwd, args.jcode_model, memory=False))
+            elif tool == "jcode_memory_on":
                 results.append(run_jcode(n, args.turns, args.cwd, args.jcode_model, memory=True))
             elif tool == "jcode_memory_off":
                 results.append(run_jcode(n, args.turns, args.cwd, args.jcode_model, memory=False))
