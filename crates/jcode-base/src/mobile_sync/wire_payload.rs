@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "thumbnail_identity.rs"]
+mod thumbnail_identity;
+
 #[cfg(test)]
 #[path = "wire_payload_tests.rs"]
 mod tests;
@@ -223,7 +226,7 @@ pub(super) fn image_thumbnail(reader: impl std::io::BufRead + std::io::Seek) -> 
     limits.max_alloc = Some(128 * 1024 * 1024);
     reader.limits(limits);
     let mut thumbnail = match reader.decode() {
-        Ok(image) => image.thumbnail(1024, 1024).into_rgb8(),
+        Ok(image) => thumbnail_identity::thumbnail_rgb(image),
         Err(error) => {
             crate::logging::debug(&format!("Cannot decode mobile thumbnail: {error}"));
             return None;
