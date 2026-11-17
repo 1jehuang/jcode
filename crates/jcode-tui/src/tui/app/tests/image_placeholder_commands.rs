@@ -2,7 +2,7 @@
 // slash-command parsing in submit_input (crates/jcode-tui/src/tui/app/input.rs).
 //
 // Placeholders are plain text: expand_paste_placeholders only expands
-// `[pasted N lines]` markers, never `[image N]`. Command routing therefore
+// `[Paste #N - M lines]` markers, never `[image N]`. Command routing therefore
 // sees the placeholder literally.
 
 fn attach_test_image(app: &mut App) {

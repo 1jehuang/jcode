@@ -410,6 +410,13 @@ pub(super) async fn handle_remote_key_internal(
                 input::handle_alt_key(app, KeyCode::Char('e'));
                 return Ok(());
             }
+            // Alt+X expands a collapsed paste block locally instead of being
+            // forwarded to the server as an unknown chord.
+            KeyCode::Char('x') => {
+                if input::expand_paste_at_cursor(app) {
+                    return Ok(());
+                }
+            }
             _ => {}
         }
     }

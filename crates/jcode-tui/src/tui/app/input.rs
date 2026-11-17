@@ -303,7 +303,10 @@ where
 }
 
 pub(in crate::tui::app) mod newline;
+mod paste;
 mod paste_guard;
+use paste::expand_paste_placeholders_with;
+pub(super) use paste::{expand_paste_at_cursor, expand_paste_placeholders, handle_text_paste};
 #[cfg(test)]
 pub(in crate::tui::app) use paste_guard::expire_for_test as paste_guard_expire_for_test;
 use paste_guard::load_dropped_image;
@@ -508,66 +511,6 @@ pub(super) fn parse_dropped_paths(text: &str) -> Option<Vec<PathBuf>> {
             path.is_file().then_some(path)
         })
         .collect()
-}
-
-pub(super) fn handle_text_paste(app: &mut App, text: String) {
-    crate::logging::info(&format!(
-        "Text paste: {} chars, {} lines",
-        text.len(),
-        text.lines().count()
-    ));
-
-    let line_count = text.lines().count().max(1);
-    if line_count < 5 {
-        insert_input_text(app, &text);
-        return;
-    }
-    if expand_matching_paste(app, &text) {
-        return;
-    }
-
-    let placeholder = paste_placeholder(&text);
-    app.pasted_contents.push(text);
-    insert_input_text(app, &placeholder);
-}
-
-fn expand_matching_paste(app: &mut App, text: &str) -> bool {
-    let Some(content_index) = app
-        .pasted_contents
-        .iter()
-        .rposition(|content| content == text)
-    else {
-        return false;
-    };
-
-    let placeholder = paste_placeholder(text);
-    // Placeholders only encode a line count. Skip placeholders belonging to
-    // newer stored pastes with the same shape so equal-length, different text
-    // cannot cause the wrong placeholder to expand.
-    let newer_same_placeholder_count = app.pasted_contents[content_index + 1..]
-        .iter()
-        .filter(|content| paste_placeholder(content) == placeholder)
-        .count();
-    let Some(placeholder_start) = app
-        .input
-        .rmatch_indices(placeholder.as_str())
-        .map(|(position, _)| position)
-        .nth(newer_same_placeholder_count)
-    else {
-        return false;
-    };
-
-    app.follow_chat_bottom_for_typing();
-    app.remember_input_undo_state();
-    app.input.replace_range(
-        placeholder_start..placeholder_start + placeholder.len(),
-        text,
-    );
-    app.cursor_pos = placeholder_start + text.len();
-    app.pasted_contents.remove(content_index);
-    app.reset_tab_completion();
-    app.sync_model_picker_preview_from_input();
-    true
 }
 
 impl App {
@@ -1139,10 +1082,6 @@ pub(super) fn clear_input_for_escape(app: &mut App) {
     }
 }
 
-pub(super) fn expand_paste_placeholders(app: &App, input: &str) -> String {
-    expand_paste_placeholders_with(&app.pasted_contents, input)
-}
-
 pub(super) fn queue_message(app: &mut App) {
     let prepared = take_prepared_input(app);
     stage_queued_input(app, prepared);
@@ -1231,17 +1170,6 @@ pub(super) fn restore_composer_draft(app: &mut App, draft: ComposerDraft) {
         app.record_prompt_history(&expanded);
         app.pending_images.extend(draft.pending_images);
     }
-}
-
-fn expand_paste_placeholders_with(pasted_contents: &[String], input: &str) -> String {
-    let mut result = input.to_string();
-    for content in pasted_contents.iter().rev() {
-        let placeholder = paste_placeholder(content);
-        if let Some(pos) = result.rfind(&placeholder) {
-            result.replace_range(pos..pos + placeholder.len(), content);
-        }
-    }
-    result
 }
 
 /// Run commands queued with Ctrl+Enter in a local (non-remote) session. Stops
@@ -2209,6 +2137,8 @@ pub(super) fn handle_alt_key(app: &mut App, code: KeyCode) -> bool {
             paste_from_clipboard(app);
             true
         }
+        // Alt+X expands the nearest collapsed paste block back into raw text.
+        KeyCode::Char('x') => expand_paste_at_cursor(app),
         KeyCode::Char('a') if app.input.is_empty() => {
             app.copy_chat_viewport_context_to_clipboard();
             true
@@ -3001,8 +2931,9 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
 pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
     promote_dropped_images(app);
     let raw_input = std::mem::take(&mut app.input);
-    app.record_prompt_history(&raw_input);
     let expanded = expand_paste_placeholders(app, &raw_input);
+    // History must hold the real text, never the collapsed placeholder.
+    app.record_prompt_history(&expanded);
     app.pasted_contents.clear();
     let images = app.take_pending_image_payloads();
     app.cursor_pos = 0;
@@ -3078,15 +3009,6 @@ impl App {
             .filter(|(media_type, data)| !media_type.is_empty() && !data.is_empty())
             .collect()
     }
-}
-
-fn paste_placeholder(content: &str) -> String {
-    let line_count = content.lines().count().max(1);
-    format!(
-        "[pasted {} line{}]",
-        line_count,
-        if line_count == 1 { "" } else { "s" }
-    )
 }
 
 impl App {
@@ -3772,9 +3694,6 @@ impl App {
         }
 
         let raw_input = std::mem::take(&mut self.input);
-        // Persist to cross-session prompt history (no-op for slash/shell
-        // commands, secret-intercept inputs, and oversized pastes).
-        self.record_prompt_history(&raw_input);
         let mut input = self.expand_paste_placeholders(&raw_input);
         if let Some(notice) = input_exceeds_submit_limit(&input) {
             self.input = raw_input;
@@ -3783,6 +3702,9 @@ impl App {
             self.push_display_message(DisplayMessage::system(notice));
             return;
         }
+        // Persist the expanded text to cross-session prompt history (no-op for
+        // slash/shell commands, secret-intercept inputs, and oversized pastes).
+        self.record_prompt_history(&input);
         self.pasted_contents.clear();
         self.cursor_pos = 0;
         self.clear_input_undo_history();

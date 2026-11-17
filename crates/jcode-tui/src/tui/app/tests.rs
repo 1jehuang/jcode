@@ -1878,7 +1878,7 @@ fn oversized_pasted_submit_is_rejected_and_preserves_input() {
 
     crate::tui::app::input::handle_text_paste(&mut app, pasted);
     let placeholder = app.input.clone();
-    assert!(placeholder.starts_with("[pasted "));
+    assert!(placeholder.starts_with("[Paste #"));
 
     app.submit_input();
 
