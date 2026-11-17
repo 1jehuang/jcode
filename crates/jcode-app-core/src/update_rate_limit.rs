@@ -144,8 +144,12 @@ mod tests {
             Duration::from_secs(90)
         );
         // A bogus far-future reset must not disable checks forever.
+        // The instant has to be representable on every platform: `u64::MAX / 2`
+        // seconds overflows Windows' FILETIME range, which takes the checked_add
+        // path to the fallback window instead of reaching the clamp.
+        let ten_years_ahead = 1_000 + 10 * 365 * 24 * 60 * 60;
         assert_eq!(
-            rate_limit_backoff(429, Some(0), None, Some(u64::MAX / 2), now).unwrap(),
+            rate_limit_backoff(429, Some(0), None, Some(ten_years_ahead), now).unwrap(),
             RATE_LIMIT_BACKOFF_MAX
         );
         // Past/zero hints fall back to the default window.

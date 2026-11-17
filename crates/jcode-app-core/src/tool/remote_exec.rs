@@ -497,7 +497,10 @@ mod tests {
     /// refuses tools that belong to the runtime.
     #[tokio::test]
     async fn worker_runs_workspace_tools_and_refuses_runtime_tools() {
-        let dir = tempfile::tempdir().unwrap();
+        // `tempfile` honours TMPDIR, and the bash tool exports a POSIX `/tmp`
+        // there; on Windows that is drive-relative, so the shell's `pwd` and the
+        // canonical path differ. Use the helper that ignores TMPDIR.
+        let dir = crate::test_temp::tempdir().unwrap();
         let (mut to_worker, worker_in) = tokio::io::duplex(1 << 16);
         let (worker_out, from_worker) = tokio::io::duplex(1 << 16);
         let worker = tokio::spawn(run_worker(worker_in, worker_out));
@@ -539,8 +542,20 @@ mod tests {
         };
         assert_eq!(error, None);
         assert!(output.contains("from the worker"), "{output}");
-        let real = dir.path().canonicalize().unwrap();
-        assert!(output.contains(&*real.to_string_lossy()), "{output}");
+        // The worker's shell is MSYS on Windows, which prints %TEMP% as `/tmp`
+        // and never the `\\?\` canonical prefix, so compare the directory's own
+        // name: it is unique per tempdir and proves the shell ran where asked.
+        let reported_cwd = output.lines().nth(1).unwrap_or_default().trim();
+        let expected_name = dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            reported_cwd.ends_with(&expected_name),
+            "{output}\nworker cwd was {reported_cwd:?}, expected to end with {expected_name:?}"
+        );
 
         let refused = call(
             &mut to_worker,
