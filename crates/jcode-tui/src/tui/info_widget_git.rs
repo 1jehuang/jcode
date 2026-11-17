@@ -87,7 +87,26 @@ pub(crate) fn is_agent_edited(
         .next()
         .unwrap_or(repo_path)
         .trim_matches('"');
-    edited.contains(&root.join(rel.trim_end_matches('/')))
+    let candidate = root.join(rel.trim_end_matches('/'));
+    edited.iter().any(|edited_path| same_path(edited_path, &candidate))
+}
+
+/// Whether two paths name the same location.
+///
+/// `Path` equality is spelling-sensitive, and on Windows two sources routinely
+/// disagree: git reports the repository root with forward slashes, session paths
+/// use backslashes, and a canonicalized path carries a `\\?\` verbatim prefix.
+/// Component comparison covers the separator difference and is free, so it is
+/// tried first; only when that fails do we ask the filesystem, because the edited
+/// files normally exist and canonicalizing both settles the prefix difference.
+fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+    if a.components().eq(b.components()) {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a.components().eq(b.components()),
+        _ => false,
+    }
 }
 
 /// Color of the agent-edit marker, shared by the rows and the legend.
@@ -799,6 +818,29 @@ mod tests {
         assert!(is_agent_edited(Some(root), "src/a.rs", &set));
         assert!(!is_agent_edited(Some(root), "src/b.rs", &set));
         assert!(!is_agent_edited(None, "src/a.rs", &set));
+    }
+
+    /// Windows reports the repository root with forward slashes (git) and the
+    /// session paths with backslashes, plus a `\\?\` prefix once canonicalized.
+    /// The agent dot used to disappear for exactly that reason.
+    #[cfg(windows)]
+    #[test]
+    fn agent_edit_matching_ignores_separator_and_verbatim_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("a.rs");
+        std::fs::write(&file, b"x").unwrap();
+
+        let edited = file.canonicalize().unwrap();
+        let set: std::collections::HashSet<_> = [edited].into_iter().collect();
+
+        // git-style root: forward slashes, no verbatim prefix.
+        let forward = std::path::PathBuf::from(dir.path().to_string_lossy().replace('\\', "/"));
+        assert!(is_agent_edited(Some(&forward), "src/a.rs", &set));
+        // backslash root with the canonical form of the file also matches.
+        assert!(is_agent_edited(Some(dir.path()), "src/a.rs", &set));
+        assert!(!is_agent_edited(Some(dir.path()), "src/b.rs", &set));
     }
 
     #[test]

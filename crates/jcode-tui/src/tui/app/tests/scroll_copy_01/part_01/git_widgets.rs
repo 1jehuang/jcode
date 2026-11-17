@@ -150,7 +150,14 @@ fn changes_widget_end_to_end_on_real_git_repo() {
         "gone.txt",
         "no mtime sorts last"
     );
-    assert_eq!(info.repo_root.as_deref(), Some(root.as_path()));
+    // The widget reports the root with forward slashes; `root` is canonicalized.
+    // Compare the directories they name rather than their spelling.
+    let reported = info.repo_root.as_deref().expect("repo root");
+    assert_eq!(
+        std::path::Path::new(reported).canonicalize().unwrap(),
+        root,
+        "widget must report the repo root it probed"
+    );
     // Commits widget data comes from the same probe against real git output.
     assert_eq!(info.recent_commits.len(), 1, "{:?}", info.recent_commits);
     let init = &info.recent_commits[0];
