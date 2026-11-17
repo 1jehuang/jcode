@@ -59,6 +59,12 @@ pub struct DisplayConfig {
     /// it scrolls, like the sticky previous-prompt preview (default: true)
     #[serde(default = "default_true")]
     pub pin_todos: bool,
+    /// How much of the pinned todo header to render above the composer:
+    /// `full` (the whole card, default), `minimal` (exactly one summary line),
+    /// or `hidden` (no rows). `pin_todos = false` remains a legacy alias for
+    /// `hidden`; [`DisplayConfig::todo_header_mode`] resolves the pair.
+    #[serde(deserialize_with = "crate::serde_lenient::lenient_enum")]
+    pub todo_header: TodoHeaderMode,
     /// Show idle animation before first prompt (default: false)
     pub idle_animation: bool,
     /// Briefly animate user prompt line when it enters viewport (default: true)
@@ -177,6 +183,55 @@ impl ResumeOpenElsewhere {
     }
 }
 
+/// How much of the pinned todo header to render.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TodoHeaderMode {
+    /// Render the whole pinned todo card (today's behaviour).
+    #[default]
+    Full,
+    /// Render exactly one summary line of todo state.
+    Minimal,
+    /// Render nothing at all.
+    Hidden,
+}
+
+impl TodoHeaderMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "full" | "on" => Some(Self::Full),
+            "minimal" | "min" | "one-line" | "one_line" => Some(Self::Minimal),
+            "hidden" | "hide" | "off" | "none" => Some(Self::Hidden),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Minimal => "minimal",
+            Self::Hidden => "hidden",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Minimal => "minimal",
+            Self::Hidden => "hidden",
+        }
+    }
+
+    /// Cycle order used by `/todos pin`: full -> minimal -> hidden -> full.
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Full => Self::Minimal,
+            Self::Minimal => Self::Hidden,
+            Self::Hidden => Self::Full,
+        }
+    }
+}
+
 /// Timestamp used for Resume's "x ago" label and recency ordering.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -213,6 +268,7 @@ impl Default for DisplayConfig {
             show_diffs: None,
             pin_images: true,
             pin_todos: true,
+            todo_header: TodoHeaderMode::default(),
             queue_mode: false,
             auto_server_reload: true,
             mouse_capture: true,
@@ -296,6 +352,23 @@ impl DisplayConfig {
 
     pub fn usage_display_used(&self) -> bool {
         self.usage_display.eq_ignore_ascii_case("used")
+    }
+
+    /// Resolve the effective todo-header mode. `pin_todos = false` is the
+    /// legacy off switch and always means `hidden`; otherwise the explicit
+    /// `todo_header` mode applies.
+    pub fn todo_header_mode(&self) -> TodoHeaderMode {
+        if self.pin_todos {
+            self.todo_header
+        } else {
+            TodoHeaderMode::Hidden
+        }
+    }
+
+    /// Persist a todo-header mode and keep the legacy `pin_todos` flag in sync.
+    pub fn set_todo_header_mode(&mut self, mode: TodoHeaderMode) {
+        self.todo_header = mode;
+        self.pin_todos = mode != TodoHeaderMode::Hidden;
     }
 }
 

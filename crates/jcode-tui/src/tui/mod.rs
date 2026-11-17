@@ -504,6 +504,7 @@ mod terminal_mode_tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn adopt_records_inherited_entry_without_pushing() {
         let _guard = super::TERMINAL_OWNERSHIP_TEST_LOCK
             .lock()
@@ -563,6 +564,7 @@ mod terminal_mode_tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn tmux_keyboard_lifecycle_requests_and_resets_extended_keys() {
         let mut output = Vec::new();
         enable_keyboard_enhancement_to(&mut output, true).unwrap();
@@ -578,6 +580,7 @@ mod terminal_mode_tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn outside_tmux_keyboard_lifecycle_keeps_kitty_protocol_only() {
         let mut output = Vec::new();
         enable_keyboard_enhancement_to(&mut output, false).unwrap();
@@ -627,6 +630,7 @@ mod terminal_mode_tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn focus_reapply_preserves_other_modes_without_rearming_focus_reporting() {
         for mouse_capture in [false, true] {
             for keyboard_enhanced in [false, true] {

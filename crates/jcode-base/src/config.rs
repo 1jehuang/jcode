@@ -12,8 +12,8 @@ pub use jcode_config_types::{
     NamedProviderConfig, NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig,
     NotificationsConfig, PowerConfig, ProviderConfig, ReasoningDisplayMode, ResumeOpenElsewhere,
     ResumeTimeMode, SafetyConfig, SessionConfig, SessionPickerResumeAction, SponsorsConfig,
-    SwarmSpawnMode, SwarmStripLayout, TerminalConfig, UpdateChannel, WebSearchConfig,
-    WebSearchEngine,
+    SwarmSpawnMode, SwarmStripLayout, TerminalConfig, TodoHeaderMode, UpdateChannel,
+    WebSearchConfig, WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -643,6 +643,27 @@ mod cloud_config_tests {
             assert_eq!(config.cloud.local_access_seconds, seconds);
         }
         assert!(toml::from_str::<Config>("[cloud]\nlocal_access_seconds = -1").is_err());
+    }
+
+    #[test]
+    fn todo_header_toml_modes_roundtrip() {
+        let defaults: Config = toml::from_str("").unwrap();
+        assert_eq!(defaults.display.todo_header_mode(), TodoHeaderMode::Full);
+
+        for (raw, mode) in [
+            ("full", TodoHeaderMode::Full),
+            ("minimal", TodoHeaderMode::Minimal),
+            ("hidden", TodoHeaderMode::Hidden),
+        ] {
+            let config: Config =
+                toml::from_str(&format!("[display]\ntodo_header = \"{raw}\"")).unwrap();
+            assert_eq!(config.display.todo_header, mode);
+            assert_eq!(config.display.todo_header_mode(), mode);
+        }
+
+        // The legacy off switch still resolves to hidden.
+        let legacy: Config = toml::from_str("[display]\npin_todos = false").unwrap();
+        assert_eq!(legacy.display.todo_header_mode(), TodoHeaderMode::Hidden);
     }
 }
 

@@ -793,7 +793,8 @@ impl Server {
         // now, off the async workers, so the storm only sees cache hits.
         if !temporary_server {
             std::thread::spawn(|| {
-                let _ = crate::background::global().persisted_detached_running_tasks_for_session("");
+                let _ =
+                    crate::background::global().persisted_detached_running_tasks_for_session("");
             });
         }
         let registry_info = self.build_registry_info();
@@ -1984,7 +1985,8 @@ impl Server {
                 // Compact todo names and progress are surfaced on the inline
                 // swarm strip so a coordinator can see each managed agent's work.
                 BusEvent::TodoUpdated(event) => {
-                    crate::agents_status::todos_updated(&event.session_id, &event.todos);
+                    // The session tracker no longer mirrors todo plans, so the swarm
+                    // strip below is the only consumer of this event.
                     dispatch_swarm_todo_progress(&event, &swarm_members, &swarms_by_id).await;
                     // Worker-owned lanes whose dependencies are met get a
                     // worker automatically; no launch call is involved.

@@ -8,7 +8,7 @@ mod power;
 mod session;
 pub use session::{HibernationMode, SessionConfig};
 pub use {
-    display::{DisplayConfig, ResumeOpenElsewhere, ResumeTimeMode},
+    display::{DisplayConfig, ResumeOpenElsewhere, ResumeTimeMode, TodoHeaderMode},
     menubar::MenubarConfig,
     power::PowerConfig,
 };

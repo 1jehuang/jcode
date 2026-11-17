@@ -1015,10 +1015,12 @@ mod tests {
             r#"{"provider":{"models":{"model":{"cost":{"input":1,"output":2}}},"ignored":[1,]}}"#
         )
         .is_err());
-        assert!(parse_api_response(
-            r#"{"provider":{"models":{"model":{"cost":{"input":1,"output":2}}}}} trailing"#
-        )
-        .is_err());
+        assert!(
+            parse_api_response(
+                r#"{"provider":{"models":{"model":{"cost":{"input":1,"output":2}}}}} trailing"#
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -51,7 +51,8 @@ impl App {
         if !(crate::tui::is_ssh_remote() || self.remote_todos_payload.is_some())
             || !(self.todos_view_enabled
                 || self.latest_todo_card_index().is_some()
-                || crate::config::config().display.pin_todos)
+                || crate::config::config().display.todo_header_mode()
+                    != crate::config::TodoHeaderMode::Hidden)
             || self
                 .remote_todos_requested_at
                 .is_some_and(|at| at.elapsed() < self.remote_todos_poll_interval())
@@ -196,7 +197,9 @@ impl App {
         if self.is_replay {
             return false;
         }
-        if !crate::config::config().display.pin_todos {
+        if crate::config::config().display.todo_header_mode()
+            == crate::config::TodoHeaderMode::Hidden
+        {
             if self.pinned_todos_payload.is_some() {
                 self.pinned_todos_payload = None;
                 self.pinned_todos_rendered_hash = 0;
@@ -463,11 +466,7 @@ pub(super) fn todos_view_status_message(app: &App) -> String {
         } else {
             "disabled"
         },
-        if crate::config::config().display.pin_todos {
-            "enabled"
-        } else {
-            "disabled"
-        }
+        crate::config::config().display.todo_header_mode().label()
     )
 }
 
@@ -518,32 +517,20 @@ pub(super) fn handle_todos_view_command(app: &mut App, trimmed: &str) -> bool {
                 "Todo screen disabled.".to_string(),
             ));
         }
-        // Pin the full todo list to the top of the chat transcript.
-        "pin" | "pin on" | "pin off" => {
-            let enabled = match arg {
-                "pin on" => true,
-                "pin off" => false,
-                _ => !crate::config::config().display.pin_todos,
-            };
-            app.set_status_notice(if enabled {
-                "Pinned todos: ON"
-            } else {
-                "Pinned todos: OFF"
-            });
-            match crate::config::Config::set_pin_todos(enabled) {
-                Ok(()) => app.push_display_message(crate::tui::DisplayMessage::system(
-                    if enabled {
-                        "Pinned todo band enabled. The todo list stays pinned to the top of the transcript while it scrolls."
-                    } else {
-                        "Pinned todo band disabled."
-                    }
-                    .to_string(),
-                )),
-                Err(error) => app.push_display_message(crate::tui::DisplayMessage::error(
-                    format!("Failed to save display.pin_todos: {}", error),
-                )),
-            }
-            app.refresh_pinned_todos_now();
+        // Control the pinned todo header above the composer. A bare `pin`
+        // cycles full -> minimal -> hidden -> full; explicit modes set one.
+        "pin" | "header" | "pin cycle" | "header cycle" => {
+            let next = crate::config::config().display.todo_header_mode().cycle();
+            apply_todo_header_mode(app, next);
+        }
+        "pin on" | "header on" | "pin full" | "header full" => {
+            apply_todo_header_mode(app, crate::config::TodoHeaderMode::Full);
+        }
+        "pin minimal" | "header minimal" => {
+            apply_todo_header_mode(app, crate::config::TodoHeaderMode::Minimal);
+        }
+        "pin off" | "header off" | "pin hidden" | "header hidden" => {
+            apply_todo_header_mode(app, crate::config::TodoHeaderMode::Hidden);
         }
         "status" => {
             app.push_display_message(crate::tui::DisplayMessage::system(
@@ -552,12 +539,28 @@ pub(super) fn handle_todos_view_command(app: &mut App, trimmed: &str) -> bool {
         }
         _ => {
             app.push_display_message(crate::tui::DisplayMessage::error(
-                "Usage: /todos [card|panel|pin|on|off|status]".to_string(),
+                "Usage: /todos [card|panel|pin|header [full|minimal|hidden]|on|off|status]"
+                    .to_string(),
             ));
         }
     }
 
     true
+}
+
+fn apply_todo_header_mode(app: &mut App, mode: crate::config::TodoHeaderMode) {
+    app.set_status_notice(format!("Todo header: {}", mode.label()));
+    match crate::config::Config::set_todo_header_mode(mode) {
+        Ok(()) => app.push_display_message(crate::tui::DisplayMessage::system(format!(
+            "Todo header mode: {}. `/todos pin` cycles full -> minimal -> hidden.",
+            mode.label()
+        ))),
+        Err(error) => app.push_display_message(crate::tui::DisplayMessage::error(format!(
+            "Failed to save display.todo_header: {}",
+            error
+        ))),
+    }
+    app.refresh_pinned_todos_now();
 }
 
 /// Pinned-todo-band payload for any session, read from disk. Used by the
