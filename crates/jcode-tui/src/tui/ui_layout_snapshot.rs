@@ -109,7 +109,12 @@ pub fn last_layout_snapshot() -> Option<LayoutSnapshot> {
     }
     #[cfg(not(test))]
     {
-        last_layout_state().lock().ok().and_then(|slot| *slot)
+        // A poisoned lock still holds the last published frame; reporting no
+        // geometry would make every out-of-draw handler lose its anchor.
+        match last_layout_state().lock() {
+            Ok(slot) => *slot,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
     }
 }
 
