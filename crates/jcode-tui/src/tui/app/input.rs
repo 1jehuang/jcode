@@ -809,12 +809,24 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
     app.sync_model_picker_preview_from_input();
 }
 
+/// Whether a `Ctrl+Enter` right now is the line break of a paste.
+pub(super) fn pasted_newline_in_progress() -> bool {
+    paste_guard::ctrl_enter_is_pasted_newline()
+}
+
 pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
     if app.append_ssh_login_input(text) {
         return true;
     }
     if text.is_empty() {
         return false;
+    }
+    // Remember character keystrokes so a following Ctrl+Enter can be recognised as
+    // the line break of a paste rather than a deliberate chord.
+    if text.chars().count() == 1 {
+        paste_guard::note_char_press();
+    } else {
+        paste_guard::clear_char_press();
     }
 
     let onboarding_suggestions = matches!(
