@@ -73,6 +73,121 @@ fn token_rows(body: &PreparedMessages) -> Vec<&str> {
 }
 
 #[test]
+fn compact_dm_await_started_is_hidden_but_finished_result_stays_visible() {
+    let _guard = viewport_snapshot_test_lock();
+    let before = vec![DisplayMessage::user("Wait for workers")];
+    let mut after = before.clone();
+    after.push(DisplayMessage::background_task(
+        "🐝 **Swarm await started** · watching `fox`\n\nWaiting in the background.",
+    ));
+    let hidden = assert_dm_rebuild_matches_full(before, after.clone(), 100);
+    assert_eq!(hidden.message_boundaries.len(), 2);
+    assert_eq!(
+        hidden.message_boundaries[0].wrapped_len,
+        hidden.message_boundaries[1].wrapped_len
+    );
+    assert!(
+        !hidden
+            .wrapped_plain_lines
+            .join("\n")
+            .contains("Swarm await started")
+    );
+    let before = after.clone();
+    after.push(DisplayMessage::background_task(
+        "🐝 **Swarm await finished**\n\nAll members done.\n\nMember statuses:\n  ✓ fox (completed)",
+    ));
+    let finished = assert_dm_rebuild_matches_full(before, after, 100);
+    let text = finished.wrapped_plain_lines.join("\n");
+    assert!(text.contains("Swarm await"), "{text}");
+    assert!(text.contains("completed"), "{text}");
+}
+
+#[test]
+fn compact_dm_single_and_group_have_only_one_total_and_badge() {
+    let _guard = viewport_snapshot_test_lock();
+    for messages in [
+        vec![dm("fox", "a".repeat(44).as_str())],
+        vec![
+            dm("fox", "a".repeat(44).as_str()),
+            dm("sheep", "b".repeat(48).as_str()),
+        ],
+    ] {
+        let total = messages
+            .iter()
+            .map(|message| crate::util::estimate_tokens(message.content.trim()))
+            .sum();
+        let icons = messages
+            .iter()
+            .map(|message| {
+                crate::id::session_icon(
+                    message
+                        .title
+                        .as_deref()
+                        .unwrap()
+                        .trim_start_matches("DM from "),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let label = if messages.len() == 1 { "DM" } else { "DMs" };
+        let state = TestState {
+            display_messages: messages,
+            ..Default::default()
+        };
+        let body = prepare::prepare_body(&state, 100, false);
+        let rows = token_rows(&body);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].trim(),
+            format!(
+                "{label} · {icons} · {} ⊞",
+                crate::util::format_approx_token_count(total)
+            )
+        );
+    }
+}
+
+#[test]
+fn compact_dm_group_chrome_stays_neutral_for_large_total() {
+    let _guard = viewport_snapshot_test_lock();
+    let messages = vec![dm("fox", &"a".repeat(52_000)), dm("sheep", "short")];
+    let line = messages::render_agent_dm_run(&messages, 100);
+    let neutral = Some(dim_color());
+    let mut token_spans = 0;
+    for span in &line.spans {
+        if span.content.contains(" tok") {
+            token_spans += 1;
+            assert_ne!(span.style.fg, neutral, "large total must carry severity");
+        } else if !span.content.trim().is_empty() {
+            assert_eq!(span.style.fg, neutral, "chrome must stay neutral: {span:?}");
+        }
+    }
+    assert_eq!(token_spans, 1, "only the aggregate total carries severity");
+}
+
+#[test]
+fn compact_dm_prepend_merges_with_existing_first_dm() {
+    let _guard = viewport_snapshot_test_lock();
+    let before = vec![
+        dm("sheep", "existing private message"),
+        dm("owl", "another existing private message"),
+        DisplayMessage::assistant("Visible tail"),
+    ];
+    let mut after = vec![dm("fox", "older private message")];
+    after.extend(before.clone());
+    let body = assert_dm_rebuild_matches_full(before, after, 100);
+    let rows = token_rows(&body);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].matches(" tok").count(), 1);
+    assert_eq!(rows[0].matches('⊞').count(), 1);
+    assert!(rows[0].contains("DMs ·"));
+    assert!(rows[0].contains(crate::id::session_icon("fox")));
+    assert!(rows[0].contains(crate::id::session_icon("sheep")));
+    assert!(rows[0].contains(crate::id::session_icon("owl")));
+    assert!(!body.wrapped_plain_lines.join("\n").contains("private"));
+}
+
+#[test]
 fn compact_dm_consecutive_append_matches_full_prepare() {
     let _guard = viewport_snapshot_test_lock();
     let mut messages = vec![
@@ -85,7 +200,9 @@ fn compact_dm_consecutive_append_matches_full_prepare() {
         let body = assert_dm_rebuild_matches_full(before, messages.clone(), 100);
         let rows = token_rows(&body);
         assert_eq!(rows.len(), 1, "{rows:?}");
-        assert_eq!(rows[0].matches(" tok").count(), messages.len() - 1);
+        assert_eq!(rows[0].matches(" tok").count(), 1);
+        assert_eq!(rows[0].matches('⊞').count(), 1);
+        assert!(rows[0].contains("DMs ·"));
         assert!(rows[0].contains(crate::id::session_icon(sender)));
         assert!(!body.wrapped_plain_lines.join("\n").contains("private"));
         assert_eq!(body.message_boundaries.len(), messages.len());
@@ -118,9 +235,12 @@ fn compact_dm_body_edit_matches_full_prepare() {
         token_rows(&old),
         "token estimate must update after body edit"
     );
-    let expected = crate::util::format_approx_token_count(crate::util::estimate_tokens(
-        after[2].content.trim(),
-    ));
+    let expected = crate::util::format_approx_token_count(
+        after[1..]
+            .iter()
+            .map(|message| crate::util::estimate_tokens(message.content.trim()))
+            .sum(),
+    );
     assert!(token_rows(&body)[0].contains(&expected));
     assert!(
         !body
@@ -140,7 +260,9 @@ fn compact_dm_assistant_breaks_group_matches_full_prepare() {
     let body = assert_dm_rebuild_matches_full(before, after, 100);
     let rows = token_rows(&body);
     assert_eq!(rows.len(), 2, "{rows:?}");
-    assert_eq!(rows[0].matches(" tok").count(), 2);
+    assert_eq!(rows[0].matches(" tok").count(), 1);
+    assert!(rows[0].contains("DMs ·"));
+    assert!(rows[1].contains("DM ·"));
     assert_eq!(rows[1].matches(" tok").count(), 1);
     let text = body.wrapped_plain_lines.join("\n");
     assert!(text.find(rows[0]).unwrap() < text.find("Visible assistant separator").unwrap());

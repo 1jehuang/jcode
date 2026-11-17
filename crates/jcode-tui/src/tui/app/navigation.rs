@@ -238,7 +238,35 @@ impl App {
         let Some(msg_idx) = super::super::ui::swarm_expand_target_from_screen(column, row) else {
             return false;
         };
-        self.toggle_swarm_message_expand(msg_idx)
+        let is_dm = |message: &DisplayMessage| {
+            message.effective_role() == "swarm"
+                && message
+                    .title
+                    .as_deref()
+                    .is_some_and(|title| title.starts_with("DM from "))
+        };
+        if self.display_messages.get(msg_idx).is_some_and(is_dm) {
+            let collapsed =
+                super::super::ui::is_collapsed_agent_dm(&self.display_messages[msg_idx]);
+            let same_state = |message: &DisplayMessage| {
+                is_dm(message) && super::super::ui::is_collapsed_agent_dm(message) == collapsed
+            };
+            let mut start = msg_idx;
+            while start > 0 && same_state(&self.display_messages[start - 1]) {
+                start -= 1;
+            }
+            let mut end = msg_idx + 1;
+            while end < self.display_messages.len() && same_state(&self.display_messages[end]) {
+                end += 1;
+            }
+            let mut toggled = false;
+            for index in start..end {
+                toggled |= self.toggle_swarm_message_expand(index);
+            }
+            toggled
+        } else {
+            self.toggle_swarm_message_expand(msg_idx)
+        }
     }
 
     /// Toggle the collapsed/expanded state of the swarm notification at

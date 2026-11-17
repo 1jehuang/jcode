@@ -1456,8 +1456,8 @@ fn repro_scroll_held_across_reasoning_close_and_answer() {
 }
 
 /// End-to-end: a swarm notification carrying a sender-provided tldr renders
-/// collapsed (tldr + `▸ expand` badge, body hidden) through a REAL draw, and a
-/// left click on the badge expands it in place (body visible, `▾ collapse`
+/// collapsed (shared token row + `⊞` badge, body hidden) through a REAL draw,
+/// and a left click on the badge expands it in place (body visible, `⊟`
 /// badge). Exercises the full path: collapsible encoding -> body render ->
 /// live copy-viewport snapshot -> `swarm_expand_target_from_screen` ->
 /// `toggle_swarm_message_expand`.
@@ -1530,7 +1530,7 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
         });
     };
 
-    // A click on the tldr text (left of the badge) must NOT toggle.
+    // A click on the token text (left of the badge) must NOT toggle.
     click(&mut app, badge_col.saturating_sub(6), badge_row);
     assert!(
         jcode_tui_messages::parse_collapsible_swarm_content(&app.display_messages[1].content)
@@ -1538,7 +1538,7 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
         "click left of the badge must not expand the card"
     );
 
-    click(&mut app, badge_col + 2, badge_row);
+    click(&mut app, badge_col, badge_row);
     let parsed =
         jcode_tui_messages::parse_collapsible_swarm_content(&app.display_messages[1].content)
             .expect("content stays collapsible after toggle");
@@ -1575,7 +1575,7 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
     }
     let (collapse_col, collapse_row) =
         collapse_badge.expect("collapse badge must be visible in the frame");
-    click(&mut app, collapse_col + 2, collapse_row);
+    click(&mut app, collapse_col, collapse_row);
     assert!(
         jcode_tui_messages::parse_collapsible_swarm_content(&app.display_messages[1].content)
             .is_some_and(|parsed| !parsed.expanded),
@@ -1584,13 +1584,18 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
 }
 
 #[test]
-fn test_grouped_dm_badges_expand_the_selected_message() {
+fn test_grouped_dm_badge_expands_all_and_any_expanded_badge_collapses_run() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
     app.display_messages = vec![
         DisplayMessage::user("hi"),
-        DisplayMessage::swarm("DM from sheep", jcode_tui_messages::encode_collapsible_swarm_content(
-            "First preview", "First private agent message.")),
+        DisplayMessage::swarm(
+            "DM from sheep",
+            jcode_tui_messages::encode_collapsible_swarm_content(
+                "First preview",
+                "First private agent message.",
+            ),
+        ),
         DisplayMessage::swarm("DM from fox", "Second private agent message."),
     ];
     app.bump_display_messages_version();
@@ -1614,17 +1619,56 @@ fn test_grouped_dm_badges_expand_the_selected_message() {
             }
         }
     }
-    assert_eq!(badges.len(), 2, "{collapsed}");
-    assert_eq!(badges[0].1, badges[1].1, "adjacent DMs share a row");
-    let (column, row) = badges[1];
+    assert_eq!(badges.len(), 1, "adjacent DMs share one badge: {collapsed}");
+    let dm_row = collapsed
+        .lines()
+        .find(|line| line.contains("DMs ·"))
+        .unwrap();
+    assert_eq!(dm_row.matches(" tok").count(), 1, "{collapsed}");
+    let (column, row) = badges[0];
     assert!(app.try_toggle_swarm_expand_at(column, row));
-    assert!(jcode_tui_messages::parse_collapsible_swarm_content(&app.display_messages[1].content)
-        .is_some_and(|parsed| !parsed.expanded));
-    assert!(jcode_tui_messages::parse_collapsible_swarm_content(&app.display_messages[2].content)
-        .is_some_and(|parsed| parsed.expanded));
+    for message in &app.display_messages[1..] {
+        assert!(
+            jcode_tui_messages::parse_collapsible_swarm_content(&message.content)
+                .is_some_and(|parsed| parsed.expanded)
+        );
+    }
     let expanded = render_and_snap(&app, &mut terminal);
-    assert!(expanded.contains("Second private agent message"), "{expanded}");
-    assert!(!expanded.contains("First private agent message"), "{expanded}");
+    assert!(
+        expanded.contains("Second private agent message"),
+        "{expanded}"
+    );
+    assert!(
+        expanded.contains("First private agent message"),
+        "{expanded}"
+    );
+
+    let buffer = terminal.backend().buffer();
+    let mut collapse_badges = Vec::new();
+    for row in 0..area.height {
+        for col in 0..area.width {
+            if buffer[(col, row)].symbol() == "⊟" {
+                collapse_badges.push((col, row));
+            }
+        }
+    }
+    assert_eq!(collapse_badges.len(), 2, "{expanded}");
+    // The second card's badge must fold the entire consecutive expanded run,
+    // not just the selected card or the suffix starting at that card.
+    let (column, row) = collapse_badges[1];
+    assert!(app.try_toggle_swarm_expand_at(column, row));
+    for message in &app.display_messages[1..] {
+        assert!(
+            jcode_tui_messages::parse_collapsible_swarm_content(&message.content)
+                .is_some_and(|parsed| !parsed.expanded)
+        );
+    }
+    let collapsed_again = render_and_snap(&app, &mut terminal);
+    assert!(
+        !collapsed_again.contains("private agent message"),
+        "{collapsed_again}"
+    );
+    assert_eq!(collapsed_again.matches('⊞').count(), 1, "{collapsed_again}");
 }
 
 #[cfg(test)]

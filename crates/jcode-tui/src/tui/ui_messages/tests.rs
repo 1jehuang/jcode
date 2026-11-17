@@ -2978,7 +2978,7 @@ fn render_swarm_message_collapsed_shows_tldr_and_expand_badge_only() {
         .flat_map(|line| &line.spans)
         .find(|span| span.content.contains("tok"))
         .expect("DM token count span");
-    assert_eq!(preview.style.fg, Some(swarm_agent_color("sheep")));
+    assert_eq!(preview.style.fg, Some(rgb(118, 118, 118)));
     assert!(
         !plain.contains("race in the setup helper"),
         "collapsed card must hide the full body: {plain}"

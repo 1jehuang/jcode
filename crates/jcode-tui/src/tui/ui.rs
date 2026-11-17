@@ -79,6 +79,7 @@ mod memory_estimates;
 mod memory_ui;
 #[path = "ui_messages.rs"]
 mod messages;
+pub(crate) use messages::is_collapsed_agent_dm;
 pub(crate) use messages::strip_todo_tool_output_headers;
 #[path = "ui_onboarding.rs"]
 mod onboarding;
@@ -2646,22 +2647,6 @@ pub(crate) fn swarm_expand_target_from_screen(column: u16, row: u16) -> Option<u
     };
     let text = snapshot.wrapped_plain_line(point.abs_line)?;
     let trimmed = text.trim_end();
-    // Consecutive DMs share one row. Each compact entry has its own badge,
-    // and its ordinal identifies the source message within that run.
-    if trimmed.contains(" tok") && trimmed.contains(messages::SWARM_EXPAND_BADGE) {
-        for (ordinal, (byte, _)) in trimmed
-            .match_indices(messages::SWARM_EXPAND_BADGE)
-            .enumerate()
-        {
-            let start = line_display_width(&trimmed[..byte]);
-            if point.column >= start && point.column < start + 3 {
-                return prepared
-                    .message_index_at_line(point.abs_line)
-                    .map(|index| index + ordinal);
-            }
-        }
-        return None;
-    }
     let badge_start = [
         messages::SWARM_EXPAND_BADGE,
         messages::SWARM_COLLAPSE_BADGE,

@@ -16,15 +16,15 @@ pub(super) fn render_message_into(
     let centered = ctx.centered;
     let diff_mode = ctx.diff_mode;
     let role = msg.effective_role();
-    // The pinned band is the canonical todo presentation while enabled. Keep
-    // todo tool messages in display_messages for history/session fidelity, but
-    // omit their duplicate cards from the prepared transcript.
-    if role == "tool"
-        && crate::config::config().display.pin_todos
-        && msg
-            .tool_data
-            .as_ref()
-            .is_some_and(|tool| tools_ui::canonical_tool_name(&tool.name) == "todo")
+    // Keep redundant await-start notices and pinned todo tool messages in
+    // display_messages for history fidelity, but omit their transcript cards.
+    if super::super::messages::is_swarm_await_started(msg)
+        || (role == "tool"
+            && crate::config::config().display.pin_todos
+            && msg
+                .tool_data
+                .as_ref()
+                .is_some_and(|tool| tools_ui::canonical_tool_name(&tool.name) == "todo"))
     {
         // Hidden messages still occupy a position in the transcript cache.
         // Without this zero-length boundary, incremental updates compare later

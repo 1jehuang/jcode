@@ -1,6 +1,67 @@
 use super::*;
 
 #[test]
+fn dm_group_only_total_tokens_use_severity_color() {
+    markdown::set_center_code_blocks(false);
+    for (each, expected_color) in [
+        (1_999usize, rgb(118, 118, 118)),
+        (2_000, rgb(214, 184, 92)),
+        (5_999, rgb(214, 184, 92)),
+        (6_000, rgb(224, 118, 118)),
+    ] {
+        let messages = [
+            DisplayMessage::swarm("DM from fox", "a".repeat(each * 4)),
+            DisplayMessage::swarm("DM from sheep", "b".repeat(each * 4)),
+        ];
+        let row = render_agent_dm_run(&messages, 100);
+        let text = row.to_string();
+        assert!(text.starts_with("DMs · 🦊 🐑 · "), "{text}");
+        assert_eq!(text.matches(" tok").count(), 1, "{text}");
+        assert_eq!(text.matches(SWARM_EXPAND_BADGE).count(), 1, "{text}");
+        assert!(text.contains(&crate::util::format_approx_token_count(each * 2)));
+        for span in &row.spans {
+            assert_eq!(
+                span.style.fg,
+                Some(if span.content.contains("tok") {
+                    expected_color
+                } else {
+                    dim_color()
+                }),
+                "{span:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn dm_total_ignores_collapsible_summary_and_stays_stable_after_toggle() {
+    markdown::set_center_code_blocks(false);
+    let body = "Message body with private details";
+    let encoded =
+        jcode_tui_messages::encode_collapsible_swarm_content("Summary adds no real tokens", body);
+    assert_eq!(
+        swarm_notification_token_count(&encoded),
+        crate::util::estimate_tokens(body)
+    );
+    let toggled = jcode_tui_messages::toggle_collapsible_swarm_content(&encoded).unwrap();
+    assert_eq!(
+        swarm_notification_token_count(&toggled),
+        swarm_notification_token_count(body)
+    );
+}
+
+#[test]
+fn dm_group_reserves_total_and_badge_when_emoji_cluster_is_truncated() {
+    markdown::set_center_code_blocks(false);
+    let messages = vec![DisplayMessage::swarm("DM from fox", "a".repeat(400)); 20];
+    let row = render_agent_dm_run(&messages, 30);
+    assert!(row.width() <= 30);
+    let text = row.to_string();
+    assert!(text.contains("2k tok"), "{text}");
+    assert!(text.ends_with(SWARM_EXPAND_BADGE), "{text}");
+}
+
+#[test]
 fn collapsed_completion_lanes_match_pinned_todo_style() {
     markdown::set_center_code_blocks(false);
     for done in [0, 1] {

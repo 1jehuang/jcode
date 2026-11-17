@@ -24,8 +24,8 @@ use crate::message::{
     parse_background_task_notification_markdown,
     parse_background_task_progress_notification_markdown, strip_ansi_escape_sequences,
 };
-pub(super) use cache_support::{get_cached_message_lines, project_cached_message_lines};
 use cache_support::{centered_wrap_width, left_pad_lines_for_centered_mode};
+pub(super) use cache_support::{get_cached_message_lines, project_cached_message_lines};
 use jcode_tui_style::theme::{error_color, warning_color};
 use std::borrow::Cow;
 use unicode_width::UnicodeWidthStr;
@@ -376,6 +376,14 @@ pub(super) fn needs_message_separator(msg: &DisplayMessage) -> bool {
         && !is_kv_cache_footer(msg)
 }
 
+pub(crate) fn is_swarm_await_started(msg: &DisplayMessage) -> bool {
+    matches!(msg.effective_role(), "system" | "background_task" | "swarm")
+        && msg
+            .content
+            .trim_start()
+            .starts_with("🐝 **Swarm await started**")
+}
+
 /// In `all` mode and restored history, thinking lives in assistant Markdown,
 /// not a dedicated `reasoning` message. Use the explicit renderer sentinel,
 /// never ordinary italic/bold prose, to identify that activity-stream prefix.
@@ -388,6 +396,9 @@ pub(crate) fn render_system_message(
     width: u16,
     _diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
+    if is_swarm_await_started(msg) {
+        return Vec::new();
+    }
     if let Some(lines) = todo_completion::render(msg, width, _diff_mode) {
         return lines;
     }
@@ -2781,6 +2792,9 @@ pub(crate) fn render_background_task_message(
     width: u16,
     diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
+    if is_swarm_await_started(msg) {
+        return Vec::new();
+    }
     if msg
         .content
         .trim_start()
@@ -3581,7 +3595,9 @@ pub(crate) fn is_collapsed_agent_dm(msg: &DisplayMessage) -> bool {
 }
 
 pub(crate) fn render_agent_dm_run(messages: &[DisplayMessage], width: u16) -> Line<'static> {
-    let mut spans = Vec::new();
+    let chrome = Style::default().fg(dim_color());
+    let mut icons = Vec::new();
+    let mut total_tokens = 0usize;
     for msg in messages {
         let sender = msg
             .title
@@ -3589,24 +3605,32 @@ pub(crate) fn render_agent_dm_run(messages: &[DisplayMessage], width: u16) -> Li
             .unwrap_or_default()
             .trim_start_matches("DM from ");
         let sender = crate::id::extract_session_name(sender).unwrap_or(sender);
-        if !spans.is_empty() {
-            spans.push(Span::styled(" · ", Style::default().fg(dim_color())));
-        }
-        spans.push(Span::styled(
-            format!(
-                "{} {}  {}",
-                crate::id::session_icon(sender),
-                swarm_notification_usage_label(&msg.content, None)
-                    .unwrap_or_else(|| "0 tok".to_string()),
-                SWARM_EXPAND_BADGE,
-            ),
-            Style::default().fg(swarm_agent_color(sender)),
-        ));
+        icons.push(crate::id::session_icon(sender));
+        total_tokens = total_tokens.saturating_add(swarm_notification_token_count(&msg.content));
     }
+    let label = if messages.len() == 1 { "DM" } else { "DMs" };
+    let prefix = Line::from(Span::styled(
+        format!("{label} · {} · ", icons.join(" ")),
+        chrome,
+    ));
+    let badge = token_badge_for_count(total_tokens);
+    let suffix = vec![
+        Span::styled(badge.label, Style::default().fg(badge.color)),
+        Span::styled(format!(" {SWARM_EXPAND_BADGE}"), chrome),
+    ];
     let max_width = centered_wrap_width(width, markdown::center_code_blocks(), 96);
+    let suffix_width = suffix
+        .iter()
+        .map(|span| span.content.width())
+        .sum::<usize>();
+    let mut line = if prefix.width() + suffix_width <= max_width {
+        prefix
+    } else {
+        super::truncate_line_with_ellipsis_to_width(&prefix, max_width.saturating_sub(suffix_width))
+    };
+    line.spans.extend(suffix);
     let mut lines = vec![super::truncate_line_with_ellipsis_to_width(
-        &Line::from(spans),
-        max_width,
+        &line, max_width,
     )];
     if markdown::center_code_blocks() {
         left_pad_lines_for_centered_mode(&mut lines, width);
@@ -3800,10 +3824,7 @@ fn render_compact_agent_notification(
 /// "time since this agent's previous message, approx tokens" for a swarm
 /// notification. Time is omitted when unknown (first message, replay).
 fn swarm_notification_usage_label(content: &str, since_last_secs: Option<f32>) -> Option<String> {
-    let body = jcode_tui_messages::parse_collapsible_swarm_content(content)
-        .map(|parsed| format!("{} {}", parsed.tldr, parsed.body))
-        .unwrap_or_else(|| content.to_string());
-    let tokens = crate::util::estimate_tokens(body.trim());
+    let tokens = swarm_notification_token_count(content);
     if tokens == 0 {
         return None;
     }
@@ -3817,6 +3838,13 @@ fn swarm_notification_usage_label(content: &str, since_last_secs: Option<f32>) -
             None => tokens,
         },
     )
+}
+
+fn swarm_notification_token_count(content: &str) -> usize {
+    let body = jcode_tui_messages::parse_collapsible_swarm_content(content)
+        .map(|parsed| parsed.body)
+        .unwrap_or(content);
+    crate::util::estimate_tokens(body.trim())
 }
 
 fn render_compact_swarm_await(
@@ -4265,6 +4293,10 @@ struct ToolOutputTokenBadge {
 
 fn tool_output_token_badge(content: &str) -> ToolOutputTokenBadge {
     let tokens = crate::util::estimate_tokens(content);
+    token_badge_for_count(tokens)
+}
+
+fn token_badge_for_count(tokens: usize) -> ToolOutputTokenBadge {
     let color = match crate::util::approx_tool_output_token_severity(tokens) {
         crate::util::ApproxTokenSeverity::Normal => rgb(118, 118, 118),
         crate::util::ApproxTokenSeverity::Warning => rgb(214, 184, 92),

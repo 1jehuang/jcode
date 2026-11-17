@@ -262,6 +262,9 @@ impl App {
             // Display-only fixture, no model prompt or agent delivery is sent.
             self.display_messages = vec![
                 DisplayMessage::user("Compact agent messages"),
+                DisplayMessage::background_task(
+                    "🐝 **Swarm await started** · watching `fox, sheep`\n\nWaiting in the background.",
+                ),
                 DisplayMessage::swarm(
                     "DM from fox",
                     "The parser changes are ready for validation.",

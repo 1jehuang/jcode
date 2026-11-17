@@ -91,7 +91,7 @@ fn test_render_direct_message_as_compact_agent_row() {
     let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
 
     assert_eq!(rendered.len(), 1);
-    assert!(rendered[0].starts_with("🦊 "));
+    assert!(rendered[0].starts_with("DM · 🦊 · "));
     assert!(rendered[0].contains("tok"));
     assert!(!rendered[0].contains("parser tests"));
     assert!(
