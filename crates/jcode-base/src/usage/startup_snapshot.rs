@@ -353,9 +353,11 @@ mod tests {
         let second = dir.path().join("other.sock");
         let _other = UnixListener::bind(&second).unwrap();
         assert!(read_snapshot(&second, &publisher.path).is_none());
-        drop(listener);
         std::fs::remove_file(&socket).unwrap();
+        // Keep the old socket alive until replacement so its inode cannot be
+        // recycled within the filesystem's timestamp resolution.
         let _replacement = UnixListener::bind(&socket).unwrap();
+        drop(listener);
         publisher.publish(&[], &[]).unwrap();
         assert_eq!(read_private(&publisher.path).unwrap(), bytes);
         assert!(read_snapshot(&publisher.socket, &publisher.path).is_none());
@@ -368,10 +370,22 @@ mod tests {
         let _listener = UnixListener::bind(&socket).unwrap();
         let mut before_chmod = AccountUsageStartupPublisher::new(&socket, "before-chmod").unwrap();
         before_chmod.path = dir.path().join("old-usage.json");
-        // Ensure the metadata change is visible even on coarse test clocks.
-        std::thread::sleep(Duration::from_millis(2));
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let current = socket_identity(&socket).unwrap();
+        // Observe the chmod transition rather than assuming a fixed sleep
+        // exceeds the filesystem's ctime resolution. The deadline diagnoses
+        // a missing transition without allowing a hung test.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let current = loop {
+            std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let current = socket_identity(&socket).unwrap();
+            if current != before_chmod.identity {
+                break current;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "chmod did not change the socket generation within five seconds"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
         assert_eq!(before_chmod.identity.inode, current.inode);
         assert_ne!(before_chmod.identity, current);
         before_chmod.publish(&[], &[]).unwrap();
