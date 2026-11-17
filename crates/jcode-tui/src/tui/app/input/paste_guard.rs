@@ -18,7 +18,12 @@ const PASTE_ENTER_SUPPRESS_WINDOW: Duration = Duration::from_millis(150);
 /// `KeyCode::Enter` with `KeyModifiers::CONTROL`**, not as a plain Enter and not as a
 /// text character. A human's deliberate `Ctrl+Enter` never follows a character
 /// keystroke within this window, so the two are distinguishable without a timer.
-const PASTED_NEWLINE_MAX_GAP: Duration = Duration::from_millis(60);
+// 150ms rather than the ~60ms a quiet machine shows: a busy machine can deliver a
+// pasted newline that long after the previous character, and at 60ms that gap read as
+// a deliberate chord and split a seven-line paste into two prompts (measured: one run
+// in five under load, none in five when quiet). A human pressing Ctrl+Enter does not
+// do it within 150ms of a character keystroke.
+const PASTED_NEWLINE_MAX_GAP: Duration = Duration::from_millis(150);
 
 thread_local! {
     static LAST_CHAR_PRESS: Cell<Option<Instant>> = const { Cell::new(None) };
