@@ -71,7 +71,7 @@ impl App {
         }
 
         // A started copy sequence (e.g. Ctrl+X then Ctrl+Y) beats offer accept keys.
-        if super::copy_last_response::handle_key_if_pending(self, code, modifiers) {
+        if crate::tui::app::copy_last_response::handle_key_if_pending(self, code, modifiers) {
             return Ok(());
         }
 
