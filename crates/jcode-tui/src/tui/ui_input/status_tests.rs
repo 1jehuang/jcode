@@ -193,7 +193,9 @@ fn live_processing_line_uses_real_tokens_transport_and_tool_intent() {
     };
     let line = live_processing_status_line(&status, Some(0.0), "⠋");
     let text = line.to_string();
-    assert!(text.contains("running bash · Verify 界 output"), "{text}");
+    // State labels are bracketed by design (see the status-bar readability work):
+    // `[tool: bash]` replaces the older "running bash" phrasing.
+    assert!(text.contains("[tool: bash] Verify 界 output"), "{text}");
     assert!(
         text.contains("↑12k ↓456") && text.contains("existing websocket") && text.contains("12s"),
         "{text}"
@@ -429,19 +431,20 @@ fn swarm_effort_model_status_uses_shared_label() {
 }
 
 #[test]
-fn running_tool_header_emphasizes_detail_over_tool_name() {
+fn running_tool_header_labels_the_tool_and_appends_detail() {
     let accent = Color::Rgb(12, 34, 56);
     let spans = running_tool_header_spans("*", "bash", Some("cargo test"), accent);
 
     assert_eq!(spans.len(), 3);
     assert_eq!(spans[0].content.as_ref(), "*");
     assert_eq!(spans[0].style.fg, Some(accent));
-    assert_eq!(spans[1].content.as_ref(), " running bash");
-    assert_eq!(spans[1].style.fg, Some(dim_color()));
-    assert!(!spans[1].style.add_modifier.contains(Modifier::BOLD));
-    assert_eq!(spans[2].content.as_ref(), " · cargo test");
-    assert_eq!(spans[2].style.fg, Some(accent));
-    assert!(spans[2].style.add_modifier.contains(Modifier::BOLD));
+    // The tool label carries the emphasis; the detail follows in plain text.
+    assert_eq!(spans[1].content.as_ref(), " [tool: bash]");
+    assert_eq!(spans[1].style.fg, Some(status_text_color()));
+    assert!(spans[1].style.add_modifier.contains(Modifier::BOLD));
+    assert_eq!(spans[2].content.as_ref(), " cargo test");
+    assert_eq!(spans[2].style.fg, Some(status_text_color()));
+    assert!(!spans[2].style.add_modifier.contains(Modifier::BOLD));
 }
 
 #[test]
@@ -709,7 +712,7 @@ fn streaming_status_spans_keep_spinner_while_finalizing() {
 
     assert_eq!(spans.len(), 3);
     assert_eq!(spans[0].content.as_ref(), "⠋");
-    assert_eq!(spans[1].content.as_ref(), " 4.2s");
+    assert_eq!(spans[1].content.as_ref(), " [streaming] 4.2s");
     assert_eq!(spans[2].content.as_ref(), " · +1 queued");
 }
 
@@ -719,7 +722,7 @@ fn streaming_status_spans_keep_spinner_after_message_end_while_finalizing() {
 
     assert_eq!(spans.len(), 2);
     assert_eq!(spans[0].content.as_ref(), "⠋");
-    assert_eq!(spans[1].content.as_ref(), " finalizing");
+    assert_eq!(spans[1].content.as_ref(), " [streaming] finalizing");
 }
 
 #[test]
