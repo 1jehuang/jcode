@@ -1,5 +1,5 @@
 //! Exact 2-by-2 RGB box averages for the thumbnail size-limit retry.
-use image::RgbImage;
+use image::{GenericImageView, RgbImage};
 
 pub(super) fn half(image: &RgbImage) -> RgbImage {
     let (width, height) = image.dimensions();
@@ -22,7 +22,8 @@ pub(super) fn half(image: &RgbImage) -> RgbImage {
     if source.len() != stride * height as usize {
         return image::imageops::thumbnail(image, width / 2, height / 2);
     }
-    let mut output = RgbImage::new(width / 2, height / 2);
+    // Use the same factory as imageops so color-space metadata is retained.
+    let mut output = image.buffer_with_dimensions(width / 2, height / 2);
     let target = output.as_mut();
     let mut y = 0usize;
     let mut destination = 0usize;

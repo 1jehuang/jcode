@@ -58,6 +58,22 @@ fn half_preserves_every_possible_four_pixel_sum_and_jpeg() {
 }
 
 #[test]
+fn half_preserves_color_space_in_fast_and_fallback_paths() {
+    use image::metadata::Cicp;
+    for color in [Cicp::SRGB, Cicp::SRGB_LINEAR, Cicp::DISPLAY_P3] {
+        for (width, height) in [(64, 48), (63, 47), (1024, 576), (2, 2048), (0, 2)] {
+            let mut image = fixture(width, height);
+            image.set_color_space(color).unwrap();
+            let expected = reference(&image);
+            let actual = half(&image);
+            assert_eq!(actual.color_space(), expected.color_space());
+            assert_eq!(actual.color_space(), color);
+            assert_eq!(actual, expected);
+        }
+    }
+}
+
+#[test]
 #[ignore = "paired unchanged-selfdev exact half-size component benchmark"]
 fn half_abba_benchmark() {
     for (width, height) in [(2, 2), (64, 64), (1024, 1024), (1024, 576), (1023, 769)] {
