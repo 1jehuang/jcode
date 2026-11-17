@@ -3599,16 +3599,19 @@ pub(crate) fn render_agent_dm_run(messages: &[DisplayMessage], width: u16) -> Li
     let mut icons = Vec::new();
     let mut total_tokens = 0usize;
     for msg in messages {
-        let sender = msg
+        let Some(sender) = msg
             .title
             .as_deref()
-            .unwrap_or_default()
-            .trim_start_matches("DM from ");
+            .and_then(|title| title.strip_prefix("DM from "))
+        else {
+            crate::logging::warn("Skipping malformed agent DM in compact message group");
+            continue;
+        };
         let sender = crate::id::extract_session_name(sender).unwrap_or(sender);
         icons.push(crate::id::session_icon(sender));
         total_tokens = total_tokens.saturating_add(swarm_notification_token_count(&msg.content));
     }
-    let label = if messages.len() == 1 { "DM" } else { "DMs" };
+    let label = if icons.len() == 1 { "DM" } else { "DMs" };
     let prefix = Line::from(Span::styled(
         format!("{label} · {} · ", icons.join(" ")),
         chrome,
