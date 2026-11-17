@@ -41,6 +41,13 @@ async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: boo
         None,
     )));
     let busy_guard = if busy { Some(agent.lock().await) } else { None };
+    // Attaching the agent repairs a persisted model it does not recognise to the
+    // provider's own, and persists the repair, so the model this fallback can
+    // serve is whatever is on disk now - not the fixture's original name.
+    let persisted_model = crate::session::Session::load(session_id)
+        .ok()
+        .and_then(|session| session.model)
+        .unwrap_or_else(|| provider.model().to_string());
 
     let (stream_a, mut stream_b) = crate::transport::stream_pair().expect("stream pair");
     let (_reader_a, writer_a) = stream_a.into_split();
@@ -102,7 +109,7 @@ async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: boo
             assert_eq!(
                 provider_model.as_deref(),
                 Some(if busy {
-                    "persisted-model"
+                    persisted_model.as_str()
                 } else {
                     "mock-model"
                 })
