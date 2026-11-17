@@ -9,9 +9,8 @@ pub(super) fn prompt_chars(tool: &ToolDefinition) -> usize {
         + value_chars(&tool.input_schema)
 }
 
-// Count string escaping directly and format borrowed schema values instead of
-// cloning the complete schema tree into another Value. Value's Display uses
-// the compact serializer, preserving escaping and number formatting.
+// Count string escaping directly. Schema counting below reuses Value's Display,
+// preserving the compact serializer's escaping and number formatting.
 fn string_chars(value: &str) -> usize {
     2 + value
         .chars()
@@ -24,8 +23,30 @@ fn string_chars(value: &str) -> usize {
 }
 
 fn value_chars(value: &Value) -> usize {
-    value.to_string().len()
+    struct ByteCount(usize);
+
+    impl std::fmt::Write for ByteCount {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            self.0 += text.len();
+            Ok(())
+        }
+    }
+
+    // Keep serialization inside serde_json's existing Display implementation.
+    // A generic io::Write serializer or a local recursive walk is significantly
+    // slower in the selfdev profile, where serde_json itself is optimized.
+    let mut count = ByteCount(0);
+    match std::fmt::write(&mut count, format_args!("{value}")) {
+        Ok(()) => count.0,
+        // Preserve the previous Display failure behavior without introducing
+        // a new panic site. Value serialization normally cannot fail.
+        Err(_) => value.to_string().len(),
+    }
 }
+
+#[cfg(test)]
+#[path = "tool_prompt_size_tests.rs"]
+mod candidate_tests;
 
 #[cfg(test)]
 mod tests {
