@@ -674,16 +674,11 @@ fn wire_fingerprint(messages: &[WireMessage], end: usize) -> u64 {
     hash.finish()
 }
 
+#[path = "mobile_sync_incremental_cache.rs"]
+mod incremental_cache;
+
 fn incremental_messages(session: &Session, progress: &SessionProgress) -> (Vec<WireMessage>, u64) {
-    let mut messages = wire_messages(session, 0);
-    let fingerprint = wire_fingerprint(&messages, session.messages.len());
-    let unchanged_prefix = progress.wire_version == WIRE_VERSION
-        && progress.uploaded <= session.messages.len()
-        && progress.fingerprint == Some(wire_fingerprint(&messages, progress.uploaded));
-    if unchanged_prefix {
-        messages.retain(|message| message.seq >= progress.uploaded);
-    }
-    (messages, fingerprint)
+    incremental_cache::messages(session, progress)
 }
 
 fn mtime_ms(path: &Path) -> u64 {
