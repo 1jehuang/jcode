@@ -786,13 +786,16 @@ impl Server {
             client_connections: Arc::clone(&self.client_connections),
         });
         lane_dispatch::spawn_startup_scan(Duration::from_secs(5));
+        let temporary_server = lifecycle::temporary_server_enabled();
         // Every resume History asks whether the session has persisted
         // background tasks. The first ask after a reload scans the whole task
         // directory (~250ms) while clients are reconnecting; build the index
         // now, off the async workers, so the storm only sees cache hits.
-        std::thread::spawn(|| {
-            let _ = crate::background::global().persisted_detached_running_tasks_for_session("");
-        });
+        if !temporary_server {
+            std::thread::spawn(|| {
+                let _ = crate::background::global().persisted_detached_running_tasks_for_session("");
+            });
+        }
         let registry_info = self.build_registry_info();
 
         let runtime = self.runtime();
@@ -811,7 +814,9 @@ impl Server {
 
         // Older snapshots predate the resume index. Backfill off the first-frame
         // path. Lookups retain an authoritative fallback until it completes.
-        crate::recent_session_index::backfill_resume_metadata_in_background();
+        if !temporary_server {
+            crate::recent_session_index::backfill_resume_metadata_in_background();
+        }
 
         // Persist auxiliary discovery metadata after the server is already live.
         self.spawn_registry_metadata_publisher(registry_info);
@@ -840,7 +845,9 @@ impl Server {
         // Warm the lightweight session-search index after daemon startup. This
         // keeps the first agent `session_search` call from paying the cold
         // indexing cost while leaving exhaustive searches available on demand.
-        crate::tool::spawn_recent_index_warmup();
+        if temporary_server_policy.is_none() {
+            crate::tool::spawn_recent_index_warmup();
+        }
 
         // Reconcile background-task status files orphaned by a previous
         // process image (crash or exec-based reload). Non-detached tasks die
@@ -1977,6 +1984,7 @@ impl Server {
                 // Compact todo names and progress are surfaced on the inline
                 // swarm strip so a coordinator can see each managed agent's work.
                 BusEvent::TodoUpdated(event) => {
+                    crate::agents_status::todos_updated(&event.session_id, &event.todos);
                     dispatch_swarm_todo_progress(&event, &swarm_members, &swarms_by_id).await;
                     // Worker-owned lanes whose dependencies are met get a
                     // worker automatically; no launch call is involved.
