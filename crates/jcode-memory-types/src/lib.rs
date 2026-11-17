@@ -742,29 +742,44 @@ fn format_entries_for_prompt_with_header(
 }
 
 pub fn normalize_search_text(text: &str) -> String {
-    let lowered = text.trim().to_lowercase();
-    let mut normalized = String::with_capacity(lowered.len());
-    let mut last_was_space = true;
+    let mut normalized = String::with_capacity(text.len());
+    append_normalized_search_text(&mut normalized, text);
+    normalized
+}
 
-    for ch in lowered.chars() {
-        let mapped = if ch.is_whitespace() || matches!(ch, '-' | '_' | '/' | '\\' | '.' | ':') {
-            ' '
-        } else {
-            ch
-        };
-
-        if mapped == ' ' {
-            if !last_was_space {
-                normalized.push(' ');
-                last_was_space = true;
+/// Append a normalized component, separating nonempty components with one space.
+/// Keep whole-string Unicode lowercasing for contextual mappings (Greek sigma).
+fn append_normalized_search_text(normalized: &mut String, text: &str) {
+    let mut pending_space = !normalized.is_empty();
+    if text.is_ascii() {
+        for byte in text.bytes() {
+            if byte.is_ascii_whitespace()
+                || matches!(byte, b'\x0b' | b'-' | b'_' | b'/' | b'\\' | b'.' | b':')
+            {
+                pending_space = !normalized.is_empty();
+            } else {
+                if pending_space {
+                    normalized.push(' ');
+                    pending_space = false;
+                }
+                normalized.push(byte.to_ascii_lowercase() as char);
             }
-        } else {
-            normalized.push(mapped);
-            last_was_space = false;
         }
+        return;
     }
 
-    normalized.trim_end().to_string()
+    let lowered = text.trim().to_lowercase();
+    for ch in lowered.chars() {
+        if ch.is_whitespace() || matches!(ch, '-' | '_' | '/' | '\\' | '.' | ':') {
+            pending_space = !normalized.is_empty();
+        } else {
+            if pending_space {
+                normalized.push(' ');
+                pending_space = false;
+            }
+            normalized.push(ch);
+        }
+    }
 }
 
 pub fn is_skill_memory(entry: &MemoryEntry) -> bool {
@@ -812,22 +827,15 @@ pub fn skill_retrieval_bonus(entry: &MemoryEntry, query_terms: &HashSet<String>)
 }
 
 pub fn normalize_memory_search_text(content: &str, tags: &[String]) -> String {
-    let normalized_content = normalize_search_text(content);
-    let normalized_tags: Vec<String> = tags
-        .iter()
-        .map(|tag| normalize_search_text(tag))
-        .filter(|tag| !tag.is_empty())
-        .collect();
-
-    if normalized_tags.is_empty() {
-        return normalized_content;
+    let capacity = tags.iter().fold(content.len(), |len, tag| {
+        len.saturating_add(tag.len()).saturating_add(1)
+    });
+    let mut normalized = String::with_capacity(capacity);
+    append_normalized_search_text(&mut normalized, content);
+    for tag in tags {
+        append_normalized_search_text(&mut normalized, tag);
     }
-
-    if normalized_content.is_empty() {
-        return normalized_tags.join(" ");
-    }
-
-    format!("{} {}", normalized_content, normalized_tags.join(" "))
+    normalized
 }
 
 pub fn memory_matches_search(memory: &MemoryEntry, normalized_query: &str) -> bool {
