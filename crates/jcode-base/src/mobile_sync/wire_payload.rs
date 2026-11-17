@@ -3,6 +3,13 @@ use super::*;
 #[path = "thumbnail_identity.rs"]
 mod thumbnail_identity;
 
+#[path = "thumbnail_half.rs"]
+mod thumbnail_half;
+
+#[cfg(test)]
+#[path = "thumbnail_pipeline_tests.rs"]
+mod pipeline_tests;
+
 #[cfg(test)]
 #[path = "wire_payload_tests.rs"]
 mod tests;
@@ -246,10 +253,6 @@ pub(super) fn image_thumbnail(reader: impl std::io::BufRead + std::io::Seek) -> 
                 data: base64::engine::general_purpose::STANDARD.encode(bytes),
             });
         }
-        thumbnail = image::imageops::thumbnail(
-            &thumbnail,
-            (thumbnail.width() / 2).max(1),
-            (thumbnail.height() / 2).max(1),
-        );
+        thumbnail = thumbnail_half::half(&thumbnail);
     }
 }
