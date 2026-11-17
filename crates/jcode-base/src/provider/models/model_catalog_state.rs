@@ -373,8 +373,7 @@ pub fn cached_openai_service_tiers_for_scope(scope: &str) -> Option<HashMap<Stri
 /// process-wide context cache contains Codex limits and must not constrain a
 /// platform API route (or a different saved Codex account).
 pub(crate) fn openai_route_context_limit_resolver() -> impl Fn(&str, &str) -> Option<usize> {
-    let store =
-        load_persisted_model_catalog_store(OPENAI_MODEL_CATALOG_CACHE_FILE).unwrap_or_default();
+    let store = load_persisted_model_catalog_store(OPENAI_MODEL_CATALOG_CACHE_FILE);
     let api_scope = configured_openai_api_key_catalog_scope();
     let oauth_scope = current_openai_account_scope();
     move |model, api_method| {
@@ -388,7 +387,7 @@ pub(crate) fn openai_route_context_limit_resolver() -> impl Fn(&str, &str) -> Op
         };
         context_limit_for_model_with_provider_and_cache(model, Some("openai"), |model| {
             scope
-                .and_then(|scope| store.scopes.get(scope))
+                .and_then(|scope| store.as_ref()?.scopes.get(scope))
                 .and_then(|catalog| catalog.context_limits.get(model))
                 .copied()
         })
