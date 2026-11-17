@@ -1,6 +1,9 @@
 #[path = "turn_system_reminder.rs"]
 pub(super) mod system_reminder;
 use super::*;
+#[path = "turn_prepared_turn.rs"]
+mod prepared_turn;
+
 use crate::message::ToolDefinition;
 
 /// Keep raw JSON separate for every in-flight call. Unkeyed providers address
@@ -13,27 +16,6 @@ struct PendingStreamingTools {
 impl PendingStreamingTools {
     fn start(&mut self, tool: ToolCall) {
         self.calls.push((tool, String::new()));
-    }
-
-    fn input(&mut self, id: Option<&str>, delta: &str) {
-        let call = match id {
-            Some(id) => self.calls.iter_mut().find(|(tool, _)| tool.id == id),
-            None => self.calls.last_mut(),
-        };
-        if let Some((_, input)) = call {
-            input.push_str(delta);
-        }
-    }
-
-    fn finish(&mut self, id: Option<&str>) -> Option<ToolCall> {
-        let index = match id {
-            Some(id) => self.calls.iter().position(|(tool, _)| tool.id == id)?,
-            None => self.calls.len().checked_sub(1)?,
-        };
-        let (mut tool, input) = self.calls.remove(index);
-        tool.input = ToolCall::parse_streamed_input_to_object(&input);
-        tool.refresh_intent_from_input();
-        Some(tool)
     }
 
     fn signature(&mut self, id: &str, signature: &str) {
