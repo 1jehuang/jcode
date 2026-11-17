@@ -254,6 +254,7 @@ pub fn format_account_model_availability_detail(
 #[path = "models/model_catalog_state.rs"]
 mod model_catalog_state;
 pub(crate) use model_catalog_state::normalize_model_id;
+pub(crate) use model_catalog_state::openai_route_context_limit_resolver;
 pub use model_catalog_state::{
     anthropic_catalog_scope_for_route, cached_anthropic_model_ids,
     cached_anthropic_model_ids_for_scope, cached_context_limit_for_model, cached_openai_model_ids,
@@ -706,6 +707,21 @@ pub fn provider_for_model(model: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod catalog_ownership_tests {
     use super::*;
+
+    #[test]
+    fn openai_route_capacity_ignores_unscoped_context_cache() {
+        let _env = crate::storage::lock_test_env();
+        let model = "gpt-6-regression-credential-scoped-context";
+        populate_context_limits(HashMap::from([(model.to_string(), 123_000)]));
+        let resolver = openai_route_context_limit_resolver();
+        let legacy = context_limit_for_model_with_provider(model, Some("openai"));
+        let api = resolver(model, "openai-api");
+        let account = resolver(model, "openai-oauth@regression-new-account");
+        CONTEXT_LIMIT_CACHE.write().unwrap().remove(model);
+        assert_eq!(legacy, Some(123_000), "reproduce the poisoned global cache");
+        assert_eq!(api, Some(1_000_000));
+        assert_eq!(account, Some(1_000_000));
+    }
 
     #[test]
     fn model_picker_transfers_first_string_and_preserves_order() {
