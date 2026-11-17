@@ -1,4 +1,3 @@
-
 #[test]
 fn test_scroll_render_bottom() {
     let _render_lock = scroll_render_test_lock();
