@@ -423,7 +423,16 @@ fn parse_api_response(body: &str) -> anyhow::Result<PricingCache> {
     }
 
     fn number(raw: Option<&RawValue>) -> Option<f64> {
-        serde_json::from_str(raw?.get()).ok()
+        match serde_json::from_str(raw?.get()) {
+            Ok(value) => Some(value),
+            // Catalog fields with a nonnumeric type are intentionally absent,
+            // matching the previous Value::as_f64 projection.
+            Err(error) if error.is_data() => None,
+            Err(error) => {
+                crate::logging::debug(&format!("Cannot decode pricing numeric field: {error}"));
+                None
+            }
+        }
     }
 
     let top: HashMap<String, &RawValue> = serde_json::from_str(body)?;
