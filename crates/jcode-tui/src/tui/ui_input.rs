@@ -1792,7 +1792,7 @@ fn overscroll_fact_spans(
             dir.clone()
         } else {
             dir.split(" → ")
-                .map(|path| path.rsplit('/').find(|seg| !seg.is_empty()).unwrap_or(path))
+                .map(crate::tui::session_facts::last_path_segment)
                 .collect::<Vec<_>>()
                 .join(" → ")
         };

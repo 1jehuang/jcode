@@ -1354,9 +1354,14 @@ fn status_line_is_always_pinned_with_pink_model_on_real_app() {
     for width in [120u16, 60] {
         let (mut app, mut terminal) = create_scroll_test_app(width, 30, 0, 36);
         let pink = ratatui::style::Color::Rgb(255, 135, 200);
-        let last_row_pink_cells = |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>| {
+        // The pinned status line is published by the renderer; the compact
+        // status bar can sit underneath it, so the frame's last row is not a
+        // reliable address for it.
+        let status_line_pink_cells = |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>| {
             let buf = terminal.backend().buffer();
-            let y = buf.area.height - 1;
+            let y = crate::tui::ui::last_overscroll_status_area()
+                .expect("status line area published by the frame")
+                .y;
             (0..buf.area.width)
                 .filter(|&x| buf[(x, y)].fg == pink && buf[(x, y)].symbol().trim() != "")
                 .count()
@@ -1365,7 +1370,7 @@ fn status_line_is_always_pinned_with_pink_model_on_real_app() {
         let at_rest = render_and_snap(&app, &mut terminal);
         assert!(!at_rest.contains("(overscroll"), "w={width}: {at_rest}");
         assert!(
-            last_row_pink_cells(&terminal) >= 3,
+            status_line_pink_cells(&terminal) >= 3,
             "pinned pink model at rest (w={width}): {at_rest}"
         );
 
@@ -1383,7 +1388,7 @@ fn status_line_is_always_pinned_with_pink_model_on_real_app() {
             let frame = render_and_snap(&app, &mut terminal);
             assert!(!frame.contains("(overscroll"), "w={width}: {frame}");
             assert!(
-                last_row_pink_cells(&terminal) >= 3,
+                status_line_pink_cells(&terminal) >= 3,
                 "status line stays pinned after {kind:?} (w={width}): {frame}"
             );
         }

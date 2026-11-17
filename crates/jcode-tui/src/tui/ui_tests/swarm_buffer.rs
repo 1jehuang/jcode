@@ -421,13 +421,12 @@ fn overscroll_line_row(state: &TestState, width: u16) -> String {
         .draw(|frame| crate::tui::ui::draw(frame, state))
         .expect("overscroll frame");
     let rows = buffer_rows(&terminal);
-    // The status line is pinned directly below the input, so it is the last
-    // non-blank row of the frame (rows below it are unused viewport).
-    rows.iter()
-        .rev()
-        .find(|row| !row.trim().is_empty())
-        .cloned()
-        .unwrap_or_default()
+    // Read the row the renderer published for the pinned status line. Picking
+    // the last non-blank row instead would silently grab the compact status bar,
+    // which is drawn underneath it on wide frames.
+    let area = crate::tui::ui::last_overscroll_status_area()
+        .expect("status line area published by the frame");
+    rows.get(area.y as usize).cloned().unwrap_or_default()
 }
 
 #[test]
@@ -533,10 +532,9 @@ fn overscroll_model_is_pink() {
             .map(|x| buf[(x, y)].symbol().to_string())
             .collect()
     };
-    let y = (0..buf.area.height)
-        .rev()
-        .find(|&y| !row_at(y).trim().is_empty())
-        .expect("status line rendered");
+    let y = crate::tui::ui::last_overscroll_status_area()
+        .expect("status line area published by the frame")
+        .y;
     let row = row_at(y);
     let col = row
         .find("GPT-5.6 Sol")

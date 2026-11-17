@@ -158,8 +158,6 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/initiatives"
             | "/goals"
             | "/goal"
-            | "/dictate"
-            | "/dictation"
             | "/debug-fixture"
             | "/subagent-model"
             | "/z"

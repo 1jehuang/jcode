@@ -1682,6 +1682,11 @@ pub struct LayoutSnapshot {
     pub diagram_area: Option<Rect>,
     pub diff_pane_area: Option<Rect>,
     pub input_area: Option<Rect>,
+    /// The pinned session status line below the input, when the frame had room
+    /// for it. Consumers outside `draw` need this to address that row: it is
+    /// not always the last row of the frame, because the compact status bar is
+    /// drawn underneath it once the chat area is wide enough.
+    pub overscroll_area: Option<Rect>,
 }
 
 #[cfg(not(test))]
@@ -1720,6 +1725,7 @@ pub fn record_layout_snapshot(
                 diagram_area,
                 diff_pane_area,
                 input_area,
+                overscroll_area: None,
             });
         });
         return;
@@ -1732,9 +1738,42 @@ pub fn record_layout_snapshot(
                 diagram_area,
                 diff_pane_area,
                 input_area,
+                overscroll_area: None,
             });
         }
     }
+}
+
+/// Record the pinned status line's row for the frame being drawn.
+///
+/// A separate call site from [`record_layout_snapshot`] because the status line
+/// is laid out and drawn after the snapshot is published. It only fills in the
+/// field; the snapshot itself stays owned by the messages/input recorder.
+pub fn record_overscroll_status_area(area: Rect) {
+    if secondary_render_active() {
+        return;
+    }
+    fn apply(snapshot: &mut Option<LayoutSnapshot>, area: Rect) {
+        if let Some(snapshot) = snapshot.as_mut() {
+            snapshot.overscroll_area = Some(area);
+        }
+    }
+    #[cfg(test)]
+    {
+        TEST_LAST_LAYOUT.with(|snapshot| apply(&mut snapshot.borrow_mut(), area));
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        if let Ok(mut snapshot) = last_layout_state().lock() {
+            apply(&mut snapshot, area);
+        }
+    }
+}
+
+/// Row geometry of the pinned status line in the last drawn frame.
+pub fn last_overscroll_status_area() -> Option<Rect> {
+    last_layout_snapshot().and_then(|snapshot| snapshot.overscroll_area)
 }
 
 pub fn last_layout_snapshot() -> Option<LayoutSnapshot> {
@@ -3932,6 +3971,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     );
 
     if overscroll_height > 0 {
+        record_overscroll_status_area(chunks[8]);
         input_ui::draw_overscroll_status(frame, app, chunks[8]);
     }
 

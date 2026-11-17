@@ -1454,7 +1454,7 @@ pub(super) fn get_tool_summary_with_budget(
                 .get("file_path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let short_file = file.rsplit('/').next().unwrap_or(file);
+            let short_file = crate::tui::session_facts::last_path_segment(file);
             let line = tool.input.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
             format!("{} {}:{}", op, short_file, line)
         }

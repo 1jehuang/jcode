@@ -311,8 +311,11 @@ fn test_remote_definitive_exhaustion_immediately_stages_exact_route_not_resend()
     });
 }
 
+/// A generic failure is ambiguous, so it keeps the cancelable countdown even
+/// when `exhausted_usage_immediate_failover` is on; the immediate path is
+/// reserved for definitive exhaustion (see `docs/USAGE_LIMIT_ROUTING.md`).
 #[test]
-fn test_remote_failover_first_generic_failure_is_instant_then_countdown_and_bounded() {
+fn test_remote_failover_generic_failure_keeps_the_countdown_then_stays_bounded() {
     with_temp_jcode_home(|| {
         write_test_config(
             "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
@@ -328,8 +331,11 @@ fn test_remote_failover_first_generic_failure_is_instant_then_countdown_and_boun
         write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
 
         app.handle_provider_failover_prompt_with_payload(prompt.clone(), payload.clone());
-        assert!(app.pending_provider_failover.is_none());
-        assert!(app.pending_automatic_failover_route.is_some());
+        assert!(
+            app.pending_provider_failover.is_some(),
+            "an ambiguous failure must keep the countdown and its cancel key"
+        );
+        assert!(app.pending_automatic_failover_route.is_none());
         let count = app.display_messages().len();
         app.handle_provider_failover_prompt_with_payload(prompt.clone(), payload.clone());
         assert_eq!(app.display_messages().len(), count);
@@ -337,6 +343,7 @@ fn test_remote_failover_first_generic_failure_is_instant_then_countdown_and_boun
 
         // Simulate the acknowledged fallback failing. New targets wait rather
         // than immediately chaining, even if they report definitive exhaustion.
+        app.pending_provider_failover = None;
         app.pending_automatic_failover_route = None;
         app.pending_fallback_resend = None;
         prompt.reason = "OAuth usage exhausted".into();

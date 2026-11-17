@@ -266,9 +266,13 @@ fn swarm_popout_daemon_client_preserves_runtime_and_ssh_stays_context_free() {
     }
 }
 
-/// Plain typing (letters, space, enter, arrows without alt) must pass
+/// Plain typing (letters, enter, arrows without alt) must pass
 /// through so the user can keep writing into the chat input while the
 /// panel is focused.
+///
+/// Space is deliberately absent: the panel claims it for multi-select.
+/// `space_toggles_select` pins that half, so together the two tests
+/// describe the exact boundary.
 #[test]
 fn plain_typing_is_not_captured() {
     for code in [
@@ -277,7 +281,6 @@ fn plain_typing_is_not_captured() {
         KeyCode::Char('o'),
         KeyCode::Char('g'),
         KeyCode::Char('G'),
-        KeyCode::Char(' '),
         KeyCode::Enter,
         KeyCode::Up,
         KeyCode::Down,
