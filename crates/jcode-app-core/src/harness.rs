@@ -13,6 +13,23 @@ use std::sync::{LazyLock, Mutex};
 
 pub const MAX_INTERVENTIONS: u32 = 2;
 const MAX_AUTO_ROUTED: usize = 3;
+const MIN_ROUTE_SCORE: usize = 2;
+/// Internal resume/reload/compaction messages are not user intent.
+const SYSTEM_PREFIXES: &[&str] = &[
+    "[resume",
+    "[reload",
+    "[system",
+    "## Previous Conversation Summary",
+    "<system-reminder>",
+];
+/// Generic words never route on their own (as a tag or a skill name).
+const STOP_WORDS: &[&str] = &[
+    "build", "do", "background", "server", "file", "files", "code", "run", "check",
+    "test", "tests", "update", "fix", "make", "plan", "release", "deploy", "install",
+    "setup", "init", "talk", "hero", "design", "data", "search", "review", "debug",
+    "web", "page", "image", "video", "text", "api", "tool", "tools", "skill", "skills",
+    "log", "logs", "git", "app", "ui", "doc", "docs", "report", "audit", "memory",
+];
 const MAX_CONSTRAINT_LINES: usize = 8;
 
 pub const CORE_INVARIANT: &str = "ACTION OVER MEMORY: Never answer factual, codebase, system-state, or data questions from memory. Every claim must be verified via tool calls executed in this session. Do not stop after initial discovery; complete the full verification/action workflow.";
@@ -98,19 +115,34 @@ fn contains_phrase(haystack: &str, needle: &str) -> bool {
 /// Skills whose `triggers` (or exact name) appear in the prompt. Descriptions
 /// are deliberately not matched: with hundreds of installed skills they
 /// route nearly everything.
+/// Multi-word phrases and a non-generic skill name weigh 2, lone words 1,
+/// generic words 0, so one incidental tag never routes alone.
+fn route_score(text: &str, name: &str, triggers: &[String]) -> usize {
+    let generic = |t: &str| STOP_WORDS.contains(&t.trim().to_lowercase().as_str());
+    let tags: usize = triggers
+        .iter()
+        .filter(|t| contains_phrase(text, t))
+        .map(|t| if t.trim().contains(' ') { 2 } else if generic(t) { 0 } else { 1 })
+        .sum();
+    tags + if !generic(name) && contains_phrase(text, name) { 2 } else { 0 }
+}
+
+fn is_system_message(prompt: &str) -> bool {
+    let head = prompt.trim_start();
+    SYSTEM_PREFIXES.iter().any(|p| head.starts_with(p))
+}
+
 pub fn route_skills(prompt: &str, skills: &SkillRegistry) -> Vec<String> {
+    if is_system_message(prompt) {
+        return Vec::new();
+    }
     let text = prompt.to_lowercase();
     let mut hits: Vec<(usize, String)> = skills
         .list()
         .into_iter()
         .filter_map(|s| {
-            let score = s
-                .triggers
-                .iter()
-                .filter(|t| contains_phrase(&text, t))
-                .count()
-                + usize::from(contains_phrase(&text, &s.name));
-            (score > 0).then(|| (score, s.name.clone()))
+            let score = route_score(&text, &s.name, &s.triggers);
+            (score >= MIN_ROUTE_SCORE).then(|| (score, s.name.clone()))
         })
         .collect();
     hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
@@ -445,6 +477,19 @@ mod tests {
         assert!(!is_actionable("thanks!"));
         assert!(!is_actionable("hi"));
         assert!(is_actionable("why do CRM contacts have no address?"));
+    }
+
+    #[test]
+    fn generic_words_and_resume_messages_do_not_route() {
+        let v = |xs: &[&str]| xs.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+        let bg = v(&["liquid", "fluid", "background", "hero"]);
+        let t = "restart the background server and build it";
+        assert!(route_score(t, "frame-liquid-bg-hero", &bg) < MIN_ROUTE_SCORE);
+        assert!(route_score(t, "build", &[]) < MIN_ROUTE_SCORE);
+        assert!(route_score("liquid fluid hero", "frame-liquid-bg-hero", &bg) >= MIN_ROUTE_SCORE);
+        assert!(route_score("use code mode", "code-mode", &v(&["code mode"])) >= MIN_ROUTE_SCORE);
+        assert!(is_system_message("## Previous Conversation Summary\nx"));
+        assert!(!is_system_message("use code mode"));
     }
 
     #[test]
