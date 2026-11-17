@@ -1926,7 +1926,7 @@ fn input_routes_to_new_session(app: &App) -> bool {
     !trimmed.starts_with('/') && extract_input_shell_command(trimmed).is_none()
 }
 
-fn route_prompt_to_new_session_local(app: &mut App) -> bool {
+pub(super) fn route_prompt_to_new_session_local(app: &mut App) -> bool {
     if !input_routes_to_new_session(app) {
         return false;
     }

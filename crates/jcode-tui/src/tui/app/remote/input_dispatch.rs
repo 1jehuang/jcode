@@ -505,6 +505,10 @@ fn queue_transcript_input(app: &mut App) {
 }
 
 fn submit_transcript_input(app: &mut App) {
+    // An armed new-session prompt takes precedence over steering or queueing.
+    if input::route_prompt_to_new_session_local(app) {
+        return;
+    }
     match app.send_action(false) {
         SendAction::Submit => app.submit_input(),
         SendAction::Queue => queue_transcript_input(app),
@@ -538,6 +542,11 @@ async fn submit_remote_transcript_input(
         app.clear_input_undo_history();
         submit_remote_input_shell(app, remote, raw_input, command.to_string()).await?;
         return Ok(());
+    }
+
+    if app.route_next_prompt_to_new_session && app.pending_login.is_none() {
+        let prepared = input::take_prepared_input(app);
+        return route_prepared_input_to_new_remote_session(app, remote, prepared).await;
     }
 
     match app.send_action(false) {
