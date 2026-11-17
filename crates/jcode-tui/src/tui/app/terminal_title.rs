@@ -74,6 +74,22 @@ impl App {
             crate::tui::herdr::AgentState::Idle
         };
         crate::tui::herdr::sync(state, self.active_client_session_id());
+        self.sync_herdr_core_agent_state();
+    }
+
+    /// Report state to Herdr Desktop (herdr-core) over OSC 7501. Runs on the
+    /// UI thread between frames; a no-op outside herdr-core terminals.
+    fn sync_herdr_core_agent_state(&self) {
+        if !crate::tui::herdr_core::enabled() {
+            return;
+        }
+        let state = if self.is_processing() {
+            crate::tui::herdr_core::State::Working
+        } else {
+            crate::tui::herdr_core::State::Idle
+        };
+        let title = self.terminal_title.borrow().base.clone();
+        crate::tui::herdr_core::sync(state, &title, "");
     }
 
     pub(super) fn set_terminal_title_base(&self, session_id: &str, base: String) {

@@ -158,6 +158,7 @@ pub fn sync(state: AgentState, session_id: Option<&str>) {
 /// [`COMMAND_TIMEOUT`]. Do not call this when jcode is about to exec itself
 /// (reload/update) since the same agent keeps running in the pane.
 pub fn release() {
+    crate::tui::herdr_core::release();
     let Some(reporter) = reporter() else {
         return;
     };
