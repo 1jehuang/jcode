@@ -1034,6 +1034,10 @@ pub trait TuiState {
     fn inline_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
         Vec::new()
     }
+    /// Whether ownership-scoped gallery members exist, without requiring a list.
+    fn has_inline_swarm_members(&self) -> bool {
+        !self.inline_swarm_members().is_empty()
+    }
     /// Members available for cards embedded beneath swarm spawn tool calls.
     ///
     /// This may be broader than `inline_swarm_members`: the gallery is scoped by

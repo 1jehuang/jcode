@@ -1298,7 +1298,7 @@ pub(crate) fn pinned_todos_show_workers(app: &dyn TuiState, width: u16) -> bool 
     crate::config::config().display.pin_todos
         && app.pinned_todos_payload().is_some()
         && app.inline_swarm_gallery_active()
-        && !app.inline_swarm_members().is_empty()
+        && app.has_inline_swarm_members()
         && todo_margins::pinned_todo_card_has_lines(
             app.pinned_todos_payload(),
             app.diff_mode(),
