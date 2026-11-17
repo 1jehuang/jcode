@@ -54,20 +54,30 @@ fn drain_peer(peer: crate::transport::Stream) -> tokio::sync::mpsc::UnboundedRec
 /// stop writing history and still pass, so every drained test pins the frame it
 /// was previously too busy blocking to inspect. Bounded so a resume that fails
 /// to write at all fails the test instead of parking it.
+///
+/// A resume publishes the authoritative todo payload for the session *before*
+/// the history replay ("Send authoritative resume todos before large history
+/// replay"), so a `Todos` frame for the same session is expected first and is
+/// skipped here rather than treated as a wrong frame.
 async fn assert_peer_history_for(
     peer: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
     session_id: &str,
 ) -> Result<()> {
-    let line = tokio::time::timeout(std::time::Duration::from_secs(5), peer.recv())
-        .await
-        .map_err(|_| anyhow!("peer never received the resume History frame"))?
-        .ok_or_else(|| anyhow!("peer stream closed before the resume History frame"))?;
-    let event: ServerEvent = serde_json::from_str(line.trim())?;
-    match event {
-        ServerEvent::History {
-            session_id: got, ..
-        } if got == session_id => Ok(()),
-        other => Err(anyhow!("expected History for {session_id}, got {other:?}")),
+    loop {
+        let line = tokio::time::timeout(std::time::Duration::from_secs(5), peer.recv())
+            .await
+            .map_err(|_| anyhow!("peer never received the resume History frame"))?
+            .ok_or_else(|| anyhow!("peer stream closed before the resume History frame"))?;
+        let event: ServerEvent = serde_json::from_str(line.trim())?;
+        match event {
+            ServerEvent::History {
+                session_id: got, ..
+            } if got == session_id => return Ok(()),
+            ServerEvent::Todos {
+                session_id: got, ..
+            } if got == session_id => continue,
+            other => return Err(anyhow!("expected History for {session_id}, got {other:?}")),
+        }
     }
 }
 

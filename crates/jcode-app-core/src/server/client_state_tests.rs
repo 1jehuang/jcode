@@ -597,7 +597,6 @@ async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
     let (_reader, write_half) = stream.into_split();
     let writer = Arc::new(Mutex::new(write_half));
     let busy_guard = agent.lock().await;
-
     // Keep the mutex held throughout, representing either idle prefetch or a
     // real turn. Concurrent requests must not queue behind either lock owner.
     let request = |id, processing| {
@@ -619,14 +618,11 @@ async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
             None,
         )
     };
-    // An unbounded await in a test turns a product bug into a suite hang: the
-    // whole `--lib` run stops on the first one and reports nothing. Every step
-    // below is bounded so a block names itself.
-    async fn bounded<F: std::future::Future>(label: &str, fut: F) -> F::Output {
-        match tokio::time::timeout(std::time::Duration::from_secs(2), fut).await {
-            Ok(value) => value,
-            Err(_) => panic!("{label} did not finish within 2s"),
-        }
+    // An unbounded await here turns a product bug into a silent suite hang.
+    async fn bounded<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::time::timeout(std::time::Duration::from_secs(2), fut)
+            .await
+            .unwrap_or_else(|_| panic!("step did not finish within 2s"))
     }
     for processing in [false, true] {
         let results = tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -649,26 +645,22 @@ async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
 
     // A nonexistent session is not the same as a registered, unsaved one.
     sessions.clear_for_test().await;
-    assert!(bounded("unregistered request", request(4, false)).await.is_err());
-    // Publication captures the runtime observer from an idle Agent. Preserve
-    // that invariant, then hold the Agent busy again for the corruption check.
+    assert!(bounded(request(4, false)).await.is_err());
+    // Publication needs an idle Agent; hold it busy again for the corruption check.
     drop(busy_guard);
     sessions
         .register_new(session_id.into(), agent.clone())
         .await
         .unwrap();
     let busy_guard = agent.lock().await;
-    // Corrupt snapshots must not silently become empty history either.
     std::fs::create_dir_all(snapshot_path.parent().unwrap()).unwrap();
     std::fs::write(&snapshot_path, b"not valid session json").unwrap();
-    assert!(bounded("corrupt-snapshot request", request(5, false)).await.is_err());
+    assert!(bounded(request(5, false)).await.is_err());
 
     drop(busy_guard);
     drop(writer);
     let mut bytes = Vec::new();
-    bounded("history stream EOF", peer.read_to_end(&mut bytes))
-        .await
-        .unwrap();
+    bounded(peer.read_to_end(&mut bytes)).await.unwrap();
     let events: Vec<crate::protocol::ServerEvent> = std::io::Cursor::new(bytes)
         .lines()
         .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
