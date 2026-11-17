@@ -23,10 +23,32 @@ use std::sync::{Mutex, OnceLock};
 
 const APP: &str = "jcode";
 
+/// Why jcode is waiting on the user. herdr-core accepts these as `kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockedKind {
+    /// Approve something before work continues.
+    Permission,
+    /// Pick an option (e.g. switch model and resend).
+    Question,
+    /// Log in or fix credentials.
+    Auth,
+}
+
+impl BlockedKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Permission => "permission",
+            Self::Question => "question",
+            Self::Auth => "auth",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     Idle,
     Working,
+    Blocked(BlockedKind),
 }
 
 impl State {
@@ -34,6 +56,7 @@ impl State {
         match self {
             Self::Idle => "idle",
             Self::Working => "working",
+            Self::Blocked(_) => "blocked",
         }
     }
 }
@@ -93,6 +116,10 @@ fn clean(text: &str, max_chars: usize) -> String {
 
 fn encode(report: &Report) -> String {
     let mut out = format!("\x1b]7501;state={}:app={APP}", report.state.as_str());
+    if let State::Blocked(kind) = report.state {
+        out.push_str(":kind=");
+        out.push_str(kind.as_str());
+    }
     if !report.title.is_empty() {
         out.push_str(":title=");
         out.push_str(&b64(&report.title));
@@ -183,6 +210,18 @@ mod tests {
         assert_eq!(
             encode(&report(State::Idle, "hi", "hello")),
             "\x1b]7501;state=idle:app=jcode:title=aGk=:msg=aGVsbG8=\x07"
+        );
+    }
+
+    #[test]
+    fn encodes_blocked_with_kind() {
+        assert_eq!(
+            encode(&report(State::Blocked(BlockedKind::Question), "", "hello")),
+            "\x1b]7501;state=blocked:app=jcode:kind=question:msg=aGVsbG8=\x07"
+        );
+        assert!(
+            encode(&report(State::Blocked(BlockedKind::Auth), "", ""))
+                .contains(":kind=auth")
         );
     }
 

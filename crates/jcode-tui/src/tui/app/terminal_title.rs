@@ -68,7 +68,9 @@ impl App {
         if self.suppress_terminal_title_updates || !self.is_remote_client() {
             return;
         }
-        let state = if self.is_processing() {
+        let state = if self.herdr_core_blocked_kind().is_some() {
+            crate::tui::herdr::AgentState::Blocked
+        } else if self.is_processing() {
             crate::tui::herdr::AgentState::Working
         } else {
             crate::tui::herdr::AgentState::Idle
@@ -83,13 +85,34 @@ impl App {
         if !crate::tui::herdr_core::enabled() {
             return;
         }
-        let state = if self.is_processing() {
+        let state = if let Some(kind) = self.herdr_core_blocked_kind() {
+            crate::tui::herdr_core::State::Blocked(kind)
+        } else if self.is_processing() {
             crate::tui::herdr_core::State::Working
         } else {
             crate::tui::herdr_core::State::Idle
         };
         let title = self.terminal_title.borrow().base.clone();
         crate::tui::herdr_core::sync(state, &title, "");
+    }
+
+    /// Whether jcode is stopped until the user acts, and why. A pending login
+    /// waits for a pasted code or key; a fallback offer waits for the switch
+    /// key after a failed turn. The automatic failover countdown proceeds on
+    /// its own, so it is not blocked.
+    fn herdr_core_blocked_kind(&self) -> Option<crate::tui::herdr_core::BlockedKind> {
+        use crate::tui::herdr_core::BlockedKind;
+        if self
+            .pending_login
+            .as_ref()
+            .is_some_and(|login| !matches!(login, super::PendingLogin::Exchanging { .. }))
+        {
+            return Some(BlockedKind::Auth);
+        }
+        if self.pending_fallback_offer.is_some() && !self.is_processing() {
+            return Some(BlockedKind::Question);
+        }
+        None
     }
 
     pub(super) fn set_terminal_title_base(&self, session_id: &str, base: String) {

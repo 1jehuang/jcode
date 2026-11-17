@@ -1,9 +1,9 @@
 //! Native agent-state reporting for the herdr terminal multiplexer.
 //!
 //! When jcode runs inside a herdr pane (`HERDR_ENV=1`), it reports its state
-//! (`idle` / `working`), the command that resumes the current session, and
-//! releases the pane when the user quits. The interactive TUI never blocks a
-//! turn on a user decision, so `blocked` is not reported. See
+//! (`idle` / `working` / `blocked`), the command that resumes the current
+//! session, and releases the pane when the user quits. `blocked` means jcode
+//! waits on the user: a login code or a fallback-switch keypress. See
 //! <https://herdr.dev/docs/add-herdr-support/>.
 //!
 //! Reports go through `"$HERDR_BIN_PATH" pane report-agent ...` on a single
@@ -30,6 +30,7 @@ const MAX_RESUME_BYTES: usize = 8 * 1024;
 pub enum AgentState {
     Idle,
     Working,
+    Blocked,
 }
 
 impl AgentState {
@@ -37,6 +38,7 @@ impl AgentState {
         match self {
             Self::Idle => "idle",
             Self::Working => "working",
+            Self::Blocked => "blocked",
         }
     }
 }
