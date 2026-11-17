@@ -179,10 +179,28 @@ pub fn reload_process_alive(pid: u32) -> bool {
         matches!(err.raw_os_error(), Some(libc::EPERM))
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = pid;
-        true
+        use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        // SAFETY: the handle is closed on every path that opens it, and
+        // `code` is a valid `u32` for the duration of the call. A missing pid
+        // makes OpenProcess fail with ERROR_INVALID_PARAMETER, which is the
+        // "no such process" signal; access denied means it exists but is
+        // protected, mirroring the unix EPERM branch.
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return std::io::Error::last_os_error().raw_os_error()
+                    == Some(ERROR_ACCESS_DENIED as i32);
+            }
+            let mut code = 0u32;
+            let queried = GetExitCodeProcess(handle, &mut code);
+            CloseHandle(handle);
+            queried != 0 && code == STILL_ACTIVE as u32
+        }
     }
 }
 
@@ -778,13 +796,16 @@ mod tests {
     /// dead at the moment of selection. Retries guard against the (extremely
     /// rare) case where the kernel immediately recycles the pid for another
     /// test thread's process.
-    #[cfg(unix)]
     fn spawn_and_reap_dead_pid() -> u32 {
         use std::process::Command;
+        let (shell, args): (&str, &[&str]) = if cfg!(windows) {
+            ("cmd", &["/c", "exit 0"])
+        } else {
+            ("/bin/sh", &["-c", "exit 0"])
+        };
         for _ in 0..16 {
-            let mut child = Command::new("/bin/sh")
-                .arg("-c")
-                .arg("exit 0")
+            let mut child = Command::new(shell)
+                .args(args)
                 .spawn()
                 .expect("spawn short-lived child");
             let pid = child.id();
@@ -953,7 +974,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn reload_process_alive_handles_zero_and_dead_pids() {
         assert!(!reload_process_alive(0), "pid 0 is never a live reload pid");
