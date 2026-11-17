@@ -1,20 +1,25 @@
 //! Pinned todo bands and viewport margins.
 
 use super::*;
+use crate::config::TodoHeaderMode;
 
 /// Use the exact pinned-card identity and context for both drawing and queries.
 fn project_pinned_todo_card<R>(
     payload: Option<&str>,
     diff_mode: crate::config::DiffDisplayMode,
     width: u16,
+    mode: TodoHeaderMode,
     project: impl FnOnce(&[Line<'static>]) -> R,
 ) -> R {
-    if width < 16 || !crate::config::config().display.pin_todos {
+    if width < 16 || mode == TodoHeaderMode::Hidden {
         return project(&[]);
     }
     let Some(payload) = payload else {
         return project(&[]);
     };
+    if payload.trim().is_empty() {
+        return project(&[]);
+    }
     // Distinct title avoids sharing the width-capped transcript card's entry.
     let mut msg = crate::tui::DisplayMessage::todos(payload.to_string());
     msg.title = Some("Pinned todos".to_string());
@@ -35,7 +40,32 @@ pub(super) fn pinned_todo_card_has_lines(
     diff_mode: crate::config::DiffDisplayMode,
     width: u16,
 ) -> bool {
-    project_pinned_todo_card(payload, diff_mode, width, |lines| !lines.is_empty())
+    pinned_todo_card_has_lines_for_mode(
+        payload,
+        diff_mode,
+        width,
+        crate::config::config().display.todo_header_mode(),
+    )
+}
+
+pub(super) fn pinned_todo_card_has_lines_for_mode(
+    payload: Option<&str>,
+    diff_mode: crate::config::DiffDisplayMode,
+    width: u16,
+    mode: TodoHeaderMode,
+) -> bool {
+    match mode {
+        TodoHeaderMode::Hidden => false,
+        // Minimal always draws exactly one line for a non-empty payload. It does
+        // not need the full card projection, which may legitimately be empty for
+        // an unparseable payload.
+        TodoHeaderMode::Minimal => {
+            width >= 16 && payload.is_some_and(|payload| !payload.trim().is_empty())
+        }
+        TodoHeaderMode::Full => {
+            project_pinned_todo_card(payload, diff_mode, width, mode, |lines| !lines.is_empty())
+        }
+    }
 }
 
 /// Pinned todo band for an arbitrary todo payload. Shared by the live chat
@@ -47,11 +77,36 @@ pub(crate) fn pinned_todo_band_lines_for_payload(
     width: u16,
     viewport_height: u16,
 ) -> (Vec<Line<'static>>, Option<usize>) {
-    if width < 16 || viewport_height < 3 {
+    pinned_todo_band_lines_for_mode(
+        payload,
+        expanded,
+        diff_mode,
+        width,
+        viewport_height,
+        crate::config::config().display.todo_header_mode(),
+    )
+}
+
+pub(crate) fn pinned_todo_band_lines_for_mode(
+    payload: Option<&str>,
+    expanded: bool,
+    diff_mode: crate::config::DiffDisplayMode,
+    width: u16,
+    viewport_height: u16,
+    mode: TodoHeaderMode,
+) -> (Vec<Line<'static>>, Option<usize>) {
+    if width < 16 || viewport_height < 3 || mode == TodoHeaderMode::Hidden {
         return (Vec::new(), None);
     }
+    if mode == TodoHeaderMode::Minimal {
+        let Some(payload) = payload.filter(|payload| !payload.trim().is_empty()) else {
+            return (Vec::new(), None);
+        };
+        return (vec![minimal_todo_header_line(payload)], None);
+    }
 
-    let card_lines = project_pinned_todo_card(payload, diff_mode, width, <[Line<'static>]>::to_vec);
+    let card_lines =
+        project_pinned_todo_card(payload, diff_mode, width, mode, <[Line<'static>]>::to_vec);
     PINNED_TODO_LAST_MAX.store(0, std::sync::atomic::Ordering::Relaxed);
     if card_lines.is_empty() {
         return (Vec::new(), None);
@@ -105,6 +160,73 @@ pub(crate) fn pinned_todo_band_lines_for_payload(
         lines.extend(card_lines);
     }
     (lines, more_line)
+}
+
+/// Exactly one line of todo state for `todo_header = "minimal"`.
+fn minimal_todo_header_line(payload: &str) -> Line<'static> {
+    let summary = minimal_todo_summary(payload).unwrap_or_else(|| "Todos".to_string());
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(summary, Style::default().fg(dim_color())),
+    ])
+}
+
+/// Summarize a todo payload as one short phrase: progress counts plus the
+/// active (or next pending) task. Returns `None` when the payload is not the
+/// expected JSON object, so the caller can fall back to a generic label.
+fn minimal_todo_summary(payload: &str) -> Option<String> {
+    let value = match serde_json::from_str::<serde_json::Value>(payload) {
+        Ok(value) => value,
+        Err(_) => return None,
+    };
+    let todos = value.get("todos")?.as_array()?;
+    if todos.is_empty() {
+        return Some("Todos: none yet".to_string());
+    }
+    let status = |todo: &serde_json::Value| -> String {
+        todo.get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("pending")
+            .to_ascii_lowercase()
+    };
+    let done = todos
+        .iter()
+        .filter(|todo| status(todo) == "completed")
+        .count();
+    let total = todos.len();
+    let content = |todo: &serde_json::Value| -> Option<String> {
+        let raw = todo.get("content")?.as_str()?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        Some(raw.lines().next().unwrap_or(raw).trim().to_string())
+    };
+    let active = todos
+        .iter()
+        .find(|todo| matches!(status(todo).as_str(), "in_progress" | "in-progress"))
+        .and_then(content);
+    let next = active.is_none().then(|| {
+        todos
+            .iter()
+            .find(|todo| {
+                let status = status(todo);
+                status != "completed" && status != "cancelled" && status != "canceled"
+            })
+            .and_then(content)
+    });
+    let label = |text: String| -> String {
+        // The composer owns the width; keep the summary one short phrase.
+        let mut text: String = text.chars().take(80).collect();
+        if text.chars().count() == 80 {
+            text.push('…');
+        }
+        text
+    };
+    Some(match (active, next.flatten()) {
+        (Some(task), _) => label(format!("Todos {done}/{total} · {task}")),
+        (None, Some(task)) => label(format!("Todos {done}/{total} · next: {task}")),
+        (None, None) => format!("Todos {done}/{total} done"),
+    })
 }
 
 pub(crate) fn compute_visible_margins(
@@ -391,5 +513,76 @@ mod pinned_todo_projection_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn todo_header_full_mode_renders_the_whole_card() {
+        let active = payload(4);
+        let (lines, _) = pinned_todo_band_lines_for_mode(
+            Some(active.as_str()),
+            false,
+            crate::config::DiffDisplayMode::Off,
+            80,
+            30,
+            TodoHeaderMode::Full,
+        );
+        assert!(
+            lines.len() > 1,
+            "full mode must keep the multi-line card, got {} line(s)",
+            lines.len()
+        );
+        assert!(pinned_todo_card_has_lines_for_mode(
+            Some(active.as_str()),
+            crate::config::DiffDisplayMode::Off,
+            80,
+            TodoHeaderMode::Full
+        ));
+    }
+
+    #[test]
+    fn todo_header_minimal_mode_is_exactly_one_line() {
+        let active = payload(8);
+        let (lines, more) = pinned_todo_band_lines_for_mode(
+            Some(active.as_str()),
+            false,
+            crate::config::DiffDisplayMode::Off,
+            80,
+            30,
+            TodoHeaderMode::Minimal,
+        );
+        assert_eq!(lines.len(), 1, "minimal mode must occupy exactly one row");
+        assert!(more.is_none(), "minimal mode has no expand affordance");
+        assert!(
+            lines[0].to_string().contains("Todos 0/8"),
+            "minimal summary should report progress: {:?}",
+            lines[0].to_string()
+        );
+        assert!(pinned_todo_card_has_lines_for_mode(
+            Some(active.as_str()),
+            crate::config::DiffDisplayMode::Off,
+            80,
+            TodoHeaderMode::Minimal
+        ));
+    }
+
+    #[test]
+    fn todo_header_hidden_mode_is_zero_lines() {
+        let active = payload(8);
+        let (lines, more) = pinned_todo_band_lines_for_mode(
+            Some(active.as_str()),
+            false,
+            crate::config::DiffDisplayMode::Off,
+            80,
+            30,
+            TodoHeaderMode::Hidden,
+        );
+        assert!(lines.is_empty(), "hidden mode must occupy no rows");
+        assert!(more.is_none());
+        assert!(!pinned_todo_card_has_lines_for_mode(
+            Some(active.as_str()),
+            crate::config::DiffDisplayMode::Off,
+            80,
+            TodoHeaderMode::Hidden
+        ));
     }
 }

@@ -271,6 +271,19 @@ impl Config {
         Ok(())
     }
 
+    /// Update the persisted todo-header mode (full/minimal/hidden). Also keeps
+    /// the legacy `pin_todos` flag in sync so old front-ends stay correct.
+    pub fn set_todo_header_mode(mode: TodoHeaderMode) -> anyhow::Result<()> {
+        let mut cfg = Self::load_for_update()?;
+        cfg.display.set_todo_header_mode(mode);
+        cfg.save()?;
+        crate::logging::info(&format!(
+            "Saved display.todo_header to config: {}",
+            mode.as_str()
+        ));
+        Ok(())
+    }
+
     /// Update the persisted show-agentgrep-output preference.
     pub fn set_show_agentgrep_output(show: bool) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;

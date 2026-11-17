@@ -1295,7 +1295,7 @@ pub(super) use viewport_margins::{INFO_WIDGET_LOOKAHEAD_ROWS, windowed_min};
 /// Passive worker status lives in the todo lanes. The focused swarm panel
 /// remains available for keyboard navigation and its transcript controls.
 pub(crate) fn pinned_todos_show_workers(app: &dyn TuiState, width: u16) -> bool {
-    crate::config::config().display.pin_todos
+    crate::config::config().display.todo_header_mode() == crate::config::TodoHeaderMode::Full
         && app.pinned_todos_payload().is_some()
         && app.inline_swarm_gallery_active()
         && app.has_inline_swarm_members()
@@ -1318,7 +1318,8 @@ pub(crate) fn pinned_todo_band_lines(
         width,
         viewport_height,
     );
-    if width > 0
+    if crate::config::config().display.todo_header_mode() == crate::config::TodoHeaderMode::Full
+        && width > 0
         && viewport_height >= 3
         && let Some(status) = app.justrust_status()
     {

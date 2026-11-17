@@ -176,6 +176,11 @@ pin_images = true
 # scrolls, like the sticky previous-prompt preview (default: false)
 # pin_todos = true
 
+# How much of the pinned todo header to render above the composer:
+# "full" (whole card, default), "minimal" (one summary line), or "hidden".
+# `/todos pin` cycles the three modes.
+# todo_header = "full"
+
 # Queue mode: wait until assistant is done before sending next message
 queue_mode = false
 
