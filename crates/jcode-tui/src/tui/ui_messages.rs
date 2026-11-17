@@ -24,7 +24,7 @@ use crate::message::{
     parse_background_task_notification_markdown,
     parse_background_task_progress_notification_markdown, strip_ansi_escape_sequences,
 };
-pub(super) use cache_support::get_cached_message_lines;
+pub(super) use cache_support::{get_cached_message_lines, project_cached_message_lines};
 use cache_support::{centered_wrap_width, left_pad_lines_for_centered_mode};
 use jcode_tui_style::theme::{error_color, warning_color};
 use std::borrow::Cow;

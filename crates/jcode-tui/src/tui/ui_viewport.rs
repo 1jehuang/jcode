@@ -1299,15 +1299,11 @@ pub(crate) fn pinned_todos_show_workers(app: &dyn TuiState, width: u16) -> bool 
         && app.pinned_todos_payload().is_some()
         && app.inline_swarm_gallery_active()
         && !app.inline_swarm_members().is_empty()
-        && !pinned_todo_band_lines_for_payload(
+        && todo_margins::pinned_todo_card_has_lines(
             app.pinned_todos_payload(),
-            app.pinned_todos_expanded(),
             app.diff_mode(),
             width,
-            3,
         )
-        .0
-        .is_empty()
 }
 
 pub(crate) fn pinned_todo_band_lines(
