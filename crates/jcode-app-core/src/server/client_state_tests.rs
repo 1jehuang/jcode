@@ -619,6 +619,15 @@ async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
             None,
         )
     };
+    // An unbounded await in a test turns a product bug into a suite hang: the
+    // whole `--lib` run stops on the first one and reports nothing. Every step
+    // below is bounded so a block names itself.
+    async fn bounded<F: std::future::Future>(label: &str, fut: F) -> F::Output {
+        match tokio::time::timeout(std::time::Duration::from_secs(2), fut).await {
+            Ok(value) => value,
+            Err(_) => panic!("{label} did not finish within 2s"),
+        }
+    }
     for processing in [false, true] {
         let results = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             tokio::join!(
@@ -640,7 +649,7 @@ async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
 
     // A nonexistent session is not the same as a registered, unsaved one.
     sessions.clear_for_test().await;
-    assert!(request(4, false).await.is_err());
+    assert!(bounded("unregistered request", request(4, false)).await.is_err());
     // Publication captures the runtime observer from an idle Agent. Preserve
     // that invariant, then hold the Agent busy again for the corruption check.
     drop(busy_guard);
@@ -652,12 +661,14 @@ async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
     // Corrupt snapshots must not silently become empty history either.
     std::fs::create_dir_all(snapshot_path.parent().unwrap()).unwrap();
     std::fs::write(&snapshot_path, b"not valid session json").unwrap();
-    assert!(request(5, false).await.is_err());
+    assert!(bounded("corrupt-snapshot request", request(5, false)).await.is_err());
 
     drop(busy_guard);
     drop(writer);
     let mut bytes = Vec::new();
-    peer.read_to_end(&mut bytes).await.unwrap();
+    bounded("history stream EOF", peer.read_to_end(&mut bytes))
+        .await
+        .unwrap();
     let events: Vec<crate::protocol::ServerEvent> = std::io::Cursor::new(bytes)
         .lines()
         .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
