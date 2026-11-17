@@ -353,7 +353,7 @@ fn build_grep_args_includes_scope_flags() {
     assert!(args.paths_only);
     assert!(args.hidden);
     assert!(args.no_ignore);
-    assert_eq!(args.path.as_deref(), Some("/tmp/root/src"));
+    assert_eq!(args.path, Some(joined("/tmp/root", "src")));
     assert_eq!(args.glob.as_deref(), Some("src/**/*.rs"));
 }
 
@@ -382,7 +382,7 @@ fn build_grep_args_drops_match_all_glob() {
     let args = build_grep_args(&params, &ctx).unwrap();
     assert_eq!(args.query, "agentgrep");
     assert_eq!(args.file_type.as_deref(), Some("rs"));
-    assert_eq!(args.path.as_deref(), Some("/tmp/root/."));
+    assert_eq!(args.path, Some(joined("/tmp/root", ".")));
     assert_eq!(args.glob, None);
 }
 
@@ -479,7 +479,7 @@ fn build_find_args_allows_glob_only_search() {
 
     let args = build_find_args(&params, &ctx).expect("glob-only find should be valid");
     assert!(args.query_parts.is_empty());
-    assert_eq!(args.path.as_deref(), Some("/tmp/root/."));
+    assert_eq!(args.path, Some(joined("/tmp/root", ".")));
     assert_eq!(args.glob.as_deref(), Some("**/*release*"));
     assert_eq!(args.max_files, 25);
     assert!(args.paths_only);
@@ -551,7 +551,7 @@ fn build_smart_args_uses_terms() {
     assert!(args.debug_plan);
     assert!(args.debug_score);
     assert_eq!(args.file_type.as_deref(), Some("rs"));
-    assert_eq!(args.path.as_deref(), Some("/workspace/repo"));
+    assert_eq!(args.path, Some(joined("/workspace", "repo")));
     assert_eq!(query.subject, "auth_status");
     assert_eq!(query.relation.as_str(), "rendered");
     assert_eq!(query.path_hint.as_deref(), Some("src/tui"));
@@ -699,7 +699,7 @@ fn build_outline_args_accepts_file_field() {
 
     let args = build_outline_args(&params, &ctx, None).unwrap();
     assert_eq!(args.file, "src/tool/agentgrep.rs");
-    assert_eq!(args.path.as_deref(), Some("/workspace/repo"));
+    assert_eq!(args.path, Some(joined("/workspace", "repo")));
 }
 
 #[test]
@@ -800,7 +800,8 @@ async fn execute_runs_linked_grep() {
         .await
         .expect("tool output");
     assert!(output.output.contains("query: auth_status"));
-    assert!(output.output.contains("src/app.rs"));
+    // The linked engine prints paths with the platform separator.
+    assert!(output.output.replace('\\', "/").contains("src/app.rs"));
     assert!(output.output.contains("@ 1 pub fn auth_status() {}"));
 }
 
@@ -1150,4 +1151,10 @@ fn grep_defaults_to_a_bounded_match_count() {
         result.total_matches,
         DEFAULT_GREP_MAX_REGIONS
     );
+}
+/// The resolver joins the scope root with the platform separator, so an
+/// expectation written as `/tmp/root/src` is wrong on Windows
+/// (`/tmp/root\src`). Build the expected string the same way the product does.
+fn joined(root: &str, relative: &str) -> String {
+    Path::new(root).join(relative).display().to_string()
 }
