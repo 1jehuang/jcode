@@ -98,7 +98,10 @@ fn gif_and_webp_attachments_are_decoded_into_bounded_wire_thumbnails() {
             .decode(&thumbnail.data)
             .unwrap();
         assert!(bytes.len() <= 256 * 1024);
-        assert_eq!(image::guess_format(&bytes).unwrap(), image::ImageFormat::Jpeg);
+        assert_eq!(
+            image::guess_format(&bytes).unwrap(),
+            image::ImageFormat::Jpeg
+        );
         let decoded = image::load_from_memory(&bytes).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (1024, 805));
     }

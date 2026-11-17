@@ -46,11 +46,16 @@ pub(super) fn ensure_started(repo_root: &Path, on_change: fn()) {
 
 /// Whether an event on `name` inside the git dir can change the widget.
 /// Lock files and temp objects churn during every git command.
+///
+/// Only the Linux implementation below consumes these, so they are gated with it
+/// rather than left dead on macOS and Windows, where they cost a warning each.
+#[cfg(target_os = "linux")]
 pub(super) fn git_dir_event_relevant(name: &str) -> bool {
     !(name.ends_with(".lock") || name.starts_with("tmp_") || name == "ORIG_HEAD.lock")
 }
 
 /// Directories never worth watching even if not gitignored.
+#[cfg(target_os = "linux")]
 pub(super) fn skip_dir(name: &str) -> bool {
     name == ".git"
 }

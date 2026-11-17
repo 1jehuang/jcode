@@ -4,7 +4,11 @@ use super::*;
 /// The tags are wire syntax for the model and must never reach the transcript.
 pub(in crate::tui::app) fn system_reminder_body(content: &str) -> Option<&str> {
     let rest = content.trim().strip_prefix("<system-reminder>")?;
-    Some(rest.strip_suffix("</system-reminder>").unwrap_or(rest).trim())
+    Some(
+        rest.strip_suffix("</system-reminder>")
+            .unwrap_or(rest)
+            .trim(),
+    )
 }
 
 impl App {
