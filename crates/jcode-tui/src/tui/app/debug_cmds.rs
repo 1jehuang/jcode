@@ -258,6 +258,26 @@ impl App {
                 provider: "openai".to_string(),
             });
             serde_json::json!({"ok": true, "fixture": "login-progress-exchange"}).to_string()
+        } else if cmd == "dm-fixture" {
+            // Display-only fixture, no model prompt or agent delivery is sent.
+            self.display_messages = vec![
+                DisplayMessage::user("Compact agent messages"),
+                DisplayMessage::swarm(
+                    "DM from fox",
+                    "The parser changes are ready for validation.",
+                ),
+                DisplayMessage::swarm(
+                    "DM from sheep",
+                    "The regression tests pass and the patch is ready.",
+                ),
+                DisplayMessage::assistant("An intervening reply starts a new DM row."),
+                DisplayMessage::swarm("DM from owl", "The final validation is complete."),
+            ];
+            self.bump_display_messages_version();
+            self.scroll_offset = 0;
+            self.auto_scroll_paused = false;
+            self.request_full_redraw();
+            "OK: compact DM fixture ready".to_string()
         } else if cmd == "expand-badge-fixture" {
             let old_string = (0..24)
                 .map(|idx| format!("old fixture line {idx}\n"))
