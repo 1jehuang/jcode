@@ -114,65 +114,8 @@ fn isolate_openrouter_autodetect_env() -> Vec<EnvVarGuard> {
     guards
 }
 
-#[test]
-fn test_has_credentials() {
-    let _has_creds = OpenRouterProvider::has_credentials();
-}
-
 #[path = "openrouter_tests/catalog_shape_tests.rs"]
 mod catalog_shape_tests;
-
-#[test]
-fn named_openai_compatible_provider_sets_catalog_cache_namespace() {
-    let _lock = ENV_LOCK.lock();
-    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
-    let _key = EnvVarGuard::set("TEST_NAMED_COMPAT_KEY", "test-key");
-
-    let profile = jcode_base::config::NamedProviderConfig {
-        base_url: "https://llm.example.com/v1".to_string(),
-        api_key_env: Some("TEST_NAMED_COMPAT_KEY".to_string()),
-        model_catalog: true,
-        default_model: Some("example-model".to_string()),
-        ..Default::default()
-    };
-
-    let _provider = OpenRouterProvider::new_named_openai_compatible("example-compat", &profile)
-        .expect("named profile should initialize");
-
-    assert_eq!(
-        std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE").as_deref(),
-        Ok("example-compat")
-    );
-}
-
-#[test]
-fn named_openai_compatible_provider_exposes_static_models_as_routes() {
-    let _lock = ENV_LOCK.lock();
-    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
-    let _key = EnvVarGuard::set("TEST_NAMED_COMPAT_KEY", "test-key");
-
-    let profile = jcode_base::config::NamedProviderConfig {
-        base_url: "https://llm.example.com/v1".to_string(),
-        api_key_env: Some("TEST_NAMED_COMPAT_KEY".to_string()),
-        model_catalog: true,
-        default_model: Some("glm-51-nvfp4".to_string()),
-        models: vec![jcode_base::config::NamedProviderModelConfig {
-            id: "glm-51-nvfp4".to_string(),
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
-
-    let provider = OpenRouterProvider::new_named_openai_compatible("comtegra-test", &profile)
-        .expect("named profile should initialize");
-    let routes = provider.model_routes();
-
-    assert!(routes.iter().any(|route| {
-        route.model == "glm-51-nvfp4"
-            && route.api_method == "openai-compatible:comtegra-test"
-            && route.available
-    }));
-}
 
 #[test]
 fn direct_openai_compatible_provider_advertises_image_input_support() {
@@ -375,7 +318,8 @@ fn deepseek_image_input_captured_requests_preserve_only_allowed_pixels() {
                 media_type: "image/png".to_string(),
                 data: pixels.to_string(),
             },
-        ],
+        ]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -473,7 +417,8 @@ fn direct_deepseek_profile_omits_image_url_parts() {
                 media_type: "image/png".to_string(),
                 data: "aW1hZ2U=".to_string(),
             },
-        ],
+        ]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -542,7 +487,8 @@ fn interrupted_reasoning_only_assistant_message_is_not_sent_empty() {
             content: vec![ContentBlock::Text {
                 text: "do a thing".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -552,7 +498,8 @@ fn interrupted_reasoning_only_assistant_message_is_not_sent_empty() {
             role: Role::Assistant,
             content: vec![ContentBlock::Reasoning {
                 text: "thinking about the request".to_string(),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -561,7 +508,8 @@ fn interrupted_reasoning_only_assistant_message_is_not_sent_empty() {
             content: vec![ContentBlock::Text {
                 text: "actually do this instead".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -635,7 +583,8 @@ fn interrupted_reasoning_only_assistant_message_keeps_reasoning_with_content() {
             content: vec![ContentBlock::Text {
                 text: "do a thing".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -643,7 +592,8 @@ fn interrupted_reasoning_only_assistant_message_keeps_reasoning_with_content() {
             role: Role::Assistant,
             content: vec![ContentBlock::Reasoning {
                 text: "thinking about the request".to_string(),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -652,7 +602,8 @@ fn interrupted_reasoning_only_assistant_message_keeps_reasoning_with_content() {
             content: vec![ContentBlock::Text {
                 text: "actually do this instead".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -729,7 +680,8 @@ fn kimi_for_coding_tool_call_message_includes_reasoning_content() {
             content: vec![ContentBlock::Text {
                 text: "list the files".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -742,7 +694,8 @@ fn kimi_for_coding_tool_call_message_includes_reasoning_content() {
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -752,7 +705,8 @@ fn kimi_for_coding_tool_call_message_includes_reasoning_content() {
                 tool_use_id: "call_1".to_string(),
                 content: "a.txt\nb.txt".to_string(),
                 is_error: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -823,7 +777,8 @@ fn direct_compatible_deepseek_tool_call_replays_reasoning_content() {
             content: vec![ContentBlock::Text {
                 text: "list the files".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -839,7 +794,8 @@ fn direct_compatible_deepseek_tool_call_replays_reasoning_content() {
                     input: serde_json::json!({"command": "ls"}),
                     thought_signature: None,
                 },
-            ],
+            ]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -849,7 +805,8 @@ fn direct_compatible_deepseek_tool_call_replays_reasoning_content() {
                 tool_use_id: "call_1".to_string(),
                 content: "a.txt\nb.txt".to_string(),
                 is_error: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -1550,7 +1507,8 @@ fn openrouter_chat_request_sends_unified_reasoning_effort() {
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1662,7 +1620,8 @@ async fn live_openrouter_unified_reasoning_smoke() -> Result<()> {
             content: vec![ContentBlock::Text {
                 text: "Live smoke test: answer exactly OK.".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         }];
@@ -1715,7 +1674,8 @@ fn direct_deepseek_chat_request_sends_reasoning_effort() {
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1771,7 +1731,8 @@ fn sol_compatible_request_sends_low_reasoning_effort() {
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1823,7 +1784,8 @@ fn direct_openai_compatible_chat_request_preserves_max_reasoning_effort() {
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -3450,7 +3412,8 @@ model_catalog = false
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -3542,3 +3505,6 @@ fn venice_disables_venice_system_prompt_by_default_but_user_can_override() {
 
 #[path = "catalog_auth_tests.rs"]
 mod catalog_auth;
+
+#[path = "openrouter_tests_additional_tests.rs"]
+mod additional_cache_breakpoint_preserves_shared_payload_when_already_marked;

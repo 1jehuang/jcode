@@ -10,6 +10,51 @@
 // reload snapshot must therefore fold it back into the queue.
 
 #[test]
+fn test_reload_soft_interrupt_recovery_preserves_order_across_verdict_groups() {
+    use crate::protocol::ServerEvent;
+    use crate::tui::backend::soft_interrupt_client_id;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for duplicate_content in [false, true] {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+        let first = "original request";
+        let second = if duplicate_content {
+            first
+        } else {
+            "correction"
+        };
+        app.track_pending_soft_interrupt(41, first.into());
+        app.track_pending_soft_interrupt(42, second.into());
+        app.track_pending_soft_interrupt(43, "final correction".into());
+        app.queued_messages.push("later queued request".into());
+
+        rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+        let (cancel_id, _) = app.soft_interrupt_recovery.unwrap();
+        app.handle_server_event(
+            ServerEvent::SoftInterruptsCancelled {
+                id: cancel_id,
+                // Deliberately reversed within the group, with the first send
+                // in the other group because its receipt was lost on reload.
+                cancelled: vec![soft_interrupt_client_id(43), soft_interrupt_client_id(42)],
+                not_queued: vec![soft_interrupt_client_id(41)],
+            },
+            &mut remote,
+        );
+        assert_eq!(
+            app.queued_messages,
+            [first, second, "final correction", "later queued request"]
+        );
+        assert!(app.pending_soft_interrupts.is_empty());
+        assert!(app.pending_soft_interrupt_requests.is_empty());
+        assert!(app.sent_soft_interrupts.is_empty());
+    }
+}
+
+#[test]
 fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
     for auto_retry in [false, true] {
         let mut app = create_test_app();
@@ -31,6 +76,15 @@ fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
         ))
         .unwrap();
         let rejected_id = app.current_message_id.unwrap();
+        let retry_reminder = app
+            .rate_limit_pending_message
+            .as_ref()
+            .unwrap()
+            .system_reminder
+            .clone()
+            .unwrap();
+        assert!(retry_reminder.contains("Retry the interrupted execution"));
+        assert!(retry_reminder.ends_with("Continue the pending task"));
         app.handle_server_event(
             crate::protocol::ServerEvent::Error {
                 id: rejected_id,
@@ -44,10 +98,7 @@ fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
         assert!(app.current_message_id.is_none());
         assert!(app.rate_limit_pending_message.is_none());
         assert!(app.rate_limit_reset.is_none());
-        assert_eq!(
-            app.hidden_queued_system_messages,
-            ["Continue the pending task"]
-        );
+        assert_eq!(app.hidden_queued_system_messages, [retry_reminder.clone()]);
         assert!(!app.display_messages().iter().any(|m| m.role == "error"));
         assert!(app.pending_fallback_offer.is_none());
 
@@ -64,10 +115,7 @@ fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
         rt.block_on(remote::handle_tick(&mut app, &mut remote));
         assert!(app.is_processing);
         assert!(app.current_message_id.is_none());
-        assert_eq!(
-            app.hidden_queued_system_messages,
-            ["Continue the pending task"]
-        );
+        assert_eq!(app.hidden_queued_system_messages, [retry_reminder.clone()]);
 
         app.handle_server_event(
             crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
@@ -89,7 +137,7 @@ fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
                 .unwrap()
                 .system_reminder
                 .as_deref(),
-            Some("Continue the pending task")
+            Some(retry_reminder.as_str())
         );
     }
 }

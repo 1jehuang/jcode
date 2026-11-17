@@ -1,5 +1,6 @@
 #![cfg_attr(test, allow(clippy::clone_on_copy))]
 mod tool_duration;
+include!("tests/streaming_hash.rs");
 include!("tests/provider_env.rs");
 include!("tests/cache_diagnostics.rs");
 include!("tests/support_failover/part_01.rs");
@@ -72,6 +73,7 @@ include!("tests/issue_832_remote_ctrl_k.rs");
 include!("tests/voice_input.rs");
 include!("tests/issue_998_model_status_overlay.rs");
 include!("tests/issue_1685_bounded_auto_resume.rs");
+include!("tests/held_retry_dispatch.rs");
 include!("tests/spinner_slash_commands.rs");
 include!("tests/command_suggestions_cache.rs");
 include!("tests/merge_command.rs");
@@ -81,44 +83,6 @@ include!("tests/slash_command_boundaries.rs");
 include!("tests/prompt_history_cross_session.rs");
 include!("tests/ssh_remote.rs");
 include!("tests/skill_startup.rs");
-#[test]
-fn kv_cache_signature_prefix_match_allows_appended_messages() {
-    let baseline_messages = vec![
-        crate::message::Message::user("first prompt"),
-        crate::message::Message::assistant_text("first answer"),
-    ];
-    let mut current_messages = baseline_messages.clone();
-    current_messages.push(crate::message::Message::user("follow up"));
-
-    let baseline = App::kv_cache_request_signature(&baseline_messages, &[], "system", "memory a");
-    let current = App::kv_cache_request_signature(&current_messages, &[], "system", "memory b");
-
-    assert!(App::kv_cache_signatures_prefix_match(&current, &baseline));
-    assert_eq!(
-        App::kv_cache_common_prefix_messages(&current, &baseline),
-        baseline_messages.len()
-    );
-    assert_ne!(baseline.ephemeral_hash, current.ephemeral_hash);
-}
-
-#[test]
-fn kv_cache_signature_prefix_match_detects_prefix_mutation() {
-    let baseline_messages = vec![
-        crate::message::Message::user("first prompt"),
-        crate::message::Message::assistant_text("first answer"),
-    ];
-    let current_messages = vec![
-        crate::message::Message::user("changed first prompt"),
-        crate::message::Message::assistant_text("first answer"),
-        crate::message::Message::user("follow up"),
-    ];
-
-    let baseline = App::kv_cache_request_signature(&baseline_messages, &[], "system", "");
-    let current = App::kv_cache_request_signature(&current_messages, &[], "system", "");
-
-    assert!(!App::kv_cache_signatures_prefix_match(&current, &baseline));
-    assert_eq!(App::kv_cache_common_prefix_messages(&current, &baseline), 0);
-}
 
 #[test]
 fn kv_cache_signature_ignores_non_transmitted_message_metadata() {
@@ -135,7 +99,8 @@ fn kv_cache_signature_ignores_non_transmitted_message_metadata() {
             content: vec![ContentBlock::Text {
                 text: "boundary answer".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         },
@@ -159,7 +124,8 @@ fn kv_cache_signature_ignores_non_transmitted_message_metadata() {
                 ContentBlock::ReasoningTrace {
                     text: "internal scratch thinking".to_string(),
                 },
-            ],
+            ]
+            .into(),
             // Backfilled after the tool ran / a newer turn was committed.
             timestamp: Some(chrono::Utc::now() + chrono::Duration::seconds(5)),
             tool_duration_ms: Some(1234),
@@ -1942,3 +1908,6 @@ include!("tests/kv_cache_provider_identity.rs");
 include!("tests/cache_retention_routes.rs");
 
 include!("tests/cache_prompt_accounting.rs");
+
+#[path = "tests_additional_tests.rs"]
+mod additional_materialized_provider_messages_share_payload_and_detach_on_edit;

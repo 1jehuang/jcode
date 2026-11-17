@@ -56,7 +56,7 @@ use super::{
 use crate::agent::Agent;
 use crate::bus::{Bus, BusEvent};
 use crate::id;
-use crate::protocol::{Request, ServerEvent, decode_request, encode_event};
+use crate::protocol::{Request, ServerEvent, decode_request, encode_event, encode_event_into};
 use crate::provider::Provider;
 use crate::tool::Registry;
 use crate::transport::Stream;
@@ -138,105 +138,9 @@ use request_watchdog::{
     RequestHandlerWatchdog, RequestHandlerWatchdogContext, log_request_lifecycle_handled,
     reject_if_agent_busy_for_request, send_agent_busy_error, should_start_idle_soft_interrupt,
 };
-/// Session and payload of a todo snapshot, for skipping identical resends.
-fn todos_event_key(event: &ServerEvent) -> Option<(String, String)> {
-    match event {
-        ServerEvent::Todos {
-            session_id,
-            payload,
-            ..
-        } => Some((session_id.clone(), payload.clone())),
-        _ => None,
-    }
-}
-
-fn server_reload_starting() -> bool {
-    matches!(
-        crate::server::recent_reload_state(RELOAD_STARTING_GUARD_MAX_AGE),
-        Some(state) if state.phase == crate::server::ReloadPhase::Starting
-    )
-}
-
-fn compaction_server_event(event: crate::compaction::CompactionEvent) -> ServerEvent {
-    ServerEvent::Compaction {
-        trigger: event.trigger,
-        pre_tokens: event.pre_tokens,
-        post_tokens: event.post_tokens,
-        tokens_saved: event.tokens_saved,
-        duration_ms: event.duration_ms,
-        messages_dropped: event.messages_dropped,
-        messages_compacted: event.messages_compacted,
-        summary_chars: event.summary_chars,
-        active_messages: event.active_messages,
-    }
-}
-
-async fn poll_agent_compaction_completion(agent: Arc<Mutex<Agent>>) -> Option<ServerEvent> {
-    let mut agent_guard = agent.lock().await;
-    agent_guard
-        .poll_compaction_completion_event()
-        .map(compaction_server_event)
-}
-
-async fn refresh_session_control_handle(
-    session_id: &str,
-    agent: &Arc<Mutex<Agent>>,
-    shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
-    soft_interrupt_queues: &SessionInterruptQueues,
-) -> SessionControlHandle {
-    let started = Instant::now();
-    let agent_guard = match agent.try_lock() {
-        Ok(agent_guard) => agent_guard,
-        Err(_) => {
-            crate::logging::warn(&format!(
-                "refresh_session_control_handle: waiting for busy agent lock for session {}; cancel/control requests on this connection may be delayed",
-                session_id
-            ));
-            let fallback_stop_signal = shutdown_signals.read().await.get(session_id).cloned();
-            let fallback_soft_interrupt_queue =
-                soft_interrupt_queues.read().await.get(session_id).cloned();
-            if let Some(soft_interrupt_queue) = fallback_soft_interrupt_queue {
-                // A missing shutdown-signal registration (e.g. a session created
-                // through the headless spawn path) must not force this connection
-                // to block on the busy agent mutex: cancels fired through the
-                // handle fan out to the running turn's own signal via the
-                // turn-cancel registry (issue #428), so a detached signal is a
-                // safe stand-in.
-                let stop_signal = fallback_stop_signal.unwrap_or_else(|| {
-                    crate::logging::warn(&format!(
-                        "refresh_session_control_handle: no registered shutdown signal for busy session {}; using detached signal (cancels reach the running turn via the turn cancel registry)",
-                        session_id
-                    ));
-                    InterruptSignal::new()
-                });
-                crate::logging::warn(&format!(
-                    "refresh_session_control_handle: using lock-free cancel-only control handle for busy session {} after {}ms",
-                    session_id,
-                    started.elapsed().as_millis()
-                ));
-                return SessionControlHandle::cancel_only(
-                    session_id,
-                    soft_interrupt_queue,
-                    stop_signal,
-                );
-            }
-            let agent_guard = agent.lock().await;
-            crate::logging::warn(&format!(
-                "refresh_session_control_handle: acquired agent lock for session {} after {}ms",
-                session_id,
-                started.elapsed().as_millis()
-            ));
-            agent_guard
-        }
-    };
-    SessionControlHandle::new(
-        session_id,
-        agent_guard.soft_interrupt_queue(),
-        agent_guard.background_tool_signal(),
-        agent_guard.graceful_shutdown_signal(),
-    )
-    .with_provider(agent_guard.provider_handle())
-}
+#[path = "client_event_control.rs"]
+mod client_event_control;
+use client_event_control::*;
 
 #[expect(
     clippy::too_many_arguments,
@@ -542,6 +446,7 @@ pub(super) async fn handle_client(
 
     // Per-client event channel (not shared with other clients)
     let _sdk_connection_guard = crate::tool::sdk::ConnectionGuard(client_connection_id.clone());
+    let _focus_guard = crate::stream_batching::ConnectionFocusGuard(client_connection_id.clone());
     let (client_event_tx, mut client_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
 
@@ -550,42 +455,20 @@ pub(super) async fn handle_client(
     let client_connection_id_for_events = client_connection_id.clone();
     let client_connections_for_events = Arc::clone(&client_connections);
     let event_handle = tokio::spawn(async move {
+        let mut event_buffer = Vec::new();
         while let Some(event) = client_event_rx.recv().await {
-            {
+            if let Some(update) = ConnectionMetadataUpdate::from_event(&event) {
                 let mut connections = client_connections_for_events.write().await;
                 if let Some(info) = connections.get_mut(&client_connection_id_for_events) {
-                    let observed = match &event {
-                        ServerEvent::TurnEvent { event, .. } => event.as_ref(),
-                        event => event,
-                    };
-                    match observed {
-                        ServerEvent::TurnStarted { .. } => {
-                            info.is_processing = true;
-                            info.current_tool_name = None;
-                        }
-                        ServerEvent::ToolStart { name, .. } => {
-                            info.is_processing = true;
-                            info.current_tool_name = Some(name.clone());
-                        }
-                        ServerEvent::ToolDone { .. } => {
-                            info.current_tool_name = None;
-                        }
-                        ServerEvent::Done { .. }
-                        | ServerEvent::Error { .. }
-                        | ServerEvent::Interrupted => {
-                            info.is_processing = false;
-                            info.current_tool_name = None;
-                        }
-                        _ => {}
-                    }
+                    update.apply(&mut info.is_processing, &mut info.current_tool_name);
                 }
             }
             let Some(event) = event_for_transport(event, supports_turn_identity) else {
                 continue;
             };
-            let json = encode_event(&event);
+            encode_event_into(&event, &mut event_buffer);
             let mut w = writer_clone.lock().await;
-            if let Err(error) = w.write_all(json.as_bytes()).await {
+            if let Err(error) = w.write_all(&event_buffer).await {
                 // A broken pipe here is routine (client reload/disconnect mid
                 // broadcast), so keep the line short: a full Debug dump of e.g.
                 // a SwarmStatus event prints every member and floods the log.
@@ -596,6 +479,7 @@ pub(super) async fn handle_client(
                 ));
                 break;
             }
+            release_large_event_buffer(&mut event_buffer);
         }
     });
 
@@ -848,6 +732,20 @@ pub(super) async fn handle_client(
                 }
             }
         };
+        // A focus report only updates this connection's flag. It takes no
+        // admission reservation and gets no Ack: it exists to remove wakeups.
+        if let Request::ClientFocus {
+            focused, hidden, ..
+        } = &request
+        {
+            crate::stream_batching::set_connection_focus(
+                &client_connection_id,
+                &client_session_id,
+                *focused,
+                *hidden,
+            );
+            continue;
+        }
         let request_decoded_at = Instant::now();
         // Direct input wins the biased select above. A client may already have
         // observed Done/Error while this actor still holds the finished turn's
@@ -1554,6 +1452,8 @@ pub(super) async fn handle_client(
                     break;
                 }
             }
+
+            Request::ClientFocus { .. } => unreachable!("focus reports are handled before acknowledgment"),
 
             Request::GetTodos { .. } => {
                 let event = super::client_writer::todos_snapshot_event(&client_session_id);
@@ -3541,6 +3441,14 @@ pub(super) async fn process_reserved_message_streaming_mpsc(
 #[cfg(test)]
 #[path = "client_lifecycle_tests.rs"]
 mod tests;
+
+#[path = "connection_metadata.rs"]
+mod connection_metadata;
+use connection_metadata::*;
+
+#[cfg(test)]
+#[path = "client_lifecycle_metadata_tests.rs"]
+mod metadata_tests;
 
 #[cfg(test)]
 #[path = "client_target_attach_tests.rs"]

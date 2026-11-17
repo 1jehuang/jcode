@@ -32,6 +32,9 @@ pub struct LoginOptions {
     pub flow_id: Option<String>,
     pub cancel: bool,
     pub no_validate: bool,
+    /// Use the OpenAI device-code flow (enter a short code at
+    /// auth.openai.com/codex/device) instead of a localhost callback.
+    pub device_code: bool,
     pub google_access_tier: Option<auth::google::GmailAccessTier>,
     pub google_services: Option<Vec<auth::google::GoogleService>>,
     /// Run the guided Google Cloud OAuth client setup even when a client is saved.
@@ -83,7 +86,8 @@ impl LoginOptions {
             || self.complete
             || self.has_provided_input()
             || self.flow_id.is_some()
-            || self.cancel)
+            || self.cancel
+            || self.device_code)
     }
 }
 
@@ -126,6 +130,11 @@ enum PendingScriptableLogin {
         verifier: String,
         state: String,
         redirect_uri: String,
+    },
+    /// Device-code login (`--device-code`): no callback URL, resume with `--complete`.
+    OpenaiDevice {
+        account_label: String,
+        device: auth::oauth::OpenAiDeviceCode,
     },
     Gemini {
         verifier: String,
@@ -171,6 +180,7 @@ impl PendingScriptableLogin {
         match self {
             Self::Claude { .. } => "claude",
             Self::Openai { .. } => "openai",
+            Self::OpenaiDevice { .. } => "openai",
             Self::Gemini { .. } => "gemini",
             Self::Antigravity { .. } => "antigravity",
             Self::Google { .. } => "google",
@@ -581,33 +591,9 @@ pub(crate) async fn run_jcode_account_login(no_browser: bool) -> Result<()> {
     login_jcode_flow(no_browser).await
 }
 
-fn login_openai_api_key_flow() -> Result<()> {
-    eprintln!("Setting up OpenAI API key...");
-    eprintln!("Get your API key from: https://platform.openai.com/api-keys\n");
-    eprint!("Paste your OpenAI API key: ");
-    io::stdout().flush()?;
-
-    let key = read_secret_line()?;
-    if key.is_empty() {
-        anyhow::bail!("No API key provided.");
-    }
-    if !key.starts_with("sk-") {
-        eprintln!("Warning: OpenAI API keys usually start with 'sk-'. Saving anyway.");
-    }
-
-    save_named_api_key("openai.env", "OPENAI_API_KEY", &key)?;
-    eprintln!("\nSuccessfully saved OpenAI API key!");
-    eprintln!(
-        "Stored at {}",
-        crate::storage::app_config_dir()?
-            .join("openai.env")
-            .display()
-    );
-    eprintln!("Provider: openai-api (native OpenAI Responses API)");
-    crate::telemetry::record_auth_success("openai-api", "api_key");
-    Ok(())
-}
-
+#[path = "login_key_flows.rs"]
+mod key_flows;
+use key_flows::*;
 async fn login_claude_flow(requested_label: Option<&str>, no_browser: bool) -> Result<()> {
     let label = auth::claude::login_target_label(requested_label)?;
     eprintln!("Logging in to Claude (account: {})...", label);

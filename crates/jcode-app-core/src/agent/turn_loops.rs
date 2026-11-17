@@ -6,42 +6,11 @@ use crate::{terminal_eprintln as eprintln, terminal_print as print, terminal_pri
 #[path = "provider_prewarm.rs"]
 mod provider_prewarm;
 
+#[path = "turn_loop_policy.rs"]
+mod turn_loop_policy;
+
 impl Agent {
     /// Run turns until no more tool calls
-    /// Maximum number of context-limit compaction retries before giving up.
-    pub(super) const MAX_CONTEXT_LIMIT_RETRIES: u32 = 5;
-    pub(super) const MAX_INCOMPLETE_CONTINUATION_ATTEMPTS: u32 = 3;
-    /// Retries allowed when the provider returns an empty response right after
-    /// tool results. This is a transient provider hiccup, not a signal that the
-    /// task is finished, so a single retry is too few: one empty response
-    /// observed once in 43 turns silently ended a 20-hour benchmark run with the
-    /// task half-done. The counter is per turn-loop, so a genuinely finished
-    /// agent still exits promptly.
-    pub(crate) const MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS: u32 = 5;
-    const SEQUENTIAL_TOOL_ROUNDS_BEFORE_BATCH_NUDGE: u32 = 3;
-    const BATCH_NUDGE: &str = "<system-reminder>Several tool calls have been made one at a time. If the next independent operations can run concurrently, use the batch tool instead of making more sequential calls. Keep sequential calls when one result is required to decide the next operation.</system-reminder>";
-    const TOOL_CALLS_BEFORE_TODO_NUDGE: usize = 20;
-    const TODO_NUDGE: &str = "<system-reminder>Many tool calls have been made but this session has no todos. Use the todo tool to plan and track this task.</system-reminder>";
-    fn update_sequential_tool_rounds(current: u32, tool_count: usize, used_batch: bool) -> u32 {
-        if tool_count == 1 && !used_batch {
-            current.saturating_add(1)
-        } else {
-            0
-        }
-    }
-
-    fn should_inject_batch_nudge(pending: bool, batch_available: bool) -> bool {
-        pending && batch_available
-    }
-
-    pub(super) fn plan_limit_reminder(
-        notice: &crate::subscription_notice::QuotaExceeded,
-    ) -> String {
-        format!(
-            "<system-reminder>Jcode plan limit: {notice} An upgrade card with a button is already shown to the user in the chat. Mention the limit in one short sentence, including the upgrade link if one is given. Do not open checkout or purchase anything. Continue the task without that feature.</system-reminder>"
-        )
-    }
-
     pub(super) async fn run_turn(&mut self, print_output: bool) -> Result<String> {
         let _runtime_activity =
             crate::runtime_activity::global().try_enter_session(&self.session.id)?;
@@ -620,7 +589,17 @@ impl Agent {
                             eprintln!("[trace] provider_service_tier={tier}");
                         }
                     }
+                    StreamEvent::ResolvedModel { model } => {
+                        usage_recorder.resolve_model(model);
+                    }
                     StreamEvent::RetryRollback { attempt, max } => {
+                        // Preserve reported usage from the failed attempt, but
+                        // never let its model or counters bleed into the retry.
+                        usage_recorder.finish();
+                        usage_input = None;
+                        usage_output = None;
+                        usage_cache_read = None;
+                        usage_cache_creation = None;
                         // Transient transport fault mid-stream; the provider is
                         // replaying the request. Discard this attempt's partial
                         // output so the replay doesn't duplicate it in history.

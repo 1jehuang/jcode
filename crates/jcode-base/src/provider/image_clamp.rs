@@ -484,7 +484,8 @@ mod tests {
             content: vec![ContentBlock::Image {
                 media_type: "image/png".to_string(),
                 data,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         }
@@ -496,7 +497,8 @@ mod tests {
             content: vec![ContentBlock::Image {
                 media_type: media_type.to_string(),
                 data,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         }
@@ -799,7 +801,8 @@ mod tests {
                     cache_control: None,
                 },
                 tool_result_block("toolu_2", "second"),
-            ],
+            ]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         }];

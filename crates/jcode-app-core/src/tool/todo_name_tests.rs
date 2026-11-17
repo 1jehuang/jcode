@@ -215,7 +215,6 @@ fn public_schema_uses_names_and_descriptions_not_storage_fields() {
     for item in [phase_item, add_item] {
         let properties = item["properties"].as_object().unwrap();
         assert!(properties.contains_key("name"));
-        assert!(properties.contains_key("description"));
         for field in ["id", "content", "details"] {
             assert!(
                 !properties.contains_key(field),
@@ -230,6 +229,9 @@ fn public_schema_uses_names_and_descriptions_not_storage_fields() {
                 .any(|field| field == "name")
         );
     }
+    assert!(add_item["properties"]["description"].is_object());
+    assert_eq!(phase_item["additionalProperties"], true);
+    assert_eq!(phase_item["properties"].as_object().unwrap().len(), 4);
     assert!(update_item["properties"]["rename_to"].is_object());
 }
 

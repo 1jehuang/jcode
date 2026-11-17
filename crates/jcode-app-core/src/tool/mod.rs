@@ -41,6 +41,7 @@ mod open;
 mod panel;
 mod patch;
 mod read;
+pub mod remote_exec;
 pub(crate) mod sdk;
 pub mod selfdev;
 pub(crate) mod serde_coerce;
@@ -403,6 +404,12 @@ impl Clone for Registry {
     }
 }
 
+#[path = "registry_touched_paths.rs"]
+mod registry_touched_paths;
+
+#[path = "registry_lifecycle.rs"]
+mod registry_lifecycle;
+
 impl Registry {
     /// Desktop opts in through its inline response renderer capability.
     /// Keep Desktop-only UI tools out of the base map so terminal/headless
@@ -747,244 +754,6 @@ impl Registry {
         crate::util::estimate_tokens(s)
     }
 
-    /// Paths a tool call names in its input, labelled by the input key they
-    /// came from, resolved against the session working directory. Covers the
-    /// common path keys, `paths` arrays (first 8), and `apply_patch` file
-    /// headers (Codex envelope and unified diff).
-    fn touched_paths(input: &Value, ctx: &ToolContext) -> Vec<(&'static str, std::path::PathBuf)> {
-        let mut touched = Vec::new();
-        let Some(object) = input.as_object() else {
-            return touched;
-        };
-        let resolve = |path: &str| ctx.resolve_path(std::path::Path::new(path));
-        for key in [
-            "file_path",
-            "path",
-            "target",
-            "target_path",
-            "old_path",
-            "new_path",
-        ] {
-            if let Some(path) = object.get(key).and_then(Value::as_str) {
-                touched.push((key, resolve(path)));
-            }
-        }
-        if let Some(paths) = object.get("paths").and_then(Value::as_array) {
-            for path in paths.iter().filter_map(Value::as_str).take(8) {
-                touched.push(("paths", resolve(path)));
-            }
-        }
-        if let Some(patch) = object.get("patch_text").and_then(Value::as_str) {
-            for path in Self::patch_paths(patch) {
-                if !touched
-                    .iter()
-                    .any(|(_, existing)| *existing == resolve(path))
-                {
-                    touched.push(("patch", resolve(path)));
-                }
-            }
-        }
-        touched
-    }
-
-    /// File paths named in patch headers. Deletions are included because the
-    /// path was still touched; `/dev/null` sides of unified diffs are not.
-    fn patch_paths(patch: &str) -> Vec<&str> {
-        let mut paths = Vec::new();
-        for line in patch.lines() {
-            let path = [
-                "*** Add File: ",
-                "*** Update File: ",
-                "*** Delete File: ",
-                "*** Move to: ",
-            ]
-            .iter()
-            .find_map(|prefix| line.strip_prefix(prefix))
-            .or_else(|| {
-                let header = line
-                    .strip_prefix("+++ ")
-                    .or_else(|| line.strip_prefix("--- "))?;
-                let header = header.split('\t').next().unwrap_or(header).trim();
-                if header == "/dev/null" {
-                    return None;
-                }
-                Some(
-                    header
-                        .strip_prefix("a/")
-                        .or_else(|| header.strip_prefix("b/"))
-                        .unwrap_or(header),
-                )
-            });
-            if let Some(path) = path.map(str::trim).filter(|path| !path.is_empty())
-                && !paths.contains(&path)
-            {
-                paths.push(path);
-            }
-        }
-        paths
-    }
-
-    fn tool_lifecycle_fields(
-        phase: &str,
-        requested_name: &str,
-        resolved_name: &str,
-        input: &Value,
-        ctx: &ToolContext,
-    ) -> Vec<(String, String)> {
-        let cwd = ctx
-            .working_dir
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "none".to_string());
-        let input_json = serde_json::to_string(input).unwrap_or_default();
-        let mut fields = vec![
-            ("phase".to_string(), phase.to_string()),
-            ("tool_name".to_string(), requested_name.to_string()),
-            ("resolved_tool_name".to_string(), resolved_name.to_string()),
-            ("session_id".to_string(), ctx.session_id.clone()),
-            ("message_id".to_string(), ctx.message_id.clone()),
-            ("tool_call_id".to_string(), ctx.tool_call_id.clone()),
-            (
-                "execution_mode".to_string(),
-                format!("{:?}", ctx.execution_mode),
-            ),
-            ("cwd".to_string(), cwd),
-            ("input_json_bytes".to_string(), input_json.len().to_string()),
-        ];
-
-        if let Some(object) = input.as_object() {
-            let mut keys = object.keys().cloned().collect::<Vec<_>>();
-            keys.sort();
-            fields.push(("input_keys".to_string(), keys.join(",")));
-
-            let touched_paths = Self::touched_paths(input, ctx)
-                .into_iter()
-                .map(|(key, path)| format!("{key}:{}", path.display()))
-                .collect::<Vec<_>>();
-            if !touched_paths.is_empty() {
-                fields.push(("touched_paths".to_string(), touched_paths.join(",")));
-                fields.push((
-                    "touched_path_count".to_string(),
-                    touched_paths.len().to_string(),
-                ));
-            }
-
-            for text_key in ["command", "prompt", "task", "query", "content"] {
-                if let Some(text) = object.get(text_key).and_then(Value::as_str) {
-                    fields.push((format!("{text_key}_bytes"), text.len().to_string()));
-                    fields.push((
-                        format!("{text_key}_chars"),
-                        text.chars().count().to_string(),
-                    ));
-                }
-            }
-        }
-
-        fields
-    }
-
-    /// Maximum fraction of context budget a single tool output may consume.
-    /// Outputs that would push total context beyond this are truncated.
-    const CONTEXT_GUARD_THRESHOLD: f32 = 0.90;
-
-    /// Event payload shared by the `post_tool` observer and the
-    /// `post_tool_feedback` hook.
-    fn post_tool_event(
-        event_name: &'static str,
-        resolved_name: &str,
-        input: &Value,
-        ctx: &ToolContext,
-        result: std::result::Result<&ToolOutput, &anyhow::Error>,
-        latency_ms: u64,
-    ) -> crate::hooks::HookEvent {
-        let mut unique_paths: Vec<String> = Vec::new();
-        for (_, path) in Self::touched_paths(input, ctx) {
-            let path = path.display().to_string();
-            if !unique_paths.contains(&path) {
-                unique_paths.push(path);
-            }
-        }
-        let mut event = crate::hooks::HookEvent::new(event_name)
-            .session_id(ctx.session_id.clone())
-            .field("TOOL_NAME", resolved_name)
-            .field("TOOL_CALL_ID", ctx.tool_call_id.clone())
-            .field(
-                "TOOL_INPUT",
-                crate::hooks::truncate_tool_input(&input.to_string()),
-            )
-            .field("TOUCHED_PATHS", unique_paths.join("\n"))
-            .field("STATUS", if result.is_ok() { "ok" } else { "error" })
-            .field("DURATION_MS", latency_ms.to_string());
-        if let Some(dir) = &ctx.working_dir {
-            event = event.cwd(dir.display().to_string());
-        }
-        match result {
-            Ok(output) => {
-                event = event.field("OUTPUT_BYTES", output.output.len().to_string());
-            }
-            Err(error) => {
-                const ERROR_LIMIT: usize = 1000;
-                let message: String = error.to_string().chars().take(ERROR_LIMIT).collect();
-                event = event.field("ERROR", message);
-            }
-        }
-        event
-    }
-
-    /// Fire the `post_tool` observer hook with tool outcome metadata.
-    /// No-op (without building the payload) when the hook is not configured.
-    fn fire_post_tool_hook(
-        resolved_name: &str,
-        input: &Value,
-        ctx: &ToolContext,
-        result: &Result<ToolOutput>,
-        latency_ms: u64,
-    ) {
-        if !crate::hooks::hook_configured("post_tool") {
-            return;
-        }
-        crate::hooks::dispatch_observer(Self::post_tool_event(
-            "post_tool",
-            resolved_name,
-            input,
-            ctx,
-            result.as_ref(),
-            latency_ms,
-        ));
-    }
-
-    /// Run the synchronous `post_tool_feedback` hooks after a successful tool
-    /// call and append whatever they print to the tool result, so linters and
-    /// checkers can feed findings straight back to the model.
-    async fn apply_post_tool_feedback(
-        resolved_name: &str,
-        input: &Value,
-        ctx: &ToolContext,
-        latency_ms: u64,
-        output: &mut ToolOutput,
-    ) {
-        if !crate::hooks::hook_configured("post_tool_feedback") {
-            return;
-        }
-        let event = Self::post_tool_event(
-            "post_tool_feedback",
-            resolved_name,
-            input,
-            ctx,
-            Ok(output),
-            latency_ms,
-        );
-        if let Some(feedback) =
-            crate::hooks::run_post_tool_feedback(&event, &input.to_string()).await
-        {
-            if !output.output.is_empty() && !output.output.ends_with('\n') {
-                output.output.push('\n');
-            }
-            output.output.push_str("\n[post_tool_feedback]\n");
-            output.output.push_str(&feedback);
-        }
-    }
-
     /// Maximum fraction of context budget a single tool output may occupy.
     /// Even if we have room, a single output shouldn't dominate the context.
     const SINGLE_OUTPUT_MAX_FRACTION: f32 = 0.30;
@@ -1181,7 +950,13 @@ impl Registry {
         );
 
         let started_at = std::time::Instant::now();
-        let result = tool.execute(input.clone(), ctx.clone()).await;
+        // Hooks, policy, telemetry and the context guard stay in the runtime.
+        // Only the workspace side effect moves to the execution environment.
+        let result = if !is_custom && remote_exec::routes(resolved_name) {
+            remote_exec::execute(resolved_name, input.clone(), &ctx).await
+        } else {
+            tool.execute(input.clone(), ctx.clone()).await
+        };
         let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
         crate::telemetry::record_tool_execution(resolved_name, &input, result.is_ok(), latency_ms);
@@ -1237,6 +1012,10 @@ impl Registry {
 
         Ok(output)
     }
+
+    /// Maximum fraction of context budget a single tool output may consume.
+    /// Outputs that would push total context beyond this are truncated.
+    const CONTEXT_GUARD_THRESHOLD: f32 = 0.90;
 
     /// Check if a tool output would overflow the context window and truncate if needed.
     /// Returns the (possibly truncated) output.

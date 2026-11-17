@@ -1,51 +1,9 @@
 use super::*;
 
+#[path = "commands_cloud_tests/account_onboarding.rs"]
+mod account_onboarding;
 #[path = "commands_cloud_tests/auto_recovery.rs"]
 mod auto_recovery;
-
-#[test]
-fn parses_mobile_as_a_move_to_managed_cloud() {
-    for input in ["/mobile", "/mobile ", " /mobile\t"] {
-        assert_eq!(
-            parse_cloud_command(input),
-            Some(CloudCommand::Move {
-                host: Some("jcode-cloud".into()),
-            }),
-            "{input:?}"
-        );
-    }
-}
-
-#[test]
-fn parses_mobile_cancel() {
-    for input in ["/mobile cancel", "/mobile\tcancel "] {
-        assert_eq!(
-            parse_cloud_command(input),
-            Some(CloudCommand::Cancel),
-            "{input:?}"
-        );
-    }
-}
-
-#[test]
-fn mobile_rejects_unexpected_arguments() {
-    for input in [
-        "/mobile box",
-        "/mobile --host box",
-        "/mobile --session-only",
-        "/mobile --include-session other",
-        "/mobile --dry-run",
-        "/mobile status",
-        "/mobile cancel extra",
-        "/mobile cancel cancel",
-    ] {
-        assert_eq!(
-            parse_cloud_command(input),
-            Some(CloudCommand::MoveUsage),
-            "{input}"
-        );
-    }
-}
 
 #[test]
 fn mobile_does_not_match_command_prefixes() {
@@ -1325,3 +1283,6 @@ fn prepared_handoff_interrupts_running_turn_once() {
     app.poll_cloud_job_interrupt_only_for_test();
     assert!(!app.take_cloud_remote_interrupt(), "interrupts only once");
 }
+
+#[path = "commands_cloud_tests_additional_tests.rs"]
+mod additional_parses_mobile_as_a_move_to_managed_cloud;

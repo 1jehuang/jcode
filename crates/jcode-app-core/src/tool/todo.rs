@@ -195,64 +195,6 @@ impl TodoTool {
     }
 }
 
-/// Fold each incoming todo's confidence into its tool-maintained history.
-///
-/// The model reports `confidence` while working and `completion_confidence` at
-/// completion. Each todo-tool write contributes at most one observation so a
-/// single completion update cannot manufacture an apparent intermediate step.
-/// The append-only trail lets downstream consumers distinguish an
-/// evidence-driven rise (75 -> 85 -> 95 -> 100) from a bulk end-of-task stamp
-/// (75 -> 100). Model-supplied `confidence_history` is ignored: the tool owns
-/// this field.
-fn merge_confidence_history(previous: &[TodoItem], incoming: &mut [TodoItem]) {
-    let prior: HashMap<&str, &TodoItem> = previous
-        .iter()
-        .map(|todo| (todo.id.as_str(), todo))
-        .collect();
-    for todo in incoming.iter_mut() {
-        let previous_todo = prior.get(todo.id.as_str()).copied();
-        let mut history = previous_todo
-            .map(|prev| prev.confidence_history.clone())
-            .unwrap_or_default();
-        if history.is_empty()
-            && let Some(value) = previous_todo.and_then(|prev| {
-                if prev.status == "completed" {
-                    prev.completion_confidence.or(prev.confidence)
-                } else {
-                    prev.confidence
-                }
-            })
-        {
-            history.push(value);
-        }
-        let observation = if todo.status == "completed" {
-            todo.completion_confidence.or(todo.confidence)
-        } else {
-            todo.confidence
-        };
-        if let Some(value) = observation
-            && history.last() != Some(&value)
-        {
-            history.push(value);
-        }
-        todo.confidence_history = history;
-        // `assigned_to` links a todo to the swarm worker running it. It is set
-        // by swarm dispatch, not the model (the schema does not expose it), so
-        // a model rewrite of the list must not silently unassign the worker.
-        if todo.assigned_to.is_none() {
-            todo.assigned_to = previous_todo.and_then(|prev| prev.assigned_to.clone());
-        }
-        // Only a new start claims local ownership. Merely rewriting an old
-        // unassigned in-progress item does not establish who is working on it.
-        if todo.assigned_to.is_none()
-            && todo.status == "in_progress"
-            && previous_todo.is_none_or(|prev| prev.status != "in_progress")
-        {
-            todo.assigned_to = Some("@self".to_string());
-        }
-    }
-}
-
 /// How a todo call wrote, for measuring whether agents use incremental edits
 /// instead of resending the list. Counted locally in
 /// `~/.jcode/stats/todo-write-modes.json`; nothing leaves the machine.
@@ -284,8 +226,19 @@ fn record_todo_write_mode(input: &Value) {
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
     *counts.entry(mode.to_string()).or_default() += 1;
-    let _ = std::fs::create_dir_all(&dir);
-    let _ = crate::storage::write_json_fast(&path, &counts);
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        crate::logging::warn(&format!(
+            "Failed to create todo statistics directory {}: {error}",
+            dir.display()
+        ));
+        return;
+    }
+    if let Err(error) = crate::storage::write_json_fast(&path, &counts) {
+        crate::logging::warn(&format!(
+            "Failed to persist todo write statistics {}: {error}",
+            path.display()
+        ));
+    }
 }
 
 /// Every key an update may carry once names and pauses are normalized: the
@@ -654,12 +607,22 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
                     "group",
                     "wave",
                     "lane_after",
+                    "lane_dependencies",
                     "lane_owner",
                 ]
                 .iter()
                 .any(|key| item.contains_key(*key))
                 {
                     bail!("hierarchical items must not own phase/lane/stage/group membership");
+                }
+                for key in item.keys() {
+                    // Pause normalization below still handles legacy null
+                    // blocker keys and supplies their migration guidance.
+                    if !UPDATE_FIELDS.contains(&key.as_str())
+                        && !["external_blocker", "completely_blocked"].contains(&key.as_str())
+                    {
+                        bail!("unexpected phase item field {key:?}");
+                    }
                 }
                 let id = item
                     .get("id")
@@ -690,132 +653,9 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
 
 /// Normalize a goal's group label: trimmed, with empty/whitespace collapsed
 /// to `None` (the implicit goal of an ungrouped list).
-fn goal_group_key(group: Option<&str>) -> Option<String> {
-    group
-        .map(str::trim)
-        .filter(|group| !group.is_empty())
-        .map(str::to_string)
-}
-
-fn todo_telemetry_update(
-    previous: &[TodoItem],
-    todos: &[TodoItem],
-    goals: &[TodoGoal],
-    plan: &TodoPlan,
-) -> crate::telemetry::TodoTelemetryUpdate {
-    let previous_by_id: HashMap<&str, &TodoItem> = previous
-        .iter()
-        .map(|todo| (todo.id.as_str(), todo))
-        .collect();
-    let current_by_id: HashMap<&str, &TodoItem> =
-        todos.iter().map(|todo| (todo.id.as_str(), todo)).collect();
-
-    let todos_created = current_by_id
-        .keys()
-        .filter(|id| !previous_by_id.contains_key(**id))
-        .count()
-        .min(u32::MAX as usize) as u32;
-    let todos_completed = current_by_id
-        .iter()
-        .filter(|(id, todo)| {
-            todo.status == "completed"
-                && previous_by_id
-                    .get(**id)
-                    .is_none_or(|previous| previous.status != "completed")
-        })
-        .count()
-        .min(u32::MAX as usize) as u32;
-    let todos_abandoned = previous_by_id
-        .iter()
-        .filter(|(id, todo)| todo.status != "completed" && !current_by_id.contains_key(**id))
-        .count()
-        .min(u32::MAX as usize) as u32;
-    let current_incomplete = current_by_id
-        .values()
-        .filter(|todo| todo.status != "completed")
-        .count()
-        .min(u32::MAX as usize) as u32;
-
-    let mut group_completion: HashMap<Option<String>, bool> = HashMap::new();
-    for todo in current_by_id.values() {
-        let completed = todo.status == "completed";
-        group_completion
-            .entry(goal_group_key(todo.group.as_deref()))
-            .and_modify(|all_completed| *all_completed &= completed)
-            .or_insert(completed);
-    }
-
-    crate::telemetry::TodoTelemetryUpdate {
-        todos_created,
-        todos_completed,
-        todos_abandoned,
-        current_incomplete,
-        list_size: todos.len().min(u32::MAX as usize) as u32,
-        groups_completed: group_completion
-            .values()
-            .filter(|completed| **completed)
-            .count()
-            .min(u32::MAX as usize) as u32,
-        groups_total: group_completion.len().min(u32::MAX as usize) as u32,
-        confidence: crate::telemetry::TelemetryScoreSummary::from_scores(
-            current_by_id
-                .values()
-                .filter_map(|todo| todo.confidence.map(|state| state.legacy_score())),
-        ),
-        completion_confidence: crate::telemetry::TelemetryScoreSummary::from_scores(
-            current_by_id
-                .values()
-                .filter_map(|todo| todo.completion_confidence.map(|state| state.legacy_score())),
-        ),
-        understands_user_intent: crate::telemetry::TelemetryScoreSummary::from_scores(
-            plan.understands_user_intent
-                .map(|state| state.legacy_score()),
-        ),
-        closed_feedback_loop: crate::telemetry::TelemetryScoreSummary::from_scores(
-            goals
-                .iter()
-                .filter_map(|goal| goal.closed_feedback_loop.map(|state| state.legacy_score())),
-        ),
-        feedback_loop_relevance: crate::telemetry::TelemetryScoreSummary::from_scores(
-            goals.iter().filter_map(|goal| {
-                goal.feedback_loop_relevance
-                    .map(|state| state.legacy_score())
-            }),
-        ),
-        feedback_loop_coverage: crate::telemetry::TelemetryScoreSummary::from_scores(
-            goals.iter().filter_map(|goal| {
-                goal.feedback_loop_coverage
-                    .map(|state| state.legacy_score())
-            }),
-        ),
-        end_to_end_ownership: crate::telemetry::TelemetryScoreSummary::from_scores(
-            goals
-                .iter()
-                .filter_map(|goal| goal.delivery_state.map(|state| state.legacy_score())),
-        ),
-    }
-}
-
-fn record_todo_telemetry(
-    previous: &[TodoItem],
-    todos: &[TodoItem],
-    goals: &[TodoGoal],
-    plan: &TodoPlan,
-) {
-    crate::telemetry::record_todo_update(todo_telemetry_update(previous, todos, goals, plan));
-}
-
-/// Append `value` to `history` when it is a new observation.
-///
-/// One todo-tool write contributes at most one entry per score, so a single
-/// bulk update cannot manufacture an apparent gradual climb.
-fn record_score_observation<T: Copy + PartialEq>(history: &mut Vec<T>, value: Option<T>) {
-    if let Some(value) = value
-        && history.last() != Some(&value)
-    {
-        history.push(value);
-    }
-}
+#[path = "todo_telemetry.rs"]
+mod todo_telemetry;
+use todo_telemetry::*;
 
 /// Merge incoming goal assessments with the stored ones.
 ///
@@ -949,6 +789,52 @@ fn prune_orphaned_goals(goals: Vec<TodoGoal>, todos: &[TodoItem]) -> Vec<TodoGoa
         .into_iter()
         .filter(|goal| live_groups.contains(&goal_group_key(goal.group.as_deref())))
         .collect()
+}
+
+/// Explain a goal assessment that this write sent but `prune_orphaned_goals`
+/// discards because no todo carries its group any more.
+///
+/// Without this the write returned normally, the assessment vanished, and the
+/// agent kept resending it (field report: goals-only updates for a finished
+/// group were "silently dropped").
+fn ignored_goal_groups_note(incoming: &[TodoGoal], todos: &[TodoItem]) -> Option<String> {
+    if todos.is_empty() {
+        return None;
+    }
+    let live_groups: std::collections::HashSet<Option<String>> = todos
+        .iter()
+        .map(|todo| goal_group_key(todo.group.as_deref()))
+        .collect();
+    let mut ignored: Vec<String> = Vec::new();
+    for goal in incoming {
+        let key = goal_group_key(goal.group.as_deref());
+        if live_groups.contains(&key) {
+            continue;
+        }
+        let label = match key {
+            Some(group) => format!("\"{group}\""),
+            None => "(ungrouped)".to_string(),
+        };
+        if !ignored.contains(&label) {
+            ignored.push(label);
+        }
+    }
+    if ignored.is_empty() {
+        return None;
+    }
+    let mut live: Vec<String> = live_groups
+        .into_iter()
+        .map(|group| match group {
+            Some(group) => format!("\"{group}\""),
+            None => "(ungrouped)".to_string(),
+        })
+        .collect();
+    live.sort();
+    Some(format!(
+        "Note: goal assessment ignored for {}: no todo is in that group, so it was not saved. Current groups: {}.",
+        ignored.join(", "),
+        live.join(", ")
+    ))
 }
 
 fn changed_goal_fields(before: Option<&TodoGoal>, after: Option<&TodoGoal>) -> Vec<TodoGoalField> {
@@ -1337,20 +1223,6 @@ fn coerce_empty_string_to_null(value: &mut Value) {
     }
 }
 
-/// Drop the `description` of every property of an item schema except `keep`.
-fn strip_property_descriptions(item: &mut Value, keep: &[&str]) {
-    let Some(properties) = item["properties"].as_object_mut() else {
-        return;
-    };
-    for (name, property) in properties {
-        if !keep.contains(&name.as_str())
-            && let Some(property) = property.as_object_mut()
-        {
-            property.remove("description");
-        }
-    }
-}
-
 #[async_trait]
 impl Tool for TodoTool {
     fn name(&self) -> &str {
@@ -1562,19 +1434,22 @@ impl Tool for TodoTool {
         });
         schema["properties"]["add"]["items"]["properties"] = add_properties;
         schema["properties"]["add"]["items"]["additionalProperties"] = json!(false);
-        // The item schema is built locally above. Remove flat aliases from the
-        // hierarchical representation without assuming the JSON object shape.
-        let mut item = schema["properties"]["todos"]["items"].clone();
+        // Like update, phase items refer to add rather than repeating its
+        // fields. Runtime validation rejects unknown fields and membership.
+        let item = json!({
+            "type": "object",
+            "required": ["name", "status", "priority", "confidence"],
+            "properties": {
+                "name": {"type": "string", "minLength": 1},
+                "status": {"type": "string"},
+                "priority": {"type": "string"},
+                "confidence": {"type": "string"}
+            },
+            "additionalProperties": true
+        });
         if let Some(properties) = schema["properties"].as_object_mut() {
             properties.remove("todos");
         }
-        if let Some(properties) = item["properties"].as_object_mut() {
-            properties.remove("phase");
-            properties.remove("lane");
-            properties.remove("lane_dependencies");
-            properties.remove("lane_owner");
-        }
-        item["additionalProperties"] = json!(false);
         schema["properties"]["phases"] = json!({
             "type": "array",
             "description": "Creates or replaces the whole plan; [] clears. Use once, then change items with update/add/remove. Phases are sequential, lanes parallel, items ordered.",
@@ -1599,8 +1474,9 @@ impl Tool for TodoTool {
         // and point the other two routes at it.
         let phase_items = &mut schema["properties"]["phases"]["items"]["properties"]["lanes"]["items"]
             ["properties"]["items"];
-        strip_property_descriptions(&mut phase_items["items"], &[]);
-        phase_items["description"] = json!("Item fields as in add.");
+        phase_items["description"] = json!(
+            "Item fields as in add, except after and phase/lane membership (set on containers)."
+        );
         schema
     }
 
@@ -1646,10 +1522,13 @@ impl Tool for TodoTool {
             (|| {
                 let stored_goals = load_goals(&ctx.session_id).unwrap_or_default();
                 let stored_plan = load_plan(&ctx.session_id).unwrap_or_default();
+                let ignored_goals =
+                    ignored_goal_groups_note(params.goals.as_deref().unwrap_or_default(), &todos);
                 let goals = prune_orphaned_goals(merge_goals(&stored_goals, params.goals), &todos);
                 let plan = merge_plan(&stored_plan, params.plan);
-                let (observations, nudges) =
+                let (observations, mut nudges) =
                     record_reframe_observations(&plan, &goals, &todos, &previous);
+                nudges.extend(ignored_goals);
                 for observation in &observations {
                     let kind = match observation.kind {
                         GateObservationKind::IntentUnderstanding => {

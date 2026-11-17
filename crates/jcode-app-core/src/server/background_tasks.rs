@@ -376,7 +376,7 @@ pub(super) async fn dispatch_swarm_worker_report(
     ).await {
         let queued = queue_soft_interrupt_for_session(
             &event.session_id,
-            format!("{}\n\nReview this worker report and continue coordinating the remaining actionable plan, including assigning available workers their next work.", event.notification),
+            format!("{}\n\nIntegrate results. Continue actionable work or stop idle workers.", event.notification),
             false,
             SoftInterruptSource::System,
             soft_interrupt_queues,

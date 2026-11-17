@@ -12,7 +12,8 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
         content: vec![crate::message::ContentBlock::Text {
             text: "persisted busy attach history".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,

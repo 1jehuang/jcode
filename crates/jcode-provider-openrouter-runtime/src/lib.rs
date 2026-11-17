@@ -488,37 +488,9 @@ impl ProviderAuth {
     }
 }
 
-fn add_cache_breakpoint(messages: &mut [Message]) -> bool {
-    let mut cache_index = None;
-    for (idx, msg) in messages.iter().enumerate().rev() {
-        if let Role::User = msg.role
-            && msg
-                .content
-                .iter()
-                .any(|b| matches!(b, ContentBlock::Text { .. }))
-        {
-            cache_index = Some(idx);
-            break;
-        }
-    }
-
-    let Some(idx) = cache_index else {
-        return false;
-    };
-
-    let msg = &mut messages[idx];
-    for block in msg.content.iter_mut().rev() {
-        if let ContentBlock::Text { cache_control, .. } = block {
-            if cache_control.is_none() {
-                *cache_control = Some(CacheControl::ephemeral(None));
-            }
-            return true;
-        }
-    }
-
-    false
-}
-
+#[path = "lib_cache_breakpoints.rs"]
+mod cache_breakpoints;
+use cache_breakpoints::*;
 fn models_fingerprint(models: &[ModelInfo]) -> String {
     serde_json::to_string(models).unwrap_or_default()
 }
