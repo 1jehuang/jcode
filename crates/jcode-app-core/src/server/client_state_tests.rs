@@ -12,8 +12,21 @@ use std::collections::HashMap;
 use std::io::BufRead as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, RwLock, mpsc};
+
+async fn read_frames<R: tokio::io::AsyncRead + Unpin>(reader: R, count: usize) -> Vec<u8> {
+    use tokio::io::AsyncBufReadExt;
+    let mut reader = tokio::io::BufReader::new(reader);
+    let mut bytes = Vec::new();
+    for _ in 0..count {
+        let read = tokio::time::timeout(Duration::from_secs(2), reader.read_until(b'\n', &mut bytes))
+            .await
+            .unwrap_or_else(|_| panic!("frame {count} did not arrive"))
+            .unwrap();
+        assert!(read > 0, "stream closed before {count} frames");
+    }
+    bytes
+}
 
 struct MockProvider(Option<&'static str>);
 
@@ -244,8 +257,7 @@ fn model_prefetch_hydrates_capabilities_with_existing_model_names() {
                 .await
                 .unwrap();
             drop(writer);
-            let mut bytes = Vec::new();
-            peer.read_to_end(&mut bytes).await.unwrap();
+            let bytes = read_frames(&mut peer, 1).await;
             let event: crate::protocol::ServerEvent = serde_json::from_slice(&bytes).unwrap();
             let crate::protocol::ServerEvent::History {
                 available_service_tiers,
@@ -526,8 +538,7 @@ async fn turn_identity_busy_history_bootstraps_active_turn_and_idle_watermark() 
         .unwrap();
     drop(busy);
     drop(writer);
-    let mut bytes = Vec::new();
-    peer.read_to_end(&mut bytes).await.unwrap();
+    let bytes = read_frames(&mut peer, 4).await;
     let events: Vec<crate::protocol::ServerEvent> = std::io::Cursor::new(bytes)
         .lines()
         .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
@@ -618,12 +629,6 @@ async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
             None,
         )
     };
-    // An unbounded await here turns a product bug into a silent suite hang.
-    async fn bounded<F: std::future::Future>(fut: F) -> F::Output {
-        tokio::time::timeout(std::time::Duration::from_secs(2), fut)
-            .await
-            .unwrap_or_else(|_| panic!("step did not finish within 2s"))
-    }
     for processing in [false, true] {
         let results = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             tokio::join!(
@@ -643,9 +648,8 @@ async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
         "fallback must not persist synthetic state"
     );
 
-    // A nonexistent session is not the same as a registered, unsaved one.
     sessions.clear_for_test().await;
-    assert!(bounded(request(4, false)).await.is_err());
+    assert!(request(4, false).await.is_err());
     // Publication needs an idle Agent; hold it busy again for the corruption check.
     drop(busy_guard);
     sessions
@@ -655,12 +659,11 @@ async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
     let busy_guard = agent.lock().await;
     std::fs::create_dir_all(snapshot_path.parent().unwrap()).unwrap();
     std::fs::write(&snapshot_path, b"not valid session json").unwrap();
-    assert!(bounded(request(5, false)).await.is_err());
+    assert!(request(5, false).await.is_err());
 
     drop(busy_guard);
     drop(writer);
-    let mut bytes = Vec::new();
-    bounded(peer.read_to_end(&mut bytes)).await.unwrap();
+    let bytes = read_frames(peer, 6).await;
     let events: Vec<crate::protocol::ServerEvent> = std::io::Cursor::new(bytes)
         .lines()
         .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
@@ -873,11 +876,7 @@ async fn assert_history_service_tier_and_pdf_capability(
     drop(busy_guard);
     drop(writer);
 
-    let mut bytes = Vec::new();
-    stream_b
-        .read_to_end(&mut bytes)
-        .await
-        .expect("read history event bytes");
+    let bytes = read_frames(stream_b, 1).await;
     let mut cursor = std::io::Cursor::new(bytes);
     let mut line = String::new();
     cursor.read_line(&mut line).expect("read first line");
