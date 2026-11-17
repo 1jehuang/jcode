@@ -2072,6 +2072,10 @@ fn prepare_streaming_cached(
         lines.push(align_if_unset(line, align));
     }
 
+    // Streaming replies need the same copy targets as finalized messages.
+    // Extract before wrapping, then map the ranges after joining the cached
+    // stable head and live tail so targets spanning that boundary stay intact.
+    let copy_targets = markdown::extract_copy_targets_from_rendered_lines(&lines);
     let mut prepared = if head_md_lines == 0 {
         wrap_lines(lines, &[], &[], &[], width)
     } else {
@@ -2097,6 +2101,23 @@ fn prepare_streaming_cached(
         });
         append_wrapped_tail(&head, wrap_lines(tail_lines, &[], &[], &[], width))
     };
+    prepared.copy_targets = copy_targets
+        .into_iter()
+        .map(|target| {
+            let wrapped_row = |raw_line| {
+                prepared
+                    .wrapped_line_map
+                    .partition_point(|map| map.raw_line < raw_line)
+            };
+            CopyTarget {
+                kind: target.kind,
+                content: target.content,
+                start_line: wrapped_row(target.start_raw_line),
+                end_line: wrapped_row(target.end_raw_line),
+                badge_line: wrapped_row(target.badge_raw_line),
+            }
+        })
+        .collect();
     stamp_mermaid_pending(&mut prepared, mermaid_epoch_before);
     prepared
 }
@@ -2242,6 +2263,12 @@ pub(super) fn prepare_body(
         if centered {
             markdown::recenter_structured_blocks_for_display(&mut md_lines, display_width);
         }
+        let line_offset = acc.lines.len();
+        acc.copy_targets.extend(
+            assistant_message_copy_targets(app.streaming_text(), &md_lines)
+                .into_iter()
+                .map(|target| offset_copy_target(target, line_offset)),
+        );
         let align = default_message_alignment("assistant", centered);
         for line in md_lines {
             acc.lines.push(align_if_unset(line, align));
