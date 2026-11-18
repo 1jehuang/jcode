@@ -128,6 +128,7 @@ pub struct PushLabels {
     pub origin: Option<String>,
     pub repo: Option<String>,
     pub elapsed: Option<Duration>,
+    pub todos: Option<crate::agents_status::TodoProgress>,
 }
 
 impl PushLabels {
@@ -153,6 +154,9 @@ impl PushLabels {
             origin: Some(origin_label().to_string()),
             repo: dir.and_then(|dir| repo_label(std::path::Path::new(dir))),
             elapsed,
+            todos: crate::todo::load_todos(session_id)
+                .ok()
+                .and_then(|items| crate::agents_status::TodoProgress::from_items(&items)),
         }
     }
 }
@@ -293,6 +297,7 @@ pub fn build_payload_with(
     turn_id: Option<u64>,
     labels: &PushLabels,
 ) -> PushPayload {
+    let requested = kind;
     let title = session_title
         .map(str::trim)
         .filter(|t| !t.is_empty())
@@ -330,18 +335,35 @@ pub fn build_payload_with(
     let clean_label = |label: &Option<String>| {
         label
             .as_deref()
-            .map(|l| plain_inline(l.trim()))
+            .map(|l| {
+                let normalized = plain_inline(l)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                truncate_chars(&normalized, LABEL_MAX_CHARS)
+            })
             .filter(|l| !l.is_empty())
     };
     let origin = clean_label(&labels.origin);
     let repo = clean_label(&labels.repo);
     let run_time = labels.elapsed.map(humanize_duration);
-    let status = match (kind_status(kind), run_time) {
+    let mut status = match (kind_status(kind), run_time) {
         // A finished turn needs no word beyond its check mark and run time.
         (_, Some(time)) if kind == PushKind::TurnDone => format!("{} {time}", kind_marker(kind)),
         (word, Some(time)) => format!("{} {word}{LABEL_SEPARATOR}{time}", kind_marker(kind)),
         (word, None) => format!("{} {word}", kind_marker(kind)),
     };
+    if requested == PushKind::TurnDone
+        && let Some(progress) = labels.todos.and_then(todo_indicator)
+    {
+        status = format!("{progress}{LABEL_SEPARATOR}{status}");
+    }
+    // Reserve the complete progress/status/runtime suffix before budgeting labels.
+    let context_budget = TITLE_MAX_CHARS
+        .saturating_sub(status.chars().count() + 2 * LABEL_SEPARATOR.chars().count());
+    let context_cap = LABEL_MAX_CHARS.min(context_budget / 2);
+    let origin = origin.map(|label| truncate_chars(&label, context_cap));
+    let repo = repo.map(|label| truncate_chars(&label, context_cap));
     let headline = [origin.clone(), repo.clone(), Some(status)]
         .into_iter()
         .flatten()
@@ -362,6 +384,29 @@ pub fn build_payload_with(
         repo,
         duration_secs,
     }
+}
+
+/// Keep large plans bounded while retaining their actual task count.
+fn todo_indicator(progress: crate::agents_status::TodoProgress) -> Option<String> {
+    let total = progress.total;
+    if total == 0 {
+        return None;
+    }
+    let done = progress.done.min(total);
+    let active = progress.active.min(total - done);
+    let bubbles = if total <= 8 {
+        format!(
+            "{}{}{}",
+            "●".repeat(done as usize),
+            "◐".repeat(active as usize),
+            "○".repeat((total - done - active) as usize)
+        )
+    } else {
+        // Same filled/empty glyph convention as the info widget's limit bar.
+        let filled = (u64::from(done) * 8 / u64::from(total)) as usize;
+        format!("{}{}", "▰".repeat(filled), "▱".repeat(8 - filled))
+    };
+    Some(format!("{bubbles} {done}/{total}"))
 }
 
 const JS_SAFE_INT_MASK: u64 = (1 << 53) - 1;
