@@ -2386,8 +2386,7 @@ pub(super) fn handle_pre_control_shortcuts(
     if super::copy_last_response::handle_key(app, code, modifiers) {
         return true;
     }
-    // Ctrl+K kills to EOL. Shift+K must reach the scroll handler (Kitty reports
-    // Ctrl+Shift+K as Char('k')+CONTROL|SHIFT; without the guard it wipes the draft).
+    // Ctrl+K kills to EOL; Ctrl+Shift+K (Kitty: CONTROL|SHIFT) must reach scroll.
     if modifiers.contains(KeyModifiers::CONTROL)
         && !modifiers.contains(KeyModifiers::SHIFT)
         && matches!(code, KeyCode::Char('k'))
