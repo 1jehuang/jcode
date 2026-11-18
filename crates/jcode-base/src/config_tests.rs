@@ -14,6 +14,35 @@ fn restore_env_var(key: &str, previous: Option<OsString>) {
     }
 }
 
+#[test]
+fn jarvis_speech_endpoint_override_and_cache_fingerprint() {
+    let _guard = crate::storage::lock_test_env();
+    struct Restore(Option<OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            restore_env_var("JCODE_JARVIS_SPEECH_ENDPOINT", self.0.take());
+        }
+    }
+    let _restore = Restore(std::env::var_os("JCODE_JARVIS_SPEECH_ENDPOINT"));
+    crate::env::remove_var("JCODE_JARVIS_SPEECH_ENDPOINT");
+    let before = config_env_fingerprint();
+    crate::env::set_var(
+        "JCODE_JARVIS_SPEECH_ENDPOINT",
+        "http://127.0.0.1:8765/v1/audio/speech",
+    );
+    assert_ne!(before, config_env_fingerprint());
+    let mut config: Config =
+        toml::from_str("[jarvis.speech]\nendpoint = 'http://old.example/tts'").unwrap();
+    config.apply_env_overrides();
+    assert_eq!(
+        config.jarvis.speech.endpoint.as_deref(),
+        Some("http://127.0.0.1:8765/v1/audio/speech")
+    );
+    crate::env::set_var("JCODE_JARVIS_SPEECH_ENDPOINT", "");
+    config.apply_env_overrides();
+    assert_eq!(config.jarvis.speech.endpoint.as_deref(), Some(""));
+}
+
 struct GeminiConfigEnv {
     _home: tempfile::TempDir,
     previous: Vec<(&'static str, Option<OsString>)>,

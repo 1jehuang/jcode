@@ -7,6 +7,11 @@ impl Config {
         reason = "Environment override parsing is intentionally explicit and grouped by config area"
     )]
     pub(crate) fn apply_env_overrides(&mut self) {
+        if let Ok(endpoint) = std::env::var("JCODE_JARVIS_SPEECH_ENDPOINT") {
+            // Preserve an explicitly empty value so endpoint validation fails
+            // rather than silently changing the selected voice to eSpeak.
+            self.jarvis.speech.endpoint = Some(endpoint);
+        }
         if let Ok(value) = std::env::var("JCODE_BROWSER_HANDOFF") {
             self.tools.browser_handoff = value == "1" || value.eq_ignore_ascii_case("true");
         }

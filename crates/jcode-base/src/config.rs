@@ -219,6 +219,7 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_JADE_RELAY_TOKEN",
     "JCODE_JADE_RELAY_TOKEN_ID",
     "JCODE_JADE_RELAY_USER_ID",
+    "JCODE_JARVIS_SPEECH_ENDPOINT",
     "JCODE_KV_CACHE_MISS_NOTICES",
     "JCODE_LATEX_RENDERING",
     "JCODE_MARKDOWN_SPACING",
@@ -662,6 +663,9 @@ pub struct Config {
     /// External dictation / speech-to-text integration
     pub dictation: DictationConfig,
 
+    /// Experimental voice replies. Models and synthesis services remain external.
+    pub jarvis: JarvisConfig,
+
     /// Display/UI configuration
     pub display: DisplayConfig,
 
@@ -1024,6 +1028,66 @@ impl Default for CompanionConfig {
             lid: true,
             browser_updates: true,
         }
+    }
+}
+
+/// Jarvis speech-output configuration. Synthesis services and voice models
+/// remain external to Jcode.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct JarvisConfig {
+    pub speech: JarvisSpeechConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JarvisSpeechConfig {
+    /// Full OpenAI-compatible POST endpoint returning WAV audio.
+    /// None selects the free local eSpeak placeholder.
+    pub endpoint: Option<String>,
+    pub model: String,
+    pub voice: String,
+    /// Name of an environment variable, never the secret itself.
+    pub api_key_env: Option<String>,
+}
+
+impl Default for JarvisSpeechConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: None,
+            model: "piper-jarvis".into(),
+            voice: "jarvis".into(),
+            api_key_env: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod jarvis_config_tests {
+    use super::*;
+
+    #[test]
+    fn jarvis_endpoint_is_optional_and_serializes() {
+        assert!(Config::default().jarvis.speech.endpoint.is_none());
+        let config: Config = toml::from_str(
+            "[jarvis.speech]\nendpoint = 'http://127.0.0.1:8765/v1/audio/speech'\nmodel = 'custom-model'\nvoice = 'custom-voice'\napi_key_env = 'MY_TTS_KEY'",
+        ).unwrap();
+        assert_eq!(
+            config.jarvis.speech.endpoint.as_deref(),
+            Some("http://127.0.0.1:8765/v1/audio/speech")
+        );
+        assert_eq!(config.jarvis.speech.model, "custom-model");
+        assert_eq!(config.jarvis.speech.voice, "custom-voice");
+        assert_eq!(
+            config.jarvis.speech.api_key_env.as_deref(),
+            Some("MY_TTS_KEY")
+        );
+        let roundtrip: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(
+            roundtrip.jarvis.speech.endpoint,
+            config.jarvis.speech.endpoint
+        );
+        assert!(CONFIG_ENV_KEYS.contains(&"JCODE_JARVIS_SPEECH_ENDPOINT"));
     }
 }
 

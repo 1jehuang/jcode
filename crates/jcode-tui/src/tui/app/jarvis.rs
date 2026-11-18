@@ -31,7 +31,7 @@ impl App {
         remote: &mut RemoteConnection,
     ) -> anyhow::Result<()> {
         if crate::tui::jarvis::enabled() && self.jarvis_speech.is_none() {
-            self.jarvis_speech = Some(jcode_voice::speech::SpeechPlayer::new()?);
+            self.jarvis_speech = Some(crate::tui::jarvis::create_speech_player()?);
             self.push_display_message(DisplayMessage::system(
                 "Jarvis mode: local spoken replies enabled. Use /voice or the voice key to talk. Starting voice input interrupts speech.",
             ));
@@ -46,6 +46,19 @@ impl App {
             remote.configure_cloud_tools(Default::default()).await?;
         }
         Ok(())
+    }
+
+    pub(super) fn poll_jarvis_speech_error(&mut self) -> bool {
+        let error = self
+            .jarvis_speech
+            .as_ref()
+            .and_then(|player| player.take_error());
+        if let Some(error) = error {
+            self.push_display_message(DisplayMessage::error(error));
+            self.set_status_notice("Jarvis speech failed");
+            return true;
+        }
+        false
     }
 
     pub(super) fn cancel_jarvis_speech(&self) {

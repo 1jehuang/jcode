@@ -117,6 +117,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     });
     let mut needs_redraw = crate::tui::periodic_redraw_required(app)
         | crate::tui::terminal_events::theme_redraw_pending();
+    needs_redraw |= app.poll_jarvis_speech_error();
     needs_redraw |= app.poll_pending_startup_transcript();
     if remote.has_loaded_history()
         && let Err(error) = remote

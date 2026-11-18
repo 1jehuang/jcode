@@ -1,5 +1,5 @@
-//! Free, local speech playback through an installed eSpeak executable.
-//! No runtime, shell, network service, or audio library is required.
+//! Cancellable client-side speech playback. Voice models remain external.
+//! Supports an explicitly configured speech HTTP API or local eSpeak fallback.
 use std::{
     collections::VecDeque,
     fmt,
@@ -8,6 +8,9 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+
+#[cfg(feature = "desktop-config")]
+mod http;
 
 pub const MAX_TEXT_BYTES: usize = 4096;
 pub const MAX_QUEUED_UTTERANCES: usize = 16;
@@ -19,7 +22,10 @@ pub enum SpeechError {
     Unavailable,
     InvalidText,
     QueueFull,
+    InvalidEndpoint,
+    PlayerUnavailable,
     WorkerUnavailable,
+    InvalidConfiguration,
 }
 impl fmt::Display for SpeechError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -27,7 +33,14 @@ impl fmt::Display for SpeechError {
             Self::Unavailable => "Install espeak-ng or espeak to enable local speech",
             Self::InvalidText => "Speech must be nonempty, NUL-free, and at most 4096 bytes",
             Self::QueueFull => "Speech queue is full",
+            Self::InvalidEndpoint => {
+                "Speech endpoint must be HTTP(S), without credentials or a fragment"
+            }
+            Self::PlayerUnavailable => "Install pw-play or aplay to play HTTP speech",
             Self::WorkerUnavailable => "Speech worker is unavailable",
+            Self::InvalidConfiguration => {
+                "Speech configuration is invalid or its API-key environment variable is missing"
+            }
         })
     }
 }
@@ -38,6 +51,9 @@ type Backend = Arc<dyn Fn(&str) -> std::io::Result<Child> + Send + Sync>;
 struct State {
     queue: VecDeque<String>,
     active: Option<(Child, Instant)>,
+    generation: u64,
+    synthesizing: bool,
+    last_error: Option<&'static str>,
     stopped: bool,
 }
 impl State {
@@ -84,6 +100,23 @@ impl SpeechPlayer {
         Err(SpeechError::Unavailable)
     }
 
+    #[cfg(feature = "desktop-config")]
+    pub fn with_endpoint(endpoint: &str) -> Result<Self, SpeechError> {
+        Self::with_http(endpoint, "piper-jarvis", "jarvis", None)
+    }
+
+    /// Use an external OpenAI-compatible speech endpoint. Secrets are kept out
+    /// of URLs, model context, logs, and error messages.
+    #[cfg(feature = "desktop-config")]
+    pub fn with_http(
+        endpoint: &str,
+        model: &str,
+        voice: &str,
+        api_key: Option<String>,
+    ) -> Result<Self, SpeechError> {
+        http::create(endpoint, model, voice, api_key)
+    }
+
     fn with_backend(backend: Backend) -> Result<Self, SpeechError> {
         let shared = Arc::new((Mutex::new(State::default()), Condvar::new()));
         let state = shared.clone();
@@ -116,10 +149,27 @@ impl SpeechPlayer {
         Ok(())
     }
 
+    /// True only when neither synthesis nor playback nor queued work remains.
+    pub fn is_idle(&self) -> bool {
+        let state = self.shared.0.lock().unwrap_or_else(|e| e.into_inner());
+        state.queue.is_empty() && state.active.is_none() && !state.synthesizing
+    }
+
+    /// A redacted asynchronous failure, for the local UI rather than model context.
+    pub fn take_error(&self) -> Option<&'static str> {
+        self.shared
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .last_error
+            .take()
+    }
+
     /// Clear pending speech and kill and reap the active process, if any.
     pub fn cancel(&self) {
         let (lock, wake) = &*self.shared;
         let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+        state.generation = state.generation.wrapping_add(1);
         state.queue.clear();
         state.stop_child();
         wake.notify_one();

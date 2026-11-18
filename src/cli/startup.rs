@@ -315,8 +315,8 @@ fn parse_and_prepare_args(args: Args) -> Result<Args> {
             args.command.is_none(),
             "--jarvis currently supports the interactive TUI only"
         );
-        // Fail before entering raw terminal mode if no free local voice exists.
-        drop(jcode_voice::speech::SpeechPlayer::new()?);
+        // Validate the selected backend before entering raw terminal mode.
+        drop(crate::tui::jarvis::create_speech_player()?);
         crate::tui::jarvis::enable();
     }
 

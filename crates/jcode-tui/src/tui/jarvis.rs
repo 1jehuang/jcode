@@ -10,6 +10,32 @@ pub fn enable() {
     ENABLED.store(true, Ordering::Relaxed);
 }
 
+/// Construct the configured client-side speech backend. Explicit HTTP service
+/// configuration fails closed rather than changing the user's selected voice.
+pub fn create_speech_player()
+-> Result<jcode_voice::speech::SpeechPlayer, jcode_voice::speech::SpeechError> {
+    let config = &crate::config::config().jarvis.speech;
+    match config.endpoint.as_deref() {
+        Some(endpoint) => {
+            let key = config
+                .api_key_env
+                .as_ref()
+                .map(|name| {
+                    std::env::var(name)
+                        .map_err(|_| jcode_voice::speech::SpeechError::InvalidConfiguration)
+                })
+                .transpose()?;
+            jcode_voice::speech::SpeechPlayer::with_http(
+                endpoint,
+                &config.model,
+                &config.voice,
+                key,
+            )
+        }
+        None => jcode_voice::speech::SpeechPlayer::new(),
+    }
+}
+
 pub(crate) fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
