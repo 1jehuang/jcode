@@ -6,6 +6,19 @@ use std::cell::Cell;
 use std::hint::black_box;
 use std::time::Instant;
 
+#[cfg(target_os = "linux")]
+fn thread_cpu_ns() -> u128 {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    assert_eq!(
+        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) },
+        0
+    );
+    time.tv_sec as u128 * 1_000_000_000 + time.tv_nsec as u128
+}
+
 struct CountingAllocator;
 thread_local! {
     static COUNTS: Cell<Option<(usize, usize)>> = const { Cell::new(None) };
@@ -80,17 +93,24 @@ fn tokenization_probe() {
                 let index = (round + slot) % 2;
                 let f = [legacy as fn(&str) -> Vec<String>, optimized][index];
                 let start = Instant::now();
+                #[cfg(target_os = "linux")]
+                let cpu_start = thread_cpu_ns();
                 for _ in 0..iterations {
                     black_box(f(black_box(&text)));
                 }
-                samples[index].push(start.elapsed().as_nanos() / iterations as u128);
+                #[cfg(target_os = "linux")]
+                let elapsed = thread_cpu_ns() - cpu_start;
+                #[cfg(not(target_os = "linux"))]
+                let elapsed = start.elapsed().as_nanos();
+                black_box(start.elapsed());
+                samples[index].push(elapsed / iterations as u128);
             }
         }
         for times in &mut samples {
             times.sort_unstable();
         }
         println!(
-            "{name}: median ns legacy={} optimized={} ratio={:.3}, allocations/bytes {:?} -> {:?}",
+            "{name}: median ns (Linux thread CPU, otherwise elapsed) legacy={} optimized={} ratio={:.3}, allocations/bytes {:?} -> {:?}",
             samples[0][7],
             samples[1][7],
             samples[1][7] as f64 / samples[0][7] as f64,
