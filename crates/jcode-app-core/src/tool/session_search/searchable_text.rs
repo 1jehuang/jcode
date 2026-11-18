@@ -1,20 +1,28 @@
 //! Searchable text projection for transcript and tool messages.
 
 use super::{ContentBlock, StoredMessage};
+use std::borrow::Cow;
 
-pub(super) fn searchable_message_text(msg: &StoredMessage, include_tools: bool) -> String {
-    msg.content
+#[cfg(test)]
+#[path = "searchable_text_tests.rs"]
+mod tests;
+
+pub(super) fn searchable_message_text(msg: &StoredMessage, include_tools: bool) -> Cow<'_, str> {
+    let mut parts: Vec<Cow<'_, str>> = msg
+        .content
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::Text { text, .. } => Some(text.clone()),
-            ContentBlock::ToolResult { content, .. } if include_tools => Some(content.clone()),
+            ContentBlock::Text { text, .. } => Some(Cow::Borrowed(text.as_str())),
+            ContentBlock::ToolResult { content, .. } if include_tools => {
+                Some(Cow::Borrowed(content.as_str()))
+            }
             ContentBlock::ToolUse { name, input, .. } if include_tools => {
                 let input = input.to_string();
-                Some(if input == "null" {
+                Some(Cow::Owned(if input == "null" {
                     format!("[tool call: {name}]")
                 } else {
                     format!("[tool call: {name}] {input}")
-                })
+                }))
             }
             ContentBlock::ToolUse { name, input, .. } => {
                 let mut fields = Vec::new();
@@ -53,12 +61,16 @@ pub(super) fn searchable_message_text(msg: &StoredMessage, include_tools: bool) 
                     .filter(|s| !s.trim().is_empty())
                     .collect::<Vec<_>>()
                     .join("\n");
-                (!text.is_empty()).then_some(text)
+                (!text.is_empty()).then_some(Cow::Owned(text))
             }
             _ => None,
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    match parts.len() {
+        0 => Cow::Borrowed(""),
+        1 => parts.pop().unwrap(),
+        _ => Cow::Owned(parts.join("\n")),
+    }
 }
 
 fn append_todo_task_text<'a>(item: &'a serde_json::Value, fields: &mut Vec<&'a str>) {
