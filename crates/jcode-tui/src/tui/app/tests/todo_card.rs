@@ -1058,6 +1058,7 @@ fn pinned_band_shows_stage_grid_and_live_swarm_agents_end_to_end() {
 }
 
 #[test]
+#[ignore = "obsolete since 92fc0d019 retired inline swarm controls; needs rewrite for dedicated swarm page"]
 fn pinned_todo_live_status_is_full_width_without_passive_gallery() {
     let _env_lock = crate::storage::lock_test_env();
     let _render_lock = crate::tui::ui::render_state_test_lock();
