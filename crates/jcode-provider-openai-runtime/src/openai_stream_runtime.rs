@@ -515,6 +515,79 @@ pub(super) enum PersistentWsResult {
     Failed(String),
 }
 
+fn persistent_ws_delta_request(
+    request: &Value,
+    incremental_items: &[Value],
+    previous_response_id: &str,
+) -> Value {
+    let mut continuation_request = serde_json::json!({
+        "type": "response.create",
+        "previous_response_id": previous_response_id,
+        "input": incremental_items,
+    });
+    if let Some(model) = request.get("model") {
+        continuation_request["model"] = model.clone();
+    }
+    if let Some(tools) = request.get("tools") {
+        continuation_request["tools"] = tools.clone();
+    }
+    if let Some(tool_choice) = request.get("tool_choice") {
+        continuation_request["tool_choice"] = tool_choice.clone();
+    }
+    if let Some(instructions) = request.get("instructions") {
+        continuation_request["instructions"] = instructions.clone();
+    }
+    if let Some(max_output_tokens) = request.get("max_output_tokens") {
+        continuation_request["max_output_tokens"] = max_output_tokens.clone();
+    }
+    if let Some(reasoning) = request.get("reasoning") {
+        continuation_request["reasoning"] = reasoning.clone();
+    }
+    if let Some(context_management) = request.get("context_management") {
+        continuation_request["context_management"] = context_management.clone();
+    }
+    if let Some(include) = request.get("include") {
+        continuation_request["include"] = include.clone();
+    }
+    if let Some(service_tier) = request.get("service_tier") {
+        continuation_request["service_tier"] = service_tier.clone();
+    }
+    if let Some(prompt_cache_key) = request.get("prompt_cache_key") {
+        continuation_request["prompt_cache_key"] = prompt_cache_key.clone();
+    }
+    if let Some(prompt_cache_retention) = request.get("prompt_cache_retention") {
+        continuation_request["prompt_cache_retention"] = prompt_cache_retention.clone();
+    }
+    if let Some(options) = request.get("prompt_cache_options") {
+        continuation_request["prompt_cache_options"] = options.clone();
+    }
+    continuation_request
+}
+
+/// Clone a full replay once, without constructing a discarded delta request.
+fn persistent_ws_full_replay_request(request: &Value, input: &[Value]) -> Option<Value> {
+    let original = request.as_object()?;
+    // Clone only fields that survive on the wire. In particular, cloning the
+    // old input before replacing it duplicates the largest part of a replay.
+    let mut replay: serde_json::Map<String, Value> = original
+        .iter()
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                "input" | "type" | "previous_response_id" | "stream" | "background"
+            )
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    replay.insert("type".into(), Value::String("response.create".into()));
+    replay.insert("input".into(), Value::Array(input.to_vec()));
+    Some(Value::Object(replay))
+}
+
+#[cfg(test)]
+#[path = "openai_full_replay_tests.rs"]
+mod full_replay_tests;
+
 /// Try to continue a conversation on an existing persistent WebSocket connection
 /// using `previous_response_id` to send only incremental input. A socket drained
 /// after cancellation has no response id and receives a full, independent replay.
@@ -754,16 +827,19 @@ async fn continue_persistent_ws_locked(
     // rs_...". The full input still needs reasoning items for fresh requests,
     // but deltas must only contain genuinely new client-side input/tool
     // callbacks.
-    let (incremental_items, skipped_output_items) = if full_replay || state.message_count == 0 {
+    let (incremental_items, skipped_output_items) = if full_replay {
+        (std::borrow::Cow::Borrowed(input), 0)
+    } else if state.message_count == 0 {
         // A generate:false warmup has no model output in its context. Preserve
         // all history (including encrypted reasoning) for its first generation.
-        (input.to_vec(), 0)
+        (std::borrow::Cow::Owned(input.to_vec()), 0)
     } else {
-        persistent_ws_incremental_items(
+        let (items, skipped) = persistent_ws_incremental_items(
             input,
             state.last_input_item_count,
             &state.last_response_output,
-        )
+        );
+        (std::borrow::Cow::Owned(items), skipped)
     };
     if skipped_output_items > 0 {
         jcode_base::logging::info(&format!(
@@ -882,73 +958,28 @@ async fn continue_persistent_ws_locked(
         ],
     );
 
-    // Build the incremental request - only include new items + previous_response_id
-    let mut continuation_request = serde_json::json!({
-        "type": "response.create",
-        "previous_response_id": previous_response_id,
-        "input": incremental_items,
-    });
-
-    // Copy over model, tools, and other settings from the original request
-    if let Some(model) = request.get("model") {
-        continuation_request["model"] = model.clone();
-    }
-    if let Some(tools) = request.get("tools") {
-        continuation_request["tools"] = tools.clone();
-    }
-    if let Some(tool_choice) = request.get("tool_choice") {
-        continuation_request["tool_choice"] = tool_choice.clone();
-    }
-    if let Some(instructions) = request.get("instructions") {
-        continuation_request["instructions"] = instructions.clone();
-    }
-    if let Some(max_output_tokens) = request.get("max_output_tokens") {
-        continuation_request["max_output_tokens"] = max_output_tokens.clone();
-    }
-    if let Some(reasoning) = request.get("reasoning") {
-        continuation_request["reasoning"] = reasoning.clone();
-    }
-    if let Some(context_management) = request.get("context_management") {
-        continuation_request["context_management"] = context_management.clone();
-    }
-    if let Some(include) = request.get("include") {
-        continuation_request["include"] = include.clone();
-    }
-    if let Some(service_tier) = request.get("service_tier") {
-        continuation_request["service_tier"] = service_tier.clone();
-    }
-    if let Some(prompt_cache_key) = request.get("prompt_cache_key") {
-        continuation_request["prompt_cache_key"] = prompt_cache_key.clone();
-    }
-    if let Some(prompt_cache_retention) = request.get("prompt_cache_retention") {
-        continuation_request["prompt_cache_retention"] = prompt_cache_retention.clone();
-    }
-    if let Some(options) = request.get("prompt_cache_options") {
-        continuation_request["prompt_cache_options"] = options.clone();
-    }
-    if !full_replay && state.message_count > 0 {
-        add_cache_comparison(
-            &mut continuation_request,
-            OpenAIProvider::is_chatgpt_mode(&*credentials.read().await),
-            &previous_response_id,
-        );
-    }
-    continuation_request["store"] = serde_json::json!(false);
-    continuation_request["parallel_tool_calls"] = serde_json::json!(false);
-
-    if full_replay {
+    let continuation_request = if full_replay {
         // A drained cancelled response may contain unseen tool calls. Reuse
         // only its transport, never its server-side conversation context.
-        continuation_request = request.clone();
-        let Some(object) = continuation_request.as_object_mut() else {
+        let Some(replay) = persistent_ws_full_replay_request(request, input) else {
             return PersistentWsResult::Failed("invalid full replay request".into());
         };
-        object.insert("type".into(), serde_json::json!("response.create"));
-        object.insert("input".into(), Value::Array(input.to_vec()));
-        object.remove("previous_response_id");
-        object.remove("stream");
-        object.remove("background");
-    }
+        replay
+    } else {
+        let mut continuation_request =
+            persistent_ws_delta_request(request, &incremental_items, &previous_response_id);
+        if !full_replay && state.message_count > 0 {
+            add_cache_comparison(
+                &mut continuation_request,
+                OpenAIProvider::is_chatgpt_mode(&*credentials.read().await),
+                &previous_response_id,
+            );
+        }
+        continuation_request["store"] = serde_json::json!(false);
+        continuation_request["parallel_tool_calls"] = serde_json::json!(false);
+
+        continuation_request
+    };
 
     let empty_tools = serde_json::json!([]);
     let continuation_tools = continuation_request.get("tools").unwrap_or(&empty_tools);
