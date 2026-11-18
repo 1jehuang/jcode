@@ -24,3 +24,6 @@ Separately, a pinned historical jemalloc profiling binary (`3d312fee…`, not th
 ## Action
 
 The retained diagnostic history is intentional. What was not needed was allocating a formatted `String` for each historical event solely to find its byte count on every `server:memory` request. `e6ab9efab` counts the unchanged UTF-8 Debug output without retaining it. This change targets temporary allocation and CPU **while inspecting** the daemon, not baseline RSS, the retained history, or the reconnect residual. The standalone allocation/elapsed-time probe is `scripts/probe_swarm_event_bytes.sh`. In a hosted optimized build of the actual daemon crate, the UTF-8 oracle and alternating Linux thread-CPU probe both passed (receipt `20261118-145417502-3114384`). Median time per history: common 29.46 → 18.84 µs, escaped 227.00 → 188.76 µs, large 661.45 → 424.30 µs. This measures the estimator, not end-to-end diagnostic latency.
+## Post-change runtime check
+
+On the rebuilt `a06e8df45` daemon, the isolated `broader-reconnect-verified-counter` run verified all 32 streamed and persisted answers across four waves on eight sessions. The fixture reported no provider errors. This checks runtime behavior, not a change in idle RAM.
