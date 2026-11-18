@@ -1160,8 +1160,21 @@ pub fn spawn_background_sync() {
     tokio::spawn(background_sync());
 }
 
+/// The two daemon mobile loops use exactly reqwest's default configuration.
+/// Share their TLS configuration and connection pool, not request credentials.
+/// Initialization stays eager at loop startup even when mobile sync is disabled.
+/// Do not substitute the provider client: its defaults are intentionally different.
+pub(crate) fn daemon_http_client() -> reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new).clone()
+}
+
+#[cfg(test)]
+#[path = "mobile_http_tests.rs"]
+mod mobile_http_tests;
+
 async fn background_sync() {
-    let client = reqwest::Client::new();
+    let client = daemon_http_client();
     let mut ticks = tokio::time::interval(SYNC_INTERVAL);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
