@@ -1440,10 +1440,10 @@ impl App {
         if self.is_replay {
             return false;
         }
-        // Daemon sessions own continuation policy, regardless of whether the
-        // daemon is reached over a local socket or SSH. Never read client-side
-        // todos or enqueue a second continuation at its idle boundary.
-        if self.is_remote || crate::tui::is_ssh_remote() {
+        // SSH campaign state and todo reads belong to the remote daemon.
+        // A local daemon still uses the explicit TUI overnight campaign below,
+        // separately from daemon-owned ordinary todo continuation.
+        if crate::tui::is_ssh_remote() {
             return false;
         }
         if self.guardrail_stops_exhausted_at_turn_end() {
@@ -1460,6 +1460,12 @@ impl App {
         // merged into it (or sent ahead of it) after an Esc redirect.
         if self.has_pending_user_followup() {
             return false;
+        }
+        if self.is_remote {
+            // Ordinary todo follow-ups belong to the daemon. Explicit local
+            // /overnight campaigns retain their independent scheduler until
+            // campaign ownership is migrated as well.
+            return self.schedule_overnight_poke_followup_if_needed();
         }
         if self.all_open_todos_are_paused() {
             self.last_auto_poke_fingerprint = None;

@@ -1,6 +1,41 @@
 use super::*;
 
 #[test]
+fn daemon_poke_preserves_explicit_local_overnight_campaign() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        // Explicit campaigns remain independent of ordinary todo auto-poke.
+        app.auto_poke_default_on = false;
+        app.auto_poke_incomplete_todos = false;
+        assert!(super::super::commands::handle_session_command(
+            &mut app,
+            "/overnight 1m campaign regression"
+        ));
+        assert!(app.overnight_auto_poke.is_some());
+        assert_eq!(app.queued_messages.len(), 1);
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+
+        // Playback and a queued user redirect must retain priority over the
+        // explicit campaign, just as they do for a local in-process session.
+        app.is_replay = true;
+        assert!(!app.schedule_turn_end_followups());
+        app.is_replay = false;
+        app.queued_messages.push("user redirect".into());
+        assert!(!app.schedule_turn_end_followups());
+        app.queued_messages.clear();
+
+        assert!(!app.schedule_auto_poke_followup_if_needed());
+        assert!(app.schedule_turn_end_followups_after_response(true));
+        assert_eq!(app.queued_messages.len(), 1);
+        assert!(app.queued_messages[0].starts_with("Overnight auto-poke for run `"));
+        assert!(app.pending_queued_dispatch);
+        assert!(!app.auto_poke_incomplete_todos);
+    });
+}
+
+#[test]
 fn daemon_poke_never_schedules_client_continuations() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
@@ -8,8 +43,8 @@ fn daemon_poke_never_schedules_client_continuations() {
         app.remote_session_id = Some(app.session.id.clone());
         app.auto_poke_default_on = true;
         app.auto_poke_incomplete_todos = true;
-        // No client filesystem state, including guardrail and overnight state,
-        // should be consulted at a daemon-owned turn boundary.
+        // Without an explicit campaign, daemon-owned todo policy must not
+        // enqueue any second client continuation at the terminal boundary.
         assert!(!app.schedule_turn_end_followups_after_response(false));
         assert!(!app.schedule_turn_end_followups_after_response(true));
         assert!(!app.schedule_auto_poke_followup_if_needed());
