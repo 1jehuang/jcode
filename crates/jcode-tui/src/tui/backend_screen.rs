@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::watch;
 
 // Kept separate from ordinary request IDs. Acks carry no turn semantics.
-static NEXT_SCREEN_ID: AtomicU64 = AtomicU64::new(1 << 62);
+static NEXT_SCREEN_ID: AtomicU64 = AtomicU64::new(1 << 63);
 fn request(session: &str, action: ScreenContextAction) -> Request {
     Request::ScreenContext {
         id: NEXT_SCREEN_ID.fetch_add(1, Ordering::Relaxed),
@@ -151,13 +151,13 @@ impl RemoteConnection {
     /// settle an observer turn whose current request ID is unknown locally.
     pub(crate) fn handle_screen_control_event(&mut self, event: &ServerEvent) -> bool {
         match event {
-            ServerEvent::Ack { id } if *id >= (1 << 62) => {
+            ServerEvent::Ack { id } if *id >= (1 << 63) => {
                 if let Some(feed) = &self.screen_feed {
                     feed.acknowledged.send_replace(*id);
                 }
                 true
             }
-            ServerEvent::Error { id, message, .. } if *id >= (1 << 62) => {
+            ServerEvent::Error { id, message, .. } if *id >= (1 << 63) => {
                 if let Some(feed) = &self.screen_feed {
                     feed.task.abort();
                 }
@@ -232,6 +232,16 @@ mod tests {
             message: "expired".into(),
             retry_after_secs: None
         }));
+        // Ordinary request IDs deliberately occupy the 01 high-bit range.
+        // They must reach tool-registration handling, not passive ACK handling.
+        for ordinary in [7, 1_u64 << 62, (1_u64 << 63) - 1] {
+            assert!(!remote.handle_screen_control_event(&ServerEvent::Ack { id: ordinary }));
+            assert!(!remote.handle_screen_control_event(&ServerEvent::Error {
+                id: ordinary,
+                message: "ordinary control failure".into(),
+                retry_after_secs: None,
+            }));
+        }
         assert!(!remote.handle_screen_control_event(&ServerEvent::Ack { id: 7 }));
         assert!(!remote.handle_screen_control_event(&ServerEvent::Error {
             id: 7,
