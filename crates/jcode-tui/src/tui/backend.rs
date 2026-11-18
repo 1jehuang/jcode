@@ -5,6 +5,8 @@
 //!
 //! Also provides debug socket events for exposing full TUI state.
 
+#[path = "backend_screen.rs"]
+mod screen;
 mod ssh_sessions;
 
 use crate::message::ToolCall;
@@ -259,6 +261,7 @@ pub struct RemoteConnection {
     _dummy_peer: Option<Stream>,
     session_id: Option<String>,
     cloud_authority: Option<std::sync::Weak<std::sync::atomic::AtomicBool>>,
+    screen_feed: Option<screen::ScreenFeed>,
     pub(crate) jarvis_tools_configured: bool,
     pub(crate) local_tools_request: Option<u64>,
     cloud_callbacks: Vec<tokio::task::AbortHandle>,
@@ -468,6 +471,7 @@ impl RemoteConnection {
             _dummy_peer: None,
             session_id: None,
             cloud_authority: None,
+            screen_feed: None,
             jarvis_tools_configured: false,
             local_tools_request: None,
             cloud_callbacks: Vec::new(),
@@ -1442,6 +1446,7 @@ impl RemoteConnection {
             _dummy_peer: Some(b),
             session_id: None,
             cloud_authority: None,
+            screen_feed: None,
             jarvis_tools_configured: false,
             local_tools_request: None,
             cloud_callbacks: Vec::new(),
@@ -1476,6 +1481,7 @@ impl RemoteConnection {
     /// Set session ID
     pub fn set_session_id(&mut self, id: String) {
         if self.session_id.as_deref() != Some(id.as_str()) {
+            self.stop_screen_context();
             self.jarvis_tools_configured = false;
             self.local_tools_request = None;
         }

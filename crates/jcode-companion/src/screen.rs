@@ -1,352 +1,440 @@
 //! Explicitly opted-in, metadata-only local Niri observation.
-//! No screenshots, input monitoring, focus changes, or model requests.
-use anyhow::{Context, Result, bail};
+//! Wire schema: https://docs.rs/niri-ipc/latest/niri_ipc/enum.Request.html
+//! No screenshots, OCR, input monitoring, focus changes, or compositor actions.
+use anyhow::{Context, Result, ensure};
+use jcode_base::protocol::{ScreenInteraction, ScreenOutput, ScreenSnapshot, ScreenWindow};
 use serde_json::{Value, json};
+use std::time::{Duration, Instant};
+use tokio::sync::watch;
 
-pub const MAX_WINDOWS: usize = 32;
-pub const MAX_TITLE_BYTES: usize = 256;
-const MAX_REPLY_BYTES: u64 = 1024 * 1024;
+const DEBOUNCE: Duration = Duration::from_millis(500);
+const RATE: Duration = Duration::from_millis(2_050);
+const HEARTBEAT: Duration = Duration::from_secs(15);
+const MAX_IPC_BYTES: usize = 1024 * 1024;
 
-fn bounded_text(value: &Value, max: usize) -> Value {
-    match value.as_str() {
-        Some(text) => {
-            let mut end = text.len().min(max);
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            Value::String(text[..end].chars().filter(|c| !c.is_control()).collect())
-        }
-        None => Value::Null,
-    }
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
-/// Geometry is explicitly in Niri's scrolling-layout coordinate space.
-/// Workspace activity does not prove a tile is visible on the output.
-pub fn normalize(windows: &Value, workspaces: &Value, outputs: &Value) -> Value {
-    let mut ordered: Vec<&Value> = windows.as_array().into_iter().flatten().collect();
-    ordered.sort_by_key(|w| {
-        (
-            !w["is_focused"].as_bool().unwrap_or(false),
-            w["id"].as_u64(),
-        )
-    });
-    let windows: Vec<Value> = ordered.into_iter().take(MAX_WINDOWS).map(|w| {
-        let layout = &w["layout"];
-        json!({"id":w["id"].as_u64(), "app_id":bounded_text(&w["app_id"],128),
-            "title":bounded_text(&w["title"],MAX_TITLE_BYTES), "workspace_id":w["workspace_id"].as_u64(),
-            "is_focused":w["is_focused"].as_bool(), "visibility":"unknown",
-            "layout":{"coordinate_space":"niri_scrolling_layout", "tile_size":layout["tile_size"],
-                "window_size":layout["window_size"], "pos_in_scrolling_layout":layout["pos_in_scrolling_layout"],
-                "tile_pos_in_workspace_view":layout["tile_pos_in_workspace_view"]}})
-    }).collect();
-    let workspaces: Vec<Value> = workspaces.as_array().into_iter().flatten().take(32).map(|w|
-        json!({"id":w["id"], "name":bounded_text(&w["name"],128), "output":bounded_text(&w["output"],128),
-            "is_active":w["is_active"], "is_focused":w["is_focused"]})).collect();
-    let outputs: Vec<Value> = outputs
-        .as_object()
-        .into_iter()
-        .flat_map(|o| o.iter())
-        .take(8)
-        .map(|(name, o)| {
-            json!({"name":bounded_text(&Value::String(name.clone()),128),"logical":o["logical"],
-            "coordinate_space":"niri_logical_output"})
-        })
-        .collect();
-    let mut snapshot = json!({"source":"niri", "interaction":"unknown", "visible_window_ids":null,
-        "windows":windows,"workspaces":workspaces,"outputs":outputs});
-    // Leave room for the wire envelope. Focused windows sort first and survive
-    // truncation. Never grow a pending history to preserve every observed tile.
-    while serde_json::to_vec(&snapshot).map_or(true, |v| v.len() > 15 * 1024) {
-        let windows = snapshot["windows"].as_array_mut().unwrap();
-        if windows.len() > 1 {
-            windows.pop();
-            continue;
-        }
-        let workspaces = snapshot["workspaces"].as_array_mut().unwrap();
-        if !workspaces.is_empty() {
-            workspaces.pop();
-            continue;
-        }
-        let outputs = snapshot["outputs"].as_array_mut().unwrap();
-        if !outputs.is_empty() {
-            outputs.pop();
-            continue;
-        }
-        // A malformed oversized layout is not useful desktop context.
-        if let Some(window) = snapshot["windows"].as_array_mut().unwrap().first_mut() {
-            window["layout"] = Value::Null;
-        } else {
+fn text(value: &Value, max: usize) -> Option<String> {
+    let mut result = String::new();
+    for ch in value.as_str()?.chars().filter(|ch| !ch.is_control()) {
+        if result.len() + ch.len_utf8() > max {
             break;
         }
+        result.push(ch);
     }
-    snapshot
+    Some(result)
 }
-
-#[cfg(unix)]
-mod local {
-    use super::*;
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixStream;
-    use tokio::sync::watch;
-    use tokio::task::JoinHandle;
-    use tokio::time::{Duration, Instant, sleep, timeout};
-
-    async fn buffered_line(
-        reader: &mut BufReader<UnixStream>,
-        bytes: &mut Vec<u8>,
-    ) -> Result<Value> {
-        let remaining = MAX_REPLY_BYTES.saturating_sub(bytes.len() as u64);
-        let count = reader.take(remaining).read_until(b'\n', bytes).await?;
-        if count == 0 || !bytes.ends_with(b"\n") {
-            bail!("Niri reply missing or oversized");
-        }
-        let result = serde_json::from_slice(bytes);
-        bytes.clear();
-        Ok(result?)
-    }
-
-    async fn line(reader: &mut BufReader<UnixStream>) -> Result<Value> {
-        buffered_line(reader, &mut Vec::new()).await
-    }
-
-    async fn request(path: &std::path::Path, name: &str) -> Result<Value> {
-        timeout(Duration::from_secs(2), async {
-            let mut socket = UnixStream::connect(path).await?;
-            socket.write_all(format!("\"{name}\"\n").as_bytes()).await?;
-            let reply = line(&mut BufReader::new(socket)).await?;
-            reply
-                .get("Ok")
-                .and_then(|ok| ok.get(name))
-                .cloned()
-                .context("Unexpected Niri response")
-        })
-        .await
-        .context("Niri snapshot timed out")?
-    }
-
-    /// A watch channel retains exactly one latest observation. Slow consumers
-    /// never accumulate historical window titles. Dropping this handle closes
-    /// both IPC sockets by aborting the owning task.
-    pub struct ScreenFeed {
-        latest: watch::Receiver<Option<Value>>,
-        task: JoinHandle<()>,
-    }
-    impl Drop for ScreenFeed {
-        fn drop(&mut self) {
-            self.task.abort();
-        }
-    }
-    impl ScreenFeed {
-        pub async fn next(&mut self) -> Option<Value> {
-            self.latest.changed().await.ok()?;
-            self.latest.borrow_and_update().clone()
-        }
-    }
-
-    pub async fn subscribe() -> Result<ScreenFeed> {
-        let path = std::path::PathBuf::from(
-            std::env::var_os("NIRI_SOCKET").context("NIRI_SOCKET is not set")?,
-        );
-        subscribe_path(path).await
-    }
-
-    async fn subscribe_path(path: std::path::PathBuf) -> Result<ScreenFeed> {
-        let mut stream = UnixStream::connect(&path).await?;
-        stream.write_all(b"\"EventStream\"\n").await?;
-        let mut events = BufReader::new(stream);
-        let reply = timeout(Duration::from_secs(2), line(&mut events)).await??;
-        if reply.get("Ok").is_none() {
-            bail!("Niri rejected event subscription");
-        }
-        let (tx, latest) = watch::channel(None);
-        let task = tokio::spawn(async move {
-            let mut previous = Value::Null;
-            // Keep partial lines across debounce cancellation boundaries.
-            let mut event_bytes = Vec::new();
-            let mut next_publish = Instant::now();
-            loop {
-                // Refresh authoritative snapshots, never interpret individual
-                // focus events as user activity or model instructions.
-                let snapshot = async {
-                    let windows = request(&path, "Windows").await?;
-                    let workspaces = request(&path, "Workspaces").await?;
-                    let outputs = request(&path, "Outputs").await?;
-                    anyhow::Ok(normalize(&windows, &workspaces, &outputs))
-                }
-                .await;
-                let Ok(snapshot) = snapshot else {
-                    break;
-                };
-                if serde_json::to_vec(&snapshot).map_or(true, |bytes| bytes.len() > 16 * 1024) {
-                    break;
-                }
-                if snapshot != previous {
-                    previous = snapshot.clone();
-                    if tx.send(Some(snapshot)).is_err() {
-                        break;
-                    }
-                    next_publish = Instant::now() + Duration::from_secs(2);
-                }
-                if buffered_line(&mut events, &mut event_bytes).await.is_err() {
-                    break;
-                }
-                // Drain bursts while waiting for the later of debounce and
-                // rate limit. No unbounded event queue or pending snapshots.
-                let deadline = next_publish.max(Instant::now() + Duration::from_millis(500));
-                loop {
-                    tokio::select! {
-                        _ = sleep(deadline.saturating_duration_since(Instant::now())) => break,
-                        event = buffered_line(&mut events, &mut event_bytes) => { if event.is_err() { return; } }
-                    }
-                }
+fn geometry(value: &Value, fields: &[&str]) -> Option<Value> {
+    let source = value.as_object()?;
+    let mut result = serde_json::Map::new();
+    for field in fields {
+        if let Some(value) = source.get(*field) {
+            // Numeric geometry only. Do not relay arbitrary compositor strings.
+            let valid = value.is_number()
+                || value.is_null()
+                || value
+                    .as_array()
+                    .is_some_and(|v| v.len() == 2 && v.iter().all(Value::is_number));
+            if valid {
+                result.insert((*field).into(), value.clone());
             }
-        });
-        Ok(ScreenFeed { latest, task })
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use std::sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        };
-        use tokio::net::UnixListener;
-
-        #[tokio::test]
-        async fn burst_is_coalesced_latest_only_and_drop_closes_subscription() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("niri.sock");
-            let listener = UnixListener::bind(&path).unwrap();
-            let revision = Arc::new(AtomicUsize::new(0));
-            let reads = Arc::new(AtomicUsize::new(0));
-            let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<()>(1);
-            let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
-            let revision_server = revision.clone();
-            let reads_server = reads.clone();
-            let server = tokio::spawn(async move {
-                let mut event_socket: Option<UnixStream> = None;
-                let mut closed_tx = Some(closed_tx);
-                loop {
-                    tokio::select! {
-                        socket = listener.accept() => {
-                            let (socket, _) = socket.unwrap();
-                            let mut reader = BufReader::new(socket);
-                            let request = line(&mut reader).await.unwrap();
-                            let name = request.as_str().unwrap();
-                            if name == "EventStream" {
-                                reader.get_mut().write_all(b"{\"Ok\":\"Handled\"}\n").await.unwrap();
-                                event_socket = Some(reader.into_inner());
-                            } else {
-                                reads_server.fetch_add(1, Ordering::SeqCst);
-                                let payload = match name {
-                                    "Windows" => json!([{"id":1,"title":revision_server.load(Ordering::SeqCst).to_string()}]),
-                                    "Workspaces" => json!([]),
-                                    _ => json!({}),
-                                };
-                                let response = json!({"Ok":{name:payload}}).to_string()+"\n";
-                                reader.get_mut().write_all(response.as_bytes()).await.unwrap();
-                            }
-                        }
-                        _ = event_rx.recv() => {
-                            if let Some(socket) = &mut event_socket {
-                                for _ in 0..100 { socket.write_all(b"{\"WindowFocusChanged\":{}}\n").await.unwrap(); }
-                            }
-                        }
-                        result = async { match &mut event_socket {
-                            Some(socket) => { let mut byte=[0]; socket.read(&mut byte).await },
-                            None => std::future::pending().await,
-                        }} => {
-                            if result.unwrap() == 0 { let _ = closed_tx.take().unwrap().send(()); return; }
-                        }
-                    }
-                }
-            });
-            let mut feed = subscribe_path(path).await.unwrap();
-            let first = timeout(Duration::from_secs(1), feed.next())
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(first["windows"][0]["title"], "0");
-            revision.store(100, Ordering::SeqCst);
-            event_tx.send(()).await.unwrap();
-            assert!(
-                timeout(Duration::from_millis(300), feed.next())
-                    .await
-                    .is_err()
-            );
-            let latest = timeout(Duration::from_secs(3), feed.next())
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(latest["windows"][0]["title"], "100");
-            assert_eq!(reads.load(Ordering::SeqCst), 6);
-            assert!(
-                timeout(Duration::from_millis(100), feed.next())
-                    .await
-                    .is_err()
-            );
-            drop(feed);
-            timeout(Duration::from_secs(1), closed_rx)
-                .await
-                .unwrap()
-                .unwrap();
-            server.await.unwrap();
         }
+    }
+    result.insert(
+        "coordinate_space".into(),
+        json!("niri_logical_pixels_not_global_window_rect"),
+    );
+    Some(Value::Object(result))
+}
 
-        #[tokio::test]
-        #[ignore = "requires the local graphical Niri session"]
-        async fn local_niri_snapshot_smoke() {
-            let mut feed = subscribe().await.unwrap();
-            let snapshot = timeout(Duration::from_secs(5), feed.next())
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(snapshot["source"], "niri");
-            assert!(snapshot["windows"].is_array());
-            assert_eq!(snapshot["interaction"], "unknown");
+fn snapshot(
+    windows: &Value,
+    outputs: &Value,
+    sequence: u64,
+    observed_at_ms: u64,
+) -> Result<ScreenSnapshot> {
+    let source_windows = windows
+        .as_array()
+        .context("Niri Windows response is not an array")?;
+    let source_outputs = outputs
+        .as_object()
+        .context("Niri Outputs response is not an object")?;
+    // Focus first so truncation cannot drop the foreground window.
+    let mut ordered: Vec<_> = source_windows.iter().collect();
+    ordered.sort_by_key(|w| {
+        (
+            w.get("is_focused").and_then(Value::as_bool) != Some(true),
+            w.get("id").and_then(Value::as_u64).unwrap_or(u64::MAX),
+        )
+    });
+    let mut result = ScreenSnapshot {
+        sequence,
+        observed_at_ms,
+        source: "niri".into(),
+        interaction: ScreenInteraction::Unknown,
+        focused_window: None,
+        windows: vec![],
+        outputs: vec![],
+    };
+    for window in ordered
+        .into_iter()
+        .take(jcode_base::protocol::SCREEN_MAX_WINDOWS)
+    {
+        let id = window
+            .get("id")
+            .and_then(Value::as_u64)
+            .context("Niri window missing id")?;
+        if window.get("is_focused").and_then(Value::as_bool) == Some(true) {
+            result.focused_window = Some(id);
+        }
+        result.windows.push(ScreenWindow {
+            id,
+            app_id: text(&window["app_id"], 128),
+            title: text(&window["title"], 512),
+            workspace_id: window.get("workspace_id").and_then(Value::as_u64),
+            // Active workspace and focus alone do not establish visibility or occlusion.
+            visible: None,
+            layout: geometry(
+                &window["layout"],
+                &[
+                    "pos_in_scrolling_layout",
+                    "tile_size",
+                    "window_size",
+                    "tile_pos_in_workspace_view",
+                    "window_offset_in_tile",
+                ],
+            ),
+        });
+    }
+    let mut ordered_outputs: Vec<_> = source_outputs.iter().collect();
+    ordered_outputs.sort_by_key(|(name, _)| *name);
+    for (name, output) in ordered_outputs
+        .into_iter()
+        .take(jcode_base::protocol::SCREEN_MAX_OUTPUTS)
+    {
+        let logical = &output["logical"];
+        result.outputs.push(ScreenOutput {
+            name: text(&json!(name), 128).unwrap_or_default(),
+            logical: geometry(logical, &["x", "y", "width", "height"]),
+            scale: logical
+                .get("scale")
+                .and_then(Value::as_f64)
+                .filter(|n| n.is_finite() && *n > 0.0),
+            transform: text(&logical["transform"], 64),
+        });
+    }
+    // Total bound takes precedence over count. Preserve focus at index zero.
+    while serde_json::to_vec(&result)?.len() > jcode_base::protocol::SCREEN_MAX_BYTES {
+        if result.windows.len() > 1 {
+            result.windows.pop();
+        } else if !result.outputs.is_empty() {
+            result.outputs.pop();
+        } else {
+            anyhow::bail!("Niri snapshot cannot fit protocol bound");
+        }
+    }
+    result.validate().map_err(anyhow::Error::msg)?;
+    Ok(result)
+}
+
+#[derive(Default)]
+struct Schedule {
+    first_event: Option<Instant>,
+    last_event: Option<Instant>,
+    last_publish: Option<Instant>,
+}
+impl Schedule {
+    fn event(&mut self, now: Instant) {
+        self.first_event.get_or_insert(now);
+        self.last_event = Some(now);
+    }
+    fn deadline(&self, now: Instant) -> Instant {
+        let heartbeat = self.last_publish.map_or(now, |last| last + HEARTBEAT);
+        let Some(first) = self.first_event else {
+            return heartbeat;
+        };
+        let debounced = (self.last_event.unwrap_or(first) + DEBOUNCE).min(first + RATE);
+        let throttled = self
+            .last_publish
+            .map_or(debounced, |last| debounced.max(last + RATE));
+        heartbeat.min(throttled)
+    }
+    fn published(&mut self, now: Instant) {
+        self.last_publish = Some(now);
+        self.first_event = None;
+        self.last_event = None;
+    }
+}
+fn relevant(event: &Value) -> bool {
+    event.as_object().is_some_and(|object| {
+        object.keys().any(|key| {
+            matches!(
+                key.as_str(),
+                "WindowsChanged"
+                    | "WindowOpenedOrChanged"
+                    | "WindowClosed"
+                    | "WindowFocusChanged"
+                    | "WindowLayoutsChanged"
+                    | "WorkspacesChanged"
+                    | "WorkspaceActivated"
+                    | "WorkspaceActiveWindowChanged"
+                    | "ConfigLoaded"
+                    | "OverviewOpenedOrClosed"
+            )
+        })
+    })
+}
+fn same_metadata(a: &ScreenSnapshot, b: &ScreenSnapshot) -> bool {
+    a.source == b.source
+        && a.interaction == b.interaction
+        && a.focused_window == b.focused_window
+        && a.windows == b.windows
+        && a.outputs == b.outputs
+}
+
+#[cfg(unix)]
+async fn line_bounded<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+) -> Result<()> {
+    use tokio::io::AsyncBufReadExt;
+    loop {
+        let buf = reader.fill_buf().await?;
+        ensure!(!buf.is_empty(), "Niri IPC disconnected");
+        let end = buf.iter().position(|byte| *byte == b'\n');
+        let count = end.map_or(buf.len(), |i| i + 1);
+        ensure!(
+            line.len() + count <= MAX_IPC_BYTES,
+            "Niri IPC line exceeds 1 MiB"
+        );
+        line.extend_from_slice(&buf[..count]);
+        reader.consume(count);
+        if end.is_some() {
+            return Ok(());
         }
     }
 }
 #[cfg(unix)]
-pub use local::{ScreenFeed, subscribe};
+async fn query(path: &std::path::Path, kind: &str) -> Result<Value> {
+    use tokio::io::{AsyncWriteExt, BufReader};
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut socket = tokio::net::UnixStream::connect(path).await?;
+        socket.write_all(format!("\"{kind}\"\n").as_bytes()).await?;
+        let mut line = vec![];
+        line_bounded(&mut BufReader::new(socket), &mut line).await?;
+        let reply: Value = serde_json::from_slice(&line)?;
+        reply
+            .get("Ok")
+            .and_then(|ok| ok.get(kind))
+            .cloned()
+            .context("Unexpected Niri reply")
+    })
+    .await?
+}
+
+/// One replaceable watch slot, no event history or normal user messages.
+#[cfg(unix)]
+pub async fn run(sender: watch::Sender<Option<ScreenSnapshot>>) -> Result<()> {
+    let path =
+        std::env::var_os("NIRI_SOCKET").context("Screen context requires a local NIRI_SOCKET")?;
+    run_at(sender, std::path::PathBuf::from(path)).await
+}
+
+#[cfg(unix)]
+async fn run_at(
+    sender: watch::Sender<Option<ScreenSnapshot>>,
+    path: std::path::PathBuf,
+) -> Result<()> {
+    use tokio::io::{AsyncWriteExt, BufReader};
+    let mut stream = tokio::net::UnixStream::connect(&path)
+        .await
+        .context("Connect local Niri metadata stream")?;
+    stream.write_all(b"\"EventStream\"\n").await?;
+    let mut stream = BufReader::new(stream);
+    let mut line = vec![];
+    tokio::time::timeout(Duration::from_secs(2), line_bounded(&mut stream, &mut line)).await??;
+    let reply: Value = serde_json::from_slice(&line)?;
+    ensure!(
+        reply.get("Ok") == Some(&json!("Handled")),
+        "Niri did not accept metadata event subscription"
+    );
+    line.clear();
+    let mut schedule = Schedule::default();
+    let mut sequence = 0u64;
+    let mut previous: Option<ScreenSnapshot> = None;
+    let mut last_sent: Option<Instant> = None;
+    loop {
+        let now = Instant::now();
+        let heartbeat_deadline = last_sent.map_or(now, |last| last + HEARTBEAT);
+        let deadline = schedule.deadline(now).min(heartbeat_deadline);
+        tokio::select! {
+            _ = sender.closed() => return Ok(()),
+            result = line_bounded(&mut stream, &mut line) => {
+                result?;
+                let event: Value = serde_json::from_slice(&line)?;
+                line.clear();
+                if relevant(&event) { schedule.event(Instant::now()); }
+            }
+            _ = tokio::time::sleep_until(deadline.into()) => {
+                // Refresh authoritative snapshots, not a guessed reduction of
+                // event payloads. Separate IPC queries are not an atomic view.
+                let windows = query(&path, "Windows").await?;
+                let outputs = query(&path, "Outputs").await?;
+                sequence = sequence.checked_add(1).context("Screen sequence exhausted")?;
+                let next = snapshot(&windows, &outputs, sequence, now_ms())?;
+                let now = Instant::now();
+                let heartbeat = last_sent.is_none_or(|last| now.duration_since(last) >= HEARTBEAT);
+                if heartbeat || previous.as_ref().is_none_or(|prev| !same_metadata(prev, &next)) {
+                    sender.send_replace(Some(next.clone()));
+                    previous = Some(next);
+                    last_sent = Some(now);
+                }
+                schedule.published(now);
+            }
+        }
+    }
+}
+#[cfg(not(unix))]
+pub async fn run(_sender: watch::Sender<Option<ScreenSnapshot>>) -> Result<()> {
+    anyhow::bail!("Niri metadata observation requires a local Unix compositor")
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn snapshot_is_bounded_and_never_claims_visibility_or_activity() {
-        let windows = Value::Array(
-            (0..100)
-                .map(|id| {
-                    json!({"id":id,"title":"界".repeat(500),
-            "app_id":"app", "is_focused":id==99, "workspace_id":1,
-            "layout":{"tile_size":[900,1105]}})
-                })
-                .collect(),
+    fn screen_burst_scheduler_is_bounded_debounced_and_trailing() {
+        let start = Instant::now();
+        let mut schedule = Schedule::default();
+        schedule.published(start);
+        for i in 0..100 {
+            schedule.event(start + Duration::from_millis(i * 5));
+        }
+        assert_eq!(schedule.deadline(start), start + RATE);
+        schedule.published(start + RATE);
+        assert_eq!(schedule.deadline(start + RATE), start + RATE + HEARTBEAT);
+        schedule.event(start + RATE + Duration::from_secs(3));
+        assert_eq!(
+            schedule.deadline(start),
+            start + RATE + Duration::from_millis(3_500)
         );
-        let snapshot = normalize(&windows, &json!([]), &json!({}));
-        let windows = snapshot["windows"].as_array().unwrap();
-        assert!(windows.len() <= MAX_WINDOWS && !windows.is_empty());
-        assert_eq!(windows[0]["id"], 99);
-        assert!(
-            windows
-                .iter()
-                .all(|w| w["title"].as_str().unwrap().len() <= MAX_TITLE_BYTES)
-        );
-        assert_eq!(snapshot["interaction"], "unknown");
-        assert!(snapshot["visible_window_ids"].is_null());
-        assert_eq!(windows[0]["visibility"], "unknown");
-        assert!(windows[0]["layout"]["tile_pos_in_workspace_view"].is_null());
-        assert!(serde_json::to_vec(&snapshot).unwrap().len() <= 15 * 1024);
     }
     #[test]
-    fn snapshot_is_deterministic_across_compositor_window_order() {
-        let a = json!({"id":1,"title":"a"});
-        let b = json!({"id":2,"title":"b"});
-        assert_eq!(
-            normalize(&json!([a, b]), &json!([]), &json!({})),
-            normalize(&json!([b, a]), &json!([]), &json!({}))
+    fn screen_niri_schema_bounds_and_unknowns() {
+        let windows = json!([{"id":5,"title":"x".repeat(900),"app_id":"org.browser","workspace_id":9,"is_focused":true,"layout":{"tile_size":[1000.0,800.0],"pos_in_scrolling_layout":[1,2]}}, {"id":6}]);
+        let outputs = json!({"DP-1":{"logical":{"x":0,"y":0,"width":1920,"height":1080,"scale":1.25,"transform":"Normal"}}});
+        let result = snapshot(&windows, &outputs, 1, 100).unwrap();
+        assert_eq!(result.focused_window, Some(5));
+        assert_eq!(result.windows[0].title.as_ref().unwrap().len(), 512);
+        assert_eq!(result.windows[0].visible, None);
+        assert_eq!(result.interaction, ScreenInteraction::Unknown);
+        assert_eq!(result.outputs[0].scale, Some(1.25));
+        assert_eq!(result.outputs[0].transform.as_deref(), Some("Normal"));
+        assert!(result.windows[1].layout.is_none());
+        assert!(!relevant(&json!({"ScreenshotCaptured":{"path":"private"}})));
+        assert!(!relevant(
+            &json!({"WindowFocusTimestampChanged":{"id":5,"focus_timestamp":100}})
+        ));
+        assert!(relevant(&json!({"WindowFocusChanged":{"id":5}})));
+    }
+    #[test]
+    fn screen_latest_total_bound_and_dedupe() {
+        let windows = Value::Array((0..100).map(|id| json!({"id":id,"title":"界".repeat(300),"app_id":"a".repeat(200),"is_focused":id == 99,"layout":{"tile_size":[100.0,100.0]}})).collect());
+        let first = snapshot(&windows, &json!({}), 1, 100).unwrap();
+        let second = snapshot(&windows, &json!({}), 2, 200).unwrap();
+        assert!(same_metadata(&first, &second));
+        assert_eq!(first.focused_window, Some(99));
+        assert!(first.windows.len() <= 32);
+        assert!(
+            serde_json::to_vec(&first).unwrap().len() <= jcode_base::protocol::SCREEN_MAX_BYTES
         );
+        assert_eq!(text(&json!("hello\n\u{1b}[31m"), 128).unwrap(), "hello[31m");
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn screen_niri_socket_feed_is_readonly_and_stops_with_receiver() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("niri.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            assert_eq!(line, "\"EventStream\"\n");
+            stream
+                .get_mut()
+                .write_all(b"{\"Ok\":\"Handled\"}\n")
+                .await
+                .unwrap();
+            for _ in 0..100 {
+                stream
+                    .get_mut()
+                    .write_all(b"{\"WindowFocusChanged\":{\"id\":42}}\n")
+                    .await
+                    .unwrap();
+            }
+            // Authoritative snapshot requests must be strictly read-only.
+            for expected in ["Windows", "Outputs"] {
+                let (query, _) = listener.accept().await.unwrap();
+                let mut query = BufReader::new(query);
+                let mut line = String::new();
+                query.read_line(&mut line).await.unwrap();
+                assert_eq!(line.trim(), format!("\"{expected}\""));
+                let reply = if expected == "Windows" {
+                    json!({"Ok":{"Windows":[{"id":42,"title":"final metadata","is_focused":true}]}})
+                } else {
+                    json!({"Ok":{"Outputs":{}}})
+                };
+                query
+                    .get_mut()
+                    .write_all(format!("{reply}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            // Keep compositor subscription live until the client drops it.
+            let mut rest = String::new();
+            assert_eq!(stream.read_line(&mut rest).await.unwrap(), 0);
+        });
+        let (tx, mut rx) = watch::channel(None);
+        let collector = tokio::spawn(run_at(tx, path));
+        tokio::time::timeout(Duration::from_secs(3), rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let observation = rx.borrow_and_update().clone().unwrap();
+        assert_eq!(observation.focused_window, Some(42));
+        assert_eq!(
+            observation.windows[0].title.as_deref(),
+            Some("final metadata")
+        );
+        assert_eq!(observation.interaction, ScreenInteraction::Unknown);
+        drop(rx);
+        tokio::time::timeout(Duration::from_secs(1), collector)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn screen_line_reader_bounds_local_ipc() {
+        use tokio::io::BufReader;
+        let bytes = vec![b'x'; MAX_IPC_BYTES + 1];
+        let mut reader = BufReader::new(bytes.as_slice());
+        let mut line = vec![];
+        assert!(line_bounded(&mut reader, &mut line).await.is_err());
+        assert!(line.len() <= MAX_IPC_BYTES);
     }
 }

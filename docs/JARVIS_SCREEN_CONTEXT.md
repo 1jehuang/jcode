@@ -10,7 +10,35 @@ Normal sessions do not register it. Clearing the registration or disconnecting
 the temporary Jarvis client removes the addition. Existing approval rules remain
 in force. Tool queue acceptance does not establish that speech was heard.
 
-## Screen context: proposed follow-up, not implemented by this document
+## Screen context: implemented read-only metadata stage
+
+Enable with `--jarvis-screen`, which explicitly opts in to Jarvis window metadata.
+Voice-only and ordinary sessions never start
+the observer. This requires a local Niri graphical session (`NIRI_SOCKET`).
+The TUI reuses the shared `jcode-companion::screen` observer locally even when
+its daemon is remote. No screenshot, OCR, input monitoring, focus change, or
+computer action is performed.
+
+The wire `screen_context` request carries its immutable session attachment and
+an explicit enable/update/disable action. The daemon accepts updates only from
+the live Jarvis overlay owner. Transport snapshots are capped at 16 KiB,
+32 windows, 16 outputs, 512-byte titles and 128-byte app IDs. A replaceable watch
+slot and socket-write throttling prevent a slow daemon from growing a history.
+Compositor events debounce for 500 ms and publish no faster than 2.05 seconds,
+with final-state delivery and 15-second metadata renewal. The lease and
+observation freshness expire after 30 seconds. Out-of-order, stale, oversized,
+cross-client and wrong-session updates are rejected without changing state.
+
+Only a compact, focus-first summary of at most 2 KiB enters dynamic provider
+context at existing request/tool boundaries. It never enters the stable prefix
+or persisted transcript. Idle updates only replace state and never start a turn.
+The read-only `screen_context` client tool returns the latest bounded local
+metadata on demand, not pixels. Unknown visibility and activity stay unknown.
+Disconnect, disable, and session-transfer paths revoke collection and ownership.
+The read path also removes expired leases before exposing metadata.
+
+The remaining sections document the original design and later visual/action
+work, not permissions granted by this first metadata stage.
 
 Screen awareness should be a separate explicit opt-in capability. Enabling voice
 must not silently enable screenshots, OCR, input monitoring, or desktop control.
