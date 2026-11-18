@@ -1,4 +1,9 @@
 fn with_ssh_remote_test_home(f: impl FnOnce()) {
+    let thread = std::thread::current();
+    let test_name = thread.name().expect("named test thread");
+    if super::commands_dispatch::ssh_test_runs_in_child(test_name) {
+        return;
+    }
     with_temp_jcode_home(|| {
         struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
         impl Drop for RestoreEnv {
