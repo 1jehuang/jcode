@@ -16,7 +16,7 @@ prompt ordinals. Fixtures cover empty/tiny/large plain text, reasoning-only,
 mixed, images with and without text, labels assembled across text fragments,
 suppressed attached-image labels, and buffers left behind after either flush.
 
-## Validation
+## Preliminary debug validation (not optimized acceptance)
 
 - Hosted `justrust check -p jcode-base --tests` passed.
 - 11 renderer tests passed with full persisted reasoning enabled.
@@ -64,3 +64,73 @@ The ignored test is
 Run it alone with `--ignored --nocapture --test-threads=1` on the rebuilt test
 executable using the isolated environment above. Normal frozen parity is
 `final_text_frozen_parity`.
+
+## Optimized hosted acceptance
+
+The debug measurements above do not substitute for optimized acceptance.
+Both probes were rerun on the hosted x86_64 Linux machine using the repository's
+release profile (`opt-level = 1`). No production or test changes were required.
+
+Receipts:
+
+- `20261118-045454995-2494200`: hosted release compilation and both independent
+  frozen renderer parity tests passed (2 passed, 2 measurement tests ignored).
+  `justrust show` reports `where hosted on hosted`. The saved compiler command
+  for `jcode_base` includes `-C opt-level=1`, including its test compilation.
+  Release test executable: `jcode_base-7796e47604c4ddd7`.
+- `20261118-045712828-2501345`: both ignored CPU/allocation probes passed
+  (2 passed, 0 failed, 0 ignored) on hosted, reusing the release executable
+  (357 fresh units, zero compiled). Both tests also execute frozen parity before
+  measurement. No `JCODE_HOME` override was applied to justrust or compilation.
+  The Cargo target runner applies the isolated home and full reasoning mode
+  only to the actual executable.
+
+Reproduction commands:
+
+```bash
+justrust test --release -p jcode-base --lib session::render::image_context_tests -- --nocapture --test-threads=1
+justrust test --release -p jcode-base --lib cpu_allocation_probe \
+  --config 'target.x86_64-unknown-linux-gnu.runner = ["env", "JCODE_HOME=/tmp/jcode-render-release-20261118", "JCODE_TEST_SESSION=1", "JCODE_REASONING_DISPLAY=full"]' \
+  -- --ignored --nocapture --test-threads=1
+justrust show 20261118-045454995-2494200
+justrust show 20261118-045712828-2501345
+```
+
+The same 64 warmups, 12 alternating old/new rounds, actual per-thread CPU
+clock and separately counted allocations described above apply. CPU entries
+are sorted sample 6 of 12, in nanoseconds per batch, not per render. The hosted
+machine was busy (13.4 other cores on average, up to 64 other rustc processes),
+so these are CPU-time comparisons rather than wall-time speedup claims.
+The host differs from the local laptop used for preliminary debug results.
+
+### Final text release results
+
+| Case | CPU new/old | Old CPU ns/sample | New CPU ns/sample | Allocation calls old/new | Requested bytes old/new |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| empty | 0.9535 | 915,250 | 872,710 | 0 / 0 | 0 / 0 |
+| tiny | 0.8738 | 3,625,700 | 3,168,280 | 6 / 5 | 1,389 / 1,381 |
+| plain-large | 0.3748 | 2,782,510 | 1,042,950 | 6 / 5 | 525,661 / 263,517 |
+| reasoning-only | 0.9967 | 369,711,740 | 368,506,290 | 174 / 173 | 2,370,561 / 2,108,405 |
+| mixed | 1.0033 | 515,600,930 | 517,290,080 | 176 / 176 | 3,157,017 / 3,157,017 |
+| images | 0.4866 | 2,223,380 | 1,081,930 | 10 / 9 | 526,259 / 264,115 |
+| no-text | 0.8291 | 2,366,600 | 1,962,230 | 5 / 5 | 630 / 630 |
+
+### Image context release results
+
+This probe compares the frozen renderer from `7e8ca3a2f` with the current
+renderer, so its result includes both image-context ownership and the final-text
+change. Its tool/image fixtures allocate the same calls and bytes as the earlier
+image-context-only debug probe. It is not a standalone final-text attribution.
+
+| Case | CPU new/old | Old CPU ns/sample | New CPU ns/sample | Allocation calls old/new | Requested bytes old/new |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| empty (noimages) | 0.9876 | 432,830 | 427,460 | 0 / 0 | 0 / 0 |
+| tiny | 0.7365 | 10,589,710 | 7,799,720 | 41 / 30 | 4,170 / 3,453 |
+| largeinput | 0.5918 | 4,924,750 | 2,914,540 | 41 / 30 | 790,578 / 527,725 |
+| images | 0.7062 | 4,944,560 | 3,491,790 | 47 / 36 | 791,185 / 528,332 |
+
+All eleven optimized cases pass the declared CPU ratio gate of 1.05 and
+nonincreasing allocation calls and requested bytes. Reasoning-only and mixed
+establish nonregression, not a CPU speedup. No reproducible regression was
+observed, so both renderer candidates are accepted under this synthetic gate.
+This does not claim an interactive TUI or end-to-end provider speedup.
