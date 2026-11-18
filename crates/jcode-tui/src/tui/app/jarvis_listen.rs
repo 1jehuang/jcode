@@ -101,7 +101,7 @@ impl AlwaysListening {
         self.status = Some(status);
         self.recording = Some(recording);
         self.wake = Some(tokio::spawn(async {
-            let mut tick = tokio::time::interval(Duration::from_millis(200));
+            let mut tick = tokio::time::interval(Duration::from_millis(50));
             loop {
                 tick.tick().await;
                 Bus::global().publish(BusEvent::VoiceInputWake);

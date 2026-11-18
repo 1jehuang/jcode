@@ -67,6 +67,30 @@ def render(value):
     return {"text": text, "tooltip": html.escape(tooltip), "class": "capturing" if capturing else "paused" if state == "paused" else "off"}
 
 
+def native_render(value):
+    """Bounded measured envelope for Waybar's native Cairo waveform module."""
+    legacy = render(value)
+    legacy["tooltip"] = html.unescape(legacy["tooltip"])  # Native GTK uses plain text.
+    if value is None:
+        return {"capturing": False, "state": "off", "levels": [],
+                "sequence": 0, "sample_interval_ms": 50, **legacy}
+    levels = value.get("levels", [])
+    levels = levels[-128:] if isinstance(levels, list) else []
+    levels = [max(0.0, min(1.0, float(v)))
+              if isinstance(v, (int, float)) and not isinstance(v, bool)
+              and math.isfinite(v) else 0.0 for v in levels]
+    interval = value.get("sample_interval_ms", 200)  # Original clients published at 5 Hz.
+    interval = interval if isinstance(interval, int) and not isinstance(interval, bool) else 200
+    sequence = value.get("sequence", 0)
+    sequence = sequence if isinstance(sequence, int) and not isinstance(sequence, bool) else 0
+    state = value.get("state", "unknown")
+    state = state[:80] if isinstance(state, str) else "unknown"
+    return {**legacy, "text": "", "capturing": value.get("capturing") is True,
+            "state": state, "levels": levels, "pid": value.get("pid", 0),
+            "sequence": max(0, min(2**64 - 1, sequence)),
+            "sample_interval_ms": max(20, min(1000, interval))}
+
+
 def toggle(directory):
     status = latest_status(directory)
     if not status:
@@ -86,6 +110,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--toggle", action="store_true")
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--native", action="store_true", help="emit measured samples for the native Waybar waveform module")
     args = parser.parse_args()
     directory = runtime_dir()
     if args.toggle:
@@ -94,13 +119,16 @@ def main():
     previous = None
     while True:
         found = latest_status(directory)
-        output = json.dumps(render(found[2] if found else None), ensure_ascii=False)
+        value = dict(found[2]) if found else None
+        if value is not None:
+            value.setdefault("sequence", int(found[0] * 1_000_000_000))
+        output = json.dumps(native_render(value) if args.native else render(value), ensure_ascii=False, allow_nan=False)
         if output != previous or args.once:
             print(output, flush=True)
             previous = output
         if args.once:
             break
-        time.sleep(0.2)
+        time.sleep(0.05 if args.native and value and value.get("capturing") is True else 0.2)
 
 
 if __name__ == "__main__":
