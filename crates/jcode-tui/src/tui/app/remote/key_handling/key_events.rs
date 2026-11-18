@@ -248,50 +248,17 @@ pub(super) async fn handle_remote_key_internal(
     }
 
     if app.toggle_keys.auto_poke.matches(code, modifiers) {
-        if crate::tui::is_ssh_remote() {
-            let args = if app.auto_poke_incomplete_todos {
-                vec!["off".to_string()]
-            } else if app.is_processing {
-                vec!["on".to_string()]
-            } else {
-                Vec::new()
-            };
-            remote.runtime_command("poke", args).await?;
-            app.set_status_notice("Requested remote poke toggle");
-            return Ok(());
-        }
-        if app.auto_poke_incomplete_todos {
-            let cleared = app_mod::commands::disable_auto_poke(app);
-            app.set_status_notice("Poke: OFF");
-            app.push_display_message(DisplayMessage::system(
-                app_mod::commands::poke_disabled_message(cleared),
-            ));
+        // The daemon owns the policy even when its socket is local. Mirror
+        // state only on RuntimeCommandResult, not optimistically on keypress.
+        let args = if app.auto_poke_incomplete_todos {
+            vec!["off".to_string()]
+        } else if app.is_processing {
+            vec!["on".to_string()]
         } else {
-            match app_mod::commands::activate_auto_poke(app) {
-                app_mod::commands::PokeActivation::EnabledNoIncomplete => {
-                    app.push_display_message(DisplayMessage::system(
-                        app_mod::commands::poke_enabled_without_incomplete_message(),
-                    ));
-                }
-                app_mod::commands::PokeActivation::Queued => {
-                    app.push_display_message(DisplayMessage::system(
-                        app_mod::commands::poke_queued_display_message(),
-                    ));
-                }
-                app_mod::commands::PokeActivation::SendNow {
-                    incomplete_count,
-                    poke_msg,
-                } => {
-                    app.push_display_message(DisplayMessage::system(
-                        app_mod::commands::poke_triggered_display_message(incomplete_count),
-                    ));
-
-                    let _ =
-                        begin_remote_send(app, remote, poke_msg, vec![], true, None, true, 0).await;
-                    app.visible_turn_started = Some(Instant::now());
-                }
-            }
-        }
+            Vec::new()
+        };
+        remote.runtime_command("poke", args).await?;
+        app.set_status_notice("Requested remote poke toggle");
         return Ok(());
     }
 
@@ -842,6 +809,9 @@ pub(super) async fn handle_remote_key_internal(
                         .queued_messages
                         .iter()
                         .any(|message| app_mod::commands::is_poke_message(message));
+                // Esc without a redirect stops daemon-owned continuation too.
+                // Send the control before cancellation reaches a turn boundary.
+                remote.runtime_command("poke", vec!["off".into()]).await?;
                 remote.cancel_with_reason("keyboard_escape").await?;
                 if disabled_auto_poke {
                     app_mod::commands::disable_auto_poke(app);

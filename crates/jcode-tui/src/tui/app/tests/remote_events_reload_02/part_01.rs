@@ -1,5 +1,5 @@
 #[test]
-fn test_remote_poke_queues_when_turn_is_in_progress() {
+fn test_remote_poke_defers_to_daemon_when_turn_is_in_progress() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -47,13 +47,9 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
         assert!(app.input().is_empty());
         assert_eq!(
             app.status_notice(),
-            Some("Poke queued after current turn".to_string())
+            Some("Requested remote poke".to_string())
         );
         assert!(app.queued_messages().is_empty());
-        assert!(app.display_messages().iter().any(|msg| {
-            msg.content
-                .contains("Poke queued. We'll re-check for unfinished todos after this turn")
-        }));
 
         crate::todo::save_todos(
             &app.session.id,
@@ -104,11 +100,8 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
             app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
 
         assert!(needs_redraw);
-        assert!(app.pending_queued_dispatch);
-        assert_eq!(app.queued_messages().len(), 1);
-        assert!(app.queued_messages()[0].contains("You have 2 incomplete todos"));
-        assert!(app.queued_messages()[0].contains("Handle the newly discovered follow-up"));
-        assert!(!app.queued_messages()[0].contains("/poke off"));
+        assert!(!app.pending_queued_dispatch);
+        assert!(app.queued_messages().is_empty());
     });
 }
 
@@ -125,17 +118,41 @@ fn test_remote_ctrl_p_toggles_auto_poke() {
 
         rt.block_on(app.handle_remote_key(KeyCode::Char('p'), KeyModifiers::CONTROL, &mut remote))
             .expect("Ctrl+P should disable poke remotely");
+        assert!(
+            app.auto_poke_incomplete_todos,
+            "wait for daemon acknowledgement"
+        );
+        assert_eq!(
+            app.status_notice(),
+            Some("Requested remote poke toggle".into())
+        );
+        app.handle_server_event(
+            crate::protocol::ServerEvent::RuntimeCommandResult {
+                id: 1,
+                command: "poke".into(),
+                data: serde_json::json!({"poke_enabled": false}),
+                message: "Auto-poke disabled".into(),
+            },
+            &mut remote,
+        );
         assert!(!app.auto_poke_incomplete_todos);
-        assert_eq!(app.status_notice(), Some("Poke: OFF".to_string()));
 
         rt.block_on(app.handle_remote_key(KeyCode::Char('p'), KeyModifiers::CONTROL, &mut remote))
             .expect("Ctrl+P should enable poke remotely");
+        assert!(
+            !app.auto_poke_incomplete_todos,
+            "wait for daemon acknowledgement"
+        );
+        app.handle_server_event(
+            crate::protocol::ServerEvent::RuntimeCommandResult {
+                id: 2,
+                command: "poke".into(),
+                data: serde_json::json!({"poke_enabled": true}),
+                message: "Auto-poke enabled".into(),
+            },
+            &mut remote,
+        );
         assert!(app.auto_poke_incomplete_todos);
-        assert_eq!(app.status_notice(), Some("Poke: ON".to_string()));
-        assert!(app.display_messages().iter().any(|msg| {
-            msg.content
-                .contains("Auto-poke enabled. Nothing unfinished right now")
-        }));
     });
 }
 
@@ -165,7 +182,7 @@ fn test_remote_transfer_queues_pause_when_processing() {
 }
 
 #[test]
-fn test_remote_interrupted_auto_poke_requeues_after_deferred_poke() {
+fn test_remote_interrupted_does_not_schedule_client_poke() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -202,14 +219,12 @@ fn test_remote_interrupted_auto_poke_requeues_after_deferred_poke() {
         app.status = ProcessingStatus::Streaming;
         app.current_message_id = Some(42);
 
-        let needs_redraw =
+        let _needs_redraw =
             app.handle_server_event(crate::protocol::ServerEvent::Interrupted, &mut remote);
 
-        assert!(needs_redraw);
-        assert!(app.pending_queued_dispatch);
-        assert_eq!(app.queued_messages().len(), 1);
-        assert!(app.queued_messages()[0].contains("You have 1 incomplete todo"));
-        assert!(!app.queued_messages()[0].contains("/poke off"));
+        // No client continuation was created, so there need not be a redraw.
+        assert!(!app.pending_queued_dispatch);
+        assert!(app.queued_messages().is_empty());
     });
 }
 

@@ -1440,9 +1440,10 @@ impl App {
         if self.is_replay {
             return false;
         }
-        // SSH workflow state and todo reads belong to the remote daemon.
-        // Even the guardrail/report checks below consult laptop session files.
-        if crate::tui::is_ssh_remote() {
+        // Daemon sessions own continuation policy, regardless of whether the
+        // daemon is reached over a local socket or SSH. Never read client-side
+        // todos or enqueue a second continuation at its idle boundary.
+        if self.is_remote || crate::tui::is_ssh_remote() {
             return false;
         }
         if self.guardrail_stops_exhausted_at_turn_end() {
@@ -1481,7 +1482,7 @@ impl App {
         if self.is_replay {
             return false;
         }
-        if crate::tui::is_ssh_remote() {
+        if self.is_remote || crate::tui::is_ssh_remote() {
             return false;
         }
         // Completion is visible even with /poke off, and never needs another
