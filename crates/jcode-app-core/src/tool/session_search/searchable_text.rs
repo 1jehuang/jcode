@@ -28,12 +28,24 @@ pub(super) fn searchable_message_text(msg: &StoredMessage, include_tools: bool) 
                 Some(Cow::Borrowed(content.as_str()))
             }
             ContentBlock::ToolUse { name, input, .. } if include_tools => {
-                let input = input.to_string();
-                Some(Cow::Owned(if input == "null" {
-                    format!("[tool call: {name}]")
+                // Serialize into the final buffer, rather than first allocating JSON
+                // and then copying it into a second formatted allocation.
+                let capacity = if input.is_null() {
+                    name.len() + 13
                 } else {
-                    format!("[tool call: {name}] {input}")
-                }))
+                    32.max(name.len() + 14)
+                };
+                let mut text = Vec::with_capacity(capacity);
+                text.extend_from_slice(b"[tool call: ");
+                text.extend_from_slice(name.as_bytes());
+                text.push(b']');
+                if !input.is_null() {
+                    text.push(b' ');
+                    serde_json::to_writer(&mut text, input)
+                        .expect("serializing a JSON value into memory cannot fail");
+                }
+                // SAFETY: the prefix/name and serde_json's output are valid UTF-8.
+                Some(Cow::Owned(unsafe { String::from_utf8_unchecked(text) }))
             }
             ContentBlock::ToolUse { name, input, .. } => {
                 let mut fields = Vec::new();
