@@ -2,8 +2,8 @@ use crate::auth::{AuthState, AuthStatus};
 
 use super::pricing::cheapness_for_route;
 use super::{
-    ALL_OPENAI_MODELS, AccountModelAvailabilityState, CHATGPT_WEB_MODEL, GROK_BUILD_PROFILE_ID,
-    ModelRoute, MultiProvider, Provider, ProviderRegistry, anthropic_api_key_route_availability,
+    ALL_OPENAI_MODELS, AccountModelAvailabilityState, GROK_BUILD_PROFILE_ID, ModelRoute,
+    MultiProvider, Provider, ProviderRegistry, anthropic_api_key_route_availability,
     anthropic_oauth_route_availability, bedrock, build_anthropic_oauth_route,
     build_chatgpt_web_route, build_copilot_route, build_openai_api_key_route,
     build_openai_oauth_route, build_openrouter_auto_route, build_openrouter_endpoint_route,
@@ -14,6 +14,17 @@ use super::{
     openrouter, openrouter_catalog_model_id, provider_for_model,
     standard_openrouter_profile_configured,
 };
+
+fn chatgpt_web_route_for_model(model: &str) -> ModelRoute {
+    match super::chatgpt_web::find_model(model) {
+        Some(entry) => build_chatgpt_web_route(model, entry.available, entry.detail),
+        None => build_chatgpt_web_route(
+            model,
+            false,
+            "not observed in the current ChatGPT browser session",
+        ),
+    }
+}
 
 /// Build the fast local route snapshot used by the TUI model picker while the
 /// full provider catalog is hydrating.
@@ -30,14 +41,15 @@ pub fn simplified_model_routes_for_picker(
     let mut routes = Vec::new();
 
     for model in display_models {
-        if model == CHATGPT_WEB_MODEL {
-            routes.push(build_chatgpt_web_route());
+        if jcode_provider_core::is_chatgpt_web_model(&model) {
+            routes.push(chatgpt_web_route_for_model(&model));
             continue;
         }
         if !model.contains('/') && provider_for_model(&model) == Some("openai") {
             // Platform-API-only GPT Pro models: never advertise an OAuth route.
             if jcode_provider_core::is_openai_api_only_pro_model(&model) {
                 routes.push(ModelRoute {
+                    catalog_metadata: None,
                     model: model.clone(),
                     provider: "OpenAI".to_string(),
                     api_method: "openai-api-key".to_string(),
@@ -54,6 +66,7 @@ pub fn simplified_model_routes_for_picker(
             }
             if auth.openai_has_oauth {
                 routes.push(ModelRoute {
+                    catalog_metadata: None,
                     model: model.clone(),
                     provider: "OpenAI".to_string(),
                     api_method: "openai-oauth".to_string(),
@@ -65,6 +78,7 @@ pub fn simplified_model_routes_for_picker(
             }
             if auth.openai_has_api_key {
                 routes.push(ModelRoute {
+                    catalog_metadata: None,
                     model: model.clone(),
                     provider: "OpenAI".to_string(),
                     api_method: "openai-api-key".to_string(),
@@ -76,6 +90,7 @@ pub fn simplified_model_routes_for_picker(
             }
             if auth.openai == AuthState::NotConfigured {
                 routes.push(ModelRoute {
+                    catalog_metadata: None,
                     model,
                     provider: "OpenAI".to_string(),
                     api_method: "openai-oauth".to_string(),
@@ -143,6 +158,7 @@ pub fn simplified_model_routes_for_picker(
             };
 
         routes.push(ModelRoute {
+            catalog_metadata: None,
             model,
             provider,
             api_method,
@@ -153,8 +169,24 @@ pub fn simplified_model_routes_for_picker(
         });
     }
 
+    for model in super::chatgpt_web::cached_models() {
+        if !routes
+            .iter()
+            .any(|route| route.model == model.model && route.api_method == "chatgpt-web")
+        {
+            routes.push(build_chatgpt_web_route(
+                &model.model,
+                model.available,
+                model.detail,
+            ));
+        }
+    }
+    if routes.is_empty() && jcode_provider_core::is_chatgpt_web_model(current_model) {
+        routes.push(chatgpt_web_route_for_model(current_model));
+    }
     if routes.is_empty() && !current_model.is_empty() && current_model != "unknown" {
         routes.push(ModelRoute {
+            catalog_metadata: None,
             model: current_model.to_string(),
             provider: current_provider_name.to_string(),
             api_method: "current".to_string(),
@@ -245,7 +277,7 @@ fn expand_saved_account_routes(mut routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
         for account in openai {
             for model in known_openai_model_ids_for_scope(&account.label) {
                 if !is_listable_model_name(&model)
-                    || model == CHATGPT_WEB_MODEL
+                    || jcode_provider_core::is_chatgpt_web_model(&model)
                     || jcode_provider_core::is_openai_api_only_pro_model(&model)
                 {
                     continue;
@@ -344,6 +376,7 @@ pub fn append_simplified_anthropic_model_routes(
             anthropic_api_key_route_availability(&model)
         };
         routes.push(ModelRoute {
+            catalog_metadata: None,
             model: model.clone(),
             provider: "Anthropic".to_string(),
             api_method: if oauth { "claude-oauth" } else { "claude-api" }.to_string(),
@@ -384,12 +417,20 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
 
     append_anthropic_routes(provider, &mut routes, has_oauth, has_api_key);
     append_openai_routes(provider, &mut routes, &openai_auth);
+    for model in super::chatgpt_web::cached_models() {
+        routes.push(build_chatgpt_web_route(
+            &model.model,
+            model.available,
+            model.detail,
+        ));
+    }
     let added_direct_openai_compatible_routes =
         append_openai_compatible_profile_routes(provider, &mut routes);
     append_copilot_routes(provider, &mut routes);
     append_gemini_routes(provider, &mut routes);
     append_antigravity_routes(provider, &mut routes);
     append_cursor_routes(provider, &mut routes);
+    append_claude_code_routes(provider, &mut routes);
     append_bedrock_routes(provider, &mut routes);
 
     let has_openrouter_transport = provider.openrouter_provider().is_some();
@@ -402,6 +443,7 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
     if !has_openrouter_transport && !added_direct_openai_compatible_routes {
         // OpenRouter not configured - show a placeholder as unavailable.
         routes.push(ModelRoute {
+            catalog_metadata: None,
             model: "openrouter models".to_string(),
             provider: "—".to_string(),
             api_method: "openrouter".to_string(),
@@ -504,6 +546,7 @@ pub(super) fn append_anthropic_routes(
                 routes.push(build_anthropic_oauth_route(&model, available, detail));
             } else {
                 routes.push(ModelRoute {
+                    catalog_metadata: None,
                     model: model.clone(),
                     provider: "Anthropic".to_string(),
                     api_method: "claude-api".to_string(),
@@ -579,8 +622,7 @@ fn append_openai_routes(
     };
 
     for model in openai_models {
-        if model == CHATGPT_WEB_MODEL {
-            routes.push(build_chatgpt_web_route());
+        if jcode_provider_core::is_chatgpt_web_model(&model) {
             continue;
         }
         // GPT Pro models are platform-API-only: never offer an OAuth route
@@ -667,16 +709,41 @@ fn append_openai_compatible_profile_routes(
             continue;
         }
         let named_routes = named_provider_profile_routes(profile_name, profile_config);
+        let named_routes = without_existing_model_routes(routes, named_routes);
         added_any |= !named_routes.is_empty();
         routes.extend(named_routes);
     }
     added_any
 }
 
+fn same_model_route_identity(left: &ModelRoute, right: &ModelRoute) -> bool {
+    left.api_method.eq_ignore_ascii_case(&right.api_method)
+        && left.model.eq_ignore_ascii_case(&right.model)
+}
+
+fn without_existing_model_routes(
+    existing_routes: &[ModelRoute],
+    candidate_routes: Vec<ModelRoute>,
+) -> Vec<ModelRoute> {
+    candidate_routes
+        .into_iter()
+        .filter(|candidate| {
+            !existing_routes
+                .iter()
+                .any(|existing| same_model_route_identity(existing, candidate))
+        })
+        .collect()
+}
+
+pub fn named_provider_model_supports_chat(model: &crate::config::NamedProviderModelConfig) -> bool {
+    model.supports_chat != Some(false)
+        && (model.input.is_empty() || model.input.iter().any(|input| input == "text"))
+}
+
 /// Picker routes for one user-defined named provider profile from config.
 ///
-/// Text-capable static models plus the profile's `default_model` are offered;
-/// models declared image-only via `input = ["image"]` are excluded.
+/// Chat-capable static models plus the profile's `default_model` are offered;
+/// generation-only and image-only models are excluded.
 fn named_provider_profile_routes(
     profile_name: &str,
     profile_config: &crate::config::NamedProviderConfig,
@@ -684,10 +751,7 @@ fn named_provider_profile_routes(
     let mut models: Vec<String> = profile_config
         .models
         .iter()
-        .filter(|model| {
-            // `input` empty means unspecified (assume text-capable).
-            model.input.is_empty() || model.input.iter().any(|input| input == "text")
-        })
+        .filter(|model| named_provider_model_supports_chat(model))
         .map(|model| model.id.trim().to_string())
         .filter(|id| !id.is_empty())
         .collect();
@@ -697,6 +761,13 @@ fn named_provider_profile_routes(
             .as_deref()
             .map(str::trim)
             .filter(|model| !model.is_empty())
+            .filter(|model| {
+                profile_config
+                    .models
+                    .iter()
+                    .find(|entry| entry.id.trim().eq_ignore_ascii_case(model))
+                    .is_none_or(named_provider_model_supports_chat)
+            })
     {
         models.push(default_model.to_string());
     }
@@ -713,7 +784,33 @@ fn named_provider_profile_routes(
         if !is_listable_model_name(&model) || routes.iter().any(|route| route.model == model) {
             continue;
         }
+        let model_config = profile_config
+            .models
+            .iter()
+            .find(|entry| entry.id.trim().eq_ignore_ascii_case(&model));
         routes.push(ModelRoute {
+            catalog_metadata: model_config.map(|model_config| jcode_provider_core::ModelMetadata {
+                context_window: model_config.context_window.or_else(|| {
+                    jcode_provider_core::context_limit_for_model_with_provider(
+                        &model,
+                        Some(profile_name),
+                    )
+                }),
+                max_input_tokens: model_config.max_input_tokens,
+                max_output_tokens: model_config.max_output_tokens,
+                supports_chat: model_config.supports_chat,
+                supports_thinking: model_config.supports_thinking,
+                input_modalities: model_config.input.clone(),
+                output_modalities: model_config.output.clone(),
+                supported_endpoints: model_config.supported_endpoints.clone(),
+                reasoning_efforts: model_config.reasoning_efforts.clone(),
+                supports_tool_calls: model_config.supports_tool_calls,
+                supports_streaming: model_config.supports_streaming,
+                supports_structured_outputs: model_config.supports_structured_outputs,
+                supports_image_input: (!model_config.input.is_empty())
+                    .then(|| model_config.input.iter().any(|input| input == "image")),
+                ..Default::default()
+            }),
             model,
             provider: profile_name.to_string(),
             api_method: api_method.clone(),
@@ -734,7 +831,9 @@ fn append_copilot_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>)
         let detail = copilot.model_catalog_detail();
         let copilot_models_empty = copilot_models.is_empty();
         for model in copilot_models {
-            routes.push(build_copilot_route(&model, true, detail.clone()));
+            let mut route = build_copilot_route(&model, true, detail.clone());
+            route.catalog_metadata = copilot.model_metadata(&model);
+            routes.push(route);
         }
         if copilot_models_empty && copilot::has_credentials() {
             routes.push(build_copilot_route("copilot models", false, detail));
@@ -752,6 +851,7 @@ fn append_gemini_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>) 
     if let Some(gemini) = provider.gemini_provider() {
         for model in gemini.available_models_display() {
             routes.push(ModelRoute {
+                catalog_metadata: None,
                 model,
                 provider: "Gemini".to_string(),
                 api_method: "code-assist-oauth".to_string(),
@@ -774,6 +874,7 @@ fn append_cursor_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>) 
     if let Some(cursor) = provider.cursor_provider() {
         for model in cursor.available_models_display() {
             routes.push(ModelRoute {
+                catalog_metadata: None,
                 model,
                 provider: "Cursor".to_string(),
                 api_method: "cursor".to_string(),
@@ -784,6 +885,59 @@ fn append_cursor_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>) 
             });
         }
     }
+}
+
+/// Claude Code CLI routes: one per configured instance per known Claude model.
+/// The default instance uses the bare `claude-code` api method, other
+/// instances `claude-code:<id>`, so picking a route also picks the account.
+fn append_claude_code_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>) {
+    if let Some(claude_code) = provider.claude_code_provider() {
+        routes.extend(claude_code.model_routes());
+    }
+}
+
+/// Provider label for a Claude Code instance route.
+pub(crate) fn claude_code_route_provider_label(
+    settings: &crate::config::ClaudeCodeConfig,
+    instance: &crate::config::ClaudeCodeInstanceConfig,
+) -> String {
+    match instance.display_name.as_deref().map(str::trim) {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ if settings.is_default_instance(&instance.id) => "Claude Code".to_string(),
+        _ => format!("Claude Code ({})", instance.id),
+    }
+}
+
+/// Routes for every configured instance, each from its own discovered models:
+/// instances have separate logins, so their model access can differ.
+pub fn claude_code_routes_for(
+    settings: &crate::config::ClaudeCodeConfig,
+    models_for: impl Fn(&crate::config::ClaudeCodeInstanceConfig) -> Vec<String>,
+) -> Vec<ModelRoute> {
+    let mut routes = Vec::new();
+    for instance in settings.effective_instances() {
+        let api_method = jcode_provider_core::claude_code_api_method(
+            (!settings.is_default_instance(&instance.id)).then_some(instance.id.as_str()),
+        );
+        let provider_label = claude_code_route_provider_label(settings, &instance);
+        let detail = match instance.resolved_home() {
+            Some(home) => format!("Claude Code CLI, CLAUDE_CONFIG_DIR={}", home.display()),
+            None => "Claude Code CLI, default login".to_string(),
+        };
+        for model in models_for(&instance) {
+            routes.push(ModelRoute {
+                catalog_metadata: None,
+                model,
+                provider: provider_label.clone(),
+                api_method: api_method.clone(),
+                available: true,
+                detail: detail.clone(),
+                usage: None,
+                cheapness: None,
+            });
+        }
+    }
+    routes
 }
 
 /// AWS Bedrock models and inference profiles, including the
@@ -876,6 +1030,7 @@ fn append_openrouter_routes(
                     )
                 });
             routes.push(ModelRoute {
+                catalog_metadata: None,
                 model: model.clone(),
                 provider,
                 api_method,

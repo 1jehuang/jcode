@@ -2,15 +2,19 @@ use super::*;
 
 impl OpenAIProvider {
     pub(super) async fn prefetch_model_catalog(&self) -> Result<()> {
-        if self.is_browser_only() {
-            return Ok(());
+        if self.is_browser_only() || is_chatgpt_web_model(&self.model()) {
+            return self.apply_browser_catalog_refresh(
+                jcode_base::provider::chatgpt_web::refresh_models().await?,
+            );
         }
+        // Optional discovery must not wait for an unrelated active browser turn.
+        spawn_optional_browser_catalog_refresh(jcode_base::provider::chatgpt_web::refresh_models());
         // The loaded credential's *shape* is authoritative for which catalog
         // endpoint to hit, not the requested credential mode. In Auto mode a
         // user with only an OPENAI_API_KEY loads an API-key-shaped credential
         // while the mode stays Auto; routing by mode would send that platform
         // key to the ChatGPT/Codex endpoint and get a 401.
-        let account_label = self.refresh_account_label();
+        let account_label = self.resolved_account_label(AccountProviderKind::OpenAi);
         let (access_token, is_chatgpt_mode, credential_identity, scope) = {
             let creds = self.credentials.read().await;
             (
@@ -21,8 +25,7 @@ impl OpenAIProvider {
             )
         };
         let catalog = if is_chatgpt_mode {
-            let access_token =
-                openai_access_token(self.refresh_account_label(), &self.credentials).await?;
+            let access_token = openai_access_token(&self.credentials, &self.account_pin).await?;
             match jcode_base::provider::fetch_openai_model_catalog(&access_token).await {
                 Ok(catalog) => catalog,
                 // The server can reject a token that still looks fresh by its
@@ -45,8 +48,8 @@ impl OpenAIProvider {
                     let refreshed =
                         super::super::openai_stream_runtime::force_refresh_openai_token(
                             &self.credentials,
+                            &self.account_pin,
                             &refresh_token,
-                            account_label.clone(),
                         )
                         .await
                         .map_err(|refresh_err| {
@@ -66,7 +69,7 @@ impl OpenAIProvider {
             Self::catalog_credential_identity(&credentials)
         };
         if current_credential_identity != credential_identity
-            || self.refresh_account_label() != account_label
+            || self.resolved_account_label(AccountProviderKind::OpenAi) != account_label
         {
             jcode_base::logging::info(
                 "Discarding OpenAI model catalog fetched for credentials that are no longer active",

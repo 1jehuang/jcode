@@ -11,6 +11,7 @@ pub fn remote_model_routes_fallback(
             .iter()
             .filter(|model| is_listable_model_name(model))
             .map(|model| ModelRoute {
+                catalog_metadata: None,
                 model: model.clone(),
                 provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
                 api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
@@ -29,6 +30,11 @@ pub fn remote_model_routes_fallback(
             continue;
         }
 
+        if jcode_provider_core::is_chatgpt_web_model(model) {
+            routes.push(chatgpt_web_route_for_model(model));
+            continue;
+        }
+
         let openrouter_catalog_model = openrouter_catalog_model_id(model);
         let openrouter_cached = openrouter_catalog_model
             .as_deref()
@@ -38,6 +44,7 @@ pub fn remote_model_routes_fallback(
             let available = auth.bedrock != AuthState::NotConfigured
                 || crate::provider::bedrock::BedrockProvider::has_credentials();
             routes.push(ModelRoute {
+                catalog_metadata: None,
                 model: model.clone(),
                 provider: "AWS Bedrock".to_string(),
                 api_method: "bedrock".to_string(),
@@ -181,6 +188,7 @@ pub fn remote_model_routes_fallback(
 
         if crate::provider::gemini::is_gemini_model_id(model) {
             routes.push(ModelRoute {
+                catalog_metadata: None,
                 model: model.clone(),
                 provider: "Gemini".to_string(),
                 api_method: "code-assist-oauth".to_string(),
@@ -194,6 +202,7 @@ pub fn remote_model_routes_fallback(
 
         if !added_any {
             routes.push(ModelRoute {
+                catalog_metadata: None,
                 model: model.clone(),
                 provider: "unknown".to_string(),
                 api_method: "unknown".to_string(),
@@ -223,7 +232,12 @@ pub fn remote_model_routes_lightweight_fallback(
         if !is_listable_model_name(model) {
             continue;
         }
+        if jcode_provider_core::is_chatgpt_web_model(model) {
+            routes.push(chatgpt_web_route_for_model(model));
+            continue;
+        }
         routes.push(ModelRoute {
+            catalog_metadata: None,
             model: model.clone(),
             provider: provider.clone(),
             api_method: if is_jcode_subscription {
@@ -242,8 +256,12 @@ pub fn remote_model_routes_lightweight_fallback(
         });
     }
 
+    if routes.is_empty() && jcode_provider_core::is_chatgpt_web_model(current_model) {
+        routes.push(chatgpt_web_route_for_model(current_model));
+    }
     if routes.is_empty() && !current_model.is_empty() && current_model != "unknown" {
         routes.push(ModelRoute {
+            catalog_metadata: None,
             model: current_model.to_string(),
             provider,
             api_method: "current".to_string(),
@@ -282,6 +300,7 @@ pub fn remote_current_openai_compatible_route_for_model(
     }
 
     Some(ModelRoute {
+        catalog_metadata: None,
         model: model.to_string(),
         provider: resolved.display_name,
         api_method: format!("openai-compatible:{}", resolved.id),
@@ -324,6 +343,7 @@ pub fn remote_openai_compatible_route_for_model(model: &str) -> Option<ModelRout
             )
         };
         return Some(ModelRoute {
+            catalog_metadata: None,
             model: model.to_string(),
             provider: resolved.display_name,
             api_method: format!("openai-compatible:{}", resolved.id),
@@ -369,6 +389,7 @@ pub(super) fn named_provider_profile_route_for_model_in(
             profile_config.base_url.trim().to_string()
         };
         return Some(ModelRoute {
+            catalog_metadata: None,
             model: model.to_string(),
             provider: profile_name.clone(),
             api_method: format!("openai-compatible:{}", profile_name),

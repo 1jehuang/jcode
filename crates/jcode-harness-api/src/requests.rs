@@ -160,6 +160,17 @@ pub enum ApiRequest {
     /// Clear conversation history.
     Clear { session_id: String },
 
+    /// List durable checkpoints before user prompts in this session.
+    ListRewindCheckpoints { session_id: String },
+
+    /// Restore the selected checkpoint. Conversation restores stream History
+    /// before the RewindComplete reply.
+    RewindCheckpoint {
+        session_id: String,
+        checkpoint_id: String,
+        mode: crate::RewindMode,
+    },
+
     /// Rewind history to the given 1-based message index.
     Rewind {
         session_id: String,

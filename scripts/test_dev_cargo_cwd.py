@@ -17,7 +17,7 @@ class CargoWorkingDirectoryTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(dir=os.environ.get("JCODE_SCRATCH_DIR"))
         self.addCleanup(self.tmp.cleanup)
-        self.project = Path(self.tmp.name) / "other rust project"
+        self.project = (Path(self.tmp.name) / "other rust project").resolve()
         (self.project / "src").mkdir(parents=True)
         (self.project / "Cargo.toml").write_text(
             '[package]\nname = "cwd_probe"\nversion = "0.1.0"\nedition = "2021"\n'

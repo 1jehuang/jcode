@@ -378,22 +378,36 @@ fn lock_private(base: &Path, relative: &Path) -> Result<std::fs::File> {
     {
         use std::os::fd::{AsRawFd, FromRawFd};
         let (dir, name) = open_parent(base, relative, true)?;
-        let fd = unsafe {
-            libc::openat(
-                dir.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDWR
-                    | libc::O_CREAT
-                    | libc::O_NOFOLLOW
-                    | libc::O_CLOEXEC
-                    | libc::O_NONBLOCK,
-                0o600,
-            )
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let fd = loop {
+            let fd = unsafe {
+                libc::openat(
+                    dir.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDWR
+                        | libc::O_CREAT
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC
+                        | libc::O_NONBLOCK,
+                    0o600,
+                )
+            };
+            if fd >= 0 {
+                break fd;
+            }
+            let error = std::io::Error::last_os_error();
+            // APFS can return ENOENT when another opener is creating the same inode.
+            ensure!(
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::Interrupted
+                ) && std::time::Instant::now() < deadline,
+                "cannot open private state lock: {error}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
         };
-        ensure!(fd >= 0, "cannot lock private state");
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
         ensure!(file.metadata()?.is_file(), "invalid private lock");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
                 break;
@@ -404,7 +418,7 @@ fn lock_private(base: &Path, relative: &Path) -> Result<std::fs::File> {
                     error.kind(),
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
                 ),
-                "cannot lock private state"
+                "cannot lock private state: {error}"
             );
             ensure!(
                 std::time::Instant::now() < deadline,
@@ -659,9 +673,9 @@ mod tests {
     #[test]
     fn environment_root_subdirectory_and_invalid_values() {
         let _guard = crate::storage::lock_test_env();
-        let home = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let _home = HomeGuard::set(home.path());
-        let project = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         std::fs::create_dir(project.path().join(".git")).unwrap();
         let subdirectory = project.path().join("src/nested");
         std::fs::create_dir_all(&subdirectory).unwrap();
@@ -689,9 +703,9 @@ mod tests {
     #[test]
     fn concurrent_manifest_and_environment_updates_are_not_lost() {
         let _guard = crate::storage::lock_test_env();
-        let home = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let _home = HomeGuard::set(home.path());
-        let project = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         std::fs::create_dir(project.path().join(".git")).unwrap();
         let barrier = std::sync::Barrier::new(12);
         std::thread::scope(|scope| {
@@ -735,9 +749,9 @@ mod tests {
     fn workspace_hydration_lock_is_shared_and_released() {
         use std::os::fd::AsRawFd;
         let _guard = crate::storage::lock_test_env();
-        let home = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let _home = HomeGuard::set(home.path());
-        let project = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         std::fs::create_dir(project.path().join(".git")).unwrap();
         let nested = project.path().join("nested");
         std::fs::create_dir(&nested).unwrap();

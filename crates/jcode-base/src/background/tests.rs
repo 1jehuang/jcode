@@ -16,10 +16,10 @@ async fn silent_background_task_still_publishes_started_activity() {
     );
     let activity = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if let Ok(BusEvent::UiActivity(activity)) = events.recv().await {
-                if activity.session_id.as_deref() == Some("silent-session") {
-                    break activity;
-                }
+            if let Ok(BusEvent::UiActivity(activity)) = events.recv().await
+                && activity.session_id.as_deref() == Some("silent-session")
+            {
+                break activity;
             }
         }
     })

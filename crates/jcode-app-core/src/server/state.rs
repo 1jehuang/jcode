@@ -423,6 +423,7 @@ pub(super) fn send_event_to_targets<'a>(
 
 /// Return the original payload when every queue is closed or rejects delivery.
 /// A caller can then use its fallback without cloning successful events first.
+#[allow(clippy::result_large_err)] // hands the undelivered event back so callers avoid a clone
 fn send_event_to_targets_recover<'a>(
     targets: impl IntoIterator<Item = &'a mpsc::UnboundedSender<ServerEvent>>,
     event: ServerEvent,
@@ -440,6 +441,26 @@ fn send_event_to_targets_recover<'a>(
         delivered += usize::from(tx.send(event.clone()).is_ok());
     }
     Err(Box::new(event))
+}
+
+pub(super) fn collect_event_targets<'a>(
+    members: &mut HashMap<String, SwarmMember>,
+    session_ids: impl IntoIterator<Item = &'a str>,
+) -> Vec<mpsc::UnboundedSender<ServerEvent>> {
+    let mut targets = Vec::new();
+    for sid in session_ids {
+        let Some(member) = members.get_mut(sid) else {
+            continue;
+        };
+        member.event_txs.retain(|_, tx| !tx.is_closed());
+        if let Some((_, tx)) = member.event_txs.iter().next() {
+            member.event_tx = tx.clone();
+            targets.extend(member.event_txs.values().cloned());
+        } else if !member.event_tx.is_closed() {
+            targets.push(member.event_tx.clone());
+        }
+    }
+    targets
 }
 
 // Keep sends outside the session lock without allocating for the usual single
@@ -495,6 +516,7 @@ pub(super) async fn fanout_session_event(
         .unwrap_or(0)
 }
 
+#[allow(clippy::result_large_err)] // hands the undelivered event back so callers avoid a clone
 async fn fanout_session_event_recover(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     session_id: &str,

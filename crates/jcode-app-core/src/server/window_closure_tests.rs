@@ -26,6 +26,8 @@ impl Drop for Runtime {
 }
 fn connection(id: &str) -> ClientConnectionInfo {
     ClientConnectionInfo {
+        supports_user_response: false,
+        ask_user_tx: None,
         client_id: id.into(),
         session_id: "session_closure_test".into(),
         client_instance_id: None,

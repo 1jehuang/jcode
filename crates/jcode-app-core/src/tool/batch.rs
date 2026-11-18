@@ -215,8 +215,11 @@ impl Tool for BatchTool {
 
         // Check for disallowed tools
         for tc in &params.tool_calls {
-            if Registry::resolve_tool_name(&tc.tool) == "batch" {
-                return Err(anyhow::anyhow!("Cannot batch the 'batch' tool"));
+            match Registry::resolve_tool_name(&tc.tool) {
+                "batch" => return Err(anyhow::anyhow!("Cannot batch the 'batch' tool")),
+                // A question dialog must block the turn it belongs to.
+                "ask_user" => return Err(anyhow::anyhow!("Cannot batch the 'ask_user' tool")),
+                _ => {}
             }
         }
 

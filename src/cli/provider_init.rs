@@ -24,8 +24,8 @@ use crate::external_auth::{
 pub enum ProviderChoice {
     Jcode,
     /// Native Claude (Anthropic OAuth/API). `claude-subprocess` is kept as a
-    /// hidden alias for old scripts; the Claude Code CLI subprocess transport
-    /// has been removed.
+    /// hidden alias for old scripts. To run turns through the installed Claude
+    /// Code CLI instead, use `claude-code`.
     #[value(alias = "claude-subprocess")]
     Claude,
     #[value(alias = "claude-api", alias = "anthropic-key", alias = "claude-key")]
@@ -95,6 +95,10 @@ pub enum ProviderChoice {
     /// Grok Build subscription via the authenticated Grok CLI ACP transport.
     #[value(name = "grok-build")]
     GrokBuild,
+    /// Claude through the local Claude Code CLI (`claude`), side by side with
+    /// native Claude. The CLI owns login and tokens.
+    #[value(name = "claude-code", alias = "claude-code-cli")]
+    ClaudeCode,
     #[value(alias = "nvidia", alias = "nim")]
     NvidiaNim,
     #[value(alias = "xiaomi", alias = "mimo", alias = "xiaomi-mimo-api")]
@@ -127,6 +131,10 @@ pub enum ProviderChoice {
     Belvedir,
     #[value(alias = "orca-router")]
     Orcarouter,
+    #[value(alias = "vs-llm", alias = "weiyun")]
+    Vsllm,
+    #[value(alias = "a6")]
+    A6api,
     #[value(
         alias = "bailian",
         alias = "aliyun-bailian",
@@ -190,6 +198,7 @@ impl ProviderChoice {
             Self::Minimax => "minimax",
             Self::Xai => "xai",
             Self::GrokBuild => "grok-build",
+            Self::ClaudeCode => "claude-code",
             Self::NvidiaNim => "nvidia-nim",
             Self::XiaomiMimo => "xiaomi-mimo",
             Self::MetaMuse => "meta-muse",
@@ -203,6 +212,8 @@ impl ProviderChoice {
             Self::Cerebras => "cerebras",
             Self::Belvedir => "belvedir",
             Self::Orcarouter => "orcarouter",
+            Self::Vsllm => "vsllm",
+            Self::A6api => "a6api",
             Self::AlibabaCodingPlan => "alibaba-coding-plan",
             Self::OpenaiCompatible => "openai-compatible",
             Self::Cursor => "cursor",
@@ -359,6 +370,10 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
         crate::provider_catalog::GROK_BUILD_LOGIN_PROVIDER,
     ),
     (
+        ProviderChoice::ClaudeCode,
+        crate::provider_catalog::CLAUDE_CODE_LOGIN_PROVIDER,
+    ),
+    (
         ProviderChoice::NvidiaNim,
         crate::provider_catalog::NVIDIA_NIM_LOGIN_PROVIDER,
     ),
@@ -405,6 +420,14 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
     (
         ProviderChoice::Belvedir,
         crate::provider_catalog::BELVEDIR_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Vsllm,
+        crate::provider_catalog::VSLLM_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::A6api,
+        crate::provider_catalog::A6API_LOGIN_PROVIDER,
     ),
     (
         ProviderChoice::Orcarouter,
@@ -814,6 +837,27 @@ pub(super) fn ensure_external_api_key_auth_allowed_for_explicit_choice(
         provider_name,
         login_hint
     )
+}
+
+fn ensure_anthropic_api_auth_allowed_for_explicit_choice() -> Result<()> {
+    if std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_some() {
+        if std::env::var("JCODE_ANTHROPIC_AUTH")
+            .is_ok_and(|mode| mode.trim().eq_ignore_ascii_case("none"))
+        {
+            return Ok(());
+        }
+        let key = std::env::var("JCODE_ANTHROPIC_API_KEY_NAME")
+            .ok()
+            .filter(|key| !key.trim().is_empty())
+            .unwrap_or_else(|| "ANTHROPIC_API_KEY".to_string());
+        if std::env::var("JCODE_ANTHROPIC_ENV_FILE")
+            .is_ok_and(|file| direct_env_file_contains_key(&key, &file))
+        {
+            return Ok(());
+        }
+        return ensure_external_api_key_auth_allowed_for_explicit_choice(&key);
+    }
+    ensure_external_api_key_auth_allowed_for_explicit_choice("ANTHROPIC_API_KEY")
 }
 
 fn direct_api_key_configured_for_env(env_key: &str) -> bool {
@@ -1394,6 +1438,11 @@ pub async fn login_and_bootstrap_provider(
             )
             .ok_or_else(|| anyhow::anyhow!("Grok Build runtime is not registered"))?
         }
+        LoginProviderTarget::ClaudeCode => {
+            disable_subscription_runtime_mode();
+            select_initial_model_provider("claude-code");
+            Arc::new(provider::MultiProvider::new_fast())
+        }
         LoginProviderTarget::OpenAiApiKey => {
             disable_subscription_runtime_mode();
             select_initial_model_provider("openai");
@@ -1578,7 +1627,7 @@ async fn init_provider_with_model_policy(
         }
         ProviderChoice::AnthropicApi => {
             disable_subscription_runtime_mode();
-            ensure_external_api_key_auth_allowed_for_explicit_choice("ANTHROPIC_API_KEY")?;
+            ensure_anthropic_api_auth_allowed_for_explicit_choice()?;
             init_notice("Using Anthropic API key as the initial provider (use /model to switch)");
             select_initial_model_provider("claude");
             Arc::new(provider::MultiProvider::with_preference_fast(false))
@@ -1635,6 +1684,23 @@ async fn init_provider_with_model_policy(
                 crate::provider::external::GROK_BUILD_RUNTIME,
             )
             .ok_or_else(|| anyhow::anyhow!("Grok Build runtime is not registered"))?
+        }
+        ProviderChoice::ClaudeCode => {
+            disable_subscription_runtime_mode();
+            let binary = crate::auth::claude_code::binary();
+            if !crate::auth::claude_code::binary_available() {
+                anyhow::bail!(
+                    "Claude Code CLI `{binary}` was not found. Install Claude Code, or set [provider.claude_code].binary / JCODE_CLAUDE_CODE_BIN."
+                );
+            }
+            init_notice(&format!(
+                "Using Claude Code via the official CLI (`{binary}`, instance {}). Use /model to switch.",
+                crate::auth::claude_code::default_instance_id()
+            ));
+            // MultiProvider keeps native Claude and every other route available
+            // for /model; only the initial slot is Claude Code.
+            select_initial_model_provider("claude-code");
+            Arc::new(provider::MultiProvider::new_fast())
         }
         ProviderChoice::Openrouter => {
             disable_subscription_runtime_mode();
@@ -1697,6 +1763,8 @@ async fn init_provider_with_model_policy(
         | ProviderChoice::Cerebras
         | ProviderChoice::Belvedir
         | ProviderChoice::Orcarouter
+        | ProviderChoice::Vsllm
+        | ProviderChoice::A6api
         | ProviderChoice::AlibabaCodingPlan
         | ProviderChoice::GeminiApi
         | ProviderChoice::MuseSubscription

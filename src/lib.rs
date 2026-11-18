@@ -33,6 +33,8 @@ fn register_bundled_docs() {
 }
 
 pub async fn run() -> Result<()> {
+    // Library callers bypass main, but must pin before CLI startup side effects.
+    let _ = server::pin_running_binary();
     cli::startup::run().await
 }
 

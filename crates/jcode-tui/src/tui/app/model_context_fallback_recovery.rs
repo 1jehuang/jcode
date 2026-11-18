@@ -166,6 +166,9 @@ impl App {
 }
 
 impl App {
+    /// Show a provider failover prompt. In countdown mode arm the cancelable
+    /// countdown; nothing is sent to the target until it expires. Remote
+    /// sessions resend the failed turn (`remote_resend`) after the switch.
     pub(in super::super) fn handle_provider_failover_prompt_with_payload(
         &mut self,
         prompt: crate::provider::ProviderFailoverPrompt,
@@ -231,15 +234,21 @@ impl App {
                 ));
             }
             crate::config::CrossProviderFailoverMode::Countdown
-                if prompt.target_route.as_deref().is_some_and(|route| {
-                    self.is_remote
-                        || crate::provider::MultiProvider::is_failover_route_pool_approved(route)
-                }) && (!self.is_remote || remote_resend.is_some()) =>
+                if (Self::is_profile_failover_prompt(&prompt)
+                    || prompt.target_route.as_deref().is_some_and(|route| {
+                        self.is_remote
+                            || crate::provider::MultiProvider::is_failover_route_pool_approved(
+                                route,
+                            )
+                    }))
+                    && (!self.is_remote || remote_resend.is_some()) =>
             {
-                let Some(target) = prompt.target_route.as_ref() else {
-                    return;
-                };
-                if self.automatic_failover_targets.contains(target)
+                // Profile prompts may carry no route; their profile names the target.
+                let target = prompt
+                    .target_route
+                    .clone()
+                    .unwrap_or_else(|| prompt.to_provider.clone());
+                if self.automatic_failover_targets.contains(&target)
                     || self.automatic_failover_targets.len()
                         >= usize::from(Self::AUTO_RETRY_MAX_ATTEMPTS)
                 {
@@ -257,6 +266,7 @@ impl App {
                 // Only the first switch gets the fast path. An exhausted
                 // fallback must not create an instantaneous account loop.
                 let immediate = config.exhausted_usage_immediate_failover
+                    && !Self::is_profile_failover_prompt(&prompt)
                     && self.automatic_failover_targets.is_empty();
                 self.automatic_failover_targets.push(target.clone());
                 self.pending_provider_failover = Some(super::super::PendingProviderFailover {

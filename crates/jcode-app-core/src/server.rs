@@ -28,6 +28,7 @@ mod comm_plan;
 mod comm_session;
 mod comm_sync;
 mod configured_name;
+mod credential_watch;
 use configured_name::normalize_configured_server_name;
 mod debug;
 mod debug_ambient;
@@ -74,6 +75,7 @@ mod swarm_persistence;
 pub(crate) mod swarm_todo_link;
 mod swarm_watchdog;
 mod turn_failover;
+mod usage_limit_resume;
 mod util;
 mod worker_revive;
 
@@ -103,11 +105,11 @@ use self::swarm_channels::{
 };
 pub(super) use self::swarm_mutation_state::SwarmMutationRuntime;
 use self::swarm_persistence::{
-    LoadedSwarmRuntimeState, capture_swarm_state_version,
-    load_runtime_state as load_persisted_swarm_runtime_state,
-    persist_swarm_state as persist_swarm_state_snapshot, remove_swarm_state_if_version,
-    swarm_operation_lock,
+    LoadedSwarmRuntimeState, load_runtime_state as load_persisted_swarm_runtime_state,
+    persist_swarm_state as persist_swarm_state_snapshot, swarm_operation_lock,
 };
+#[cfg(test)]
+use self::swarm_persistence::{capture_swarm_state_version, remove_swarm_state_if_version};
 use self::util::get_shared_mcp_pool;
 use crate::agent::Agent;
 use crate::ambient_runner::AmbientRunnerHandle;
@@ -190,6 +192,7 @@ pub(super) async fn remove_session_entry(
     sessions: &SessionAgents,
     session_id: &str,
 ) -> Option<Arc<Mutex<Agent>>> {
+    swarm::cancel_session_turn(session_id).await;
     let removed = sessions.remove(session_id).await;
     if removed.is_some() {
         crate::storage::unregister_active_pid(session_id);
@@ -398,6 +401,7 @@ pub(super) async fn persist_swarm_state_for(swarm_id: &str, swarm_state: &SwarmS
     );
 }
 
+#[cfg(test)]
 pub(super) async fn remove_persisted_swarm_state_for(swarm_id: &str, swarm_state: &SwarmState) {
     // Persist and remove share one per-swarm ordering domain. The file version
     // is an extra CAS guard against direct/recovery writers outside this path.
@@ -415,7 +419,7 @@ fn headless_member_should_restore(status: &str, is_headless: bool) -> bool {
     is_headless
         && !matches!(
             status,
-            "ready" | "completed" | "done" | "failed" | "stopped"
+            "ready" | "completed" | "done" | "failed" | "stopped" | "suspended" | "paused"
         )
 }
 
@@ -500,6 +504,12 @@ pub use self::socket::{
 };
 use self::socket::{signal_ready_fd, socket_has_live_listener};
 
+/// Pin this process's executable before asynchronous provider initialization.
+/// Repeated calls return the same launch target, even after an install moves
+/// the channel link. Binary entry points should call this before startup work.
+pub fn pin_running_binary() -> Option<std::path::PathBuf> {
+    self::util::running_server_binary()
+}
 pub(crate) use self::util::server_has_newer_binary;
 pub use self::util::{MANAGED_CLOUD_LIVE_RELOAD_MARKER, ServerIdentity};
 use self::util::{
@@ -528,6 +538,15 @@ mod queue_tests;
 
 #[cfg(test)]
 mod file_activity_tests;
+
+#[cfg(test)]
+mod usage_limit_resume_tests;
+
+mod headless_recovery;
+#[cfg(test)]
+mod headless_recovery_tests;
+mod power_activity;
+mod recovered_assignment;
 
 /// Idle timeout for the shared server when no clients are connected (5 minutes)
 const IDLE_TIMEOUT_SECS: u64 = 300;
@@ -608,9 +627,6 @@ pub struct Server {
     /// Persisted dedupe registry for mutating swarm coordinator operations.
     swarm_mutation_runtime: SwarmMutationRuntime,
 }
-
-#[path = "server_headless_recovery.rs"]
-mod server_headless_recovery;
 
 impl Server {
     pub fn new(provider: Arc<dyn Provider>) -> Self {
@@ -752,6 +768,10 @@ impl Server {
         });
     }
 
+    async fn recover_headless_sessions_on_startup(&self) {
+        headless_recovery::recover(self).await;
+    }
+
     async fn finish_startup_after_bind(
         &self,
         main_listener: Listener,
@@ -849,6 +869,10 @@ impl Server {
         if temporary_server_policy.is_none() {
             crate::tool::spawn_recent_index_warmup();
         }
+
+        // Announce account swaps made outside this server (CLI switch, another
+        // process, manual auth-file edit) so held turns resend promptly.
+        credential_watch::spawn();
 
         // Reconcile background-task status files orphaned by a previous
         // process image (crash or exec-based reload). Non-detached tasks die
@@ -1505,102 +1529,6 @@ impl Server {
         });
     }
 
-    /// Spawn the background loop that keeps the machine awake while any session
-    /// is actively streaming/processing.
-    ///
-    /// The shared daemon owns every session, so a single inhibitor here covers
-    /// all of them. We poll the swarm-member map (the authoritative "running"
-    /// signal that also drives Waybar's "N streaming" indicator) on a short
-    /// interval and reconcile a best-effort OS power inhibitor against it. The
-    /// inhibitor blocks automatic system sleep; Linux also blocks lid-switch
-    /// handling. Windows still honors explicit lid/power-button actions from the
-    /// active power plan. The display can turn off. When no session is running,
-    /// the guard is released so normal power management resumes immediately.
-    fn spawn_power_inhibitor(swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>) {
-        // Reconcile interval. Short enough that the inhibitor engages promptly
-        // when a turn starts and releases promptly when work finishes, but cheap
-        // (a read lock + a scan) so it adds no meaningful load.
-        const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
-
-        let mut inhibitor = crate::power_inhibit::PowerInhibitor::new();
-        if !inhibitor.is_available() {
-            // Disabled via the legacy env escape hatch, or unsupported platform.
-            crate::logging::info(
-                "power_inhibit: unavailable (unsupported platform or JCODE_DISABLE_POWER_INHIBIT set); not monitoring",
-            );
-            return;
-        }
-
-        crate::logging::info(
-            "power_inhibit: monitoring active sessions to prevent sleep while streaming",
-        );
-
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut last_active: Option<bool> = None;
-            // macOS/Windows have no process-scoped lid lock, so lid-close
-            // blocking changes a persistent OS setting. That belongs to the
-            // user's desktop session, not the agent runtime: tell `jcode
-            // companion`, which journals and restores it. No companion (a
-            // headless or remote server) means no lid override.
-            let mut lid_reported: Option<bool> = None;
-            loop {
-                interval.tick().await;
-
-                // Re-evaluate the config each tick so toggling it at runtime
-                // takes effect without restarting the daemon.
-                let power = &crate::config::config().power;
-                let enabled = power.prevent_sleep_while_streaming;
-                let block_lid = enabled && power.block_lid_close;
-
-                let active = enabled && Self::any_session_streaming(&swarm_members).await;
-                if last_active != Some(active) {
-                    crate::logging::info(&format!(
-                        "power_inhibit: {} (streaming sessions {})",
-                        if active { "engaging" } else { "releasing" },
-                        if active { "present" } else { "absent" },
-                    ));
-                    last_active = Some(active);
-                }
-                inhibitor.set_active(active);
-                let want_lid = active && block_lid;
-                // Re-send while active so a companion started mid-turn engages
-                // too. Idle state is sent once.
-                if want_lid || lid_reported != Some(false) {
-                    let reported = crate::companion_client::request_async(
-                        crate::companion_client::CompanionRequest::PowerActivity {
-                            active: want_lid,
-                        },
-                        Duration::from_secs(2),
-                    )
-                    .await
-                    .is_ok();
-                    lid_reported = reported.then_some(want_lid);
-                }
-            }
-        });
-    }
-
-    /// On Jcode Cloud the host powers off after 30 minutes without an SSH
-    /// client unless the busy marker is fresh. Turns keep running after the
-    /// client disconnects, so mark the host busy while any session runs.
-    fn spawn_cloud_activity_keepalive(swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>) {
-        if !crate::mobile_runner::is_cloud_machine() {
-            return;
-        }
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                interval.tick().await;
-                if Self::any_session_streaming(&swarm_members).await {
-                    crate::mobile_runner::touch_cloud_activity_marker();
-                }
-            }
-        });
-    }
-
     /// Whether at least one session is currently in the "running" state, i.e.
     /// actively streaming/processing a turn. This is the same signal that drives
     /// the Waybar "N streaming" indicator.
@@ -1965,6 +1893,21 @@ impl Server {
                     )
                     .await;
                 }
+                BusEvent::PeerMessageReceived(event) => {
+                    background_tasks::dispatch_peer_message(
+                        &event,
+                        &sessions,
+                        &soft_interrupt_queues,
+                        live_turn::LiveTurnSwarmContext::new(
+                            &swarm_members,
+                            &swarms_by_id,
+                            &event_history,
+                            &event_counter,
+                            &swarm_event_tx,
+                        ),
+                    )
+                    .await;
+                }
                 BusEvent::SessionUpdateStatus(status) => {
                     let (session_id, event) = runtime_ssh_host::maintenance_event(status);
                     fanout_session_event(&swarm_members, &session_id, event).await;
@@ -2081,7 +2024,7 @@ impl Server {
             .spawn(|| {
                 loop {
                     crate::scratch_maintenance::prune_stale_scratch();
-                    crate::build::prune_old_versions();
+                    crate::build::prune_old_versions_on_idle();
                     std::thread::sleep(std::time::Duration::from_secs(6 * 60 * 60));
                 }
             });

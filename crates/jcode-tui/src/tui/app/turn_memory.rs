@@ -18,14 +18,7 @@ impl App {
         // Announced once in the transcript on activation; never in the
         // system prompt, so skill changes cannot invalidate the cache.
         let skill_prompt: Option<String> = None;
-        let available_skills: Vec<crate::prompt::SkillInfo> = skills
-            .list()
-            .iter()
-            .map(|s| crate::prompt::SkillInfo {
-                name: s.name.clone(),
-                description: s.description.clone(),
-            })
-            .collect();
+        let available_skills = crate::skill_overrides::model_skill_infos(&skills);
         let (split, context_info) = crate::prompt::build_system_prompt_split(
             skill_prompt.as_deref(),
             &available_skills,

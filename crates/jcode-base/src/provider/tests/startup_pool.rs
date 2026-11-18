@@ -24,7 +24,7 @@ fn startup_pool_hydrates_disk_only_exhaustion_before_route_and_request_guards() 
             for label in ["claude-otter", "claude-fox"] {
                 let saved = auth::claude::upsert_account(auth::claude::AnthropicAccount {
                     label: label.into(),
-                    access: "fixture-access".into(),
+                    access: format!("fixture-access-{label}"),
                     refresh: "fixture-refresh".into(),
                     expires: chrono::Utc::now().timestamp_millis() + 86_400_000,
                     email: None,
@@ -43,7 +43,12 @@ fn startup_pool_hydrates_disk_only_exhaustion_before_route_and_request_guards() 
             pool.save().unwrap();
             // The old sample is past the polling deadline, but its weekly
             // reset is still in the future. No usage endpoint may be needed.
-            let persisted = serde_json::json!({"label:claude-fox": {
+            // Fork keys Claude usage by label and credential fingerprint.
+            let key = crate::usage::anthropic_usage_cache_key(
+                "fixture-access-claude-fox",
+                Some("claude-fox"),
+            );
+            let persisted = serde_json::json!({(key.clone()): {
                 "last_good": {
                     "fetched_unix_ms": chrono::Utc::now().timestamp_millis() - 3_600_000,
                     "five_hour": 0.1, "five_hour_resets_at": null,

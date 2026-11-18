@@ -32,6 +32,7 @@ fn first_three_launches_can_include_hotkey_notice_too() {
     let state = SetupHintsState {
         launch_count: 2,
         hotkey_configured: true,
+        startup_spawn_hint_dismissed: false,
         ..SetupHintsState::default()
     };
 
@@ -600,8 +601,10 @@ fn disabled_config_wins_over_install_and_migrate() {
 fn onboarding_start_choice_shown_defaults_false_and_round_trips() {
     let legacy: SetupHintsState = serde_json::from_str(r#"{"launch_count":2}"#).unwrap();
     assert!(!legacy.onboarding_start_choice_shown);
-    let mut state = SetupHintsState::default();
-    state.onboarding_start_choice_shown = true;
+    let state = SetupHintsState {
+        onboarding_start_choice_shown: true,
+        ..Default::default()
+    };
     let json = serde_json::to_string(&state).unwrap();
     let back: SetupHintsState = serde_json::from_str(&json).unwrap();
     assert!(back.onboarding_start_choice_shown);

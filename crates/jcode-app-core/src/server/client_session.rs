@@ -160,6 +160,7 @@ pub(super) async fn handle_clear_session(
             Ok(lease) => lease,
             Err(error) => {
                 let _ = client_event_tx.send(ServerEvent::Error {
+                    server_resumes: false,
                     id,
                     message: error.to_string(),
                     retry_after_secs: Some(1),
@@ -194,6 +195,7 @@ pub(super) async fn handle_clear_session(
         Ok(lease) => lease,
         Err(error) => {
             let _ = client_event_tx.send(ServerEvent::Error {
+                server_resumes: false,
                 id,
                 message: error.to_string(),
                 retry_after_secs: None,
@@ -207,6 +209,7 @@ pub(super) async fn handle_clear_session(
         .await
     {
         let _ = client_event_tx.send(ServerEvent::Error {
+            server_resumes: false,
             id,
             message: error.to_string(),
             retry_after_secs: None,
@@ -589,27 +592,8 @@ fn apply_or_defer_subscribe_selfdev(agent: &Arc<Mutex<Agent>>, session_id: &str)
     });
 }
 
-/// Apply to the bound agent, not the connection's temporary registry. Like
-/// working-dir updates, a busy live target must not block client attachment.
-pub(super) async fn apply_or_defer_desktop_response_capability(
-    agent: &Arc<Mutex<Agent>>,
-    supports_user_response: bool,
-) {
-    if let Ok(mut guard) = agent.try_lock() {
-        guard
-            .set_desktop_response_capability(supports_user_response)
-            .await;
-        return;
-    }
-    let agent = Arc::clone(agent);
-    crate::runtime_activity::spawn(async move {
-        agent
-            .lock()
-            .await
-            .set_desktop_response_capability(supports_user_response)
-            .await;
-    });
-}
+#[path = "client_response_capability.rs"]
+pub(super) mod response_capability;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_subscribe(
@@ -1480,6 +1464,13 @@ pub(super) async fn handle_resume_session(
             registry.register_selfdev_tools().await;
         }
 
+        if *client_session_id != session_id {
+            // Release callbacks before acknowledging the switch, so another
+            // attached client cannot send the old session's call to this one.
+            drop(crate::tool::sdk::ConnectionGuard(
+                client_connection_id.to_string(),
+            ));
+        }
         *client_session_id = session_id.clone();
 
         send_resume_todos(&session_id, writer).await?;
@@ -1660,6 +1651,7 @@ pub(super) async fn handle_resume_session(
                     session_id
                 ),
                 retry_after_secs: Some(1),
+                server_resumes: false,
             });
             crate::logging::event_warn(
                 "SESSION_LIFECYCLE",
@@ -1742,6 +1734,11 @@ pub(super) async fn handle_resume_session(
                 )
             };
             let old_session_id = client_session_id.clone();
+            if old_session_id != session_id {
+                drop(crate::tool::sdk::ConnectionGuard(
+                    client_connection_id.to_string(),
+                ));
+            }
             *client_session_id = session_id.clone();
             let attach_start = Instant::now();
             let mut attach_laps: Vec<(&'static str, u128)> = Vec::new();
@@ -2035,6 +2032,7 @@ pub(super) async fn handle_resume_session(
                     crate::util::format_error_chain(&error)
                 ),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             crate::logging::event_warn(
                 "SESSION_LIFECYCLE",

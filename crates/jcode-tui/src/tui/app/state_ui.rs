@@ -9,32 +9,9 @@ use crate::tui::ui::tools_ui;
 use crate::tui::{TuiState, backend};
 use count_format::*;
 
-pub(super) struct RestoredReloadInput {
-    pub input: String,
-    pub cursor: usize,
-    pub pending_images: Vec<(String, String)>,
-    pub submit_on_restore: bool,
-    pub queued_messages: Vec<String>,
-    pub queued_commands: Vec<String>,
-    pub hidden_queued_system_messages: Vec<String>,
-    pub startup_status_notice: Option<String>,
-    pub startup_display_message: Option<(String, String)>,
-    pub interleave_message: Option<String>,
-    pub pending_soft_interrupts: Vec<String>,
-    pub pending_soft_interrupt_resend: Option<Vec<String>>,
-    pub rate_limit_pending_message: Option<super::PendingRemoteMessage>,
-    pub rate_limit_reset: Option<Instant>,
-    pub observe_mode_enabled: bool,
-    pub observe_page_markdown: String,
-    pub observe_page_updated_at_ms: u64,
-    pub split_view_enabled: bool,
-    pub todos_view_enabled: bool,
-    pub todo_confidence_spike_challenged: bool,
-    pub last_todo_ownership_fingerprint: Option<String>,
-    pub final_response_todo_fingerprint: Option<String>,
-    pub last_auto_poke_fingerprint: Option<String>,
-    pub auto_poke_attempts: u8,
-}
+pub(super) use super::tui_lifecycle::reload_input::RestoredReloadInput;
+
+include!("state_ui_info_helpers.rs");
 
 impl App {
     /// Publish attachments immediately, without waiting for a history refresh.
@@ -405,6 +382,18 @@ impl App {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+            let queued_message_images = value
+                .get("queued_message_images")
+                .and_then(|images| {
+                    serde_json::from_value::<Vec<(String, String)>>(images.clone()).ok()
+                })
+                .unwrap_or_default();
+            let interleave_images = value
+                .get("interleave_images")
+                .and_then(|images| {
+                    serde_json::from_value::<Vec<(String, String)>>(images.clone()).ok()
+                })
+                .unwrap_or_default();
             let queued_commands = value
                 .get("queued_commands")
                 .and_then(|v| v.as_array())
@@ -446,7 +435,7 @@ impl App {
                 .get("interleave_message")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
-                .filter(|s| !s.is_empty());
+                .filter(|s| !s.trim().is_empty() || !interleave_images.is_empty());
             let pending_soft_interrupts = value
                 .get("pending_soft_interrupts")
                 .and_then(|v| v.as_array())
@@ -509,6 +498,11 @@ impl App {
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0) as u8,
                     retry_at: None,
+                    // Older reload files have no count: start at 0 for those.
+                    overload_attempts: pending
+                        .get("overload_attempts")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u8,
                 });
             let rate_limit_reset = value
                 .get("rate_limit_reset_in_ms")
@@ -550,13 +544,16 @@ impl App {
                 input,
                 cursor,
                 pending_images,
+                image_markers: super::input_images::InputImageMarkers::from_saved(&value),
                 submit_on_restore,
                 queued_messages,
+                queued_message_images,
                 queued_commands,
                 hidden_queued_system_messages,
                 startup_status_notice,
                 startup_display_message,
                 interleave_message,
+                interleave_images,
                 pending_soft_interrupts,
                 pending_soft_interrupt_resend,
                 rate_limit_pending_message,
@@ -594,13 +591,16 @@ impl App {
             input: input.to_string(),
             cursor,
             pending_images: Vec::new(),
+            image_markers: Default::default(),
             submit_on_restore: false,
             queued_messages: Vec::new(),
+            queued_message_images: Vec::new(),
             queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             startup_status_notice: None,
             startup_display_message: None,
             interleave_message: None,
+            interleave_images: Vec::new(),
             pending_soft_interrupts: Vec::new(),
             pending_soft_interrupt_resend: None,
             rate_limit_pending_message: None,
@@ -633,6 +633,14 @@ impl App {
             self.set_status_notice("📌 Bookmark set - press again to return");
         }
         // If already at bottom with no bookmark, do nothing
+    }
+
+    /// `scroll_to_bottom` hotkey / "Jump to bottom" pill: go to the live tail
+    /// and resume auto-follow. Unlike the Ctrl+G bookmark this is one-way, so
+    /// any stashed bookmark is dropped.
+    pub(super) fn jump_to_chat_bottom(&mut self) {
+        self.scroll_bookmark = None;
+        self.follow_chat_bottom();
     }
 
     pub(super) fn follow_chat_bottom_for_typing(&mut self) {
@@ -1120,8 +1128,13 @@ fn format_cache_stats(app: &App) -> String {
     };
     let read_pct = format_pct(read, effective_reported);
     let write_pct = format_pct(write, effective_reported);
-    let optimal_pct =
-        (optimal > 0 && remote_cache_read == 0).then(|| cache_ratio_pct(read, optimal));
+    // Optimal input is live-only, so compare it against live-only reads.
+    let optimal_pct = (optimal > 0).then(|| {
+        cache_ratio_pct(
+            app.token_accounting.total_cache_optimal_read_tokens,
+            optimal,
+        )
+    });
     let cache_totals_source = match (
         remote_usage.is_some(),
         app.token_accounting.total_cache_prompt_tokens > 0,
@@ -1762,15 +1775,37 @@ fn build_skills_report(app: &App) -> String {
 }
 
 pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
+    if let Some(command) = crate::tui::plugin_command::parse(trimmed) {
+        if super::commands_dispatch::ssh_local_action_blocked(app, "Plugin management") {
+            return true;
+        }
+        match command {
+            Ok(command) => {
+                let directory = app
+                    .session
+                    .working_dir
+                    .as_deref()
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| std::env::current_dir().ok());
+                match directory {
+                    Some(directory) => {
+                        app.dialog = Some(crate::tui::dialog::Dialog::plugins(directory, command));
+                    }
+                    None => app.push_display_message(DisplayMessage::error(
+                        "Cannot determine the plugin project directory".to_string(),
+                    )),
+                }
+            }
+            Err(error) => app.push_display_message(DisplayMessage::error(error)),
+        }
+        return true;
+    }
     if trimmed == "/skills" {
-        // Sync from disk first so skills added by agent-side `skill_manage
-        // reload_all` (which only updates the server process registry) show up
-        // without a restart (issue #431).
-        app.refresh_skills_snapshot();
-        app.push_display_message(
-            DisplayMessage::system(build_skills_report(app)).with_title("Skills"),
-        );
-        app.set_status_notice("Skills");
+        app.open_skills_dialog();
+        return true;
+    }
+
+    if handle_skills_or_mcp_info_command(app, trimmed) {
         return true;
     }
 

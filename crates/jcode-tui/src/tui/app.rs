@@ -57,6 +57,7 @@ pub enum AppRuntimeMode {
     TestHarness,
 }
 
+mod agent_profiles;
 mod auth;
 mod auth_account_picker_saved_accounts;
 mod auth_remote;
@@ -78,6 +79,7 @@ mod commands_review;
 mod conversation_state;
 mod copy_selection;
 mod debug;
+mod dialog_actions;
 mod dictation;
 mod event_wrappers;
 mod handterm_native_scroll;
@@ -87,8 +89,12 @@ pub(crate) mod idle_animation_repaint;
 mod idle_heap_release;
 mod idle_hibernation;
 mod inline_interactive;
+mod rewind;
+pub(crate) use inline_interactive::{model_picker_active_provider, split_model_picker_filter};
 mod input;
 mod input_help;
+mod input_images;
+mod input_selection;
 mod jarvis;
 mod jarvis_listen;
 mod jarvis_status;
@@ -121,8 +127,10 @@ mod state_ui;
 mod state_ui_input_helpers;
 mod update_rehearsal;
 mod update_sim;
+mod usage_limit_notice;
 mod usage_reset;
 mod voice_input;
+pub(crate) mod window_account;
 pub(crate) use state_ui_input_helpers::{registered_command_entries, registered_command_names};
 mod binary_watch;
 mod justrust_status;
@@ -161,12 +169,7 @@ pub(crate) fn has_safe_slash_command_token(input: &str) -> bool {
 
 pub(crate) const COMMAND_SUGGESTION_VISIBLE_LIMIT: usize = 8;
 
-fn active_runtime_provider_key() -> Option<String> {
-    std::env::var("JCODE_RUNTIME_PROVIDER")
-        .ok()
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-}
+use tui_lifecycle_runtime::active_runtime_provider_key;
 
 #[derive(Debug, Clone)]
 struct PendingRemoteMessage {
@@ -177,6 +180,10 @@ struct PendingRemoteMessage {
     auto_retry: bool,
     retry_attempts: u8,
     retry_at: Option<Instant>,
+    /// Turn-level resends after a provider overload. Kept apart from
+    /// `retry_attempts` so ordinary retries never use up the overload
+    /// schedule. Starts at 0 for every new turn.
+    overload_attempts: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -203,8 +210,6 @@ struct TurnReasoningTrace {
 #[derive(Debug, Clone)]
 struct LocalRewindUndoSnapshot {
     messages: Vec<StoredMessage>,
-    provider_session_id: Option<String>,
-    session_provider_session_id: Option<String>,
     visible_message_count: usize,
 }
 
@@ -356,7 +361,6 @@ struct ModelPickerBuildContext {
     current_provider: String,
     remote_provider_name: Option<String>,
     current_api_method: Option<String>,
-    current_effort: Option<String>,
     recent_authenticated_provider: Option<String>,
 }
 
@@ -411,6 +415,8 @@ struct PreparedTransferSession {
 struct PendingProviderFailover {
     prompt: crate::provider::ProviderFailoverPrompt,
     deadline: Instant,
+    /// Remote sessions only: the failed turn's payload, resent through the
+    /// server once it confirms the switch.
     remote_resend: Option<FallbackResendPayload>,
 }
 
@@ -809,12 +815,18 @@ struct TokenAccounting {
     total_cache_read_tokens: u64,
     total_cache_creation_tokens: u64,
     total_cache_optimal_input_tokens: u64,
+    /// Cache reads only from requests that also contributed an optimal denominator.
+    total_cache_optimal_read_tokens: u64,
     last_cache_reported_input_tokens: Option<u64>,
     last_cache_prompt_tokens: Option<u64>,
     last_cache_read_tokens: Option<u64>,
     last_cache_creation_tokens: Option<u64>,
     last_cache_optimal_input_tokens: Option<u64>,
     cache_next_optimal_input_tokens: Option<u64>,
+    /// Whether the most recently recorded request contributed an optimal
+    /// denominator, so later usage snapshots for that same request keep
+    /// `total_cache_optimal_read_tokens` in step with the read total.
+    current_request_has_optimal: bool,
 }
 
 /// KV cache baseline tracking and per-turn cache-miss attribution.
@@ -1010,6 +1022,8 @@ pub struct App {
     should_quit: bool,
     // Message queueing
     queued_messages: Vec<String>,
+    /// Images belonging to the next combined queued user turn, never the composer draft.
+    queued_message_images: Vec<(String, String)>,
     /// Slash (`/...`) and shell (`!...`) commands queued with Ctrl+Enter while
     /// a turn was running. They run as real commands once the turn ends.
     queued_commands: Vec<String>,
@@ -1160,11 +1174,15 @@ pub struct App {
     // many trailing assistant messages; reset whenever a new API attempt's
     // output starts cleanly or the turn ends.
     attempt_committed_assistant_messages: usize,
-    // Provider-specific session ID for conversation resume
+    // Whether the in-flight remote send has streamed any output (text,
+    // reasoning, or a tool call). Reset on each send. A turn that already
+    // showed output is not held for a full overload resend, because the new
+    // answer would be appended to the partial one.
+    remote_turn_streamed_output: bool,
+    // Provider continuation and local rewind state.
     provider_session_id: Option<String>,
-    // One-step undo snapshot captured before the most recent local rewind.
     rewind_undo_snapshot: Option<LocalRewindUndoSnapshot>,
-    // Cancel flag for interrupting generation
+    rewind_ui: rewind::RewindUiState,
     cancel_requested: bool,
     // Quit confirmation: tracks when first Ctrl+C was pressed
     quit_pending: Option<Instant>,
@@ -1245,9 +1263,7 @@ pub struct App {
     pasted_contents: Vec<String>,
     // Pending pasted images (media_type, base64_data) attached to next message
     pending_images: Vec<(String, String)>,
-    // Payloads of images whose `[image N]` marker left the composer, keyed by
-    // slot index, so restoring the marker (Ctrl+Z after Esc) reattaches them.
-    detached_images: std::collections::HashMap<usize, (String, String)>,
+    input_image_markers: input_images::InputImageMarkers,
     // Expanded prompt history (Alt+E) backfill: (transcript rows when the last
     // older-history load was requested, loads requested since the toggle).
     prompt_history_backfill: (Option<usize>, u8),
@@ -1382,6 +1398,8 @@ pub struct App {
         Vec<crate::session::RenderedImage>,
     )>,
     remote_reasoning_effort: Option<String>,
+    // Outer Some means a request is pending. Inner None is a confirmed default.
+    remote_reasoning_effort_before_request: Option<Option<String>>,
     remote_service_tier: Option<String>,
     remote_available_service_tiers: Option<Vec<String>>,
     remote_reported_service_tier: Option<(Option<String>, String)>,
@@ -1391,6 +1409,8 @@ pub struct App {
     remote_available_entries: Vec<String>,
     remote_model_options: Vec<crate::provider::ModelRoute>,
     pending_remote_model_refresh_snapshot: Option<(Vec<String>, Vec<crate::provider::ModelRoute>)>,
+    // A names-only live catalog update arrived; refetch full routes when `/model` is open.
+    remote_model_routes_stale: bool,
     // Remote MCP servers and skills (set from server in remote mode)
     remote_mcp_servers: Vec<String>,
     remote_skills: Vec<String>,
@@ -1517,6 +1537,8 @@ pub struct App {
     swarm_panel_focused: bool,
     // Whether the focused swarm panel owns the main transcript viewport.
     swarm_panel_full_page: bool,
+    // Parent session to return to after entering a swarm/background agent.
+    swarm_parent_session_id: Option<String>,
     // Diff display mode (cycle with /diff)
     diff_mode: crate::config::DiffDisplayMode,
     // Center all content (from config)
@@ -1661,11 +1683,8 @@ pub struct App {
     pending_automatic_failover_route: Option<crate::provider::RouteSelection>,
     pending_automatic_failover_request_id: Option<u64>,
     pending_automatic_failover_started: Option<Instant>,
-    // Reasoning-effort variant chosen together with a model in the picker
-    // (e.g. "gpt-5.5 (high)"), staged for remote mode alongside the model
-    // switch. Without forwarding this to the server, it keeps its configured
-    // default effort (low by default) and silently runs the newly selected
-    // model at the wrong effort (issue #427).
+    // Carry the picker's reasoning effort through remote model switches so
+    // the server does not fall back to its configured default (#427).
     pending_reasoning_effort: Option<String>,
     // Remote SetModel has been sent but ModelChanged has not arrived yet. User
     // prompts submitted in this window are held so the first request cannot race
@@ -1685,6 +1704,14 @@ pub struct App {
     pending_startup_prompt_echo: Option<String>,
     // Pending account switch from inline picker (for remote mode async processing)
     pending_account_picker_action: Option<crate::tui::AccountPickerAction>,
+    /// Account this window uses per provider family ("claude" | "openai"),
+    /// from History / SessionAccountChanged (remote) or the local pin.
+    window_accounts: Vec<crate::protocol::SessionAccountInfo>,
+    /// Per-window same-provider failover override (`None` = config default).
+    window_account_failover: Option<bool>,
+    /// Account requests sent to the server, applied only once the server
+    /// answers that request id with Done (an Error leaves the window as is).
+    pending_account_requests: std::collections::HashMap<u64, window_account::PendingAccountRequest>,
     /// Last sent account switch, used only as the cycle cursor until acknowledged.
     pending_account_switch_target: Option<crate::tui::AccountPickerAction>,
     // Keybindings for model switching
@@ -1734,13 +1761,24 @@ pub struct App {
     // Scroll bookmark: stashed scroll position for quick teleport back
     scroll_bookmark: Option<usize>,
     // Stashed input: saved via Ctrl+S for later retrieval
-    stashed_input: Option<(String, usize)>,
+    stashed_input: Option<input_images::InputUndoSnapshot>,
     // Undo history for in-progress input editing (Ctrl+Z)
-    input_undo_stack: Vec<(String, usize)>,
+    input_undo_stack: Vec<input_images::InputUndoSnapshot>,
+    /// Attachment count at each `input_undo_stack` entry (same length), so
+    /// undo also detaches images pasted after that snapshot.
+    input_undo_image_counts: Vec<usize>,
+    /// Attachments discarded by each Ctrl+C draft clear, keyed by the undo
+    /// depth of that clear's snapshot, so Ctrl+Z restores images with text.
+    cleared_draft_images: Vec<(usize, Vec<(String, String)>)>,
+    /// Anchor (byte offset into `input`) of the editable composer selection;
+    /// the other end is `cursor_pos`. `None` means no selection.
+    input_selection_anchor: Option<input_selection::InputSelectionAnchor>,
+    /// Derives double/triple clicks for word/line selection in the composer.
+    input_selection_clicks: input_selection::ClickCounter,
     input_typing_undo: Option<(Instant, usize)>,
-    // Draft replaced by an explicit jump into prompt history (Ctrl+Up),
-    // restored when Down walks back past the newest entry
-    history_draft: Option<(String, usize)>,
+    terminal_reply_filter: input::terminal_replies::OscColorReplyFilter,
+    // Ctrl+Up's draft, restored when Down passes the newest history entry.
+    history_draft: Option<input_images::InputUndoSnapshot>,
     // Short-lived notice for status feedback (model switch, cycle diff mode, etc.)
     status_notice: Option<(String, Instant)>,
     // Distinct learned-keybinding nudge ("you keep doing X the slow way, press
@@ -1842,6 +1880,15 @@ pub struct App {
     client_binary_mtime: Option<std::time::SystemTime>,
     // Rate limit state: when rate limit resets (if rate limited)
     rate_limit_reset: Option<Instant>,
+    // Automatic quota resumes reserved for the current local logical turn.
+    local_usage_limit_resume_attempts: u8,
+    // When the server last reported a credential change (login, account
+    // switch, credential file edit). A limit error for a turn sent before this
+    // belongs to the previous account and must not hold the turn.
+    credentials_changed_at: Option<Instant>,
+    // `rate_limit_reset` value that an account change pulled forward, so the
+    // resend tick does not also claim "Rate limit reset".
+    account_change_resend_at: Option<Instant>,
     // Message being sent when rate limit hit (to auto-retry in remote mode)
     rate_limit_pending_message: Option<PendingRemoteMessage>,
     // Consecutive turn errors that classify as credential/auth failures.
@@ -1912,6 +1959,16 @@ pub struct App {
     login_picker_overlay: Option<RefCell<super::login_picker::LoginPicker>>,
     /// Account picker overlay (None = not visible)
     account_picker_overlay: Option<RefCell<super::account_picker::AccountPicker>>,
+    /// `/mcp` or `/skills` dialog (None = not visible)
+    dialog: Option<super::dialog::Dialog>,
+    /// Request id of the in-flight `mcp` runtime command.
+    mcp_request_id: Option<u64>,
+    /// Profile command replies are control traffic, never turn completion.
+    agent_profile_request_ids: std::collections::HashSet<u64>,
+    agent_profile_picker_request_id: Option<u64>,
+    agent_profile_ui: agent_profiles::AgentProfileUi,
+    /// Whether this client already asked about new project MCP servers.
+    mcp_approval_checked: bool,
     /// Usage overlay (None = not visible)
     usage_overlay: Option<RefCell<super::usage_overlay::UsageOverlay>>,
     /// Whether a usage refresh request is currently in flight.
@@ -1928,9 +1985,9 @@ pub struct App {
     workspace_client: super::workspace_client::WorkspaceClientState,
     /// Reverse prompt-history search overlay state (Ctrl+R). None = closed.
     prompt_history_search: Option<prompt_history::PromptHistorySearchState>,
-    /// Lazily-loaded persisted cross-session prompt history (oldest first,
-    /// deduped). None until first use; see `prompt_history.rs`.
+    /// Active session's independent prompt journal (oldest first, deduped).
     persisted_prompt_history: Option<Vec<String>>,
+    prompt_history_scope: prompt_history::PromptHistoryScope,
 }
 
 /// Inert provider used by runtime modes whose output is supplied by another source.
@@ -1985,6 +2042,15 @@ impl Provider for InertRuntimeProvider {
 impl App {
     const AUTO_RETRY_BASE_DELAY_SECS: u64 = 2;
     const AUTO_RETRY_MAX_ATTEMPTS: u8 = 3;
+    /// Turn-level resends after a provider overload (5xx / 529). The stream
+    /// layer already retried several times within seconds, so these waits are
+    /// longer: about 3.5 minutes in total before giving up.
+    const OVERLOAD_RETRY_MAX_ATTEMPTS: u8 = 4;
+    const OVERLOAD_RETRY_DELAYS_SECS: [u64; 4] = [15, 30, 60, 120];
+    /// Hidden reminder sent instead of a full resend when a provider failure
+    /// hits a turn that already streamed output or ran tools. The server saved
+    /// every completed step, so the model can pick up from there.
+    const PROVIDER_ERROR_CONTINUATION: &str = "[The model provider failed mid-turn with a temporary error. Everything up to your last completed tool result is saved; the reply you were writing when it failed was lost. Continue the task from where you left off.]";
     /// Budget for completion-confidence gate nudges per auto-poke cycle.
     /// Observed live: a session that stopped updating its todos was re-nudged
     /// with the same hidden continuation every ~5 seconds indefinitely, one
@@ -2236,6 +2302,7 @@ impl App {
         }
 
         let optimal_input_tokens = self.token_accounting.cache_next_optimal_input_tokens;
+        self.token_accounting.current_request_has_optimal = false;
         // Context size includes the uncached tail, but the next cache-read
         // expectation must stop at the boundary actually read or written.
         let effective_prompt_tokens = crate::tui::info_widget::effective_prompt_tokens(
@@ -2299,6 +2366,11 @@ impl App {
                 .token_accounting
                 .total_cache_optimal_input_tokens
                 .saturating_add(optimal);
+            self.token_accounting.total_cache_optimal_read_tokens = self
+                .token_accounting
+                .total_cache_optimal_read_tokens
+                .saturating_add(self.streaming.streaming_cache_read_tokens.unwrap_or(0));
+            self.token_accounting.current_request_has_optimal = true;
         }
         self.token_accounting.total_cache_read_tokens = self
             .token_accounting

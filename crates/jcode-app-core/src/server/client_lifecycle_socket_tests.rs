@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Clone, Default)]
-struct SdkCallbackProvider {
+pub(super) struct SdkCallbackProvider {
     calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 #[async_trait]
@@ -140,7 +140,11 @@ async fn catalog_failure_preserves_remote_socket_owner_and_next_turn() {
     sdk_socket_cancel_workflow(false, true, true, false, false, true).await;
 }
 
-async fn sdk_socket_workflow(response_only: bool, terminal_race: bool, identity_capability: bool) {
+pub(super) async fn sdk_socket_workflow(
+    response_only: bool,
+    terminal_race: bool,
+    identity_capability: bool,
+) {
     sdk_socket_cancel_workflow(
         response_only,
         terminal_race,

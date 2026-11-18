@@ -45,6 +45,7 @@ pub mod running_tool_registry;
 pub mod screen_context;
 pub mod server;
 pub mod server_spawn;
+pub mod session_accounts;
 pub mod session_effort;
 pub mod session_env;
 pub mod session_launch;

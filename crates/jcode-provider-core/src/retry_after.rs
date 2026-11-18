@@ -113,6 +113,12 @@ impl RetryAfter {
         }
     }
 
+    /// A hint for a wait jcode chooses itself (for example from a provider's
+    /// body wording), capped like a header value.
+    pub fn after(delay: Duration) -> Self {
+        Self::new(delay.min(MAX_RETRY_AFTER))
+    }
+
     /// Time still remaining on the hint. Time spent reading and classifying an
     /// error response counts toward the requested wait.
     pub fn remaining(self) -> Duration {
@@ -288,6 +294,54 @@ mod tests {
         assert_eq!(
             retry_after_delay_at(&headers(value), SystemTime::UNIX_EPOCH),
             Some(MAX_RETRY_AFTER)
+        );
+    }
+
+    /// Openference answers 429 rate limits with the delay only in the JSON
+    /// body (`retry_after_seconds: 2`, `max_rpm: 25`) and no `Retry-After`
+    /// header. The exact 2s must survive parsing so bounded holds and retry
+    /// delays match what the server asked for.
+    #[test]
+    fn openference_body_retry_after_seconds_is_parsed_exactly() {
+        let body = "{\"error\":\"Rate limit exceeded. Too many requests per minute.\",\"type\":\"rate_limit_error\",\"code\":\"rate_limit_exceeded\",\"retry_after_seconds\":2,\"max_rpm\":25}";
+        assert_eq!(retry_after_body_delay(body), Some(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn body_retry_after_seconds_is_found_nested_in_error_object() {
+        let body = "{\"error\":{\"message\":\"rate limit exceeded\",\"metadata\":{\"retry_after_seconds\":3}}}";
+        assert_eq!(retry_after_body_delay(body), Some(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn body_string_retry_after_seconds_and_limit_fields_are_ignored() {
+        // A string hint and account limit fields must not be mistaken for
+        // the wait; a malformed body falls back to the caller's backoff.
+        assert_eq!(
+            retry_after_body_delay("{\"retry_after_seconds\":\"2\"}"),
+            None
+        );
+        assert_eq!(retry_after_body_delay("{\"max_rpm\":25}"), None);
+        assert_eq!(
+            retry_after_body_delay("{\"reset\":\"2026-10-03\",\"retry_at\":3600}"),
+            None
+        );
+        assert_eq!(retry_after_body_delay("rate limited"), None);
+        assert_eq!(retry_after_body_delay("{\"broken\":"), None);
+    }
+
+    #[test]
+    fn body_retry_after_seconds_is_bounded() {
+        assert_eq!(retry_after_body_delay("{\"retry_after_seconds\":0}"), None);
+        assert_eq!(retry_after_body_delay("{\"retry_after_seconds\":-1}"), None);
+        assert_eq!(
+            retry_after_body_delay("{\"retry_after_seconds\":999999999}"),
+            Some(MAX_RETRY_AFTER)
+        );
+        // Fractional hints round up to whole seconds.
+        assert_eq!(
+            retry_after_body_delay("{\"retry_after_seconds\":1.2}"),
+            Some(Duration::from_secs(2))
         );
     }
 

@@ -11,7 +11,7 @@ pub(super) async fn run_stream_with_retries(
     mut request: ApiRequest,
     tx: mpsc::Sender<Result<StreamEvent>>,
     credentials: Arc<RwLock<Option<CachedCredentials>>>,
-    oauth_account_label: Option<String>,
+    account_pin: AccountPinSlot,
     model_name: String,
     oauth_session_id: String,
     model_state: Arc<std::sync::RwLock<String>>,
@@ -28,6 +28,9 @@ pub(super) async fn run_stream_with_retries(
     // Track every model id we have already attempted so a retired/renamed
     // model only falls back to genuinely new candidates.
     let mut tried_models: Vec<String> = vec![original_model.clone()];
+    // Credential generation observed when the current attempt's token was
+    // chosen. A swap after this point wakes the retry wait.
+    let mut token_generation = auth::credential_signal::generation();
     // Transport faults get a longer budget than other transient errors; the
     // displayed maximum grows only once one has actually been seen.
     let mut retry_max = MAX_RETRIES;
@@ -49,12 +52,33 @@ pub(super) async fn run_stream_with_retries(
                     },
                 }))
                 .await;
-            tokio::time::sleep(delay).await;
+            let swapped_token = sleep_until_retry_or_credential_swap(
+                delay,
+                token_generation,
+                is_oauth,
+                &token,
+                &credentials,
+                &account_pin,
+            )
+            .await;
             jcode_base::logging::info(&format!(
                 "Retrying Anthropic API request (attempt {}/{})",
                 attempt + 1,
                 retry_max
             ));
+            token_generation = auth::credential_signal::generation();
+            // The user may have swapped Claude accounts while this request was
+            // failing (often because the old account hit its usage limit).
+            // Re-resolve so the retry uses the currently stored credential
+            // instead of the token captured when the turn started.
+            if let Some(swapped) = swapped_token {
+                token = swapped;
+            } else if is_oauth
+                && let Ok((current, true)) =
+                    resolve_oauth_access_token(&credentials, &account_pin).await
+            {
+                token = current;
+            }
         }
 
         // Track whether this attempt streams replay-visible output so a
@@ -101,6 +125,36 @@ pub(super) async fn run_stream_with_retries(
                 // Anthropic API", and the retry classifier needs to see it.
                 let error_str = format!("{e:#}").to_lowercase();
 
+                // Usage limit that resets long after this turn's retries could
+                // end. Retrying the same account is doomed. If the stored
+                // credential already changed (a swap), retry right away on
+                // it. Otherwise fail fast with the reset time so the client
+                // holds the turn and resends when credentials change.
+                if is_oauth
+                    && !saw_output
+                    && e.chain()
+                        .any(|source| source.downcast_ref::<UsageLimitExhausted>().is_some())
+                {
+                    if let Ok((current, true)) =
+                        resolve_oauth_access_token(&credentials, &account_pin).await
+                        && current != token
+                        && attempt + 1 < MAX_RETRIES
+                    {
+                        jcode_base::logging::info(
+                            "Claude usage limit hit on a credential that was since replaced; retrying now with the new account",
+                        );
+                        token = current;
+                        next_retry_delay = Some(std::time::Duration::ZERO);
+                        last_error = Some(e);
+                        continue;
+                    }
+                    jcode_base::logging::warn(&format!(
+                        "Claude usage limit resets beyond the retry window; failing fast: {e}"
+                    ));
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+
                 // OAuth auth failures: force refresh and retry once immediately.
                 if is_oauth && is_oauth_auth_error(&error_str) && !attempted_forced_refresh {
                     attempted_forced_refresh = true;
@@ -112,7 +166,7 @@ pub(super) async fn run_stream_with_retries(
                             phase: jcode_message_types::ConnectionPhase::Authenticating,
                         }))
                         .await;
-                    match force_refresh_oauth_token(Arc::clone(&credentials), &oauth_account_label)
+                    match force_refresh_oauth_token(Arc::clone(&credentials), account_pin.clone())
                         .await
                     {
                         Ok(refreshed_token) => {
@@ -236,12 +290,14 @@ pub(super) async fn run_stream_with_retries(
                 if is_oauth
                     && !saw_output
                     && is_account_limit_error(&error_str)
-                    && oauth_account_label.as_deref().is_some_and(|label| {
-                        jcode_base::usage::account_known_exhausted(
-                            jcode_base::usage::MultiAccountProviderKind::Anthropic,
-                            label,
-                        )
-                    })
+                    && usage_recording::credential_label(is_oauth, &token)
+                        .as_deref()
+                        .is_some_and(|label| {
+                            jcode_base::usage::account_known_exhausted(
+                                jcode_base::usage::MultiAccountProviderKind::Anthropic,
+                                label,
+                            )
+                        })
                 {
                     // The API often uses the same generic 429 for exhausted plan
                     // usage and burst throttles. Preserve verified account usage

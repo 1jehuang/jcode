@@ -57,7 +57,7 @@ pub(in crate::tui::app) fn no_models_available_message(is_remote: bool) -> Strin
         String::new(),
         "Next steps:".to_string(),
         "  - Run /login to connect or refresh a provider".to_string(),
-        "  - Run /account to inspect or switch credentials".to_string(),
+        "  - Run /accounts to inspect or switch credentials".to_string(),
         "  - If you just logged in, wait a moment and try /model again".to_string(),
     ];
 
@@ -78,7 +78,7 @@ pub(in crate::tui::app) fn model_switch_failure_message(error: &str, is_remote: 
         "Next steps:".to_string(),
         "  - Use /model to choose another available route".to_string(),
         "  - Run /login to add or refresh credentials".to_string(),
-        "  - Run /account to inspect or switch accounts".to_string(),
+        "  - Run /accounts to inspect or switch accounts".to_string(),
     ];
 
     if is_remote {
@@ -111,7 +111,7 @@ pub(in crate::tui::app) fn unavailable_model_route_message(
         "Next steps:".to_string(),
         "  - Pick another available row in /model".to_string(),
         "  - Run /login to add or refresh credentials".to_string(),
-        "  - Run /account to inspect or switch accounts".to_string(),
+        "  - Run /accounts to inspect or switch accounts".to_string(),
     ];
 
     if is_remote {
@@ -122,4 +122,28 @@ pub(in crate::tui::app) fn unavailable_model_route_message(
     }
 
     lines.join("\n")
+}
+
+/// Match `/usage <provider>` queries against report names such as
+/// "Anthropic (Claude)" or "OpenAI (ChatGPT)", accepting common aliases.
+pub(in crate::tui::app) fn usage_provider_matches(provider_name: &str, query: &str) -> bool {
+    let normalize = |text: &str| -> String {
+        text.chars()
+            .filter(|ch| ch.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let name = normalize(provider_name);
+    let query = normalize(query);
+    if query.is_empty() {
+        return true;
+    }
+    let alias = match query.as_str() {
+        "claude" | "anthropic" => "anthropic",
+        "openai" | "chatgpt" | "codex" | "gpt" => "openai",
+        "gemini" | "google" => "gemini",
+        "copilot" | "github" => "copilot",
+        _ => query.as_str(),
+    };
+    name.contains(&query) || name.contains(alias)
 }

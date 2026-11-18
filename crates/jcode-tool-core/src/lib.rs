@@ -77,13 +77,32 @@ pub struct StdinInputRequest {
     pub response_tx: tokio::sync::oneshot::Sender<String>,
 }
 
+/// Questions from the `ask_user` tool. `None` in the reply means the user
+/// dismissed them; a dropped sender means no interactive user can answer.
+pub struct AskUserInputRequest {
+    pub request_id: String,
+    pub tool_call_id: String,
+    pub questions: Vec<jcode_message_types::ask_user::AskUserQuestion>,
+    pub response_tx:
+        tokio::sync::oneshot::Sender<Option<Vec<jcode_message_types::ask_user::AskUserAnswer>>>,
+}
+
+/// A request a tool sends to the attached interactive client.
+pub enum ClientInputRequest {
+    Stdin(StdinInputRequest),
+    AskUser(AskUserInputRequest),
+    /// The `ask_user` call with this request id ended without an answer.
+    AskUserClosed(String),
+}
+
 #[derive(Clone)]
 pub struct ToolContext {
     pub session_id: String,
     pub message_id: String,
     pub tool_call_id: String,
     pub working_dir: Option<PathBuf>,
-    pub stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<StdinInputRequest>>,
+    /// Channel to the attached interactive client: stdin prompts and `ask_user`.
+    pub stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<ClientInputRequest>>,
     pub graceful_shutdown_signal: Option<InterruptSignal>,
     pub execution_mode: ToolExecutionMode,
 }

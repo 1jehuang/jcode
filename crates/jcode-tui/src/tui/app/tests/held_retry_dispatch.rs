@@ -46,13 +46,15 @@ fn recovery_log_snapshot_correlates_state_without_payloads() {
 
 fn held_retry_message(attempts: u8, auto_retry: bool) -> PendingRemoteMessage {
     PendingRemoteMessage {
-        content: "finish the interrupted task [image 1]".into(),
+        // Transport text excludes owned attachment markers.
+        content: "finish the interrupted task".into(),
         images: vec![("image/png".into(), "aW1hZ2U=".into())],
         is_system: false,
         system_reminder: None,
         auto_retry,
         retry_attempts: attempts,
         retry_at: None,
+        overload_attempts: 0,
     }
 }
 
@@ -137,7 +139,7 @@ fn held_retry_failed_write_at_limit_restores_draft_and_images() {
     assert!(!app.is_processing);
     assert!(app.rate_limit_reset.is_none());
     assert!(app.rate_limit_pending_message.is_none());
-    assert_eq!(app.input, original.content);
+    assert_eq!(app.input, format!("{} [image 1]", original.content));
     assert_eq!(app.pending_images, original.images);
     assert!(!app.auto_poke_incomplete_todos);
     assert!(
@@ -161,6 +163,9 @@ fn remote_disconnect_releases_unconfirmed_switch_and_restores_waiting_prompt() {
             app.input = new_draft.to_string();
             let image = ("image/png".to_string(), "aW1hZ2U=".to_string());
             app.pending_prompt_after_model_switch = Some(input::PreparedInput {
+                image_markers: Default::default(),
+                routing_input: None,
+                pasted_contents: Vec::new(),
                 raw_input: "use the selected model [image 1]".to_string(),
                 expanded: "expanded prompt for selected model".to_string(),
                 images: vec![image.clone()],

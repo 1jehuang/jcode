@@ -6,11 +6,13 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeCommand {
     Skills,
+    Mcp,
     Context,
     Info,
     Cache,
     Memory,
     Swarm,
+    Agent,
     Agents,
     SubagentModel,
     Autoreview,

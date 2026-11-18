@@ -4,16 +4,26 @@ pub(crate) enum PendingLogin {
     Exchanging { provider: String },
     /// SSH flow state and sensitive input are held separately, never in local auth.
     Remote,
+    /// Choose Jcode's OAuth flow or Claude Code's CLI-managed sign-in.
+    ClaudeMethodChoice,
     /// Waiting for user to paste Claude OAuth code for a specific stored account
     ClaudeAccount {
         verifier: String,
         label: String,
+        expected_existing: bool,
+        expected_identity: Option<String>,
+        replace: bool,
+        attempt: std::sync::Arc<std::sync::atomic::AtomicU8>,
         redirect_uri: Option<String>,
     },
     /// Waiting for user to paste an OpenAI OAuth callback URL/query for a specific stored account.
     OpenAiAccount {
         verifier: String,
         label: String,
+        expected_existing: bool,
+        expected_identity: Option<String>,
+        replace: bool,
+        attempt: std::sync::Arc<std::sync::atomic::AtomicU8>,
         expected_state: String,
         redirect_uri: String,
     },
@@ -82,10 +92,42 @@ pub(crate) enum PendingLogin {
 }
 
 impl PendingLogin {
+    pub(crate) fn cancel_saved_attempt(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        match self {
+            Self::ClaudeAccount { attempt, .. } | Self::OpenAiAccount { attempt, .. } => loop {
+                let state = attempt.load(Ordering::Acquire);
+                match state {
+                    0 | 4 => {
+                        if attempt
+                            .compare_exchange(state, 2, Ordering::AcqRel, Ordering::Acquire)
+                            .is_ok()
+                        {
+                            break true;
+                        }
+                    }
+                    1 => break false,
+                    _ => break true,
+                }
+            },
+            _ => true,
+        }
+    }
+
+    pub(crate) fn is_exchanging(&self) -> bool {
+        match self {
+            Self::ClaudeAccount { attempt, .. } | Self::OpenAiAccount { attempt, .. } => {
+                matches!(attempt.load(std::sync::atomic::Ordering::Acquire), 1 | 4)
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn telemetry_context(&self) -> Option<(String, String)> {
         match self {
             Self::Exchanging { provider } => Some((provider.clone(), "oauth".to_string())),
             Self::Remote => None,
+            Self::ClaudeMethodChoice => None,
             Self::ClaudeAccount { .. } => Some(("claude".to_string(), "oauth".to_string())),
             Self::OpenAiAccount { .. } => Some(("openai".to_string(), "oauth".to_string())),
             Self::Gemini { .. } => Some(("gemini".to_string(), "oauth".to_string())),
@@ -123,6 +165,10 @@ impl PendingLogin {
 
 #[derive(Debug, Clone)]
 pub(crate) enum PendingAccountInput {
+    Rename {
+        provider_id: String,
+        label: String,
+    },
     NewAccountLabel {
         provider_id: String,
         display_name: String,
@@ -137,6 +183,7 @@ pub(crate) enum PendingAccountInput {
 
 #[derive(Debug, Clone)]
 pub(crate) enum AccountCommand {
+    ChooseAddProvider,
     OpenOverlay {
         provider_filter: Option<String>,
     },
@@ -156,13 +203,35 @@ pub(crate) enum AccountCommand {
         provider_id: String,
         label: Option<String>,
     },
-    Switch {
+    Replace {
         provider_id: String,
         label: String,
     },
-    SwitchShorthand {
+    Reauthenticate {
+        provider_id: String,
         label: String,
     },
+    Rename {
+        provider_id: String,
+        label: String,
+        new_label: Option<String>,
+    },
+    /// Pin THIS window to a stored account (`/accounts switch <label>`).
+    UseInWindow {
+        provider_id: String,
+        label: String,
+    },
+    /// Change the default account for new and unpinned windows.
+    SetDefault {
+        provider_id: String,
+        label: String,
+    },
+    /// Unpin this window (`None` = every provider) so it follows the default.
+    Unpin {
+        provider_id: Option<String>,
+    },
+    /// Per-window same-provider account failover.
+    Failover(AccountFailoverMode),
     Remove {
         provider_id: String,
         label: String,
@@ -177,4 +246,13 @@ pub(crate) enum AccountCommand {
     SetOpenAiCompatApiKeyName(Option<String>),
     SetOpenAiCompatEnvFile(Option<String>),
     SetOpenAiCompatDefaultModel(Option<String>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccountFailoverMode {
+    On,
+    Off,
+    /// Clear the per-window override and use the config default.
+    Default,
+    Status,
 }

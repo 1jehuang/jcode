@@ -90,22 +90,13 @@ impl App {
         }
 
         if !self.is_remote && !crate::perf::tui_policy().simplified_model_picker {
-            let routes_started = std::time::Instant::now();
-            let routes = self.simplified_model_routes_for_picker(&current_model);
-            let routes_ms = routes_started.elapsed().as_millis();
-            self.open_model_picker_with_routes(
-                cache_signature.clone(),
-                picker_started,
-                routes,
-                routes_ms,
-                preserve_input,
-                false,
-            );
-            if self.inline_interactive_state.is_some() {
-                self.set_status_notice("Updating model routes…");
-            } else {
-                self.open_loading_model_picker(&current_model);
-            }
+            // Building the simplified catalog also expands saved OAuth accounts and
+            // reads their cached model lists. That work is allowed to be slow, so it
+            // must not happen on the TUI thread just because the user typed `/model`.
+            // Paint a usable current-model row first, then replace it when the full
+            // catalog arrives through the existing async loader.
+            self.open_loading_model_picker(&current_model);
+            self.set_status_notice("Updating model routes…");
             self.start_model_picker_route_load(cache_signature, picker_started);
             return;
         }
@@ -186,7 +177,7 @@ impl App {
             // take seconds on a large catalog, so for big catalogs open
             // instantly with lightweight names-only routes and upgrade in the
             // background. Small catalogs stay synchronous so the first paint
-            // already has effort-expanded, provider-classified rows.
+            // already has provider-classified rows.
             const SYNC_REMOTE_FALLBACK_MAX_MODELS: usize = 64;
             if crate::tui::is_ssh_remote() {
                 self.build_remote_model_routes_lightweight_fallback(&current_model)

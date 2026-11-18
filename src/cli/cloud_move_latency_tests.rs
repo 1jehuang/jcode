@@ -22,9 +22,9 @@ fn bundle_fixture(root: &Path, stage: &Path) -> (RepoManifest, String) {
 
 #[test]
 fn incremental_bundle_preserves_branch_and_full_wrapper_is_self_contained() {
-    let root = tempfile::tempdir().unwrap();
-    let stage = tempfile::tempdir().unwrap();
-    let empty = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+    let stage = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+    let empty = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     git(empty.path(), &["init", "--quiet"]).unwrap();
     let (repo, base) = bundle_fixture(root.path(), stage.path());
     assert!(
@@ -59,7 +59,7 @@ fn incremental_bundle_preserves_branch_and_full_wrapper_is_self_contained() {
         create_repo_bundle(&repo, "bundle-test", stage.path(), Some(unsafe_base)).unwrap();
         git(empty.path(), &["bundle", "verify", bundle]).unwrap();
     }
-    let full = tempfile::tempdir().unwrap();
+    let full = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let before = git(root.path(), &["status", "--porcelain"]).unwrap();
     snapshot_repo(root.path(), "full-wrapper", full.path())
         .unwrap()
@@ -98,7 +98,7 @@ fn isolated_preflight_and_parallel_preparation_regressions() {
         "history",
         "history-unknown",
     ] {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let bin = root.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         // Fake SSH accepts the same final shell-command argument as real SSH.
@@ -201,7 +201,7 @@ fn isolated_latency_child() {
     if mode.starts_with("history") {
         let checkout = root.join("checkout");
         std::fs::create_dir(&checkout).unwrap();
-        let stage = tempfile::tempdir().unwrap();
+        let stage = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let (repo, base) = bundle_fixture(&checkout, stage.path());
         let unknown = "0000000000000000000000000000000000000000";
         // Unknown cloud-only tip, then known HEAD (unsafe to exclude), then

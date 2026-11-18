@@ -4,6 +4,9 @@ Jcode treats a definitive exhausted usage window differently from a temporary
 rate limit. HTTP 429 alone, including Anthropic's “would exceed your account's
 rate limit”, does not prove the account has exhausted its plan allowance.
 
+Switching between OpenAI-compatible profiles retains the cancelable countdown
+before resending a conversation to another endpoint.
+
 ## Configuration
 
 In `~/.jcode/config.toml`:

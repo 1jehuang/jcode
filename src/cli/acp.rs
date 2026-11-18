@@ -108,6 +108,8 @@ struct SessionUiState {
     provider_name: Option<String>,
     model: Option<String>,
     available_models: Vec<String>,
+    available_model_routes: Vec<crate::provider::ModelRoute>,
+    selected_route: Option<crate::provider::RouteSelection>,
     reasoning_effort: Option<String>,
 }
 
@@ -288,18 +290,88 @@ fn prompt_response(stop_reason: &str, usage: &TurnUsage) -> Value {
     response
 }
 
+fn apply_model_catalog(
+    state: &mut SessionUiState,
+    provider_name: Option<String>,
+    provider_model: Option<String>,
+    available_models: Vec<String>,
+    available_model_routes: Vec<crate::provider::ModelRoute>,
+    reasoning_effort: Option<String>,
+) {
+    if provider_model
+        .as_ref()
+        .is_some_and(|model| state.model.as_ref() != Some(model))
+        || provider_name
+            .as_ref()
+            .is_some_and(|provider| state.provider_name.as_ref() != Some(provider))
+    {
+        state.selected_route = None;
+    }
+    if provider_name.is_some() {
+        state.provider_name = provider_name;
+    }
+    if provider_model.is_some() {
+        state.model = provider_model;
+    }
+    state.available_models = available_models;
+    state.available_model_routes = available_model_routes;
+    if reasoning_effort.is_some() {
+        state.reasoning_effort = reasoning_effort;
+    }
+}
+
 impl SessionUiState {
+    fn apply_model_event(&mut self, event: &ServerEvent) -> bool {
+        match event {
+            ServerEvent::AvailableModelsUpdated {
+                provider_name,
+                provider_model,
+                available_models,
+                available_model_routes,
+            } => {
+                apply_model_catalog(
+                    self,
+                    provider_name.clone(),
+                    provider_model.clone(),
+                    available_models.clone(),
+                    available_model_routes.clone(),
+                    None,
+                );
+                true
+            }
+            ServerEvent::ModelChanged {
+                model,
+                provider_name,
+                error: None,
+                reasoning_effort,
+                ..
+            } => {
+                self.selected_route = None;
+                self.model = Some(model.clone());
+                if provider_name.is_some() {
+                    self.provider_name = provider_name.clone();
+                }
+                self.reasoning_effort = reasoning_effort.clone();
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn from_history_fields(
         provider_name: Option<String>,
         provider_model: Option<String>,
         available_models: Vec<String>,
+        available_model_routes: Vec<crate::provider::ModelRoute>,
         reasoning_effort: Option<String>,
     ) -> Self {
         Self {
             provider_name,
             model: provider_model,
             available_models,
+            available_model_routes,
             reasoning_effort,
+            ..Default::default()
         }
     }
 
@@ -785,15 +857,7 @@ impl AcpRuntime {
 
         let request_id = session.next_id();
         let apply_result = match config_id.as_str() {
-            CONFIG_ID_MODEL => {
-                session
-                    .send(&Request::SetModel {
-                        id: request_id,
-                        model: value.clone(),
-                    })
-                    .await?;
-                wait_for_model_changed(&session, request_id).await
-            }
+            CONFIG_ID_MODEL => set_session_model(&session, request_id, &value).await,
             CONFIG_ID_EFFORT => {
                 session
                     .send(&Request::SetReasoningEffort {
@@ -927,9 +991,11 @@ impl AcpRuntime {
         let subscribe_id = 1;
         session
             .send(&Request::Subscribe {
+                agent_profile_name: None,
                 system_prompt: None,
                 supports_pdf_panels: false,
                 supports_user_response: false,
+                supports_ask_user: false,
                 supports_server_failover: true,
                 supports_turn_identity: false,
                 crash_on_disconnect: false,
@@ -943,17 +1009,21 @@ impl AcpRuntime {
                 history_base: None,
                 allow_session_takeover: false,
                 terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
+                account_pins: Vec::new(),
+                supports_session_accounts: false,
                 client_name: None,
             })
             .await?;
         wait_for_done(&session, subscribe_id).await?;
         let history = request_history(&session).await?;
-        let (session_id, ui_state) = match history {
+        let catalog = request_model_catalog(&session).await?;
+        let (session_id, mut ui_state) = match history {
             ServerEvent::History {
                 session_id,
                 provider_name,
                 provider_model,
                 available_models,
+                available_model_routes,
                 reasoning_effort,
                 ..
             } => (
@@ -962,11 +1032,30 @@ impl AcpRuntime {
                     provider_name,
                     provider_model,
                     available_models,
+                    available_model_routes,
                     reasoning_effort,
                 ),
             ),
             other => anyhow::bail!("expected history after session creation, got {other:?}"),
         };
+        if let ServerEvent::History {
+            provider_name,
+            provider_model,
+            available_models,
+            available_model_routes,
+            reasoning_effort,
+            ..
+        } = catalog
+        {
+            apply_model_catalog(
+                &mut ui_state,
+                provider_name,
+                provider_model,
+                available_models,
+                available_model_routes,
+                reasoning_effort,
+            );
+        }
         Ok(DaemonSession::new(
             session_id,
             session.reader.into_inner().into_inner(),
@@ -1006,9 +1095,11 @@ impl AcpRuntime {
         let resume_id = 1;
         session
             .send(&Request::Subscribe {
+                agent_profile_name: None,
                 system_prompt: None,
                 supports_pdf_panels: false,
                 supports_user_response: false,
+                supports_ask_user: false,
                 supports_server_failover: true,
                 supports_turn_identity: false,
                 crash_on_disconnect: false,
@@ -1022,6 +1113,8 @@ impl AcpRuntime {
                 history_base: None,
                 allow_session_takeover: false,
                 terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
+                account_pins: Vec::new(),
+                supports_session_accounts: false,
                 client_name: None,
             })
             .await?;
@@ -1038,6 +1131,7 @@ impl AcpRuntime {
                     provider_name,
                     provider_model,
                     available_models,
+                    available_model_routes,
                     reasoning_effort,
                     ..
                 } => {
@@ -1046,6 +1140,7 @@ impl AcpRuntime {
                         provider_name,
                         provider_model,
                         available_models,
+                        available_model_routes,
                         reasoning_effort,
                     );
                     if replay_history {
@@ -1063,6 +1158,26 @@ impl AcpRuntime {
                     }
                 }
             }
+        }
+
+        let catalog = request_model_catalog(&session).await?;
+        if let ServerEvent::History {
+            provider_name,
+            provider_model,
+            available_models,
+            available_model_routes,
+            reasoning_effort,
+            ..
+        } = catalog
+        {
+            apply_model_catalog(
+                &mut ui_state,
+                provider_name,
+                provider_model,
+                available_models,
+                available_model_routes,
+                reasoning_effort,
+            );
         }
 
         Ok(DaemonSession::new(
@@ -1278,36 +1393,11 @@ impl AcpRuntime {
                     )
                     .await?;
                 }
-                ServerEvent::ModelChanged {
-                    model,
-                    provider_name,
-                    error,
-                    ..
-                } => {
-                    // Mid-prompt model changes happen on provider failover;
-                    // keep the selector in sync.
-                    if error.is_none() {
-                        let config_options = {
-                            let mut state = session.ui_state.lock().await;
-                            state.model = Some(model);
-                            if provider_name.is_some() {
-                                state.provider_name = provider_name;
-                            }
-                            session_config_options(&state)
-                        };
-                        if !config_options.is_empty() {
-                            self.write_notification(
-                                "session/update",
-                                json!({
-                                    "sessionId": session.session_id,
-                                    "update": {
-                                        "sessionUpdate": "config_option_update",
-                                        "configOptions": config_options,
-                                    }
-                                }),
-                            )
-                            .await?;
-                        }
+                event @ (ServerEvent::ModelChanged { .. }
+                | ServerEvent::AvailableModelsUpdated { .. }) => {
+                    let changed = session.ui_state.lock().await.apply_model_event(&event);
+                    if changed {
+                        self.write_config_option_update(&session).await?;
                     }
                 }
                 other => {
@@ -1347,13 +1437,7 @@ impl AcpRuntime {
             }
             AcpSlashCommand::Model(Some(model)) => {
                 let id = session.next_id();
-                session
-                    .send(&Request::SetModel {
-                        id,
-                        model: model.clone(),
-                    })
-                    .await?;
-                wait_for_model_changed(session, id).await?;
+                set_session_model(session, id, &model).await?;
                 self.write_config_option_update(session).await?;
                 let selected = session.ui_state.lock().await.model.clone().unwrap_or(model);
                 Ok(format!("Switched model to `{selected}`."))
@@ -1364,24 +1448,39 @@ impl AcpRuntime {
                     provider_name,
                     provider_model,
                     available_models,
+                    available_model_routes,
+                    reasoning_effort,
                     ..
                 } = event
                 else {
                     unreachable!("request_model_catalog only returns history")
                 };
-                let (current, models) = {
+                let models = {
                     let mut state = session.ui_state.lock().await;
-                    if provider_name.is_some() {
-                        state.provider_name = provider_name;
-                    }
-                    if provider_model.is_some() {
-                        state.model = provider_model;
-                    }
-                    state.available_models = available_models;
-                    (state.model.clone(), state.available_models.clone())
+                    apply_model_catalog(
+                        &mut state,
+                        provider_name,
+                        provider_model,
+                        available_models,
+                        available_model_routes,
+                        reasoning_effort,
+                    );
+                    let current = state.current_model_id();
+                    state
+                        .model_choices()
+                        .into_iter()
+                        .map(|(id, name)| {
+                            let selected = if current.as_ref() == Some(&id) {
+                                " (current)"
+                            } else {
+                                ""
+                            };
+                            format!("{id} {name}{selected}")
+                        })
+                        .collect::<Vec<_>>()
                 };
                 self.write_config_option_update(session).await?;
-                Ok(format_model_catalog(current.as_deref(), &models))
+                Ok(format_model_catalog(None, &models))
             }
             AcpSlashCommand::Effort(None) => {
                 let state = session.ui_state.lock().await;
@@ -1530,7 +1629,9 @@ async fn request_history(session: &DaemonSession) -> Result<ServerEvent> {
                 message,
                 ..
             } if event_id == id => anyhow::bail!(message),
-            _ => {}
+            event => {
+                session.ui_state.lock().await.apply_model_event(&event);
+            }
         }
     }
 }
@@ -1554,7 +1655,9 @@ async fn request_model_catalog(session: &DaemonSession) -> Result<ServerEvent> {
                 message,
                 ..
             } if event_id == id => anyhow::bail!(message),
-            _ => {}
+            event => {
+                session.ui_state.lock().await.apply_model_event(&event);
+            }
         }
     }
 }
@@ -1562,31 +1665,41 @@ async fn request_model_catalog(session: &DaemonSession) -> Result<ServerEvent> {
 mod session_configuration;
 use session_configuration::*;
 
+async fn set_session_model(session: &DaemonSession, id: u64, value: &str) -> Result<()> {
+    let request = session.ui_state.lock().await.model_request(id, value)?;
+    let selection = match &request {
+        Request::SetRoute { selection, .. } => Some(selection.clone()),
+        _ => None,
+    };
+    session.send(&request).await?;
+    wait_for_model_changed(session, id).await?;
+    session.ui_state.lock().await.selected_route = selection;
+    Ok(())
+}
+
 async fn wait_for_model_changed(session: &DaemonSession, request_id: u64) -> Result<()> {
     loop {
         match session.read_event().await? {
             ServerEvent::Ack { .. } => {}
+            event @ ServerEvent::ModelChanged {
+                id, error: None, ..
+            } if id == request_id => {
+                session.ui_state.lock().await.apply_model_event(&event);
+                return Ok(());
+            }
             ServerEvent::ModelChanged {
                 id,
-                model,
-                provider_name,
-                error,
+                error: Some(error),
                 ..
             } if id == request_id => {
-                if let Some(error) = error {
-                    anyhow::bail!(error);
-                }
-                let mut state = session.ui_state.lock().await;
-                state.model = Some(model);
-                if provider_name.is_some() {
-                    state.provider_name = provider_name;
-                }
-                return Ok(());
+                anyhow::bail!(error);
             }
             ServerEvent::Error { id, message, .. } if id == request_id => {
                 anyhow::bail!(message)
             }
-            _ => {}
+            event => {
+                session.ui_state.lock().await.apply_model_event(&event);
+            }
         }
     }
 }
@@ -1606,7 +1719,9 @@ async fn wait_for_effort_changed(session: &DaemonSession, request_id: u64) -> Re
             ServerEvent::Error { id, message, .. } if id == request_id => {
                 anyhow::bail!(message)
             }
-            _ => {}
+            event => {
+                session.ui_state.lock().await.apply_model_event(&event);
+            }
         }
     }
 }

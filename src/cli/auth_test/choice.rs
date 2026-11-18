@@ -58,6 +58,13 @@ pub(crate) fn tool_smoke_skip_detail_for_choice(
         );
     }
 
+    if matches!(choice, super::provider_init::ProviderChoice::ClaudeCode) {
+        return Some(
+            "Skipped: Claude Code runs its own tool loop inside the Claude Code CLI; jcode tools are offered to it over MCP rather than as outer tool calls. Basic provider smoke validates the transport."
+                .to_string(),
+        );
+    }
+
     if matches!(choice, super::provider_init::ProviderChoice::Fpt) {
         let model = effective_openai_compatible_auth_test_model(
             crate::provider_catalog::FPT_PROFILE,

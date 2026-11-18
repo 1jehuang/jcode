@@ -1,17 +1,16 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
-use super::client_lifecycle::process_reserved_message_streaming_mpsc;
 use super::{
     ClientConnectionInfo, SessionInterruptQueues, SwarmEvent, SwarmMember, SwarmState,
     VersionedPlan, broadcast_swarm_status, fanout_session_event, persist_swarm_state_for,
     queue_soft_interrupt_for_session, remove_session_channel_subscriptions,
-    remove_session_from_swarm, swarm_id_for_session, truncate_detail, update_member_status,
+    remove_session_from_swarm, swarm_id_for_session,
 };
 use crate::agent::Agent;
 use crate::protocol::{FeatureToggle, NotificationType, ServerEvent};
 use crate::session::Session;
 use crate::util::truncate_str;
-use jcode_agent_runtime::{SoftInterruptSource, StreamError};
+use jcode_agent_runtime::SoftInterruptSource;
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -127,6 +126,7 @@ pub(super) async fn handle_notify_session(
             id,
             message: format!("Session '{}' is not currently live", session_id),
             retry_after_secs: None,
+            server_resumes: false,
         });
     }
 }
@@ -149,6 +149,7 @@ pub(super) async fn handle_applet_action(
                 id,
                 message: error.to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -186,6 +187,7 @@ pub(super) fn handle_close_applet(
                 id,
                 message: error.to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             });
         }
     }
@@ -295,6 +297,7 @@ pub(super) async fn handle_set_subagent_model(
                 id,
                 message: crate::util::format_error_chain(&error),
                 retry_after_secs: None,
+                server_resumes: false,
             });
         }
     }
@@ -338,6 +341,7 @@ pub(super) fn handle_run_subagent(
                         id,
                         message: crate::util::format_error_chain(&error),
                         retry_after_secs: None,
+                        server_resumes: false,
                     });
                     return;
                 }
@@ -409,6 +413,7 @@ pub(super) fn handle_run_subagent(
                         id,
                         message: crate::util::format_error_chain(&error),
                         retry_after_secs: None,
+                        server_resumes: false,
                     });
                     return;
                 }
@@ -431,6 +436,7 @@ pub(super) fn handle_run_subagent(
                         id,
                         message: crate::util::format_error_chain(&persist_error),
                         retry_after_secs: None,
+                        server_resumes: false,
                     });
                     return;
                 }
@@ -493,6 +499,7 @@ pub(super) async fn handle_set_feature(
                         id,
                         message: crate::util::format_error_chain(&error),
                         retry_after_secs: None,
+                        server_resumes: false,
                     });
                 }
             }
@@ -508,6 +515,7 @@ pub(super) async fn handle_set_feature(
                         id,
                         message: crate::util::format_error_chain(&error),
                         retry_after_secs: None,
+                        server_resumes: false,
                     });
                 }
             }
@@ -614,6 +622,7 @@ pub(super) async fn handle_set_session_saved(
             id,
             message: crate::util::format_error_chain(&error),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     }
@@ -715,6 +724,7 @@ pub(super) async fn handle_rename_session(
                     id,
                     message: crate::util::format_error_chain(&error),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             }
@@ -782,6 +792,7 @@ pub(super) async fn handle_split(
     client_session_id: &str,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    feedback_role: Option<&str>,
 ) {
     let started = Instant::now();
     crate::logging::event_info(
@@ -796,9 +807,10 @@ pub(super) async fn handle_split(
     // Agent lock: busy sessions can still fork their last persisted snapshot.
     let result = {
         let idle_agent = agent.try_lock().ok();
-        clone_split_session(
+        clone_split_session_with_feedback(
             client_session_id,
             idle_agent.as_ref().map(|agent| agent.session_for_split()),
+            feedback_role,
         )
     };
     let (new_session_id, new_session_name) = match result {
@@ -818,6 +830,7 @@ pub(super) async fn handle_split(
                 id,
                 message: format!("Failed to save split session: {e}"),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -872,6 +885,7 @@ pub(super) async fn handle_transfer(
                 id,
                 message: format!("Failed to load session for transfer: {error}"),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -905,6 +919,7 @@ pub(super) async fn handle_transfer(
                 id,
                 message: format!("Failed to compact session for transfer: {error}"),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -931,6 +946,7 @@ pub(super) async fn handle_transfer(
                 id,
                 message: format!("Failed to create transfer session: {error}"),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -957,44 +973,7 @@ pub(super) async fn handle_transfer(
 #[path = "client_actions_tests.rs"]
 mod tests;
 
-/// Decide whether an idle live session still owes the model a continuation.
-///
-/// This is the live-session analog of `restored_session_was_interrupted`: a
-/// session "would continue if resumed" when it has a pending reload-recovery
-/// directive, when it carries reload-interruption markers, or when its last
-/// model-visible message is a user/tool turn the assistant never answered
-/// (e.g. the turn errored or the process was interrupted mid-generation).
-fn live_session_owes_continuation(agent: &Agent) -> bool {
-    // Never continue an empty/fresh session.
-    if agent.visible_conversation_message_count() == 0 {
-        return false;
-    }
-
-    if super::reload_recovery::peek_for_session(agent.session_id())
-        .ok()
-        .flatten()
-        .map(|record| record.status == super::reload_recovery::ReloadRecoveryStatus::Pending)
-        .unwrap_or(false)
-    {
-        return true;
-    }
-
-    if super::client_session::session_was_interrupted_by_reload(agent) {
-        return true;
-    }
-
-    matches!(
-        agent.last_visible_conversation_role(),
-        Some(crate::message::Role::User)
-    )
-}
-
 /// Continue every live, idle session that would auto-resume on a reload.
-///
-/// This is the on-demand equivalent of the post-reload recovery sweep: it walks
-/// the currently-live sessions, and for each idle one that still owes the model
-/// a continuation, injects the standard "continue where you left off" reminder
-/// so the session picks back up without the user having to open each one.
 #[expect(
     clippy::too_many_arguments,
     reason = "resuming live sessions needs session, swarm membership, and status event state"
@@ -1008,13 +987,14 @@ pub(super) async fn handle_resume_all_sessions(
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    swarm_state: Option<&SwarmState>,
 ) {
-    // Snapshot live sessions (those with at least one live client attachment).
+    // Headless workers own a server Agent, not a live client attachment.
     let live_session_ids: Vec<String> = {
         let members = swarm_members.read().await;
         members
             .iter()
-            .filter(|(_, member)| !member.event_txs.is_empty() || !member.event_tx.is_closed())
+            .filter(|(_, member)| super::live_turn::member_accepts_automatic_turn(member))
             .map(|(session_id, _)| session_id.clone())
             .collect()
     };
@@ -1023,27 +1003,22 @@ pub(super) async fn handle_resume_all_sessions(
     let mut skipped = 0usize;
 
     for session_id in live_session_ids {
-        let agent = {
-            let guard = sessions.read().await;
-            guard.get(&session_id).cloned()
-        };
-        let Some(agent) = agent else {
-            continue;
-        };
-
         // Only act on idle sessions; a busy session is already making progress.
-        // The owned guard doubles as the turn reservation (#1152).
-        let Ok(agent_guard) = Arc::clone(&agent).try_lock_owned() else {
+        // The shared reservation rechecks status and pending provider waits.
+        let Some(agent_guard) =
+            super::live_turn::idle_live_agent(&session_id, sessions, swarm_members).await
+        else {
             skipped += 1;
             continue;
         };
 
-        if !live_session_owes_continuation(&agent_guard) {
+        if !super::live_turn::live_session_owes_continuation(&agent_guard) {
             drop(agent_guard);
             skipped += 1;
             continue;
         }
 
+        let publication = super::swarm::begin_turn_publication(&session_id).await;
         let reminder = match super::reload_recovery::pending_directive_for_session(&session_id) {
             Ok(Some(directive)) => directive.continuation_message,
             _ => crate::tool::selfdev::ReloadContext::interrupted_session_continuation_message(),
@@ -1053,6 +1028,47 @@ pub(super) async fn handle_resume_all_sessions(
             .map(str::to_string)
             .unwrap_or_else(|| session_id[..8.min(session_id.len())].to_string());
 
+        let mut swarm = super::live_turn::LiveTurnSwarmContext::new(
+            swarm_members,
+            swarms_by_id,
+            event_history,
+            event_counter,
+            swarm_event_tx,
+        );
+        if let Some(state) = swarm_state {
+            swarm.recovery_swarm = Some(state.clone());
+            swarm.recovered_assignment =
+                super::recovered_assignment::RecoveredAssignment::capture(&session_id, state).await;
+        }
+        if !swarm_members
+            .read()
+            .await
+            .get(&session_id)
+            .is_some_and(super::live_turn::member_accepts_automatic_turn)
+        {
+            skipped += 1;
+            continue;
+        }
+        // Keep the recovery intent pending until the turn actually starts, so a
+        // rejected launch leaves it for the next recovery attempt.
+        if !super::live_turn::spawn_tracked_live_turn_with_publication(
+            &session_id,
+            agent_guard,
+            super::live_turn::LiveTurnInput {
+                message: String::new(),
+                images: Vec::new(),
+                system_reminder: Some(reminder.clone()),
+                display_role: None,
+                status_detail: Some("resuming interrupted session".to_string()),
+            },
+            swarm,
+            publication,
+        )
+        .await
+        {
+            skipped += 1;
+            continue;
+        }
         // Best-effort: record that the durable recovery intent was delivered.
         if let Err(error) = super::reload_recovery::mark_delivered_if_matching_continuation(
             &session_id,
@@ -1064,23 +1080,6 @@ pub(super) async fn handle_resume_all_sessions(
                 session_id, error
             ));
         }
-
-        super::live_turn::spawn_tracked_live_turn(
-            &session_id,
-            agent_guard,
-            String::new(),
-            Some(reminder),
-            None,
-            Some("resuming interrupted session".to_string()),
-            super::live_turn::LiveTurnSwarmContext::new(
-                swarm_members,
-                swarms_by_id,
-                event_history,
-                event_counter,
-                swarm_event_tx,
-            ),
-        )
-        .await;
 
         resumed_sessions.push(display_name);
     }
@@ -1159,98 +1158,38 @@ pub(super) async fn handle_stdin_response(
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }
 
-pub(super) struct AgentTaskContext<'a> {
-    pub(super) client_event_tx: &'a mpsc::UnboundedSender<ServerEvent>,
-    pub(super) swarm_members: &'a Arc<RwLock<HashMap<String, SwarmMember>>>,
-    pub(super) swarms_by_id: &'a Arc<RwLock<HashMap<String, HashSet<String>>>>,
-    pub(super) event_history: &'a Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
-    pub(super) event_counter: &'a Arc<std::sync::atomic::AtomicU64>,
-    pub(super) swarm_event_tx: &'a broadcast::Sender<SwarmEvent>,
-}
+pub(super) type AskUserResponses = Arc<
+    Mutex<
+        HashMap<
+            String,
+            tokio::sync::oneshot::Sender<Option<Vec<jcode_message_types::ask_user::AskUserAnswer>>>,
+        >,
+    >,
+>;
 
-pub(super) async fn handle_agent_task(
+pub(super) async fn handle_ask_user_response(
     id: u64,
-    task: String,
-    client_session_id: &str,
-    agent: &Arc<Mutex<Agent>>,
-    ctx: &AgentTaskContext<'_>,
+    request_id: String,
+    answers: Option<Vec<jcode_message_types::ask_user::AskUserAnswer>>,
+    ask_user_responses: &AskUserResponses,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
-    let mut agent = agent.lock().await;
-    let lease = match agent.claim_server_turn() {
-        Ok(lease) => lease,
-        Err(error) => {
-            let _ = ctx.client_event_tx.send(ServerEvent::Error {
-                id,
-                message: error.to_string(),
-                retry_after_secs: None,
-            });
-            return;
+    let pending = ask_user_responses.lock().await.remove(&request_id);
+    match pending {
+        Some(tx) => {
+            let _ = tx.send(answers);
         }
-    };
-    let events = super::state::TurnEventChannel::new(
-        client_session_id.into(),
-        Arc::clone(ctx.swarm_members),
-        ctx.client_event_tx.clone(),
-        &lease,
-    );
-    update_member_status(
-        client_session_id,
-        "running",
-        Some(truncate_detail(&task, 120)),
-        ctx.swarm_members,
-        ctx.swarms_by_id,
-        Some(ctx.event_history),
-        Some(ctx.event_counter),
-        Some(ctx.swarm_event_tx),
-    )
-    .await;
-
-    let result = process_reserved_message_streaming_mpsc(
-        &mut agent,
-        &lease,
-        &task,
-        vec![],
-        None,
-        events.sender(),
-    )
-    .await;
-    match result {
-        Ok(()) => {
-            update_member_status(
-                client_session_id,
-                "completed",
-                None,
-                ctx.swarm_members,
-                ctx.swarms_by_id,
-                Some(ctx.event_history),
-                Some(ctx.event_counter),
-                Some(ctx.swarm_event_tx),
-            )
-            .await;
-            let _ = events.sender().send(ServerEvent::Done { id });
-        }
-        Err(e) => {
-            update_member_status(
-                client_session_id,
-                "failed",
-                Some(truncate_detail(&e.to_string(), 120)),
-                ctx.swarm_members,
-                ctx.swarms_by_id,
-                Some(ctx.event_history),
-                Some(ctx.event_counter),
-                Some(ctx.swarm_event_tx),
-            )
-            .await;
-            let retry_after_secs = e
-                .downcast_ref::<StreamError>()
-                .and_then(|stream_error| stream_error.retry_after_secs);
-            let _ = events.sender().send(ServerEvent::Error {
-                id,
-                message: crate::util::format_error_chain(&e),
-                retry_after_secs,
+        // A late dismissal needs no notice.
+        None if answers.is_some() => {
+            let _ = client_event_tx.send(ServerEvent::AskUserClosed {
+                request_id,
+                error: Some(
+                    "Your answer arrived after the question closed, so the agent did not get it."
+                        .to_string(),
+                ),
             });
         }
+        None => {}
     }
-    drop(agent);
-    events.finish().await;
+    let _ = client_event_tx.send(ServerEvent::Done { id });
 }

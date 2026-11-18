@@ -111,6 +111,7 @@ fn persist_reload_recovery_intents_records_running_peer_recovery() -> anyhow::Re
     let swarm_members = Arc::new(RwLock::new(HashMap::from([
         ("initiator".to_string(), member("initiator", "running")),
         ("peer".to_string(), member("peer", "running")),
+        ("waiting".to_string(), member("waiting", "rate_limited")),
         ("idle".to_string(), member("idle", "ready")),
     ])));
 
@@ -120,6 +121,10 @@ fn persist_reload_recovery_intents_records_running_peer_recovery() -> anyhow::Re
         Some("initiator"),
     ));
 
+    assert!(
+        crate::server::reload_recovery::pending_directive_for_session("waiting")?.is_some(),
+        "quota-waiting turns need a durable reload continuation too"
+    );
     let peer_directive = crate::server::reload_recovery::pending_directive_for_session("peer")
         .expect("claim peer recovery")
         .expect("peer recovery intent should exist");

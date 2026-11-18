@@ -10,83 +10,35 @@ impl App {
 
         let mut items = vec![AccountPickerItem::action(
             "account-flow",
-            "Add / Replace",
-            "Back to account center",
-            "Return to the full provider/auth account center",
+            "Accounts",
+            "Back to accounts",
+            "Return to your saved accounts",
             AccountPickerCommand::OpenAccountCenter {
-                provider_filter: provider_filter.map(|value| value.to_string()),
+                provider_filter: provider_filter.map(str::to_owned),
             },
         )];
-
-        let include_claude = provider_filter.is_none()
-            || matches!(provider_filter, Some("claude") | Some("anthropic"));
-        let include_openai = provider_filter.is_none() || matches!(provider_filter, Some("openai"));
-
-        if include_claude {
-            items.push(AccountPickerItem::action(
-                "claude",
-                "Claude",
-                "Add new account",
-                "Create the next numbered Claude account",
-                AccountPickerCommand::SubmitInput("/account claude add".to_string()),
-            ));
-            let accounts = match crate::auth::claude::list_accounts() {
-                Ok(accounts) => accounts,
-                Err(error) => {
-                    self.push_display_message(DisplayMessage::error(format!(
-                        "Could not load saved Claude accounts: {error}"
-                    )));
-                    return;
-                }
-            };
-            for account in accounts {
-                let label = account.label.clone();
-                items.push(AccountPickerItem::action(
-                    "claude",
-                    "Claude",
-                    format!("Replace account {label}"),
-                    "Refresh this saved Claude account in place",
-                    AccountPickerCommand::SubmitInput(format!("/account claude add {}", label)),
-                ));
+        for (id, name) in [("claude", "Claude"), ("openai", "OpenAI")] {
+            if provider_filter
+                .is_some_and(|filter| filter != id && !(id == "claude" && filter == "anthropic"))
+            {
+                continue;
             }
+            items.push(AccountPickerItem::action(
+                id,
+                name,
+                "Add new account",
+                format!("Sign in to another {name} account. Existing saved accounts are kept."),
+                AccountPickerCommand::SubmitInput(format!("/accounts {id} add")),
+            ));
         }
 
-        if include_openai {
-            items.push(AccountPickerItem::action(
-                "openai",
-                "OpenAI",
-                "Add new account",
-                "Create the next numbered OpenAI account",
-                AccountPickerCommand::SubmitInput("/account openai add".to_string()),
-            ));
-            let accounts = match crate::auth::codex::list_accounts() {
-                Ok(accounts) => accounts,
-                Err(error) => {
-                    self.push_display_message(DisplayMessage::error(format!(
-                        "Could not load saved OpenAI accounts: {error}"
-                    )));
-                    return;
-                }
-            };
-            for account in accounts {
-                let label = account.label.clone();
-                items.push(AccountPickerItem::action(
-                    "openai",
-                    "OpenAI",
-                    format!("Replace account {label}"),
-                    "Refresh this saved OpenAI account in place",
-                    AccountPickerCommand::SubmitInput(format!("/account openai add {}", label)),
-                ));
-            }
-        }
-
-        self.account_picker_overlay = Some(std::cell::RefCell::new(AccountPicker::new(
-            " Add / Replace Account ",
-            items,
-        )));
+        self.account_picker_overlay = Some(std::cell::RefCell::new(
+            AccountPicker::new(" Add account ", items)
+                .with_manager_scope(provider_filter.map(str::to_owned)),
+        ));
         self.inline_interactive_state = None;
         self.input.clear();
         self.cursor_pos = 0;
-        self.set_status_notice("Account center: choose add/replace target");
+        self.set_status_notice("Accounts: choose a provider for the new account");
     }
 }

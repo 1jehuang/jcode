@@ -6,19 +6,17 @@ impl App {
     pub(in super::super) fn save_input_for_reload(&self, session_id: &str) {
         let resume_prompt = self.rate_limit_pending_message.as_ref().filter(|pending| {
             !pending.auto_retry
+                && self.rate_limit_reset.is_none()
                 && !pending.is_system
                 && (!pending.content.trim().is_empty() || !pending.images.is_empty())
         });
-        // A queued follow-up that was dequeued and is currently in flight lives
-        // only in `rate_limit_pending_message` (is_system). Without a scheduled
-        // retry reset, that shape has no dispatch path after a restore (the
-        // tick resend requires `rate_limit_reset`), so persist it back into
-        // the queued/hidden lists instead; the restored queue re-sends it once
-        // the turn is proven idle (issue #391).
+        // Requeue in-flight follow-ups without retry deadlines so reload can dispatch them (#391).
         let inflight_continuation = self.rate_limit_pending_message.as_ref().filter(|pending| {
             pending.is_system
                 && self.rate_limit_reset.is_none()
-                && (!pending.content.trim().is_empty() || pending.system_reminder.is_some())
+                && (!pending.content.trim().is_empty()
+                    || !pending.images.is_empty()
+                    || pending.system_reminder.is_some())
         });
         if self.input.is_empty()
             && self.pending_images.is_empty()
@@ -84,14 +82,21 @@ impl App {
                             "system_reminder": pending.system_reminder,
                             "auto_retry": pending.auto_retry,
                             "retry_attempts": pending.retry_attempts,
+                            "overload_attempts": pending.overload_attempts,
                         })
                     })
                 };
             let mut queued_messages = self.queued_messages.clone();
+            let mut queued_message_images = if queued_messages.is_empty() {
+                Vec::new()
+            } else {
+                self.queued_message_images.clone()
+            };
             let mut hidden_queued_system_messages = self.hidden_queued_system_messages.clone();
             if let Some(pending) = inflight_continuation {
-                if !pending.content.trim().is_empty() {
+                if !pending.content.trim().is_empty() || !pending.images.is_empty() {
                     queued_messages.insert(0, pending.content.clone());
+                    queued_message_images.splice(0..0, pending.images.clone());
                 }
                 if let Some(reminder) = pending.system_reminder.clone() {
                     hidden_queued_system_messages.insert(0, reminder);
@@ -113,11 +118,14 @@ impl App {
                     "media_type": media_type,
                     "data": data,
                 })).collect::<Vec<_>>(),
+                "image_markers": if resume_prompt.is_some() { super::input_images::InputImageMarkers::default() } else { self.input_image_markers.clone() },
                 "submit_on_restore": resume_prompt.is_some(),
                 "queued_messages": queued_messages,
+                "queued_message_images": queued_message_images,
                 "queued_commands": self.queued_commands,
                 "hidden_queued_system_messages": hidden_queued_system_messages,
                 "interleave_message": self.interleave_message,
+                "interleave_images": self.interleave_images,
                 "pending_soft_interrupts": self.pending_soft_interrupts,
                 "pending_soft_interrupt_resend": pending_soft_interrupt_resend,
                 "rate_limit_pending_message": rate_limit_pending_message,

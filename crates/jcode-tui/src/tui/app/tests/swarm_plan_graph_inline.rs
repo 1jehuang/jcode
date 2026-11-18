@@ -532,6 +532,8 @@ fn user_history_message(content: &str) -> crate::protocol::HistoryMessage {
 
 fn history_event_for_session(session_id: &str) -> crate::protocol::ServerEvent {
     crate::protocol::ServerEvent::History {
+messages_base_count: None,
+images_unchanged: false,
         id: 1,
         session_id: session_id.to_string(),
         messages: vec![],
@@ -565,6 +567,7 @@ fn history_event_for_session(session_id: &str) -> crate::protocol::ServerEvent {
         resolved_credential: None,
         reasoning_effort: None,
         service_tier: None,
+        account_labels: Vec::new(),
         available_service_tiers: None,
         compaction_mode: crate::config::CompactionMode::Reactive,
         activity: None,

@@ -23,8 +23,9 @@ use jcode_provider_copilot::{
 };
 use jcode_provider_copilot::{DEFAULT_MODEL, FALLBACK_MODELS};
 pub use jcode_provider_core::PremiumMode;
-use jcode_provider_core::{EventStream, Provider};
+use jcode_provider_core::{EventStream, ModelMetadata, Provider};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -40,11 +41,15 @@ enum CatalogSource {
     Live,
 }
 
+const DEFAULT_MAX_OUTPUT_TOKENS: usize = 32_768;
+const DEFAULT_CONTEXT_WINDOW: usize = 128_000;
+
 /// Copilot API provider - uses GitHub Copilot's OpenAI-compatible API.
 /// Authenticates via GitHub OAuth token, exchanges for Copilot bearer token,
-/// and sends requests to api.githubcopilot.com.
+/// and pins requests to the configured public or enterprise endpoints.
 pub struct CopilotApiProvider {
     client: reqwest::Client,
+    endpoints: copilot_auth::CopilotEndpoints,
     model: Arc<RwLock<String>>,
     github_token: String,
     bearer_token: Arc<tokio::sync::RwLock<Option<copilot_auth::CopilotApiToken>>>,
@@ -59,6 +64,9 @@ pub struct CopilotApiProvider {
     reasoning_effort: Arc<RwLock<Option<String>>>,
     /// Per-model reasoning efforts advertised by the live `/models` catalog.
     model_efforts: Arc<RwLock<std::collections::HashMap<String, Vec<String>>>>,
+    /// Per-model inference endpoints advertised by the live `/models` catalog.
+    model_endpoints: Arc<RwLock<std::collections::HashMap<String, Vec<String>>>>,
+    model_metadata: Arc<RwLock<HashMap<String, ModelMetadata>>>,
     created_at: std::time::Instant,
 }
 
@@ -91,6 +99,7 @@ impl CopilotApiProvider {
         tools: &[ToolDefinition],
         system: &str,
     ) -> Value {
+        let max_output_tokens = self.max_output_tokens_for(model);
         let (mut payload, built_tools) = if responses {
             let mut input = jcode_provider_openai::build_responses_input(messages);
             // Copilot never declares OpenAI's hosted web_search tool.
@@ -98,7 +107,7 @@ impl CopilotApiProvider {
             let mut payload = json!({
                 "model": model,
                 "stream": true,
-                "max_output_tokens": 32_768u32,
+                "max_output_tokens": max_output_tokens,
             });
             payload["input"] = Value::Array(input);
             if !system.is_empty() {
@@ -108,12 +117,22 @@ impl CopilotApiProvider {
         } else {
             let mut payload = json!({ "model": model, "stream": true });
             payload["messages"] = Value::Array(Self::build_messages(system, messages));
-            Self::add_max_token_parameter(&mut payload, model, 32_768u32);
+            Self::add_max_token_parameter(
+                &mut payload,
+                model,
+                u32::try_from(max_output_tokens).unwrap_or(u32::MAX),
+            );
             (payload, Self::build_tools(tools))
         };
         self.add_reasoning_effort_parameter(&mut payload, model, responses);
         if !built_tools.is_empty() {
             payload["tools"] = Value::Array(built_tools);
+            if let Some(supports_parallel) = self
+                .model_metadata(model)
+                .and_then(|metadata| metadata.supports_parallel_tool_calls)
+            {
+                payload["parallel_tool_calls"] = json!(supports_parallel);
+            }
         }
         payload
     }
@@ -134,12 +153,88 @@ impl CopilotApiProvider {
             .clone()
     }
 
+    fn install_model_metadata(&self, metadata: HashMap<String, ModelMetadata>) {
+        *self
+            .model_efforts
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = metadata
+            .iter()
+            .map(|(model, info)| (model.clone(), info.reasoning_efforts.clone()))
+            .collect();
+        *self
+            .model_endpoints
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = metadata
+            .iter()
+            .map(|(model, info)| (model.clone(), info.supported_endpoints.clone()))
+            .collect();
+        *self
+            .model_metadata
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = metadata.clone();
+        jcode_provider_core::register_copilot_model_metadata(metadata);
+        jcode_base::provider::bump_catalog_generation();
+    }
+
+    fn configured_reasoning_effort(&self, model: &str) -> Option<String> {
+        let metadata = self.model_metadata(model)?;
+        let config = jcode_base::config::config();
+        let configured = if model.starts_with("gpt-") {
+            config.provider.openai_reasoning_effort.as_deref()
+        } else if model.starts_with("claude-") {
+            config.provider.anthropic_reasoning_effort.as_deref()
+        } else {
+            None
+        }?;
+        metadata
+            .reasoning_efforts
+            .into_iter()
+            .find(|effort| effort.eq_ignore_ascii_case(configured.trim()))
+    }
+
+    fn reconcile_reasoning_effort(&self, model: &str) {
+        let supported = self.efforts_for(model);
+        let mut effort = self
+            .reasoning_effort
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if effort
+            .as_ref()
+            .is_some_and(|effort| supported.contains(effort))
+        {
+            return;
+        }
+        let configured = self.configured_reasoning_effort(model);
+        if let Some(previous) = effort.as_ref() {
+            jcode_base::logging::info(&format!(
+                "Copilot model '{model}' does not support reasoning effort '{previous}'; selected effort -> {}",
+                configured.as_deref().unwrap_or("unset")
+            ));
+        }
+        *effort = configured;
+    }
+
+    fn max_output_tokens_for(&self, model: &str) -> usize {
+        self.model_metadata(model)
+            .and_then(|metadata| metadata.max_output_tokens)
+            .filter(|limit| *limit > 0)
+            .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)
+    }
+
     fn efforts_for(&self, model: &str) -> Vec<String> {
         let catalog = self
             .model_efforts
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         copilot_model_efforts(&catalog, model)
+    }
+
+    fn uses_responses_api(&self, model: &str) -> bool {
+        let catalog = self
+            .model_endpoints
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        copilot_model_uses_responses_api_with_catalog(&catalog, model)
     }
 
     /// Selected effort, only if the model supports that exact level, so
@@ -162,29 +257,9 @@ impl CopilotApiProvider {
     }
 
     pub fn new() -> Result<Self> {
-        let github_token = copilot_auth::load_github_token()?;
-        let model =
-            std::env::var("JCODE_COPILOT_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
-
-        let provider = Self {
-            client: jcode_provider_core::shared_http_client(),
-            model: Arc::new(RwLock::new(model)),
-            github_token,
-            bearer_token: Arc::new(tokio::sync::RwLock::new(None)),
-            fetched_models: Arc::new(RwLock::new(Vec::new())),
-            catalog_source: Arc::new(RwLock::new(CatalogSource::None)),
-            session_id: Uuid::new_v4().to_string(),
-            machine_id: Self::get_or_create_machine_id(),
-            init_ready: Arc::new(tokio::sync::Notify::new()),
-            init_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            premium_mode: Arc::new(std::sync::atomic::AtomicU8::new(Self::env_premium_mode())),
-            user_turn_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            reasoning_effort: Arc::new(RwLock::new(None)),
-            model_efforts: Arc::new(RwLock::new(Default::default())),
-            created_at: std::time::Instant::now(),
-        };
-        provider.seed_cached_catalog();
-        Ok(provider)
+        let endpoints = copilot_auth::CopilotEndpoints::load()?;
+        let github_token = copilot_auth::load_github_token_with_endpoints(&endpoints)?;
+        Ok(Self::new_with_endpoints(github_token, endpoints))
     }
 
     pub fn has_credentials() -> bool {
@@ -199,12 +274,18 @@ impl CopilotApiProvider {
         }
     }
 
-    pub fn new_with_token(github_token: String) -> Self {
+    pub fn new_with_token(github_token: String) -> Result<Self> {
+        let endpoints = copilot_auth::CopilotEndpoints::load()?;
+        Ok(Self::new_with_endpoints(github_token, endpoints))
+    }
+
+    fn new_with_endpoints(github_token: String, endpoints: copilot_auth::CopilotEndpoints) -> Self {
         let model =
             std::env::var("JCODE_COPILOT_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
 
         let provider = Self {
             client: jcode_provider_core::shared_http_client(),
+            endpoints,
             model: Arc::new(RwLock::new(model)),
             github_token,
             bearer_token: Arc::new(tokio::sync::RwLock::new(None)),
@@ -218,6 +299,8 @@ impl CopilotApiProvider {
             user_turn_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             reasoning_effort: Arc::new(RwLock::new(None)),
             model_efforts: Arc::new(RwLock::new(Default::default())),
+            model_endpoints: Arc::new(RwLock::new(Default::default())),
+            model_metadata: Arc::new(RwLock::new(Default::default())),
             created_at: std::time::Instant::now(),
         };
         provider.seed_cached_catalog();
@@ -316,6 +399,26 @@ impl CopilotApiProvider {
         }
     }
 
+    fn choose_catalog_default(&self, models: &[copilot_auth::CopilotModelInfo]) -> String {
+        let default = copilot_auth::choose_default_model(models);
+        if !self.endpoints.is_enterprise() {
+            return default;
+        }
+        let selected = self.model();
+        if models.iter().any(|model| model.id == selected) {
+            return selected;
+        }
+        if models.iter().any(|model| model.id == default) {
+            return default;
+        }
+        models
+            .iter()
+            .find(|model| model.model_picker_enabled)
+            .or_else(|| models.first())
+            .map(|model| model.id.clone())
+            .unwrap_or(selected)
+    }
+
     /// Detect the user's Copilot tier and set the best default model.
     /// Call this after construction. Fetches a bearer token and queries /models.
     /// JCODE_COPILOT_MODEL pins selection, but does not disable discovery.
@@ -344,7 +447,13 @@ impl CopilotApiProvider {
         };
 
         let fetch_start = std::time::Instant::now();
-        match copilot_auth::fetch_available_models(&self.client, &bearer).await {
+        match copilot_auth::fetch_available_models_with_endpoints(
+            &self.client,
+            &bearer,
+            &self.endpoints,
+        )
+        .await
+        {
             Ok(models) => {
                 let picker_models: Vec<String> = models
                     .iter()
@@ -352,13 +461,17 @@ impl CopilotApiProvider {
                     .map(|m| m.id.clone())
                     .collect();
                 let all_ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
-                if let Ok(mut efforts) = self.model_efforts.write() {
-                    *efforts = models
+                self.install_model_metadata(
+                    models
                         .iter()
-                        .map(|m| (m.id.clone(), m.reasoning_efforts()))
-                        .collect();
-                }
-                let default = copilot_auth::choose_default_model(&models);
+                        .map(|model| (model.id.clone(), model.metadata()))
+                        .collect(),
+                );
+                let default = if model_pinned {
+                    self.model()
+                } else {
+                    self.choose_catalog_default(&models)
+                };
                 jcode_base::logging::info(&format!(
                     "Copilot tier detection: bearer={}ms, fetch_models={}ms, total={}ms, {} total, {} picker-enabled, default -> {}. Picker: [{}]. All: [{}]",
                     bearer_start.elapsed().as_millis(),
@@ -379,6 +492,7 @@ impl CopilotApiProvider {
                 {
                     *m = default;
                 }
+                self.reconcile_reasoning_effort(&self.model());
                 let display_models = if picker_models.is_empty() {
                     all_ids
                 } else {
@@ -390,7 +504,7 @@ impl CopilotApiProvider {
                 if let Ok(mut source) = self.catalog_source.try_write() {
                     *source = CatalogSource::Live;
                 }
-                Self::persist_catalog(
+                self.persist_catalog(
                     &self
                         .fetched_models
                         .try_read()
@@ -413,6 +527,7 @@ impl CopilotApiProvider {
     }
 
     fn mark_init_done(&self) {
+        jcode_base::provider::bump_catalog_generation();
         self.init_done
             .store(true, std::sync::atomic::Ordering::Release);
         self.init_ready.notify_waiters();
@@ -446,8 +561,12 @@ impl CopilotApiProvider {
         }
 
         // Need to refresh
-        let new_token =
-            copilot_auth::exchange_github_token(&self.client, &self.github_token).await?;
+        let new_token = copilot_auth::exchange_github_token_with_endpoints(
+            &self.client,
+            &self.github_token,
+            &self.endpoints,
+        )
+        .await?;
         let token_str = new_token.token.clone();
         *self.bearer_token.write().await = Some(new_token);
         Ok(token_str)
@@ -468,12 +587,21 @@ impl CopilotApiProvider {
         build_copilot_tools(tools)
     }
 
+    fn inference_url(&self, uses_responses_api: bool) -> String {
+        format!(
+            "{}/{}",
+            self.endpoints.api_base,
+            copilot_api_path(uses_responses_api)
+        )
+    }
+
     /// Send a streaming request to Copilot API with retry logic
     async fn stream_request(
         &self,
         body: Value,
         uses_responses_api: bool,
         is_user_initiated: bool,
+        has_images: bool,
         tx: mpsc::Sender<Result<StreamEvent>>,
     ) {
         use jcode_message_types::ConnectionPhase;
@@ -540,12 +668,8 @@ impl CopilotApiProvider {
                 jcode_provider_core::fresh_transport_client()
             };
 
-            let resp = attempt_client
-                .post(format!(
-                    "{}/{}",
-                    copilot_auth::COPILOT_API_BASE,
-                    copilot_api_path(uses_responses_api)
-                ))
+            let mut request = attempt_client
+                .post(self.inference_url(uses_responses_api))
                 .header("Authorization", format!("Bearer {}", bearer_token))
                 .header("Editor-Version", copilot_auth::EDITOR_VERSION)
                 .header("Editor-Plugin-Version", copilot_auth::EDITOR_PLUGIN_VERSION)
@@ -560,10 +684,11 @@ impl CopilotApiProvider {
                 .header("Openai-Organization", "github-copilot")
                 .header("X-GitHub-Api-Version", COPILOT_API_VERSION)
                 .header("Vscode-Sessionid", &self.session_id)
-                .header("Vscode-Machineid", &self.machine_id)
-                .json(&body)
-                .send()
-                .await;
+                .header("Vscode-Machineid", &self.machine_id);
+            if has_images {
+                request = request.header("Copilot-Vision-Request", "true");
+            }
+            let resp = request.json(&body).send().await;
 
             let resp = match resp {
                 Ok(r) => r,
@@ -948,6 +1073,7 @@ mod canonical_payload_tests {
     fn provider() -> CopilotApiProvider {
         CopilotApiProvider {
             client: jcode_provider_core::shared_http_client(),
+            endpoints: copilot_auth::CopilotEndpoints::from_enterprise_url(None).unwrap(),
             model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
             github_token: "test-token".into(),
             bearer_token: Arc::new(tokio::sync::RwLock::new(None)),
@@ -961,6 +1087,8 @@ mod canonical_payload_tests {
             user_turn_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             reasoning_effort: Arc::new(RwLock::new(None)),
             model_efforts: Arc::new(RwLock::new(Default::default())),
+            model_endpoints: Arc::new(RwLock::new(Default::default())),
+            model_metadata: Arc::new(RwLock::new(Default::default())),
             created_at: std::time::Instant::now(),
         }
     }
@@ -1115,5 +1243,52 @@ mod canonical_payload_tests {
     #[test]
     fn chat_canonical_payload_matches_legacy() {
         assert_legacy_equivalence("gpt-4o", false);
+    }
+
+    #[test]
+    fn canonical_payload_preserves_discovered_model_limits_and_tool_capabilities() {
+        let provider = provider();
+        let model = "future-copilot-model-2099";
+        let models: Vec<copilot_auth::CopilotModelInfo> = serde_json::from_value(json!([{
+            "id": model,
+            "supported_endpoints": ["/responses"],
+            "capabilities": {
+                "limits": {"max_output_tokens": 65536},
+                "supports": {"parallel_tool_calls": false}
+            }
+        }]))
+        .unwrap();
+        provider.install_model_metadata(
+            models
+                .iter()
+                .map(|model| (model.id.clone(), model.metadata()))
+                .collect(),
+        );
+        assert!(provider.uses_responses_api(model));
+        let tools = [ToolDefinition::new(
+            "lookup",
+            "Look up a value",
+            json!({"type": "object"}),
+        )];
+        for responses in [false, true] {
+            let payload = provider.canonical_payload(model, responses, &[], &tools, "system");
+            assert_eq!(
+                payload[if responses {
+                    "max_output_tokens"
+                } else {
+                    "max_tokens"
+                }],
+                65536
+            );
+            assert_eq!(payload["parallel_tool_calls"], false);
+            let (input, _, diagnostic_tools) = canonical_diagnostic_parts(&payload, responses);
+            assert_eq!(
+                input,
+                payload[if responses { "input" } else { "messages" }]
+                    .as_array()
+                    .unwrap()
+            );
+            assert!(std::ptr::eq(diagnostic_tools.unwrap(), &payload["tools"]));
+        }
     }
 }

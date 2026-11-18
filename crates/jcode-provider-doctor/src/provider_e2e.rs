@@ -1486,7 +1486,7 @@ impl NativeProviderKind {
                     Ok(runtime) => runtime,
                     Err(_) => jcode_provider_copilot_runtime::CopilotApiProvider::new_with_token(
                         String::new(),
-                    ),
+                    )?,
                 };
                 std::sync::Arc::new(runtime)
             }
@@ -2021,6 +2021,7 @@ fn run_wiring_checks_for_contract(
     let catalog_routes: Vec<ModelRoute> = catalog_models
         .iter()
         .map(|model| ModelRoute {
+            catalog_metadata: None,
             model: model.clone(),
             provider: contract.route_provider.clone(),
             api_method: api_method.clone(),

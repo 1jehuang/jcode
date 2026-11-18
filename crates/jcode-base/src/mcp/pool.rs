@@ -48,6 +48,59 @@ enum ConnectAttempt {
     Wait(Arc<Notify>),
 }
 
+type Connecting = Arc<Mutex<HashMap<String, Arc<Notify>>>>;
+
+/// Servers found to declare `claude/channel`. Their identity is per session
+/// (claude-peers registers one peer per process), so the pool refuses them
+/// and each session runs its own copy.
+static PER_SESSION_SERVERS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Whether `name` was found to be a channel server that must run per session.
+pub fn is_per_session_server(name: &str) -> bool {
+    PER_SESSION_SERVERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(name)
+}
+
+fn per_session_error(name: &str) -> String {
+    format!("MCP server '{name}' is a channel server and runs per session")
+}
+
+/// Clears a leader's `connecting` entry when its future is dropped mid-connect
+/// (e.g. by an outer timeout), so waiters wake and later sessions can retry.
+struct LeaderGuard {
+    connecting: Connecting,
+    name: String,
+    notify: Option<Arc<Notify>>,
+}
+
+impl Drop for LeaderGuard {
+    fn drop(&mut self) {
+        let Some(notify) = self.notify.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let connecting = Arc::clone(&self.connecting);
+        let name = std::mem::take(&mut self.name);
+        runtime.spawn(async move {
+            let mut map = connecting.lock().await;
+            if map
+                .get(&name)
+                .is_some_and(|current| Arc::ptr_eq(current, &notify))
+            {
+                map.remove(&name);
+            }
+            drop(map);
+            notify.notify_waiters();
+        });
+    }
+}
+
 /// Global shared pool of MCP server processes.
 ///
 /// Only one pool exists per jcode daemon. It owns the child processes
@@ -60,7 +113,7 @@ pub struct SharedMcpPool {
     /// stable across reloads because the daemon may serve sessions in many dirs.
     config_dir: Option<std::path::PathBuf>,
     ref_counts: Mutex<HashMap<String, usize>>,
-    connecting: Mutex<HashMap<String, Arc<Notify>>>,
+    connecting: Connecting,
     last_errors: RwLock<HashMap<String, FailedConnectRecord>>,
 }
 
@@ -77,7 +130,7 @@ impl SharedMcpPool {
             config: RwLock::new(config),
             config_dir,
             ref_counts: Mutex::new(HashMap::new()),
-            connecting: Mutex::new(HashMap::new()),
+            connecting: Arc::default(),
             last_errors: RwLock::new(HashMap::new()),
         }
     }
@@ -103,7 +156,7 @@ impl SharedMcpPool {
             }
             // Non-shared servers are owned per-session (with the session cwd)
             // and must never be spawned in the daemon-global pool (issue #557).
-            if !server_config.shared {
+            if !server_config.shared || is_per_session_server(name) {
                 continue;
             }
             let name = name.clone();
@@ -390,6 +443,9 @@ impl SharedMcpPool {
         name: String,
         config: McpServerConfig,
     ) -> std::result::Result<bool, String> {
+        if is_per_session_server(&name) {
+            return Err(per_session_error(&name));
+        }
         if let Some(record) = self.recent_failure(&name).await {
             let retry_after = record
                 .cooldown()
@@ -409,7 +465,18 @@ impl SharedMcpPool {
         match self.begin_connect(&name).await {
             ConnectAttempt::Connected => Ok(false),
             ConnectAttempt::Wait(notify) => {
-                self.wait_for_connect(&name, &notify).await;
+                // Another session leads this handshake; never wait longer than
+                // this server's own request budget for it.
+                let limit = super::client::request_timeout_for(&config);
+                if tokio::time::timeout(limit, self.wait_for_connect(&name, &notify))
+                    .await
+                    .is_err()
+                {
+                    return Err(format!(
+                        "MCP server '{name}' is still connecting after {}s",
+                        limit.as_secs()
+                    ));
+                }
                 if self
                     .handles
                     .read()
@@ -432,12 +499,29 @@ impl SharedMcpPool {
                 }
             }
             ConnectAttempt::Leader(notify) => {
-                let result = McpClient::connect(name.clone(), &config).await;
+                let mut guard = LeaderGuard {
+                    connecting: Arc::clone(&self.connecting),
+                    name: name.clone(),
+                    notify: Some(Arc::clone(&notify)),
+                };
+                let result = match McpClient::connect(name.clone(), &config).await {
+                    Ok(mut client) if client.handle().is_channel_server() => {
+                        client.shutdown().await;
+                        PER_SESSION_SERVERS
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .insert(name.clone());
+                        // Dropping the guard clears `connecting` and wakes waiters.
+                        return Err(per_session_error(&name));
+                    }
+                    other => other,
+                };
                 let outcome = match &result {
                     Ok(_) => Ok(true),
                     Err(error) => Err(format!("{:#}", error)),
                 };
                 self.finish_connect(&name, notify, result).await;
+                guard.notify = None;
                 outcome
             }
         }
@@ -588,6 +672,51 @@ mod tests {
         )
         .await
         .expect("an already-completed attempt must not wait for a lost notification");
+    }
+
+    fn sh_config(script: &str, timeout_secs: u64) -> crate::mcp::protocol::McpServerConfig {
+        serde_json::from_value(serde_json::json!({
+            "command": "/bin/sh", "args": ["-c", script], "timeout_secs": timeout_secs
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn waiter_gives_up_on_a_leader_that_never_finishes() {
+        let pool = SharedMcpPool::new(McpConfig::default());
+        let ConnectAttempt::Leader(_stuck) = pool.begin_connect("stuck").await else {
+            panic!("leader");
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            pool.ensure_connected("stuck".to_string(), sh_config("true", 1)),
+        )
+        .await
+        .expect("a waiter must be bounded by the server's request timeout");
+        assert!(result.unwrap_err().contains("still connecting"));
+    }
+
+    #[tokio::test]
+    async fn dropped_leader_clears_its_connecting_entry() {
+        let pool = SharedMcpPool::new(McpConfig::default());
+        // An outer timeout (connect-on-call) drops the leader mid-handshake.
+        let attempt = pool.ensure_connected("hang".to_string(), sh_config("exec sleep 5", 600));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), attempt)
+                .await
+                .is_err()
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while pool.connecting.lock().await.contains_key("hang") {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a dropped leader must not wedge later sessions");
+        assert!(matches!(
+            pool.begin_connect("hang").await,
+            ConnectAttempt::Leader(_)
+        ));
     }
 
     #[tokio::test]

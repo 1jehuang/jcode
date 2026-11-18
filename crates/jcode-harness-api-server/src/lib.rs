@@ -379,6 +379,7 @@ where
     ));
     let user_connections_supported = daemon_caps.iter().any(|cap| cap == "session_connections");
     let runtime_commands_supported = daemon_caps.iter().any(|cap| cap == "runtime_commands");
+    let rewind_checkpoints_supported = daemon_caps.iter().any(|cap| cap == "rewind_checkpoints");
     let session_tools_supported = daemon_caps.iter().any(|cap| cap == "session_tools");
     let soft_interrupt_ids_supported = daemon_caps.iter().any(|cap| cap == "soft_interrupt_ids");
     let hello_ok = ServerFrame::reply(
@@ -407,6 +408,7 @@ where
             .map(str::to_string)
             .chain(user_connections_supported.then(|| "session_connections".to_string()))
             .chain(runtime_commands_supported.then(|| "runtime_commands".to_string()))
+            .chain(rewind_checkpoints_supported.then(|| "rewind_checkpoints".to_string()))
             .chain(session_tools_supported.then(|| "session_tools".to_string()))
             .chain(
                 ["soft_interrupt_ids", "background_tool_result"]
@@ -715,7 +717,7 @@ mod public_acceptance_tests {
     async fn public_socket_keeps_its_attachment_after_another_sessions_state() {
         let _home_lock = translate::jcode_home_test_lock();
         let root = std::env::temp_dir().join(format!(
-            "jcode-api-attachment-{}-{}",
+            "jc-at-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

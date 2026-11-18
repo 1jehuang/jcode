@@ -97,8 +97,7 @@ fn active_assignment_error(task_id: &str, conflict: &ActiveAssignmentConflict) -
     )
 }
 
-/// A worker turn that ends while its task is still running auto-completes the
-/// task. Anything already terminal or re-queued mid-turn is left alone.
+/// A turn may complete only a task still running under its assignment.
 fn turn_end_should_auto_complete(status: &str) -> bool {
     matches!(status, "running" | "running_stale")
 }
@@ -399,302 +398,9 @@ async fn resolve_assignment_target_for_task(
     select_and_claim_auto_target(swarm_id, &candidates, &affinities.loads)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "task execution restart needs session state, plan state, and event sinks together"
-)]
-fn spawn_assigned_task_run(
-    agent_arc: Arc<Mutex<Agent>>,
-    target_session: String,
-    swarm_id: String,
-    task_id: String,
-    assignment_text: String,
-    swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
-    swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
-    swarm_plans: Arc<RwLock<HashMap<String, VersionedPlan>>>,
-    swarm_coordinators: Arc<RwLock<HashMap<String, String>>>,
-    event_history: Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
-    event_counter: Arc<std::sync::atomic::AtomicU64>,
-    swarm_event_tx: broadcast::Sender<SwarmEvent>,
-) {
-    crate::runtime_activity::spawn(async move {
-        let mut agent = agent_arc.lock().await;
-        let turn_lease = match agent.claim_server_turn() {
-            Ok(lease) => lease,
-            Err(error) => {
-                crate::logging::warn(&format!(
-                    "Assigned task {task_id} could not reserve {target_session}: {error}"
-                ));
-                return;
-            }
-        };
-        let (fallback, _) = mpsc::unbounded_channel();
-        let events = Arc::new(super::state::TurnEventChannel::new(
-            target_session.clone(),
-            Arc::clone(&swarm_members),
-            fallback,
-            &turn_lease,
-        ));
-        {
-            let now_ms = now_unix_ms();
-            let mut plans = swarm_plans.write().await;
-            if let Some(plan) = plans.get_mut(&swarm_id)
-                && let Some(item) = plan.items.iter_mut().find(|item| item.id == task_id)
-            {
-                item.status = "running".to_string();
-                let progress = plan.task_progress.entry(task_id.clone()).or_default();
-                progress.assigned_session_id = Some(target_session.clone());
-                progress.assignment_summary = Some(truncate_detail(&assignment_text, 120));
-                progress.started_at_unix_ms = Some(now_ms);
-                progress.last_heartbeat_unix_ms = Some(now_ms);
-                progress.last_detail = Some(truncate_detail(&assignment_text, 120));
-                progress.last_checkpoint_unix_ms = Some(now_ms);
-                progress.checkpoint_summary = Some("task started".to_string());
-                progress.completed_at_unix_ms = None;
-                progress.stale_since_unix_ms = None;
-                progress.heartbeat_count = Some(progress.heartbeat_count.unwrap_or(0) + 1);
-                progress.checkpoint_count = Some(progress.checkpoint_count.unwrap_or(0) + 1);
-                plan.version += 1;
-            }
-        }
-        let swarm_state = SwarmState {
-            members: Arc::clone(&swarm_members),
-            swarms_by_id: Arc::clone(&swarms_by_id),
-            plans: Arc::clone(&swarm_plans),
-            coordinators: Arc::clone(&swarm_coordinators),
-        };
-        persist_swarm_state_for(&swarm_id, &swarm_state).await;
-        broadcast_swarm_plan(
-            &swarm_id,
-            Some("task_running".to_string()),
-            &swarm_plans,
-            &swarm_members,
-            &swarms_by_id,
-        )
-        .await;
-        set_member_task_label(&target_session, &assignment_text, &swarm_members).await;
-        update_member_status(
-            &target_session,
-            "running",
-            Some(truncate_detail(&assignment_text, 120)),
-            &swarm_members,
-            &swarms_by_id,
-            Some(&event_history),
-            Some(&event_counter),
-            Some(&swarm_event_tx),
-        )
-        .await;
-
-        let (heartbeat_stop_tx, mut heartbeat_stop_rx) = watch::channel(false);
-        let heartbeat_task = {
-            let target_session = target_session.clone();
-            let swarm_id = swarm_id.clone();
-            let task_id = task_id.clone();
-            let swarm_members = Arc::clone(&swarm_members);
-            let swarms_by_id = Arc::clone(&swarms_by_id);
-            let swarm_plans = Arc::clone(&swarm_plans);
-            let swarm_coordinators = Arc::clone(&swarm_coordinators);
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(swarm_task_heartbeat_interval());
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                interval.tick().await;
-                loop {
-                    tokio::select! {
-                        _ = interval.tick() => {
-                            let revived = touch_swarm_task_progress(
-                                &swarm_id,
-                                &task_id,
-                                Some(&target_session),
-                                None,
-                                None,
-                                &swarm_members,
-                                &swarms_by_id,
-                                &swarm_plans,
-                                &swarm_coordinators,
-                            )
-                            .await;
-                            if revived {
-                                broadcast_swarm_plan(
-                                    &swarm_id,
-                                    Some("task_heartbeat".to_string()),
-                                    &swarm_plans,
-                                    &swarm_members,
-                                    &swarms_by_id,
-                                )
-                                .await;
-                            }
-                        }
-                        changed = heartbeat_stop_rx.changed() => {
-                            if changed.is_err() || *heartbeat_stop_rx.borrow() {
-                                break;
-                            }
-                        }
-                    }
-                }
-            })
-        };
-
-        let progress_events = task_progress_event_sender(
-            target_session.clone(),
-            swarm_id.clone(),
-            task_id.clone(),
-            Arc::clone(&swarm_members),
-            Arc::clone(&swarms_by_id),
-            Arc::clone(&swarm_plans),
-            Arc::clone(&swarm_coordinators),
-            Arc::clone(&event_history),
-            Arc::clone(&event_counter),
-            swarm_event_tx.clone(),
-            Arc::clone(&events),
-            turn_lease.publication_pin(),
-        );
-        let event_tx = progress_events.sender();
-        let start_message_index = agent.message_count();
-        let result = super::turn_failover::process_reserved_locked_message_with_server_failover(
-            &mut agent,
-            &turn_lease,
-            &assignment_text,
-            vec![],
-            None,
-            event_tx,
-        )
-        .await;
-        let completion_report = agent.recent_assistant_output_tail_after(start_message_index);
-        // The lease preserves ownership without holding Agent across queue drains.
-        drop(agent);
-        if let Err(error) = heartbeat_stop_tx.send(true) {
-            crate::logging::debug(&format!("Task heartbeat already stopped: {error}"));
-        }
-        if let Err(error) = heartbeat_task.await {
-            crate::logging::warn(&format!("Task heartbeat failed: {error}"));
-        }
-        progress_events.finish().await;
-
-        match result {
-            Ok(_) => {
-                let previous_items = {
-                    let plans = swarm_plans.read().await;
-                    plans
-                        .get(&swarm_id)
-                        .map(|plan| plan.items.clone())
-                        .unwrap_or_default()
-                };
-                let mut auto_completed = false;
-                {
-                    let now_ms = now_unix_ms();
-                    let mut plans = swarm_plans.write().await;
-                    if let Some(plan) = plans.get_mut(&swarm_id)
-                        && let Some(item) = plan.items.iter_mut().find(|item| item.id == task_id)
-                        && turn_end_should_auto_complete(&item.status)
-                    {
-                        auto_completed = true;
-                        item.status = "done".to_string();
-                        let progress = plan.task_progress.entry(task_id.clone()).or_default();
-                        progress.last_heartbeat_unix_ms = Some(now_ms);
-                        progress.last_checkpoint_unix_ms = Some(now_ms);
-                        progress.checkpoint_summary = Some("task completed".to_string());
-                        progress.completed_at_unix_ms = Some(now_ms);
-                        progress.stale_since_unix_ms = None;
-                        progress.checkpoint_count =
-                            Some(progress.checkpoint_count.unwrap_or(0) + 1);
-                        plan.version += 1;
-                    }
-                }
-                let swarm_state = SwarmState {
-                    members: Arc::clone(&swarm_members),
-                    swarms_by_id: Arc::clone(&swarms_by_id),
-                    plans: Arc::clone(&swarm_plans),
-                    coordinators: Arc::clone(&swarm_coordinators),
-                };
-                persist_swarm_state_for(&swarm_id, &swarm_state).await;
-                let plan_reason = if auto_completed {
-                    "task_completed"
-                } else {
-                    "task_turn_ended"
-                };
-                broadcast_swarm_plan_with_previous(
-                    &swarm_id,
-                    Some(plan_reason.to_string()),
-                    Some(&previous_items),
-                    &swarm_plans,
-                    &swarm_members,
-                    &swarms_by_id,
-                )
-                .await;
-                update_member_status_with_report(
-                    &target_session,
-                    "completed",
-                    None,
-                    completion_report,
-                    &swarm_members,
-                    &swarms_by_id,
-                    Some(&event_history),
-                    Some(&event_counter),
-                    Some(&swarm_event_tx),
-                )
-                .await;
-                let _ = events.sender().send(ServerEvent::Done { id: 0 });
-            }
-            Err(error) => {
-                {
-                    let now_ms = now_unix_ms();
-                    let mut plans = swarm_plans.write().await;
-                    if let Some(plan) = plans.get_mut(&swarm_id)
-                        && let Some(item) = plan.items.iter_mut().find(|item| item.id == task_id)
-                    {
-                        item.status = "failed".to_string();
-                        let progress = plan.task_progress.entry(task_id.clone()).or_default();
-                        progress.last_heartbeat_unix_ms = Some(now_ms);
-                        progress.last_checkpoint_unix_ms = Some(now_ms);
-                        progress.checkpoint_summary =
-                            Some(truncate_detail(&format!("task failed: {}", error), 120));
-                        progress.completed_at_unix_ms = Some(now_ms);
-                        progress.stale_since_unix_ms = None;
-                        progress.checkpoint_count =
-                            Some(progress.checkpoint_count.unwrap_or(0) + 1);
-                        plan.version += 1;
-                    }
-                }
-                let swarm_state = SwarmState {
-                    members: Arc::clone(&swarm_members),
-                    swarms_by_id: Arc::clone(&swarms_by_id),
-                    plans: Arc::clone(&swarm_plans),
-                    coordinators: Arc::clone(&swarm_coordinators),
-                };
-                persist_swarm_state_for(&swarm_id, &swarm_state).await;
-                broadcast_swarm_plan(
-                    &swarm_id,
-                    Some("task_failed".to_string()),
-                    &swarm_plans,
-                    &swarm_members,
-                    &swarms_by_id,
-                )
-                .await;
-                update_member_status_with_report(
-                    &target_session,
-                    "failed",
-                    Some(truncate_detail(&error.to_string(), 120)),
-                    completion_report,
-                    &swarm_members,
-                    &swarms_by_id,
-                    Some(&event_history),
-                    Some(&event_counter),
-                    Some(&swarm_event_tx),
-                )
-                .await;
-                let _ = events.sender().send(ServerEvent::Error {
-                    id: 0,
-                    message: crate::util::format_error_chain(&error),
-                    retry_after_secs: None,
-                });
-            }
-        }
-        let events =
-            Arc::try_unwrap(events).unwrap_or_else(|_| unreachable!("progress tap drained"));
-        events.finish().await;
-        drop(turn_lease);
-    });
-}
+#[path = "comm_control_assigned.rs"]
+mod assigned;
+use assigned::spawn_assigned_task_run;
 
 fn format_salvage_message(
     source_session: &str,
@@ -765,6 +471,7 @@ impl Drop for TaskProgressEvents {
     reason = "task progress fanout needs plan state, swarm membership, and event sinks together"
 )]
 fn task_progress_event_sender(
+    durable_publication: Arc<super::swarm::TurnPublication>,
     session_id: String,
     swarm_id: String,
     task_id: String,
@@ -793,62 +500,69 @@ fn task_progress_event_sender(
                 event = rx.recv() => event,
             }
         } {
-            let (detail, checkpoint_summary) = match &event {
-                ServerEvent::StatusDetail { detail } => (Some(detail.clone()), None),
-                ServerEvent::ToolStart { name, .. } => {
-                    let summary = format!("tool start: {name}");
-                    (Some(summary.clone()), Some(summary))
-                }
-                ServerEvent::ToolDone { name, error, .. } => {
-                    let summary = if error.is_some() {
-                        format!("tool error: {name}")
-                    } else {
-                        format!("tool done: {name}")
+            if !durable_publication
+                .publish_start(async {
+                    let (detail, checkpoint_summary) = match &event {
+                        ServerEvent::StatusDetail { detail } => (Some(detail.clone()), None),
+                        ServerEvent::ToolStart { name, .. } => {
+                            let summary = format!("tool start: {name}");
+                            (Some(summary.clone()), Some(summary))
+                        }
+                        ServerEvent::ToolDone { name, error, .. } => {
+                            let summary = if error.is_some() {
+                                format!("tool error: {name}")
+                            } else {
+                                format!("tool done: {name}")
+                            };
+                            (Some(summary.clone()), Some(summary))
+                        }
+                        _ => (None, None),
                     };
-                    (Some(summary.clone()), Some(summary))
-                }
-                _ => (None, None),
-            };
 
-            if detail.is_some() || checkpoint_summary.is_some() {
-                let revived = touch_swarm_task_progress(
-                    &swarm_id,
-                    &task_id,
-                    Some(&session_id),
-                    detail.clone(),
-                    checkpoint_summary,
-                    &swarm_members,
-                    &swarms_by_id,
-                    &swarm_plans,
-                    &swarm_coordinators,
-                )
-                .await;
-                if let Some(detail) = detail {
-                    update_member_status(
-                        &session_id,
-                        "running",
-                        Some(truncate_detail(&detail, 120)),
-                        &swarm_members,
-                        &swarms_by_id,
-                        Some(&event_history),
-                        Some(&event_counter),
-                        Some(&swarm_event_tx),
-                    )
-                    .await;
-                }
-                if revived {
-                    broadcast_swarm_plan(
-                        &swarm_id,
-                        Some("task_heartbeat".to_string()),
-                        &swarm_plans,
-                        &swarm_members,
-                        &swarms_by_id,
-                    )
-                    .await;
-                }
+                    if detail.is_some() || checkpoint_summary.is_some() {
+                        let revived = touch_swarm_task_progress(
+                            &swarm_id,
+                            &task_id,
+                            Some(&session_id),
+                            detail.clone(),
+                            checkpoint_summary,
+                            &swarm_members,
+                            &swarms_by_id,
+                            &swarm_plans,
+                            &swarm_coordinators,
+                        )
+                        .await;
+                        if let Some(detail) = detail {
+                            update_member_status(
+                                &session_id,
+                                "running",
+                                Some(truncate_detail(&detail, 120)),
+                                &swarm_members,
+                                &swarms_by_id,
+                                Some(&event_history),
+                                Some(&event_counter),
+                                Some(&swarm_event_tx),
+                            )
+                            .await;
+                        }
+                        if revived {
+                            broadcast_swarm_plan(
+                                &swarm_id,
+                                Some("task_heartbeat".to_string()),
+                                &swarm_plans,
+                                &swarm_members,
+                                &swarms_by_id,
+                            )
+                            .await;
+                        }
+                    }
+
+                    let _ = output.send(event);
+                })
+                .await
+            {
+                break;
             }
-
-            let _ = output.send(event);
         }
         // Keep the scoped channel alive through the tap drain, including abort.
         drop(events);
@@ -927,6 +641,7 @@ pub(super) async fn handle_comm_assign_role(
             id,
             message: "Only the coordinator can assign roles. (Tip: if the coordinator has disconnected, use assign_role with target_session set to your own session ID to self-promote.)".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     }
@@ -938,6 +653,7 @@ pub(super) async fn handle_comm_assign_role(
                 id,
                 message: "Not in a swarm.".to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -1540,6 +1256,7 @@ pub(super) async fn handle_comm_assign_next(
                 id,
                 message: "No runnable unassigned tasks are available in the swarm plan".to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         };
@@ -1617,6 +1334,7 @@ pub(super) async fn handle_comm_assign_next(
                         id,
                         message: format!("Failed to spawn preferred worker: {error}"),
                         retry_after_secs: None,
+                        server_resumes: false,
                     });
                     return;
                 }
@@ -1655,6 +1373,7 @@ pub(super) async fn handle_comm_assign_next(
                     id,
                     message,
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
             }
         }
@@ -1712,6 +1431,7 @@ pub(super) async fn handle_comm_task_control(
             id,
             message: "Unknown task control action. Use start, wake, resume, retry, reassign, replace, or salvage.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     };
@@ -1801,6 +1521,7 @@ pub(super) async fn handle_comm_task_control(
                     action.as_str()
                 ),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         };
@@ -1811,6 +1532,7 @@ pub(super) async fn handle_comm_task_control(
                     id,
                     message,
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             }
@@ -1824,6 +1546,7 @@ pub(super) async fn handle_comm_task_control(
             id,
             message: format!("Task '{}' not found in swarm plan", task_id),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     };
@@ -1833,6 +1556,7 @@ pub(super) async fn handle_comm_task_control(
             id,
             message: task_control_status_error(action, &snapshot.status, &task_id),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     }
@@ -1856,6 +1580,7 @@ pub(super) async fn handle_comm_task_control(
                 task_id
             ),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     }
@@ -1870,6 +1595,7 @@ pub(super) async fn handle_comm_task_control(
                         task_id
                     ),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             };
@@ -1883,6 +1609,7 @@ pub(super) async fn handle_comm_task_control(
                         task_id, assignee, requested_target
                     ),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             }
@@ -1904,6 +1631,7 @@ pub(super) async fn handle_comm_task_control(
                         assignee
                     ),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             };
@@ -1915,6 +1643,7 @@ pub(super) async fn handle_comm_task_control(
                         assignee
                     ),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             };
@@ -2014,6 +1743,7 @@ pub(super) async fn handle_comm_task_control(
                         assignee
                     ),
                     retry_after_secs: Some(1),
+                    server_resumes: false,
                 });
             }
         }
@@ -2026,6 +1756,7 @@ pub(super) async fn handle_comm_task_control(
                         task_id
                     ),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             };
@@ -2069,6 +1800,7 @@ pub(super) async fn handle_comm_task_control(
                         task_id
                     ),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             };
@@ -2077,6 +1809,7 @@ pub(super) async fn handle_comm_task_control(
                     id,
                     message: format!("'target_session' is required for {}.", action.as_str()),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             };
@@ -2086,6 +1819,7 @@ pub(super) async fn handle_comm_task_control(
                     id,
                     message: format!("Task '{}' is already assigned to '{}'.", task_id, assignee),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             }
@@ -2098,6 +1832,7 @@ pub(super) async fn handle_comm_task_control(
                         task_id, assignee
                     ),
                     retry_after_secs: Some(1),
+                    server_resumes: false,
                 });
                 return;
             }
@@ -2115,6 +1850,7 @@ pub(super) async fn handle_comm_task_control(
                         task_id, snapshot.status
                     ),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             }
@@ -2250,6 +1986,7 @@ pub(super) async fn handle_client_debug_command(
         id,
         message: "ClientDebugCommand is for internal use only".to_string(),
         retry_after_secs: None,
+        server_resumes: false,
     });
 }
 
@@ -2388,6 +2125,7 @@ async fn wake_session_without_plan(
         Ok(session_id) => session_id,
         Err(message) => {
             let _ = client_event_tx.send(ServerEvent::Error {
+                server_resumes: false,
                 id,
                 message,
                 retry_after_secs: None,
@@ -2397,6 +2135,7 @@ async fn wake_session_without_plan(
     };
     if session_id == req_session_id {
         let _ = client_event_tx.send(ServerEvent::Error {
+            server_resumes: false,
             id,
             message: "Coordinator cannot wake itself.".to_string(),
             retry_after_secs: None,
@@ -2408,6 +2147,7 @@ async fn wake_session_without_plan(
         .is_none()
     {
         let _ = client_event_tx.send(ServerEvent::Error {
+            server_resumes: false,
             id,
             message: format!(
                 "Session '{}' has no live agent on the server. Spawn a replacement instead.",
@@ -2486,6 +2226,7 @@ async fn require_plan_driver_swarm(
             id,
             message: "Not in a swarm.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return None;
     };
@@ -2505,6 +2246,7 @@ async fn require_plan_driver_swarm(
         id,
         message: permission_error.to_string(),
         retry_after_secs: None,
+        server_resumes: false,
     });
     None
 }

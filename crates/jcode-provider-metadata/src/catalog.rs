@@ -111,6 +111,19 @@ pub const OPENROUTER_OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiComp
     requires_api_key: true,
 };
 
+/// VSLLM provides an OpenAI-compatible gateway. Discover the account's live
+/// model catalog; availability and supported modalities depend on its access.
+pub const VSLLM_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "vsllm",
+    display_name: "VSLLM",
+    api_base: "https://vsllm.cc/v1",
+    api_key_env: "VSLLM_API_KEY",
+    env_file: "vsllm.env",
+    setup_url: "https://vsllm.cc/",
+    default_model: None,
+    requires_api_key: true,
+};
+
 pub const ORCAROUTER_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "orcarouter",
     display_name: "OrcaRouter",
@@ -498,6 +511,18 @@ pub const YOLO_AUTO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     requires_api_key: true,
 };
 
+// A6 API (https://a6api.com) — OpenAI-compatible marketplace exchange.
+pub const A6API_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "a6api",
+    display_name: "A6 API",
+    api_base: "https://api.a6api.vip/v1",
+    api_key_env: "A6API_KEY",
+    env_file: "a6api.env",
+    setup_url: "https://a6api.com",
+    default_model: Some("gpt-6-astra"),
+    requires_api_key: true,
+};
+
 pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "openai-compatible",
     display_name: "OpenAI-compatible",
@@ -509,7 +534,7 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     requires_api_key: true,
 };
 
-pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 45] = [
+pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 47] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
@@ -523,6 +548,7 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 45] = [
     CONIFER_PROFILE,
     CORTECS_PROFILE,
     OPENROUTER_OPENAI_COMPAT_PROFILE,
+    VSLLM_PROFILE,
     ORCAROUTER_PROFILE,
     ANTHROPIC_OPENAI_COMPAT_PROFILE,
     OPENAI_NATIVE_OPENAI_COMPAT_PROFILE,
@@ -552,6 +578,7 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 45] = [
     CELERIS_PROFILE,
     VENICE_PROFILE,
     YOLO_AUTO_PROFILE,
+    A6API_PROFILE,
     LMSTUDIO_PROFILE,
     OLLAMA_PROFILE,
     OPENAI_COMPAT_PROFILE,
@@ -651,6 +678,19 @@ pub const OPENROUTER_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDesc
     recommended: false,
     target: LoginProviderTarget::OpenRouter,
     order: LoginProviderSurfaceOrder::new(Some(4), Some(3), Some(4), Some(3), Some(3)),
+};
+
+pub const VSLLM_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "vsllm",
+    display_name: "VSLLM",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &["vs-llm", "weiyun"],
+    menu_detail: "VSLLM API key, OpenAI-compatible model gateway",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(VSLLM_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(5), Some(4), Some(6), Some(5), Some(5)),
 };
 
 pub const ORCAROUTER_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
@@ -865,6 +905,19 @@ pub const DEEPSEEK_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescri
     recommended: false,
     target: LoginProviderTarget::OpenAiCompatible(DEEPSEEK_PROFILE),
     order: LoginProviderSurfaceOrder::new(Some(21), Some(21), Some(21), Some(21), Some(21)),
+};
+
+pub const A6API_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "a6api",
+    display_name: "A6 API",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &["a6", "a6 api"],
+    menu_detail: "API key",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(A6API_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(41), Some(41), Some(41), Some(41), Some(41)),
 };
 
 pub const COMTEGRA_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
@@ -1103,6 +1156,22 @@ pub const GROK_BUILD_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDesc
     order: LoginProviderSurfaceOrder::new(Some(100), Some(100), Some(100), Some(100), Some(100)),
 };
 
+/// Claude Code mode runs Claude through the official `claude` CLI, which owns
+/// login and tokens. Separate from `claude` (native jcode OAuth): nothing is
+/// imported into jcode's auth store.
+pub const CLAUDE_CODE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "claude-code",
+    display_name: "Claude Code (CLI)",
+    auth_kind: LoginProviderAuthKind::Cli,
+    auth_state_key: LoginProviderAuthStateKey::ClaudeCode,
+    auth_status_method: "Claude Code CLI login",
+    aliases: &["claude-code-cli", "claude_code"],
+    menu_detail: "Claude subscription through the official Claude Code CLI",
+    recommended: false,
+    target: LoginProviderTarget::ClaudeCode,
+    order: LoginProviderSurfaceOrder::new(Some(101), Some(101), Some(101), Some(101), Some(101)),
+};
+
 pub const NVIDIA_NIM_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "nvidia-nim",
     display_name: "NVIDIA NIM",
@@ -1290,7 +1359,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 57] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 60] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     ANTHROPIC_API_LOGIN_PROVIDER,
@@ -1298,7 +1367,6 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 57] = [
     OPENAI_API_LOGIN_PROVIDER,
     JCODE_LOGIN_PROVIDER,
     OPENROUTER_LOGIN_PROVIDER,
-    ORCAROUTER_LOGIN_PROVIDER,
     BEDROCK_LOGIN_PROVIDER,
     AZURE_LOGIN_PROVIDER,
     OPENCODE_LOGIN_PROVIDER,
@@ -1332,6 +1400,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 57] = [
     MINIMAX_LOGIN_PROVIDER,
     XAI_LOGIN_PROVIDER,
     GROK_BUILD_LOGIN_PROVIDER,
+    CLAUDE_CODE_LOGIN_PROVIDER,
     NVIDIA_NIM_LOGIN_PROVIDER,
     XIAOMI_MIMO_LOGIN_PROVIDER,
     META_MUSE_LOGIN_PROVIDER,
@@ -1339,6 +1408,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 57] = [
     CELERIS_LOGIN_PROVIDER,
     VENICE_LOGIN_PROVIDER,
     YOLO_AUTO_LOGIN_PROVIDER,
+    A6API_LOGIN_PROVIDER,
     LMSTUDIO_LOGIN_PROVIDER,
     OLLAMA_LOGIN_PROVIDER,
     OPENAI_COMPAT_LOGIN_PROVIDER,
@@ -1348,4 +1418,6 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 57] = [
     GEMINI_API_LOGIN_PROVIDER,
     ANTIGRAVITY_LOGIN_PROVIDER,
     GOOGLE_LOGIN_PROVIDER,
+    VSLLM_LOGIN_PROVIDER,
+    ORCAROUTER_LOGIN_PROVIDER,
 ];

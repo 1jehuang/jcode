@@ -223,42 +223,126 @@ fn menubar_enabled_in_config() -> bool {
     crate::config::config().menubar.enabled
 }
 
-/// True when another process of this uid looks like a `jcode menubar` helper
-/// (see [`menubar_helper_pids`]).
+/// True when another process of this uid looks like a `jcode menubar` helper.
 #[cfg(target_os = "macos")]
 fn other_menubar_helper_alive() -> bool {
+    !live_menubar_helper_pids().is_empty()
+}
+
+#[cfg(target_os = "macos")]
+fn live_menubar_helper_pids() -> Vec<u32> {
     let uid = unsafe { libc::getuid() };
     let Ok(output) = std::process::Command::new("/bin/ps")
-        .args(["-U", &uid.to_string(), "-o", "pid=,args="])
+        .args(["-U", &uid.to_string(), "-o", "pid="])
         .stderr(std::process::Stdio::null())
         .output()
     else {
-        return false;
+        return Vec::new();
     };
-    let listing = String::from_utf8_lossy(&output.stdout);
-    !menubar_helper_pids(&listing, std::process::id()).is_empty()
+    if !output.status.success() {
+        return Vec::new();
+    }
+    menubar_helper_pids(
+        &String::from_utf8_lossy(&output.stdout),
+        std::process::id(),
+        process_args,
+    )
 }
 
-/// Parse `ps -o pid=,args=` output and return pids whose argv is exactly
-/// `<.../jcode*> menubar`, excluding `self_pid`.
+/// Read macOS's NUL-delimited executable and argv record, not ps's lossy text.
+#[cfg(target_os = "macos")]
+fn process_args(pid: u32) -> Option<Vec<u8>> {
+    let pid = i32::try_from(pid).ok()?;
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let mut size = 0;
+    // SAFETY: the MIB and length pointers are valid and no data is written yet.
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return None;
+    }
+    let mut bytes = vec![0u8; size];
+    // SAFETY: bytes has size writable bytes, and sysctl updates size to the used length.
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            bytes.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return None;
+    }
+    if size > bytes.len() {
+        return None;
+    }
+    bytes.truncate(size);
+    Some(bytes)
+}
+
+/// Enumerate only uid-scoped PIDs and inspect each candidate's preserved argv.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn menubar_helper_pids(ps_output: &str, self_pid: u32) -> Vec<u32> {
+fn menubar_helper_pids(
+    ps_output: &str,
+    self_pid: u32,
+    mut read_args: impl FnMut(u32) -> Option<Vec<u8>>,
+) -> Vec<u32> {
     ps_output
         .lines()
         .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            let Ok(pid) = parts.next()?.parse::<u32>() else {
-                return None;
-            };
-            let exe = parts.next()?;
-            let arg = parts.next()?;
-            if parts.next().is_some() || arg != "menubar" || pid == self_pid {
+            let pid = line.trim().parse::<u32>().ok()?;
+            if pid == self_pid || pid == 0 {
                 return None;
             }
-            let name = std::path::Path::new(exe).file_name()?.to_str()?;
-            name.starts_with("jcode").then_some(pid)
+            is_menubar_process_args(&read_args(pid)?).then_some(pid)
         })
         .collect()
+}
+
+/// KERN_PROCARGS2 starts with native argc, an executable path, padding, then
+/// NUL-terminated argv and environment. Only exactly two argv entries qualify.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn is_menubar_process_args(bytes: &[u8]) -> bool {
+    let Some(argc) = bytes
+        .get(..4)
+        .and_then(|value| value.try_into().ok())
+        .map(i32::from_ne_bytes)
+    else {
+        return false;
+    };
+    if argc != 2 {
+        return false;
+    }
+    let mut rest = &bytes[4..];
+    let Some(exe_end) = rest.iter().position(|&byte| byte == 0) else {
+        return false;
+    };
+    let exe = &rest[..exe_end];
+    let name = exe.rsplit(|&byte| byte == b'/').next().unwrap_or_default();
+    if !name.starts_with(b"jcode") {
+        return false;
+    }
+    rest = &rest[exe_end..];
+    rest = &rest[rest.iter().take_while(|&&byte| byte == 0).count()..];
+    let Some(argv0_end) = rest.iter().position(|&byte| byte == 0) else {
+        return false;
+    };
+    rest = &rest[argv0_end + 1..];
+    let Some(arg_end) = rest.iter().position(|&byte| byte == 0) else {
+        return false;
+    };
+    &rest[..arg_end] == b"menubar"
 }
 
 /// Resolve the directory holding the *global* (per-OS-user) menu bar singleton

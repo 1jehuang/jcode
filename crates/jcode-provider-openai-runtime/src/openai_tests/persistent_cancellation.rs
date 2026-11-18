@@ -152,8 +152,7 @@ async fn persistent_cancellation_keepalive_abort_invalidates_before_handoff() {
 async fn persistent_cancellation_waiting_lock_preserves_current_owner() {
     let _env_lock = jcode_base::storage::lock_test_env();
     let (state, server) = test_persistent_ws_state().await;
-    let provider = OpenAIProvider::new(prewarm_test_credentials());
-    *provider.credentials.write().await = prewarm_test_credentials();
+    let provider = prewarm_test_provider().await;
     provider.set_model("gpt-5.6-sol").unwrap();
     provider.set_transport("websocket").unwrap();
     jcode_base::provider::populate_account_models_for_scope(
@@ -376,14 +375,9 @@ async fn persistent_cancellation_public_drop_releases_chain_and_reconnects() {
     let (ws_stream, _) = connect_ws(format!("ws://{addr}/v1/responses"))
         .await
         .unwrap();
-    let provider = OpenAIProvider::new(prewarm_test_credentials());
-    *provider.credentials.write().await = prewarm_test_credentials();
+    let provider = prewarm_test_provider().await;
     provider.set_model("gpt-5.6-sol").unwrap();
     provider.set_transport("websocket").unwrap();
-    jcode_base::provider::populate_account_models_for_scope(
-        &provider.catalog_scope(),
-        vec!["gpt-5.6-sol".to_string()],
-    );
     *provider.persistent_ws.lock().await = Some(PersistentWsState {
         ws_stream,
         identity: openai_websocket_prewarm::prewarm_identity(

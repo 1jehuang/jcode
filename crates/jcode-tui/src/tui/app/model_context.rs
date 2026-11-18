@@ -89,6 +89,13 @@ impl App {
         &mut self,
         prompt: &crate::provider::ProviderFailoverPrompt,
     ) -> anyhow::Result<String> {
+        // Out-of-credit failover between OpenAI-compatible profiles offers an
+        // exact sibling model spec (`<profile>:<model>`) serving the same model.
+        if Self::is_profile_failover_prompt(prompt) {
+            self.provider.set_model(&prompt.to_provider)?;
+            let active_model = self.provider.model();
+            return Ok(self.finalize_model_switch(&active_model));
+        }
         // Pool edits during the countdown apply to both ends. Derive the
         // source from the live provider, never stale prompt/session metadata.
         let provider = self.provider.name().to_ascii_lowercase();
@@ -103,11 +110,22 @@ impl App {
         let credential = self.provider.active_resolved_credential();
         let source_key = match (provider, credential) {
             ("claude" | "openai", Some(jcode_provider_core::ResolvedCredential::Oauth)) => {
-                let label = self.provider.oauth_account_label().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Source account identity is unknown. Use /model to switch manually."
-                    )
-                })?;
+                // An explicit saved-account route, else the account this
+                // window resolved to (its pin or the default login).
+                let kind = if provider == "openai" {
+                    crate::provider::AccountProviderKind::OpenAi
+                } else {
+                    crate::provider::AccountProviderKind::Claude
+                };
+                let label = self
+                    .provider
+                    .oauth_account_label()
+                    .or_else(|| self.provider.resolved_account_label(kind))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Source account identity is unknown. Use /model to switch manually."
+                        )
+                    })?;
                 let exists = if provider == "openai" {
                     crate::auth::codex::list_accounts()
                         .unwrap_or_default()
@@ -164,6 +182,15 @@ impl App {
         );
         self.provider.set_model(route)?;
         Ok(self.finalize_model_switch(route))
+    }
+
+    /// Out-of-credit failover between OpenAI-compatible profiles names an
+    /// exact `<profile>:<model>` target; built-in provider and saved-account
+    /// prompts name a provider and carry a pool-approved `target_route`.
+    pub(super) fn is_profile_failover_prompt(
+        prompt: &crate::provider::ProviderFailoverPrompt,
+    ) -> bool {
+        prompt.to_provider.contains(':')
     }
 
     /// Diagnostic metadata only. Never include prompts, reminders, credentials,
@@ -268,75 +295,6 @@ impl App {
         reason: &str,
     ) {
         crate::logging::event(level, event, self.recovery_log_fields(reason));
-    }
-
-    pub(super) fn restore_failover_payload(&mut self, payload: super::FallbackResendPayload) {
-        self.log_recovery_event(
-            crate::logging::LogLevel::Info,
-            "RECOVERY_DRAFT_RESTORE",
-            "held_payload",
-        );
-        let restored = payload.raw_input.unwrap_or(payload.content);
-        let image_indices: Vec<Option<usize>> = payload
-            .images
-            .into_iter()
-            .map(|image| {
-                if image.0.is_empty() || image.1.is_empty() {
-                    return None;
-                }
-                let index = self
-                    .pending_images
-                    .iter()
-                    .position(|existing| existing == &image)
-                    .unwrap_or_else(|| {
-                        self.pending_images.push(image);
-                        self.pending_images.len() - 1
-                    });
-                Some(index + 1)
-            })
-            .collect();
-        if self.input.is_empty() {
-            // The composer may already have attachment slots. Remap markers
-            // in the recovered prompt once, so swaps and collisions cannot
-            // associate its text with a different image.
-            static IMAGE_MARKER: std::sync::LazyLock<Result<regex::Regex, regex::Error>> =
-                std::sync::LazyLock::new(|| regex::Regex::new(r"\[image (\d+)\]"));
-            self.input = if let Ok(marker) = &*IMAGE_MARKER {
-                marker
-                    .replace_all(&restored, |captures: &regex::Captures<'_>| {
-                        captures[1]
-                            .parse::<usize>()
-                            .ok()
-                            .and_then(|number| number.checked_sub(1))
-                            .and_then(|index| image_indices.get(index).copied().flatten())
-                            .map(|index| format!("[image {index}]"))
-                            .unwrap_or_else(|| captures[0].to_string())
-                    })
-                    .into_owned()
-            } else {
-                restored.clone()
-            };
-            self.cursor_pos = self.input.len();
-        } else if !restored.is_empty() && self.input != restored {
-            // Do not turn a partially typed command or prompt into a different
-            // request. Keep the held request recoverable in the transcript.
-            self.push_display_message(DisplayMessage::system(format!(
-                "Failover request was not resent. Your draft text is preserved. Recover the previous request from here:\n\n{restored}"
-            )));
-        }
-        // Attachment synchronization intentionally drops payloads without a
-        // marker. Keep recovered images attached even for image-only prompts
-        // or when a newer draft was already present.
-        for index in image_indices.into_iter().flatten() {
-            let marker = format!("[image {index}]");
-            if !self.input.contains(&marker) {
-                if !self.input.is_empty() && !self.input.ends_with(char::is_whitespace) {
-                    self.input.push(' ');
-                }
-                self.input.push_str(&marker);
-                self.cursor_pos = self.input.len();
-            }
-        }
     }
 
     pub(super) fn cancel_pending_provider_failover(&mut self, notice: impl Into<String>) {
@@ -499,6 +457,21 @@ impl App {
         self.pending_provider_failover = None;
         self.remove_failover_countdown_message(&pending.prompt.to_label);
         if self.is_remote {
+            if Self::is_profile_failover_prompt(&pending.prompt) {
+                // The remote tick loop sends the switch to the server; the
+                // failed turn is resent once the server confirms it.
+                self.pending_model_switch = Some(pending.prompt.to_provider.clone());
+                self.pending_fallback_resend = pending.remote_resend.clone();
+                self.push_display_message(DisplayMessage::system(format!(
+                    "Switching {} → {}. Retrying once the server confirms.",
+                    pending.prompt.from_label, pending.prompt.to_label,
+                )));
+                self.set_status_notice(format!(
+                    "Provider → {} (retrying)",
+                    pending.prompt.to_label
+                ));
+                return true;
+            }
             let selection = pending.prompt.target_route.as_deref().and_then(|target| {
                 self.fallback_candidate_routes()
                     .iter()
@@ -596,7 +569,7 @@ impl App {
     /// failed route and to recognize same-model/different-method alternatives.
     pub(super) fn current_route_api_method(&self) -> Option<String> {
         // Session route metadata records a past selection, not necessarily the
-        // credential now in use (e.g. after /account or a remote route switch).
+        // credential now in use (e.g. after /accounts or a remote route switch).
         // Prefer the same authoritative credential that drives billing identity
         // so we never offer the active route as its own fallback.
         let provider =
@@ -978,23 +951,10 @@ impl App {
         } else {
             self.provider.reasoning_effort()
         };
-        let current_index = current
-            .as_ref()
-            .and_then(|c| efforts.iter().position(|e| *e == c.as_str()))
-            .unwrap_or(efforts.len() - 1); // default to last (highest)
-
+        let next_index =
+            super::helpers::cycled_effort_index(&efforts, current.as_deref(), direction)
+                .expect("nonempty effort ladder");
         let len = efforts.len();
-        let next_index = if direction > 0 {
-            if current_index + 1 >= len {
-                current_index // already at max
-            } else {
-                current_index + 1
-            }
-        } else if current_index == 0 {
-            0 // already at min
-        } else {
-            current_index - 1
-        };
 
         let next_effort = efforts[next_index];
         if Some(next_effort.to_string()) == current {
@@ -1101,7 +1061,7 @@ impl App {
         {
             let compaction = self.registry.compaction();
             if let Ok(mut manager) = compaction.try_write() {
-                manager.set_budget(limit);
+                manager.set_budget(self.prompt_budget_for_context_limit(limit));
             };
         }
     }
@@ -1118,8 +1078,28 @@ impl App {
         self.context_warning_shown = false;
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
-            manager.set_budget(limit);
+            manager.set_budget(self.prompt_budget_for_context_limit(limit));
         };
+    }
+
+    fn prompt_budget_for_context_limit(&self, limit: usize) -> usize {
+        let metadata = if self.is_remote {
+            if jcode_provider_core::provider_key_from_hint(self.remote_provider_name.as_deref())
+                != Some("copilot")
+            {
+                return limit;
+            }
+            self.remote_provider_model
+                .as_deref()
+                .and_then(jcode_provider_core::copilot_model_metadata)
+        } else {
+            self.provider.model_metadata(&self.provider.model())
+        };
+        metadata
+            .and_then(|metadata| metadata.max_input_tokens)
+            .filter(|budget| *budget > 0)
+            .unwrap_or(limit)
+            .min(limit)
     }
 
     pub(super) fn effective_context_tokens_from_usage(
@@ -1228,61 +1208,27 @@ impl App {
         };
     }
 
-    /// Recover the complete user payload before a terminal retry path clears it.
-    /// Restoring only `last_submitted_input` loses consumed image attachments.
-    pub(super) fn restore_terminal_remote_retry_input(&mut self) {
-        self.log_recovery_event(
-            crate::logging::LogLevel::Warn,
-            "RECOVERY_RETRY_RESTORE",
-            "terminal_retry_stop",
-        );
-        if let Some(pending) = self
-            .rate_limit_pending_message
-            .take_if(|pending| !pending.is_system)
-        {
-            let raw_input = self.last_submitted_input.take();
-            self.restore_failover_payload(super::FallbackResendPayload {
-                content: pending.content,
-                images: pending.images,
-                is_system: pending.is_system,
-                system_reminder: pending.system_reminder,
-                auto_retry: pending.auto_retry,
-                retry_attempts: pending.retry_attempts,
-                raw_input,
-            });
-            self.reset_tab_completion();
-            self.sync_model_picker_preview_from_input();
-        } else {
-            self.restore_failed_input_to_box();
-        }
-    }
-
-    /// Put the prompt that started the failed turn back into the input box so the
-    /// user does not lose what they typed when a turn errors out (for example a
-    /// "token refresh needed" / auth error). Only restores when the input box is
-    /// empty, so we never clobber text the user has already started typing.
-    pub(super) fn restore_failed_input_to_box(&mut self) {
-        let Some(prompt) = self.last_submitted_input.take() else {
-            return;
-        };
-        if prompt.trim().is_empty() {
-            return;
-        }
-        if !self.input.is_empty() {
-            // User already started a new prompt; do not overwrite it.
-            return;
-        }
-        self.input = prompt;
-        self.cursor_pos = self.input.len();
-        self.reset_tab_completion();
-        self.sync_model_picker_preview_from_input();
-        self.set_status_notice("Prompt restored to input after error");
-    }
-
     pub(super) fn handle_turn_error(&mut self, error: impl Into<String>) {
         let error = error.into();
         self.refresh_openai_usage_after_quota_error(&error);
         self.last_stream_error = Some(error.clone());
+        if error.starts_with(crate::agent::Agent::MALFORMED_TOOL_CALL_ERROR_PREFIX) {
+            // The agent already used its schema-guided recovery attempts.
+            // Auto-poke must not start a new turn and reset that circuit breaker.
+            super::commands::disable_auto_poke(self);
+            self.overnight_auto_poke = None;
+            self.clear_pending_remote_retry();
+            self.restore_failed_input_to_box();
+            self.push_display_message(DisplayMessage::error(error));
+            self.set_status_notice("Paused: invalid tool arguments");
+            return;
+        }
+
+        // A usage limit with a known reset is a pause: hold the turn and run
+        // it again after the reset (local mode).
+        if self.hold_local_turn_for_usage_limit(&error) {
+            return;
+        }
 
         if let Some(prompt) = crate::provider::parse_failover_prompt_message(&error) {
             self.handle_provider_failover_prompt(prompt);
@@ -1496,6 +1442,7 @@ impl App {
         match retry_result {
             Ok(()) => {
                 self.last_stream_error = None;
+                self.local_usage_limit_resume_attempts = 0;
                 true
             }
             Err(e) => {
@@ -1944,27 +1891,3 @@ impl App {
 #[path = "model_context_messages.rs"]
 mod messages;
 pub(super) use messages::*;
-
-/// Match `/usage <provider>` queries against report names such as
-/// "Anthropic (Claude)" or "OpenAI (ChatGPT)", accepting common aliases.
-pub(super) fn usage_provider_matches(provider_name: &str, query: &str) -> bool {
-    let normalize = |text: &str| -> String {
-        text.chars()
-            .filter(|ch| ch.is_alphanumeric())
-            .flat_map(char::to_lowercase)
-            .collect()
-    };
-    let name = normalize(provider_name);
-    let query = normalize(query);
-    if query.is_empty() {
-        return true;
-    }
-    let alias = match query.as_str() {
-        "claude" | "anthropic" => "anthropic",
-        "openai" | "chatgpt" | "codex" | "gpt" => "openai",
-        "gemini" | "google" => "gemini",
-        "copilot" | "github" => "copilot",
-        _ => query.as_str(),
-    };
-    name.contains(&query) || name.contains(alias)
-}

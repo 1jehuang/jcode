@@ -1,7 +1,5 @@
-use super::*;
-
 pub(crate) fn is_chatgpt_web_model(model: &str) -> bool {
-    model.trim() == CHATGPT_WEB_MODEL
+    jcode_provider_core::is_chatgpt_web_model(model)
 }
 
 pub(super) fn model_supports_image_generation(model_id: &str) -> bool {

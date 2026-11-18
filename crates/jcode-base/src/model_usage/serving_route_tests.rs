@@ -109,6 +109,7 @@ fn row(model: &str, provider: &str, method: &str) -> ModelRoute {
         detail: "preserve row metadata".into(),
         cheapness: None,
         usage: None,
+        catalog_metadata: None,
     }
 }
 fn probe() -> Probe {

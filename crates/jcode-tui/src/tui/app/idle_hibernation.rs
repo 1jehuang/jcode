@@ -446,7 +446,7 @@ mod tests {
         assert_eq!(app.pasted_contents, ["expanded paste"]);
         app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
         assert!(app.hibernation_frame().is_none());
-        assert_eq!(app.input, "draft");
+        assert_eq!(app.input, "draft [image 1]");
         assert_eq!(app.cursor_pos, 3);
         assert_eq!(app.scroll_offset, 17);
         assert!(app.hibernation_notice().is_none());
@@ -505,7 +505,9 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(screen.contains("Hibernated"));
-        assert!(screen.contains("private mem"));
+        if private_memory_bytes().is_some() {
+            assert!(screen.contains("private mem"));
+        }
         let snapshot = app.hibernation_frame().unwrap().clone();
         app.enter_idle_hibernation(Some(&Buffer::empty(Rect::new(0, 0, 5, 5))));
         assert_eq!(app.hibernation_frame().unwrap(), &snapshot);

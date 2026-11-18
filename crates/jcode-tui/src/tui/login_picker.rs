@@ -693,7 +693,7 @@ fn claude_account_lines() -> Vec<Line<'static>> {
         )]));
         lines.push(Line::from(vec![
             Span::styled("Add more later with ", Style::default().fg(MUTED_DARK)),
-            Span::styled("/account claude add", Style::default().fg(Color::White)),
+            Span::styled("/accounts claude add", Style::default().fg(Color::White)),
         ]));
         return lines;
     }
@@ -746,7 +746,7 @@ fn claude_account_lines() -> Vec<Line<'static>> {
 
     lines.push(Line::from(vec![
         Span::styled("Manage with ", Style::default().fg(MUTED_DARK)),
-        Span::styled("/account claude", Style::default().fg(Color::White)),
+        Span::styled("/accounts claude", Style::default().fg(Color::White)),
     ]));
     lines
 }
@@ -768,7 +768,7 @@ fn openai_account_lines() -> Vec<Line<'static>> {
         )]));
         lines.push(Line::from(vec![
             Span::styled("Add more later with ", Style::default().fg(MUTED_DARK)),
-            Span::styled("/account openai add", Style::default().fg(Color::White)),
+            Span::styled("/accounts openai add", Style::default().fg(Color::White)),
         ]));
         return lines;
     }
@@ -821,7 +821,7 @@ fn openai_account_lines() -> Vec<Line<'static>> {
 
     lines.push(Line::from(vec![
         Span::styled("Manage with ", Style::default().fg(MUTED_DARK)),
-        Span::styled("/account openai", Style::default().fg(Color::White)),
+        Span::styled("/accounts openai", Style::default().fg(Color::White)),
     ]));
     lines
 }

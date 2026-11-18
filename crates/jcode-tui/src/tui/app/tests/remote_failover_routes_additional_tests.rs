@@ -116,6 +116,7 @@ fn test_remote_account_failover_prompt_does_not_hold_or_retry_same_account() {
         auto_retry: true,
         retry_attempts: 0,
         retry_at: None,
+        overload_attempts: 0,
     });
     app.last_submitted_input = Some("hi".to_string());
     app.is_processing = true;
@@ -136,6 +137,7 @@ fn test_remote_account_failover_prompt_does_not_hold_or_retry_same_account() {
             id: 21,
             message: prompt.to_error_message(),
             retry_after_secs: Some(60),
+            server_resumes: false,
         },
         &mut remote,
     );

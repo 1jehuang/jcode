@@ -60,6 +60,7 @@ impl JcodeProvider {
     fn model_routes_for(tier: crate::subscription_catalog::JcodeTier) -> Vec<ModelRoute> {
         Self::entitled_models_for(tier)
             .map(|model| ModelRoute {
+                catalog_metadata: None,
                 model: model.id.to_string(),
                 provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
                 api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
@@ -227,6 +228,10 @@ impl Provider for JcodeProvider {
         self.inner.handles_tools_internally()
     }
 
+    fn uses_own_system_prompt(&self) -> bool {
+        self.inner.uses_own_system_prompt()
+    }
+
     async fn invalidate_credentials(&self) {
         self.inner.invalidate_credentials().await;
     }
@@ -276,6 +281,18 @@ impl Provider for JcodeProvider {
 
     fn native_result_sender(&self) -> Option<NativeToolResultSender> {
         self.inner.native_result_sender()
+    }
+
+    async fn reset_conversation_state(&self) -> Result<()> {
+        self.inner.reset_conversation_state().await
+    }
+
+    fn set_host_tool_executor_available(&self, available: bool) {
+        self.inner.set_host_tool_executor_available(available);
+    }
+
+    fn bind_session(&self, session_id: &str) {
+        self.inner.bind_session(session_id)
     }
 
     fn drain_startup_notices(&self) -> Vec<String> {

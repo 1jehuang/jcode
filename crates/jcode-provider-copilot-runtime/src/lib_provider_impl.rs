@@ -11,6 +11,18 @@ impl Provider for CopilotApiProvider {
     ) -> Result<EventStream> {
         self.wait_for_init().await;
 
+        let model = self.model();
+        if let Some(metadata) = self.model_metadata(&model) {
+            anyhow::ensure!(
+                metadata.supports_streaming != Some(false),
+                "Copilot model '{model}' does not support streaming."
+            );
+            anyhow::ensure!(
+                tools.is_empty() || metadata.supports_tool_calls != Some(false),
+                "Copilot model '{model}' does not support tool calls."
+            );
+        }
+
         self.get_bearer_token().await.map_err(|e| {
             jcode_base::logging::warn(&format!(
                 "Copilot bearer token acquisition failed (will trigger fallback): {}",
@@ -20,12 +32,18 @@ impl Provider for CopilotApiProvider {
         })?;
 
         let is_user_initiated = self.is_user_initiated(messages);
+        let has_images = messages.iter().any(|message| {
+            message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Image { .. }))
+        });
         if is_user_initiated {
             self.user_turn_count
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let model_for_fingerprint = self.model();
-        let uses_responses_api = copilot_model_uses_responses_api(&model_for_fingerprint);
+        let uses_responses_api = self.uses_responses_api(&model_for_fingerprint);
         let canonical_payload = self.canonical_payload(
             &model_for_fingerprint,
             uses_responses_api,
@@ -55,6 +73,7 @@ impl Provider for CopilotApiProvider {
 
         let provider = CopilotApiProvider {
             client: self.client.clone(),
+            endpoints: self.endpoints.clone(),
             model: self.model.clone(),
             github_token: self.github_token.clone(),
             bearer_token: self.bearer_token.clone(),
@@ -68,12 +87,20 @@ impl Provider for CopilotApiProvider {
             user_turn_count: self.user_turn_count.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
             model_efforts: self.model_efforts.clone(),
+            model_endpoints: self.model_endpoints.clone(),
+            model_metadata: self.model_metadata.clone(),
             created_at: self.created_at,
         };
 
         tokio::spawn(async move {
             provider
-                .stream_request(canonical_payload, uses_responses_api, is_user_initiated, tx)
+                .stream_request(
+                    canonical_payload,
+                    uses_responses_api,
+                    is_user_initiated,
+                    has_images,
+                    tx,
+                )
                 .await;
         });
 
@@ -105,6 +132,7 @@ impl Provider for CopilotApiProvider {
         }
         if let Ok(mut current) = self.model.try_write() {
             *current = trimmed.to_string();
+            self.reconcile_reasoning_effort(trimmed);
             Ok(())
         } else {
             Err(anyhow::anyhow!(
@@ -181,13 +209,36 @@ impl Provider for CopilotApiProvider {
     }
 
     fn context_window(&self) -> usize {
+        if let Some(limit) = self
+            .model_metadata(&self.model())
+            .and_then(|metadata| metadata.context_window)
+            .filter(|limit| *limit > 0)
+        {
+            return limit;
+        }
         jcode_provider_core::context_limit_for_model_with_provider(&self.model(), Some(self.name()))
-            .unwrap_or(128_000)
+            .unwrap_or(DEFAULT_CONTEXT_WINDOW)
+    }
+
+    fn model_metadata(&self, model: &str) -> Option<ModelMetadata> {
+        let model = jcode_provider_core::strip_own_model_prefix(model, "copilot:");
+        self.model_metadata
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(model)
+            .cloned()
+    }
+
+    fn supports_image_input(&self) -> bool {
+        self.model_metadata(&self.model())
+            .and_then(|metadata| metadata.supports_image_input)
+            .unwrap_or(false)
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(CopilotApiProvider {
             client: self.client.clone(),
+            endpoints: self.endpoints.clone(),
             model: Arc::new(RwLock::new(self.model())),
             github_token: self.github_token.clone(),
             bearer_token: self.bearer_token.clone(),
@@ -199,8 +250,10 @@ impl Provider for CopilotApiProvider {
             init_done: self.init_done.clone(),
             premium_mode: self.premium_mode.clone(),
             user_turn_count: self.user_turn_count.clone(),
-            reasoning_effort: self.reasoning_effort.clone(),
+            reasoning_effort: Arc::new(RwLock::new(self.current_reasoning_effort())),
             model_efforts: self.model_efforts.clone(),
+            model_endpoints: self.model_endpoints.clone(),
+            model_metadata: self.model_metadata.clone(),
             created_at: self.created_at,
         })
     }
@@ -219,28 +272,31 @@ impl Provider for CopilotApiProvider {
             );
         }
         let normalized = effort.trim().to_lowercase();
-        if !supported.contains(&normalized) {
+        let Some(selected) = supported
+            .iter()
+            .find(|level| level.eq_ignore_ascii_case(&normalized))
+        else {
             anyhow::bail!(
                 "Unsupported reasoning effort '{}' for Copilot model '{}'. Supported: {}",
                 effort,
                 model,
                 supported.join(", ")
             );
-        }
+        };
         let mut guard = self
             .reasoning_effort
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *guard = Some(normalized);
+        *guard = Some(selected.clone());
         Ok(())
     }
 
     fn available_efforts(&self) -> Vec<&'static str> {
         const KNOWN: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
         let supported = self.efforts_for(&self.model());
-        KNOWN
-            .into_iter()
-            .filter(|e| supported.iter().any(|s| s == e))
+        supported
+            .iter()
+            .filter_map(|level| KNOWN.into_iter().find(|known| level == known))
             .collect()
     }
 }

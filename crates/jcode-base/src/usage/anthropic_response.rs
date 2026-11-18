@@ -59,14 +59,13 @@ pub(super) fn credential_error(error: anyhow::Error) -> anyhow::Error {
 /// never bypass a usage lookup's 429/Retry-After deadline.
 pub(crate) fn invalidate_auth_failure(label: &str) {
     let key = format!("label:{label}");
+    let prefix = format!("{key}:");
     disk_cache::clear_auth_failure(&key);
-    if let Ok(mut cache) = cache::anthropic_usage_cache().lock()
-        && cache
-            .get(&key)
-            .and_then(|data| data.last_error.as_deref())
-            .is_some_and(is_auth_failure)
-    {
-        cache.remove(&key);
+    if let Ok(mut cache) = cache::anthropic_usage_cache().lock() {
+        cache.retain(|name, data| {
+            !(name == &key || name.starts_with(&prefix))
+                || !data.last_error.as_deref().is_some_and(is_auth_failure)
+        });
     }
 }
 
@@ -119,25 +118,26 @@ mod tests {
     fn response_limits_recover_bars_without_bypassing_endpoint_backoff() {
         with_home(|runtime| {
             runtime.block_on(async {
-                let key = "label:passive-recovery";
+                let key = anthropic_usage_cache_key("fixture", Some("passive-recovery"));
                 let before =
-                    disk_cache::store_error_with_hint(key, "Usage API error (429)", Some("3600"));
+                    disk_cache::store_error_with_hint(&key, "Usage API error (429)", Some("3600"));
                 let deadline = before.refresh_after.unwrap();
                 record_anthropic_response_limits("fixture", Some("passive-recovery"), &headers());
                 // Simulate a different process recording the headers while
                 // this daemon retains the earlier failure in memory.
-                store_anthropic_usage(key.into(), before);
+                store_anthropic_usage(key.clone(), before);
                 assert!(
-                    cached_or_shared_anthropic_usage(key)
+                    cached_or_shared_anthropic_usage(&key)
                         .unwrap()
                         .last_error
                         .is_none()
                 );
-                let data = disk_cache::fresh(key).unwrap();
+                let data = disk_cache::fresh(&key).unwrap();
                 assert_eq!((data.five_hour, data.seven_day), (0.37, 0.62));
                 assert!(data.last_error.is_none());
                 assert!(data.last_success_at.is_some());
                 assert!(data.refresh_after.unwrap() + Duration::from_millis(10) >= deadline);
+                update_anthropic_usage_credentials([("passive-recovery", "fixture")].into_iter());
                 let snapshot = cached_account_usage_snapshot(
                     MultiAccountProviderKind::Anthropic,
                     "passive-recovery",
@@ -146,7 +146,7 @@ mod tests {
                 assert_eq!(snapshot.five_hour_ratio, Some(0.37));
                 assert_eq!(snapshot.seven_day_ratio, Some(0.62));
                 assert!(snapshot.error.is_none());
-                flight::fetch(key.into(), || async {
+                flight::fetch(key.clone(), || async {
                     panic!("passive telemetry must not cause a usage request during Retry-After")
                 })
                 .await
@@ -154,7 +154,7 @@ mod tests {
                 // Relogin must not erase a known provider cooldown either.
                 invalidate_auth_failure("passive-recovery");
                 assert!(
-                    disk_cache::fresh(key).unwrap().refresh_after.unwrap()
+                    disk_cache::fresh(&key).unwrap().refresh_after.unwrap()
                         + Duration::from_millis(10)
                         >= deadline
                 );
@@ -165,12 +165,13 @@ mod tests {
     #[test]
     fn partial_invalid_and_expired_headers_never_create_zero_usage() {
         with_home(|_| {
+            let key = anthropic_usage_cache_key("fixture", Some("passive-invalid"));
             let name = "anthropic-ratelimit-unified-5h-utilization";
             for value in ["NaN", "inf", "-0.1", "1.01", "garbage"] {
                 let mut headers = headers();
                 headers.insert(name, value.parse().unwrap());
                 record_anthropic_response_limits("fixture", Some("passive-invalid"), &headers);
-                assert!(disk_cache::fresh("label:passive-invalid").is_none());
+                assert!(disk_cache::fresh(&key).is_none());
             }
             for name in [
                 "anthropic-ratelimit-unified-5h-utilization",
@@ -181,23 +182,23 @@ mod tests {
                 let mut headers = headers();
                 headers.remove(name);
                 record_anthropic_response_limits("fixture", Some("passive-invalid"), &headers);
-                assert!(disk_cache::fresh("label:passive-invalid").is_none());
+                assert!(disk_cache::fresh(&key).is_none());
             }
             let mut headers = headers();
             headers.insert("anthropic-ratelimit-unified-7d-reset", "1".parse().unwrap());
             record_anthropic_response_limits("fixture", Some("passive-invalid"), &headers);
-            assert!(disk_cache::fresh("label:passive-invalid").is_none());
+            assert!(disk_cache::fresh(&key).is_none());
         });
     }
 
     #[test]
     fn first_failed_account_probe_keeps_the_shared_retry_after() {
         with_home(|_| {
-            let key = "label:first-failure-policy";
+            let key = anthropic_usage_cache_key("fixture", Some("first-failure-policy"));
             let original =
-                disk_cache::store_error_with_hint(key, "Usage API error (429)", Some("7200"));
+                disk_cache::store_error_with_hint(&key, "Usage API error (429)", Some("7200"));
             let data = account_fetch::cache_anthropic_account_failure(
-                key.into(),
+                key.clone(),
                 anyhow::anyhow!("Usage API error (429)"),
             );
             assert!(
@@ -238,7 +239,6 @@ mod tests {
         with_home(|runtime| {
             runtime.block_on(async {
                 let label = auth::claude::primary_account_label();
-                store_anthropic_usage(format!("label:{label}"), UsageData::default());
                 let tokens = auth::oauth::OAuthTokens {
                     access_token: "fixture-rejected-access".into(),
                     refresh_token: "fixture-rejected-refresh".into(),
@@ -266,13 +266,13 @@ mod tests {
                     assert!(accounts[0].error.as_deref().unwrap().contains("401"));
                     assert!(accounts[0].five_hour_ratio.is_none());
                 }
-                let key = format!("label:{label}");
+                let key = anthropic_usage_cache_key(&tokens.access_token, Some(&label));
                 disk_cache::store_error(&key, "Usage API error (401 Unauthorized)");
                 assert!(cached_anthropic_usage(&key).is_some());
                 let new_tokens = auth::oauth::OAuthTokens {
                     access_token: "fixture-new-access".into(),
                     refresh_token: "fixture-new-refresh".into(),
-                    expires_at: chrono::Utc::now().timestamp_millis() + 7200_000,
+                    expires_at: chrono::Utc::now().timestamp_millis() + 7_200_000,
                     ..tokens
                 };
                 auth::oauth::save_claude_tokens_for_account(&new_tokens, &label).unwrap();

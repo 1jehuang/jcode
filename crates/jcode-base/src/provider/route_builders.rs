@@ -94,7 +94,7 @@ pub fn model_name_is_likely_non_chat(model: &str) -> bool {
 
 pub fn openrouter_catalog_model_id(model: &str) -> Option<String> {
     let trimmed = model.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || jcode_provider_core::is_chatgpt_web_model(trimmed) {
         return None;
     }
 
@@ -110,8 +110,10 @@ pub fn listable_model_names_from_routes(routes: &[ModelRoute]) -> Vec<String> {
     let mut models = Vec::new();
     let mut seen = BTreeSet::new();
     for route in routes {
-        if is_listable_model_name(&route.model) && seen.insert(route.model.clone()) {
-            models.push(route.model.clone());
+        let model = route.model.trim();
+        let canonical = model.to_ascii_lowercase();
+        if is_listable_model_name(model) && seen.insert(canonical) {
+            models.push(model.to_string());
         }
     }
     models
@@ -123,6 +125,7 @@ pub fn build_anthropic_oauth_route(
     detail: impl Into<String>,
 ) -> ModelRoute {
     ModelRoute {
+        catalog_metadata: None,
         model: model.to_string(),
         provider: "Anthropic".to_string(),
         api_method: "claude-oauth".to_string(),
@@ -149,13 +152,29 @@ pub fn build_openai_api_key_route(
     build_openai_route(model, "openai-api-key", available, detail)
 }
 
-pub fn build_chatgpt_web_route() -> ModelRoute {
+pub fn build_chatgpt_web_route(
+    model: &str,
+    available: bool,
+    detail: impl Into<String>,
+) -> ModelRoute {
+    let choices: Vec<_> = super::chatgpt_web::cached_reasoning_options(model)
+        .into_iter()
+        .filter(|choice| choice.available)
+        .collect();
     ModelRoute {
-        model: super::CHATGPT_WEB_MODEL.to_string(),
+        catalog_metadata: Some(jcode_provider_core::ModelMetadata {
+            reasoning_efforts: choices.iter().map(|choice| choice.value.clone()).collect(),
+            reasoning_effort_labels: choices
+                .into_iter()
+                .map(|choice| (choice.value, choice.label))
+                .collect(),
+            ..Default::default()
+        }),
+        model: model.to_string(),
         provider: "OpenAI".to_string(),
         api_method: "chatgpt-web".to_string(),
-        available: true,
-        detail: "logged-in Firefox ChatGPT session".to_string(),
+        available,
+        detail: detail.into(),
         usage: None,
         cheapness: None,
     }
@@ -168,6 +187,7 @@ fn build_openai_route(
     detail: impl Into<String>,
 ) -> ModelRoute {
     ModelRoute {
+        catalog_metadata: None,
         model: model.to_string(),
         provider: "OpenAI".to_string(),
         api_method: api_method.to_string(),
@@ -180,6 +200,7 @@ fn build_openai_route(
 
 pub fn build_copilot_route(model: &str, available: bool, detail: impl Into<String>) -> ModelRoute {
     ModelRoute {
+        catalog_metadata: jcode_provider_core::copilot_model_metadata(model),
         model: model.to_string(),
         provider: "Copilot".to_string(),
         api_method: "copilot".to_string(),
@@ -196,6 +217,7 @@ pub fn build_openrouter_auto_route(
     auto_detail: impl Into<String>,
 ) -> ModelRoute {
     ModelRoute {
+        catalog_metadata: None,
         model: model.to_string(),
         provider: "auto".to_string(),
         api_method: "openrouter".to_string(),
@@ -222,6 +244,7 @@ pub fn build_openrouter_endpoint_route(
     }
 
     ModelRoute {
+        catalog_metadata: None,
         model: model.to_string(),
         provider: endpoint.provider_name.clone(),
         api_method: "openrouter".to_string(),
@@ -246,6 +269,7 @@ pub fn build_openrouter_fallback_provider_route(
     provider: &str,
 ) -> ModelRoute {
     ModelRoute {
+        catalog_metadata: None,
         model: display_model.to_string(),
         provider: provider.to_string(),
         api_method: "openrouter".to_string(),
@@ -258,7 +282,32 @@ pub fn build_openrouter_fallback_provider_route(
 
 #[cfg(test)]
 mod listable_tests {
-    use super::{is_listable_model_name, model_name_is_likely_non_chat};
+    use super::{
+        is_listable_model_name, listable_model_names_from_routes, model_name_is_likely_non_chat,
+    };
+    use crate::provider::ModelRoute;
+
+    fn route(model: &str) -> ModelRoute {
+        ModelRoute {
+            catalog_metadata: None,
+            model: model.to_string(),
+            provider: "test".to_string(),
+            api_method: "test".to_string(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        }
+    }
+
+    #[test]
+    fn duplicate_model_names_differing_only_by_case_or_whitespace_collapse() {
+        let routes = [route("a6api/model"), route(" A6API/model "), route("other")];
+        assert_eq!(
+            listable_model_names_from_routes(&routes),
+            vec!["a6api/model".to_string(), "other".to_string()]
+        );
+    }
 
     #[test]
     fn keeps_real_chat_models() {

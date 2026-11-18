@@ -445,6 +445,20 @@ fn hash_json_value(value: &Value, hasher: &mut DefaultHasher) {
     }
 }
 
+/// Reject malformed or partial timing fields without dropping their diagnostics.
+fn parse_timing_number<T: std::str::FromStr>(value: &str) -> Option<T>
+where
+    T::Err: std::fmt::Display,
+{
+    match value.parse() {
+        Ok(number) => Some(number),
+        Err(error) => {
+            jcode_logging::debug(&format!("Ignoring malformed tool timing number: {error}"));
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -589,19 +603,5 @@ mod tests {
             latest_user_transcript_preview(messages.iter().copied(), 20),
             Some("hello world".to_string())
         );
-    }
-}
-
-/// Reject malformed or partial timing fields without dropping their diagnostics.
-fn parse_timing_number<T: std::str::FromStr>(value: &str) -> Option<T>
-where
-    T::Err: std::fmt::Display,
-{
-    match value.parse() {
-        Ok(number) => Some(number),
-        Err(error) => {
-            jcode_logging::debug(&format!("Ignoring malformed tool timing number: {error}"));
-            None
-        }
     }
 }

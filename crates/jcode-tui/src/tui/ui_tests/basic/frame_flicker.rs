@@ -326,6 +326,8 @@ fn test_inline_ui_gap_height_only_when_inline_ui_visible() {
         column: 0,
         filter: String::new(),
         preview: false,
+        scoped_route_restore: Vec::new(),
+        effort_step: None,
     };
     let state_with_picker = TestState {
         inline_interactive_state: Some(inline_interactive_state),
@@ -833,7 +835,7 @@ fn notification_spans_include_recent_flicker_warning_and_log_hint() {
         "expected log hint in notification line, got: {rendered}"
     );
     assert!(
-        rendered.contains("[Alt⇧Z]"),
+        rendered.contains(&format!("[{}⇧Z]", if cfg!(target_os = "macos") { "⌥" } else { "Alt" })),
         "expected copy badge in notification line, got: {rendered}"
     );
 

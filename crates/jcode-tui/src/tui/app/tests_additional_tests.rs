@@ -1,5 +1,9 @@
 use super::*;
 
+include!("tests/resume_search_first.rs");
+include!("tests/usage_limit_resume.rs");
+include!("tests/credentials_changed_resend.rs");
+include!("tests/window_accounts_local.rs");
 #[test]
 fn materialized_provider_messages_share_payload_and_detach_on_edit() {
     let mut app = create_test_app();

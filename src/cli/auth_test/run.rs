@@ -11,9 +11,7 @@ async fn maybe_run_auth_test_smoke(
         // Cursor native agent transport is text-only (no tool calls over
         // agent.v1.AgentService/Run), so skip the tool smoke with an
         // explanation instead of hanging waiting for a tool call.
-        if matches!(kind, AuthTestSmokeKind::Tool)
-            && matches!(target, AuthTestTarget::Cursor)
-        {
+        if matches!(kind, AuthTestSmokeKind::Tool) && matches!(target, AuthTestTarget::Cursor) {
             report.push_step(
                 kind.step_name(),
                 true,
@@ -116,6 +114,16 @@ async fn run_post_login_validation_inner(
     provider: crate::provider_catalog::LoginProviderDescriptor,
     verbose: bool,
 ) -> Result<()> {
+    if provider.target == crate::provider_catalog::LoginProviderTarget::ClaudeCode {
+        // The Claude Code CLI owns this login. A live validation turn would
+        // spend subscription usage; `claude auth status` is the cheap check.
+        if verbose {
+            eprintln!(
+                "\nSkipping runtime validation for Claude Code. Check the login with `claude auth status` (set CLAUDE_CONFIG_DIR for non-default instances)."
+            );
+        }
+        return Ok(());
+    }
     let Some(choice) = super::provider_init::choice_for_login_provider(provider) else {
         crate::logging::auth_event(
             "post_login_validation_skipped",

@@ -159,7 +159,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn repo() -> (TempDir, String) {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let path = temp.path().join("repo with spaces");
         std::fs::create_dir(&path).unwrap();
         let path = path.to_str().unwrap().to_owned();
@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn unborn_head_does_not_create_a_branch() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let path = temp.path().to_str().unwrap();
         git(path, &["init", "-b", "main"]).unwrap();
         assert!(create(path, "new").is_err());

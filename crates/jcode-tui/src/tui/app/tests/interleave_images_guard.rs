@@ -60,10 +60,14 @@ fn remote_image_queue_keeps_complete_draft_for_both_enter_shortcuts() {
         app.is_remote = true;
         app.is_processing = true;
         app.queue_mode = queue_mode;
-        app.input = "Compare [image 1] [pasted 2 lines]".to_string();
+        app.input = "Compare [pasted 2 lines]".to_string();
         app.pasted_contents = vec!["detail one\ndetail two".to_string()];
         app.cursor_pos = app.input.len();
-        let expected = input::expand_paste_placeholders(&app, &app.input);
+        // The guard restores expanded text; the attachment gets an owned marker.
+        let expected = format!(
+            "{} [image 1]",
+            input::expand_paste_placeholders(&app, &app.input)
+        );
         let image = ("image/png".to_string(), "queued-image".to_string());
         app.pending_images = vec![image.clone()];
         let mut connection = crate::tui::backend::RemoteConnection::dummy();
@@ -121,3 +125,6 @@ fn remote_text_only_queue_still_accepts_both_enter_shortcuts() {
         assert!(app.input.is_empty());
     }
 }
+
+#[path = "checkpoint_input.rs"]
+mod checkpoint_input;

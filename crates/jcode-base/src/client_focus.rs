@@ -192,6 +192,10 @@ fn is_live_jcode_client(pid: u32) -> bool {
     }
 }
 
+fn last_focused_session_path() -> Result<std::path::PathBuf> {
+    Ok(crate::storage::jcode_dir()?.join("last_focused_client_session"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::clients_showing_session_in;
@@ -211,8 +215,4 @@ mod tests {
         assert_eq!(found, vec![10, 11]);
         assert!(clients_showing_session_in(dir.path(), " ", 13, |_| true).is_empty());
     }
-}
-
-fn last_focused_session_path() -> Result<std::path::PathBuf> {
-    Ok(crate::storage::jcode_dir()?.join("last_focused_client_session"))
 }

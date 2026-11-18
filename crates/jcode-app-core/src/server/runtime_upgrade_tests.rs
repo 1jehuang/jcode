@@ -181,6 +181,25 @@ fn changed_candidate_after_progress_refuses_exec_and_releases_idle_gate() {
 
 #[test]
 fn failed_exec_releases_publication_fence_without_reentrant_logging() {
+    // Even a failed exec changes process state (including SIGPIPE). Keep that
+    // probe out of the harness that runs later pipe-writing tool tests.
+    if std::env::var_os("JCODE_FAILED_EXEC_PROBE").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "server::runtime_upgrade::tests::failed_exec_releases_publication_fence_without_reentrant_logging",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("JCODE_FAILED_EXEC_PROBE", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     let (_dir, path, metadata) = candidate();
     let gate = ActivityGate::default();
     let UpgradeDecision::Ready(prepared) =

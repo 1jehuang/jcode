@@ -112,7 +112,7 @@ impl App {
                                 revoked_account_status_message(crate::subscription_catalog::clear_account_credentials())
                             } else {
                                 format!(
-                                    "Jcode Account Status\n\nCould not load /v1/me: {}\n\nThe local credential was retained. Retry /account jcode status, open /account jcode manage, or use /account jcode logout.",
+                                    "Jcode Account Status\n\nCould not load /v1/me: {}\n\nThe local credential was retained. Retry /accounts jcode status, open /accounts jcode manage, or use /accounts jcode logout.",
                                     error
                                 )
                             };
@@ -133,9 +133,9 @@ impl App {
 
 fn revoked_account_status_message(cleanup: anyhow::Result<()>) -> String {
     match cleanup {
-                                    Ok(()) => "Jcode Account Status\n\nThe saved account key was revoked or expired. Local credentials were cleared. Use /account jcode login to sign in again.".to_string(),
+                                    Ok(()) => "Jcode Account Status\n\nThe saved account key was revoked or expired. Local credentials were cleared. Use /accounts jcode login to sign in again.".to_string(),
                                     Err(clear_error) => format!(
-                                        "Jcode Account Status\n\nThe saved account key was revoked or expired, but local credentials could not be cleared: {clear_error}\n\nUse /account jcode logout to retry cleanup before signing in again."
+                                        "Jcode Account Status\n\nThe saved account key was revoked or expired, but local credentials could not be cleared: {clear_error}\n\nUse /accounts jcode logout to retry cleanup before signing in again."
                                     ),
                                 }
 }

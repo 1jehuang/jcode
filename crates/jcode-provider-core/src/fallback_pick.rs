@@ -21,6 +21,7 @@ fn api_method_is_oauth(api_method: &ModelRouteApiMethod) -> bool {
             | ModelRouteApiMethod::OpenAIOAuth
             | ModelRouteApiMethod::CodeAssistOAuth
             | ModelRouteApiMethod::GrokBuild
+            | ModelRouteApiMethod::ClaudeCode { .. }
     )
 }
 
@@ -191,6 +192,7 @@ mod tests {
 
     fn route(model: &str, provider: &str, api_method: &str, available: bool) -> ModelRoute {
         ModelRoute {
+            catalog_metadata: None,
             model: model.to_string(),
             provider: provider.to_string(),
             api_method: api_method.to_string(),
@@ -395,6 +397,7 @@ mod generation_tests {
 
     fn route(model: &str, provider: &str, api_method: &str) -> ModelRoute {
         ModelRoute {
+            catalog_metadata: Default::default(),
             model: model.to_string(),
             provider: provider.to_string(),
             api_method: api_method.to_string(),
@@ -513,6 +516,7 @@ mod unified_rank_tests {
             "OpenAI"
         };
         ModelRoute {
+            catalog_metadata: Default::default(),
             model: model.into(),
             provider: provider.into(),
             api_method: api_method.into(),
@@ -553,6 +557,7 @@ mod unified_rank_account_tests {
     #[test]
     fn spent_account_does_not_exclude_sibling_account() {
         let routes = vec![ModelRoute {
+            catalog_metadata: Default::default(),
             model: "claude-opus-5-5".into(),
             provider: "Anthropic".into(),
             api_method: "claude-oauth@claude-otter".into(),

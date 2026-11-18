@@ -261,13 +261,16 @@ impl App {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
+        let account = self.window_account_label("openai");
         let email = self.openai_widget_account_email();
         let (sender, receiver) = oneshot::channel();
         self.usage_reset.quota_refresh = Some(receiver);
         runtime.spawn(async move {
             // Refresh only a uniquely identified session account. The global
             // active login may belong to an entirely different session.
-            if let Some(email) = email {
+            if let Some(account) = account {
+                crate::usage::invalidate_openai_usage_cache(Some(&account)).await;
+            } else if let Some(email) = email {
                 let accounts = crate::auth::codex::list_accounts().unwrap_or_default();
                 let mut matches = accounts.iter().filter(|account| {
                     account.email.as_deref().is_some_and(|candidate| {
@@ -646,6 +649,7 @@ mod tests {
                 id: 43,
                 message: "cache refresh rejected".into(),
                 retry_after_secs: None,
+                server_resumes: false,
             },
             &mut remote
         ));

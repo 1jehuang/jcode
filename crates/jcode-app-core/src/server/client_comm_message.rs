@@ -180,6 +180,7 @@ pub(super) async fn handle_comm_message(
                             id,
                             message: format!("Cross-swarm DM failed: {err}"),
                             retry_after_secs: None,
+                            server_resumes: false,
                         });
                         return;
                     }
@@ -192,6 +193,7 @@ pub(super) async fn handle_comm_message(
                 id,
                 message: "Channels are swarm-local. Cross-swarm messages are DMs: pass to_swarm with an optional to_session.".to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -253,6 +255,7 @@ pub(super) async fn handle_comm_message(
                         id,
                         message: message.to_string(),
                         retry_after_secs: None,
+                        server_resumes: false,
                     });
                     return;
                 }
@@ -283,6 +286,7 @@ pub(super) async fn handle_comm_message(
                     super::swarm_labels::swarm_display_name(&delivery_swarm_id)
                 ),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -295,6 +299,7 @@ pub(super) async fn handle_comm_message(
                     super::swarm_labels::swarm_display_name(&delivery_swarm_id)
                 ),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -321,6 +326,7 @@ pub(super) async fn handle_comm_message(
                 .is_some_and(|member| member.role == "coordinator");
             if !sender_is_coordinator {
                 let _ = client_event_tx.send(ServerEvent::Error {
+server_resumes: false,
                     id,
                     message: "message needs a target: pass to_session (the agent to message) or channel. Only the coordinator can message everyone without one.".to_string(),
                     retry_after_secs: None,
@@ -567,6 +573,7 @@ pub(super) async fn handle_comm_message(
             id,
             message: "Not in a swarm. Use a git repository to enable swarm features.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
     }
 }

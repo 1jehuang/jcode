@@ -10,13 +10,15 @@ use crate::tui::{
 
 impl App {
     pub(crate) fn open_agents_picker(&mut self) {
-        if crate::tui::app::commands_dispatch::ssh_local_action_blocked(
-            self,
-            "Agent model configuration",
-        ) {
+        if !self.is_remote
+            && crate::tui::app::commands_dispatch::ssh_local_action_blocked(
+                self,
+                "Agent model configuration",
+            )
+        {
             return;
         }
-        let models = [
+        let mut models: Vec<PickerEntry> = [
             AgentModelTarget::Swarm,
             AgentModelTarget::Review,
             AgentModelTarget::Judge,
@@ -25,7 +27,9 @@ impl App {
         ]
         .into_iter()
         .map(|target| {
-            let configured = if self.agent_models_global_scope {
+            let configured = if crate::tui::is_ssh_remote() {
+                None
+            } else if self.agent_models_global_scope {
                 load_agent_model_override(target)
             } else {
                 self.session.effective_agent_model(
@@ -74,15 +78,26 @@ impl App {
         })
         .collect();
 
+        models.push(super::super::agent_profiles::profile_entry(
+            "Instruction profile [session]".into(),
+            PickerAction::AgentProfiles,
+            false,
+            self.is_remote,
+            "Additive Markdown instructions · choose explicitly · current session only",
+        ));
+        let count = models.len();
+
         self.inline_view_state = None;
         self.inline_interactive_state = Some(InlineInteractiveState {
             kind: PickerKind::Model,
-            filtered: (0..5).collect(),
+            filtered: (0..count).collect(),
             entries: models,
             selected: 0,
             column: 0,
             filter: String::new(),
             preview: false,
+            scoped_route_restore: Vec::new(),
+            effort_step: None,
         });
         self.input.clear();
         self.cursor_pos = 0;
@@ -208,6 +223,8 @@ impl App {
             column: 0,
             filter: String::new(),
             preview: false,
+            scoped_route_restore: Vec::new(),
+            effort_step: None,
         });
         self.input.clear();
         self.cursor_pos = 0;

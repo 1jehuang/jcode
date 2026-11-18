@@ -696,10 +696,8 @@ impl StatusSpinnerRenderer {
         cell.set_symbol(symbol)
             .set_style(status_spinner_patch_style());
 
-        // Keep ratatui's virtual buffers authoritative while preserving the user's cursor position.
-        // The only terminal mutation outside ratatui here is cursor save/restore; cell contents still
-        // go through Terminal's retained-cell API so the next full-frame diff stays synchronized. Wrap the
-        // single-cell update in a synchronized update so it applies atomically (see issue #282).
+        // Keep retained buffers synchronized while saving/restoring the cursor.
+        // The synchronized update makes this single-cell patch atomic (#282).
         crossterm::queue!(
             terminal.backend_mut(),
             BeginSynchronizedUpdate,
@@ -818,6 +816,14 @@ impl App {
 
             if self.should_quit {
                 break;
+            }
+
+            // Dialog keys are synchronous; filesystem rewind acquires async
+            // path locks here, before any queued model turn can start.
+            if self.rewind_ui.local_restore.is_some() {
+                self.process_local_rewind().await;
+                needs_redraw = true;
+                continue;
             }
 
             // Process pending turn OR wait for input/redraw

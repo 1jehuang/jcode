@@ -1,6 +1,27 @@
 use super::*;
 use crate::tui::connection_type_icon;
 
+pub(super) fn active_runtime_provider_key() -> Option<String> {
+    let Ok(value) = std::env::var("JCODE_RUNTIME_PROVIDER") else {
+        return None;
+    };
+    let value = value.trim().to_ascii_lowercase();
+    (!value.is_empty()).then_some(value)
+}
+
+/// Hot-exec resumes must not turn a client-only handoff into a shared daemon
+/// reload. Older clients already export these markers, so this also protects
+/// handoffs from binaries that predate this policy. Ordinary `--resume` and
+/// fresh launches retain the configured behavior. Manual `/reload` is separate.
+pub(super) fn remote_auto_server_reload(
+    configured: bool,
+    has_resume_target: bool,
+    resuming_handoff: bool,
+    reload_fast_start: bool,
+) -> bool {
+    configured && !(has_resume_target && (resuming_handoff || reload_fast_start))
+}
+
 impl App {
     /// Create an App instance for replay mode (playing back a saved session)
     pub fn new_for_replay(session: crate::session::Session) -> Self {
@@ -386,6 +407,7 @@ impl App {
             // Don't restore provider_session_id - Claude sessions don't persist across
             // process restarts. The messages are restored, so Claude will get full context.
             self.provider_session_id = None;
+            self.invalidate_rewind_ui();
             self.session = session;
             crate::memory::sync_injected_memories(
                 &self.session.id,
@@ -425,6 +447,9 @@ impl App {
             if restored_model || self.session.model.is_none() {
                 self.session.model = Some(active_model.clone());
             }
+            // Per-window accounts and the failover toggle live on the
+            // session, but only the provider acts on them.
+            self.restore_local_window_accounts();
             self.update_context_limit_for_model(&active_model, None);
             // Mark session as active now that it's being used again
             self.session.mark_active();

@@ -3,6 +3,121 @@ use crate::message::{ConnectionPhase, StreamEvent};
 use futures::StreamExt;
 
 impl MultiProvider {
+    pub(super) async fn try_auto_banked_reset(
+        &self,
+        provider: ActiveProvider,
+        reason: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        mode: CompletionMode<'_>,
+    ) -> Result<bool> {
+        if !self.provider_uses_oauth_accounts(provider) {
+            return Ok(false);
+        }
+        let config = crate::config::Config::load().provider;
+        let enabled = match provider {
+            ActiveProvider::OpenAI => config.openai_auto_banked_reset,
+            ActiveProvider::Claude => config.anthropic_auto_fable_reset,
+            _ => false,
+        };
+        if !enabled {
+            return Ok(false);
+        }
+        if let Some(prompt) = self.auto_reset_route_prompt(provider, reason, messages, tools, mode)
+        {
+            // Preserve the router's exact-route approval/countdown boundary.
+            // A reset must not spend a grant while a permitted route is ready.
+            let account = self
+                .selected_account_for_provider(provider)
+                .or_else(|| active_account_label_for_provider(provider));
+            models::record_provider_unavailable_for_account_label(
+                Self::provider_key(provider),
+                account.as_deref(),
+                reason,
+            );
+            return Err(anyhow::anyhow!(prompt.to_error_message()));
+        }
+        let account = self
+            .selected_account_for_provider(provider)
+            .or_else(|| active_account_label_for_provider(provider));
+        let reset = match provider {
+            ActiveProvider::OpenAI => crate::usage::auto_reset_weekly_usage(account).await,
+            ActiveProvider::Claude => crate::usage::auto_reset_fable_usage(account).await,
+            _ => return Ok(false),
+        };
+        Ok(match reset {
+            Ok(true) => {
+                self.startup_notices
+                    .write()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push(format!(
+                        "{} usage is available again after earned-reset recovery. Continuing automatically.",
+                        Self::provider_label(provider)
+                    ));
+                true
+            }
+            Ok(false) => false,
+            Err(error) => {
+                crate::logging::warn(&format!("Automatic banked reset failed: {error:#}"));
+                false
+            }
+        })
+    }
+
+    /// Use the same capacity, cooldown, pool and context filters as normal failover.
+    pub(super) fn auto_reset_route_prompt(
+        &self,
+        provider: ActiveProvider,
+        reason: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        mode: CompletionMode<'_>,
+    ) -> Option<ProviderFailoverPrompt> {
+        if !crate::config::Config::load()
+            .provider
+            .auto_reset_only_when_no_routes
+        {
+            return None;
+        }
+        let (chars, tokens) = Self::estimate_request_input(messages, tools, mode);
+        self.cross_provider_pool_prompt(provider, provider, reason.to_owned(), chars, tokens)
+    }
+
+    /// Retry only before the stream is accepted, never replay partial output.
+    pub(super) async fn complete_with_auto_reset(
+        &self,
+        provider: ActiveProvider,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        mode: CompletionMode<'_>,
+        resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let mut may_reset = true;
+        loop {
+            let attempt = self
+                .complete_candidate(provider, messages, tools, mode, resume_session_id)
+                .await;
+            let attempt = self.await_account_stream_start(provider, attempt).await;
+            if may_reset
+                && let Err(error) = &attempt
+                && Self::classify_failover_error(error).should_mark_provider_unavailable()
+                && self
+                    .try_auto_banked_reset(
+                        provider,
+                        &Self::summarize_error(error),
+                        messages,
+                        tools,
+                        mode,
+                    )
+                    .await?
+            {
+                may_reset = false;
+                continue;
+            }
+            return attempt;
+        }
+    }
+
     pub(super) async fn await_account_stream_start(
         &self,
         provider: ActiveProvider,
@@ -17,9 +132,9 @@ impl MultiProvider {
             ActiveProvider::Claude => config.anthropic_auto_fable_reset,
             _ => false,
         };
-        if (self.selected_account_for_provider(provider).is_none()
-            && active_account_label_for_provider(provider).is_none()
-            && !automatic_reset)
+        let window_account = account_failover::account_kind(provider)
+            .and_then(|kind| self.session_account_label(kind));
+        if (window_account.is_none() && !automatic_reset)
             || !self.provider_uses_oauth_accounts(provider)
         {
             return attempt;

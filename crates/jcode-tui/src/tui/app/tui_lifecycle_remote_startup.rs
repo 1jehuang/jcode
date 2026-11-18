@@ -72,6 +72,15 @@ impl App {
         let reload_fast_start = std::env::var("JCODE_RELOAD_FAST_START")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        // Capture the inherited handoff before consuming its one-shot marker.
+        // Keep the effective policy for this client's lifetime, including
+        // reconnects, rather than consulting an already-consumed environment.
+        app.auto_server_reload = remote_auto_server_reload(
+            app.auto_server_reload,
+            resume_session.is_some(),
+            std::env::var_os("JCODE_RESUMING").is_some(),
+            reload_fast_start,
+        );
         // One-shot handoff flag. A later ordinary resume in the same process
         // must retain the existing eager local-history behavior.
         crate::env::remove_var("JCODE_RELOAD_FAST_START");

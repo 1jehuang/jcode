@@ -59,6 +59,8 @@ mod preview_refresh;
 mod progressive_preview;
 mod render;
 mod saved_placement;
+mod search_input;
+mod selection;
 mod session_view;
 use session_view::highlight_buffer_matches;
 mod transcript_search;
@@ -299,6 +301,9 @@ pub struct SessionPicker {
     reserved_panel_area: Option<Rect>,
     /// Whether to show debug/test/canary sessions
     show_test_sessions: bool,
+    /// Spawned agent conversations are hidden by default so /resume stays
+    /// focused on top-level threads.
+    pub(crate) show_spawned_sessions: bool,
     /// Current list filter mode
     filter_mode: SessionFilterMode,
     /// Search query for filtering sessions
@@ -365,6 +370,8 @@ pub struct SessionPicker {
     /// Set once the user cycles the filter, so async reloads never replace
     /// their choice with the automatic current-project default.
     filter_mode_user_chosen: bool,
+    /// Navigation or marking is deliberate, unlike the automatic first-row highlight.
+    user_selection_intent: bool,
     /// Live process presence keyed by session ID (active-pid registry snapshot).
     /// Drives the working/ready badges in the list and the Active filter
     /// membership. Refreshed on load/reseed and periodically while the Active
@@ -412,6 +419,7 @@ impl SessionPicker {
             last_preview_area: None,
             reserved_panel_area: None,
             show_test_sessions: false,
+            show_spawned_sessions: false,
             filter_mode: SessionFilterMode::All,
             search_query: String::new(),
             search_active: false,
@@ -445,6 +453,7 @@ impl SessionPicker {
             current_repo: None,
             same_project_cache: RefCell::new(HashMap::new()),
             filter_mode_user_chosen: false,
+            user_selection_intent: false,
             live_presence: std::collections::HashMap::new(),
             recent_window_closures: HashMap::new(),
             live_presence_refreshed_at: None,
@@ -477,6 +486,7 @@ impl SessionPicker {
             last_preview_area: None,
             reserved_panel_area: None,
             show_test_sessions: false,
+            show_spawned_sessions: false,
             filter_mode: SessionFilterMode::All,
             search_query: String::new(),
             search_active: false,
@@ -510,6 +520,7 @@ impl SessionPicker {
             current_repo: None,
             same_project_cache: RefCell::new(HashMap::new()),
             filter_mode_user_chosen: false,
+            user_selection_intent: false,
             live_presence: std::collections::HashMap::new(),
             recent_window_closures: HashMap::new(),
             live_presence_refreshed_at: None,
@@ -574,6 +585,7 @@ impl SessionPicker {
             last_preview_area: None,
             reserved_panel_area: None,
             show_test_sessions: false,
+            show_spawned_sessions: false,
             filter_mode: SessionFilterMode::All,
             search_query: String::new(),
             search_active: false,
@@ -607,6 +619,7 @@ impl SessionPicker {
             current_repo: None,
             same_project_cache: RefCell::new(HashMap::new()),
             filter_mode_user_chosen: false,
+            user_selection_intent: false,
             live_presence: std::collections::HashMap::new(),
             recent_window_closures: HashMap::new(),
             live_presence_refreshed_at: None,
@@ -617,10 +630,6 @@ impl SessionPicker {
         picker.refresh_live_presence();
         picker.rebuild_items();
         picker
-    }
-
-    pub fn activate_search(&mut self) {
-        self.search_active = true;
     }
 
     pub fn activate_catchup_filter(&mut self) {
@@ -728,6 +737,11 @@ impl SessionPicker {
     #[cfg(test)]
     pub(crate) fn claude_takeover_confirmation_active_for_test(&self) -> bool {
         self.pending_claude_takeover.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn filter_mode_for_test(&self) -> SessionFilterMode {
+        self.filter_mode
     }
 
     /// Whether the current picker view contains a running session whose status
@@ -961,17 +975,6 @@ impl SessionPicker {
         self.selected_session_ids.len()
     }
 
-    fn toggle_selected_session(&mut self) {
-        self.search_selection.stop();
-        let Some(session_id) = self.selected_session().map(|session| session.id.clone()) else {
-            return;
-        };
-
-        if !self.selected_session_ids.insert(session_id.clone()) {
-            self.selected_session_ids.remove(&session_id);
-        }
-    }
-
     pub fn clear_selected_sessions(&mut self) {
         self.selected_session_ids.clear();
     }
@@ -1129,9 +1132,11 @@ impl SessionPicker {
             ResumeTarget::PiSession { session_path } => {
                 loading::load_pi_external_preview(std::path::Path::new(&session_path))
             }
-            ResumeTarget::OpenCodeSession { .. } => external_path.as_deref().and_then(|path| {
-                loading::load_opencode_external_preview(std::path::Path::new(path))
-            }),
+            ResumeTarget::OpenCodeSession { session_id, .. } => {
+                external_path.as_deref().and_then(|path| {
+                    loading::load_opencode_external_preview(std::path::Path::new(path), &session_id)
+                })
+            }
             ResumeTarget::CursorSession { .. } => external_path
                 .as_deref()
                 .and_then(|path| loading::load_cursor_external_preview(std::path::Path::new(path))),
@@ -1322,170 +1327,6 @@ impl SessionPicker {
         }
     }
 
-    /// Delete the word immediately before the (implicit) end-of-line cursor in
-    /// the search query. Used for Ctrl+W / Ctrl+Backspace inside the search bar.
-    fn delete_search_word_back(&mut self) {
-        let query = &self.search_query;
-        let mut end = query.len();
-        // Skip trailing whitespace.
-        while end > 0 {
-            let prev = super::core::prev_char_boundary(query, end);
-            let ch = query[prev..].chars().next().unwrap_or(' ');
-            if !ch.is_whitespace() {
-                break;
-            }
-            end = prev;
-        }
-        // Skip the word characters.
-        while end > 0 {
-            let prev = super::core::prev_char_boundary(query, end);
-            let ch = query[prev..].chars().next().unwrap_or(' ');
-            if ch.is_whitespace() {
-                break;
-            }
-            end = prev;
-        }
-        self.search_query.truncate(end);
-    }
-
-    pub fn search_submission_pending(&self) -> bool {
-        self.pending_search_submission.is_some()
-    }
-
-    /// Advance queued Enter without waiting on transcript I/O. Repeated Enter
-    /// cannot extend the existing query-following deadline.
-    pub fn poll_search_submission(&mut self) -> Option<OverlayAction> {
-        let modifiers = self.pending_search_submission?;
-        self.poll_transcript_search();
-        if self.transcript_search.pending() && self.search_selection.following() {
-            return None;
-        }
-        self.pending_search_submission = None;
-        if self.transcript_search.pending() && self.search_selection.holding() {
-            // Nothing matched within the wait. The rows on screen belong to
-            // the previous query, so keep editing instead of resuming one.
-            return None;
-        }
-        self.rebuild_items_following();
-        let targets = self.selection_or_current_targets();
-        if targets.is_empty() {
-            // Keep a no-match query editable. Later results must not auto-submit.
-            self.search_active = true;
-            return None;
-        }
-        self.search_active = false;
-        Some(OverlayAction::Selected(
-            self.selection_result_for_enter(targets, modifiers),
-        ))
-    }
-
-    fn queue_search_submission(&mut self, modifiers: KeyModifiers) -> bool {
-        if !self.search_query.trim().is_empty()
-            // Held rows belong to the previous query: never resume one of them.
-            && (self.search_selection.following() || self.search_selection.holding())
-            && self.transcript_search.pending()
-        {
-            self.pending_search_submission = Some(modifiers);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Shared handling for key events while the search bar is active. Used by
-    /// both the overlay (`handle_overlay_key`) and the standalone `run` loop so
-    /// the editing and navigation keybindings stay consistent.
-    fn handle_search_key(
-        &mut self,
-        code: KeyCode,
-        modifiers: KeyModifiers,
-    ) -> Result<OverlayAction> {
-        let ctrl = modifiers.contains(KeyModifiers::CONTROL);
-        match code {
-            KeyCode::Esc => {
-                self.search_active = false;
-                self.search_query.clear();
-                self.rebuild_items();
-            }
-            // Do not submit or erase a query before any sessions are available.
-            // In particular, never queue Enter to unexpectedly resume a session
-            // when the background load eventually completes.
-            KeyCode::Enter if self.loading_message.is_some() => {}
-            KeyCode::Enter if self.search_edit_pending => {
-                self.pending_search_submission = Some(modifiers);
-            }
-            KeyCode::Enter => {
-                if self.queue_search_submission(modifiers) {
-                    return Ok(OverlayAction::Continue);
-                }
-                self.search_active = false;
-                if self.visible_sessions.is_empty() {
-                    self.search_query.clear();
-                    self.rebuild_items();
-                } else {
-                    let targets = self.selection_or_current_targets();
-                    if !targets.is_empty() {
-                        return Ok(OverlayAction::Selected(
-                            self.selection_result_for_enter(targets, modifiers),
-                        ));
-                    }
-                }
-            }
-            // Ctrl+W / Ctrl+Backspace (and the \u{8} BS alias some terminals
-            // send for Ctrl+Backspace) delete the previous word in the query.
-            KeyCode::Backspace if ctrl => {
-                self.delete_search_word_back();
-                self.search_edit_pending = true;
-            }
-            KeyCode::Char('\u{8}') => {
-                self.delete_search_word_back();
-                self.search_edit_pending = true;
-            }
-            KeyCode::Backspace => {
-                self.search_query.pop();
-                self.search_edit_pending = true;
-            }
-            // Ctrl+U clears the whole query (like readline's kill-to-start).
-            KeyCode::Char('u') if ctrl => {
-                self.search_query.clear();
-                self.search_edit_pending = true;
-            }
-            // Vim-style / readline navigation that keeps working while typing.
-            KeyCode::Char('j') | KeyCode::Char('n') if ctrl => self.next(),
-            KeyCode::Char('k') | KeyCode::Char('p') if ctrl => self.previous(),
-            KeyCode::Char('w') if ctrl => {
-                self.delete_search_word_back();
-                self.search_edit_pending = true;
-            }
-            KeyCode::Char(c) => {
-                if ctrl && c == 'c' {
-                    return Ok(OverlayAction::Close);
-                }
-                // Ignore other control-modified characters so they don't get
-                // inserted as literal text in the search bar.
-                if ctrl {
-                    return Ok(OverlayAction::Continue);
-                }
-                self.search_query.push(c);
-                self.search_edit_pending = true;
-            }
-            KeyCode::Down => self.next(),
-            KeyCode::Up => self.previous(),
-            _ => {}
-        }
-        Ok(OverlayAction::Continue)
-    }
-
-    /// Standalone picker input follows the main TUI's press/repeat policy.
-    /// Release events must not trigger navigation, editing, or selection.
-    fn handle_key_event(&mut self, key: event::KeyEvent) -> Result<OverlayAction> {
-        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-            return Ok(OverlayAction::Continue);
-        }
-        let key = jcode_tui_core::korean_input::normalize_key_event(key);
-        self.handle_overlay_key(key.code, key.modifiers)
-    }
-
     /// Handle a key event when used as an overlay inside the main TUI.
     /// Returns:
     /// - `Some(PickerResult::Selected(targets))` if user selected one or more sessions
@@ -1535,13 +1376,10 @@ impl SessionPicker {
                 _ => {}
             }
         }
-        // Search editing must work even before the first cached list arrives.
-        // Keep the query in picker state so reseeding applies it to new entries.
-        if self.search_active {
-            return self.handle_search_key(code, modifiers);
-        }
-
         if self.loading_message.is_some() {
+            if self.handle_loading_search_key(code, modifiers) {
+                return Ok(OverlayAction::Continue);
+            }
             match code {
                 KeyCode::Esc | KeyCode::Char('q') => return Ok(OverlayAction::Close),
                 KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1554,6 +1392,10 @@ impl SessionPicker {
                 _ => {}
             }
             return Ok(OverlayAction::Continue);
+        }
+
+        if self.search_active {
+            return self.handle_search_key(code, modifiers);
         }
 
         // The first-run choice is deliberately simpler than the full session
@@ -1571,6 +1413,11 @@ impl SessionPicker {
             } else {
                 self.onboarding_action = Some(OnboardingAction::ReviewRecentProject);
             }
+            return Ok(OverlayAction::Continue);
+        }
+
+        // Type-to-search: a printable, non-shortcut character starts a search.
+        if self.start_search_from_list_key(code, modifiers) {
             return Ok(OverlayAction::Continue);
         }
 
@@ -1619,6 +1466,12 @@ impl SessionPicker {
             }
             KeyCode::Char('d') => {
                 self.toggle_test_sessions();
+            }
+            KeyCode::Char('a') => {
+                self.show_spawned_sessions = !self.show_spawned_sessions;
+                self.cached_search_query.clear();
+                self.cached_search_refs.clear();
+                self.rebuild_items();
             }
             KeyCode::Char('T') => {
                 self.begin_claude_takeover_confirmation();
@@ -2020,69 +1873,6 @@ impl SessionPicker {
         }
     }
 
-    /// Apply search-match highlighting to already-built preview lines in place.
-    /// Returns the index of the first line that contains a highlighted match, if
-    /// any. Each token highlights independently (matching the AND-token filter).
-    #[cfg(test)]
-    fn highlight_lines_in_place(lines: &mut [Line<'static>], tokens: &[String]) -> Option<usize> {
-        if tokens.is_empty() {
-            return None;
-        }
-        let mut first_match: Option<usize> = None;
-        for (idx, line) in lines.iter_mut().enumerate() {
-            let mut new_spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len());
-            let mut line_had_match = false;
-            for span in line.spans.drain(..) {
-                let lower = span.content.to_lowercase();
-                if tokens.iter().any(|token| lower.contains(token)) {
-                    line_had_match = true;
-                    new_spans.extend(Self::highlight_spans(
-                        span.content.as_ref(),
-                        tokens,
-                        span.style,
-                    ));
-                } else {
-                    new_spans.push(span);
-                }
-            }
-            line.spans = new_spans;
-            if line_had_match && first_match.is_none() {
-                first_match = Some(idx);
-            }
-        }
-        first_match
-    }
-
-    /// Lines for the pinned "previous prompt" header in the preview pane.
-    /// Mirrors the main chat viewport's `prompt_preview`: the last user prompt
-    /// whose wrapped start has scrolled above the viewport, drawn dimmed.
-    #[cfg(test)]
-    fn preview_prompt_header_lines(
-        &self,
-        scroll: usize,
-        width: u16,
-        align: Alignment,
-    ) -> Vec<Line<'static>> {
-        if scroll == 0 || !crate::config::config().display.prompt_preview {
-            return Vec::new();
-        }
-        // Read the wrapped prompt markers from the cached preview content so
-        // the header costs nothing extra during a scroll burst.
-        let Some(cache) = self.preview_cache.as_ref() else {
-            return Vec::new();
-        };
-        let Some((_, prompt_num, text)) = cache
-            .user_prompt_markers
-            .iter()
-            .rev()
-            .find(|(wrapped_start, _, _)| *wrapped_start < scroll)
-        else {
-            return Vec::new();
-        };
-
-        super::ui::viewport::prompt_preview_lines(*prompt_num, text, width, align)
-    }
-
     /// Label for the blank-session onboarding action, naming the directory
     /// the new session will start in (home abbreviated to `~`).
     fn onboarding_start_new_label(&self) -> String {
@@ -2241,7 +2031,6 @@ impl SessionPicker {
 
     fn render_inner(&mut self, frame: &mut Frame) {
         let has_banner = self.crashed_sessions.is_some();
-        let has_search = self.search_active || !self.search_query.is_empty();
         let has_onboarding = self.onboarding_banner.is_some();
         // The first-run picker is action-only. Do not render the session list or
         // preview panes underneath it, which would make this look like `/resume`.
@@ -2271,9 +2060,9 @@ impl SessionPicker {
         if has_banner {
             v_constraints.push(Constraint::Length(1));
         }
-        if has_search {
-            v_constraints.push(Constraint::Length(1));
-        }
+        // The search bar row is always present so the picker reads like a
+        // search box: users can just start typing.
+        v_constraints.push(Constraint::Length(1));
         v_constraints.push(Constraint::Min(8));
 
         let v_chunks = Layout::default()
@@ -2295,31 +2084,9 @@ impl SessionPicker {
             chunk_idx += 1;
         }
 
-        // Render search bar if active
-        if has_search {
-            let search_area = v_chunks[chunk_idx];
-            chunk_idx += 1;
-
-            let cursor_char = if self.search_active { "▎" } else { "" };
-            let search_line = Line::from(vec![
-                Span::styled(" 🔍 ", Style::default().fg(rgb(186, 139, 255))),
-                Span::styled(
-                    &self.search_query,
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(cursor_char, Style::default().fg(rgb(186, 139, 255))),
-                if self.search_active {
-                    Span::styled("  Esc to clear", Style::default().fg(rgb(60, 60, 60)))
-                } else {
-                    Span::styled("  / to edit", Style::default().fg(rgb(60, 60, 60)))
-                },
-            ]);
-            let search_widget =
-                Paragraph::new(search_line).style(Style::default().bg(rgb(25, 25, 30)));
-            frame.render_widget(search_widget, search_area);
-        }
+        // Search bar row: always visible, placeholder when empty.
+        self.render_search_bar(frame, v_chunks[chunk_idx]);
+        chunk_idx += 1;
 
         let main_area = v_chunks[chunk_idx];
 
@@ -2398,20 +2165,6 @@ impl SessionPicker {
 
     pub(crate) fn set_cloud_warning(&mut self, warning: String) {
         self.cloud_warning = Some(warning);
-    }
-
-    fn apply_session_list_update(&mut self, update: SessionListUpdate) -> Result<bool> {
-        let (sessions, finished) = match update {
-            SessionListUpdate::Cached(sessions) => (sessions, false),
-            SessionListUpdate::CloudUnavailable(warning) => {
-                self.set_cloud_warning(warning);
-                return Ok(false);
-            }
-            SessionListUpdate::Fresh(sessions) => (sessions?, true),
-        };
-        self.reseed_grouped(sessions.0, sessions.1);
-        self.apply_resume_project_scope_default();
-        Ok(finished)
     }
 
     fn run_with_session_updates(
@@ -2552,6 +2305,8 @@ pub fn pick_session() -> Result<Option<PickerResult>> {
             .map(|dir| dir.to_string_lossy().into_owned()),
     );
     picker.apply_resume_project_scope_default();
+    // The standalone picker is the CLI resume flow: open search-first.
+    picker.focus_search_input();
     picker.run_with_session_updates(Some(receiver))
 }
 

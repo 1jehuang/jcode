@@ -34,9 +34,8 @@ pub(crate) fn format_rate_limit_error(body: &str, retry_after: Option<Duration>)
     let resets_in = error
         .get("resets_in_seconds")
         .and_then(json_nonnegative_seconds);
-    let resets_at = error
-        .get("resets_at")
-        .and_then(json_timestamp)
+    let resets_at_unix = error.get("resets_at").and_then(json_timestamp);
+    let resets_at = resets_at_unix
         .and_then(|timestamp| chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0))
         .map(|timestamp| timestamp.format("%Y-%m-%d %H:%M UTC").to_string());
 
@@ -55,6 +54,22 @@ pub(crate) fn format_rate_limit_error(body: &str, retry_after: Option<Duration>)
 
     if let Some(delay) = retry_after {
         output.push_str(&format!(" Retry after {}.", format_compact_duration(delay)));
+    }
+
+    // Codex subscription exhaustion: tag it with the stable marker so account
+    // failover can move this session to another account. A limit that resets
+    // within two minutes is an ordinary short 429 and stays unmarked.
+    if error.get("type").and_then(Value::as_str) == Some("usage_limit_reached") {
+        let now = chrono::Utc::now().timestamp();
+        let resets_at_unix =
+            resets_at_unix.or_else(|| resets_in.map(|secs| now + secs.min(i64::MAX as u64) as i64));
+        let resets_in_secs = resets_at_unix.map(|at| at - now);
+        if jcode_provider_core::usage_limit::is_far_usage_limit_reset(resets_in_secs) {
+            output.push(' ');
+            output.push_str(&jcode_provider_core::account_usage_limit_marker(
+                resets_at_unix,
+            ));
+        }
     }
 
     output
@@ -136,6 +151,52 @@ mod tests {
         assert!(!message.contains("usage_limit_reached"));
         assert!(!message.contains("eligible_promo"));
         assert!(!message.contains("2608165"));
+    }
+
+    #[test]
+    fn codex_usage_limit_reached_carries_account_marker() {
+        let now = chrono::Utc::now().timestamp();
+        let body = format!(
+            r#"{{"error":{{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_at":{},"resets_in_seconds":7200}}}}"#,
+            now + 7200
+        );
+        let message = format_rate_limit_error(&body, None);
+        assert_eq!(
+            jcode_provider_core::classify_account_usage_limit(&message),
+            Some(jcode_provider_core::AccountUsageLimit {
+                resets_at: Some(now + 7200)
+            }),
+            "{message}"
+        );
+
+        // Only resets_in_seconds given: resets_at is derived from now.
+        let body = r#"{"error":{"type":"usage_limit_reached","message":"limit","resets_in_seconds":3600}}"#;
+        let limit =
+            jcode_provider_core::classify_account_usage_limit(&format_rate_limit_error(body, None))
+                .expect("marker");
+        assert!((limit.resets_at.unwrap() - (now + 3600)).abs() <= 2);
+
+        // A usage_limit_reached that resets within two minutes is a short 429.
+        let body = format!(
+            r#"{{"error":{{"type":"usage_limit_reached","message":"limit","resets_at":{}}}}}"#,
+            now + 30
+        );
+        assert_eq!(
+            jcode_provider_core::classify_account_usage_limit(&format_rate_limit_error(
+                &body, None
+            )),
+            None
+        );
+
+        // Ordinary rate limits are not account exhaustion.
+        let body = r#"{"error":{"type":"rate_limit_exceeded","message":"Too many requests"}}"#;
+        assert_eq!(
+            jcode_provider_core::classify_account_usage_limit(&format_rate_limit_error(
+                body,
+                Some(Duration::from_secs(5))
+            )),
+            None
+        );
     }
 
     #[test]

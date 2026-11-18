@@ -776,3 +776,85 @@ mod tests {
         );
     }
 }
+
+impl App {
+    pub(super) fn restore_failover_payload(&mut self, payload: super::FallbackResendPayload) {
+        self.log_recovery_event(
+            crate::logging::LogLevel::Info,
+            "RECOVERY_DRAFT_RESTORE",
+            "held_payload",
+        );
+        let restored = payload.raw_input.unwrap_or(payload.content);
+        let into_empty_composer = self.input.is_empty();
+        if into_empty_composer {
+            self.input = restored;
+        } else if !restored.is_empty() && self.input != restored {
+            // Do not turn a partially typed command or prompt into a different
+            // request. Keep the held request recoverable in the transcript.
+            self.push_display_message(DisplayMessage::system(format!(
+                "Failover request was not resent. Your draft text is preserved. Recover the previous request from here:\n\n{restored}"
+            )));
+        }
+        for image in payload.images {
+            if !self.pending_images.contains(&image) {
+                self.pending_images.push(image);
+            }
+        }
+        self.ensure_input_image_markers();
+        if into_empty_composer {
+            // After any appended attachment markers.
+            self.cursor_pos = self.input.len();
+        }
+    }
+
+    /// Recover the complete user payload before a terminal retry path clears it.
+    /// Restoring only `last_submitted_input` loses consumed image attachments.
+    pub(super) fn restore_terminal_remote_retry_input(&mut self) {
+        self.log_recovery_event(
+            crate::logging::LogLevel::Warn,
+            "RECOVERY_RETRY_RESTORE",
+            "terminal_retry_stop",
+        );
+        if let Some(pending) = self
+            .rate_limit_pending_message
+            .take_if(|pending| !pending.is_system)
+        {
+            let raw_input = self.last_submitted_input.take();
+            self.restore_failover_payload(super::FallbackResendPayload {
+                content: pending.content,
+                images: pending.images,
+                is_system: pending.is_system,
+                system_reminder: pending.system_reminder,
+                auto_retry: pending.auto_retry,
+                retry_attempts: pending.retry_attempts,
+                raw_input,
+            });
+            self.reset_tab_completion();
+            self.sync_model_picker_preview_from_input();
+        } else {
+            self.restore_failed_input_to_box();
+        }
+    }
+
+    /// Put the prompt that started the failed turn back into the input box so the
+    /// user does not lose what they typed when a turn errors out (for example a
+    /// "token refresh needed" / auth error). Only restores when the input box is
+    /// empty, so we never clobber text the user has already started typing.
+    pub(super) fn restore_failed_input_to_box(&mut self) {
+        let Some(prompt) = self.last_submitted_input.take() else {
+            return;
+        };
+        if prompt.trim().is_empty() {
+            return;
+        }
+        if !self.input.is_empty() {
+            // User already started a new prompt; do not overwrite it.
+            return;
+        }
+        self.input = prompt;
+        self.cursor_pos = self.input.len();
+        self.reset_tab_completion();
+        self.sync_model_picker_preview_from_input();
+        self.set_status_notice("Prompt restored to input after error");
+    }
+}

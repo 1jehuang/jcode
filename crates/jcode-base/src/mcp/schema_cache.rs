@@ -340,6 +340,7 @@ mod shared_snapshot_tests {
                 .map(|i| McpToolDef {
                     name: format!("tool_{i}"),
                     description: None,
+                    annotations: Some(json!({"readOnlyHint": true})),
                     input_schema: json!({
                         "type": "object",
                         "properties": {"payload": {

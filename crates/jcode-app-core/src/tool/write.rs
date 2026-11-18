@@ -76,7 +76,8 @@ impl Tool for WriteTool {
         };
 
         // Write the file
-        tokio::fs::write(&path, &params.content).await?;
+        crate::file_history::tracked_write(&ctx.session_id, &path, params.content.as_bytes())
+            .await?;
         super::edit_stats::record(
             &ctx,
             old_content.as_deref().unwrap_or(""),

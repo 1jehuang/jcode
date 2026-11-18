@@ -14,6 +14,15 @@ impl Agent {
     pub(super) async fn run_turn(&mut self, print_output: bool) -> Result<String> {
         let _runtime_activity =
             crate::runtime_activity::global().try_enter_session(&self.session.id)?;
+        self.return_account_home_at_turn_start(None);
+        let result = self.run_turn_inner(print_output).await;
+        // Persist an account move made by failover, on success and on error.
+        self.sync_account_pins_after_stream(None);
+        result
+    }
+
+    async fn run_turn_inner(&mut self, print_output: bool) -> Result<String> {
+        self.ensure_provider_conversation_reset().await?;
         self.ensure_session_lease()?;
         self.set_log_context();
         let usage_turn_id = self.model_usage_turn_id();
@@ -174,6 +183,8 @@ impl Agent {
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
             self.last_status_detail = None;
+            self.provider.set_host_tool_executor_available(true);
+            self.provider.bind_session(&self.session.id);
             self.provider.set_session_id(&self.session.id);
             let completion = self
                 .provider
@@ -596,10 +607,6 @@ impl Agent {
                         // Preserve reported usage from the failed attempt, but
                         // never let its model or counters bleed into the retry.
                         usage_recorder.finish();
-                        usage_input = None;
-                        usage_output = None;
-                        usage_cache_read = None;
-                        usage_cache_creation = None;
                         // Transient transport fault mid-stream; the provider is
                         // replaying the request. Discard this attempt's partial
                         // output so the replay doesn't duplicate it in history.
@@ -627,6 +634,11 @@ impl Agent {
                         openai_reasoning_items.clear();
                         provider_native_items.clear();
                         openai_native_compaction = None;
+                        // Usage belongs to the discarded attempt, not its replacement.
+                        usage_input = None;
+                        usage_output = None;
+                        usage_cache_read = None;
+                        usage_cache_creation = None;
                         saw_message_end = false;
                         stop_reason = None;
                     }
@@ -746,7 +758,7 @@ impl Agent {
                             crate::telemetry::record_tool_failure();
                         }
                         let native_result = match tool_result {
-                            Ok(output) => NativeToolResult::success(request_id, output.output),
+                            Ok(output) => NativeToolResult::from_tool_output(request_id, output),
                             Err(e) => NativeToolResult::error(request_id, e.to_string()),
                         };
                         // Send result back to SDK bridge
@@ -1347,3 +1359,7 @@ impl Agent {
 #[cfg(test)]
 #[path = "turn_loops_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "retry_rollback_usage_tests.rs"]
+mod retry_rollback_usage_tests;

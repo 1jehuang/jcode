@@ -722,7 +722,10 @@ pub fn parse_provider_routing_from_env() -> ProviderRouting {
 
 pub fn is_kimi_model(model: &str) -> bool {
     let lower = model.to_lowercase();
-    lower.contains("moonshotai/") || lower.contains("kimi-k2") || lower.contains("kimi-k2.5")
+    lower.contains("moonshotai/")
+        || lower.contains("kimi-k2")
+        || lower.contains("kimi-k2.5")
+        || lower.contains("kimi-k3")
 }
 
 pub fn rank_providers_from_endpoints(endpoints: &[EndpointInfo]) -> Vec<String> {

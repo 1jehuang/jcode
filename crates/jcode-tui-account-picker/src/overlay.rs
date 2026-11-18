@@ -2,12 +2,16 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use std::collections::HashMap;
 
 use crate::{AccountPickerCommand, AccountPickerItem, AccountPickerSummary, AccountProviderKind};
 
+#[path = "overlay_navigation.rs"]
+mod navigation;
+#[path = "overlay_prompt.rs"]
+mod prompt;
 #[path = "overlay_render.rs"]
 mod render_support;
 use render_support::{
@@ -26,6 +30,14 @@ const MUTED_DARK: Color = Color::Rgb(100, 106, 122);
 const OVERLAY_PERCENT_X: u16 = 88;
 const OVERLAY_PERCENT_Y: u16 = 74;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AccountPickerView {
+    Flat,
+    Accounts,
+    Account(usize),
+    ProviderSettings,
+}
+
 #[derive(Debug, Clone)]
 pub struct AccountPicker {
     title: String,
@@ -35,12 +47,20 @@ pub struct AccountPicker {
     filter: String,
     summary: Option<AccountPickerSummary>,
     last_action_list_area: Option<Rect>,
+    removal_confirmation: Option<usize>,
+    view: AccountPickerView,
+    account_list_position: Option<(String, usize)>,
+    manager_scope: Option<Option<String>>,
+    prompt: Option<prompt::AccountPrompt>,
+    notice: Option<(String, bool)>,
 }
 
 pub enum OverlayAction {
     Continue,
     Close,
     Execute(AccountPickerCommand),
+    SubmitPrompt(String),
+    CancelPrompt,
 }
 
 impl AccountPicker {
@@ -58,7 +78,9 @@ impl AccountPicker {
             .as_ref()
             .map(estimate_summary_bytes)
             .unwrap_or(0);
-        let total_estimate_bytes = items_estimate_bytes
+        let prompt_estimate_bytes = self.prompt_estimate_bytes();
+        let total_estimate_bytes = prompt_estimate_bytes
+            + items_estimate_bytes
             + filtered_estimate_bytes
             + filter_bytes
             + title_bytes
@@ -68,6 +90,17 @@ impl AccountPicker {
             "items_count": self.items.len(),
             "filtered_count": self.filtered.len(),
             "selected": self.selected,
+            "view": self.view_name(),
+            "visible_items": self.filtered.iter().map(|index| {
+                let item = &self.items[*index];
+                serde_json::json!({
+                    "provider_id": item.provider_id,
+                    "title": item.title,
+                    "command": format!("{:?}", item.command),
+                })
+            }).collect::<Vec<_>>(),
+            "prompt_open": self.prompt_is_open(),
+            "prompt_estimate_bytes": prompt_estimate_bytes,
             "title_bytes": title_bytes,
             "filter_bytes": filter_bytes,
             "summary_estimate_bytes": summary_estimate_bytes,
@@ -90,6 +123,12 @@ impl AccountPicker {
             filter: String::new(),
             summary: Some(summary),
             last_action_list_area: None,
+            removal_confirmation: None,
+            view: AccountPickerView::Flat,
+            account_list_position: None,
+            manager_scope: None,
+            prompt: None,
+            notice: None,
         };
         picker.apply_filter();
         picker
@@ -101,53 +140,89 @@ impl AccountPicker {
             .and_then(|idx| self.items.get(*idx))
     }
 
-    fn visible_window_start(&self, available_items: usize) -> usize {
-        self.selected
-            .saturating_sub(available_items.saturating_sub(1).min(available_items / 2))
+    /// Refresh row metadata without changing the active filter or selection.
+    /// The callback must leave commands and row identity unchanged.
+    pub fn update_account_details(&mut self, update: impl FnOnce(&mut [AccountPickerItem])) {
+        update(&mut self.items);
+    }
+
+    pub fn select_account(&mut self, provider_id: &str, label: Option<&str>) {
+        let target = self
+            .filtered
+            .iter()
+            .position(|index| {
+                let item = &self.items[*index];
+                item.provider_id == provider_id
+                    && match &item.command {
+                        AccountPickerCommand::Switch { label: target, .. } => {
+                            label == Some(target.as_str())
+                        }
+                        AccountPickerCommand::SubmitInput(input) => label.is_some_and(|label| {
+                            input == &format!("/accounts {provider_id} switch {label}")
+                        }),
+                        _ => false,
+                    }
+            })
+            .or_else(|| {
+                self.filtered
+                    .iter()
+                    .position(|index| action_section(&self.items[*index]) == ActionSection::Switch)
+            });
+        if let Some(target) = target {
+            self.selected = target;
+        }
+    }
+
+    fn visible_rows(&self, height: u16) -> Vec<(usize, bool)> {
+        let capacity = height as usize;
+        if capacity == 0 || self.filtered.is_empty() {
+            return Vec::new();
+        }
+        let mut start = self.selected.saturating_sub(capacity / 2);
+        loop {
+            let mut rows = Vec::new();
+            let mut provider = None;
+            for index in start..self.filtered.len() {
+                let item = &self.items[self.filtered[index]];
+                if capacity > 1 && provider != Some(item.provider_id.as_str()) {
+                    if rows.len() + 2 > capacity {
+                        break;
+                    }
+                    rows.push((index, true));
+                }
+                provider = Some(item.provider_id.as_str());
+                if rows.len() == capacity {
+                    break;
+                }
+                rows.push((index, false));
+            }
+            if rows
+                .iter()
+                .any(|&(index, header)| index == self.selected && !header)
+                || start >= self.selected
+            {
+                return rows;
+            }
+            start += 1;
+        }
     }
 
     fn visible_index_for_action_row(&self, row: u16, list_height: u16) -> Option<usize> {
-        if self.filtered.is_empty() {
-            return None;
-        }
-
-        let available_items = (list_height as usize).max(1);
-        let start = self.visible_window_start(available_items);
-        let end = (start + available_items).min(self.filtered.len());
-        let mut current_provider: Option<&str> = None;
-        let mut rendered_row = 0u16;
-
-        for visible_idx in start..end {
-            let item = &self.items[self.filtered[visible_idx]];
-            if current_provider != Some(item.provider_id.as_str()) {
-                current_provider = Some(item.provider_id.as_str());
-                if rendered_row == row {
-                    return None;
-                }
-                rendered_row = rendered_row.saturating_add(1);
-                if rendered_row >= list_height {
-                    return None;
-                }
-            }
-
-            if rendered_row == row {
-                return Some(visible_idx);
-            }
-            rendered_row = rendered_row.saturating_add(1);
-            if rendered_row > row && rendered_row >= list_height {
-                return None;
-            }
-        }
-
-        None
+        self.visible_rows(list_height)
+            .get(row as usize)
+            .and_then(|&(index, header)| (!header).then_some(index))
     }
 
     fn apply_filter(&mut self) {
+        self.removal_confirmation = None;
         self.filtered = self
             .items
             .iter()
             .enumerate()
-            .filter_map(|(idx, item)| crate::item_matches_filter(item, &self.filter).then_some(idx))
+            .filter_map(|(idx, item)| {
+                (self.item_in_view(idx) && crate::item_matches_filter(item, &self.filter))
+                    .then_some(idx)
+            })
             .collect();
         let provider_order = self.provider_order();
         self.filtered.sort_by(|left, right| {
@@ -251,7 +326,10 @@ impl AccountPicker {
         let mut seen = Vec::new();
         let mut stats: HashMap<String, (String, usize, usize)> = HashMap::new();
 
-        for item in &self.items {
+        for (index, item) in self.items.iter().enumerate() {
+            if !self.item_in_view(index) {
+                continue;
+            }
             if matches!(item.provider_id.as_str(), "defaults" | "account-flow") {
                 continue;
             }
@@ -307,6 +385,25 @@ impl AccountPicker {
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Result<OverlayAction> {
+        if self.prompt.is_some() {
+            return Ok(self.handle_prompt_key(code, modifiers));
+        }
+        if let Some(target) = self.removal_confirmation {
+            if code == KeyCode::Char('y')
+                && modifiers.is_empty()
+                && self.filtered.get(self.selected) == Some(&target)
+            {
+                self.removal_confirmation = None;
+                return Ok(OverlayAction::Execute(self.items[target].command.clone()));
+            }
+            if code == KeyCode::Enter {
+                return Ok(OverlayAction::Continue);
+            }
+            self.removal_confirmation = None;
+            if code == KeyCode::Esc {
+                return Ok(OverlayAction::Continue);
+            }
+        }
         match code {
             KeyCode::Esc => {
                 if !self.filter.is_empty() {
@@ -314,18 +411,18 @@ impl AccountPicker {
                     self.apply_filter();
                     return Ok(OverlayAction::Continue);
                 }
-                return Ok(OverlayAction::Close);
-            }
-            KeyCode::Char('q') if !modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.return_to_account_list() {
+                    return Ok(OverlayAction::Continue);
+                }
                 return Ok(OverlayAction::Close);
             }
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                 return Ok(OverlayAction::Close);
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 self.selected = self.selected.saturating_sub(1);
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 let max = self.filtered.len().saturating_sub(1);
                 self.selected = (self.selected + 1).min(max);
             }
@@ -335,17 +432,17 @@ impl AccountPicker {
             KeyCode::Right => {
                 self.select_next_provider_group();
             }
-            KeyCode::PageUp | KeyCode::Char('K') => {
+            KeyCode::PageUp => {
                 self.selected = self.selected.saturating_sub(6);
             }
-            KeyCode::PageDown | KeyCode::Char('J') => {
+            KeyCode::PageDown => {
                 let max = self.filtered.len().saturating_sub(1);
                 self.selected = (self.selected + 6).min(max);
             }
-            KeyCode::Home | KeyCode::Char('g') => {
+            KeyCode::Home => {
                 self.selected = 0;
             }
-            KeyCode::End | KeyCode::Char('G') => {
+            KeyCode::End => {
                 self.selected = self.filtered.len().saturating_sub(1);
             }
             KeyCode::Backspace => {
@@ -354,10 +451,33 @@ impl AccountPicker {
                 }
             }
             KeyCode::Enter => {
+                if self.open_selected_menu() {
+                    return Ok(OverlayAction::Continue);
+                }
                 if let Some(item) = self.selected_item() {
+                    if action_section(item) == ActionSection::Remove
+                        || matches!(item.command, AccountPickerCommand::Replace { .. })
+                    {
+                        self.removal_confirmation = self.filtered.get(self.selected).copied();
+                        return Ok(OverlayAction::Continue);
+                    }
                     return Ok(OverlayAction::Execute(item.command.clone()));
                 }
-                return Ok(OverlayAction::Close);
+                return Ok(OverlayAction::Continue);
+            }
+            // Keep plain letters available for account search.
+            KeyCode::Char('d')
+                if modifiers.contains(KeyModifiers::CONTROL)
+                    && !modifiers.contains(KeyModifiers::ALT) =>
+            {
+                if let Some(AccountPickerCommand::Switch { provider, label }) =
+                    self.selected_item().map(|item| &item.command)
+                {
+                    return Ok(OverlayAction::Execute(AccountPickerCommand::SetDefault {
+                        provider: provider.clone(),
+                        label: label.clone(),
+                    }));
+                }
             }
             KeyCode::Char(c)
                 if !modifiers.contains(KeyModifiers::CONTROL)
@@ -372,6 +492,10 @@ impl AccountPicker {
     }
 
     pub fn handle_overlay_mouse(&mut self, mouse: MouseEvent) {
+        self.removal_confirmation = None;
+        if self.prompt.is_some() {
+            return;
+        }
         let Some(list_inner) = self.last_action_list_area else {
             return;
         };
@@ -400,13 +524,25 @@ impl AccountPicker {
     }
 
     pub fn render(&mut self, frame: &mut Frame) {
-        let area = centered_rect(OVERLAY_PERCENT_X, OVERLAY_PERCENT_Y, frame.area());
+        let compact = frame.area().height < 24 || frame.area().width < 70;
+        let area = if compact {
+            frame.area()
+        } else {
+            centered_rect(OVERLAY_PERCENT_X, OVERLAY_PERCENT_Y, frame.area())
+        };
 
         let block = Block::default()
-            .title(format!(" {} ", self.title))
+            .title(format!(" {} ", self.navigation_title()))
             .title_bottom(Line::from(vec![
                 hotkey(" Enter "),
-                Span::styled(" run  ", Style::default().fg(MUTED_DARK)),
+                Span::styled(
+                    if self.view == AccountPickerView::Accounts {
+                        " open  "
+                    } else {
+                        " run  "
+                    },
+                    Style::default().fg(MUTED_DARK),
+                ),
                 hotkey(" Up/Down "),
                 Span::styled(" navigate  ", Style::default().fg(MUTED_DARK)),
                 hotkey(" Click "),
@@ -414,7 +550,7 @@ impl AccountPicker {
                 hotkey(" type "),
                 Span::styled(" filter  ", Style::default().fg(MUTED_DARK)),
                 hotkey(" Esc "),
-                Span::styled(" clear / close ", Style::default().fg(MUTED_DARK)),
+                Span::styled(" clear / back / close ", Style::default().fg(MUTED_DARK)),
             ]))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(PANEL_BORDER));
@@ -426,6 +562,17 @@ impl AccountPicker {
             width: area.width.saturating_sub(2),
             height: area.height.saturating_sub(2),
         };
+        if compact {
+            let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(3)]).split(inner);
+            frame.render_widget(
+                Paragraph::new(format!("Filter: {} | Ctrl+D default", self.filter)),
+                rows[0],
+            );
+            self.render_action_list(frame, rows[1]);
+            self.render_removal_confirmation(frame, inner);
+            self.render_prompt_and_notice(frame, inner);
+            return;
+        }
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -448,11 +595,57 @@ impl AccountPicker {
         let footer = Paragraph::new(Line::from(vec![
             Span::styled("Focus ", Style::default().fg(MUTED_DARK)),
             Span::styled(
-                "saved accounts stay surfaced here; click actions to focus them, use Left/Right to jump provider groups, or use `/account <provider> settings` for the full text view.",
+                "Ctrl+D: default for new/unpinned windows. Left/Right: provider groups. Home/End, PageUp/PageDown: navigate. Type to search.",
                 Style::default().fg(MUTED),
             ),
         ]));
         frame.render_widget(footer, rows[2]);
+        self.render_removal_confirmation(frame, inner);
+        self.render_prompt_and_notice(frame, inner);
+    }
+
+    fn render_removal_confirmation(&self, frame: &mut Frame, area: Rect) {
+        let Some(target) = self
+            .removal_confirmation
+            .and_then(|index| self.items.get(index))
+        else {
+            return;
+        };
+        let replacing = matches!(target.command, AccountPickerCommand::Replace { .. });
+        let exact_target = match &target.command {
+            AccountPickerCommand::Replace { label, .. }
+            | AccountPickerCommand::Remove { label, .. } => {
+                format!("{} account `{label}`", target.provider_label)
+            }
+            AccountPickerCommand::SubmitInput(input) => input.clone(),
+            _ => return,
+        };
+        let area = centered_rect(90, 65, area);
+        frame.render_widget(Clear, area);
+        let block = Block::bordered()
+            .title(if replacing {
+                " Confirm replacement "
+            } else {
+                " Confirm removal "
+            })
+            .border_style(Style::default().fg(Color::Red));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let message = if replacing {
+            format!(
+                "Replace login for {exact_target}?\nThe old login remains until OAuth succeeds. A different identity is allowed.\n\ny: confirm replacement\nEsc: cancel\nEnter does not replace. Navigation, search or mouse cancels."
+            )
+        } else {
+            format!(
+                "Remove {exact_target}?\n\ny: confirm removal\nEsc: cancel\nEnter does not delete. Navigation, search or mouse cancels."
+            )
+        };
+        frame.render_widget(
+            Paragraph::new(message)
+                .wrap(Wrap { trim: false })
+                .style(Style::default().fg(Color::White).bg(PANEL_BG)),
+            inner,
+        );
     }
 
     fn render_header(&self, frame: &mut Frame, area: Rect) {
@@ -496,15 +689,21 @@ impl AccountPicker {
     }
 
     fn render_action_list(&mut self, frame: &mut Frame, area: Rect) {
-        let title = if self.filtered.is_empty() {
-            " Providers & Quick Actions ".to_string()
-        } else {
-            format!(
-                " Providers & Quick Actions ({}/{}) ",
-                self.selected + 1,
-                self.filtered.len()
-            )
+        let list_title = match self.view {
+            AccountPickerView::Accounts => "Saved accounts",
+            AccountPickerView::Account(_) => "Account actions",
+            AccountPickerView::ProviderSettings => "Provider settings",
+            AccountPickerView::Flat => "Providers & Quick Actions",
         };
+        let title = format!(
+            " {list_title} ({}/{}) ",
+            if self.filtered.is_empty() {
+                0
+            } else {
+                self.selected + 1
+            },
+            self.filtered.len()
+        );
         let block = Block::default()
             .title(Span::styled(
                 title,
@@ -517,10 +716,6 @@ impl AccountPicker {
         frame.render_widget(block, area);
         self.last_action_list_area = Some(list_inner);
 
-        let available_items = (list_inner.height as usize).max(1);
-        let start = self.visible_window_start(available_items);
-        let end = (start + available_items).min(self.filtered.len());
-
         let mut lines = Vec::new();
         if self.filtered.is_empty() {
             lines.push(Line::from(Span::styled(
@@ -532,20 +727,19 @@ impl AccountPicker {
                 Style::default().fg(MUTED),
             )));
         } else {
-            let mut current_provider: Option<&str> = None;
-            for visible_idx in start..end {
+            for (visible_idx, header) in self.visible_rows(list_inner.height) {
                 let idx = self.filtered[visible_idx];
                 let item = &self.items[idx];
                 let selected = visible_idx == self.selected;
 
-                if current_provider != Some(item.provider_id.as_str()) {
-                    current_provider = Some(item.provider_id.as_str());
+                if header {
                     lines.push(provider_header_line(
                         &item.provider_label,
                         self.filtered_provider_switch_count(&item.provider_id),
                         self.filtered_provider_secondary_count(&item.provider_id),
                         &item.provider_id,
                     ));
+                    continue;
                 }
 
                 let row_style = if selected {
@@ -554,26 +748,57 @@ impl AccountPicker {
                     Style::default()
                 };
                 let (icon, icon_color) = action_icon(item);
-                let title = compact_item_title(item);
-                let meta_width = list_inner.width.saturating_sub(16) as usize;
+                let badges = render_support::account_badges(item);
+                let badge_text: String = badges
+                    .iter()
+                    .filter_map(|badge| {
+                        let badge = match (*badge, list_inner.width) {
+                            ("this window", 0..50) | ("pinned", 0..50) => return None,
+                            ("this window", 50..72) => "here",
+                            ("pinned", 50..72) => "pin",
+                            ("default", 0..72) => "def",
+                            _ => badge,
+                        };
+                        Some(format!(" [{badge}]"))
+                    })
+                    .collect();
+                // Keep a remaining-capacity value visible even on a long or
+                // active/default account row. Full names and scopes are in Details.
+                let quota_width = if matches!(item.command, AccountPickerCommand::Switch { .. }) {
+                    17
+                } else {
+                    0
+                };
+                let title_width = 22.min(
+                    (list_inner.width as usize).saturating_sub(7 + badge_text.len() + quota_width),
+                );
+                let title = truncate_with_ellipsis(&compact_item_title(item), title_width);
+                let meta_width = (list_inner.width as usize)
+                    .saturating_sub(7 + Line::from(title.clone()).width())
+                    .saturating_sub(badge_text.chars().count());
                 let meta = truncate_with_ellipsis(&item.subtitle, meta_width);
-                lines.push(Line::from(vec![
+                let mut spans = vec![
                     Span::styled(
                         if selected { "> " } else { "  " },
                         row_style.fg(Color::White),
                     ),
                     Span::styled(format!("{} ", icon), row_style.fg(icon_color).bold()),
-                    Span::styled(
-                        truncate_with_ellipsis(&title, 22),
-                        row_style.fg(Color::White),
-                    ),
-                    Span::styled(" - ", row_style.fg(MUTED_DARK)),
-                    Span::styled(meta, row_style.fg(MUTED)),
-                ]));
+                    Span::styled(title, row_style.fg(Color::White)),
+                ];
+                if !badge_text.is_empty() {
+                    spans.push(Span::styled(
+                        badge_text,
+                        row_style.fg(Color::Rgb(110, 214, 158)),
+                    ));
+                }
+                spans.push(Span::styled(" - ", row_style.fg(MUTED_DARK)));
+                spans.push(Span::styled(meta, row_style.fg(MUTED)));
+                lines.push(Line::from(spans));
             }
         }
 
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), list_inner);
+        // Each logical row must occupy exactly one physical line for mouse mapping.
+        frame.render_widget(Paragraph::new(lines), list_inner);
     }
 
     fn render_detail_pane(&self, frame: &mut Frame, area: Rect) {
@@ -600,12 +825,21 @@ impl AccountPicker {
             return;
         };
 
+        if let AccountPickerView::Account(index) = self.view {
+            self.render_account_action_details(frame, inner, index, item);
+            return;
+        }
+
         // Usage belongs ahead of the provider's quick-switch/control inventory,
         // which can otherwise push the selected account's totals off-screen.
         if !item.details.is_empty() {
             let mut lines = vec![
                 Line::styled(item.title.clone(), Style::default().fg(Color::White).bold()),
-                Line::from("Enter: run action."),
+                Line::from(if self.view == AccountPickerView::Accounts {
+                    "Enter: manage this account."
+                } else {
+                    "Enter: run action."
+                }),
                 Line::from(""),
             ];
             for (label, value) in &item.details {
@@ -853,9 +1087,15 @@ fn estimate_command_bytes(command: &AccountPickerCommand) -> usize {
                 + status_notice.capacity()
         }
         AccountPickerCommand::Switch { label, .. }
+        | AccountPickerCommand::SetDefault { label, .. }
+        | AccountPickerCommand::Replace { label, .. }
         | AccountPickerCommand::Login { label, .. }
+        | AccountPickerCommand::Rename { label, .. }
         | AccountPickerCommand::Remove { label, .. } => label.capacity(),
-        AccountPickerCommand::PromptNew { .. } => 0,
+        AccountPickerCommand::PromptNew { .. }
+        | AccountPickerCommand::Unpin { .. }
+        | AccountPickerCommand::ToggleFailover
+        | AccountPickerCommand::OpenProviderSettings => 0,
     }
 }
 
@@ -879,285 +1119,5 @@ fn estimate_summary_bytes(summary: &AccountPickerSummary) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use ratatui::{Terminal, backend::TestBackend, widgets::Paragraph};
-
-    #[test]
-    fn account_usage_details_wrap_without_changing_switch_action() {
-        let mut picker = AccountPicker::new(
-            "Accounts",
-            vec![
-                AccountPickerItem::action(
-                    "openai",
-                    "OpenAI",
-                    "Switch OpenAI Otter",
-                    "saved",
-                    AccountPickerCommand::SubmitInput("/account openai switch openai-otter".into()),
-                )
-                .with_details(vec![
-                    (
-                        "Full usage details".into(),
-                        "/account openai settings".into(),
-                    ),
-                    (
-                        "Today (local midnight)".into(),
-                        "123456789 input / 450000 output tokens (60000 cached input), $1.2500 known + unknown cost (2 unpriced responses) API-equivalent estimate, not a bill; recorded only; partial token counts; since local midnight"
-                            .into(),
-                    ),
-                    (
-                        "Lifetime".into(),
-                        "1234567890 input / 4500000 output tokens (600000 cached input), $12.5000 API-equivalent estimate, not a bill; recorded only; since 2026-09-06 12:34 -07:00"
-                            .into(),
-                    ),
-                    (
-                        "Estimate".into(),
-                        "Not your subscription bill. Recorded Jcode usage only.".into(),
-                    ),
-                ]),
-            ],
-        );
-        let mut terminal = Terminal::new(TestBackend::new(42, 38)).unwrap();
-        terminal
-            .draw(|frame| picker.render_detail_pane(frame, frame.area()))
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let rendered = (1..37)
-            .map(|y| {
-                (1..41)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
-                    .trim()
-                    .to_string()
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-        for expected in [
-            "Today",
-            "Lifetime",
-            "$1.25",
-            "$12.50",
-            "1234567890 input",
-            "600000 cached input",
-            "Not your subscription bill.",
-            "/account openai settings",
-        ] {
-            assert!(
-                rendered.contains(expected),
-                "missing {expected}: {rendered}"
-            );
-        }
-        assert!(!rendered.contains('…'));
-        let mut compact = Terminal::new(TestBackend::new(42, 10)).unwrap();
-        compact
-            .draw(|frame| picker.render_detail_pane(frame, frame.area()))
-            .unwrap();
-        let compact_buffer = compact.backend().buffer();
-        let compact_text = (0..10)
-            .flat_map(|y| (0..42).map(move |x| compact_buffer[(x, y)].symbol()))
-            .collect::<String>();
-        assert!(
-            compact_text.contains("/account openai settings"),
-            "short panes retain the full-detail route"
-        );
-        assert!(
-            matches!(picker.handle_overlay_key(KeyCode::Enter, KeyModifiers::empty()).unwrap(),
-            OverlayAction::Execute(AccountPickerCommand::SubmitInput(command)) if command == "/account openai switch openai-otter")
-        );
-    }
-
-    #[test]
-    fn test_account_picker_preserves_underlying_background_outside_panels() {
-        let mut picker = AccountPicker::new(
-            " Accounts ",
-            vec![AccountPickerItem::action(
-                "openai",
-                "OpenAI",
-                "Add account",
-                "Start login flow",
-                AccountPickerCommand::SubmitInput("/account openai add default".to_string()),
-            )],
-        );
-
-        let backend = TestBackend::new(40, 12);
-        let mut terminal = Terminal::new(backend).expect("failed to create terminal");
-        terminal
-            .draw(|frame| {
-                let area = frame.area();
-                let fill = vec![Line::from("X".repeat(area.width as usize)); area.height as usize];
-                frame.render_widget(Paragraph::new(fill), area);
-                picker.render(frame);
-            })
-            .expect("draw failed");
-
-        let overlay = centered_rect(
-            OVERLAY_PERCENT_X,
-            OVERLAY_PERCENT_Y,
-            Rect::new(0, 0, 40, 12),
-        );
-        let probe = &terminal.backend().buffer()[(overlay.x + overlay.width - 3, overlay.y + 2)];
-        assert_eq!(probe.symbol(), "X");
-        assert_ne!(probe.bg, Color::Rgb(18, 21, 30));
-    }
-
-    #[test]
-    fn test_account_picker_mouse_click_selects_visible_action_after_group_header() {
-        let mut picker = AccountPicker::new(
-            " Accounts ",
-            vec![
-                AccountPickerItem::action(
-                    "openai",
-                    "OpenAI",
-                    "Provider settings",
-                    "configured",
-                    AccountPickerCommand::SubmitInput("/account openai settings".to_string()),
-                ),
-                AccountPickerItem::action(
-                    "openai",
-                    "OpenAI",
-                    "Login / refresh",
-                    "OAuth",
-                    AccountPickerCommand::SubmitInput("/account openai login".to_string()),
-                ),
-            ],
-        );
-
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).expect("failed to create terminal");
-        terminal
-            .draw(|frame| picker.render(frame))
-            .expect("draw failed");
-
-        let list_area = picker
-            .last_action_list_area
-            .expect("render should record action list area");
-
-        let initially_selected = picker.selected;
-        picker.handle_overlay_mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: list_area.x + 1,
-            row: list_area.y,
-            modifiers: KeyModifiers::empty(),
-        });
-        assert_eq!(
-            picker.selected, initially_selected,
-            "provider group header rows should not be selectable"
-        );
-
-        let expected_first_action = picker.items[picker.filtered[0]].title.clone();
-        // Row 0 is the provider group header; row 1 is the first sorted action.
-        picker.handle_overlay_mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: list_area.x + 1,
-            row: list_area.y + 1,
-            modifiers: KeyModifiers::empty(),
-        });
-
-        assert_eq!(
-            picker.selected_item().map(|item| item.title.as_str()),
-            Some(expected_first_action.as_str())
-        );
-    }
-
-    #[test]
-    fn test_prompt_value_command_preview_shows_placeholder() {
-        let preview = command_preview(&AccountPickerCommand::PromptValue {
-            prompt: "Enter default model".to_string(),
-            command_prefix: "/account default-model".to_string(),
-            empty_value: Some("clear".to_string()),
-            status_notice: "editing".to_string(),
-        });
-
-        assert!(preview.contains("/account default-model <value>"));
-        assert!(preview.contains("clear"));
-    }
-
-    #[test]
-    fn test_account_picker_sorts_switches_before_settings() {
-        let picker = AccountPicker::new(
-            " Accounts ",
-            vec![
-                AccountPickerItem::action(
-                    "openai",
-                    "OpenAI",
-                    "Provider settings",
-                    "configured",
-                    AccountPickerCommand::SubmitInput("/account openai settings".to_string()),
-                ),
-                AccountPickerItem::action(
-                    "openai",
-                    "OpenAI",
-                    "Switch account `work`",
-                    "user@example.com - valid - active",
-                    AccountPickerCommand::SubmitInput("/account openai switch work".to_string()),
-                ),
-                AccountPickerItem::action(
-                    "defaults",
-                    "Global",
-                    "Default provider",
-                    "Current: auto",
-                    AccountPickerCommand::PromptValue {
-                        prompt: "provider".to_string(),
-                        command_prefix: "/account default-provider".to_string(),
-                        empty_value: Some("auto".to_string()),
-                        status_notice: "editing".to_string(),
-                    },
-                ),
-            ],
-        );
-
-        let ordered_titles: Vec<String> = picker
-            .filtered
-            .iter()
-            .map(|idx| picker.items[*idx].title.clone())
-            .collect();
-
-        assert_eq!(ordered_titles[0], "Switch account `work`");
-        assert_eq!(ordered_titles[1], "Provider settings");
-        assert_eq!(ordered_titles[2], "Default provider");
-    }
-
-    #[test]
-    fn test_account_picker_left_right_jump_by_provider_group() {
-        let mut picker = AccountPicker::new(
-            " Accounts ",
-            vec![
-                AccountPickerItem::action(
-                    "claude",
-                    "Claude",
-                    "Switch account `work`",
-                    "a@example.com - valid - active",
-                    AccountPickerCommand::SubmitInput("/account claude switch work".to_string()),
-                ),
-                AccountPickerItem::action(
-                    "claude",
-                    "Claude",
-                    "Provider settings",
-                    "configured",
-                    AccountPickerCommand::SubmitInput("/account claude settings".to_string()),
-                ),
-                AccountPickerItem::action(
-                    "openai",
-                    "OpenAI",
-                    "Switch account `default`",
-                    "b@example.com - valid - active",
-                    AccountPickerCommand::SubmitInput("/account openai switch default".to_string()),
-                ),
-            ],
-        );
-
-        picker.selected = 1;
-        let _ = picker.handle_overlay_key(KeyCode::Right, KeyModifiers::empty());
-        assert_eq!(
-            picker.items[picker.filtered[picker.selected]].provider_id,
-            "openai"
-        );
-
-        let _ = picker.handle_overlay_key(KeyCode::Left, KeyModifiers::empty());
-        assert_eq!(
-            picker.items[picker.filtered[picker.selected]].provider_id,
-            "claude"
-        );
-        assert_eq!(picker.selected, 0);
-    }
-}
+#[path = "overlay_tests.rs"]
+mod tests;

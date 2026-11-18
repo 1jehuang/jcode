@@ -3,6 +3,7 @@ fn reload_replay_history(
     directive: crate::protocol::ReloadRecoverySnapshot,
 ) -> crate::protocol::ServerEvent {
     crate::protocol::ServerEvent::History {
+account_labels: Vec::new(),
         id: 1,
         session_id: session_id.to_string(),
         messages: vec![crate::protocol::HistoryMessage {
@@ -336,6 +337,9 @@ fn reload_recovery_prepared_send_failure_restores_draft_without_exiting() {
         &mut app,
         &mut connection,
         input::PreparedInput {
+            image_markers: Default::default(),
+            routing_input: None,
+            pasted_contents: Vec::new(),
             raw_input: "Continue the interrupted work".to_string(),
             expanded: "Expanded instructions for the interrupted work".to_string(),
             images: images.clone(),
@@ -407,6 +411,9 @@ fn reload_recovery_deferred_send_failure_preserves_newer_draft() {
             &mut app,
             &mut connection,
             input::PreparedInput {
+                image_markers: Default::default(),
+                routing_input: None,
+                pasted_contents: Vec::new(),
                 raw_input: "Held prompt [image 1]".to_string(),
                 expanded: "Expanded held prompt".to_string(),
                 images: vec![held_image.clone()],
@@ -414,9 +421,10 @@ fn reload_recovery_deferred_send_failure_preserves_newer_draft() {
         ))
         .unwrap();
         let new_image = ("image/png".to_string(), "new-image".to_string());
-        app.input = "Newer unsent draft [image 1]".to_string();
-        app.cursor_pos = app.input.len();
+        app.input = "Newer unsent draft".to_string();
         app.pending_images = vec![new_image.clone()];
+        app.ensure_input_image_markers();
+        app.cursor_pos = app.input.len();
         connection.mark_history_loaded();
         app.remote_model_switch_in_flight = false;
         drop(connection.take_dummy_peer());

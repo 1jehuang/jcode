@@ -85,7 +85,10 @@ mod tests {
         let git = data.git_info.unwrap();
         assert_eq!(git.branch, "selected-preview");
         assert_eq!(git.untracked, 1);
-        assert_eq!(git.repo_root.as_deref(), Some(repo.path()));
+        assert_eq!(
+            git.repo_root.as_deref(),
+            Some(repo.path().canonicalize().unwrap().as_path())
+        );
     }
 
     #[test]

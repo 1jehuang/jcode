@@ -1,6 +1,53 @@
 use super::*;
 
 #[test]
+fn opera_detection_covers_aliases_and_platform_ids() {
+    for alias in [
+        "opera",
+        "Opera",
+        "opera-stable",
+        "opera-browser",
+        "opera-gx",
+    ] {
+        assert_eq!(BrowserKind::parse(alias), Some(BrowserKind::Opera));
+    }
+    for id in [
+        "com.operasoftware.Opera",
+        "com.operasoftware.OperaGX",
+        "com.operasoftware.OperaDeveloper",
+    ] {
+        assert_eq!(browser_from_macos_bundle_id(id), Some(BrowserKind::Opera));
+    }
+    assert_eq!(
+        browser_from_linux_desktop_id("opera.desktop"),
+        Some(BrowserKind::Opera)
+    );
+    assert_eq!(BrowserKind::Opera.family(), BrowserFamily::Chromium);
+    assert_eq!(BrowserKind::Opera.macos_app_name(), "Opera");
+    assert_eq!(
+        BrowserKind::Opera.macos_bundle_id(),
+        "com.operasoftware.Opera"
+    );
+    assert_eq!(BrowserKind::Opera.extensions_page(), "opera://extensions");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_native_host_directories_match_browser_lookup_locations() {
+    let chrome = BrowserKind::Chrome.native_messaging_dirs();
+    assert!(chrome[0].ends_with("Library/Application Support/Google/Chrome/NativeMessagingHosts"));
+    assert_eq!(BrowserKind::Brave.native_messaging_dirs(), chrome);
+    assert!(
+        BrowserKind::Firefox.native_messaging_dirs()[0]
+            .ends_with("Library/Application Support/Mozilla/NativeMessagingHosts")
+    );
+    assert!(
+        BrowserKind::Opera.native_messaging_dirs()[1]
+            .ends_with("Library/Application Support/com.operasoftware.Opera/NativeMessagingHosts")
+    );
+}
+
+#[test]
 fn parses_browser_names_and_aliases() {
     assert_eq!(BrowserKind::parse("Chrome"), Some(BrowserKind::Chrome));
     assert_eq!(
@@ -112,7 +159,10 @@ fn maps_windows_prog_ids() {
         browser_from_windows_prog_id("BraveHTML"),
         Some(BrowserKind::Brave)
     );
-    assert_eq!(browser_from_windows_prog_id("OperaStable"), None);
+    assert_eq!(
+        browser_from_windows_prog_id("OperaStable"),
+        Some(BrowserKind::Opera)
+    );
 }
 
 #[test]

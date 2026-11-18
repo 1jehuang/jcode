@@ -72,6 +72,11 @@ pub(super) fn classify_unavailable_model_error(status: StatusCode, body: &str) -
 
 /// Check if an error is transient and should be retried
 pub(in super::super) fn is_retryable_error(error_str: &str) -> bool {
+    // Subscription usage spent until a far reset: retrying on the same
+    // account is doomed. Fail fast so account failover can move the session.
+    if jcode_provider_core::classify_account_usage_limit(error_str).is_some() {
+        return false;
+    }
     // Shared transport-layer classifier used by every other provider. This
     // covers transient TLS/network faults (connection reset/closed/refused/
     // aborted, broken pipe, timeouts, unexpected EOF, error decoding/reading,

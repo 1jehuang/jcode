@@ -9,9 +9,45 @@ impl App {
         modifiers: KeyModifiers,
         text_input: Option<String>,
     ) -> Result<()> {
+        if modifiers == KeyModifiers::ALT && code == KeyCode::Char(']') {
+            self.terminal_reply_filter.reset();
+            insert_input_text(self, "\x1b]");
+            return Ok(());
+        }
+        if self.terminal_reply_filter.is_pending() {
+            let terminator = match (code, modifiers) {
+                (KeyCode::Char('\\'), KeyModifiers::ALT) => Some("\x1b\\"),
+                (KeyCode::Char('g'), KeyModifiers::CONTROL) => Some("\x07"),
+                (KeyCode::Char('\x07'), KeyModifiers::NONE) => Some("\x07"),
+                _ => None,
+            };
+            if let Some(terminator) = terminator {
+                insert_input_text(self, terminator);
+                return Ok(());
+            }
+            if !modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+                && let Some(text) = text_input
+                    .clone()
+                    .or_else(|| text_input_for_key(code, modifiers))
+            {
+                // Consume response characters before modal/suggestion routing.
+                insert_input_text_with_undo(self, &text, true);
+                return Ok(());
+            }
+        }
+        // Editing/navigation/submit shortcuts end a response burst. Printable
+        // keys may still complete a frame, but controls cannot preserve stale
+        // parser state across a user action such as undo or history movement.
+        if !matches!(code, KeyCode::Char(_))
+            || modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+        {
+            self.terminal_reply_filter.reset();
+        }
         let mut code = code;
         let mut modifiers = modifiers;
         ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
+        let previous_empty_escape = self.rewind_ui.last_empty_escape.take();
 
         if self.handle_ssh_login_key(code, modifiers, text_input.as_deref()) {
             return Ok(());
@@ -40,6 +76,12 @@ impl App {
         }
 
         if self.handle_onboarding_continue_prompt_key(code) {
+            return Ok(());
+        }
+
+        // Composer text selection (copy/cut/delete/extend) takes priority over
+        // the whole-line Ctrl+X, the Ctrl+C clear/quit, and plain arrow moves.
+        if super::super::input_selection::handle_input_selection_key(self, code, modifiers) {
             return Ok(());
         }
 
@@ -200,6 +242,15 @@ impl App {
         // inserting a surprise character.
         self.note_unrecognized_hotkey(code, modifiers, false);
 
+        if code == KeyCode::Esc
+            && modifiers.is_empty()
+            && self.inline_interactive_state.is_none()
+            && self.inline_view_state.is_none()
+            && self.rewind_empty_escape(previous_empty_escape, Instant::now())
+        {
+            self.open_rewind_dialog_local();
+            return Ok(());
+        }
         if handle_basic_key(self, code) {
             return Ok(());
         }

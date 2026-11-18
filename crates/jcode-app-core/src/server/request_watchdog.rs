@@ -140,6 +140,7 @@ pub(super) fn send_agent_busy_error(
         ],
     );
     if let Err(error) = client_event_tx.send(ServerEvent::Error {
+server_resumes: false,
         id: request_id,
         message: format!(
             "Cannot handle {request_kind} while the session is busy. Try again after the current turn finishes."

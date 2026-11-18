@@ -465,6 +465,7 @@ fn tool_use_step(block: &ContentBlock) -> Option<String> {
         }
         "communicate" => Some("Coordinated with other agents".to_string()),
         "subagent" => Some("Spawned a subagent".to_string()),
+        "ask_user" => Some("Asked you to choose".to_string()),
         "memory" => Some("Queried memory context".to_string()),
         "side_panel" | "panel" | "applet" | "todo" | "todoread" | "todowrite" | "initiative" => {
             None

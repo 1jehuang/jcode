@@ -640,6 +640,10 @@ mod tests {
             pretty_model_display_name("gpt-5.6-pro[web]"),
             "GPT-5.6 Pro (web)"
         );
+        assert_eq!(
+            pretty_model_display_name("gpt-6-thinking[web]"),
+            "GPT-6 Thinking (web)"
+        );
         // Dated snapshots read as a date, not as extra version digits.
         assert_eq!(
             pretty_model_display_name("claude-haiku-4-5-20251001"),

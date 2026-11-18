@@ -20,6 +20,20 @@ pub async fn run_provider_doctor_command(
         .parse()
         .map_err(|message: String| anyhow!("{message}"))?;
 
+    // Claude Code runs its own agent loop inside the `claude` CLI, so the
+    // catalog/picker/tool checkpoints here do not apply. `auth-test` drives a
+    // real turn through the CLI instead.
+    if matches!(
+        provider.trim().to_ascii_lowercase().as_str(),
+        "claude-code" | "claude_code" | "claudecode"
+    ) {
+        anyhow::bail!(
+            "provider-doctor has no driver for `{provider}`: Claude Code runs its own agent loop. \
+             Use `jcode auth-test --provider claude-code` to check its login and a live turn, \
+             and `jcode usage` to see its limits."
+        );
+    }
+
     // Native-runtime providers cannot be driven by the OpenAI-compatible doctor;
     // route them to their native drivers, which exercise the production runtime.
     // Claude and Antigravity keep bespoke drivers (unusual credential/catalog

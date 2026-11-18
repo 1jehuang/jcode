@@ -1,4 +1,7 @@
 mod response_stats;
+mod user_input;
+
+pub use user_input::{is_authentic_user_input, is_authentic_user_prompt};
 
 #[cfg(test)]
 mod prompt_count_tests;

@@ -24,38 +24,6 @@ pub(super) fn panel_area(area: Rect) -> Rect {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resume_card_uses_eighty_percent_height_without_a_row_cap() {
-        for height in [40, 50, 80, 100, 160] {
-            let area = Rect::new(3, 7, 120, height);
-            let panel = panel_area(area);
-            assert_eq!(panel.height, height * 4 / 5);
-            assert_eq!(panel.y - area.y, ((height - panel.height) / 2).max(5));
-            assert!(panel.x > area.x + area.width / 2);
-        }
-    }
-
-    #[test]
-    fn resume_card_stays_within_small_terminal_bounds() {
-        for width in 0..65 {
-            for height in 0..50 {
-                let area = Rect::new(3, 7, width, height);
-                let panel = panel_area(area);
-                assert!(panel.x >= area.x && panel.right() <= area.right());
-                assert!(panel.y >= area.y && panel.bottom() <= area.bottom());
-                if width > 0 && height >= 9 {
-                    assert!(panel.y >= area.y + 5);
-                    assert!(panel.bottom() <= area.bottom() - 2);
-                }
-            }
-        }
-    }
-}
-
 impl SessionPicker {
     pub(super) fn render_resume_canvas(&mut self, frame: &mut Frame) {
         let area = frame.area();
@@ -114,5 +82,37 @@ impl SessionPicker {
         self.last_list_area = Some(list);
         self.render_session_list(frame, list);
         self.render_claude_takeover_confirmation(frame);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resume_card_uses_eighty_percent_height_without_a_row_cap() {
+        for height in [40, 50, 80, 100, 160] {
+            let area = Rect::new(3, 7, 120, height);
+            let panel = panel_area(area);
+            assert_eq!(panel.height, height * 4 / 5);
+            assert_eq!(panel.y - area.y, ((height - panel.height) / 2).max(5));
+            assert!(panel.x > area.x + area.width / 2);
+        }
+    }
+
+    #[test]
+    fn resume_card_stays_within_small_terminal_bounds() {
+        for width in 0..65 {
+            for height in 0..50 {
+                let area = Rect::new(3, 7, width, height);
+                let panel = panel_area(area);
+                assert!(panel.x >= area.x && panel.right() <= area.right());
+                assert!(panel.y >= area.y && panel.bottom() <= area.bottom());
+                if width > 0 && height >= 9 {
+                    assert!(panel.y >= area.y + 5);
+                    assert!(panel.bottom() <= area.bottom() - 2);
+                }
+            }
+        }
     }
 }

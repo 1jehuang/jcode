@@ -244,7 +244,11 @@ fn terminal_command_from_parts(
     kind: Option<String>,
     session_id: Option<String>,
     env: Vec<(String, String)>,
+    fresh_spawn: bool,
 ) -> jcode_base::terminal_launch::TerminalCommand {
+    if fresh_spawn {
+        command = command.fresh_spawn();
+    }
     if let Some(title) = title {
         command = command.title(title);
     }
@@ -281,6 +285,7 @@ fn terminal_command_from_request(
                 kind,
                 session_id,
                 env,
+                false,
             ),
             cwd,
         )),
@@ -297,20 +302,14 @@ fn terminal_command_from_request(
             fresh_spawn,
         } => Some((
             terminal_command_from_parts(
-                {
-                    let command = jcode_base::terminal_launch::TerminalCommand::new(program, args)
-                        .client_terminal_env(client_terminal_env)
-                        .runtime_env(runtime_env);
-                    if fresh_spawn {
-                        command.fresh_spawn()
-                    } else {
-                        command
-                    }
-                },
+                jcode_base::terminal_launch::TerminalCommand::new(program, args)
+                    .client_terminal_env(client_terminal_env)
+                    .runtime_env(runtime_env),
                 title,
                 kind,
                 session_id,
                 env,
+                fresh_spawn,
             ),
             cwd,
         )),
@@ -325,6 +324,9 @@ pub async fn run(options: CompanionOptions) -> Result<()> {
     // loop back into the companion socket.
     jcode_base::env::set_var("JCODE_COMPANION", "1");
 
+    #[cfg(windows)]
+    let mut listener = bind(&options.socket)?;
+    #[cfg(not(windows))]
     let listener = bind(&options.socket)?;
     // Windows named-pipe acceptance replaces the listening pipe instance.
     #[cfg(windows)]

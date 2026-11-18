@@ -23,7 +23,7 @@ impl SkillRegistry {
 
         for end in boundaries {
             let name = &invocation[..end];
-            if name.is_empty() || !self.skills.contains_key(name) {
+            if name.is_empty() || !self.contains(name) {
                 continue;
             }
 
@@ -59,6 +59,7 @@ mod tests {
                     name: (*name).to_string(),
                     description: "Test skill".to_string(),
                     allowed_tools: None,
+                    disable_model_invocation: false,
                     content: "content".to_string(),
                     path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
                     search_text: std::sync::OnceLock::from(build_skill_search_text(

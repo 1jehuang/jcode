@@ -23,10 +23,86 @@ pub struct McpHandle {
     closed: Arc<AtomicBool>,
     writer_tx: mpsc::Sender<String>,
     server_info: Arc<std::sync::RwLock<Option<ServerInfo>>>,
+    instructions: Arc<std::sync::RwLock<Option<String>>>,
     capabilities: Arc<std::sync::RwLock<ServerCapabilities>>,
     tools: Arc<std::sync::RwLock<Vec<McpToolDef>>>,
     /// Reply timeout applied to every request on this server.
     request_timeout: std::time::Duration,
+    channel_route: Arc<std::sync::Mutex<ChannelRoute>>,
+}
+
+/// Where `notifications/claude/channel` messages go. Messages that arrive
+/// before the owning session is known wait in `pending`.
+#[derive(Default)]
+struct ChannelRoute {
+    owner: Option<String>,
+    pending: Vec<String>,
+}
+
+const CLAUDE_CHANNEL_METHOD: &str = "notifications/claude/channel";
+
+fn publish_channel_message(session_id: &str, notification: String) {
+    crate::bus::Bus::global().publish(crate::bus::BusEvent::PeerMessageReceived(
+        crate::bus::PeerMessageReceived {
+            session_id: session_id.to_string(),
+            notification,
+        },
+    ));
+}
+
+/// Render a channel push the way Claude Code shows it to the model, so server
+/// instructions that refer to `<channel source=...>` blocks still apply.
+fn format_channel_message(server: &str, params: Option<&Value>) -> String {
+    let attr = |value: &str| value.replace('&', "&amp;").replace('"', "&quot;");
+    let mut tag = format!("<channel source=\"{}\"", attr(server));
+    if let Some(meta) = params
+        .and_then(|p| p.get("meta"))
+        .and_then(Value::as_object)
+    {
+        for (key, value) in meta {
+            let value = value
+                .as_str()
+                .map_or_else(|| value.to_string(), str::to_string);
+            tag.push_str(&format!(" {}=\"{}\"", attr(key), attr(&value)));
+        }
+    }
+    let content = params
+        .and_then(|p| p.get("content"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    format!("{tag}>\n{content}\n</channel>")
+}
+
+fn handle_server_notification(
+    server: &str,
+    line: &str,
+    capabilities: &std::sync::RwLock<ServerCapabilities>,
+    route: &std::sync::Mutex<ChannelRoute>,
+) {
+    let Ok(message) = serde_json::from_str::<Value>(line) else {
+        return;
+    };
+    if message.get("method").and_then(Value::as_str) != Some(CLAUDE_CHANNEL_METHOD) {
+        return;
+    }
+    if !capabilities
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .is_channel_server()
+    {
+        crate::logging::warn(&format!(
+            "MCP [{server}]: ignoring channel message from a server that did not declare {CLAUDE_CHANNEL_CAPABILITY}"
+        ));
+        return;
+    }
+    let notification = format_channel_message(server, message.get("params"));
+    let mut route = route
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match route.owner.clone() {
+        Some(owner) => publish_channel_message(&owner, notification),
+        None => route.pending.push(notification),
+    }
 }
 
 /// Removes waiters on timeout, send failure and cancellation of the caller.
@@ -125,6 +201,27 @@ impl McpHandle {
 
     /// Whether the transport can no longer deliver replies. Closed handles
     /// must be replaced by a fresh connection, never used to replay a call.
+    /// Whether the server declared the `claude/channel` capability.
+    pub fn is_channel_server(&self) -> bool {
+        self.capabilities
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_channel_server()
+    }
+
+    /// Route this server's channel messages to `session_id`, flushing any
+    /// that arrived before the owner was known.
+    pub fn set_channel_owner(&self, session_id: &str) {
+        let mut route = self
+            .channel_route
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        route.owner = Some(session_id.to_string());
+        for notification in route.pending.drain(..) {
+            publish_channel_message(session_id, notification);
+        }
+    }
+
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst) || self.writer_tx.is_closed()
     }
@@ -142,6 +239,14 @@ impl McpHandle {
             .clone()
     }
 
+    /// Instructions from the server's `initialize` result, if any.
+    pub fn instructions(&self) -> Option<String> {
+        self.instructions
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     /// Get available tools
     pub fn tools(&self) -> Vec<McpToolDef> {
         self.tools
@@ -152,15 +257,31 @@ impl McpHandle {
 
     /// Refresh the list of available tools
     pub async fn refresh_tools(&self) -> Result<()> {
-        let response = self.request("tools/list", None).await?;
-
-        if let Some(result) = response.result {
-            let tools_result: ToolsListResult = serde_json::from_value(result)?;
-            *self
-                .tools
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = tools_result.tools;
+        // Follow `nextCursor` so servers that paginate expose every tool. A
+        // server that cycles cursors or never ends is cut off, not followed.
+        const MAX_PAGES: usize = 100;
+        let mut tools = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..MAX_PAGES {
+            let params = cursor
+                .as_ref()
+                .map(|cursor| serde_json::json!({ "cursor": cursor }));
+            let response = self.request("tools/list", params).await?;
+            let Some(result) = response.result else {
+                break;
+            };
+            let page: ToolsListResult = serde_json::from_value(result)?;
+            tools.extend(page.tools);
+            match page.next_cursor {
+                Some(next) if seen.insert(next.clone()) => cursor = Some(next),
+                _ => break,
+            }
         }
+        *self
+            .tools
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = tools;
 
         Ok(())
     }
@@ -286,6 +407,10 @@ impl McpClient {
         });
 
         // Spawn reader task
+        let capabilities = Arc::new(std::sync::RwLock::new(ServerCapabilities::default()));
+        let channel_route = Arc::new(std::sync::Mutex::new(ChannelRoute::default()));
+        let reader_capabilities = Arc::clone(&capabilities);
+        let reader_route = Arc::clone(&channel_route);
         let pending_clone = Arc::clone(&pending);
         let closed = Arc::new(AtomicBool::new(false));
         let closed_clone = Arc::clone(&closed);
@@ -307,6 +432,13 @@ impl McpClient {
                                 if let Some(tx) = pending.remove(&id) {
                                     let _ = tx.send(response);
                                 }
+                            } else {
+                                handle_server_notification(
+                                    &reader_name,
+                                    &line,
+                                    &reader_capabilities,
+                                    &reader_route,
+                                );
                             }
                         } else {
                             let trimmed = line.trim();
@@ -337,9 +469,11 @@ impl McpClient {
             closed,
             writer_tx,
             server_info: Arc::new(std::sync::RwLock::new(None)),
-            capabilities: Arc::new(std::sync::RwLock::new(ServerCapabilities::default())),
+            instructions: Arc::new(std::sync::RwLock::new(None)),
+            capabilities,
             tools: Arc::new(std::sync::RwLock::new(Vec::new())),
             request_timeout: request_timeout_for(config),
+            channel_route,
         };
 
         let mut client = Self {
@@ -381,9 +515,11 @@ impl McpClient {
             closed,
             writer_tx,
             server_info: Arc::new(std::sync::RwLock::new(None)),
+            instructions: Arc::new(std::sync::RwLock::new(None)),
             capabilities: Arc::new(std::sync::RwLock::new(ServerCapabilities::default())),
             tools: Arc::new(std::sync::RwLock::new(Vec::new())),
             request_timeout: request_timeout_for(config),
+            channel_route: Arc::default(),
         }
     }
 
@@ -534,6 +670,13 @@ impl McpClient {
                 .server_info
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = init_result.server_info;
+            *self
+                .handle
+                .instructions
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = init_result
+                .instructions
+                .filter(|text| !text.trim().is_empty());
             *self
                 .handle
                 .capabilities
@@ -776,6 +919,41 @@ done
             disabled: None,
             timeout_secs: None,
         }
+    }
+
+    #[tokio::test]
+    async fn tools_list_paging_stops_on_a_repeated_cursor_and_keeps_instructions() {
+        // Every tools/list page says there is a next page with cursor "a".
+        let script = r#"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{},"instructions":"Use me well","serverInfo":{"name":"pager","version":"0"}}}\n' "$id"
+      ;;
+    *'"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"t","inputSchema":{"type":"object"}}],"nextCursor":"a"}}\n' "$id"
+      ;;
+  esac
+done
+"#;
+        let config = McpServerConfig {
+            args: vec!["-c".to_string(), script.to_string()],
+            ..fake_server_config()
+        };
+        let client = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            McpClient::connect("pager".to_string(), &config),
+        )
+        .await
+        .expect("a cycling cursor must not hang connect")
+        .expect("connect");
+        // First page, then the page for cursor "a"; the repeat ends paging.
+        assert_eq!(client.tools().len(), 2);
+        assert_eq!(
+            client.handle().instructions().as_deref(),
+            Some("Use me well")
+        );
     }
 
     #[tokio::test]

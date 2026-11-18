@@ -294,7 +294,7 @@ impl TranscriptSearch {
                     if cancel.load(Ordering::Relaxed) {
                         return;
                     }
-                    let identities: HashMap<_, _> = candidates
+                    let identities: IdentityRanks = candidates
                         .iter()
                         .filter_map(|candidate| {
                             let rank = candidate.identity_rank(&tokens);
@@ -303,7 +303,8 @@ impl TranscriptSearch {
                         .collect();
                     let identity_ids: Vec<_> = identities.keys().cloned().collect();
                     if shared_identities.set(identities).is_err() {
-                        crate::logging::debug("Transcript search identities already initialized");
+                        crate::logging::debug("Transcript search identities already published");
+                        return;
                     }
                     for id in identity_ids {
                         if sender.send((id, SearchRank::default())).is_err() {

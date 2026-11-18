@@ -267,13 +267,27 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "/help <command>",
         "Show details for one command",
     ));
-    lines.push(help_entry("/model", "List or switch models"));
+    lines.push(help_entry(
+        "/model",
+        "Browse models: search, Ctrl+P filters by provider",
+    ));
+    lines.push(help_entry(
+        "/model @<provider>",
+        "Browse one provider's models",
+    ));
     lines.push(help_entry("/model <name>", "Switch to a different model"));
     lines.push(help_entry(
         "/provider-test-coverage",
         "Show live-test evidence for the current provider/model",
     ));
-    lines.push(help_entry("/agents", "Configure models for agent roles"));
+    lines.push(help_entry(
+        "/agents",
+        "Choose session instructions or configure role models",
+    ));
+    lines.push(help_entry(
+        "/agent [NAME|off|reload]",
+        "List or select an additive Markdown profile",
+    ));
     lines.push(help_entry(
         "/swarm-prompt",
         "Open the active swarm routing prompt in your editor",
@@ -320,7 +334,11 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     ));
     lines.push(help_entry(
         "/skills",
-        "Show loaded skills and jcode-endorsed recommendations",
+        "Browse skills and turn them on or off (/skills list: endorsed skills)",
+    ));
+    lines.push(help_entry(
+        "/plugin",
+        "Discover and manage plugins and marketplaces",
     ));
     lines.push(help_entry("/info", "Show session info and token usage"));
     lines.push(help_entry(
@@ -359,7 +377,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     ));
     lines.push(help_entry(
         "/rewind",
-        "Show numbered history, /rewind N to rewind",
+        "Choose a prompt to restore conversation or tracked files",
     ));
     lines.push(help_entry(
         "/fix",
@@ -465,8 +483,8 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "Interactive or direct login",
     ));
     lines.push(help_entry(
-        "/account",
-        "Open combined Claude/OpenAI account picker",
+        "/accounts",
+        "Manage accounts, reauthenticate, and check usage",
     ));
     lines.push(help_entry(
         "/subscription",
@@ -653,6 +671,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
             "Move to start / end of input",
         ));
     }
+    lines.push(key_entry("Esc Esc", "Rewind selector (idle, empty input)"));
     lines.push(key_entry("Cmd/Super+Z", "Undo input edit"));
     lines.push(key_entry("Cmd/Super+X / V", "Cut input / paste clipboard"));
     lines.push(key_entry("Ctrl+S", "Stash / pop input (save for later)"));
@@ -673,10 +692,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     ));
     lines.push(key_entry("Ctrl+Up", "Retrieve pending message for editing"));
     lines.push(key_entry("Ctrl+Tab / Ctrl+T", "Toggle queue mode"));
-    lines.push(key_entry(
-        "Ctrl+R",
-        "Search prompt history (across sessions)",
-    ));
+    lines.push(key_entry("Ctrl+R", "Search this session's prompt history"));
     lines.push(key_entry(
         &format!("Ctrl+V / {}", alt("V")),
         "Paste clipboard (text or image)",

@@ -116,17 +116,13 @@ async fn saved_account_observed_binding_is_persisted() {
         .is_none()
     );
     crate::provider::clear_openai_provider_unavailability_for_account_label(Some("work"));
+    // The persisted route follows the window's account: failover, return
+    // home and /accounts switch move it, so a stale label must not block turns.
     agent.session.route_api_method = Some("openai-oauth@personal".to_string());
     agent.sync_bound_account_route();
     assert_eq!(
         agent.session.route_api_method.as_deref(),
-        Some("openai-oauth@personal")
+        Some("openai-oauth@work")
     );
-    assert!(
-        agent
-            .ensure_session_lease()
-            .unwrap_err()
-            .to_string()
-            .contains("personal")
-    );
+    assert!(agent.ensure_session_lease().is_ok());
 }

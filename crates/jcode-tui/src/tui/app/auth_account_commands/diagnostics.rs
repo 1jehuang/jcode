@@ -22,9 +22,12 @@ pub(super) fn render_provider_settings_markdown(app: &App, provider_id: &str) ->
             .map(crate::auth::validation::format_record_label)
             .unwrap_or_else(|| "not validated".to_string())
     ));
-    lines.push(format!("  - Login command: /account {} login", provider.id));
     lines.push(format!(
-        "  - Doctor command: /account {} doctor",
+        "  - Login command: /accounts {} login",
+        provider.id
+    ));
+    lines.push(format!(
+        "  - Doctor command: /accounts {} doctor",
         provider.id
     ));
     lines.push(String::new());
@@ -43,9 +46,9 @@ pub(super) fn render_provider_settings_markdown(app: &App, provider_id: &str) ->
             lines.push(app.render_anthropic_accounts_markdown());
             lines.push(String::new());
             lines.push("Commands:".to_string());
-            lines.push("  - /account claude add".to_string());
-            lines.push("  - /account claude switch <label>".to_string());
-            lines.push("  - /account claude remove <label>".to_string());
+            lines.push("  - /accounts claude add".to_string());
+            lines.push("  - /accounts claude switch <label>".to_string());
+            lines.push("  - /accounts claude remove <label>".to_string());
         }
         "openai" => {
             lines.push(app.render_openai_accounts_markdown());
@@ -70,12 +73,12 @@ pub(super) fn render_provider_settings_markdown(app: &App, provider_id: &str) ->
                     "off"
                 }
             ));
-            lines.push("  - /account openai transport <auto|https|websocket>".to_string());
+            lines.push("  - /accounts openai transport <auto|https|websocket>".to_string());
             lines.push(
-                "  - /account openai effort <none|minimal|low|medium|high|xhigh|max|clear>"
+                "  - /accounts openai effort <none|minimal|low|medium|high|xhigh|max|clear>"
                     .to_string(),
             );
-            lines.push("  - /account openai fast <on|off>".to_string());
+            lines.push("  - /accounts openai fast <on|off>".to_string());
         }
         "copilot" => {
             lines.push("Settings".to_string());
@@ -83,7 +86,7 @@ pub(super) fn render_provider_settings_markdown(app: &App, provider_id: &str) ->
                 "  - Premium mode: {}",
                 cfg.provider.copilot_premium.as_deref().unwrap_or("normal")
             ));
-            lines.push("  - /account copilot premium <normal|one|zero>".to_string());
+            lines.push("  - /accounts copilot premium <normal|one|zero>".to_string());
         }
         "openai-compatible" => {
             let compat = crate::provider_catalog::resolve_openai_compatible_profile(
@@ -101,10 +104,10 @@ pub(super) fn render_provider_settings_markdown(app: &App, provider_id: &str) ->
                 "  - Default model hint: {}",
                 compat.default_model.as_deref().unwrap_or("(unset)")
             ));
-            lines.push("  - /account openai-compatible api-base <url|clear>".to_string());
-            lines.push("  - /account openai-compatible api-key-name <ENV_VAR|clear>".to_string());
-            lines.push("  - /account openai-compatible env-file <file.env|clear>".to_string());
-            lines.push("  - /account openai-compatible default-model <model|clear>".to_string());
+            lines.push("  - /accounts openai-compatible api-base <url|clear>".to_string());
+            lines.push("  - /accounts openai-compatible api-key-name <ENV_VAR|clear>".to_string());
+            lines.push("  - /accounts openai-compatible env-file <file.env|clear>".to_string());
+            lines.push("  - /accounts openai-compatible default-model <model|clear>".to_string());
         }
         _ => {
             lines.push("No provider-specific settings are exposed here yet. Use /login to configure credentials.".to_string());
@@ -126,10 +129,10 @@ pub(super) fn render_provider_settings_markdown(app: &App, provider_id: &str) ->
                 .unwrap_or("(provider default)")
         ));
         lines.push(
-            "  - /account default-provider <claude|openai|copilot|gemini|openrouter|auto>"
+            "  - /accounts default-provider <claude|openai|copilot|gemini|openrouter|auto>"
                 .to_string(),
         );
-        lines.push("  - /account default-model <model|clear>".to_string());
+        lines.push("  - /accounts default-model <model|clear>".to_string());
     }
 
     lines.join("\n")
@@ -143,7 +146,7 @@ pub(super) fn render_auth_doctor_markdown(provider_filter: Option<&str>) -> Stri
             Some(provider) => vec![provider],
             None => {
                 return format!(
-                    "Unknown provider {}. Use /account <provider> doctor with a valid provider id.",
+                    "Unknown provider {}. Use /accounts <provider> doctor with a valid provider id.",
                     provider_id
                 );
             }

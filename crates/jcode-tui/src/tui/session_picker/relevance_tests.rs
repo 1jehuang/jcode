@@ -393,9 +393,9 @@ fn fuzzy_transcript_search_rejects_distant_spellings_regardless_of_recency() {
     std::fs::write(&loose, r#"{"text":"maxboxes"}"#).unwrap();
     let tokens = search_query_tokens("mxabox");
     let cancel = AtomicBool::new(false);
-    let close_score = paths_match_scored(&[close.clone()], &tokens, &cancel).unwrap();
+    let close_score = paths_match_scored(std::slice::from_ref(&close), &tokens, &cancel).unwrap();
     assert!(close_score > 0);
-    assert!(paths_match_scored(&[loose.clone()], &tokens, &cancel).is_none());
+    assert!(paths_match_scored(std::slice::from_ref(&loose), &tokens, &cancel).is_none());
     let mut picker = SessionPicker::new(vec![
         session("loose", "unrelated", 0, &loose),
         session("close", "unrelated", 1000, &close),
@@ -494,6 +494,8 @@ fn repeated_rendering_requests_outrank_recent_rendering_bug_title() {
          you should implement direct rendering code",
     );
     let mut picker = SessionPicker::new(vec![bug, video]);
+    // This fork hides spawned sessions (those with a parent) by default.
+    picker.show_spawned_sessions = true;
     picker.search_query = "render".into();
     picker.rebuild_items();
     wait(&mut picker);

@@ -95,7 +95,7 @@ impl AnthropicProvider {
                 Err(err) if is_oauth_catalog_auth_error(&err.to_string()) => {
                     let token = force_refresh_oauth_token(
                         Arc::clone(&self.credentials),
-                        &self.oauth_refresh_label(),
+                        self.account_pin.clone(),
                     )
                     .await?;
                     jcode_base::provider::fetch_anthropic_model_catalog_oauth(&token).await?

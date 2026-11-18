@@ -1,7 +1,36 @@
 use super::*;
 
-/// The login picker offers explicit additions alongside reauthentication of saved
-/// credentials. Both use the same account actions as the `/account` picker.
+#[path = "auth_account_usage.rs"]
+mod account_usage;
+use account_usage::account_usage_presentation;
+pub(super) use account_usage::{poll_account_usage_refresh, start_account_usage_refresh};
+
+/// Update metadata only; the picker keeps its filter, selected row and scroll.
+pub(super) fn decorate_account_usage_items(
+    items: &mut [crate::tui::account_picker::AccountPickerItem],
+) {
+    use crate::tui::account_picker::{AccountPickerCommand, AccountProviderKind};
+    for item in items {
+        let AccountPickerCommand::Switch { provider, label } = &item.command else {
+            continue;
+        };
+        let provider = match provider {
+            AccountProviderKind::Anthropic => "claude",
+            AccountProviderKind::OpenAi => "openai",
+        };
+        let (capacity, details) = account_usage_presentation(provider, label);
+        let identity = item
+            .subtitle
+            .split_once(" | ")
+            .map(|(_, tail)| tail)
+            .unwrap_or(&item.subtitle);
+        item.subtitle = format!("{capacity} | {identity}");
+        item.details = details;
+    }
+}
+
+/// Saved credentials are switch actions, not new OAuth logins. Keep the exact
+/// label in both the visible name and action, including single-account setups.
 pub(super) fn saved_login_picker_entries(
     current_provider: &str,
     selected_label: Option<&str>,
@@ -209,19 +238,19 @@ impl App {
 
     pub(crate) fn render_openai_accounts_markdown(&self) -> String {
         let accounts = crate::auth::codex::list_accounts().unwrap_or_default();
-        let active_label = crate::auth::codex::active_account_label();
+        let window_label = self.window_account_label("openai");
+        let default_label = super::window_account::stored_default_label("openai");
         let now_ms = chrono::Utc::now().timestamp_millis();
 
         if accounts.is_empty() {
             return "OpenAI Accounts: none configured\n\n\
-                 Use /account openai add to add another account, or /login openai to refresh the active one."
+                 Use /accounts openai add to add another account, or /login openai to refresh the active one."
                 .to_string();
         }
 
-        let headers = ["Account", "Email", "Status", "ChatGPT Account ID", "Active"];
+        let headers = ["Account", "Email", "Status", "ChatGPT Account ID", "Use"];
         let mut rows: Vec<[String; 5]> = Vec::new();
         for account in &accounts {
-            let is_active = active_label.as_deref() == Some(&account.label);
             let status = match account.expires_at {
                 Some(expires_at) if expires_at > now_ms => "valid",
                 Some(_) => "expired",
@@ -233,7 +262,10 @@ impl App {
                 .map(mask_email)
                 .unwrap_or_else(|| "unknown".to_string());
             let account_id = account.account_id.as_deref().unwrap_or("unknown");
-            let active_mark = if is_active { "active" } else { "" };
+            let active_mark = scope_mark(
+                window_label.as_deref() == Some(&account.label),
+                default_label.as_deref() == Some(&account.label),
+            );
             rows.push([
                 account_display_name("OpenAI", &account.label, accounts.len()),
                 email,
@@ -264,7 +296,7 @@ impl App {
 
         lines.push(String::new());
         lines.push(
-            "Commands: /account openai switch <label>, /account openai add, /account openai remove <label>"
+            "Commands: /accounts switch <label> (this window), /accounts default <label> (new windows), /accounts openai add, /accounts openai remove <label>"
                 .to_string(),
         );
 
@@ -273,19 +305,23 @@ impl App {
 
     pub(crate) fn render_anthropic_accounts_markdown(&self) -> String {
         let accounts = crate::auth::claude::list_accounts().unwrap_or_default();
-        let active_label = crate::auth::claude::active_account_label();
+        let window_label = self.window_account_label("claude");
+        let default_label = super::window_account::stored_default_label("claude");
         let now_ms = chrono::Utc::now().timestamp_millis();
 
         if accounts.is_empty() {
             return "Anthropic Accounts: none configured\n\n\
-                 Use /account claude add to add another account, or /login claude to refresh the active one."
+                 Use /accounts claude add to add another account, or /login claude to refresh the active one."
                 .to_string();
         }
 
         let headers = ["Account", "Email", "Status", "Use", "Subscription"];
         let mut rows: Vec<[String; 5]> = Vec::new();
         for account in &accounts {
-            let is_active = active_label.as_deref() == Some(&account.label);
+            let mark = scope_mark(
+                window_label.as_deref() == Some(&account.label),
+                default_label.as_deref() == Some(&account.label),
+            );
             let status = if account.expires > now_ms {
                 "valid"
             } else {
@@ -298,10 +334,10 @@ impl App {
                 .unwrap_or_else(|| "unknown".to_string());
             let sub = account.subscription_type.as_deref().unwrap_or("unknown");
             let account_use = anthropic_account_use(account.subscription_type.as_deref());
-            let sub = if is_active {
-                format!("{sub} (active)")
-            } else {
+            let sub = if mark.is_empty() {
                 sub.to_string()
+            } else {
+                format!("{sub} ({mark})")
             };
             rows.push([
                 account_display_name("Claude", &account.label, accounts.len()),
@@ -316,7 +352,7 @@ impl App {
         lines.extend(format_account_table(&headers, &rows));
         lines.push(String::new());
         lines.push(
-            "Commands: /account claude switch <label>, /account claude add, /account claude remove <label>"
+            "Commands: /accounts switch <label> (this window), /accounts default <label> (new windows), /accounts claude add, /accounts claude remove <label>"
                 .to_string(),
         );
 
@@ -328,7 +364,6 @@ impl App {
         items: &mut Vec<crate::tui::account_picker::AccountPickerItem>,
         provider: crate::provider_catalog::LoginProviderDescriptor,
     ) {
-        let active_label = crate::auth::claude::active_account_label();
         let now_ms = chrono::Utc::now().timestamp_millis();
         let accounts = crate::auth::claude::list_accounts().unwrap_or_default();
         for account in &accounts {
@@ -346,40 +381,47 @@ impl App {
             let account_use = anthropic_account_use(account.subscription_type.as_deref());
             let label = account.label.clone();
             let display_name = account_display_name("Claude", &label, accounts.len());
-            let active_suffix = if active_label.as_deref() == Some(label.as_str()) {
-                " - active"
-            } else {
-                ""
-            };
+            let scope_suffix = self.account_row_scope_suffix("claude", &label);
+            let (capacity, details) = account_usage_presentation("claude", &label);
             items.push(crate::tui::account_picker::AccountPickerItem::action(
                 provider.id,
                 provider.display_name,
-                format!("Switch {display_name}"),
-                format!("{email} - {account_use} - {status} - plan {plan}{active_suffix}"),
-                crate::tui::account_picker::AccountPickerCommand::SubmitInput(format!(
-                    "/account {} switch {}",
-                    provider.id, label
-                )),
-            ));
+                format!("Use {display_name} in this window"),
+                format!("{capacity} | {email} - {account_use} - {status} - plan {plan}{scope_suffix}"),
+                crate::tui::account_picker::AccountPickerCommand::Switch {
+                    provider: crate::tui::account_picker::AccountProviderKind::Anthropic,
+                    label: label.clone(),
+                },
+            ).with_details(details));
             items.push(crate::tui::account_picker::AccountPickerItem::action(
                 provider.id,
                 provider.display_name,
                 format!("Re-login account `{label}`"),
                 format!("Refresh OAuth tokens for `{label}`"),
-                crate::tui::account_picker::AccountPickerCommand::SubmitInput(format!(
-                    "/account {} add {}",
-                    provider.id, label
-                )),
+                crate::tui::account_picker::AccountPickerCommand::Login {
+                    provider: crate::tui::account_picker::AccountProviderKind::Anthropic,
+                    label: label.clone(),
+                },
+            ));
+            items.push(crate::tui::account_picker::AccountPickerItem::action(
+                provider.id,
+                provider.display_name,
+                format!("Rename account `{label}`"),
+                "Change this saved login's label",
+                crate::tui::account_picker::AccountPickerCommand::Rename {
+                    provider: crate::tui::account_picker::AccountProviderKind::Anthropic,
+                    label: label.clone(),
+                },
             ));
             items.push(crate::tui::account_picker::AccountPickerItem::action(
                 provider.id,
                 provider.display_name,
                 format!("Remove account `{label}`"),
                 format!("Delete saved credentials for `{label}`"),
-                crate::tui::account_picker::AccountPickerCommand::SubmitInput(format!(
-                    "/account {} remove {}",
-                    provider.id, label
-                )),
+                crate::tui::account_picker::AccountPickerCommand::Remove {
+                    provider: crate::tui::account_picker::AccountProviderKind::Anthropic,
+                    label: label.clone(),
+                },
             ));
         }
     }
@@ -389,7 +431,6 @@ impl App {
         items: &mut Vec<crate::tui::account_picker::AccountPickerItem>,
         provider: crate::provider_catalog::LoginProviderDescriptor,
     ) {
-        let active_label = crate::auth::codex::active_account_label();
         let now_ms = chrono::Utc::now().timestamp_millis();
         let accounts = crate::auth::codex::list_accounts().unwrap_or_default();
         for account in &accounts {
@@ -406,43 +447,51 @@ impl App {
             let account_id = account.account_id.as_deref().unwrap_or("unknown");
             let label = account.label.clone();
             let display_name = account_display_name("OpenAI", &label, accounts.len());
-            let active_suffix = if active_label.as_deref() == Some(label.as_str()) {
-                " - active"
-            } else {
-                ""
-            };
+            let scope_suffix = self.account_row_scope_suffix("openai", &label);
+            let (capacity, mut details) = account_usage_presentation("openai", &label);
+            details.extend(openai_account_usage_details(&label));
             items.push(
                 crate::tui::account_picker::AccountPickerItem::action(
                     provider.id,
                     provider.display_name,
-                    format!("Switch {display_name}"),
-                    format!("{email} - {status} - acct {account_id}{active_suffix}"),
-                    crate::tui::account_picker::AccountPickerCommand::SubmitInput(format!(
-                        "/account {} switch {}",
-                        provider.id, label
-                    )),
+                    format!("Use {display_name} in this window"),
+                    format!("{capacity} | {email} - {status} - acct {account_id}{scope_suffix}"),
+                    crate::tui::account_picker::AccountPickerCommand::Switch {
+                        provider: crate::tui::account_picker::AccountProviderKind::OpenAi,
+                        label: label.clone(),
+                    },
                 )
-                .with_details(openai_account_usage_details(&label)),
+                .with_details(details),
             );
             items.push(crate::tui::account_picker::AccountPickerItem::action(
                 provider.id,
                 provider.display_name,
                 format!("Re-login account `{label}`"),
                 format!("Refresh OpenAI OAuth tokens for `{label}`"),
-                crate::tui::account_picker::AccountPickerCommand::SubmitInput(format!(
-                    "/account {} add {}",
-                    provider.id, label
-                )),
+                crate::tui::account_picker::AccountPickerCommand::Login {
+                    provider: crate::tui::account_picker::AccountProviderKind::OpenAi,
+                    label: label.clone(),
+                },
+            ));
+            items.push(crate::tui::account_picker::AccountPickerItem::action(
+                provider.id,
+                provider.display_name,
+                format!("Rename account `{label}`"),
+                "Change this saved login's label",
+                crate::tui::account_picker::AccountPickerCommand::Rename {
+                    provider: crate::tui::account_picker::AccountProviderKind::OpenAi,
+                    label: label.clone(),
+                },
             ));
             items.push(crate::tui::account_picker::AccountPickerItem::action(
                 provider.id,
                 provider.display_name,
                 format!("Remove account `{label}`"),
                 format!("Delete saved credentials for `{label}`"),
-                crate::tui::account_picker::AccountPickerCommand::SubmitInput(format!(
-                    "/account {} remove {}",
-                    provider.id, label
-                )),
+                crate::tui::account_picker::AccountPickerCommand::Remove {
+                    provider: crate::tui::account_picker::AccountProviderKind::OpenAi,
+                    label: label.clone(),
+                },
             ));
         }
     }
@@ -452,15 +501,35 @@ impl App {
 fn openai_account_usage_details(label: &str) -> Vec<(String, String)> {
     let mut details = vec![(
         "Full usage details".to_string(),
-        "/account openai settings".to_string(),
+        "/accounts openai settings".to_string(),
     )];
     details.extend(crate::provider_activity::openai_oauth_usage_summary(label));
     details
 }
 
+/// "this window", "default", or both, for account tables.
+fn scope_mark(is_window: bool, is_default: bool) -> &'static str {
+    match (is_window, is_default) {
+        (true, true) => "this window, default",
+        (true, false) => "this window",
+        (false, true) => "default",
+        (false, false) => "",
+    }
+}
+
 /// A provider name is enough when there is only one login. Animal names are
 /// useful only when multiple logins of that provider need distinguishing.
 pub(super) fn account_display_name(provider: &str, label: &str, account_count: usize) -> String {
+    let generated = ["claude", "openai"].iter().any(|prefix| {
+        (1..=32).any(|index| {
+            label == crate::auth::account_store::canonical_account_label(prefix, index)
+        }) || label
+            .strip_prefix(&format!("{prefix}-animal-"))
+            .is_some_and(|suffix| suffix.parse::<usize>().is_ok_and(|index| index > 32))
+    });
+    if !generated {
+        return format!("{provider} · {label}");
+    }
     if account_count <= 1 {
         return provider.to_string();
     }
@@ -536,34 +605,32 @@ mod account_display_tests {
     use super::*;
 
     #[test]
-    fn login_additions_use_safe_account_add_actions_for_both_oauth_providers() {
-        let entries = new_login_account_entries();
-        assert_eq!(entries.len(), 2);
-        for (entry, provider) in entries.iter().zip(["claude", "openai"]) {
-            assert!(entry.name.contains("Add another account"));
-            assert_eq!(entry.options.len(), 1);
-            assert!(entry.options[0].available);
-            assert_eq!(entry.options[0].api_method, "new account");
-            assert!(!entry.is_current);
-            assert!(!entry.is_default);
-            assert!(matches!(&entry.action,
-                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Add { provider_id })
-                if provider_id == provider));
-        }
+    fn usage_decoration_is_idempotent_and_keeps_identity_and_commands() {
+        use crate::tui::account_picker::{
+            AccountPickerCommand, AccountPickerItem, AccountProviderKind,
+        };
+        let mut items = vec![AccountPickerItem::action(
+            "openai",
+            "OpenAI",
+            "Use work",
+            "old usage | me@example.com - valid",
+            AccountPickerCommand::Switch {
+                provider: AccountProviderKind::OpenAi,
+                label: "test-usage-decoration-isolated".into(),
+            },
+        )];
+        decorate_account_usage_items(&mut items);
+        let first = (items[0].subtitle.clone(), items[0].details.clone());
+        decorate_account_usage_items(&mut items);
+        assert_eq!(first, (items[0].subtitle.clone(), items[0].details.clone()));
+        assert!(items[0].subtitle.ends_with(" | me@example.com - valid"));
+        assert!(
+            matches!(&items[0].command, AccountPickerCommand::Switch { label, .. } if label == "test-usage-decoration-isolated")
+        );
     }
 
     #[test]
-    fn login_picker_includes_additions_independently_of_saved_account_state() {
-        let entries = saved_login_picker_entries("OpenAI", Some("existing-account"));
-        for provider in ["claude", "openai"] {
-            assert_eq!(entries.iter().filter(|entry| matches!(&entry.action,
-                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Add { provider_id })
-                if provider_id == provider)).count(), 1);
-        }
-    }
-
-    #[test]
-    fn saved_login_choices_preserve_all_named_reauthentication_targets() {
+    fn saved_login_choices_preserve_all_named_account_switch_targets() {
         for provider in ["claude", "openai"] {
             for label in ["work", "personal", "custom-named-account"] {
                 let entry = saved_login_entry(
@@ -667,9 +734,57 @@ mod account_display_tests {
     }
 
     #[test]
+    fn custom_labels_remain_visible_even_for_a_single_account() {
+        assert_eq!(account_display_name("Claude", "work", 1), "Claude · work");
+        assert_eq!(
+            account_display_name("OpenAI", "my-team-login", 1),
+            "OpenAI · my-team-login"
+        );
+        assert_eq!(
+            account_display_name("Claude", "claude-work", 1),
+            "Claude · claude-work"
+        );
+    }
+
+    #[test]
     fn known_anthropic_plans_identify_personal_and_work_accounts() {
         assert_eq!(anthropic_account_use(Some("max")), "personal");
         assert_eq!(anthropic_account_use(Some("team")), "work");
         assert_eq!(anthropic_account_use(None), "unknown");
+    }
+}
+
+#[cfg(test)]
+mod login_additions_use_safe_account_add_actions_for_both_oauth_providers_regression {
+    use super::*;
+    #[test]
+    fn login_additions_use_safe_account_add_actions_for_both_oauth_providers() {
+        let entries = new_login_account_entries();
+        assert_eq!(entries.len(), 2);
+        for (entry, provider) in entries.iter().zip(["claude", "openai"]) {
+            assert!(entry.name.contains("Add another account"));
+            assert_eq!(entry.options.len(), 1);
+            assert!(entry.options[0].available);
+            assert_eq!(entry.options[0].api_method, "new account");
+            assert!(!entry.is_current);
+            assert!(!entry.is_default);
+            assert!(matches!(&entry.action,
+                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Add { provider_id })
+                if provider_id == provider));
+        }
+    }
+}
+
+#[cfg(test)]
+mod login_picker_includes_additions_independently_of_saved_account_state_regression {
+    use super::*;
+    #[test]
+    fn login_picker_includes_additions_independently_of_saved_account_state() {
+        let entries = saved_login_picker_entries("OpenAI", Some("existing-account"));
+        for provider in ["claude", "openai"] {
+            assert_eq!(entries.iter().filter(|entry| matches!(&entry.action,
+                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Add { provider_id })
+                if provider_id == provider)).count(), 1);
+        }
     }
 }

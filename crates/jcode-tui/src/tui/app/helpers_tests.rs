@@ -1,8 +1,8 @@
 use super::{
     build_resume_command, effort_display_label, effort_display_label_with_root,
     extract_bracketed_system_message, format_countdown_until, gather_ambient_info_inner,
-    inferred_reasoning_efforts, partition_queued_messages, resume_invocation_args,
-    resumed_window_title,
+    inferred_reasoning_efforts, named_profile_reasoning_efforts, partition_queued_messages,
+    resume_invocation_args, resumed_window_title,
 };
 use crate::ambient::{AmbientManager, Priority, ScheduleRequest, ScheduleTarget};
 use crate::terminal_launch::{detected_resume_terminal, shell_command};
@@ -107,6 +107,253 @@ fn inferred_reasoning_efforts_use_provider_specific_order_and_max_semantics() {
         "DeepSeek direct keeps max as a real provider level"
     );
     assert!(inferred_reasoning_efforts(Some("ollama"), Some("llama3")).is_empty());
+}
+
+#[test]
+fn named_compatible_profile_exposes_explicit_effort_levels_to_remote_client() {
+    let mut config = crate::config::Config::default();
+    config.providers.insert(
+        "custom".into(),
+        crate::config::NamedProviderConfig {
+            supports_reasoning_effort: Some(true),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        named_profile_reasoning_efforts(&config, Some("custom"), Some("kimi-k3")),
+        Some(jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS.to_vec()),
+    );
+}
+
+#[test]
+fn named_compatible_profile_uses_per_model_effort_vocabulary() {
+    let mut config = crate::config::Config::default();
+    config.providers.insert(
+        "a6api".into(),
+        crate::config::NamedProviderConfig {
+            models: vec![crate::config::NamedProviderModelConfig {
+                id: "kimi-k3".into(),
+                reasoning: Some(true),
+                reasoning_efforts: vec!["low".into(), "high".into(), "max".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        named_profile_reasoning_efforts(&config, Some("openai-compatible:a6api"), Some("kimi-k3")),
+        Some(vec!["low", "high", "max", "swarm"]),
+    );
+}
+
+#[test]
+fn a6api_model_catalog_exposes_model_specific_effort_ladders() {
+    let mut config = crate::config::Config::default();
+    config.providers.insert(
+        "a6api".into(),
+        crate::config::NamedProviderConfig {
+            models: [
+                ("grok-4.7", &["low", "medium", "high", "xhigh"][..]),
+                ("grok-4.5", &["low", "medium", "high"][..]),
+                (
+                    "claude-fable-5.1",
+                    &["low", "medium", "high", "xhigh", "max"][..],
+                ),
+                (
+                    "claude-haiku-5-5",
+                    &["low", "medium", "high", "xhigh", "max"][..],
+                ),
+                ("gemini-3.5-flash", &["low", "medium", "high"][..]),
+            ]
+            .into_iter()
+            .map(|(id, efforts)| crate::config::NamedProviderModelConfig {
+                id: id.into(),
+                reasoning_efforts: efforts.iter().map(|effort| (*effort).into()).collect(),
+                ..Default::default()
+            })
+            .collect(),
+            ..Default::default()
+        },
+    );
+    for (model, mut expected) in [
+        ("grok-4.7", vec!["low", "medium", "high", "xhigh"]),
+        ("grok-4.5", vec!["low", "medium", "high"]),
+        (
+            "claude-fable-5.1",
+            vec!["low", "medium", "high", "xhigh", "max"],
+        ),
+        (
+            "claude-haiku-5-5",
+            vec!["low", "medium", "high", "xhigh", "max"],
+        ),
+        ("gemini-3.5-flash", vec!["low", "medium", "high"]),
+    ] {
+        expected.extend(["swarm"]);
+        assert_eq!(
+            named_profile_reasoning_efforts(&config, Some("openai-compatible:a6api"), Some(model)),
+            Some(expected),
+            "unexpected effort ladder for {model}",
+        );
+    }
+}
+
+#[test]
+fn a6api_models_without_effort_metadata_do_not_infer_a_ladder_from_thinking_support() {
+    let mut config = crate::config::Config::default();
+    config.providers.insert(
+        "a6api".into(),
+        crate::config::NamedProviderConfig {
+            models: vec![crate::config::NamedProviderModelConfig {
+                id: "claude-haiku-4-5".into(),
+                reasoning: Some(true),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        named_profile_reasoning_efforts(
+            &config,
+            Some("openai-compatible:a6api"),
+            Some("claude-haiku-4-5"),
+        ),
+        Some(Vec::new()),
+    );
+}
+
+#[test]
+fn a6api_glm_models_use_zai_effort_vocabulary() {
+    let mut config = crate::config::Config::default();
+    config.providers.insert(
+        "a6api".into(),
+        crate::config::NamedProviderConfig {
+            models: vec![crate::config::NamedProviderModelConfig {
+                id: "glm-5.3".into(),
+                reasoning: Some(true),
+                reasoning_efforts: vec!["low".into(), "high".into(), "max".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        named_profile_reasoning_efforts(&config, Some("openai-compatible:a6api"), Some("glm-5.3")),
+        Some(vec!["low", "high", "max", "swarm"]),
+    );
+}
+
+#[test]
+fn a6api_gpt_terra_uses_openai_effort_vocabulary() {
+    let mut config = crate::config::Config::default();
+    config.providers.insert(
+        "a6api".into(),
+        crate::config::NamedProviderConfig {
+            models: vec![crate::config::NamedProviderModelConfig {
+                id: "gpt-5.6-terra".into(),
+                reasoning: Some(true),
+                reasoning_efforts: vec![
+                    "none".into(),
+                    "low".into(),
+                    "medium".into(),
+                    "high".into(),
+                    "xhigh".into(),
+                    "max".into(),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        named_profile_reasoning_efforts(
+            &config,
+            Some("openai-compatible:a6api"),
+            Some("gpt-5.6-terra"),
+        ),
+        Some(vec![
+            "none", "low", "medium", "high", "xhigh", "max", "swarm",
+        ]),
+    );
+}
+
+#[test]
+fn named_compatible_profile_disables_effort_for_model_with_reasoning_off() {
+    let mut config = crate::config::Config::default();
+    config.providers.insert(
+        "custom".into(),
+        crate::config::NamedProviderConfig {
+            supports_reasoning_effort: Some(true),
+            models: vec![crate::config::NamedProviderModelConfig {
+                id: "kimi-k3".into(),
+                reasoning: Some(false),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        named_profile_reasoning_efforts(&config, Some("openai-compatible:custom"), Some("kimi-k3")),
+        Some(Vec::new()),
+    );
+}
+
+#[test]
+fn named_compatible_profile_respects_explicit_effort_disable() {
+    let mut config = crate::config::Config::default();
+    config.providers.insert(
+        "custom".into(),
+        crate::config::NamedProviderConfig {
+            supports_reasoning_effort: Some(false),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        named_profile_reasoning_efforts(&config, Some("openai-compatible:custom"), Some("kimi-k3")),
+        Some(Vec::new()),
+    );
+}
+
+#[test]
+fn unconfigured_named_profile_preserves_existing_inference() {
+    assert_eq!(
+        named_profile_reasoning_efforts(
+            &crate::config::Config::default(),
+            Some("openai-compatible:missing"),
+            Some("kimi-k3")
+        ),
+        None,
+    );
+}
+
+#[test]
+fn conifer_profile_honors_both_reasoning_disables() {
+    // Greptile #1689: conifer's unified levels ignored explicit disables.
+    let levels = |profile| {
+        let mut config = crate::config::Config::default();
+        config.providers.insert("conifer".into(), profile);
+        named_profile_reasoning_efforts(&config, Some("conifer"), Some("grok-4.6")).unwrap()
+    };
+    assert!(
+        levels(crate::config::NamedProviderConfig {
+            models: vec![crate::config::NamedProviderModelConfig {
+                id: "grok-4.6".into(),
+                reasoning: Some(false),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .is_empty()
+    );
+    assert!(
+        levels(crate::config::NamedProviderConfig {
+            supports_reasoning_effort: Some(false),
+            ..Default::default()
+        })
+        .is_empty()
+    );
 }
 
 #[test]
@@ -269,11 +516,13 @@ fn resume_invocation_args_omits_blank_socket() {
 /// `launch_client_executable()` resolves deterministically, independent of
 /// whether the developer machine has a published local build channel and of
 /// other tests mutating JCODE_HOME in parallel. Returns the guards that keep
-/// the environment pinned for the duration of the test.
+/// the environment pinned for the duration of the test. Tuple fields drop
+/// first to last, so the lock must come last: JCODE_HOME is restored while it
+/// is still held, never inside another test's scoped home.
 fn pinned_resume_test_home() -> (
-    std::sync::MutexGuard<'static, ()>,
-    tempfile::TempDir,
     EnvVarGuard,
+    tempfile::TempDir,
+    std::sync::MutexGuard<'static, ()>,
 ) {
     let env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
@@ -281,7 +530,7 @@ fn pinned_resume_test_home() -> (
     std::fs::create_dir_all(&current).expect("create builds/current");
     std::fs::write(current.join("jcode"), b"#!/bin/sh\n").expect("write fake jcode binary");
     let home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
-    (env_lock, temp, home)
+    (home, temp, env_lock)
 }
 
 #[test]

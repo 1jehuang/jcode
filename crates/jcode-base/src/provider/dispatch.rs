@@ -1,5 +1,7 @@
 use super::*;
 
+const CLAUDE_CODE_UNAVAILABLE: &str = "Claude Code is not available. Install the Claude Code CLI (`claude`) or set [provider.claude_code].binary, then run `jcode login --provider claude-code`.";
+
 #[cfg(test)]
 #[path = "dispatch_estimation_tests.rs"]
 mod estimation_tests;
@@ -157,6 +159,15 @@ impl MultiProvider {
                     ))
                 }
             }
+            ActiveProvider::ClaudeCode => {
+                if let Some(claude_code) = self.claude_code_provider() {
+                    claude_code
+                        .complete(messages, tools, system, resume_session_id)
+                        .await
+                } else {
+                    Err(anyhow::anyhow!(CLAUDE_CODE_UNAVAILABLE))
+                }
+            }
             ActiveProvider::Cursor => {
                 let cursor = self
                     .cursor
@@ -312,6 +323,21 @@ impl MultiProvider {
                     Err(anyhow::anyhow!(
                         "Gemini is not available. Run `jcode login --provider gemini`."
                     ))
+                }
+            }
+            ActiveProvider::ClaudeCode => {
+                if let Some(claude_code) = self.claude_code_provider() {
+                    claude_code
+                        .complete_split(
+                            messages,
+                            tools,
+                            system_static,
+                            system_dynamic,
+                            resume_session_id,
+                        )
+                        .await
+                } else {
+                    Err(anyhow::anyhow!(CLAUDE_CODE_UNAVAILABLE))
                 }
             }
             ActiveProvider::Cursor => {

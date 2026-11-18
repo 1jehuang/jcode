@@ -8,7 +8,7 @@ fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
+pub(crate) fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let _guard = test_env_lock();
     let temp_home = tempfile::tempdir().expect("tempdir");
     let prev_home = std::env::var_os("JCODE_HOME");
@@ -20,6 +20,28 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
         jcode_core::env::remove_var("JCODE_HOME");
     }
     result
+}
+
+#[test]
+fn daily_prune_retries_after_manifest_is_repaired() {
+    with_temp_jcode_home(|| {
+        let previous = std::env::var_os(version_gc::KEEP_VERSIONS_ENV);
+        jcode_core::env::set_var(version_gc::KEEP_VERSIONS_ENV, "1");
+        let dir = builds_dir().unwrap();
+        let versions = dir.join("versions");
+        std::fs::create_dir_all(&versions).unwrap();
+        let manifest = manifest_path().unwrap();
+        std::fs::write(&manifest, b"invalid manifest").unwrap();
+        version_gc::prune_old_versions();
+        assert!(!dir.join("versions-prune.stamp").exists());
+        std::fs::write(&manifest, b"{}").unwrap();
+        version_gc::prune_old_versions();
+        assert!(dir.join("versions-prune.stamp").exists());
+        match previous {
+            Some(value) => jcode_core::env::set_var(version_gc::KEEP_VERSIONS_ENV, value),
+            None => jcode_core::env::remove_var(version_gc::KEEP_VERSIONS_ENV),
+        }
+    });
 }
 
 fn create_git_repo_fixture() -> tempfile::TempDir {
@@ -242,6 +264,47 @@ fn update_launcher_symlink_stays_inside_sandbox_home() {
         assert_eq!(
             std::fs::canonicalize(&launcher).expect("canonical launcher"),
             std::fs::canonicalize(version_binary).expect("canonical version binary")
+        );
+    });
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn idle_prune_keeps_a_running_binary_installed_under_an_old_label() {
+    with_temp_jcode_home(|| {
+        let versions = builds_dir().unwrap().join("versions");
+        let running_version = versions.join("old-running-link");
+        std::fs::create_dir_all(&running_version).unwrap();
+        std::fs::hard_link(
+            std::env::current_exe().unwrap(),
+            running_version.join(binary_name()),
+        )
+        .unwrap();
+        let day = std::time::Duration::from_secs(24 * 60 * 60);
+        std::fs::File::open(&running_version)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - day * 100)
+            .unwrap();
+        for i in 1..8u32 {
+            let unused = versions.join(format!("unused-{i}"));
+            std::fs::create_dir_all(&unused).unwrap();
+            std::fs::write(unused.join(binary_name()), b"unused binary").unwrap();
+            std::fs::File::open(&unused)
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() - day * (i + 1))
+                .unwrap();
+        }
+        let previous_keep = std::env::var_os(KEEP_VERSIONS_ENV);
+        jcode_core::env::set_var(KEEP_VERSIONS_ENV, "1");
+        prune_old_versions_on_idle();
+        if let Some(previous_keep) = previous_keep {
+            jcode_core::env::set_var(KEEP_VERSIONS_ENV, previous_keep);
+        } else {
+            jcode_core::env::remove_var(KEEP_VERSIONS_ENV);
+        }
+        assert!(
+            running_version.exists(),
+            "idle pruning must retain live binaries"
         );
     });
 }

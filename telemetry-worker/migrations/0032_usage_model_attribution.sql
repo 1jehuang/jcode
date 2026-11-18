@@ -112,4 +112,3 @@ BEGIN
       cache_read_input_tokens=NULL, cache_creation_input_tokens=NULL, total_tokens=NULL
       WHERE receipt_key=NEW.receipt_key;
 END;
-

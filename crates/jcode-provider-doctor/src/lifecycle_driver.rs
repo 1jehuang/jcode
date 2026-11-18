@@ -268,6 +268,7 @@ impl AuthLifecycleDriver {
         spec.catalog_models_after_auth
             .iter()
             .map(|model| ModelRoute {
+                catalog_metadata: None,
                 model: model.clone(),
                 provider: spec.provider_label.to_string(),
                 api_method: format!("openai-compatible:{}", spec.provider_id),
@@ -559,6 +560,7 @@ mod tests {
 
     fn stale_openai_route(model: &str) -> ModelRoute {
         ModelRoute {
+            catalog_metadata: None,
             model: model.to_string(),
             provider: "OpenAI".to_string(),
             api_method: "openai".to_string(),
@@ -928,6 +930,7 @@ mod tests {
         let activation = activate_auth_change(&AuthActivationRequest::new(None, Some(auth)));
         let routes = vec![
             ModelRoute {
+                catalog_metadata: None,
                 model: "wrong-profile-first".to_string(),
                 provider: "Cerebras".to_string(),
                 api_method: "openai-compatible:other-provider".to_string(),
@@ -937,6 +940,7 @@ mod tests {
                 cheapness: None,
             },
             ModelRoute {
+                catalog_metadata: None,
                 model: "qwen-3-235b-a22b-instruct-2507".to_string(),
                 provider: "Cerebras".to_string(),
                 api_method: "openai-compatible:cerebras".to_string(),
@@ -946,6 +950,7 @@ mod tests {
                 cheapness: None,
             },
             ModelRoute {
+                catalog_metadata: None,
                 model: "llama3.1-8b".to_string(),
                 provider: "Cerebras".to_string(),
                 api_method: "openai-compatible:cerebras".to_string(),
@@ -1019,6 +1024,7 @@ mod tests {
             .run_openai_compatible_fixture(&spec)
             .expect("lifecycle result");
         result.catalog_routes.push(ModelRoute {
+            catalog_metadata: None,
             model: "zai-glm-4.7".to_string(),
             provider: "Cerebras".to_string(),
             api_method: "openai-compatible:cerebras".to_string(),

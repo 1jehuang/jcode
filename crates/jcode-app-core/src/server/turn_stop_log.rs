@@ -254,7 +254,8 @@ mod tests {
             StopLog::default().outcome(&ServerEvent::Error {
                 id: 2,
                 message: "private".into(),
-                retry_after_secs: None
+                retry_after_secs: None,
+                server_resumes: false,
             }),
             Some((2, "failure"))
         );

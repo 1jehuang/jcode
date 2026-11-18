@@ -19,6 +19,47 @@ pub const OPENROUTER_SELECTABLE_EFFORTS: &[&str] =
 /// Direct DeepSeek effort levels, followed by Jcode's swarm mode.
 pub const DEEPSEEK_SELECTABLE_EFFORTS: &[&str] = &["none", "low", "medium", "high", "max", "swarm"];
 
+/// Canonical reasoning rank, excluding the UI-only swarm sentinels.
+pub fn reasoning_effort_rank(effort: &str) -> Option<usize> {
+    OPENAI_SELECTABLE_EFFORTS
+        .iter()
+        .take_while(|candidate| !matches!(**candidate, "swarm" | "swarm-deep"))
+        .position(|candidate| *candidate == effort)
+}
+
+/// Sort advertised reasoning levels while retaining unknown values' order.
+pub fn sort_reasoning_efforts(efforts: &mut [&str]) {
+    efforts.sort_by_key(|effort| reasoning_effort_rank(effort).unwrap_or(usize::MAX));
+}
+
+#[cfg(test)]
+mod advertised_ladder_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_sort_keeps_custom_values_stable_at_the_end() {
+        let mut efforts = ["custom-b", "max", "low", "custom-a", "minimal"];
+        sort_reasoning_efforts(&mut efforts);
+        assert_eq!(efforts, ["minimal", "low", "max", "custom-b", "custom-a"]);
+    }
+
+    #[test]
+    fn swarm_and_unknown_values_have_no_reasoning_rank() {
+        for effort in ["swarm", "swarm-deep", "custom"] {
+            assert_eq!(reasoning_effort_rank(effort), None);
+        }
+    }
+
+    #[test]
+    fn sorting_empty_and_singleton_ladders_is_safe() {
+        let mut empty = [];
+        sort_reasoning_efforts(&mut empty);
+        let mut singleton = ["high"];
+        sort_reasoning_efforts(&mut singleton);
+        assert_eq!(singleton, ["high"]);
+    }
+}
+
 /// Convert a provider-advertised OpenAI/OpenRouter effort into the canonical
 /// static value used by the provider trait.
 pub fn canonical_reasoning_effort(value: &str) -> Option<&'static str> {
@@ -43,6 +84,16 @@ pub fn inferred_reasoning_efforts(
     let provider = provider_name.unwrap_or_default().to_ascii_lowercase();
     let model = model_name.unwrap_or_default().to_ascii_lowercase();
 
+    if provider.contains("copilot")
+        && let Some(metadata) = crate::copilot_model_metadata(&model)
+    {
+        return metadata
+            .reasoning_efforts
+            .iter()
+            .filter_map(|effort| canonical_reasoning_effort(effort))
+            .collect();
+    }
+
     if provider.contains("openrouter") {
         return OPENROUTER_SELECTABLE_EFFORTS.to_vec();
     }
@@ -60,8 +111,8 @@ pub fn inferred_reasoning_efforts(
         || model.starts_with("o3")
         || model.starts_with("o4")
         || model.starts_with("o5");
-    if provider.contains("openai-compatible") {
-        return if is_openai_model {
+    if provider.contains("openai-compatible") || provider.contains("vsllm") {
+        return if is_openai_model || provider.contains("vsllm") {
             OPENAI_SELECTABLE_EFFORTS.to_vec()
         } else {
             Vec::new()
@@ -114,6 +165,11 @@ mod tests {
             inferred_reasoning_efforts(Some("openai-compatible:custom"), Some("gpt-5.6")),
             OPENAI_SELECTABLE_EFFORTS,
             "direct OpenAI-compatible runtimes use the OpenAI reasoning_effort vocabulary"
+        );
+        assert_eq!(
+            inferred_reasoning_efforts(Some("VSLLM"), Some("claude-sonnet-4-6")),
+            OPENAI_SELECTABLE_EFFORTS,
+            "VSLLM exposes its OpenAI-compatible reasoning_effort ladder even for non-OpenAI model IDs"
         );
     }
 

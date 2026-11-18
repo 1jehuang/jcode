@@ -119,7 +119,7 @@ impl App {
                     cache_write_tokens: None,
                     output_tps,
                     limit_reached: false,
-                    available: usage.last_error.is_none(),
+                    available: usage.last_error.is_none() && usage.fetched_at.is_some(),
                     account_hint: None,
                 })
             }

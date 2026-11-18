@@ -8,6 +8,7 @@ fn saved_account_routes_survive_serialization_and_restore_specs() {
     ] {
         for label in ["work", "personal", "Named-Account"] {
             let route = ModelRoute {
+                catalog_metadata: None,
                 model: model.to_string(),
                 provider: "provider".to_string(),
                 api_method: format!("{base}@{label}"),

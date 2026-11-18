@@ -314,7 +314,8 @@ fn reload_recovery_candidates<'a>(
         .collect();
     let mut candidates: HashMap<String, bool> = members
         .iter()
-        .filter(|(_, (status, _))| *status == "running")
+        // A rate-limited member is parked in a quota wait inside its turn.
+        .filter(|(_, (status, _))| matches!(*status, "running" | "rate_limited"))
         .map(|(id, (_, headless))| ((*id).to_string(), *headless))
         .collect();
     for id in active_session_ids

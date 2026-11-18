@@ -52,6 +52,7 @@ pub(super) async fn handle_comm_set_swarm_label(
             id,
             message: "Not in a swarm, so there is no swarm to label.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     };
@@ -89,6 +90,7 @@ pub(super) async fn handle_comm_set_swarm_label(
                 id,
                 message: err.to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             });
         }
     }

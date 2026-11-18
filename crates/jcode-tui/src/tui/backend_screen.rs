@@ -230,7 +230,8 @@ mod tests {
         assert!(remote.handle_screen_control_event(&ServerEvent::Error {
             id,
             message: "expired".into(),
-            retry_after_secs: None
+            retry_after_secs: None,
+            server_resumes: false,
         }));
         // Ordinary request IDs deliberately occupy the 01 high-bit range.
         // They must reach tool-registration handling, not passive ACK handling.
@@ -240,13 +241,15 @@ mod tests {
                 id: ordinary,
                 message: "ordinary control failure".into(),
                 retry_after_secs: None,
+                server_resumes: false,
             }));
         }
         assert!(!remote.handle_screen_control_event(&ServerEvent::Ack { id: 7 }));
         assert!(!remote.handle_screen_control_event(&ServerEvent::Error {
             id: 7,
             message: "chat failure".into(),
-            retry_after_secs: None
+            retry_after_secs: None,
+            server_resumes: false,
         }));
     }
 

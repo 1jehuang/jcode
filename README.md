@@ -113,6 +113,12 @@ Agents are also able to spawn their own swarms autonomously. They have a swarm t
 
 Supports a [wide range of providers](https://jcode.sh/docs#providers), including Claude OAuth and OpenAI Codex OAuth.
 
+The **Claude Code CLI** provider (`jcode login --provider claude-code [--account <instance>]`) runs Claude through the official `claude` binary, side by side with native Claude. See [Claude Code mode](OAUTH.md#claude-code-mode-opt-in-side-by-side-with-native-claude).
+
+`/accounts` opens the account center for adding, renaming, reauthenticating, removing, and switching saved logins. Saved Claude and OpenAI accounts show their own usage and remaining capacity when the provider reports it. Select a saved account to see its usage windows and reset times. Removal asks for confirmation and deletes only Jcode's saved login, not the provider account.
+
+Accounts are per window: `/accounts switch claude-fox` moves only this window, so two windows can use two subscriptions of the same provider at once. `/accounts` lists each saved login separately with its usage. Enter opens that account's actions, where you can switch, rename, reauthenticate, replace its login, remove, or make it the default. Rename, Add, Remove, and OAuth prompts stay inside Accounts; Escape cancels a form or returns to the list, and Escape from the list closes Accounts. Reauthentication verifies the same identity. To put a different identity in an existing slot, choose **Replace login** and confirm it; the old credentials remain until the replacement succeeds. Add account and provider-wide settings are separate entries. `/accounts default claude-fox` or Ctrl+D on a saved login sets the account new windows start with, `/accounts unpin` returns this window to the default, and `/accounts failover on|off|status` controls automatic moves to the next saved account in the auto-switch pool when this window's account runs out. Use `/accounts openai rename openai-otter` to enter a new name, or `/accounts openai reauth openai-otter` to sign in again to that login. From the command line, `jcode --account claude-fox` and `jcode run --account openai-otter ...` pick the account for that window or run, and `jcode login claude --default` makes a new login the default.
+
 ## Customizability / Self-Dev
 
 Jcode is inventing a new form of customizability. One that doesn't limit you to what a plugin or extension can do. Tell your jcode agent to enter self dev mode, and it will start modifying its own source code. Jcode is optimized to iterate on itself. There is significant infrastructure around self development, which allows it to edit, build, and test its own source code, then reload its own binary and continue work in your (potentially many) sessions, fully automatically.
@@ -125,3 +131,15 @@ Jcode is inventing a new form of customizability. One that doesn't limit you to 
 - [Token optimization](docs/HARNESS.md#token-optimization)
 - [KV cache](docs/HARNESS.md#kv-cache)
 - [Hill-climbable measurements](docs/HARNESS.md#hill-climbable-measurements)
+## Browser Automation
+
+The built-in `browser` tool lets agents navigate pages, fill forms, upload files,
+and capture screenshots through Firefox Agent Bridge. Ask your agent to set it
+up and handle browser tasks directly.
+
+On macOS, Brave, Chrome, Opera, and Firefox use Browser Agent Bridge, and Safari
+uses a native AppleScript backend. Pick one with `jcode browser setup <browser>`.
+Page actions there need an explicit `tab_id`, and file upload and screenshots are
+unavailable. See [macOS browser validation](docs/MACOS_BROWSER_VALIDATION.md).
+
+See [Browser Provider Protocol](docs/BROWSER_PROVIDER_PROTOCOL.md) for details.

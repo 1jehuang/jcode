@@ -8,6 +8,7 @@ impl App {
         mut self,
         mut terminal: DefaultTerminal,
         remote_working_dir: Option<String>,
+        agent_profile_name: Option<String>,
     ) -> Result<RunResult> {
         if crate::tui::is_ssh_remote() {
             self.session.working_dir = remote_working_dir.clone();
@@ -80,6 +81,9 @@ impl App {
                 &mut remote_state,
                 session_to_resume.as_deref(),
                 remote_working_dir.as_deref(),
+                agent_profile_name
+                    .as_deref()
+                    .filter(|_| session_to_resume.is_none()),
             )
             .await?
             {

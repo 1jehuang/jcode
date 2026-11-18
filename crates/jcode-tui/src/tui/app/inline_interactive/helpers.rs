@@ -88,35 +88,45 @@ pub(super) fn save_agent_model_override(
     target: AgentModelTarget,
     model: Option<&str>,
 ) -> anyhow::Result<()> {
-    let mut cfg = crate::config::Config::load();
-    let value = model
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    match target {
-        AgentModelTarget::Swarm => cfg.agents.swarm_model = value,
-        AgentModelTarget::Review => cfg.autoreview.model = value,
-        AgentModelTarget::Judge => cfg.autojudge.model = value,
-        AgentModelTarget::Memory => cfg.agents.memory_model = value,
-        AgentModelTarget::Ambient => cfg.ambient.model = value,
-    }
-    cfg.save()
+    crate::config::Config::set_agent_model_default(agent_model_target_slug(target), model)
 }
 
+/// The model id of a model row. Rows no longer carry an effort suffix (the
+/// level is picked in a second step), so the name is the id.
 pub(super) fn model_entry_base_name(entry: &PickerEntry) -> String {
-    if entry.effort.is_some() {
-        entry
-            .name
-            .rsplit_once(" (")
-            .map(|(base, _)| base.to_string())
-            .unwrap_or_else(|| entry.name.clone())
-    } else {
-        entry.name.clone()
-    }
+    entry.name.clone()
 }
 
 pub(super) fn openrouter_route_model_id(model: &str) -> String {
     crate::provider::openrouter_catalog_model_id(model).unwrap_or_else(|| model.to_string())
+}
+
+pub(super) fn model_picker_provider_hint_from_model_spec(model_spec: &str) -> Option<(&str, &str)> {
+    let (provider_hint, bare_model) = model_spec.split_once(':')?;
+    let provider_hint = provider_hint.trim();
+    let bare_model = bare_model.trim();
+    if provider_hint.is_empty() || bare_model.is_empty() {
+        return None;
+    }
+
+    let normalized = provider_hint.to_ascii_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "claude"
+            | "anthropic"
+            | "openai"
+            | "copilot"
+            | "cursor"
+            | "antigravity"
+            | "bedrock"
+            | "openrouter"
+            | "gemini"
+    ) || crate::provider_catalog::openai_compatible_profile_by_id(provider_hint).is_some()
+    {
+        Some((provider_hint, bare_model))
+    } else {
+        None
+    }
 }
 
 pub(super) fn picker_route_model_spec(entry: &PickerEntry, route: &PickerOption) -> String {
@@ -129,6 +139,9 @@ pub(super) fn picker_route_model_spec(entry: &PickerEntry, route: &PickerOption)
         crate::provider::ModelRouteApiMethod::Copilot => format!("copilot:{}", bare_name),
         crate::provider::ModelRouteApiMethod::GrokBuild => {
             crate::provider::grok_build_model_spec(&bare_name)
+        }
+        crate::provider::ModelRouteApiMethod::ClaudeCode { .. } => {
+            crate::provider::claude_code_model_spec(&bare_name)
         }
         crate::provider::ModelRouteApiMethod::ClaudeOAuth => {
             format!("claude-oauth:{}", bare_name)
@@ -164,6 +177,7 @@ pub(super) fn picker_route_selection(
     route: &PickerOption,
 ) -> crate::provider::RouteSelection {
     crate::provider::RouteSelection::from_model_route(&crate::provider::ModelRoute {
+        catalog_metadata: None,
         model: model_entry_base_name(entry),
         provider: route.provider.clone(),
         api_method: route.api_method.clone(),
@@ -315,8 +329,8 @@ mod tests {
         ] {
             for label in ["work", "personal", "research"] {
                 let option = route(provider, &format!("{base}@{label}"));
+                // Rows carry no effort suffix; the level is a second step.
                 let mut entry = entry(model, option.clone());
-                entry.name = format!("{model} (high)");
                 entry.effort = Some("high".into());
                 let expected = format!("{base}@{label}:{model}");
                 assert_eq!(picker_route_model_spec(&entry, &option), expected);

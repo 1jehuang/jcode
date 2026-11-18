@@ -32,6 +32,7 @@
 set -u
 
 repo_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+export JCODE_TEST_PUBLISH_HELPER="$repo_dir/scripts/lib/test_publish_build.sh"
 install_sh="$repo_dir/scripts/install.sh"
 install_ps1="$repo_dir/scripts/install.ps1"
 
@@ -120,7 +121,8 @@ done
 artifact="${EVAL_ARCHIVE_ARTIFACT:-jcode-linux-x86_64}"
 cat > "$dest/$artifact" <<BIN
 #!/usr/bin/env bash
-if [ "\${1:-}" = "--version" ]; then printf 'jcode ${EVAL_VERSION:-1.2.3}\n'; fi
+if [ "\${1:-}" = "--version" ]; then printf 'jcode ${EVAL_VERSION:-1.2.3}\n'; exit 0; fi
+if [ "\${2:-}" = publish-build ]; then exec bash "\$JCODE_TEST_PUBLISH_HELPER" "\$@"; fi
 exit 0
 BIN
 chmod +x "$dest/$artifact"
@@ -147,6 +149,7 @@ run_install() {
 probe_shell() { # probe_shell <home> <shell-cmd...>
   local home="$1"; shift
   HOME="$home" \
+  ZDOTDIR="$home" \
   XDG_CONFIG_HOME="$home/.config" \
   ENV="$home/.profile" \
   PATH="/usr/bin:/bin" \
@@ -384,12 +387,13 @@ printf '%s' "$ps1_text" | grep -q 'SendMessageTimeout(\[IntPtr\]0xffff'
 check "install.ps1 broadcasts WM_SETTINGCHANGE to HWND_BROADCAST" \
   "SendMessageTimeout(HWND_BROADCAST, ...) present" "broadcast missing" "$?"
 
-# Both installers must maintain the same channel layout so retention behaves
-# identically across platforms. The `stable-version` marker file is the shared
-# contract written by both.
-printf '%s' "$sh_text" | grep -q 'stable-version' && printf '%s' "$ps1_text" | grep -q 'stable-version'
+# Publication now belongs to the binary's locked transaction. Check both
+# installer call sites and the POSIX/Windows-emulation marker outcomes.
+printf '%s' "$sh_text" | grep -q 'publish-build' &&
+  printf '%s' "$ps1_text" | grep -q 'publish-build' &&
+  [ "$(cat "$work/localappdata/jcode/builds/stable-version" 2>/dev/null)" = "1.2.3" ]
 check "both installers maintain the stable/versions build channels" \
-  "stable-version channel marker written by both" "channel marker missing from one installer" "$?"
+  "publish-build delegation and stable-version marker" "publication contract or marker missing" "$?"
 
 # ---------------------------------------------------------------------------
 # Scorecard.

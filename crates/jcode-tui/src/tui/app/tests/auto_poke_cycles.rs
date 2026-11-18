@@ -354,7 +354,7 @@ fn stale_incomplete_todo_poke_is_dropped_once_todos_are_done() {
             priority: "high".to_string(),
             ..Default::default()
         };
-        crate::todo::save_todos(&app.session.id, &[done.clone()]).expect("save");
+        crate::todo::save_todos(&app.session.id, std::slice::from_ref(&done)).expect("save");
         let mut pending = done.clone();
         pending.status = "pending".to_string();
         let poke = crate::todo::build_actionable_poke_message(&[pending]);

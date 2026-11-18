@@ -130,6 +130,9 @@ fn command_suggestions_overlay_rect(
 fn command_suggestions_active(app: &dyn TuiState, suggestions: &[(String, &'static str)]) -> bool {
     let mode = composer_mode(app.input(), app.is_remote_mode());
     !suggestions.is_empty()
+        // Interactive pickers own this surface. Models render their choices in
+        // the overlay pass, while other pickers already have an inline panel.
+        && app.inline_interactive_state().is_none()
         && matches!(mode, ComposerMode::SlashCommand | ComposerMode::Chat)
         && (matches!(mode, ComposerMode::SlashCommand) || !app.is_processing())
 }
@@ -229,7 +232,15 @@ pub(super) fn draw_command_suggestions_overlay(frame: &mut Frame, app: &dyn TuiS
         // Keep it above the composer and size the window before building rows
         // so the selected model remains visible even on short terminals.
         let height = area.y.saturating_sub(frame.area().y);
-        let lines = super::inline_interactive_ui::model_suggestion_lines(picker, height as usize);
+        let lines = if picker.is_agent_profile_sources() {
+            super::inline_interactive_ui::agent_profile_source_lines(
+                picker,
+                height as usize,
+                area.width as usize,
+            )
+        } else {
+            super::inline_interactive_ui::model_suggestion_lines(picker, height as usize)
+        };
         if !lines.is_empty() && area.width > 0 {
             let rect = Rect::new(
                 area.x,
@@ -1048,6 +1059,10 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
             .as_deref()
             .and_then(overscroll_short_reasoning)
             .map(str::to_string),
+        account: data
+            .window_account
+            .as_ref()
+            .map(|account| account.display()),
     };
 
     let alignment = if app.centered_mode() {
@@ -1081,6 +1096,7 @@ pub(crate) fn preview_overscroll_line_for_host(
     host: Option<&str>,
 ) -> Line<'static> {
     let facts = OverscrollFacts {
+        account: None,
         machine: host
             .filter(|host| !host.trim().is_empty())
             .map(str::to_owned),
@@ -1138,6 +1154,8 @@ struct OverscrollFacts {
     provider: Option<String>,
     model: Option<String>,
     effort: Option<String>,
+    /// Account this window uses (`claude-fox`, `claude-otter (default)`).
+    account: Option<String>,
 }
 
 /// Per-fact detail level. 0 is the fullest form. Higher levels are more
@@ -1154,6 +1172,7 @@ struct OverscrollLevels {
     auth: u8,
     provider: u8,
     model: u8,
+    account: u8,
 }
 
 /// Compaction ladder, applied one step at a time until the line fits.
@@ -1173,9 +1192,10 @@ const OVERSCROLL_LADDER: &[fn(&mut OverscrollLevels)] = &[
     |l| l.context = 1,     // "74k/256k 29%" -> "29%"
     |l| l.git = 2,         // hide git status
     |l| l.branch = 2,      // hide branch
-    |l| l.model = 1,       // drop reasoning effort
-    |l| l.machine = 1,     // "☁ jcode-cloud:" -> "☁ "
-    |l| l.dir = 1,         // "~/…/jcode" -> "jcode"
+    |l| l.account = 1,
+    |l| l.model = 1,   // drop reasoning effort
+    |l| l.machine = 1, // "☁ jcode-cloud:" -> "☁ "
+    |l| l.dir = 1,     // "~/…/jcode" -> "jcode"
 ];
 
 fn overscroll_fact_spans(
@@ -1301,6 +1321,11 @@ fn overscroll_fact_spans(
             && let Some(effort) = &facts.effort
         {
             group.push(Span::styled(format!(" {effort}"), muted));
+        }
+        if levels.account == 0
+            && let Some(account) = &facts.account
+        {
+            group.push(Span::styled(format!(" · {account}"), muted));
         }
         out.push(group);
     }
@@ -1923,6 +1948,7 @@ pub(crate) fn wrap_input_text<'a>(
 
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn wrap_input_text_with_images<'a>(
     input: &str,
     cursor_pos: usize,

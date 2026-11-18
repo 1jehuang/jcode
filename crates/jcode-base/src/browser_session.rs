@@ -46,7 +46,36 @@ pub fn ensure_browser_session(session_id: &str) -> Option<String> {
 /// Session daemon for `session_id` talking to the host of `browser` (a bridge
 /// browser name such as `chrome`, or `None` for the bridge's default host).
 pub fn ensure_browser_session_for(session_id: &str, browser: Option<&str>) -> Option<String> {
+    let browser = match browser {
+        Some(name) => match BrowserKind::parse(name) {
+            Some(kind) if kind.family() != BrowserFamily::Safari && kind.supported_on_this_os() => {
+                Some(kind.id())
+            }
+            _ => {
+                eprintln!(
+                    "[browser] Unsupported bridge session target '{name}'; use a supported browser provider"
+                );
+                return None;
+            }
+        },
+        None => None,
+    };
     let session_name = session_name_for(session_id, browser);
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        if session_socket_path(&session_name)
+            .as_os_str()
+            .as_bytes()
+            .len()
+            >= 104
+        {
+            eprintln!(
+                "[browser] Browser session socket path is too long for Unix sockets. Set XDG_RUNTIME_DIR to a shorter existing directory; refusing an unbound session."
+            );
+            return None;
+        }
+    }
 
     if is_session_alive(&session_name) {
         return Some(session_name);
@@ -160,6 +189,36 @@ fn browser_supports_bind_window(bin: &std::path::Path) -> bool {
         })
 }
 
+fn prevent_inherited_cargo_gate(
+    command: &mut std::process::Command,
+    gate: Option<&std::path::Path>,
+) {
+    #[cfg(unix)]
+    if let Some(metadata) = gate.and_then(|path| std::fs::metadata(path).ok()) {
+        use std::os::unix::{fs::MetadataExt, process::CommandExt};
+        let (device, inode) = (metadata.dev(), metadata.ino());
+        // Only child state changes. fstat/fcntl are async-signal-safe, and an
+        // unrelated descriptor 9 is preserved even if an environment flag lied.
+        unsafe {
+            command.pre_exec(move || {
+                let mut stat: libc::stat = std::mem::zeroed();
+                if libc::fstat(9, &mut stat) == 0
+                    && stat.st_dev as u64 == device
+                    && stat.st_ino as u64 == inode
+                {
+                    let flags = libc::fcntl(9, libc::F_GETFD);
+                    if flags >= 0 && libc::fcntl(9, libc::F_SETFD, flags | libc::FD_CLOEXEC) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (command, gate);
+}
+
 fn spawn_browser_session(
     bin: &std::path::Path,
     session_name: &str,
@@ -171,6 +230,21 @@ fn spawn_browser_session(
         args.push("--bind-window");
     }
     let mut command = std::process::Command::new(bin);
+    let gate = if std::env::var("JCODE_CARGO_GATE_HELD").as_deref() == Ok("1") {
+        std::env::var_os("JCODE_CARGO_GATE_PATH")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                let dir = std::env::var_os("JCODE_CARGO_GATE_DIR")
+                    .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
+                    .or_else(|| std::env::var_os("TMPDIR"))
+                    .unwrap_or_else(|| "/tmp".into());
+                Some(std::path::PathBuf::from(dir).join("jcode-cargo-build.lock"))
+            })
+    } else {
+        None
+    };
+    prevent_inherited_cargo_gate(&mut command, gate.as_deref());
+    command.env_remove("BROWSER_SESSION");
     apply_bridge_browser_env(&mut command, browser);
     let result = command
         .args(&args)
@@ -226,18 +300,45 @@ fn spawn_browser_session(
 /// switching browsers starts a daemon bound to the other browser's host.
 pub(super) fn session_name_for(session_id: &str, browser: Option<&str>) -> String {
     let base = sanitize_session_name(session_id);
-    match browser.map(sanitize_session_name).filter(|b| !b.is_empty()) {
-        Some(browser) => format!("{}-{}", base, browser),
+    let name = match browser.map(sanitize_session_name).filter(|b| !b.is_empty()) {
+        // Old targeted daemons could have inherited FAB_BROWSER for a different
+        // browser or searched the agent's scratch TMPDIR registry. Do not reuse
+        // those after enforcing explicit identity and the system temp directory.
+        Some(browser) => format!("{}-{}-target-v4", base, browser),
         None => base,
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let capacity =
+            103_usize.saturating_sub(session_socket_path("").as_os_str().as_bytes().len());
+        if name.len() > capacity {
+            use sha2::{Digest, Sha256};
+            let digest = hex::encode(Sha256::digest(name.as_bytes()));
+            // Hash the whole browser/version-specific key when a longer
+            // XDG_RUNTIME_DIR leaves less space for a readable session ID.
+            let prefix = capacity.saturating_sub(17).min(name.len());
+            return format!("{}-{}", &name[..prefix], &digest[..16]);
+        }
     }
+    name
 }
 
 fn sanitize_session_name(session_id: &str) -> String {
-    session_id
+    let sanitized: String = session_id
         .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-        .take(64)
-        .collect()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        // Keep the complete browser-specific name short enough for macOS's
+        // 104-byte sockaddr_un.sun_path, including /tmp and socket affixes.
+        .take(32)
+        .collect();
+    if sanitized == session_id {
+        sanitized
+    } else {
+        use sha2::{Digest, Sha256};
+        let digest = hex::encode(Sha256::digest(session_id.as_bytes()));
+        format!("{}-{}", sanitized, &digest[..12])
+    }
 }
 
 #[cfg(all(test, unix))]

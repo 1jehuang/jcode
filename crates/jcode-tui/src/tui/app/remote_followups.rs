@@ -217,7 +217,13 @@ pub(in super::super) async fn process_remote_followups(
             .clone()
             .unwrap_or_else(|| "Split".to_string());
         begin_remote_split_launch(app, &flow_label);
-        if let Err(error) = remote.split().await {
+        let feedback_role = match flow_label.to_ascii_lowercase().as_str() {
+            "review" | "autoreview" | "judge" | "autojudge" => {
+                Some(flow_label.to_ascii_lowercase())
+            }
+            _ => None,
+        };
+        if let Err(error) = remote.split_feedback(feedback_role).await {
             finish_remote_split_launch(app);
             let had_startup = app.pending_split_startup_message.take().is_some();
             app.pending_split_parent_session_id = None;
@@ -260,7 +266,7 @@ pub(in super::super) async fn process_remote_followups(
 
     if app.is_processing {
         if let Some(interleave_msg) = app.interleave_message.take()
-            && !interleave_msg.trim().is_empty()
+            && (!interleave_msg.trim().is_empty() || !app.interleave_images.is_empty())
         {
             let interleave_images = std::mem::take(&mut app.interleave_images);
             let msg_clone = interleave_msg.clone();
@@ -292,7 +298,7 @@ pub(in super::super) async fn process_remote_followups(
         // passing `vec![]`, which silently dropped every image on an interleaved
         // send while still compiling, so the comment marks why the take matters.
         let interleave_images = std::mem::take(&mut app.interleave_images);
-        if !interleave_msg.trim().is_empty() {
+        if !interleave_msg.trim().is_empty() || !interleave_images.is_empty() {
             app.automatic_failover_targets.clear();
             app.automatic_failover_stopped = false;
             app.push_display_message(DisplayMessage {
@@ -324,6 +330,7 @@ pub(in super::super) async fn process_remote_followups(
     } else if !app.queued_messages.is_empty() && !app.reload_recovery_blocks_queue() {
         let mut queued_messages = std::mem::take(&mut app.queued_messages);
         super::super::commands::drop_stale_incomplete_todo_pokes(app, &mut queued_messages);
+        let queued_images = std::mem::take(&mut app.queued_message_images);
         let hidden_reminders = std::mem::take(&mut app.hidden_queued_system_messages);
         let (messages, reminder, display_system_messages) =
             super::super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
@@ -357,7 +364,7 @@ pub(in super::super) async fn process_remote_followups(
             app,
             remote,
             combined.clone(),
-            vec![],
+            queued_images.clone(),
             true,
             reminder.clone(),
             auto_retry,
@@ -374,8 +381,9 @@ pub(in super::super) async fn process_remote_followups(
             if let Some(reminder) = reminder {
                 app.hidden_queued_system_messages.insert(0, reminder);
             }
-            if !combined.is_empty() {
+            if !combined.is_empty() || !queued_images.is_empty() {
                 app.queued_messages.insert(0, combined);
+                app.queued_message_images.splice(0..0, queued_images);
             }
         }
     } else if !app.hidden_queued_system_messages.is_empty() || app.has_pending_cloud_recovery() {

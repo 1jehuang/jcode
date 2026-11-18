@@ -10,6 +10,9 @@ use tokio::sync::mpsc;
 
 /// Directory name under the durable state dir (`~/.jcode/state`).
 const SWARM_STATE_DIR: &str = "swarm";
+#[path = "swarm_persistence_member.rs"]
+mod member_lifecycle;
+pub(super) use member_lifecycle::persist_member_lifecycle;
 /// Pre-0.36 location under the runtime dir (tmpfs on Linux, wiped on reboot).
 const LEGACY_SWARM_STATE_DIR: &str = "jcode-swarm-state";
 /// Dormant plans are durable for recovery, but not immortal. A plan with no
@@ -28,6 +31,7 @@ static SWARM_OPERATION_LOCKS: LazyLock<StdMutex<HashMap<String, Weak<tokio::sync
 static SWARM_FILE_LOCKS: LazyLock<StdMutex<HashMap<String, Weak<StdMutex<()>>>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct SwarmStateFileVersion(Option<Vec<u8>>);
 
@@ -230,10 +234,12 @@ pub(super) fn state_path(swarm_id: &str) -> PathBuf {
     state_dir().join(format!("{}.json", sanitized))
 }
 
+#[cfg(test)]
 fn read_primary_version(swarm_id: &str) -> SwarmStateFileVersion {
     SwarmStateFileVersion(std::fs::read(state_path(swarm_id)).ok())
 }
 
+#[cfg(test)]
 pub(super) fn capture_swarm_state_version(swarm_id: &str) -> SwarmStateFileVersion {
     let file_lock = swarm_file_lock(swarm_id);
     let _guard = file_lock
@@ -381,6 +387,10 @@ fn recover_member_status(
     detail: Option<String>,
     is_headless: bool,
 ) -> (SwarmLifecycleStatus, Option<String>) {
+    if matches!(&status, SwarmLifecycleStatus::Other(value) if matches!(value.as_str(), "suspended" | "paused"))
+    {
+        return (status, detail);
+    }
     if status == SwarmLifecycleStatus::Running {
         return (
             SwarmLifecycleStatus::Crashed,
@@ -728,6 +738,7 @@ pub(super) fn remove_swarm_state(swarm_id: &str) {
     let _ = remove_snapshot_files(swarm_id);
 }
 
+#[cfg(test)]
 pub(super) fn remove_swarm_state_if_version(
     swarm_id: &str,
     expected: &SwarmStateFileVersion,
@@ -741,6 +752,10 @@ pub(super) fn remove_swarm_state_if_version(
     }
     remove_snapshot_files(swarm_id)
 }
+
+#[cfg(test)]
+#[path = "swarm_persistence_status_tests.rs"]
+mod status_tests;
 
 #[cfg(test)]
 #[path = "swarm_persistence_tests.rs"]

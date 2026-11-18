@@ -146,6 +146,24 @@ pub struct LoginCompleted {
     pub message: String,
 }
 
+/// A saved-login replacement belongs to one window and one OAuth attempt.
+#[derive(Clone, Debug)]
+pub struct SavedAccountLoginCompleted {
+    pub origin_session_id: String,
+    pub request_id: String,
+    pub label: String,
+    pub old_identity: Option<String>,
+    pub new_identity: Option<String>,
+    pub replace: bool,
+    pub commit_claimed: bool,
+    pub exchange_claimed: bool,
+    /// 0 = waiting, 1 = persistence claimed, 2 = cancelled, 3 = failed,
+    /// 4 = token exchange in progress. Shared by both
+    /// completion paths so manual paste and loopback can never both commit.
+    pub attempt: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    pub login: LoginCompleted,
+}
+
 /// Result of the first-run onboarding default-model validation ping. Published
 /// after the new-session screen runs a lightweight live check of the
 /// auto-selected default model so the UI can show a single "ready"/"failed"
@@ -315,6 +333,14 @@ pub struct SwarmWorkerReported {
     pub notification: String,
 }
 
+/// A message pushed by an MCP channel server (`notifications/claude/channel`,
+/// e.g. claude-peers) to the session that owns that server.
+#[derive(Clone, Debug)]
+pub struct PeerMessageReceived {
+    pub session_id: String,
+    pub notification: String,
+}
+
 /// Result of a `/productivity` report generation run.
 ///
 /// Carries already-rendered outputs (markdown + PNG bytes) so the TUI layer can
@@ -451,12 +477,15 @@ pub enum BusEvent {
     SwarmAwaitCompleted(SwarmAwaitCompleted),
     /// A spawned worker finished and its owner needs to coordinate next steps.
     SwarmWorkerReported(SwarmWorkerReported),
+    /// An MCP channel server delivered a message for its owning session.
+    PeerMessageReceived(PeerMessageReceived),
     /// Usage report fetched from providers
     UsageReport(Vec<jcode_usage_types::ProviderUsage>),
     /// Progressive usage report update while providers are still loading
     UsageReportProgress(jcode_usage_types::ProviderUsageProgress),
     /// OAuth/login flow completed in the background
     LoginCompleted(LoginCompleted),
+    SavedAccountLoginCompleted(SavedAccountLoginCompleted),
     /// First-run onboarding finished validating the auto-selected default model.
     OnboardingModelValidated(OnboardingModelValidated),
     /// Local `!cmd` shell command completed from the input line
@@ -495,10 +524,18 @@ pub enum BusEvent {
     ModelsUpdated,
     /// A single route's usage changed. Carries its snapshot so busy agents do
     /// not prevent clients from refreshing cached picker metadata.
-    ModelUsageUpdated(crate::provider::ModelRoute),
+    ModelUsageUpdated(Box<crate::provider::ModelRoute>),
     /// Synchronous provider activation after a login/import has completed, so
     /// the model picker can stop hiding the stale pre-auth catalog.
     AuthCatalogRefreshReady,
+    /// Credentials changed (login, account switch, or an external edit of a
+    /// credential file). The server forwards this to every connected client
+    /// so turns held on the previous account's limit resend promptly.
+    CredentialsChanged {
+        provider: Option<String>,
+        /// Stored account label whose credentials changed. `None` = unknown/any.
+        account_label: Option<String>,
+    },
     /// A background provider setup task selected a model for this session.
     ProviderModelActivated {
         session_id: String,
@@ -535,6 +572,7 @@ impl BusEvent {
             Self::BackgroundTaskStalled(event) => Some(&event.session_id),
             Self::SwarmAwaitCompleted(event) => Some(&event.session_id),
             Self::SwarmWorkerReported(event) => Some(&event.session_id),
+            Self::PeerMessageReceived(event) => Some(&event.session_id),
             Self::UiActivity(event) => event.session_id.as_deref(),
             Self::ToolUpdated(event) => Some(&event.session_id),
             Self::SubagentStatus(event) => Some(&event.session_id),
@@ -673,6 +711,7 @@ impl Bus {
                 | BusEvent::BackgroundTaskStalled(_)
                 | BusEvent::SwarmAwaitCompleted(_)
                 | BusEvent::SwarmWorkerReported(_)
+                | BusEvent::PeerMessageReceived(_)
                 | BusEvent::UiActivity(_)
                 | BusEvent::ToolUpdated(_)
                 | BusEvent::SubagentStatus(_)

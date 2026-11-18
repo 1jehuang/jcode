@@ -72,8 +72,19 @@ impl Agent {
         // A failed load must leave the current Agent and its concurrency lease
         // alive. Close it only after the replacement is ready to install.
         self.mark_closed_for_replacement();
+        // Old profiled sessions may have an upstream additive-prompt snapshot.
+        // Reset even when the new allowlist happens to match the old profile.
+        let preserve_profile_compaction =
+            !self.provider_conversation_reset_pending || self.preserve_compaction_on_provider_reset;
+        let profile_reset_pending = self.provider_conversation_reset_pending
+            || self.session.agent_profile.is_some()
+            || session.agent_profile.is_some();
+        if profile_reset_pending {
+            session.provider_session_id = None;
+        }
+        self.provider_conversation_reset_pending = profile_reset_pending;
+        // Restore provider_session_id for ordinary Claude CLI session resume.
         let close_ms = assign_start.elapsed().as_millis();
-        // Restore provider_session_id for Claude CLI session resume
         self.provider_session_id = session.provider_session_id.clone();
         let replaced_session = std::mem::replace(&mut self.session, session);
         drop(replaced_session);
@@ -100,12 +111,15 @@ impl Agent {
 
         let reset_start = Instant::now();
         self.reset_runtime_state_for_session_change();
+        self.preserve_compaction_on_provider_reset =
+            profile_reset_pending && preserve_profile_compaction;
         let restored_soft_interrupts = self.restore_persisted_soft_interrupts();
         let reset_ms = reset_start.elapsed().as_millis();
 
         let model_start = Instant::now();
         self.restore_session_model_from_session();
         self.restore_reasoning_effort_from_session();
+        self.restore_account_pins_from_session();
         let model_ms = model_start.elapsed().as_millis();
 
         let mark_active_start = Instant::now();

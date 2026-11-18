@@ -250,6 +250,24 @@ impl SessionPicker {
             &highlight_tokens,
             name_style,
         ));
+        if let Some(parent_id) = session.parent_id.as_deref() {
+            let parent_name = self
+                .all_sessions
+                .iter()
+                .chain(self.all_orphan_sessions.iter())
+                .chain(
+                    self.all_server_groups
+                        .iter()
+                        .flat_map(|group| group.sessions.iter()),
+                )
+                .find(|parent| parent.id == parent_id)
+                .map(Self::primary_title_display)
+                .unwrap_or_else(|| parent_id.chars().take(12).collect());
+            line1_spans.push(Span::styled(
+                format!("  ↳ from {}", parent_name),
+                Style::default().fg(rgb(150, 160, 180)),
+            ));
+        }
         line1_spans.extend([
             Span::styled(debug_marker, Style::default().fg(rgb(180, 180, 180))),
             Span::styled(saved_marker, Style::default().fg(rgb(255, 180, 100))),
@@ -655,14 +673,22 @@ impl SessionPicker {
             format!("  {}", filter_label),
             Style::default().fg(rgb(255, 180, 100)),
         ));
-        // These shortcuts insert search text while editing, so do not advertise
-        // them there or let their hint push the query out of a narrow header.
-        if !self.search_active {
-            title_parts.push(Span::styled(
-                " (s/S filter)",
-                Style::default().fg(rgb(80, 80, 80)),
-            ));
-        }
+        title_parts.push(Span::styled(
+            if self.search_active {
+                " (Ctrl+S filter)"
+            } else {
+                " (s/S filter)"
+            },
+            Style::default().fg(rgb(80, 80, 80)),
+        ));
+        title_parts.push(Span::styled(
+            if self.show_spawned_sessions {
+                "  agents:on"
+            } else {
+                "  agents:off"
+            },
+            Style::default().fg(rgb(120, 150, 180)),
+        ));
 
         if self.hidden_test_count > 0 && !self.search_active {
             title_parts.push(Span::styled(
@@ -700,19 +726,22 @@ impl SessionPicker {
         } else if self.search_busy_visible() {
             " searching in background… · selection held · ↑↓ nav · Enter confirm ".to_string()
         } else if self.search_active {
-            " type to filter · Ctrl+J/K or ↑↓ nav · Ctrl+W word-del · Esc cancel ".to_string()
+            " type to search · ↑↓ nav · Enter resume · Ctrl+S filter · Tab shortcuts · Esc clear/close "
+                .to_string()
         } else {
             match crate::config::config().keybindings.session_picker_enter {
                 crate::config::SessionPickerResumeAction::CurrentTerminal => {
-                    " y copy ID · Space select · Enter in place · Ctrl+Enter new terminal · d debug · / search · h/l focus · ↑↓ · q ".to_string()
+                    " type to search · y copy ID · Space select · Enter in place · Ctrl+Enter new terminal · a agents · d debug · h/l focus · ↑↓ · q ".to_string()
                 }
                 crate::config::SessionPickerResumeAction::NewTerminal => {
-                    " y copy ID · Space select · Enter new terminal · Ctrl+Enter in place · d debug · / search · h/l focus · ↑↓ · q ".to_string()
+                    " type to search · y copy ID · Space select · Enter new terminal · Ctrl+Enter in place · a agents · d debug · h/l focus · ↑↓ · q ".to_string()
                 }
             }
         };
-        if self.selected_live_claude_target().is_some() && !self.search_active {
-            help = format!(" T take over live Claude ·{}", help);
+        if self.selected_live_claude_target().is_some() {
+            // In the search box `T` is text, so point at Tab first.
+            let keys = if self.search_active { "Tab, T" } else { "T" };
+            help = format!(" {keys} take over live Claude ·{}", help);
         }
 
         let border_dim: Color = rgb(70, 70, 70);

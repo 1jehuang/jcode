@@ -17,6 +17,7 @@ pub enum BrowserKind {
     Chromium,
     Edge,
     Brave,
+    Opera,
     Safari,
 }
 
@@ -69,6 +70,7 @@ pub const ALL_BROWSERS: &[BrowserKind] = &[
     BrowserKind::Edge,
     BrowserKind::Brave,
     BrowserKind::Chromium,
+    BrowserKind::Opera,
     BrowserKind::Safari,
 ];
 
@@ -80,6 +82,7 @@ impl BrowserKind {
             BrowserKind::Chromium => "chromium",
             BrowserKind::Edge => "edge",
             BrowserKind::Brave => "brave",
+            BrowserKind::Opera => "opera",
             BrowserKind::Safari => "safari",
         }
     }
@@ -91,6 +94,7 @@ impl BrowserKind {
             BrowserKind::Chromium => "Chromium",
             BrowserKind::Edge => "Microsoft Edge",
             BrowserKind::Brave => "Brave",
+            BrowserKind::Opera => "Opera",
             BrowserKind::Safari => "Safari",
         }
     }
@@ -110,6 +114,7 @@ impl BrowserKind {
             "chromium" => Some(BrowserKind::Chromium),
             "edge" | "msedge" | "microsoft-edge" => Some(BrowserKind::Edge),
             "brave" | "brave-browser" => Some(BrowserKind::Brave),
+            "opera" | "opera-stable" | "opera-browser" | "opera-gx" => Some(BrowserKind::Opera),
             "safari" => Some(BrowserKind::Safari),
             _ => None,
         }
@@ -126,6 +131,7 @@ impl BrowserKind {
             BrowserKind::Firefox => "about:addons",
             BrowserKind::Edge => "edge://extensions",
             BrowserKind::Brave => "brave://extensions",
+            BrowserKind::Opera => "opera://extensions",
             BrowserKind::Safari => "Safari > Settings > Extensions",
             BrowserKind::Chrome | BrowserKind::Chromium => "chrome://extensions",
         }
@@ -141,6 +147,7 @@ impl BrowserKind {
                 BrowserKind::Chromium => &["Chromium"],
                 BrowserKind::Edge => &["Microsoft Edge"],
                 BrowserKind::Brave => &["Brave Browser"],
+                BrowserKind::Opera => &["Opera", "Opera GX"],
                 BrowserKind::Safari => &["Safari"],
             }
         }
@@ -151,6 +158,7 @@ impl BrowserKind {
                 BrowserKind::Chrome | BrowserKind::Chromium => &["chrome.exe"],
                 BrowserKind::Edge => &["msedge.exe"],
                 BrowserKind::Brave => &["brave.exe"],
+                BrowserKind::Opera => &["opera.exe"],
                 BrowserKind::Safari => &[],
             }
         }
@@ -163,6 +171,7 @@ impl BrowserKind {
                 BrowserKind::Chromium => &["chromium", "chromium-browse"],
                 BrowserKind::Edge => &["msedge", "microsoft-edge"],
                 BrowserKind::Brave => &["brave", "brave-browser"],
+                BrowserKind::Opera => &["opera"],
                 BrowserKind::Safari => &[],
             }
         }
@@ -171,6 +180,7 @@ impl BrowserKind {
     /// Executables to try on Linux, in order.
     pub fn linux_commands(self) -> &'static [&'static [&'static str]] {
         match self {
+            BrowserKind::Opera => &[&["opera"], &["opera-stable"]],
             BrowserKind::Firefox => &[
                 &["firefox"],
                 &["firefox-esr"],
@@ -207,6 +217,7 @@ impl BrowserKind {
             BrowserKind::Chromium => Some("org.chromium.Chromium"),
             BrowserKind::Edge => Some("com.microsoft.Edge"),
             BrowserKind::Brave => Some("com.brave.Browser"),
+            BrowserKind::Opera => None,
             BrowserKind::Safari => None,
         }
     }
@@ -219,6 +230,7 @@ impl BrowserKind {
             BrowserKind::Chromium => "Chromium",
             BrowserKind::Edge => "Microsoft Edge",
             BrowserKind::Brave => "Brave Browser",
+            BrowserKind::Opera => "Opera",
             BrowserKind::Safari => "Safari",
         }
     }
@@ -230,6 +242,7 @@ impl BrowserKind {
             BrowserKind::Chromium => "org.chromium.Chromium",
             BrowserKind::Edge => "com.microsoft.edgemac",
             BrowserKind::Brave => "com.brave.Browser",
+            BrowserKind::Opera => "com.operasoftware.Opera",
             BrowserKind::Safari => "com.apple.Safari",
         }
     }
@@ -241,6 +254,7 @@ impl BrowserKind {
             BrowserKind::Chrome | BrowserKind::Chromium => "chrome",
             BrowserKind::Edge => "msedge",
             BrowserKind::Brave => "brave",
+            BrowserKind::Opera => "opera",
             BrowserKind::Safari => "",
         }
     }
@@ -251,6 +265,7 @@ impl BrowserKind {
             BrowserKind::Firefox => &[r"HKCU\Software\Mozilla\NativeMessagingHosts"],
             BrowserKind::Chrome => &[r"HKCU\Software\Google\Chrome\NativeMessagingHosts"],
             BrowserKind::Chromium => &[r"HKCU\Software\Chromium\NativeMessagingHosts"],
+            BrowserKind::Opera => &[r"HKCU\Software\Google\Chrome\NativeMessagingHosts"],
             BrowserKind::Edge => &[r"HKCU\Software\Microsoft\Edge\NativeMessagingHosts"],
             // Brave reads Chrome's key on Windows as well as its own.
             BrowserKind::Brave => &[
@@ -287,9 +302,19 @@ impl BrowserKind {
                     vec![support.join("Microsoft Edge").join("NativeMessagingHosts")]
                 }
                 BrowserKind::Brave => vec![
+                    // brave-core/app/brave_main_delegate.cc overrides the
+                    // native host path to Chrome's macOS directory.
                     support
-                        .join("BraveSoftware")
-                        .join("Brave-Browser")
+                        .join("Google")
+                        .join("Chrome")
+                        .join("NativeMessagingHosts"),
+                ],
+                BrowserKind::Opera => vec![
+                    // Opera's native messaging documentation specifies Chrome's
+                    // path. Also register its own profile lookup directory.
+                    support.join("Google/Chrome/NativeMessagingHosts"),
+                    support
+                        .join("com.operasoftware.Opera")
                         .join("NativeMessagingHosts"),
                 ],
                 BrowserKind::Safari => Vec::new(),
@@ -317,6 +342,7 @@ impl BrowserKind {
                     vec![config.join("google-chrome").join("NativeMessagingHosts")]
                 }
                 BrowserKind::Chromium => vec![config.join("chromium").join("NativeMessagingHosts")],
+                BrowserKind::Opera => vec![config.join("opera").join("NativeMessagingHosts")],
                 BrowserKind::Edge => {
                     vec![config.join("microsoft-edge").join("NativeMessagingHosts")]
                 }
@@ -355,6 +381,7 @@ impl BrowserKind {
                 BrowserKind::Chromium => &[r"Chromium\Application\chrome.exe"],
                 BrowserKind::Edge => &[r"Microsoft\Edge\Application\msedge.exe"],
                 BrowserKind::Brave => &[r"BraveSoftware\Brave-Browser\Application\brave.exe"],
+                BrowserKind::Opera => &[r"Programs\Opera\launcher.exe", r"Opera\launcher.exe"],
                 BrowserKind::Safari => &[],
             };
             ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
@@ -405,6 +432,8 @@ pub fn browser_from_linux_desktop_id(desktop_id: &str) -> Option<BrowserKind> {
         Some(BrowserKind::Edge)
     } else if id.contains("brave") {
         Some(BrowserKind::Brave)
+    } else if id.contains("opera") {
+        Some(BrowserKind::Opera)
     } else if id.contains("chromium") {
         Some(BrowserKind::Chromium)
     } else {
@@ -430,6 +459,10 @@ pub fn browser_from_macos_bundle_id(bundle_id: &str) -> Option<BrowserKind> {
             Some(BrowserKind::Brave)
         }
         "com.apple.safari" | "com.apple.safaritechnologypreview" => Some(BrowserKind::Safari),
+        "com.operasoftware.opera"
+        | "com.operasoftware.operagx"
+        | "com.operasoftware.operanext"
+        | "com.operasoftware.operadeveloper" => Some(BrowserKind::Opera),
         _ => None,
     }
 }
@@ -445,6 +478,8 @@ pub fn browser_from_windows_prog_id(prog_id: &str) -> Option<BrowserKind> {
         Some(BrowserKind::Edge)
     } else if id.starts_with("bravehtml") {
         Some(BrowserKind::Brave)
+    } else if id.starts_with("operastable") || id.starts_with("operahtml") {
+        Some(BrowserKind::Opera)
     } else if id.starts_with("chromiumhtm") {
         Some(BrowserKind::Chromium)
     } else {

@@ -42,72 +42,117 @@ impl Provider for SystemPromptCaptureProvider {
     }
 }
 
+/// Shared actual-transport fixture. Only the provider is mocked.
+/// Callers must hold `storage::lock_test_env` and install an isolated home first.
+pub(super) struct SystemPromptSocketFixture {
+    pub(super) captured: Arc<std::sync::Mutex<Vec<String>>>,
+    pub(super) sessions: SessionAgents,
+    connect: Box<
+        dyn Fn() -> (
+            tokio::task::JoinHandle<Result<()>>,
+            crate::transport::Stream,
+        ),
+    >,
+}
+
+impl SystemPromptSocketFixture {
+    pub(super) fn connect(
+        &self,
+    ) -> (
+        tokio::task::JoinHandle<Result<()>>,
+        crate::transport::Stream,
+    ) {
+        (self.connect)()
+    }
+
+    pub(super) fn new() -> Self {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        Self::with_provider(
+            Arc::new(SystemPromptCaptureProvider(captured.clone())),
+            captured,
+        )
+    }
+
+    pub(super) fn with_provider(
+        provider_template: Arc<dyn Provider>,
+        captured: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> Self {
+        let sessions: SessionAgents =
+            Arc::new(crate::server::session_manager::SessionManager::new());
+        let global_session_id = Arc::new(RwLock::new(String::new()));
+        let client_count = Arc::new(RwLock::new(0usize));
+        let client_connections = Arc::new(RwLock::new(HashMap::new()));
+        let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+        let shared_context = Arc::new(RwLock::new(HashMap::new()));
+        let swarm_plans = Arc::new(RwLock::new(HashMap::new()));
+        let swarm_coordinators = Arc::new(RwLock::new(HashMap::new()));
+        let file_touch = FileTouchService::new();
+        let channel_subscriptions = Arc::new(RwLock::new(HashMap::new()));
+        let channel_subscriptions_by_session = Arc::new(RwLock::new(HashMap::new()));
+        let client_debug_state = Arc::new(RwLock::new(ClientDebugState::default()));
+        let (_debug_response_tx, _) = broadcast::channel(8);
+        let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+        let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (swarm_event_tx, _) = broadcast::channel(8);
+        let (_global_event_tx, _) = broadcast::channel(8);
+        let global_is_processing = Arc::new(RwLock::new(false));
+        let shutdown_signals = Arc::new(RwLock::new(HashMap::new()));
+        let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
+        let mcp_pool = Arc::new(crate::mcp::SharedMcpPool::from_default_config());
+
+        let fixture_sessions = sessions.clone();
+        let connect = move || {
+            let (server_stream, client_stream) =
+                crate::transport::Stream::pair().expect("socket pair");
+            let server_task = tokio::spawn(handle_client(
+                server_stream,
+                Arc::clone(&sessions),
+                _global_event_tx.clone(),
+                provider_template.clone(),
+                global_is_processing.clone(),
+                global_session_id.clone(),
+                client_count.clone(),
+                Arc::clone(&client_connections),
+                swarm_members.clone(),
+                swarms_by_id.clone(),
+                shared_context.clone(),
+                swarm_plans.clone(),
+                swarm_coordinators.clone(),
+                file_touch.clone(),
+                channel_subscriptions.clone(),
+                channel_subscriptions_by_session.clone(),
+                client_debug_state.clone(),
+                _debug_response_tx.clone(),
+                event_history.clone(),
+                event_counter.clone(),
+                swarm_event_tx.clone(),
+                "jcode-test".to_string(),
+                "🧪".to_string(),
+                mcp_pool.clone(),
+                shutdown_signals.clone(),
+                soft_interrupt_queues.clone(),
+                AwaitMembersRuntime::default(),
+                SwarmMutationRuntime::default(),
+            ));
+            (server_task, client_stream)
+        };
+        Self {
+            captured,
+            sessions: fixture_sessions,
+            connect: Box::new(connect),
+        }
+    }
+}
+
 #[tokio::test]
 async fn system_prompt_socket_creation_attach_resume_fork_and_no_leaking() {
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
-    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let provider_template: Arc<dyn Provider> =
-        Arc::new(SystemPromptCaptureProvider(captured.clone()));
-
-    let sessions: SessionAgents =
-        Arc::new(crate::server::SessionManager::from_agents(HashMap::new()));
-    let global_session_id = Arc::new(RwLock::new(String::new()));
-    let client_count = Arc::new(RwLock::new(0usize));
-    let client_connections = Arc::new(RwLock::new(HashMap::new()));
-    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
-    let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
-    let shared_context = Arc::new(RwLock::new(HashMap::new()));
-    let swarm_plans = Arc::new(RwLock::new(HashMap::new()));
-    let swarm_coordinators = Arc::new(RwLock::new(HashMap::new()));
-    let file_touch = FileTouchService::new();
-    let channel_subscriptions = Arc::new(RwLock::new(HashMap::new()));
-    let channel_subscriptions_by_session = Arc::new(RwLock::new(HashMap::new()));
-    let client_debug_state = Arc::new(RwLock::new(ClientDebugState::default()));
-    let (_debug_response_tx, _) = broadcast::channel(8);
-    let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
-    let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let (swarm_event_tx, _) = broadcast::channel(8);
-    let (_global_event_tx, _) = broadcast::channel(8);
-    let global_is_processing = Arc::new(RwLock::new(false));
-    let shutdown_signals = Arc::new(RwLock::new(HashMap::new()));
-    let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
-    let mcp_pool = Arc::new(crate::mcp::SharedMcpPool::from_default_config());
-
-    let connect = || {
-        let (server_stream, client_stream) = crate::transport::Stream::pair().expect("socket pair");
-        let server_task = tokio::spawn(handle_client(
-            server_stream,
-            Arc::clone(&sessions),
-            _global_event_tx.clone(),
-            provider_template.clone(),
-            global_is_processing.clone(),
-            global_session_id.clone(),
-            client_count.clone(),
-            Arc::clone(&client_connections),
-            swarm_members.clone(),
-            swarms_by_id.clone(),
-            shared_context.clone(),
-            swarm_plans.clone(),
-            swarm_coordinators.clone(),
-            file_touch.clone(),
-            channel_subscriptions.clone(),
-            channel_subscriptions_by_session.clone(),
-            client_debug_state.clone(),
-            _debug_response_tx.clone(),
-            event_history.clone(),
-            event_counter.clone(),
-            swarm_event_tx.clone(),
-            "jcode-test".to_string(),
-            "🧪".to_string(),
-            mcp_pool.clone(),
-            shutdown_signals.clone(),
-            soft_interrupt_queues.clone(),
-            AwaitMembersRuntime::default(),
-            SwarmMutationRuntime::default(),
-        ));
-        (server_task, client_stream)
-    };
+    let fixture = SystemPromptSocketFixture::new();
+    let captured = fixture.captured.clone();
+    let sessions = fixture.sessions.clone();
+    let connect = || fixture.connect();
     let (server_task, client_stream) = connect();
 
     let (client_reader, mut client_writer) = client_stream.into_split();
@@ -332,6 +377,122 @@ async fn system_prompt_socket_creation_attach_resume_fork_and_no_leaking() {
     drop(client_writer);
     drop(client_reader);
     tokio::time::timeout(Duration::from_secs(5), server_task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn target_attach_does_not_persist_creation_prompt_to_provisional_session() {
+    let _lock = crate::storage::lock_test_env();
+    let home = IsolatedReloadRecoveryEnv::new();
+    let fixture = SystemPromptSocketFixture::new();
+    let (owner_task, owner_stream) = fixture.connect();
+    let (mut owner_reader, mut owner_writer) = {
+        let (reader, writer) = owner_stream.into_split();
+        (BufReader::new(reader), writer)
+    };
+    async fn send(writer: &mut crate::transport::WriteHalf, value: serde_json::Value) {
+        writer
+            .write_all(format!("{value}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+    async fn until(
+        reader: &mut BufReader<crate::transport::ReadHalf>,
+        predicate: impl Fn(&ServerEvent) -> bool,
+    ) -> ServerEvent {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                let event: ServerEvent = serde_json::from_str(&line).unwrap();
+                if predicate(&event) {
+                    return event;
+                }
+            }
+        })
+        .await
+        .expect("socket event timeout")
+    }
+    use serde_json::json;
+
+    send(&mut owner_writer, json!({"type":"subscribe","id":701,"working_dir":home._home.path(),"system_prompt":"TARGET_PROMPT_701"})).await;
+    until(&mut owner_reader, |e| {
+        matches!(e, ServerEvent::Done { id: 701 })
+    })
+    .await;
+    send(
+        &mut owner_writer,
+        serde_json::to_value(Request::GetState { id: 702 }).unwrap(),
+    )
+    .await;
+    let ServerEvent::State {
+        session_id: target_id,
+        ..
+    } = until(&mut owner_reader, |e| {
+        matches!(e, ServerEvent::State { id: 702, .. })
+    })
+    .await
+    else {
+        unreachable!()
+    };
+
+    let (attacher_task, attacher_stream) = fixture.connect();
+    let (mut attacher_reader, mut attacher_writer) = {
+        let (reader, writer) = attacher_stream.into_split();
+        (BufReader::new(reader), writer)
+    };
+    // Initialization requires a first Subscribe. A rejected target profile
+    // leaves the connection provisional without committing a fresh session.
+    send(&mut attacher_writer, json!({"type":"subscribe","id":700,"working_dir":home._home.path(),"target_session_id":target_id,"agent_profile_name":"forbidden-on-attach"})).await;
+    until(&mut attacher_reader, |e| {
+        matches!(e, ServerEvent::Error { id: 700, message, .. } if message.contains("only be selected when creating"))
+    })
+    .await;
+    let provisional_id = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let sessions = fixture.sessions.read().await;
+            if let Some(id) = sessions.keys().find(|id| *id != &target_id).cloned() {
+                break id;
+            }
+            drop(sessions);
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("provisional session initialization timeout");
+    send(&mut attacher_writer, json!({"type":"subscribe","id":703,"working_dir":home._home.path(),"target_session_id":target_id,"system_prompt":"FOREIGN_PROMPT_703"})).await;
+    until(&mut attacher_reader, |e| {
+        matches!(e, ServerEvent::Done { id: 703 })
+    })
+    .await;
+    // A provisional session need not be persisted at all. If one was saved,
+    // require it to be readable and free of the attaching client's override.
+    if crate::session::session_exists(&provisional_id) {
+        let provisional = crate::session::Session::load(&provisional_id).unwrap();
+        assert_eq!(provisional.system_prompt, None);
+        assert_eq!(provisional.agent_profile, None);
+    }
+    assert_eq!(
+        crate::session::Session::load(&target_id)
+            .unwrap()
+            .system_prompt
+            .as_deref(),
+        Some("TARGET_PROMPT_701")
+    );
+
+    drop(attacher_writer);
+    drop(attacher_reader);
+    tokio::time::timeout(Duration::from_secs(5), attacher_task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    drop(owner_writer);
+    drop(owner_reader);
+    tokio::time::timeout(Duration::from_secs(5), owner_task)
         .await
         .unwrap()
         .unwrap()
