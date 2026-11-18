@@ -445,12 +445,27 @@ pub(super) async fn spawn_swarm_agent(
                     context = context.env("JCODE_SPAWN_SWARM_LABEL", label);
                 }
                 let context = context.with_client_terminal_env(client_terminal_env.clone());
-                spawn_visible_session_window_with_context(
-                    session_id,
-                    cwd,
-                    selfdev_requested,
-                    provider_key,
-                    &context,
+                // Register the identity before the client can submit its first
+                // prompt, so hooks on that prompt already see the worker.
+                super::swarm::swarm_hooks::launch_with_identity(
+                    &super::swarm::swarm_hooks::SpawnedWorker {
+                        session_id,
+                        swarm_id,
+                        coordinator_session_id: req_session_id,
+                        label: label.as_deref(),
+                        agent_type: None,
+                        spawn_mode: "visible",
+                        working_dir: None,
+                    },
+                    || {
+                        spawn_visible_session_window_with_context(
+                            session_id,
+                            cwd,
+                            selfdev_requested,
+                            provider_key,
+                            &context,
+                        )
+                    },
                 )
             },
         ),

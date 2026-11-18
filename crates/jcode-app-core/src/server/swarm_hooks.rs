@@ -40,15 +40,36 @@ pub(in crate::server) struct SpawnedWorker<'a> {
     pub working_dir: Option<&'a str>,
 }
 
-/// Register the worker's identity and fire `swarm_member_start`.
-pub(in crate::server) fn worker_spawned(worker: &SpawnedWorker<'_>) {
-    let identity = SwarmIdentity {
+fn worker_identity(worker: &SpawnedWorker<'_>) -> SwarmIdentity {
+    SwarmIdentity {
         swarm_id: worker.swarm_id.to_string(),
         coordinator_session_id: worker.coordinator_session_id.to_string(),
         parent_session_id: worker.coordinator_session_id.to_string(),
         label: worker.label.map(str::to_string),
         agent_type: worker.agent_type.map(str::to_string),
-    };
+    }
+}
+
+/// Register a visible worker's identity, then run `launch`.
+///
+/// A visible client can submit its first prompt while the spawn hook is still
+/// running, before `worker_spawned` fires, so the identity must already be in
+/// place at launch. It is removed again when the client did not launch.
+pub(in crate::server) fn launch_with_identity(
+    worker: &SpawnedWorker<'_>,
+    launch: impl FnOnce() -> anyhow::Result<bool>,
+) -> anyhow::Result<bool> {
+    hooks::register_swarm_identity(worker.session_id, worker_identity(worker));
+    let result = launch();
+    if !matches!(result, Ok(true)) {
+        hooks::forget_swarm_identity(worker.session_id);
+    }
+    result
+}
+
+/// Register the worker's identity and fire `swarm_member_start`.
+pub(in crate::server) fn worker_spawned(worker: &SpawnedWorker<'_>) {
+    let identity = worker_identity(worker);
     hooks::register_swarm_identity(worker.session_id, identity.clone());
     if !hooks::hook_configured("swarm_member_start") {
         return;
@@ -156,6 +177,39 @@ pub(in crate::server) fn member_status_changed(transition: &StatusTransition<'_>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_with_identity_registers_before_launch_and_forgets_on_failure() {
+        let worker = |session_id: &'static str| SpawnedWorker {
+            session_id,
+            swarm_id: "sw-launch",
+            coordinator_session_id: "coord-launch",
+            label: Some("task"),
+            agent_type: None,
+            spawn_mode: "visible",
+            working_dir: None,
+        };
+
+        let launched = launch_with_identity(&worker("launch-identity-ok"), || {
+            let identity = hooks::swarm_identity("launch-identity-ok")
+                .expect("identity must exist while the client launches");
+            assert_eq!(identity.swarm_id, "sw-launch");
+            Ok(true)
+        });
+        assert!(matches!(launched, Ok(true)));
+        assert!(hooks::swarm_identity("launch-identity-ok").is_some());
+        hooks::forget_swarm_identity("launch-identity-ok");
+
+        let not_started = launch_with_identity(&worker("launch-identity-no"), || Ok(false));
+        assert!(matches!(not_started, Ok(false)));
+        assert!(hooks::swarm_identity("launch-identity-no").is_none());
+
+        let failed = launch_with_identity(&worker("launch-identity-err"), || {
+            Err(anyhow::anyhow!("terminal failed"))
+        });
+        assert!(failed.is_err());
+        assert!(hooks::swarm_identity("launch-identity-err").is_none());
+    }
 
     #[test]
     fn end_and_running_status_sets() {
