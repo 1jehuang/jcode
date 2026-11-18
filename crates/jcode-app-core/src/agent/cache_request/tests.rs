@@ -97,6 +97,64 @@ fn fused_json_failure_preserves_empty_hash_and_zero_length() {
 }
 
 #[test]
+fn cached_message_lengths_match_serialization_after_metadata_and_content_edits() {
+    let mut messages = vec![
+        Message::user("quoted\"\n🦊"),
+        Message::assistant_text("tail"),
+    ];
+    assert_eq!(messages_json_len(&[]), 2);
+    for step in 0..5 {
+        assert_eq!(messages_json_len(&messages), stable_json_len(&messages));
+        let cloned = messages.clone();
+        assert_eq!(messages_json_len(&cloned), stable_json_len(&cloned));
+        match step {
+            0 => messages[0].tool_duration_ms = Some(123),
+            1 => messages[0].timestamp = chrono::DateTime::from_timestamp(99, 0),
+            2 => messages[0].content.push(ContentBlock::ToolUse {
+                id: "call".into(),
+                name: "tool".into(),
+                input: serde_json::json!({"unicode": "界", "escapes": "\t\\\""}),
+                thought_signature: None,
+            }),
+            3 => messages[1].content.clear(),
+            _ => {}
+        }
+    }
+}
+
+#[test]
+#[ignore = "paired original-profile immutable transcript byte-accounting benchmark"]
+fn benchmark_cached_request_size_accounting() {
+    let messages: Vec<_> = (0..96)
+        .map(|i| Message::user(&format!("{i}: {}", "request 🦊 \"payload\"\n".repeat(256))))
+        .collect();
+    assert_eq!(messages_json_len(&messages), stable_json_len(&messages));
+    for round in 0..4 {
+        let measure = |cached| {
+            let start = std::time::Instant::now();
+            for _ in 0..30 {
+                std::hint::black_box(if cached {
+                    messages_json_len(std::hint::black_box(&messages))
+                } else {
+                    stable_json_len(std::hint::black_box(&messages))
+                });
+            }
+            start.elapsed()
+        };
+        let (old, new) = if round % 2 == 0 {
+            (measure(false), measure(true))
+        } else {
+            let new = measure(true);
+            (measure(false), new)
+        };
+        eprintln!(
+            "REQUEST_SIZE round={round} old={old:?} new={new:?} speedup={:.3}x",
+            old.as_secs_f64() / new.as_secs_f64()
+        );
+    }
+}
+
+#[test]
 #[ignore = "paired complete cache diagnostic computation benchmark"]
 fn benchmark_request_diagnostics() {
     for count in [0, 8, 96] {

@@ -91,6 +91,99 @@ fn item_fingerprints(items: &[Value]) -> (Vec<u64>, u64) {
     (hashes, input_hash)
 }
 
+struct CanonicalFingerprints {
+    request: (u64, usize),
+    items: (Vec<u64>, u64),
+    system: Option<(u64, usize)>,
+    tools: Option<(u64, usize)>,
+}
+
+/// Provider payloads normally contain the supplied components as top-level
+/// fields. Encode those fields directly into the request buffer and fingerprint
+/// their byte ranges, instead of walking and escaping the same content again.
+/// Equality, rather than field names or pointer identity, also handles cloned
+/// components and providers with different request schemas. Nothing survives
+/// this call except hashes and lengths.
+fn canonical_fingerprints(
+    payload: &Value,
+    items: &[Value],
+    system: Option<&Value>,
+    tools: Option<&Value>,
+) -> CanonicalFingerprints {
+    let encoded = payload.as_object().and_then(|object| {
+        let mut encoded = Vec::new();
+        let mut item_result = None;
+        let mut system_result = None;
+        let mut tools_result = None;
+        encoded.push(b'{');
+        for (index, (key, value)) in object.iter().enumerate() {
+            if index > 0 {
+                encoded.push(b',');
+            }
+            if let Err(error) = serde_json::to_writer(&mut encoded, key) {
+                jcode_logging::debug(&format!("Cannot fingerprint request key: {error}"));
+                return None;
+            }
+            encoded.push(b':');
+            let start = encoded.len();
+            if item_result.is_none()
+                && value
+                    .as_array()
+                    .is_some_and(|array| std::ptr::eq(array.as_slice(), items) || array == items)
+            {
+                let mut hashes = Vec::with_capacity(items.len());
+                encoded.push(b'[');
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        encoded.push(b',');
+                    }
+                    let item_start = encoded.len();
+                    if let Err(error) = serde_json::to_writer(&mut encoded, item) {
+                        jcode_logging::debug(&format!("Cannot fingerprint request item: {error}"));
+                        return None;
+                    }
+                    hashes.push(stable_hash_bytes(&encoded[item_start..]));
+                }
+                encoded.push(b']');
+                item_result = Some((hashes, stable_hash_bytes(&encoded[start..])));
+            } else if let Err(error) = serde_json::to_writer(&mut encoded, value) {
+                jcode_logging::debug(&format!("Cannot fingerprint request field: {error}"));
+                return None;
+            }
+            let matches_system = system_result.is_none()
+                && system.is_some_and(|system| std::ptr::eq(system, value) || system == value);
+            let matches_tools = tools_result.is_none()
+                && tools.is_some_and(|tools| std::ptr::eq(tools, value) || tools == value);
+            if matches_system || matches_tools {
+                let fingerprint = (stable_hash_bytes(&encoded[start..]), encoded.len() - start);
+                if matches_system {
+                    system_result = Some(fingerprint);
+                }
+                if matches_tools {
+                    tools_result = Some(fingerprint);
+                }
+            }
+        }
+        encoded.push(b'}');
+        Some((
+            (stable_hash_bytes(&encoded), encoded.len()),
+            item_result,
+            system_result,
+            tools_result,
+        ))
+    });
+    // Non-object payloads, components absent from the payload, and serialization
+    // failures keep the historical independent-serialization behavior.
+    let (request, item_result, system_result, tools_result) =
+        encoded.unwrap_or_else(|| (stable_json_fingerprint(payload), None, None, None));
+    CanonicalFingerprints {
+        request,
+        items: item_result.unwrap_or_else(|| item_fingerprints(items)),
+        system: system_result.or_else(|| system.map(stable_json_fingerprint)),
+        tools: tools_result.or_else(|| tools.map(stable_json_fingerprint)),
+    }
+}
+
 fn prefix_matches(current: &[u64], previous: &[u64]) -> bool {
     if previous.len() > current.len() {
         return false;
@@ -124,11 +217,12 @@ pub fn log_provider_canonical_input(
     tool_count: Option<usize>,
     extra_fields: &[(&str, String)],
 ) {
-    let (request_hash, request_json_chars) = stable_json_fingerprint(payload);
-    let (item_hashes, input_hash) = item_fingerprints(items);
+    let fingerprints = canonical_fingerprints(payload, items, system, tools);
+    let (request_hash, request_json_chars) = fingerprints.request;
+    let (item_hashes, input_hash) = fingerprints.items;
     let item_hashes_hash = stable_hash_json(&item_hashes);
-    let (system_hash, system_json_chars) = system.map(stable_json_fingerprint).unzip();
-    let (tools_hash, tools_json_chars) = tools.map(stable_json_fingerprint).unzip();
+    let (system_hash, system_json_chars) = fingerprints.system.unzip();
+    let (tools_hash, tools_json_chars) = fingerprints.tools.unzip();
     let first_item_hash = item_hashes.first().copied();
     let last_item_hash = item_hashes.last().copied();
 

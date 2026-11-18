@@ -2,6 +2,7 @@
 //! action results. Executable actions come from trusted browser code or the parent,
 //! never from page instructions or model-generated JavaScript.
 use super::*;
+use crate::process_memory::estimate_json_bytes;
 use serde::Serialize;
 use std::future::Future;
 use std::time::Duration;
@@ -338,7 +339,7 @@ struct Candidate {
 }
 
 fn retain_result(result: Value, trace: &mut [Value]) -> Value {
-    let bytes = result.to_string().len();
+    let bytes = estimate_json_bytes(&result);
     let omitted = || json!({"omitted":"Result exceeds the per-action or rolling 32000-byte retention budget. Inspect current state with a read-only direct browser action. Do not repeat side effects."});
     if bytes > 16_000 {
         return omitted();
@@ -346,16 +347,16 @@ fn retain_result(result: Value, trace: &mut [Value]) -> Value {
     let mut retained: usize = trace
         .iter()
         .filter_map(|entry| entry.get("result"))
-        .map(|value| value.to_string().len())
+        .map(estimate_json_bytes)
         .sum();
     for entry in trace {
         if retained + bytes <= 32_000 {
             break;
         }
         if let Some(old) = entry.get_mut("result") {
-            let old_size = old.to_string().len();
+            let old_size = estimate_json_bytes(old);
             let marker = json!({"omitted":"Older result evicted. Inspect read-only state. Do not repeat side effects."});
-            let marker_size = marker.to_string().len();
+            let marker_size = estimate_json_bytes(&marker);
             if old_size > marker_size {
                 retained -= old_size - marker_size;
                 *old = marker;
@@ -397,7 +398,7 @@ fn parse_observation(output: ToolOutput) -> Result<Value> {
         "Malformed DOM observation"
     );
     anyhow::ensure!(
-        page.to_string().len() <= MAX_OBSERVATION,
+        estimate_json_bytes(&page) <= MAX_OBSERVATION,
         "DOM observation exceeds safe size limit"
     );
     if redact_credentials(&mut page) {
@@ -459,7 +460,7 @@ fn task_history(trace: &[Value]) -> Vec<Value> {
         let mut item = json!({"step":entry["step"],"action":entry["action"],"label":entry["label"],"status":entry["status"]});
         for key in ["result", "after", "before"] {
             if let Some(value) = entry.get(key) {
-                let size = value.to_string().len();
+                let size = estimate_json_bytes(value);
                 if size <= remaining {
                     item[key] = value.clone();
                     remaining -= size;
@@ -811,3 +812,7 @@ pub(super) async fn run(
 #[cfg(test)]
 #[path = "browser_fast_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "browser_size_tests.rs"]
+mod size_tests;

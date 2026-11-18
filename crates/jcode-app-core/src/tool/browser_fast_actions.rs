@@ -159,7 +159,8 @@ pub(super) fn candidates(input: &BrowserInput, observation: &Value) -> Result<Ve
     let mut result = Vec::new();
     for (exact_index, exact) in input.candidates.iter().enumerate() {
         anyhow::ensure!(
-            exact.label.len() <= 500 && exact.input.to_string().len() <= 16000,
+            exact.label.len() <= 500
+                && crate::process_memory::estimate_json_bytes(&exact.input) <= 16000,
             "Exact candidate too large"
         );
         result.push(Candidate {

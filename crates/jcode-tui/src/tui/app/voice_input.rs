@@ -129,6 +129,10 @@ impl App {
     }
 
     pub(crate) fn toggle_voice_input(&mut self) {
+        if crate::tui::jarvis::always_on() {
+            self.toggle_always_listening();
+            return;
+        }
         match self.voice_input.as_ref().map(|voice| voice.phase) {
             None => self.start_voice_input(),
             Some(VoicePhase::Recording) => self.stop_voice_input(),
@@ -139,6 +143,7 @@ impl App {
     }
 
     fn start_voice_input(&mut self) {
+        self.cancel_jarvis_speech();
         let Some(key) = voice::nari_api_key() else {
             self.push_display_message(DisplayMessage::error(
                 "Voice input needs a Nari API key. Set `NARI_API_KEY`, or add \
@@ -279,6 +284,9 @@ impl App {
         &mut self,
         activity: crate::protocol::VoiceActivity,
     ) {
+        if matches!(activity, crate::protocol::VoiceActivity::Recording { .. }) {
+            self.cancel_jarvis_speech();
+        }
         self.external_voice = match activity {
             crate::protocol::VoiceActivity::Idle => None,
             activity => Some((activity, Instant::now())),

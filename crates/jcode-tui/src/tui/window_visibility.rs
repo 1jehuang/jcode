@@ -257,13 +257,22 @@ fn probe_niri() -> Visibility {
 #[cfg(unix)]
 fn niri_request(socket: &std::path::Path, request: &str) -> Option<serde_json::Value> {
     use std::io::{BufRead, BufReader, Write};
-    let mut stream = std::os::unix::net::UnixStream::connect(socket).ok()?;
-    stream.set_read_timeout(Some(PROBE_IO_TIMEOUT)).ok()?;
-    stream.set_write_timeout(Some(PROBE_IO_TIMEOUT)).ok()?;
-    stream.write_all(request.as_bytes()).ok()?;
-    let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line).ok()?;
-    serde_json::from_str(&line).ok()
+    let request_result = (|| -> anyhow::Result<serde_json::Value> {
+        let mut stream = std::os::unix::net::UnixStream::connect(socket)?;
+        stream.set_read_timeout(Some(PROBE_IO_TIMEOUT))?;
+        stream.set_write_timeout(Some(PROBE_IO_TIMEOUT))?;
+        stream.write_all(request.as_bytes())?;
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line)?;
+        Ok(serde_json::from_str(&line)?)
+    })();
+    match request_result {
+        Ok(reply) => Some(reply),
+        Err(error) => {
+            crate::logging::debug(&format!("Niri visibility probe unavailable: {error}"));
+            None
+        }
+    }
 }
 
 /// This process and its parents, nearest first. The terminal emulator that
@@ -281,7 +290,15 @@ fn ancestor_pids() -> Vec<u32> {
         let Some(parent) = stat
             .rsplit_once(')')
             .and_then(|(_, rest)| rest.split_whitespace().nth(1))
-            .and_then(|ppid| ppid.parse::<u32>().ok())
+            .and_then(|ppid| match ppid.parse::<u32>() {
+                Ok(parent) => Some(parent),
+                Err(error) => {
+                    crate::logging::debug(&format!(
+                        "Cannot parse visibility probe parent PID: {error}"
+                    ));
+                    None
+                }
+            })
         else {
             break;
         };
