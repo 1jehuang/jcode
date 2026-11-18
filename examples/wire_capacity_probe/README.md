@@ -90,8 +90,65 @@ allocation calls increase from 9 to 14. The escaped fixture's cumulative request
 bytes increase from 1,048,448 to 1,276,407 despite lower retained capacity.
 
 These candidates therefore fail the no-CPU/allocation-regression acceptance gate.
-A conditional shrink, a different allocator, other growth factors, and a generic
-size hint were not tested. Do not extrapolate this rejection to those strategies.
+A conditional shrink is measured separately below. A different allocator, other
+growth factors, and a generic size hint were not tested. Do not extrapolate this
+rejection to those strategies.
+
+## Conditional large shrink follow-up
+
+Policy: serialize once with the unchanged serializer, then shrink only when
+length is at least 65,536 bytes and unused capacity is at least one quarter of
+capacity. The comparison uses integer division, explicitly covered by boundary
+tests. This isolated policy is **not shipped**: it offers retained-memory savings,
+but does not meet the strict no-CPU/allocation-regression gate.
+
+The same optimized, allocator-uninstrumented CPU harness ran two complete sets
+of 21 alternating pairs on CPU 2. Raw data is `results/conditional-cpu-{1,2}.txt`.
+The allocation-meter binary ran separately twice, with identical counters in
+`results/conditional-alloc-{1,2}.txt`.
+
+| Fixture | CPU ratio run 1 | CPU ratio run 2 | Capacity baseline -> conditional | Calls baseline -> conditional |
+| --- | ---: | ---: | ---: | ---: |
+| tiny | 1.02831 | 1.02784 | 128 -> 128 | 1 -> 1 |
+| escaped | 1.00063 | 0.99949 | 524,288 -> 524,288 | 13 -> 13 |
+| nested | 0.99503 | 1.00389 | 262,144 -> 175,604 | 12 -> 13 |
+| noisy | 1.00003 | 0.99670 | 2,097,152 -> 1,073,732 | 15 -> 16 |
+| large | 0.99998 | 0.99991 | 1,392,384 -> 1,392,384 | 9 -> 9 |
+| below-threshold | 0.99978 | 0.99951 | 131,066 -> 131,066 | 3 -> 3 |
+| at-threshold | 0.99981 | 1.00111 | 131,068 -> 65,536 | 3 -> 4 |
+| above-threshold | 1.00173 | 0.99988 | 131,070 -> 65,537 | 3 -> 4 |
+| many-small | 0.99585 | 0.99157 | 1,048,576 -> 768,904 | 14 -> 15 |
+| native-8x1MiB | 0.99978 | 0.99348 | 16,777,760 -> 8,389,090 | 6 -> 7 |
+
+Threshold fixtures have exact wire lengths 65,535 / 65,536 / 65,537. The native
+shape has eight user messages with 1 MiB text each, content-block arrays, model,
+and stream fields. It is a constructed request-shaped `Value`, not an actual
+provider type or network workload. Many-small has 20,000 short user messages.
+Escaped and large do not meet the 25% slack rule and therefore do not shrink.
+
+The native-shaped payload releases 8,388,670 logical retained bytes per buffer,
+about 8 MiB. This is meaningful retained-capacity evidence, not evidence that
+all capacity reductions are impossible. Large-body CPU results do not establish
+a regression. However, the tiny fixture reproducibly costs about 2.8% more CPU
+despite skipping shrink, and every triggered shrink adds one realloc. Native
+cumulative requested bytes increase from 32,507,038 to 40,896,128; logical peak
+remains 16,777,760. Allocator RSS, copying behavior, and whole-lifecycle latency
+are not established by these counters. This policy is a memory/CPU/allocation
+tradeoff, not a validated pure efficiency improvement.
+
+Exact-byte and policy-boundary tests pass. Existing partial serialization error
+and single-pass tests still pass. Compression and sampling remain unchanged
+because production code was not edited. No counting serialization was added.
+
+Reproduce follow-up after building/copying the CPU executable as below:
+
+```bash
+taskset -c 2 "$JCODE_SCRATCH_DIR/wire-cpu" cpu-conditional 21
+taskset -c 2 "$JCODE_SCRATCH_DIR/wire-cpu" cpu-conditional 21
+# Build the separate allocation-meter executable before these commands:
+examples/wire_capacity_probe/target/release/wire-capacity-probe alloc-conditional
+examples/wire_capacity_probe/target/release/wire-capacity-probe alloc-conditional
+```
 
 ## Reproduce
 

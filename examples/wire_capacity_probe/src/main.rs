@@ -74,6 +74,12 @@ enum Method {
     Baseline,
     Shrink,
     Growth,
+    Conditional,
+}
+fn shrink_large(bytes: &mut Vec<u8>) {
+    if bytes.len() >= 64 * 1024 && bytes.capacity() - bytes.len() >= bytes.capacity() / 4 {
+        bytes.shrink_to_fit();
+    }
 }
 fn encode(value: &Value, method: Method) -> Vec<u8> {
     match method {
@@ -81,6 +87,11 @@ fn encode(value: &Value, method: Method) -> Vec<u8> {
         Method::Shrink => {
             let mut bytes = serde_json::to_vec(value).unwrap();
             bytes.shrink_to_fit();
+            bytes
+        }
+        Method::Conditional => {
+            let mut bytes = serde_json::to_vec(value).unwrap();
+            shrink_large(&mut bytes);
             bytes
         }
         Method::Growth => {
@@ -119,6 +130,19 @@ fn fixtures() -> Vec<(&'static str, Value)> {
         ),
     ]
 }
+fn conditional_fixtures() -> Vec<(&'static str, Value)> {
+    let mut values = fixtures();
+    for (name, len) in [
+        ("below-threshold", 65535),
+        ("at-threshold", 65536),
+        ("above-threshold", 65537),
+    ] {
+        values.push((name, json!({"text":"a".repeat(len - 11)})));
+    }
+    values.push(("many-small", json!({"messages":(0..20_000).map(|i| json!({"role":"user","content":format!("turn {i}")})).collect::<Vec<_>>()})));
+    values.push(("native-8x1MiB", json!({"model":"native-test","stream":true,"messages":(0..8).map(|_| json!({"role":"user","content":[{"type":"text","text":"x".repeat(1024*1024)}]})).collect::<Vec<_>>()})));
+    values
+}
 fn thread_ns() -> u64 {
     let mut ts = libc::timespec {
         tv_sec: 0,
@@ -139,8 +163,15 @@ fn sample(value: &Value, method: Method, iterations: usize) -> u64 {
 }
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "cpu".into());
+    let conditional = mode.ends_with("-conditional");
+    let allocation = mode.starts_with("alloc");
+    let methods: &[Method] = if conditional {
+        &[Method::Conditional]
+    } else {
+        &[Method::Shrink, Method::Growth]
+    };
     assert_eq!(
-        mode == "alloc",
+        allocation,
         cfg!(feature = "allocation-meter"),
         "build CPU mode without allocation-meter, allocation mode with it"
     );
@@ -148,13 +179,17 @@ fn main() {
         .nth(2)
         .map(|x| x.parse().unwrap())
         .unwrap_or(15);
-    for (name, value) in fixtures() {
+    for (name, value) in if conditional {
+        conditional_fixtures()
+    } else {
+        fixtures()
+    } {
         let expected = encode(&value, Method::Baseline);
-        for method in [Method::Shrink, Method::Growth] {
+        for &method in methods {
             assert_eq!(encode(&value, method), expected);
         }
-        if mode == "alloc" {
-            for method in [Method::Baseline, Method::Shrink, Method::Growth] {
+        if allocation {
+            for method in std::iter::once(Method::Baseline).chain(methods.iter().copied()) {
                 CALLS.store(0, Relaxed);
                 REQUESTED.store(0, Relaxed);
                 LIVE.store(0, Relaxed);
@@ -175,7 +210,7 @@ fn main() {
             }
         } else {
             let iterations = (16_000_000 / expected.len()).clamp(8, 100_000);
-            for method in [Method::Shrink, Method::Growth] {
+            for &method in methods {
                 for _ in 0..3 {
                     sample(&value, method, iterations);
                     sample(&value, Method::Baseline, iterations);
@@ -211,6 +246,32 @@ fn main() {
 mod tests {
     use super::*;
     use serde::ser::SerializeSeq;
+
+    #[test]
+    fn conditional_preserves_bytes_and_only_shrinks_large_slack() {
+        for (name, value) in conditional_fixtures() {
+            assert_eq!(
+                encode(&value, Method::Conditional),
+                encode(&value, Method::Baseline),
+                "{name}"
+            );
+        }
+        for (len, capacity, shrink) in [
+            (65535, 131072, false),
+            (65536, 131072, true),
+            (65537, 131072, true),
+            (65536, 65536, false),
+            (65536, 87381, true),
+            (65536, 87380, false),
+        ] {
+            let mut bytes = Vec::with_capacity(capacity);
+            bytes.resize(len, 42);
+            let old_capacity = bytes.capacity();
+            shrink_large(&mut bytes);
+            assert_eq!(bytes.capacity(), if shrink { len } else { old_capacity });
+            assert!(bytes.iter().all(|b| *b == 42));
+        }
+    }
 
     #[test]
     fn candidates_preserve_exact_fixture_bytes() {
