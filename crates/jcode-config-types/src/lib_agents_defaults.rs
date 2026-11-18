@@ -9,8 +9,6 @@ impl Default for AgentsConfig {
             swarm_effort: None,
             swarm_root_effort: None,
             swarm_spawn_mode: SwarmSpawnMode::default(),
-            swarm_gallery_max_pct: None,
-            swarm_strip_layout: SwarmStripLayout::default(),
             memory_jev_provider: default_memory_jev_provider(),
             memory_jev_model: None,
             browser_jev_model: None,

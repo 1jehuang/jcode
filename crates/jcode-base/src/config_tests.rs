@@ -192,6 +192,21 @@ fn swarm_spawn_mode_parses_supported_values() {
 }
 
 #[test]
+fn retired_swarm_strip_settings_are_ignored() {
+    for layout in ["vertical", "horizontal", "obsolete"] {
+        let cfg: Config = toml::from_str(&format!(
+            "[agents]\nswarm_strip_layout = {layout:?}\nswarm_gallery_max_pct = 40\nswarm_spawn_mode = \"headless\"\n"
+        ))
+        .expect("retired swarm settings should be ignored in existing configs");
+        assert_eq!(cfg.agents.swarm_spawn_mode, SwarmSpawnMode::Headless);
+
+        let serialized = toml::to_string(&cfg).expect("config should serialize");
+        assert!(!serialized.contains("swarm_strip_layout"));
+        assert!(!serialized.contains("swarm_gallery_max_pct"));
+    }
+}
+
+#[test]
 fn swarm_spawn_mode_rejects_invalid_values() {
     let result = toml::from_str::<Config>("[agents]\nswarm_spawn_mode = \"background\"\n");
     assert!(result.is_err());
