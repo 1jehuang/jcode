@@ -220,6 +220,12 @@ pub(crate) fn run_trust_command(action: TrustCommand) -> Result<()> {
     }
 }
 
+/// Disabled project hooks never run, so there is nothing to approve at startup.
+/// `jcode trust show` still lists them.
+fn skip_disabled_review(scope: Scope, hooks_enabled: bool) -> bool {
+    scope == Scope::Hooks && !hooks_enabled
+}
+
 /// At the start of an interactive session, offer to approve untrusted project
 /// scopes. Headless runs never prompt and never block: untrusted scopes are
 /// simply skipped by their loaders.
@@ -235,9 +241,7 @@ pub(crate) fn maybe_prompt_for_project_trust(command: Option<&Command>) -> Resul
     let path = std::env::current_dir()?;
     let hooks_enabled = crate::hooks::project_hooks_enabled();
     for review in scope_reviews(&path)? {
-        // Disabled project hooks never run, so there is nothing to approve.
-        // `jcode trust show` still lists them.
-        if review.scope == Scope::Hooks && !hooks_enabled {
+        if skip_disabled_review(review.scope, hooks_enabled) {
             continue;
         }
         if project_trust::trust_state(&path, review.scope, &review.digest)? == TrustState::Trusted {
@@ -263,4 +267,16 @@ pub(crate) fn maybe_prompt_for_project_trust(command: Option<&Command>) -> Resul
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod disabled_review_tests {
+    use super::*;
+
+    #[test]
+    fn disabled_hooks_are_not_offered_for_approval() {
+        assert!(skip_disabled_review(Scope::Hooks, false));
+        assert!(!skip_disabled_review(Scope::Hooks, true));
+        assert!(!skip_disabled_review(Scope::Mcp, false));
+    }
 }
