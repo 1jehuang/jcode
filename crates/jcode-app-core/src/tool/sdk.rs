@@ -34,8 +34,12 @@ impl Drop for ConnectionGuard {
             !(overlay.owner == self.0
                 && overlay.config.enabled.is_none()
                 && overlay.config.disabled.is_empty()
-                && overlay.config.custom.len() == 1
-                && overlay.config.custom[0].name == "cloud_environment")
+                && !overlay.config.custom.is_empty()
+                && overlay
+                    .config
+                    .custom
+                    .iter()
+                    .all(|tool| matches!(tool.name.as_str(), "cloud_environment" | "speak")))
         });
         for overlay in state.overlays.values_mut().filter(|o| o.owner == self.0) {
             // Retain definitions and denies, but never fall back to a built-in override.
@@ -300,6 +304,159 @@ impl Tool for CallbackTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn custom_definition(name: &str) -> SessionToolDefinition {
+        SessionToolDefinition {
+            name: name.into(),
+            description: "test callback".into(),
+            parameters: serde_json::json!({"type":"object"}),
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnect_removes_temporary_speech_but_preserves_other_overlays() {
+        let owner = "speech-disconnect-owner";
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let cases = [
+            (
+                "sdk-speech-only-disconnect",
+                vec!["speak"],
+                None,
+                vec![],
+                false,
+            ),
+            (
+                "sdk-speech-cloud-disconnect",
+                vec!["speak", "cloud_environment"],
+                None,
+                vec![],
+                false,
+            ),
+            (
+                "sdk-speech-enabled-disconnect",
+                vec!["speak"],
+                Some(vec!["speak".into()]),
+                vec![],
+                true,
+            ),
+            (
+                "sdk-speech-disabled-disconnect",
+                vec!["speak"],
+                None,
+                vec!["bash".into()],
+                true,
+            ),
+            (
+                "sdk-speech-unrelated-disconnect",
+                vec!["speak", "unrelated"],
+                None,
+                vec![],
+                true,
+            ),
+            (
+                "sdk-unrelated-disconnect",
+                vec!["unrelated"],
+                None,
+                vec![],
+                true,
+            ),
+        ];
+        for (session, names, enabled, disabled, _) in &cases {
+            configure(
+                session,
+                owner,
+                SessionToolConfig {
+                    custom: names.iter().map(|name| custom_definition(name)).collect(),
+                    enabled: enabled.clone(),
+                    disabled: disabled.clone(),
+                },
+                tx.clone(),
+            )
+            .unwrap();
+        }
+        let other_session = "sdk-speech-other-owner-disconnect";
+        configure(
+            other_session,
+            "speech-unaffected-owner",
+            SessionToolConfig {
+                custom: vec![custom_definition("speak")],
+                ..Default::default()
+            },
+            tx,
+        )
+        .unwrap();
+
+        drop(ConnectionGuard(owner.into()));
+        for (session, names, enabled, disabled, retained) in cases {
+            assert_eq!(config(session).is_some(), retained, "{session}");
+            if retained {
+                let config = config(session).unwrap();
+                assert_eq!(config.enabled, enabled);
+                assert_eq!(config.disabled, disabled);
+                assert_eq!(
+                    config
+                        .custom
+                        .iter()
+                        .map(|tool| tool.name.as_str())
+                        .collect::<Vec<_>>(),
+                    names
+                );
+                let error = execute(session, names[0], serde_json::json!({}))
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains("owner disconnected"), "{error}");
+            }
+            remove_session(session);
+        }
+        assert!(config(other_session).is_some());
+        remove_session(other_session);
+    }
+
+    #[tokio::test]
+    async fn speak_callback_roundtrip_requires_matching_owner_and_session() {
+        let session = "sdk-speak-roundtrip-test";
+        let owner = "speak-roundtrip-owner";
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        configure(
+            session,
+            owner,
+            SessionToolConfig {
+                custom: vec![custom_definition("speak")],
+                ..Default::default()
+            },
+            tx,
+        )
+        .unwrap();
+        let input = serde_json::json!({"text": "Hello from speech"});
+        let task = tokio::spawn(execute(session, "speak", input.clone()));
+        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let ServerEvent::ToolCall {
+            session_id,
+            call_id,
+            name,
+            input: received,
+        } = event
+        else {
+            panic!("Expected speech callback");
+        };
+        assert_eq!(session_id, session);
+        assert_eq!(name, "speak");
+        assert_eq!(received, input);
+        assert!(complete("other-owner", session, &call_id, "forged".into(), None).is_err());
+        assert!(complete(owner, "other-session", &call_id, "forged".into(), None).is_err());
+        complete(owner, session, &call_id, "spoken".into(), None).unwrap();
+        let output = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(output.output, "spoken");
+        assert!(complete(owner, session, &call_id, "duplicate".into(), None).is_err());
+        remove_session(session);
+    }
+
     #[test]
     fn disconnect_removes_only_temporary_cloud_overlay() {
         let (tx, _) = mpsc::unbounded_channel();
