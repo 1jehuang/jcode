@@ -3059,60 +3059,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         (chat_area, None)
     };
 
-    // Inline swarm strip: when `swarm_spawn_mode = inline` and this session
-    // manages agents, render a compact strip (vertical agent list by default,
-    // see `agents.swarm_strip_layout`) directly above the status line instead
-    // of a big gallery band. When the panel is focused (alt+n), the selected
-    // agent's row expands in place with its live transcript tail and todos;
-    // alt+↑/↓ select, alt+o pops out, alt+shift+p opens the swarm prompt,
-    // esc exits, and plain typing keeps flowing to the chat input. The strip stands
-    // down while the SwarmStatus dock widget (margin HUD) is showing the same
-    // agents, unless the panel is focused (keyboard interaction lives here).
-    // The stand-down is sticky (anchored blinks count as engaged, plus a short
-    // linger after disengagement) because each strip appearance adds a row to
-    // the bottom chrome and shoves the transcript up: reacting to raw
-    // frame-by-frame dock visibility made the strip pop in and out and the
-    // whole screen bounce (flicker).
-    let pinned_width = chat_area.width.saturating_sub(u16::from(
-        app.chat_native_scrollbar() && last_chat_scrollbar_visible(),
-    ));
-    let pinned_width = pinned_width.saturating_sub(left_aligned_content_inset(
-        pinned_width,
-        app.centered_mode(),
-    ));
-    let workers_in_todos = viewport::pinned_todos_show_workers(app, pinned_width);
-    let swarm_strip_lines: Vec<Line<'static>> = if !swarm_page_active
-        && app.inline_swarm_gallery_active()
-        && (app.swarm_panel_focused()
-            || (!workers_in_todos && !super::info_widget::swarm_strip_stands_down_for_dock()))
-    {
-        let members = app.inline_swarm_members();
-        if chat_area.width >= 24 {
-            let focus_key = crate::tui::keybind::swarm_panel_focus_key_label();
-            // Use the same smooth cadence as the primary status spinner.
-            let spinner_frame = (app.animation_elapsed()
-                * jcode_tui_render::swarm_gallery::STRIP_SPINNER_FPS)
-                as usize;
-            // Focused budget: chips + hints + a ~14-line detail viewport, but
-            // never more than a third of the chat column so the transcript
-            // stays usable on short terminals.
-            let focused_budget = ((chat_area.height as usize) / 3).clamp(3, 16);
-            super::info_widget::swarm_gallery::render_swarm_strip_lines(
-                &members,
-                app.swarm_panel_selected(),
-                app.swarm_panel_focused(),
-                &focus_key,
-                spinner_frame,
-                chat_area.width as usize,
-                focused_budget,
-            )
-        } else {
-            Vec::new()
-        }
-    } else {
-        Vec::new()
-    };
-    let swarm_strip_height = swarm_strip_lines.len() as u16;
+    // Worker activity belongs in pinned todo lanes. The retired bottom swarm
+    // strip must not return when todos are absent or the swarm is focused.
 
     // Calculate pending messages (queued + interleave) for numbering and layout
     let pending_count = input_ui::pending_prompt_count(app);
@@ -3201,7 +3149,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let overscroll_height: u16 = 1;
     let fixed_height = 1
         + queued_height
-        + swarm_strip_height
         + notification_height
         + inline_block_height
         + inline_ui_gap_height
@@ -3362,7 +3309,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                     content_height.max(1)
                 }), // 0 Messages (exact height; 0 when terminal-cleared)
                 Constraint::Length(queued_height), // 1 Queued messages (above status)
-                Constraint::Length(swarm_strip_height), // 2 Swarm strip (above status)
+                Constraint::Length(0),             // 2 Retired swarm strip slot
                 Constraint::Length(1),             // 3 Status line
                 Constraint::Length(notification_height), // 4 Notification line
                 Constraint::Length(inline_block_height), // 5 Inline UI
@@ -3375,7 +3322,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             vec![
                 Constraint::Min(3),                       // 0 Messages (scrollable)
                 Constraint::Length(queued_height),        // 1 Queued messages (above status)
-                Constraint::Length(swarm_strip_height),   // 2 Swarm strip (above status)
+                Constraint::Length(0),                    // 2 Retired swarm strip slot
                 Constraint::Length(1),                    // 3 Status line
                 Constraint::Length(notification_height),  // 4 Notification line
                 Constraint::Length(inline_block_height),  // 5 Inline UI
@@ -3387,12 +3334,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         })
         .split(chat_area);
     record_status_area(chunks[3]);
-
-    // Draw the inline swarm strip directly above the status line if present.
-    if swarm_strip_height > 0 {
-        clear_area(frame, chunks[2]);
-        frame.render_widget(Paragraph::new(swarm_strip_lines.clone()), chunks[2]);
-    }
 
     // Capture layout info for visual debug
     if let Some(ref mut capture) = debug_capture {
@@ -3468,7 +3409,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     } else {
         diff_pane_area
     };
-    let _ = swarm_strip_height;
     note_chat_layout(ChatLayoutMetrics {
         chat_area,
         messages_area,
