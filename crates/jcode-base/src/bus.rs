@@ -333,6 +333,14 @@ pub struct SwarmWorkerReported {
     pub notification: String,
 }
 
+/// A message pushed by an MCP channel server (`notifications/claude/channel`,
+/// e.g. claude-peers) to the session that owns that server.
+#[derive(Clone, Debug)]
+pub struct PeerMessageReceived {
+    pub session_id: String,
+    pub notification: String,
+}
+
 /// Result of a `/productivity` report generation run.
 ///
 /// Carries already-rendered outputs (markdown + PNG bytes) so the TUI layer can
@@ -469,6 +477,8 @@ pub enum BusEvent {
     SwarmAwaitCompleted(SwarmAwaitCompleted),
     /// A spawned worker finished and its owner needs to coordinate next steps.
     SwarmWorkerReported(SwarmWorkerReported),
+    /// An MCP channel server delivered a message for its owning session.
+    PeerMessageReceived(PeerMessageReceived),
     /// Usage report fetched from providers
     UsageReport(Vec<jcode_usage_types::ProviderUsage>),
     /// Progressive usage report update while providers are still loading
@@ -562,6 +572,7 @@ impl BusEvent {
             Self::BackgroundTaskStalled(event) => Some(&event.session_id),
             Self::SwarmAwaitCompleted(event) => Some(&event.session_id),
             Self::SwarmWorkerReported(event) => Some(&event.session_id),
+            Self::PeerMessageReceived(event) => Some(&event.session_id),
             Self::UiActivity(event) => event.session_id.as_deref(),
             Self::ToolUpdated(event) => Some(&event.session_id),
             Self::SubagentStatus(event) => Some(&event.session_id),
@@ -700,6 +711,7 @@ impl Bus {
                 | BusEvent::BackgroundTaskStalled(_)
                 | BusEvent::SwarmAwaitCompleted(_)
                 | BusEvent::SwarmWorkerReported(_)
+                | BusEvent::PeerMessageReceived(_)
                 | BusEvent::UiActivity(_)
                 | BusEvent::ToolUpdated(_)
                 | BusEvent::SubagentStatus(_)
