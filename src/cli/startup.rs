@@ -310,7 +310,7 @@ fn parse_and_prepare_args(args: Args) -> Result<Args> {
     }
 
     output::set_quiet_enabled(args.quiet);
-    if args.jarvis {
+    if args.jarvis || args.jarvis_always_on || args.jarvis_screen {
         anyhow::ensure!(
             args.command.is_none(),
             "--jarvis currently supports the interactive TUI only"
@@ -318,6 +318,12 @@ fn parse_and_prepare_args(args: Args) -> Result<Args> {
         // Validate the selected backend before entering raw terminal mode.
         drop(crate::tui::jarvis::create_speech_player()?);
         crate::tui::jarvis::enable();
+        if args.jarvis_always_on {
+            crate::tui::jarvis::enable_always_on();
+        }
+        if args.jarvis_screen {
+            crate::tui::jarvis::enable_screen();
+        }
     }
 
     if let Some(cwd) = &args.cwd {

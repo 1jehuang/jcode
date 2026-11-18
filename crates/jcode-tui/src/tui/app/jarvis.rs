@@ -46,6 +46,7 @@ impl App {
         {
             remote.configure_cloud_tools(Default::default()).await?;
         }
+        remote.prepare_screen_context().await?;
         Ok(())
     }
 
@@ -68,9 +69,10 @@ impl App {
         }
     }
 
-    pub(super) fn jarvis_session_changed(&self, next: &str) {
+    pub(super) fn jarvis_session_changed(&mut self, next: &str) {
         if self.remote_session_id.as_deref() != Some(next) {
             self.cancel_jarvis_speech();
+            self.jarvis_listener.detach();
         }
     }
 
@@ -96,6 +98,7 @@ impl App {
                 "Speech skipped while microphone input is active"
             );
             let text = speech_text(input)?;
+            self.jarvis_listener.suppress_speech();
             self.jarvis_speech
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("Local speech backend is unavailable"))?

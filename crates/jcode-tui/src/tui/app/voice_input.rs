@@ -129,6 +129,10 @@ impl App {
     }
 
     pub(crate) fn toggle_voice_input(&mut self) {
+        if crate::tui::jarvis::always_on() {
+            self.toggle_always_listening();
+            return;
+        }
         match self.voice_input.as_ref().map(|voice| voice.phase) {
             None => self.start_voice_input(),
             Some(VoicePhase::Recording) => self.stop_voice_input(),

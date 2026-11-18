@@ -1037,6 +1037,29 @@ impl Default for CompanionConfig {
 #[serde(default)]
 pub struct JarvisConfig {
     pub speech: JarvisSpeechConfig,
+    pub listening: JarvisListeningConfig,
+}
+
+/// Bounds for the explicitly enabled always-listening client. These settings
+/// do not enable microphone access on their own.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JarvisListeningConfig {
+    pub max_audio_seconds_per_hour: u64,
+    pub max_classifications_per_hour: u32,
+    pub max_agent_turns_per_hour: u32,
+    pub action_probability: f64,
+}
+
+impl Default for JarvisListeningConfig {
+    fn default() -> Self {
+        Self {
+            max_audio_seconds_per_hour: 600,
+            max_classifications_per_hour: 120,
+            max_agent_turns_per_hour: 20,
+            action_probability: 0.97,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1065,6 +1088,17 @@ impl Default for JarvisSpeechConfig {
 #[cfg(test)]
 mod jarvis_config_tests {
     use super::*;
+
+    #[test]
+    fn listening_limits_are_bounded_defaults_and_can_be_overridden() {
+        let limits = Config::default().jarvis.listening;
+        assert_eq!(limits.max_audio_seconds_per_hour, 600);
+        assert_eq!(limits.max_classifications_per_hour, 120);
+        assert_eq!(limits.max_agent_turns_per_hour, 20);
+        let config: Config = toml::from_str("[jarvis.listening]\nmax_agent_turns_per_hour = 3\naction_probability = 0.99").unwrap();
+        assert_eq!(config.jarvis.listening.max_agent_turns_per_hour, 3);
+        assert_eq!(config.jarvis.listening.action_probability, 0.99);
+    }
 
     #[test]
     fn jarvis_endpoint_is_optional_and_serializes() {

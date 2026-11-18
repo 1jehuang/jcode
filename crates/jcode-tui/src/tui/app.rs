@@ -67,6 +67,8 @@ mod commit_log;
 pub(crate) use commit_log::CommitLogOverlay;
 mod cloud_environment;
 mod jarvis;
+mod jarvis_listen;
+mod jarvis_status;
 mod commands_cloud;
 mod commands_colors;
 mod commands_desktop;
@@ -1460,6 +1462,7 @@ pub struct App {
     remote_session_id: Option<String>,
     cloud_environment: cloud_environment::CloudEnvironment,
     jarvis_speech: Option<jcode_voice::speech::SpeechPlayer>,
+    jarvis_listener: jarvis_listen::AlwaysListening,
     // All sessions on the server (remote mode only)
     remote_sessions: Vec<String>,
     remote_side_pane_images: Vec<crate::session::RenderedImage>,

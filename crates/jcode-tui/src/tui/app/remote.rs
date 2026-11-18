@@ -118,6 +118,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     let mut needs_redraw = crate::tui::periodic_redraw_required(app)
         | crate::tui::terminal_events::theme_redraw_pending();
     needs_redraw |= app.poll_jarvis_speech_error();
+    needs_redraw |= app.poll_jarvis_listening(remote).await;
     needs_redraw |= app.poll_pending_startup_transcript();
     if remote.has_loaded_history()
         && let Err(error) = remote
@@ -974,6 +975,9 @@ pub(super) async fn handle_bus_event(
             app.handle_dictation_failure(message);
             true
         }
+        Ok(BusEvent::VoiceInputWake) if crate::tui::jarvis::always_on() => {
+            app.poll_jarvis_listening(remote).await
+        }
         Ok(BusEvent::VoiceInputWake) => match app.poll_voice_input() {
             super::voice_input::VoicePoll::Idle => false,
             super::voice_input::VoicePoll::Changed => true,
@@ -1157,6 +1161,9 @@ pub(super) async fn handle_remote_event<B: Backend>(
     event: RemoteRead,
 ) -> Result<(RemoteEventOutcome, bool)> {
     match event {
+        RemoteRead::Event(ref event) if remote.handle_screen_control_event(event) => {
+            Ok((RemoteEventOutcome::Continue, false))
+        }
         RemoteRead::Event(ServerEvent::ToolCall {
             session_id,
             call_id,
@@ -1165,13 +1172,17 @@ pub(super) async fn handle_remote_event<B: Backend>(
         }) => {
             if name == "speak" {
                 app.jarvis_call(remote, session_id, call_id, input);
+            } else if name == "screen_context" {
+                remote.screen_context_call(session_id, call_id, input);
             } else {
                 app.cloud_environment_call(remote, session_id, call_id, name, input);
             }
             Ok((RemoteEventOutcome::Continue, false))
         }
         RemoteRead::Disconnected(reason) => {
+            remote.stop_screen_context();
             app.cancel_jarvis_speech();
+            app.jarvis_listener.detach();
             app.revoke_cloud_environment();
             if let RemoteDisconnectReason::Protocol(error) = &reason {
                 let detail = format_disconnect_reason(&reason);

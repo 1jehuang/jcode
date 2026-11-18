@@ -2,15 +2,18 @@
 
 Start the interactive terminal client with `jcode --jarvis`, optionally with
 `--resume <session>`. Ordinary sessions do not advertise the `speak` tool.
-Screen capture, wake words, and always-on listening are not implemented.
+Screen capture and wake-word detection are not implemented. For the separate
+opt-in continuous-listening variant and Waybar meter, see
+[JARVIS_ALWAYS_ON.md](JARVIS_ALWAYS_ON.md). `--jarvis-screen` opts in to passive
+local window metadata, without screenshots.
 
 ## Session prompting
 
 Jarvis registers an opt-in, session-owned addition to the existing system prompt
 alongside its `speak` tool. It does not replace base instructions or add a visible
 reminder to every user turn or retry. Ordinary sessions keep their existing prompt.
-See [screen context design](JARVIS_SCREEN_CONTEXT.md) for the proposed passive
-screen-awareness channel, which is not implemented yet.
+See [screen context implementation](JARVIS_SCREEN_CONTEXT.md) for the bounded,
+opt-in passive screen-awareness channel.
 
 ## External speech service
 
