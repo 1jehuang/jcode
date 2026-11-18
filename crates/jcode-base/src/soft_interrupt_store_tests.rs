@@ -25,7 +25,7 @@ fn append_take_and_clear_round_trip() {
             content: "world".to_string(),
             images: Vec::new(),
             urgent: false,
-            source: SoftInterruptSource::BackgroundTask,
+            source: SoftInterruptSource::FileActivity,
             client_id: None,
         },
     )
@@ -36,6 +36,7 @@ fn append_take_and_clear_round_trip() {
     assert_eq!(loaded[0].content, "hello");
     assert!(loaded[0].urgent);
     assert_eq!(loaded[1].content, "world");
+    assert_eq!(loaded[1].source, SoftInterruptSource::FileActivity);
 
     let taken = take(session_id).expect("take interrupts");
     assert_eq!(taken.len(), 2);

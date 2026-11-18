@@ -1,5 +1,80 @@
 use super::*;
 use crate::protocol::{ServerEvent, SessionToolConfig, SessionToolDefinition};
+
+#[test]
+fn sdk_system_prompt_append_validation_and_disconnect() {
+    let session = "sdk-prompt-validation";
+    let _cleanup = Cleanup(session.into());
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let config = SessionToolConfig {
+        system_prompt_append: Some("Authorized instructions".into()),
+        disabled: vec!["bash".into()],
+        ..Default::default()
+    };
+    sdk::configure(
+        session,
+        "prompt-validation-owner",
+        config.clone(),
+        tx.clone(),
+    )
+    .unwrap();
+    for invalid in [
+        "".into(),
+        "   ".into(),
+        " leading".into(),
+        "trailing\n".into(),
+        "a\0b".into(),
+        "x".repeat(16 * 1024 + 1),
+    ] {
+        let mut bad = config.clone();
+        bad.system_prompt_append = Some(invalid);
+        assert!(sdk::configure(session, "prompt-validation-owner", bad, tx.clone()).is_err());
+        assert_eq!(
+            sdk::config(session).unwrap().system_prompt_append,
+            config.system_prompt_append
+        );
+    }
+    assert!(sdk::configure(session, "intruder", config, tx.clone()).is_err());
+    drop(sdk::ConnectionGuard("prompt-validation-owner".into()));
+    let retained = sdk::config(session).unwrap();
+    assert_eq!(retained.disabled, ["bash"]);
+    assert!(retained.system_prompt_append.is_none());
+    sdk::configure(session, "prompt-validation-owner", Default::default(), tx).unwrap();
+    assert!(sdk::config(session).is_none());
+    sdk::configure(
+        session,
+        "prompt-boundary-owner",
+        SessionToolConfig {
+            system_prompt_append: Some("x".repeat(16 * 1024)),
+            ..Default::default()
+        },
+        mpsc::unbounded_channel().0,
+    )
+    .unwrap();
+    drop(sdk::ConnectionGuard("prompt-boundary-owner".into()));
+    assert!(sdk::config(session).is_none());
+}
+
+#[test]
+fn sdk_system_prompt_append_wire_default_and_round_trip() {
+    let absent: SessionToolConfig = serde_json::from_value(json!({})).unwrap();
+    assert!(absent.system_prompt_append.is_none());
+    assert!(
+        serde_json::to_value(absent)
+            .unwrap()
+            .get("system_prompt_append")
+            .is_none()
+    );
+    let configured: SessionToolConfig =
+        serde_json::from_value(json!({"system_prompt_append":"Speak concisely"})).unwrap();
+    assert_eq!(
+        serde_json::to_value(configured).unwrap()["system_prompt_append"],
+        "Speak concisely"
+    );
+    assert!(
+        serde_json::from_value::<SessionToolConfig>(json!({"system_prompt_append":42})).is_err()
+    );
+}
 use serde_json::json;
 use tokio::sync::mpsc;
 
@@ -46,6 +121,7 @@ async fn sdk_selection_replacement_validation_and_isolation() {
         enabled: Some(vec![]),
         disabled: vec![],
         custom: vec![custom("read"), custom("local")],
+        system_prompt_append: None,
     };
     sdk::configure(&own_session, "selection-owner", config.clone(), tx.clone()).unwrap();
     let definitions = agent.tool_definitions_for_debug().await;
@@ -204,6 +280,7 @@ async fn sdk_disabled_batch_subcalls_and_cancel_cleanup() {
             enabled: Some(vec!["batch".into()]),
             disabled: vec!["read".into()],
             custom: vec![custom("read"), custom("callback")],
+            system_prompt_append: None,
         },
         tx.clone(),
     )
@@ -273,6 +350,7 @@ fn sdk_inheritance_and_deferred_mcp_policy() {
         SessionToolConfig {
             enabled: Some(vec!["mcp_call".into()]),
             disabled: vec!["mcp__test__blocked".into()],
+            system_prompt_append: None,
             custom: vec![],
         },
         tx.clone(),
@@ -333,6 +411,7 @@ async fn sdk_nested_alias_and_deferred_mcp_use_callbacks() {
         enabled: Some(vec!["batch".into(), "mcp_call".into()]),
         disabled: vec![],
         custom: vec![custom("shell_exec"), custom("mcp__sdk__echo")],
+        system_prompt_append: None,
     };
     sdk::configure(session, "nested-owner", config.clone(), tx.clone()).unwrap();
     for (surface, input, expected) in [

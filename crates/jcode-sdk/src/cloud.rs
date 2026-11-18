@@ -547,11 +547,11 @@ impl CloudClient {
         let mut agents = AGENTS
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(index) = agents
+        if let Some(entry) = agents
             .iter()
             .position(|(name, timeout, _)| name == &self.client_name && *timeout == self.timeout)
+            .and_then(|index| agents.remove(index))
         {
-            let entry = agents.remove(index).unwrap();
             let agent = entry.2.clone();
             agents.push_back(entry);
             return agent;

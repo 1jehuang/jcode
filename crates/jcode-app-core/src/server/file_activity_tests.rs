@@ -89,7 +89,7 @@ fn notice_is_one_short_line_with_agent_path_counts_and_intent() {
     let notice = format_file_activity_notice(&[single]);
     assert_eq!(
         notice,
-        "⚠ File activity: moss src/parser.rs +3-1 L45-60 overlap: fix the parser"
+        "moss edited src/parser.rs +3-1 L45-60 overlap: fix the parser"
     );
     // The diff preview is never part of the model-facing notice.
     assert!(!notice.contains('\n'));
@@ -99,7 +99,7 @@ fn notice_is_one_short_line_with_agent_path_counts_and_intent() {
     bare.operation = "wrote".to_string();
     assert_eq!(
         format_file_activity_notice(&[bare]),
-        "⚠ File activity: fox src/lib.rs +10-0 earlier"
+        "fox wrote src/lib.rs +10-0 earlier"
     );
 }
 
@@ -131,9 +131,9 @@ fn repeated_edits_by_one_agent_to_one_file_merge_into_one_entry() {
     assert!(entries.len() <= FILE_ACTIVITY_NOTICE_MAX_ENTRIES);
     assert_eq!(
         format_file_activity_notice(&entries),
-        "⚠ File activity: moss src/a.rs +5-3 x2 L10-45 overlap: second\n\
-         fox src/a.rs +1-0\n\
-         moss src/b.rs +7-0"
+        "moss edited src/a.rs +5-3 x2 L10-45 overlap: second\n\
+         fox edited src/a.rs +1-0\n\
+         moss edited src/b.rs +7-0"
     );
 }
 

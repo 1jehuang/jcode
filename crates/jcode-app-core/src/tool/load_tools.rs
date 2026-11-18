@@ -19,7 +19,9 @@ pub(crate) const LOAD_TOOLS_NAME: &str = "load_tools";
 ///
 /// Not listed on purpose: `websearch` (providers swap it for their own server
 /// tool by inspecting the eager list) and `desktop_selfdev` (only offered in
-/// Desktop self-dev sessions, where it is the main tool).
+/// Desktop self-dev sessions, where it is the main tool). `skill_manage` stays
+/// eager too: when it is hidden the model reads `SKILL.md` through `bash`,
+/// whose output cap silently drops the tail of a large skill.
 pub(crate) const RARELY_USED_TOOLS: &[&str] = &[
     "browser",
     "calendar",
@@ -32,7 +34,6 @@ pub(crate) const RARELY_USED_TOOLS: &[&str] = &[
     "panel",
     "schedule",
     "session_search",
-    "skill_manage",
     "webfetch",
 ];
 
@@ -215,6 +216,17 @@ mod tests {
         let mut tools = vec![def("gmail")];
         apply_deferral(&mut tools, true, true, |name| name == "gmail");
         assert_eq!(names(&tools, false), ["gmail"]);
+    }
+
+    #[test]
+    fn skill_manage_is_never_deferred() {
+        // A hidden skill loader pushes the model to `cat` SKILL.md, and bash
+        // truncates output, so large skills lose their tail.
+        assert!(!is_rarely_used("skill_manage"));
+        let mut tools = vec![def("skill_manage"), def("gmail")];
+        apply_deferral(&mut tools, true, true, |_| false);
+        assert_eq!(names(&tools, true), ["gmail"]);
+        assert!(names(&tools, false).contains(&"skill_manage"));
     }
 
     #[test]

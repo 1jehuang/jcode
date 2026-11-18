@@ -58,10 +58,9 @@ pub fn configure_temporary_server(owner_pid: Option<u32>, idle_timeout_secs: Opt
 }
 
 pub(crate) fn temporary_server_policy_from_env() -> Option<TemporaryServerPolicy> {
-    if !temporary_server_env_enabled() {
+    if !temporary_server_enabled() {
         return None;
     }
-
     let owner_pid = std::env::var(OWNER_PID_ENV)
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
@@ -78,7 +77,7 @@ pub(crate) fn temporary_server_policy_from_env() -> Option<TemporaryServerPolicy
     })
 }
 
-fn temporary_server_env_enabled() -> bool {
+pub(crate) fn temporary_server_enabled() -> bool {
     env_truthy(TEMP_SERVER_ENV)
         || std::env::var(SERVER_SCOPE_ENV)
             .ok()

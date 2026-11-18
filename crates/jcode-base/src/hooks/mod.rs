@@ -167,6 +167,64 @@ pub fn truncate_tool_input(tool_input_json: &str) -> &str {
     truncate_bytes(tool_input_json, TOOL_INPUT_ENV_LIMIT)
 }
 
+/// Serialize only the UTF-8 prefix exported in `JCODE_HOOK_TOOL_INPUT`.
+///
+/// Like [`truncate_tool_input`], this prefix is intentionally not necessarily
+/// complete, valid JSON. Serialization stops at the byte limit, without allocating
+/// the discarded suffix. Accepting only `Value` avoids interrupting arbitrary
+/// user-defined serializers with observable side effects.
+pub fn tool_input_json_prefix(value: &serde_json::Value) -> String {
+    json_prefix(value, TOOL_INPUT_ENV_LIMIT)
+}
+
+fn json_prefix(value: &serde_json::Value, limit: usize) -> String {
+    struct PrefixWriter {
+        bytes: Vec<u8>,
+        limit: usize,
+        stopped: bool,
+    }
+    impl std::io::Write for PrefixWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let remaining = self.limit - self.bytes.len();
+            let take = remaining.min(bytes.len());
+            self.bytes.extend_from_slice(&bytes[..take]);
+            if take < bytes.len() || self.bytes.len() == self.limit {
+                self.stopped = true;
+                // Deliberate sentinel: abort serde's traversal, not a short write
+                // that write_all would retry and continue serializing.
+                return Err(std::io::Error::from(std::io::ErrorKind::WriteZero));
+            }
+            Ok(take)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = PrefixWriter {
+        bytes: Vec::with_capacity(limit.min(128)),
+        limit,
+        stopped: false,
+    };
+    let result = serde_json::to_writer(&mut writer, value);
+    if let Err(error) = result {
+        assert!(
+            writer.stopped && error.is_io(),
+            "unexpected Value serialization failure: {error}"
+        );
+    }
+    // The limit may cut an emitted multibyte character. Keep exactly the same
+    // preceding character boundary as truncate_tool_input, including limits 0..3.
+    match String::from_utf8(writer.bytes) {
+        Ok(prefix) => prefix,
+        Err(error) => {
+            let end = error.utf8_error().valid_up_to();
+            let mut bytes = error.into_bytes();
+            bytes.truncate(end);
+            String::from_utf8(bytes).expect("JSON prefix is valid UTF-8")
+        }
+    }
+}
+
 /// Env fields for `event`: its own, plus swarm identity when the session is a
 /// registered worker. Explicit event fields win over identity fields.
 fn effective_fields(event: &HookEvent) -> Vec<(&'static str, String)> {
@@ -335,7 +393,10 @@ pub use feedback::run_post_tool_feedback;
 #[cfg(test)]
 use gate::{CommandVerdict, parse_gate_stdout};
 pub use gate::{GateDecision, GateOutcome, run_pre_tool_gate, transform_tool_input};
-pub use identity::{SwarmIdentity, forget_swarm_identity, register_swarm_identity, swarm_identity};
+pub use identity::{
+    SwarmIdentity, forget_swarm_identity, register_swarm_identity, set_swarm_coordinator,
+    set_swarm_parent, swarm_identity,
+};
 pub use json_output::{CommandResult, Verdict, interpret};
 pub use json_runner::run_json_commands;
 pub use payload::{TEXT_FIELD_LIMIT, common_payload, jcode_object, truncate_marked};
@@ -344,3 +405,6 @@ pub use payload::{TEXT_FIELD_LIMIT, common_payload, jcode_object, truncate_marke
 #[allow(clippy::await_holding_lock)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod json_prefix_tests;

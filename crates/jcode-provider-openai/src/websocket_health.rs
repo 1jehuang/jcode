@@ -10,6 +10,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
+#[cfg(test)]
+#[path = "websocket_health_tests.rs"]
+mod tests;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WebsocketFallbackReason {
     ConnectTimeout,
@@ -42,10 +46,54 @@ pub fn is_websocket_fallback_notice(data: &str) -> bool {
     // tool-call arguments when the model is editing source that mentions
     // websocket fallback), so a structured event must never be reinterpreted
     // as a transport control frame.
-    if is_structured_response_event(data) {
-        return false;
+    // The phrase is only a prefilter. Ordinary token deltas need no JSON parse
+    // here, while frames containing it still require validated classification.
+    data.to_lowercase().contains(WEBSOCKET_FALLBACK_NOTICE) && !is_structured_response_event(data)
+}
+
+/// Validated wire envelope shared by transport bookkeeping. Parsing through
+/// Value preserves last-key-wins classification, numeric validation and depth
+/// limits even when fields are duplicated or malformed.
+#[derive(Debug, Default)]
+pub struct WebsocketEventClassification {
+    value: Option<serde_json::Value>,
+}
+
+impl WebsocketEventClassification {
+    pub fn parse(data: &str) -> Self {
+        Self {
+            value: match serde_json::from_str(data) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    // Plain-text control frames are valid too. Do not log the
+                    // payload, which may contain private model output.
+                    jcode_logging::debug(&format!("Non-JSON websocket frame: {error}"));
+                    None
+                }
+            },
+        }
     }
-    data.to_lowercase().contains(WEBSOCKET_FALLBACK_NOTICE)
+
+    pub fn value(&self) -> Option<&serde_json::Value> {
+        self.value.as_ref()
+    }
+
+    pub fn kind(&self) -> Option<&str> {
+        self.value()?.get("type")?.as_str()
+    }
+
+    pub fn is_activity(&self) -> bool {
+        self.kind()
+            .is_some_and(|kind| kind.starts_with("response.") || kind == "error")
+    }
+
+    pub fn is_first_activity(&self) -> bool {
+        self.kind().is_some_and(|kind| !kind.is_empty())
+    }
+
+    pub fn is_fallback_notice(&self, data: &str) -> bool {
+        !self.is_activity() && data.to_lowercase().contains(WEBSOCKET_FALLBACK_NOTICE)
+    }
 }
 
 pub fn is_stream_activity_event(_event: &StreamEvent) -> bool {
@@ -61,24 +109,11 @@ pub fn is_structured_response_event(data: &str) -> bool {
 }
 
 pub fn is_websocket_activity_payload(data: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
-        return false;
-    };
-    let Some(kind) = value.get("type").and_then(|kind| kind.as_str()) else {
-        return false;
-    };
-    kind.starts_with("response.") || kind == "error"
+    WebsocketEventClassification::parse(data).is_activity()
 }
 
 pub fn is_websocket_first_activity_payload(data: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
-        return false;
-    };
-    value
-        .get("type")
-        .and_then(|kind| kind.as_str())
-        .map(|kind| !kind.is_empty())
-        .unwrap_or(false)
+    WebsocketEventClassification::parse(data).is_first_activity()
 }
 
 pub fn websocket_remaining_timeout_secs(since: Instant, timeout_secs: u64) -> Option<u64> {

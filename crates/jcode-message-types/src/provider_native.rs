@@ -164,7 +164,15 @@ pub fn provider_native_text_fallback(
     call_input: Option<&Value>,
 ) -> Option<String> {
     let display = provider_native_display(provider, item)?;
-    let output = display.output?;
+    provider_native_display_text_fallback(&display, call_input)
+}
+
+/// Render an already decoded native display without decoding its raw item again.
+pub fn provider_native_display_text_fallback(
+    display: &ProviderNativeDisplay,
+    call_input: Option<&Value>,
+) -> Option<String> {
+    let output = display.output.as_ref()?;
     let query = display
         .input
         .as_ref()
