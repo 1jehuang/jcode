@@ -41,6 +41,30 @@ pub fn forget_swarm_identity(session_id: &str) {
         .remove(session_id);
 }
 
+/// Point a registered worker's report recipient at `parent_session_id`,
+/// e.g. after its spawner left the swarm. No-op for unregistered sessions.
+pub fn set_swarm_parent(session_id: &str, parent_session_id: &str) {
+    if let Some(identity) = REGISTRY
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_mut(session_id)
+    {
+        identity.parent_session_id = parent_session_id.to_owned();
+    }
+}
+
+/// Record a new coordinator for every registered worker of `swarm_id`.
+pub fn set_swarm_coordinator(swarm_id: &str, coordinator_session_id: &str) {
+    for identity in REGISTRY
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .values_mut()
+        .filter(|identity| identity.swarm_id == swarm_id)
+    {
+        identity.coordinator_session_id = coordinator_session_id.to_owned();
+    }
+}
+
 /// The identity registered for `session_id`, if it is a swarm worker.
 pub fn swarm_identity(session_id: &str) -> Option<SwarmIdentity> {
     REGISTRY
@@ -103,6 +127,25 @@ mod tests {
         forget_swarm_identity("identity-test-a");
         assert_eq!(swarm_identity("identity-test-a"), None);
         assert_eq!(swarm_identity("never-registered"), None);
+    }
+
+    #[test]
+    fn parent_and_coordinator_updates_reach_registered_workers() {
+        let mut other = identity(None, None);
+        other.swarm_id = "other-sw".into();
+        register_swarm_identity("identity-test-b", identity(None, None));
+        register_swarm_identity("identity-test-c", other);
+        set_swarm_parent("identity-test-b", "new-parent");
+        set_swarm_parent("identity-test-missing", "x");
+        set_swarm_coordinator("sw", "new-coord");
+        let b = swarm_identity("identity-test-b").unwrap();
+        assert_eq!(b.parent_session_id, "new-parent");
+        assert_eq!(b.coordinator_session_id, "new-coord");
+        let c = swarm_identity("identity-test-c").unwrap();
+        assert_eq!(c.coordinator_session_id, "coord");
+        assert_eq!(swarm_identity("identity-test-missing"), None);
+        forget_swarm_identity("identity-test-b");
+        forget_swarm_identity("identity-test-c");
     }
 
     #[test]

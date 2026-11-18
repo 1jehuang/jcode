@@ -1285,6 +1285,7 @@ pub(super) async fn remove_session_from_swarm(
 
         if let Some(new_id) = new_coordinator {
             elected_coordinator = Some(new_id.clone());
+            crate::hooks::set_swarm_coordinator(swarm_id, &new_id);
             {
                 let mut members = swarm_members.write().await;
                 if let Some(member) = members.get_mut(&new_id) {
@@ -1365,6 +1366,9 @@ pub(super) async fn remove_session_from_swarm(
                     .clone()
                     .filter(|parent| parent != &member.session_id);
                 reparented.push(member.session_id.clone());
+                if let Some(parent) = member.report_back_to_session_id.as_deref() {
+                    crate::hooks::set_swarm_parent(&member.session_id, parent);
+                }
             }
         }
     }
