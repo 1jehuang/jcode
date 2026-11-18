@@ -38,6 +38,7 @@ use cache::*;
 pub use cache::{
     account_known_exhausted, cached_account_usage_snapshot, cached_account_usage_status_snapshot,
 };
+pub(crate) use cache::hydrate_persisted_account_usage;
 pub use disk_cache::{
     export_last_good as export_limits_snapshot, import_last_good as import_limits_snapshot,
 };
