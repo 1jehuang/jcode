@@ -494,7 +494,10 @@ mod shared_store_tests {
         for leaked in ["opaque-arg-1", "opaque-arg-2", "ghp_abcdefgh"] {
             assert!(!shown.contains(leaked), "{leaked} leaked: {shown}");
         }
-        assert!(shown.contains("fast"), "non-secret args stay visible: {shown}");
+        assert!(
+            shown.contains("fast"),
+            "non-secret args stay visible: {shown}"
+        );
         assert!(review.redacted);
     }
 
