@@ -838,6 +838,44 @@ where
     }
 }
 
+/// The model-switch request that puts a new session on the model and route
+/// `session_id` last used, or `None` (logged) when that cannot be read.
+fn startup_model_from_session(session_id: &str) -> Option<String> {
+    let loaded = session::find_session_by_name_or_id(session_id)
+        .and_then(|id| session::Session::load_startup_stub(&id));
+    let saved = match loaded {
+        Ok(saved) => saved,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "--model-from-session {session_id}: {error}; starting on the default model"
+            ));
+            return None;
+        }
+    };
+    model_request_for_saved_route(
+        saved.model.as_deref(),
+        saved.provider_key.as_deref(),
+        saved.route_api_method.as_deref(),
+    )
+}
+
+fn model_request_for_saved_route(
+    model: Option<&str>,
+    provider_key: Option<&str>,
+    route_api_method: Option<&str>,
+) -> Option<String> {
+    // New sessions record `unknown` until their first turn picks a model.
+    let model = model
+        .map(str::trim)
+        .filter(|m| !m.is_empty() && *m != "unknown")?;
+    let request = provider::MultiProvider::model_switch_request_for_session_route(
+        model,
+        provider_key,
+        route_api_method,
+    );
+    (!request.is_empty()).then_some(request)
+}
+
 fn resolve_resume_id(resume_id: &str) -> Result<String> {
     match session::find_session_by_name_or_id(resume_id) {
         Ok(full_id) => Ok(full_id),
@@ -1015,8 +1053,13 @@ async fn run_default_command(args: Args) -> Result<()> {
     if std::env::var("JCODE_RESUMING").is_err() && server_running {
         output::stderr_info("Connecting to server...");
     }
+    let startup_model = args
+        .model_from_session
+        .as_deref()
+        .and_then(startup_model_from_session);
     tui_launch::run_tui_client(
         args.resume,
+        startup_model,
         startup_hints,
         !server_running,
         args.fresh_spawn,
