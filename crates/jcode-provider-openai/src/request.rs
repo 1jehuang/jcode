@@ -624,7 +624,7 @@ fn reorder_outputs<F: FnMut(OpenAiRequestLogLevel, &str)>(
                 }
                 continue;
             }
-            if let Some(message_item) = orphan_tool_output_to_user_message(&item, &missing_output) {
+            if let Some(message_item) = orphan_tool_output_to_user_message(item, missing_output) {
                 ordered.push(Err(message_item));
                 rewritten_orphans += 1;
             } else {
@@ -679,10 +679,8 @@ fn reorder_outputs<F: FnMut(OpenAiRequestLogLevel, &str)>(
     // Count actual wire emissions first. Only repeated calls sharing a selected
     // output require a clone. The final emission moves its entire Value subtree.
     let mut remaining = vec![0usize; normalized.len()];
-    for entry in &ordered {
-        if let Ok(index) = entry {
-            remaining[*index] += 1;
-        }
+    for index in ordered.iter().flatten() {
+        remaining[*index] += 1;
     }
     let mut normalized = normalized;
     ordered

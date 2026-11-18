@@ -11,17 +11,27 @@ fn startup_pool_hydrates_disk_only_exhaustion_before_route_and_request_guards() 
             .env(WORKER, "1")
             .output()
             .unwrap();
-        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         return;
     }
     with_clean_provider_test_env(|| {
         enter_test_runtime().block_on(async {
             for label in ["claude-otter", "claude-fox"] {
                 let saved = auth::claude::upsert_account(auth::claude::AnthropicAccount {
-                    label: label.into(), access: "fixture-access".into(), refresh: "fixture-refresh".into(),
+                    label: label.into(),
+                    access: "fixture-access".into(),
+                    refresh: "fixture-refresh".into(),
                     expires: chrono::Utc::now().timestamp_millis() + 86_400_000,
-                    email: None, subscription_type: Some("max".into()), scopes: vec![],
-                }).unwrap();
+                    email: None,
+                    subscription_type: Some("max".into()),
+                    scopes: vec![],
+                })
+                .unwrap();
                 assert_eq!(saved, label);
             }
             auth::claude::set_active_account_override(Some("claude-fox".into()));
@@ -47,19 +57,34 @@ fn startup_pool_hydrates_disk_only_exhaustion_before_route_and_request_guards() 
             let router = MultiProvider::new_fast();
             assert!(crate::usage::account_known_exhausted(kind, "claude-fox"));
             assert!(!crate::usage::account_known_exhausted(kind, "claude-otter"));
-            assert_eq!(router.oauth_account_label().as_deref(), Some("claude-otter"));
-            assert_eq!(auth::claude::active_account_label().as_deref(), Some("claude-fox"));
+            assert_eq!(
+                router.oauth_account_label().as_deref(),
+                Some("claude-otter")
+            );
+            assert_eq!(
+                auth::claude::active_account_label().as_deref(),
+                Some("claude-fox")
+            );
             assert_eq!(crate::auth::account_pool::AccountPool::load(), pool);
             let model = router.model();
-            router.set_model(&format!("claude-oauth@claude-fox:{model}")).unwrap();
+            router
+                .set_model(&format!("claude-oauth@claude-fox:{model}"))
+                .unwrap();
             for split in [false, true] {
                 let result = if split {
-                    router.complete_split(&[], &[], "static", "dynamic", None).await
+                    router
+                        .complete_split(&[], &[], "static", "dynamic", None)
+                        .await
                 } else {
                     router.complete(&[], &[], "system", None).await
                 };
-                let error = result.err().expect("persisted spent pin must be stopped before the stub runtime");
-                assert!(error.to_string().contains("OAuth usage exhausted"), "{error}");
+                let error = result
+                    .err()
+                    .expect("persisted spent pin must be stopped before the stub runtime");
+                assert!(
+                    error.to_string().contains("OAuth usage exhausted"),
+                    "{error}"
+                );
                 assert!(!error.to_string().contains("does not stream"), "{error}");
                 assert_eq!(router.oauth_account_label().as_deref(), Some("claude-fox"));
             }

@@ -286,8 +286,11 @@ fn shared_terminal_process_routes_to_last_focused_client() {
         std::fs::write(registry.join(child.pid().to_string()), session).expect("register");
         std::fs::write(active.join(session), child.pid().to_string()).expect("active");
     }
-    std::fs::write(temp.path().join("last_focused_client_session"), "session_tiger_2")
-        .expect("last focused");
+    std::fs::write(
+        temp.path().join("last_focused_client_session"),
+        "session_tiger_2",
+    )
+    .expect("last focused");
 
     // This test process stands in for the shared kitty process.
     let window = super::NiriFocusedWindow {
