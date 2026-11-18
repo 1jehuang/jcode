@@ -700,7 +700,8 @@ impl Agent {
         if let Some(denied) = &session.tool_denylist {
             disabled_tools.extend(denied.iter().cloned());
         }
-        let mut agent = Self::build_base(provider, registry, session, allowed_tools, disabled_tools);
+        let mut agent =
+            Self::build_base(provider, registry, session, allowed_tools, disabled_tools);
         // begin_concurrency_tracking below writes the presence markers.
         agent.session.mark_active_unregistered();
         if agent.session.provider_key.is_none() {
