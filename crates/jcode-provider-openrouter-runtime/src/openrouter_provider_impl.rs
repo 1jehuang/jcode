@@ -247,12 +247,18 @@ impl Provider for OpenRouterProvider {
         // provider-only fields cannot leak into `/responses`; configured extra
         // body fields remain an intentional escape hatch and are merged last.
         if responses_api {
+            // `swarm` is a Jcode sentinel, not a wire effort. The chat path
+            // resolves it to the configured root level; do the same here or
+            // strict Responses servers reject `reasoning.effort = "swarm"`.
+            let responses_effort = reasoning_effort.as_deref().map(|effort| {
+                jcode_base::prompt::swarm_root_reasoning_effort(effort).unwrap_or(effort)
+            });
             request = super::opencode_go_responses::build_request(
                 &effective_messages,
                 tools,
                 system,
                 &model,
-                reasoning_effort.as_deref(),
+                responses_effort,
                 self.max_tokens,
                 jcode_provider_openrouter::request::sanitize_tool_parameters_schema,
             );
