@@ -115,6 +115,36 @@ impl Stream {
         (SplitReadRef { inner: read }, SplitWriteRef { inner: write })
     }
 
+    /// Wait until a read on this stream will not block. Parity with tokio's
+    /// Unix socket API so tests written against `UnixStream` compile here too.
+    pub async fn readable(&mut self) -> io::Result<()> {
+        let mut scratch = [0u8; 0];
+        std::future::poll_fn(|cx| {
+            let mut buf = ReadBuf::new(&mut scratch);
+            match std::pin::Pin::new(&mut *self).poll_read(cx, &mut buf) {
+                std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Ok(())),
+                std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(Err(e)),
+                std::task::Poll::Pending => std::task::Poll::Pending,
+            }
+        })
+        .await
+    }
+
+    /// Try to read without blocking. Parity with tokio's Unix socket API.
+    pub fn try_read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut read_buf = ReadBuf::new(buf);
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        match std::pin::Pin::new(&mut *self).poll_read(&mut cx, &mut read_buf) {
+            std::task::Poll::Ready(Ok(())) => Ok(read_buf.filled().len()),
+            std::task::Poll::Ready(Err(e)) => Err(e),
+            std::task::Poll::Pending => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "named pipe read would block",
+            )),
+        }
+    }
+
     pub fn pair() -> io::Result<(Self, Self)> {
         use std::sync::atomic::{AtomicU64, Ordering};
         static PAIR_COUNTER: AtomicU64 = AtomicU64::new(0);

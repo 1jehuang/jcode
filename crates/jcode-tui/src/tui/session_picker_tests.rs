@@ -926,7 +926,7 @@ fn benchmark_resume_search_reports_incremental_timings() {
                 tool_data: None,
                 duration_secs: None,
                 tool_duration_ms: None,
-            title: None,
+                title: None,
                 timestamp: None,
             }];
             session.search_index = build_search_index(

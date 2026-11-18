@@ -48,8 +48,7 @@ fn resume_card_does_not_rewrap_or_scroll_the_underlying_session() {
             tool_calls: vec![],
             duration_secs: None,
             tool_duration_ms: None,
-            tool_duration_ms: None,
-        title: None,
+            title: None,
             tool_data: None,
             timestamp: None,
         });

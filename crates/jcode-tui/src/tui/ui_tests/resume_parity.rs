@@ -97,7 +97,7 @@ fn resumed_long_session_matches_live_transcript_and_numbered_composer() {
                 content: m.content.clone(),
                 tool_calls: m.tool_calls.clone(),
                 duration_secs: m.duration_secs,
-                tool_duration_ms: msg.tool_duration_ms,
+                tool_duration_ms: m.tool_duration_ms,
                 title: m.title.clone(),
                 tool_data: m.tool_data.clone(),
                 timestamp: None,

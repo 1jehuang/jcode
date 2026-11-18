@@ -57,6 +57,7 @@ fn codemode_preview_visible_on_success_and_failure() {
             content: content.into(),
             tool_calls: vec![],
             duration_secs: None,
+            tool_duration_ms: None,
             title: None,
             tool_data: Some(tool("return 1")),
         };

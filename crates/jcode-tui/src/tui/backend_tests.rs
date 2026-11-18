@@ -26,10 +26,12 @@ fn recent_history_negotiation_preserves_local_verified_prefix() {
 async fn recent_history_page_request_explicitly_selects_normal_transcript() {
     let mut remote = RemoteConnection::dummy();
     let id = remote.get_compacted_history(192, true).await.unwrap();
-    let peer = remote._dummy_peer.as_ref().unwrap();
-    peer.readable().await.unwrap();
     let mut bytes = [0; 256];
-    let count = peer.try_read(&mut bytes).unwrap();
+    let count = {
+        let peer = remote._dummy_peer.as_mut().unwrap();
+        peer.readable().await.unwrap();
+        peer.try_read(&mut bytes).unwrap()
+    };
     assert!(
         matches!(serde_json::from_slice::<Request>(&bytes[..count]).unwrap(),
         Request::GetCompactedHistory { id: actual, visible_messages: 192, recent_history: true } if actual == id)
@@ -46,8 +48,8 @@ async fn slow_usage_hydration_does_not_block_subscribe_or_async_runtime() {
         false
     });
     started_rx.await.unwrap();
-    let remote = RemoteConnection::dummy();
-    let peer = remote._dummy_peer.as_ref().unwrap();
+    let mut remote = RemoteConnection::dummy();
+    let mut peer = remote._dummy_peer.take().unwrap();
     let start = Instant::now();
     let result = tokio::time::timeout(Duration::from_millis(250), async {
         remote

@@ -126,6 +126,7 @@ fn preview_renders_pinned_todos_global_prompt_numbers_and_hides_todo_tool_cards(
             thought_signature: None,
         }),
         duration_secs: None,
+        tool_duration_ms: None,
         title: None,
         timestamp: None,
     });
