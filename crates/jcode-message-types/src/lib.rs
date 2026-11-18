@@ -419,21 +419,51 @@ impl Message {
 
 mod message_metadata;
 
+/// Streaming FNV-1a sink. JSON is consumed in serializer order without retaining
+/// an allocation proportional to the message payload.
+struct MessageHashWriter {
+    hash: u64,
+    len: usize,
+}
+
+impl std::io::Write for MessageHashWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let mut hash = self.hash;
+        for &byte in bytes {
+            hash = (hash ^ u64::from(byte)).wrapping_mul(STABLE_HASH_PRIME);
+        }
+        self.hash = hash;
+        self.len += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod message_hash_tests;
+
 pub fn stable_message_hash(message: &Message) -> u64 {
     let metadata = match serde_json::to_vec(&message.metadata_only()) {
         Ok(metadata) => metadata,
         Err(_) => return stable_hash_bytes(format!("{:?}", message).as_bytes()),
     };
     message.content.cached_message_hash(&metadata, || {
-        match serde_json::to_vec(message) {
-            Ok(bytes) => {
+        let mut writer = MessageHashWriter {
+            hash: STABLE_HASH_SEED,
+            len: 0,
+        };
+        match serde_json::to_writer(&mut writer, message) {
+            Ok(()) => {
                 // Metadata contains the same envelope with an empty [] array.
                 // Populate the length cache from work already needed for the
                 // first hash, rather than scanning the content a second time.
                 message
                     .content
-                    .record_serialized_json_bytes(bytes.len().saturating_sub(metadata.len()) + 2);
-                stable_hash_bytes(&bytes)
+                    .record_serialized_json_bytes(writer.len.saturating_sub(metadata.len()) + 2);
+                writer.hash
             }
             Err(_) => stable_hash_bytes(format!("{:?}", message).as_bytes()),
         }
