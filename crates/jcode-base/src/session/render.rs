@@ -1,6 +1,8 @@
 mod response_stats;
 
 #[cfg(test)]
+mod final_text_original;
+#[cfg(test)]
 mod image_context_original;
 #[cfg(test)]
 mod image_context_tests;
@@ -694,11 +696,19 @@ pub fn render_messages_and_images_with_compacted_history(
             }
         }
 
-        let combined = format!("{}{}", reasoning, text);
-        if !combined.is_empty() {
+        if !reasoning.is_empty() || !text.is_empty() {
             if role == "user" && !is_attached_image_label_text(&text) {
                 user_prompt_count += 1;
             }
+            // At EOF the buffers are no longer reused. Move the sole nonempty
+            // buffer rather than copying it into a new allocation.
+            let combined = if reasoning.is_empty() {
+                text
+            } else if text.is_empty() {
+                reasoning
+            } else {
+                format!("{}{}", reasoning, text)
+            };
             rendered.push(RenderedMessage {
                 response_stats: None,
                 tool_duration_ms: None,

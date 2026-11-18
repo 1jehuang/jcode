@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "final_text_tests.rs"]
+mod final_text_tests;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::hint::black_box;
