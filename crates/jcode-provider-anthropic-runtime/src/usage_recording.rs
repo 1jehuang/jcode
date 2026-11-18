@@ -194,10 +194,9 @@ mod tests {
                             })
                             .unwrap();
                         if request.len() >= end + 4 + length {
-                            let body: serde_json::Value = serde_json::from_slice(
-                                &request[end + 4..end + 4 + length],
-                            )
-                            .unwrap();
+                            let body: serde_json::Value =
+                                serde_json::from_slice(&request[end + 4..end + 4 + length])
+                                    .unwrap();
                             assert_eq!(body["model"], "unpriced-requested-alias");
                             assert_eq!(body["max_tokens"], 1024);
                             assert_eq!(body["messages"], serde_json::json!([]));

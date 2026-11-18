@@ -19,6 +19,8 @@ pub struct ToolCall {
     pub thought_signature: Option<String>,
 }
 
+mod tool_prompt_size;
+
 /// Tool definition advertised to model providers.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ToolDefinition {
@@ -66,13 +68,7 @@ impl ToolDefinition {
 
     /// Serialized size of the full tool definition payload sent to providers.
     pub fn prompt_chars(&self) -> usize {
-        serde_json::json!({
-            "name": self.name,
-            "description": self.description,
-            "input_schema": self.input_schema,
-        })
-        .to_string()
-        .len()
+        tool_prompt_size::prompt_chars(self)
     }
 
     /// Approximate prompt-token cost of this tool's top-level description.
@@ -85,14 +81,7 @@ impl ToolDefinition {
 
     /// Approximate prompt-token cost of the full tool definition payload.
     pub fn prompt_token_estimate(&self) -> usize {
-        estimate_tokens(
-            &serde_json::json!({
-                "name": self.name,
-                "description": self.description,
-                "input_schema": self.input_schema,
-            })
-            .to_string(),
-        )
+        self.prompt_chars() / 4
     }
 
     pub fn aggregate_prompt_chars(defs: &[ToolDefinition]) -> usize {
@@ -409,14 +398,76 @@ fn stable_hash_bytes(bytes: &[u8]) -> u64 {
 }
 
 pub fn extend_stable_hash(acc: u64, next: u64) -> u64 {
-    stable_hash_bytes(&[acc.to_le_bytes().as_slice(), next.to_le_bytes().as_slice()].concat())
+    let mut bytes = [0; 16];
+    bytes[..8].copy_from_slice(&acc.to_le_bytes());
+    bytes[8..].copy_from_slice(&next.to_le_bytes());
+    stable_hash_bytes(&bytes)
 }
 
-pub fn stable_message_hash(message: &Message) -> u64 {
-    match serde_json::to_vec(message) {
-        Ok(bytes) => stable_hash_bytes(&bytes),
-        Err(_) => stable_hash_bytes(format!("{:?}", message).as_bytes()),
+impl Message {
+    fn metadata_only(&self) -> impl serde::Serialize + '_ {
+        message_metadata::Metadata::new(self)
     }
+
+    /// Exact JSON length without rescanning a shared immutable payload.
+    pub fn serialized_json_bytes(&self) -> usize {
+        message_metadata::json_bytes(&self.metadata_only())
+            .map(|metadata| metadata.saturating_sub(2) + self.content.serialized_json_bytes())
+            .unwrap_or(0)
+    }
+}
+
+mod message_metadata;
+
+/// Streaming FNV-1a sink. JSON is consumed in serializer order without retaining
+/// an allocation proportional to the message payload.
+struct MessageHashWriter {
+    hash: u64,
+    len: usize,
+}
+
+impl std::io::Write for MessageHashWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let mut hash = self.hash;
+        for &byte in bytes {
+            hash = (hash ^ u64::from(byte)).wrapping_mul(STABLE_HASH_PRIME);
+        }
+        self.hash = hash;
+        self.len += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod message_hash_tests;
+
+pub fn stable_message_hash(message: &Message) -> u64 {
+    let metadata = match serde_json::to_vec(&message.metadata_only()) {
+        Ok(metadata) => metadata,
+        Err(_) => return stable_hash_bytes(format!("{:?}", message).as_bytes()),
+    };
+    message.content.cached_message_hash(&metadata, || {
+        let mut writer = MessageHashWriter {
+            hash: STABLE_HASH_SEED,
+            len: 0,
+        };
+        match serde_json::to_writer(&mut writer, message) {
+            Ok(()) => {
+                // Metadata contains the same envelope with an empty [] array.
+                // Populate the length cache from work already needed for the
+                // first hash, rather than scanning the content a second time.
+                message
+                    .content
+                    .record_serialized_json_bytes(writer.len.saturating_sub(metadata.len()) + 2);
+                writer.hash
+            }
+            Err(_) => stable_hash_bytes(format!("{:?}", message).as_bytes()),
+        }
+    })
 }
 
 /// Project a message down to the fields that actually influence a provider's

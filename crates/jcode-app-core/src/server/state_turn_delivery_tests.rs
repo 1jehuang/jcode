@@ -97,7 +97,7 @@ async fn legacy_clone_fallback_vs_recover_fallback_microprobe() {
                                 send_event_to_targets_recover([&target], event)
                             };
                             if let Err(event) = result {
-                                fallback.send(event).unwrap();
+                                fallback.send(*event).unwrap();
                             }
                         }
                         // Identical drain for both variants, with no unbounded

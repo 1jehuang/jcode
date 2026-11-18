@@ -1,42 +1,4 @@
 #[test]
-fn test_copy_badge_modifier_highlights_while_held() {
-    let _render_lock = scroll_render_test_lock();
-    let (mut app, mut terminal) = create_copy_test_app();
-
-    render_and_snap(&app, &mut terminal);
-
-    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ModifierKeyCode};
-
-    app.handle_key_event(KeyEvent::new_with_kind(
-        KeyCode::Modifier(ModifierKeyCode::LeftAlt),
-        KeyModifiers::ALT,
-        KeyEventKind::Press,
-    ));
-    assert!(app.copy_badge_ui().alt_active);
-
-    app.handle_key_event(KeyEvent::new_with_kind(
-        KeyCode::Modifier(ModifierKeyCode::LeftShift),
-        KeyModifiers::ALT | KeyModifiers::SHIFT,
-        KeyEventKind::Press,
-    ));
-    assert!(app.copy_badge_ui().shift_active);
-
-    app.handle_key_event(KeyEvent::new_with_kind(
-        KeyCode::Modifier(ModifierKeyCode::LeftShift),
-        KeyModifiers::ALT,
-        KeyEventKind::Release,
-    ));
-    assert!(!app.copy_badge_ui().shift_active);
-
-    app.handle_key_event(KeyEvent::new_with_kind(
-        KeyCode::Modifier(ModifierKeyCode::LeftAlt),
-        KeyModifiers::empty(),
-        KeyEventKind::Release,
-    ));
-    assert!(!app.copy_badge_ui().alt_active);
-}
-
-#[test]
 fn test_copy_badge_requires_prior_combo_progress() {
     let mut state = CopyBadgeUiState::default();
     let now = std::time::Instant::now();
@@ -1682,3 +1644,6 @@ mod image_zoom;
 
 include!("math_selection.rs");
 include!("badge_partial_selection.rs");
+
+#[path = "part_02_additional_tests.rs"]
+mod additional_test_copy_badge_modifier_highlights_while_held;

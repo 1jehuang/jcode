@@ -200,7 +200,7 @@ fn decide(
         BodyEncoding::Gzip => gzip_fast(raw),
         BodyEncoding::Zstd => zstd_fast(raw),
     };
-    let Some(compressed) = compressed else {
+    let Some(mut compressed) = compressed else {
         return (Decision::Raw("encode-error"), None);
     };
     if encoding == BodyEncoding::Zstd && raw.len() > compressed.len() * MAX_ZSTD_EXPANSION {
@@ -213,6 +213,10 @@ fn decide(
     if !worth_it {
         return (Decision::Raw("low-ratio"), None);
     }
+    // Only the selected wire body survives until upload completes. Release
+    // raw-size estimates and codec growth slack for both encodings, but avoid
+    // a realloc/copy for bodies rejected by ratio or expansion-limit checks.
+    compressed.shrink_to_fit();
     let compressed_len = compressed.len();
     let decision = match encoding {
         BodyEncoding::Gzip => Decision::Gzip { compressed_len },

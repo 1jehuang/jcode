@@ -201,7 +201,9 @@ impl Snapshot {
                 ));
             }
             if matching_count > 1 {
-                text.push_str(&format!(" · +{} builds", matching_count - 1));
+                let others = matching_count - 1;
+                let noun = if others == 1 { "build" } else { "builds" };
+                text.push_str(&format!(" · +{others} other active {noun}"));
             }
             return Some(StatusRow {
                 text,
@@ -450,7 +452,37 @@ mod tests {
             row.text
                 .contains("test rewrite · 1m40s · 7.8/96 cores · compiling 2/10")
         );
-        assert!(row.text.ends_with("+1 builds"));
+        assert!(row.text.ends_with("+1 other active build"));
+    }
+
+    #[test]
+    fn additional_active_build_count_is_pluralized() {
+        for (count, suffix) in [
+            (1, None),
+            (2, Some(" · +1 other active build")),
+            (3, Some(" · +2 other active builds")),
+        ] {
+            let snapshot = Snapshot {
+                active: (0..count)
+                    .map(|_| Active {
+                        cwd: "/repo/app".into(),
+                        ..Active::default()
+                    })
+                    .chain(std::iter::once(Active {
+                        cwd: "/unrelated".into(),
+                        ..Active::default()
+                    }))
+                    .collect(),
+                recent: None,
+            };
+            let row = snapshot
+                .row(None, Some("/repo/app"), Duration::ZERO)
+                .unwrap();
+            match suffix {
+                Some(suffix) => assert!(row.text.ends_with(suffix), "{}", row.text),
+                None => assert!(!row.text.contains("other active"), "{}", row.text),
+            }
+        }
     }
 
     #[test]

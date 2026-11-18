@@ -10,9 +10,8 @@
 use crate::protocol::SwarmMemberStatus;
 use jcode_tui_core::keybind::alt_chord_lower;
 use jcode_tui_render::swarm_gallery::{
-    GalleryMember, SwarmStripHint, display_order, humanize_age, is_active_status, render_gallery,
-    render_swarm_live_card, render_swarm_panel, render_swarm_strip, render_swarm_strip_vertical,
-    status_accent, status_glyph,
+    GalleryMember, display_order, humanize_age, is_active_status, render_gallery,
+    render_swarm_live_card, render_swarm_panel, status_accent, status_glyph,
 };
 use ratatui::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -542,95 +541,6 @@ pub(crate) fn render_swarm_panel_lines(
     )
 }
 
-/// Render the compact swarm strip (agent chips + status glyphs + todo counts)
-/// shown directly above the status line.
-///
-/// The layout follows `agents.swarm_strip_layout`: `vertical` (default) lists
-/// one agent per row (session icon + task, capped to a few rows), while
-/// `horizontal` packs all agents as chips on a single row.
-///
-/// `focus_key` is the configured chord to enter the controls (e.g. "ctrl+t"),
-/// used for the unfocused enter-hint.
-/// `spinner_frame` animates active agents' glyphs. `max_height` bounds the
-/// focused strip (chips + expanded hovered-agent detail + hints).
-pub(crate) fn render_swarm_strip_lines(
-    members: &[SwarmMemberStatus],
-    selected: usize,
-    focused: bool,
-    focus_key: &str,
-    spinner_frame: usize,
-    width: usize,
-    max_height: usize,
-) -> Vec<Line<'static>> {
-    if members.is_empty() {
-        return Vec::new();
-    }
-    let enter_hint = format!("{focus_key} controls · {} open all", alt_chord_lower("p"));
-    // Focused hints: only Alt-chords (plus esc) are claimed so plain typing
-    // keeps flowing to the chat input while the panel is focused.
-    let hints = vec![
-        SwarmStripHint {
-            key: alt_chord_lower("n").into(),
-            label: "page".into(),
-        },
-        SwarmStripHint {
-            key: alt_chord_lower("↑/↓").into(),
-            label: "select".into(),
-        },
-        SwarmStripHint {
-            key: alt_chord_lower("o").into(),
-            label: "open".into(),
-        },
-        SwarmStripHint {
-            key: alt_chord_lower("p").into(),
-            label: "open all".into(),
-        },
-        SwarmStripHint {
-            key: alt_chord_lower("shift+p").into(),
-            label: "prompt".into(),
-        },
-        SwarmStripHint {
-            key: "esc".into(),
-            label: "exit".into(),
-        },
-    ];
-    match crate::config::config().agents.swarm_strip_layout {
-        crate::config::SwarmStripLayout::Vertical => render_swarm_strip_vertical(
-            &badged_gallery(members),
-            selected,
-            focused,
-            &hints,
-            if focused {
-                None
-            } else {
-                Some(enter_hint.as_str())
-            },
-            spinner_frame,
-            width,
-            SWARM_STRIP_VERTICAL_MAX_ROWS,
-            max_height,
-        ),
-        crate::config::SwarmStripLayout::Horizontal => render_swarm_strip(
-            &badged_gallery(members),
-            selected,
-            focused,
-            &hints,
-            if focused {
-                None
-            } else {
-                Some(enter_hint.as_str())
-            },
-            spinner_frame,
-            width,
-            max_height,
-        ),
-    }
-}
-
-/// Row cap for the vertical strip: agents beyond this collapse into a
-/// `+N more` line (the cap includes that overflow row).
-const SWARM_STRIP_VERTICAL_MAX_ROWS: usize = 4;
-
 /// Session ids of `members` in the same order the panel/gallery displays them
 /// (coordinator first, then worktree manager, then by session id). Lets the TUI
 /// map a selected panel index back to a concrete session for pop-out.
@@ -717,7 +627,7 @@ mod tests {
             );
         }
         for width in [16, 24, 40, 80] {
-            for line in render_swarm_strip_lines(&members, 0, false, "alt+n", 0, width, 8) {
+            for line in render_swarm_page_lines(&members, 0, 0, width, 8) {
                 assert!(line.width() <= width, "row exceeds {width} cells: {line:?}");
             }
         }

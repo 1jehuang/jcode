@@ -1,6 +1,18 @@
 use super::*;
 use crate::replay::{TimelineEvent, TimelineEventKind};
 
+#[tokio::test]
+async fn expanded_export_is_explicit_and_does_not_modify_saved_tasks() {
+    let session =
+        crate::session::Session::create_with_id("offline_expanded_plan".into(), None, None);
+    let app = App::new_for_replay_silent(session);
+    assert!(!app.pinned_todos_expanded);
+    let app = app.with_expanded_replay_todos();
+    assert!(app.pinned_todos_expanded);
+    assert!(app.pinned_todos_payload.is_none());
+    assert!(app.is_replay);
+}
+
 fn todo(name: &str) -> Value {
     json!({"id":"historical", "content":name, "status":"in_progress", "priority":"high"})
 }
