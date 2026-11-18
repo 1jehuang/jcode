@@ -1,0 +1,128 @@
+# Always-listening Jarvis (experimental)
+
+Start a local interactive client explicitly:
+
+```sh
+jcode --jarvis-always-on
+# Also opt in to local window metadata, without screenshots:
+jcode --jarvis-always-on --jarvis-screen
+```
+
+Neither ordinary Jcode nor `--jarvis` opens an always-on microphone. Settings do
+not enable listening by themselves. This variant is currently intended for a
+local, unlocked Linux graphical session. It is not a background startup service.
+
+## Bounded pipeline
+
+1. Local PCM capture and a small RMS-based voice segmenter run on the client.
+   This detector is a lightweight amplitude heuristic, not speaker recognition
+   or a guarantee that sounds are human speech. Silence is not uploaded.
+2. Bounded utterances, including a short pre-roll and silence tail, are
+   transcribed through Nari. One job runs at a time with a bounded backlog.
+3. A small, single-shot Jev decision judges whether a finalized transcript is
+   actually a request for the assistant. Natural requests need not say a wake
+   word. Ambient, quoted, hypothetical and uncertain speech should be rejected.
+   Classifier failures fail closed, never forward directly to the agent.
+4. Only accepted requests reach the ordinary agent conversation. Ambient
+   transcripts are not appended to agent history or printed in the TUI.
+5. At most one accepted request waits while the agent is busy. It expires after
+   30 seconds. Duplicate requests within ten seconds are suppressed. Delivery
+   attempts are not automatically retried.
+
+Jev uses the existing voice provider routing and credentials. This path uses
+`evaluate_once`, not interactive voice's speculative hedged requests. It sends
+only a bounded transcript and a small classification policy, not the full coding
+conversation or screen snapshot. A confidence threshold is a policy, not proof
+that a request was intended, correctly transcribed, or spoken by the user.
+Existing tool permissions and irreversible-action approvals still apply.
+
+Capture is paused on client detach and checked against the local session's lock
+and activity state. The logind LockedHint guard depends on the locker publishing
+its state. Audio captured during spoken replies is suppressed, pending results
+are invalidated, and a short cooldown avoids loudspeaker feedback. This is not
+full acoustic echo cancellation or simultaneous barge-in. Use the normal stop
+controls or pause the microphone before media playback or private conversations.
+
+## Cost limits
+
+Defaults are deliberately conservative:
+
+```toml
+[jarvis.listening]
+max_audio_seconds_per_hour = 600
+max_classifications_per_hour = 120
+max_agent_turns_per_hour = 20
+action_probability = 0.97
+```
+
+The limits bound submitted audio, utterance/classification work, and agent turn
+starts. They do not establish a dollar limit or cap the tokens of an accepted
+coding task. Pause/resume and device rotation must not reset the rolling engine
+budget. Restarting the client starts a new in-memory budget. Provider billing,
+rounding and provider-side retention policies remain external to Jcode.
+
+Audio and classifier work require configured Nari and Jev credentials/access.
+No model weights or voice clones are embedded in Jcode. The configured external
+speech-output endpoint continues to supply spoken replies.
+
+## Waybar capture indicator
+
+`scripts/waybar/jarvis-voice-status.py` reads private, transcript-free runtime
+status. It never opens a second microphone. The client holds an exclusive
+microphone lease for this mode and publishes measured amplitude history, actual
+capture state, and counters. Status expires after three seconds and vanishes
+when the client exits. It is stored under `$XDG_RUNTIME_DIR/jcode-jarvis`, not
+conversation storage. Synthetic test clients use their isolated JCODE_HOME.
+
+Example module:
+
+```json
+"custom/jarvis-voice": {
+  "exec": "python3 /path/to/jcode/scripts/waybar/jarvis-voice-status.py",
+  "return-type": "json",
+  "format": "{}",
+  "tooltip": true,
+  "on-click": "python3 /path/to/jcode/scripts/waybar/jarvis-voice-status.py --toggle"
+}
+```
+
+Add `custom/jarvis-voice` to a module list. The waveform changes with measured
+input, not a decorative animation. The tooltip distinguishes capture from
+speech suppression. Click the module, use `/voice`, or press the voice key to
+pause/resume. A pause closes the recorder, rather than merely hiding its meter.
+A fatal provider or indicator error pauses processing and requires resolving
+the error and restarting the mode, rather than an automatic retry loop.
+
+## Native smooth waveform (patched Waybar)
+
+For a graphical meter instead of text glyphs, the Jstack Waybar fork provides
+`waveform/jarvis`, a GTK drawing area rendered with Cairo. The helper's `--native`
+mode supplies bounded numeric amplitude history. Waybar renders seven rounded
+vertical pills whose heights smoothly follow measured audio levels using its
+frame clock, not a fake sine animation. It does
+not open a microphone or send audio anywhere.
+
+```json
+"waveform/jarvis": {
+  "exec": "python3 /path/to/jcode/scripts/waybar/jarvis-voice-status.py --native",
+  "width": 86,
+  "height": 18,
+  "fps": 60,
+  "on-click": "python3 /path/to/jcode/scripts/waybar/jarvis-voice-status.py --toggle"
+}
+```
+
+Replace `custom/jarvis-voice` in the module list with `waveform/jarvis` after
+installing the patched Waybar. Ordinary upstream Waybar can continue using the
+text-module example above. The native helper is backward-compatible with older
+5 Hz Jcode clients. New clients publish up to 20 measured samples per second,
+retain at most 64 amplitudes, and publish only a 1 Hz heartbeat while paused.
+No transcripts are included. A capture/state transition is published immediately.
+The renderer stops animation when capture is off or its feed expires.
+
+## Screen context
+
+`--jarvis-screen` is a separate explicit metadata-only opt-in. See
+[JARVIS_SCREEN_CONTEXT.md](JARVIS_SCREEN_CONTEXT.md). Window changes are passive
+observations, not user requests. They must not start model inference or speech.
+Pixels, OCR, eye tracking and automatic focus changes are not enabled.

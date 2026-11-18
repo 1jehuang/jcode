@@ -173,7 +173,7 @@ fn request_body_for_model(request: &DecisionRequest, model: &str) -> Result<Valu
 fn request_fits_budget(body: &mut Value, state: &serde_json::Map<String, Value>) -> Result<bool> {
     body["state"] = json!(serde_json::to_string(state)?);
     // Count the final wire representation, including nested JSON string escaping.
-    Ok(serde_json::to_vec(body)?.len() <= MAX_REQUEST_BYTES)
+    Ok(crate::process_memory::estimate_json_bytes(body) <= MAX_REQUEST_BYTES)
 }
 
 fn parse_decision(value: &Value, request: &DecisionRequest) -> Result<Decision> {
@@ -570,6 +570,39 @@ mod tests {
         let decision = transport.decide(&request()).await.unwrap();
         assert_eq!(decision.choice, "a0");
         assert!(decision.confidence.is_finite() && (0.0..=1.0).contains(&decision.confidence));
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::*;
+
+    #[test]
+    fn browser_size_jev_wire_budget_boundaries() {
+        for escaped in [false, true] {
+            for size in [
+                MAX_REQUEST_BYTES - 1,
+                MAX_REQUEST_BYTES,
+                MAX_REQUEST_BYTES + 1,
+            ] {
+                let mut state = serde_json::Map::new();
+                state.insert(
+                    "text".into(),
+                    json!(if escaped { "\"\\\n😀" } else { "plain" }),
+                );
+                let mut body = json!({"state":"", "padding":""});
+                request_fits_budget(&mut body, &state).unwrap();
+                let overhead = serde_json::to_vec(&body).unwrap().len();
+                body["padding"] = json!("x".repeat(size - overhead));
+                let expected_wire = serde_json::to_vec(&body).unwrap();
+                assert_eq!(expected_wire.len(), size);
+                assert_eq!(
+                    request_fits_budget(&mut body, &state).unwrap(),
+                    size <= MAX_REQUEST_BYTES
+                );
+                assert_eq!(serde_json::to_vec(&body).unwrap(), expected_wire);
+            }
+        }
     }
 }
 

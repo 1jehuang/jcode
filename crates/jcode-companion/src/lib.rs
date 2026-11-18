@@ -15,6 +15,7 @@
 //! Test with `justrust test -p jcode-companion`.
 
 pub mod lid_override;
+pub mod screen;
 mod server;
 #[cfg(target_os = "linux")]
 mod voice;

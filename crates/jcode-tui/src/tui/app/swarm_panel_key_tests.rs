@@ -6,6 +6,47 @@ use crate::tui::TuiState as _;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 #[test]
+fn swarm_view_cycles_directly_between_chat_and_full_page() {
+    use super::SwarmPanelView;
+    let mut app = crate::tui::app::App::new_for_remote(None);
+    app.swarm_enabled = true;
+    app.debug_force_inline_gallery = true;
+    app.remote_swarm_members = vec![crate::protocol::SwarmMemberStatus {
+        session_id: "navigation-worker".to_string(),
+        friendly_name: Some("worker".to_string()),
+        status: "running".to_string(),
+        detail: None,
+        task_label: None,
+        role: None,
+        is_headless: Some(true),
+        live_attachments: None,
+        status_age_secs: None,
+        output_tail: None,
+        report_back_to_session_id: None,
+        todo_progress: None,
+        todo_items: Vec::new(),
+        runtime: crate::protocol::SwarmMemberRuntime::default(),
+    }];
+    app.swarm_panel_selected = usize::MAX;
+    for _ in 0..2 {
+        assert_eq!(app.cycle_swarm_panel_view(), SwarmPanelView::FullPage);
+        assert!(app.swarm_panel_focused);
+        assert!(app.swarm_panel_full_page);
+        assert_eq!(app.swarm_panel_selected, 0);
+        assert_eq!(app.cycle_swarm_panel_view(), SwarmPanelView::Chat);
+        assert!(!app.swarm_panel_focused);
+        assert!(!app.swarm_panel_full_page);
+    }
+    // A stale controls-only focus state must not revive the retired strip.
+    app.swarm_panel_focused = true;
+    assert_eq!(app.cycle_swarm_panel_view(), SwarmPanelView::FullPage);
+    app.remote_swarm_members.clear();
+    assert_eq!(app.cycle_swarm_panel_view(), SwarmPanelView::Chat);
+    assert!(!app.swarm_panel_focused);
+    assert!(!app.swarm_panel_full_page);
+}
+
+#[test]
 fn agent_badge_chords_decode_only_alt_digits() {
     for (index, digit) in "1234567890".chars().enumerate() {
         assert_eq!(

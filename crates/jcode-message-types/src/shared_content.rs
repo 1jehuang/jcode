@@ -1,15 +1,46 @@
 use crate::ContentBlock;
 use std::sync::{Arc, Mutex, OnceLock};
 
+#[cfg(test)]
+#[path = "shared_content_bench_tests.rs"]
+mod bench_tests;
+
 /// Shared immutable message payload, detached on the first mutation.
 ///
 /// Transcript records, provider caches and request snapshots can retain the same
 /// blocks without copying their strings. Mutating any snapshot preserves the
 /// independent-value semantics of the original vector. Serialization remains a
 /// plain JSON array, including legacy persisted sessions.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
-pub struct SharedContent(Arc<Vec<ContentBlock>>, #[serde(skip)] Arc<ContentMetrics>);
+pub struct SharedContent(Arc<ContentPayload>);
+
+impl std::fmt::Debug for SharedContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("SharedContent")
+            .field(&self.0.blocks)
+            .field(&self.0.metrics)
+            .finish()
+    }
+}
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+struct ContentPayload {
+    blocks: Vec<ContentBlock>,
+    #[serde(skip)]
+    metrics: ContentMetrics,
+}
+
+impl Clone for ContentPayload {
+    fn clone(&self) -> Self {
+        Self {
+            blocks: self.blocks.clone(),
+            // COW detaches must never retain cached immutable measurements.
+            metrics: ContentMetrics::default(),
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 struct ContentMetrics {
@@ -21,7 +52,7 @@ impl SharedContent {
     /// Exact serialized array length, shared by immutable snapshots. Keeping a
     /// count rather than JSON bytes avoids retaining a second transcript copy.
     pub fn serialized_json_bytes(&self) -> usize {
-        *self.1.json_bytes.get_or_init(|| {
+        *self.0.metrics.json_bytes.get_or_init(|| {
             #[derive(Default)]
             struct Counter(usize);
             impl std::io::Write for Counter {
@@ -34,17 +65,17 @@ impl SharedContent {
                 }
             }
             let mut counter = Counter::default();
-            serde_json::to_writer(&mut counter, &self.0)
+            serde_json::to_writer(&mut counter, &self.0.blocks)
                 .map(|()| counter.0)
                 .unwrap_or(0)
         })
     }
 
     pub(crate) fn record_serialized_json_bytes(&self, bytes: usize) {
-        if let Err(competing_bytes) = self.1.json_bytes.set(bytes) {
+        if let Err(competing_bytes) = self.0.metrics.json_bytes.set(bytes) {
             // Immutable snapshots may race to record the same measurement.
             // Keep the first value, but detect inconsistent measurements.
-            debug_assert_eq!(self.1.json_bytes.get(), Some(&competing_bytes));
+            debug_assert_eq!(self.0.metrics.json_bytes.get(), Some(&competing_bytes));
         }
     }
 
@@ -54,7 +85,8 @@ impl SharedContent {
         compute: impl FnOnce() -> u64,
     ) -> u64 {
         if let Some((key, hash)) = &*self
-            .1
+            .0
+            .metrics
             .message_hash
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -66,29 +98,32 @@ impl SharedContent {
         // reading a large payload or computing its hash.
         let hash = compute();
         *self
-            .1
+            .0
+            .metrics
             .message_hash
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some((metadata.to_vec(), hash));
         hash
     }
 
-    fn invalidate_metrics(&mut self) {
-        // A clone may still reference the old immutable payload and its cache.
-        // Detach only this snapshot's metrics before any mutable access.
-        if let Some(metrics) = Arc::get_mut(&mut self.1) {
-            metrics.json_bytes.take();
-            *metrics
-                .message_hash
-                .get_mut()
-                .unwrap_or_else(|e| e.into_inner()) = None;
-        } else {
-            self.1 = Arc::new(ContentMetrics::default());
-        }
+    fn mutable_payload(&mut self) -> &mut ContentPayload {
+        // A shared detach copies only the vector and starts with empty metrics.
+        // Unique mutations clear the existing metrics, releasing the hash key.
+        let payload = Arc::make_mut(&mut self.0);
+        payload.metrics.json_bytes.take();
+        *payload
+            .metrics
+            .message_hash
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        payload
     }
 
     pub fn into_vec(self) -> Vec<ContentBlock> {
-        Arc::unwrap_or_clone(self.0)
+        match Arc::try_unwrap(self.0) {
+            Ok(payload) => payload.blocks,
+            Err(payload) => payload.blocks.clone(),
+        }
     }
 
     /// Whether two snapshots retain the same vector and payload allocations.
@@ -99,7 +134,10 @@ impl SharedContent {
 
 impl From<Vec<ContentBlock>> for SharedContent {
     fn from(value: Vec<ContentBlock>) -> Self {
-        Self(Arc::new(value), Arc::default())
+        Self(Arc::new(ContentPayload {
+            blocks: value,
+            metrics: ContentMetrics::default(),
+        }))
     }
 }
 
@@ -112,14 +150,13 @@ impl From<SharedContent> for Vec<ContentBlock> {
 impl std::ops::Deref for SharedContent {
     type Target = Vec<ContentBlock>;
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.0.blocks
     }
 }
 
 impl std::ops::DerefMut for SharedContent {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.invalidate_metrics();
-        Arc::make_mut(&mut self.0)
+        &mut self.mutable_payload().blocks
     }
 }
 
@@ -143,8 +180,7 @@ impl FromIterator<ContentBlock> for SharedContent {
 
 impl Extend<ContentBlock> for SharedContent {
     fn extend<T: IntoIterator<Item = ContentBlock>>(&mut self, iter: T) {
-        self.invalidate_metrics();
-        Arc::make_mut(&mut self.0).extend(iter);
+        self.mutable_payload().blocks.extend(iter);
     }
 }
 
@@ -191,7 +227,7 @@ mod tests {
         let expected = serde_json::to_vec(&original).unwrap().len();
         assert_eq!(original.serialized_json_bytes(), expected);
         let mut clone = original.clone();
-        assert!(Arc::ptr_eq(&original.1, &clone.1));
+        assert!(Arc::ptr_eq(&original.0, &clone.0));
         assert_eq!(clone.cached_message_hash(b"meta", || 7), 7);
         assert_eq!(
             original.cached_message_hash(b"meta", || panic!("cache miss")),
@@ -201,7 +237,7 @@ mod tests {
         if let ContentBlock::ToolResult { content, .. } = &mut clone[0] {
             content.push_str("changed");
         }
-        assert!(!Arc::ptr_eq(&original.1, &clone.1));
+        assert!(!Arc::ptr_eq(&original.0, &clone.0));
         assert_eq!(original.serialized_json_bytes(), expected);
         assert_eq!(
             clone.serialized_json_bytes(),
@@ -210,10 +246,10 @@ mod tests {
         assert_eq!(clone.cached_message_hash(b"changed", || 11), 11);
 
         clone.extend(Vec::<ContentBlock>::new());
-        assert!(clone.1.json_bytes.get().is_none());
+        assert!(clone.0.metrics.json_bytes.get().is_none());
         let _ = clone.serialized_json_bytes();
         let _ = clone.as_mut();
-        assert!(clone.1.json_bytes.get().is_none());
+        assert!(clone.0.metrics.json_bytes.get().is_none());
         let _ = clone.serialized_json_bytes();
         for block in &mut clone {
             if let ContentBlock::ToolResult { content, .. } = block {

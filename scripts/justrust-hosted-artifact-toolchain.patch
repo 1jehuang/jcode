@@ -1,0 +1,46 @@
+# Backport of justrust 4bc0b905a to the reviewed hosted-client base.
+# Keep this narrow until the next full client upgrade is reviewed.
+diff --git a/src/slots.rs b/src/slots.rs
+--- a/src/slots.rs
++++ b/src/slots.rs
+@@ -249,8 +249,18 @@ pub fn target_dir_in(cwd: &Path, args: &[OsString]) -> Option<PathBuf> {
+ /// downloads. Slot selection intentionally discards these errors and fails open.
+ pub fn target_dir_in_result(cwd: &Path, args: &[OsString]) -> anyhow::Result<PathBuf> {
+     use anyhow::{Context, bail};
+-    let cargo = paths::real_cargo().context("locating Cargo for target-directory metadata")?;
++    // Artifact commands run outside the recorded-build environment. Honor the
++    // explicit build pin on managed-only hosts without installing a compiler.
++    let managed = match crate::toolchain::resolve(cwd)? {
++        Some(pin) => crate::toolchain::installed(&pin.spec)?,
++        None => None,
++    };
++    let cargo = match &managed {
++        Some(tc) => tc.cargo(),
++        None => paths::real_cargo().context("locating Cargo for target-directory metadata")?,
++    };
+     let mut cmd = Command::new(cargo);
++    if let Some(tc) = managed { cmd.env("RUSTC", tc.bin("rustc")); }
+     cmd.current_dir(cwd);
+     cmd.args([
+         "metadata",
+diff --git a/src/remote_artifacts.rs b/src/remote_artifacts.rs
+--- a/src/remote_artifacts.rs
++++ b/src/remote_artifacts.rs
+@@ -869,9 +869,16 @@ fn fetch_inner(
+         have,
+         test_run: test_run.map(str::to_owned),
+     };
++    // Artifact lookup must select the same managed Cargo as the build.
++    let pin = std::env::var("JUSTRUST_TOOLCHAIN")
++        .ok()
++        .map(|pin| format!("export JUSTRUST_TOOLCHAIN={}; ", crate::remote_build::shell_quote(&pin)))
++        .unwrap_or_default();
+     let mut child = t
+         .command()
+-        .arg(format!("~/.cargo/bin/justrust {ARG}"))
++        .arg(format!(
++            "{pin}export PATH=\"$HOME/.cargo/bin:/usr/local/bin:$PATH\"; ~/.cargo/bin/justrust {ARG}"
++        ))
+         .stdin(Stdio::piped())
+         .stdout(Stdio::piped())
+         .stderr(Stdio::piped())

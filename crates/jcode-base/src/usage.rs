@@ -36,7 +36,10 @@ pub use anthropic_reset::{
     invalidate_anthropic_usage_reset_state, prepare_anthropic_limit_reset,
 };
 use api_keys::enqueue_api_key_usage_tasks;
+#[cfg(test)]
+pub(crate) use cache::anthropic_usage_cache_key;
 pub use cache::carry_anthropic_usage_across_token_refresh;
+pub(crate) use cache::hydrate_persisted_account_usage;
 pub(crate) use cache::note_openai_unavailability_observed;
 pub(crate) use cache::update_anthropic_usage_credentials;
 use cache::*;

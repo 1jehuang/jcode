@@ -39,10 +39,11 @@ impl CompactionJsonBytesCache {
 
 const LARGE_MEMORY_BLOB_THRESHOLD_BYTES: usize = 16 * 1024;
 
+#[path = "stored_message_metadata.rs"]
+mod stored_message_metadata;
+
 pub(super) fn stored_message_json_bytes(message: &super::StoredMessage) -> usize {
-    let mut metadata = message.clone();
-    metadata.content = Default::default();
-    estimate_json_bytes(&metadata).saturating_sub(2) + message.content.serialized_json_bytes()
+    stored_message_metadata::json_bytes(message)
 }
 
 #[cfg(test)]

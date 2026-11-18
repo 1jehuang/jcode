@@ -239,7 +239,7 @@ fn provider_request_builders_that_reach_the_dialect_engine_are_pinned() {
         ("../jcode-provider-gemini/src/lib.rs", true),
         ("../jcode-provider-antigravity/src/lib.rs", true),
         ("../jcode-provider-openrouter/src/request.rs", true),
-        ("../jcode-provider-anthropic/src/lib.rs", true),
+        ("../jcode-provider-anthropic/src/lib_tool_schema.rs", true),
         // OpenAI's keyword subset now comes from the engine too. Strict
         // eligibility and strict normalization stay in jcode-provider-core
         // because they are OpenAI-specific and have no dialect equivalent, so

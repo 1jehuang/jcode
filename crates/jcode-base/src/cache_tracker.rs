@@ -52,27 +52,27 @@ impl CacheTracker {
         format!("{hash:016x}")
     }
 
-    fn prefix_hashes_for_messages(messages: &[Message]) -> Vec<u64> {
-        let mut prefix_hashes = Vec::with_capacity(messages.len());
-        for message in messages {
-            let message_hash = stable_message_hash(message);
-            let prefix_hash = prefix_hashes
-                .last()
-                .copied()
-                .map(|prev| jcode_message_types::extend_stable_hash(prev, message_hash))
-                .unwrap_or(message_hash);
-            prefix_hashes.push(prefix_hash);
-        }
-        prefix_hashes
-    }
-
     /// Record a request and check for cache violations
     ///
     /// Call this BEFORE sending each request to the provider.
     /// Returns Some(violation) if the append-only property was violated.
     pub fn record_request(&mut self, messages: &[Message]) -> Option<CacheViolation> {
-        let prefix_hashes = Self::prefix_hashes_for_messages(messages);
-        self.record_prefix_hashes(&prefix_hashes)
+        // Only the full hash and the hash at the old boundary are consumed.
+        // Keep those two values rather than allocating one u64 per message.
+        let mut full_hash = None;
+        let mut previous_boundary_hash = None;
+        for (index, message) in messages.iter().enumerate() {
+            let message_hash = stable_message_hash(message);
+            full_hash = Some(
+                full_hash
+                    .map(|previous| jcode_message_types::extend_stable_hash(previous, message_hash))
+                    .unwrap_or(message_hash),
+            );
+            if index + 1 == self.previous_message_count {
+                previous_boundary_hash = full_hash;
+            }
+        }
+        self.record_prefix_hash_snapshot(messages.len(), previous_boundary_hash, full_hash)
     }
 
     pub fn record_prefix_hashes(&mut self, prefix_hashes: &[u64]) -> Option<CacheViolation> {
@@ -224,6 +224,50 @@ mod tests {
             .into(),
             timestamp: None,
             tool_duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn streaming_hashes_match_materialized_prefix_history() {
+        let mut streaming = CacheTracker::new();
+        let mut materialized = CacheTracker::new();
+        let mut messages = Vec::new();
+        // Cover empty input, growth, mutation, shrink, repeated empty input,
+        // reset, and more than MAX_HISTORY turns with identical state/results.
+        for turn in 0..40 {
+            match turn {
+                0 | 14 | 15 => messages.clear(),
+                8 => messages[0] = make_message(Role::User, "changed 🦀"),
+                12 => messages.truncate(2),
+                20 => {
+                    streaming.reset();
+                    materialized.reset();
+                }
+                _ => messages.push(make_message(Role::User, &format!("message {turn}"))),
+            }
+            let mut prefixes = Vec::with_capacity(messages.len());
+            for message in &messages {
+                let hash = stable_message_hash(message);
+                prefixes.push(
+                    prefixes
+                        .last()
+                        .copied()
+                        .map(|previous| jcode_message_types::extend_stable_hash(previous, hash))
+                        .unwrap_or(hash),
+                );
+            }
+            let expected = materialized.record_prefix_hashes(&prefixes);
+            let actual = streaming.record_request(&messages);
+            assert_eq!(
+                format!("{actual:?}"),
+                format!("{expected:?}"),
+                "turn {turn}"
+            );
+            assert_eq!(
+                format!("{streaming:?}"),
+                format!("{materialized:?}"),
+                "turn {turn}"
+            );
         }
     }
 

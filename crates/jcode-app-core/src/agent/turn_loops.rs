@@ -6,21 +6,11 @@ use crate::{terminal_eprintln as eprintln, terminal_print as print, terminal_pri
 #[path = "provider_prewarm.rs"]
 mod provider_prewarm;
 
-#[path = "turn_nudges.rs"]
-mod turn_nudges;
+#[path = "turn_loop_policy.rs"]
+mod turn_loop_policy;
 
 impl Agent {
     /// Run turns until no more tool calls
-    /// Maximum number of context-limit compaction retries before giving up.
-    pub(super) const MAX_CONTEXT_LIMIT_RETRIES: u32 = 5;
-    pub(super) const MAX_INCOMPLETE_CONTINUATION_ATTEMPTS: u32 = 3;
-    /// Retries allowed when the provider returns an empty response right after
-    /// tool results. This is a transient provider hiccup, not a signal that the
-    /// task is finished, so a single retry is too few: one empty response
-    /// observed once in 43 turns silently ended a 20-hour benchmark run with the
-    /// task half-done. The counter is per turn-loop, so a genuinely finished
-    /// agent still exits promptly.
-    pub(crate) const MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS: u32 = 5;
     pub(super) async fn run_turn(&mut self, print_output: bool) -> Result<String> {
         let _runtime_activity =
             crate::runtime_activity::global().try_enter_session(&self.session.id)?;

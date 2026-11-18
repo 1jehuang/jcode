@@ -1,6 +1,67 @@
 // Built-in voice input (Ctrl+Space / /voice), matching Jcode Desktop.
 
 #[test]
+fn voice_transcript_remote_honors_armed_new_session() {
+    for busy in [false, true] {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.is_processing = busy;
+        app.set_input_for_test("keep my draft");
+        app.cursor_pos = 4;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            app.handle_remote_key(KeyCode::Char(' '), KeyModifiers::SUPER, &mut remote)
+                .await
+                .unwrap();
+            super::remote::submit_remote_voice_transcript(&mut app, &mut remote, "fix the test")
+                .await
+                .unwrap();
+        });
+        assert!(!app.route_next_prompt_to_new_session);
+        assert_eq!(
+            app.pending_split_prompt.as_ref().unwrap().content,
+            "<transcription>\nfix the test\n</transcription>"
+        );
+        assert_eq!(app.input(), "keep my draft");
+        assert_eq!(app.cursor_pos(), 4);
+        assert!(app.interleave_message.is_none());
+        assert!(app.queued_messages.is_empty());
+        assert!(!app.pending_turn);
+        assert!(app.current_message_id.is_none());
+    }
+}
+
+#[test]
+fn external_transcript_remote_honors_armed_new_session() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.is_processing = true;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.handle_remote_key(KeyCode::Char(' '), KeyModifiers::SUPER, &mut remote)
+            .await
+            .unwrap();
+        super::remote::apply_remote_transcript_event(
+            &mut app,
+            &mut remote,
+            "fix the test".into(),
+            crate::protocol::TranscriptMode::Send,
+        )
+        .await
+        .unwrap();
+    });
+    assert!(!app.route_next_prompt_to_new_session);
+    assert_eq!(
+        app.pending_split_prompt.as_ref().unwrap().content,
+        "[transcription] fix the test"
+    );
+    assert!(app.interleave_message.is_none());
+    assert!(app.queued_messages.is_empty());
+}
+
+#[test]
 fn voice_transcript_local_send_wraps_tags_and_keeps_typed_draft() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();

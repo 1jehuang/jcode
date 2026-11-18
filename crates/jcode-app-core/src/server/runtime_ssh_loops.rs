@@ -1,6 +1,6 @@
-//! Server-owned remote loop control. Only sessions explicitly opted in through
-//! remote subscription or runtime_command get a state file, so ordinary local clients retain
-//! their existing client-side follow-up behavior.
+//! Daemon-owned turn-end continuation for every client. The persisted session
+//! policy owns auto-poke and workflow follow-ups, including while disconnected.
+//! Clients only control and display this state.
 use crate::{agent::Agent, protocol::ServerEvent, todo};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -75,9 +75,8 @@ fn read_state(path: &Path) -> Result<LoopState> {
     Ok(state)
 }
 
-/// Remote clients delegate automatic followups to the daemon, including while
-/// disconnected. Initialize once, never re-arm an explicit /poke off or reset
-/// persisted retry budgets when another client attaches.
+/// Initialize daemon continuation once for any session. Never re-arm an explicit
+/// /poke off or reset persisted retry budgets when another client attaches.
 pub(super) fn initialize_remote_session(session_id: &str, enabled: bool) -> Result<()> {
     let _lock = state_lock().lock().unwrap_or_else(|p| p.into_inner());
     let path = state_path(session_id)?;
@@ -149,7 +148,7 @@ pub(super) fn control(
             if let Some(workflow) = state.workflow.as_mut() {
                 workflow.active = true;
             }
-            let message = "Remote auto-poke enabled. Continuation will be checked at the next turn boundary. Use /poke to continue now.".to_string();
+            let message = "Daemon auto-poke enabled. Continuation will be checked at the next turn boundary. Use /poke to continue now.".to_string();
             state.last_notice = Some(message.clone());
             let data = status_data(session_id, state)?;
             Ok(Some((data, message)))
@@ -381,9 +380,7 @@ pub(super) async fn run_reserved_followups(
 ) -> Result<()> {
     agent.validate_server_turn(lease)?;
     let session_id = agent.session_id().to_string();
-    if !state_path(&session_id)?.exists() {
-        return Ok(());
-    }
+    initialize_remote_session(&session_id, crate::config::config().features.auto_poke)?;
     // Bound retries by unchanged todo state, not total productive turns. A long
     // cloud campaign can legitimately make progress across hundreds of turns.
     // The persisted policy still limits no-progress retries and quality gates.
@@ -402,7 +399,12 @@ pub(super) async fn run_reserved_followups(
             })
             .map(|task| task.task_id)
             .collect();
-        let decision = update_state(&session_id, |state| Ok(next_followup(state, &snapshot)))?;
+        let decision = update_state(&session_id, |state| {
+            state
+                .policy
+                .set_gate_digest_enabled(crate::config::config().features.todo_gate_digest);
+            Ok(next_followup(state, &snapshot))
+        })?;
         apply_effects(&session_id, &decision.effects)?;
         let Some(followup) = decision.follow_up else {
             if let Some(notice) = decision.notice {
@@ -426,6 +428,22 @@ pub(super) async fn run_reserved_followups(
             }
             return Ok(());
         };
+        // Publish continuation as progress, never a terminal event. Every
+        // observer sees the same harness decision without dispatching a poke.
+        let _ = event_tx.send(ServerEvent::Notification {
+            from_session: "runtime".into(),
+            from_name: Some("daemon continuation".into()),
+            notification_type: crate::protocol::NotificationType::Message {
+                scope: Some("runtime".into()),
+                channel: None,
+                tldr: None,
+            },
+            message: followup.notice.clone(),
+        });
+        crate::logging::info(&format!(
+            "AUTO_POKE_DECISION owner=daemon session={session_id} action=continue kind={:?}",
+            followup.kind
+        ));
         // Persisted budgets are committed before the request. A daemon restart
         // cannot turn a failing continuation into an unlimited retry loop.
         let result = super::client_lifecycle::process_reserved_message_streaming_mpsc(

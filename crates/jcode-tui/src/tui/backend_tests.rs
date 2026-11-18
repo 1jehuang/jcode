@@ -1,6 +1,67 @@
 use super::*;
 use std::time::Duration;
 
+#[tokio::test]
+async fn local_tool_registration_requires_ack_and_rejection_allows_retry() {
+    let mut remote = RemoteConnection::dummy();
+    remote
+        .configure_cloud_tools(Default::default())
+        .await
+        .unwrap();
+    let first = remote.local_tools_request.unwrap();
+    assert!(!remote.jarvis_tools_configured);
+    assert!(!remote.finish_local_tools_request(first + 1, true));
+    assert_eq!(remote.local_tools_request, Some(first));
+    assert!(remote.finish_local_tools_request(first, false));
+    assert!(remote.local_tools_request.is_none());
+    assert!(!remote.jarvis_tools_configured);
+    remote
+        .configure_cloud_tools(Default::default())
+        .await
+        .unwrap();
+    let second = remote.local_tools_request.unwrap();
+    assert_ne!(first, second);
+    assert!(!remote.finish_local_tools_request(first, true));
+    assert!(remote.finish_local_tools_request(second, true));
+    assert!(remote.local_tools_request.is_none());
+}
+
+#[tokio::test]
+async fn jarvis_session_switch_clears_old_tool_capability_before_resume() {
+    let mut remote = RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().unwrap();
+    let (reader, _writer) = peer.into_split();
+    let mut reader = BufReader::new(reader);
+    remote.session_id = Some("old-jarvis-session".into());
+    remote.jarvis_tools_configured = true;
+    remote.resume_session("next-session").await.unwrap();
+    assert!(!remote.jarvis_tools_configured);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let Request::ConfigureTools { tools, .. } = serde_json::from_str(&line).unwrap() else {
+        panic!("Expected capability cleanup before resume");
+    };
+    assert!(tools.custom.is_empty());
+    assert!(tools.enabled.is_none());
+    assert!(tools.disabled.is_empty());
+    line.clear();
+    reader.read_line(&mut line).await.unwrap();
+    assert!(
+        matches!(serde_json::from_str::<Request>(&line).unwrap(), Request::ResumeSession { session_id, .. } if session_id == "next-session")
+    );
+}
+
+#[tokio::test]
+async fn jarvis_configuration_resets_only_when_session_changes() {
+    let mut remote = RemoteConnection::dummy();
+    remote.set_session_id("same-session".into());
+    remote.jarvis_tools_configured = true;
+    remote.set_session_id("same-session".into());
+    assert!(remote.jarvis_tools_configured);
+    remote.set_session_id("different-session".into());
+    assert!(!remote.jarvis_tools_configured);
+}
+
 #[test]
 fn recent_history_negotiation_preserves_local_verified_prefix() {
     let base = HistoryBase {
