@@ -603,6 +603,36 @@ pub struct HistoryTool {
     pub input: serde_json::Value,
 }
 
+impl HistoryMessage {
+    /// Prune conversational commentary, retaining only machine-verifiable data structures.
+    pub fn prune_conversational_commentary(&self) -> Self {
+        let pruned_content = if self.role == "tool" {
+            self.content
+                .lines()
+                .filter(|line| {
+                    let trimmed = line.trim();
+                    trimmed.starts_with('{')
+                        || trimmed.starts_with('[')
+                        || trimmed.contains("exit code")
+                        || trimmed.contains("status")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else if self.role == "system" {
+            self.content.clone()
+        } else {
+            String::new()
+        };
+
+        Self {
+            response_stats: self.response_stats.clone(),
+            role: self.role.clone(),
+            content: pruned_content,
+            tool: self.tool.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RenderedImageSource {
@@ -661,6 +691,20 @@ mod image_history_tests {
 #[cfg(test)]
 mod response_stats_tests {
     use super::*;
+
+    #[test]
+    fn pruning_preserves_history_tool_metadata() {
+        let message: HistoryMessage = serde_json::from_value(serde_json::json!({
+            "role": "tool", "content": "commentary\n{\"status\":\"ok\"}",
+            "tool": {"id": "read-1", "name": "read", "input": {"path": "src/lib.rs"}},
+            "response_stats": {"input_tokens": 0, "output_tokens": 12, "cache_read_tokens": 0}
+        }))
+        .unwrap();
+        let pruned = message.prune_conversational_commentary();
+        assert_eq!(pruned.content, r#"{"status":"ok"}"#);
+        assert_eq!(pruned.tool, message.tool);
+        assert_eq!(pruned.response_stats, message.response_stats);
+    }
 
     #[test]
     fn history_response_stats_are_backward_compatible_and_optional() {

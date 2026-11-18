@@ -598,6 +598,46 @@ impl SkillRegistry {
         skills
     }
 
+    /// Add a skill to the cache
+    pub fn add_to_cache(&mut self, name: &str) -> Result<()> {
+        let cache_file = crate::storage::jcode_dir()?.join(".skill_cache");
+        let mut skills = self.list_cache()?;
+        if !skills.contains(&name.to_string()) {
+            skills.push(name.to_string());
+            std::fs::write(cache_file, skills.join("\n"))?;
+        }
+        Ok(())
+    }
+
+    /// Remove a skill from the cache
+    pub fn remove_from_cache(&mut self, name: &str) -> Result<()> {
+        let cache_file = crate::storage::jcode_dir()?.join(".skill_cache");
+        let mut skills = self.list_cache()?;
+        skills.retain(|x| x != name);
+        std::fs::write(cache_file, skills.join("\n"))?;
+        Ok(())
+    }
+
+    /// Clear the skill cache
+    pub fn clear_cache(&mut self) -> Result<()> {
+        let cache_file = crate::storage::jcode_dir()?.join(".skill_cache");
+        if cache_file.exists() {
+            std::fs::remove_file(cache_file)?;
+        }
+        Ok(())
+    }
+
+    /// List all cached skills
+    pub fn list_cache(&self) -> Result<Vec<String>> {
+        let cache_file = crate::storage::jcode_dir()?.join(".skill_cache");
+        if cache_file.exists() {
+            let content = std::fs::read_to_string(cache_file)?;
+            Ok(content.lines().map(|s| s.to_string()).collect())
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
     /// Reload a specific skill by name
     pub fn reload(&mut self, name: &str) -> Result<bool> {
         // Find the skill's path first

@@ -634,6 +634,7 @@ fn login_no_browser_flag_parses() {
             no_validate,
             flow_id,
             cancel,
+            org_uuid,
         }) => {
             assert!(provider.is_none());
             assert!(account.is_none());
@@ -653,6 +654,7 @@ fn login_no_browser_flag_parses() {
             assert!(!no_validate);
             assert!(flow_id.is_none());
             assert!(!cancel);
+            assert!(org_uuid.is_none());
         }
         other => panic!("unexpected command: {:?}", other),
     }

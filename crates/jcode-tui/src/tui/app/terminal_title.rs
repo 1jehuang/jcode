@@ -151,6 +151,7 @@ mod tests {
                 input: serde_json::json!({"file_path": "example.rs"}),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             },
         );
         app.push_display_message(message.clone());
@@ -225,6 +226,7 @@ mod tests {
                 input: serde_json::json!({"file_path": "example.rs"}),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             },
         );
         assert_eq!(edit_line_counts(&message), (2, 1));

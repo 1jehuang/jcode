@@ -122,6 +122,7 @@ fn collect_tool_exposures(session: &Session) -> Vec<ToolExposureObservation> {
                             input: input.clone(),
                             intent: None,
                             thought_signature: None,
+                            ..Default::default()
                         },
                     );
                 }
@@ -139,6 +140,7 @@ fn collect_tool_exposures(session: &Session) -> Vec<ToolExposureObservation> {
                             input: Value::Null,
                             intent: None,
                             thought_signature: None,
+                            ..Default::default()
                         });
                     observations.push(ToolExposureObservation {
                         tool,

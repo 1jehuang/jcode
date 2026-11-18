@@ -11,6 +11,7 @@ fn gmail_draft_message(content: &str, input: serde_json::Value) -> DisplayMessag
             input,
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     }
 }
@@ -172,6 +173,7 @@ fn render_batch_tool_message_shows_nested_gmail_draft_card() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 

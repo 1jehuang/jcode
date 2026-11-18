@@ -928,6 +928,7 @@ mod tests {
             input: serde_json::json!({"action": "spawn", "prompt": "try it"}),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         };
 
         assert_eq!(
@@ -944,6 +945,7 @@ mod tests {
             input: serde_json::json!({"action": "assign_task", "spawn_if_needed": true}),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         };
 
         assert_eq!(
@@ -960,6 +962,7 @@ mod tests {
             input: serde_json::json!({"action": "status"}),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         };
 
         assert_eq!(App::experimental_feature_key_for_tool(&tool), None);

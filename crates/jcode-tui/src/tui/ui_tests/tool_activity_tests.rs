@@ -14,6 +14,7 @@ fn test_activity_detail_prefers_intent_and_appends_summary() {
         }),
         intent: Some("Spin up a worker for the parser fix".to_string()),
         thought_signature: None,
+        ..Default::default()
     };
 
     let detail = tools_ui::get_tool_activity_detail(&tool);
@@ -42,6 +43,7 @@ fn test_activity_detail_falls_back_to_input_intent_field() {
         }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
 
     let detail = tools_ui::get_tool_activity_detail(&tool);
@@ -60,6 +62,7 @@ fn test_activity_detail_without_intent_matches_summary() {
         input: serde_json::json!({ "action": "dm", "to_session": "worker-1", "message": "hello" }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
 
     let detail = tools_ui::get_tool_activity_detail(&tool);

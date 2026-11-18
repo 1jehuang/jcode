@@ -1389,6 +1389,7 @@ fn test_observe_updates_latest_tool_context_only() {
         input: serde_json::json!({"file_path": "src/main.rs", "start_line": 1, "end_line": 10}),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
     app.observe_tool_call(&tool_call);
 
@@ -1430,6 +1431,7 @@ fn test_observe_ignores_noise_tools_and_preserves_latest_useful_context() {
         input: serde_json::json!({"file_path": "src/main.rs"}),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
     app.observe_tool_result(&read_tool, "fn main() {}", false, Some("read"));
     let before = app
@@ -1445,6 +1447,7 @@ fn test_observe_ignores_noise_tools_and_preserves_latest_useful_context() {
         input: serde_json::json!({"action": "write", "page_id": "plan"}),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
     app.observe_tool_call(&noise_tool);
     app.observe_tool_result(&noise_tool, "ok", false, Some("side_panel"));

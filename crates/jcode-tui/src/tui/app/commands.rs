@@ -690,6 +690,7 @@ fn launch_manual_subagent(app: &mut App, spec: ManualSubagentSpec) {
         }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
 
     app.push_display_message(DisplayMessage {

@@ -160,6 +160,7 @@ fn tool_call_keeps_explicit_non_object_streamed_input_for_validation() {
             input: ToolCall::parse_streamed_input_to_object(raw),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         };
         let error = call
             .validation_error()
@@ -180,6 +181,7 @@ fn tool_call_preserves_invalid_streamed_json_as_validation_error() {
         input,
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
 
     assert_eq!(
@@ -196,6 +198,7 @@ fn tool_call_validation_rejects_empty_name_and_non_object_input() {
         input: serde_json::json!({}),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
     assert_eq!(
         empty_name.validation_error().as_deref(),
@@ -208,6 +211,7 @@ fn tool_call_validation_rejects_empty_name_and_non_object_input() {
         input: serde_json::json!(20),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
     assert_eq!(
         primitive_args.validation_error().as_deref(),
@@ -220,6 +224,7 @@ fn tool_call_validation_rejects_empty_name_and_non_object_input() {
         input: serde_json::json!({"path":"README.md"}),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
     assert_eq!(valid.validation_error(), None);
 }

@@ -553,6 +553,7 @@ mod tests {
                 input: input.clone(),
                 intent: crate::message::ToolCall::intent_from_input(&input),
                 thought_signature: None,
+                ..Default::default()
             }),
         }
     }

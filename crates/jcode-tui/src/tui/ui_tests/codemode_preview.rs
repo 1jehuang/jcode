@@ -7,6 +7,7 @@ fn tool(code: &str) -> ToolCall {
         input: serde_json::json!({"code": code}),
         intent: Some("Inspect project files".into()),
         thought_signature: None,
+        ..Default::default()
     }
 }
 

@@ -4593,6 +4593,7 @@ dependencies = [
  "jcode-selfdev-types",
  "jcode-storage",
  "jcode-usage-types",
+ "libc",
  "reqwest 0.12.28",
  "serde_json",
  "sha2 0.10.9",
@@ -4650,6 +4651,7 @@ dependencies = [
  "jcode-agent-runtime",
  "jcode-message-types",
  "jcode-tool-types",
+ "jcode-usage-types",
  "serde_json",
  "tokio",
 ]

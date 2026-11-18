@@ -191,6 +191,7 @@ fn preview_cache_preserves_live_tool_metadata_and_invalidates_on_changes() {
             input: serde_json::json!({"command": "echo hello"}),
             intent: Some("Check saved timing".into()),
             thought_signature: None,
+            ..Default::default()
         }),
         timestamp: None,
     });

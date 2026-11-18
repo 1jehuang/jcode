@@ -54,6 +54,11 @@ impl RunStructuredOptions {
             images: self.images.clone(),
             on_event,
             auto_approve: self.auto_approve,
+            // Ask the provider to enforce the schema natively. A provider
+            // without the capability ignores it and the validation loop in
+            // `run_structured` stays the only guarantee, so this is additive
+            // rather than a replacement for it.
+            response_schema: Some(self.schema.clone()),
         }
     }
 }
@@ -93,10 +98,13 @@ pub struct StructuredTurnResult<T> {
     pub reasoning: String,
     pub tool_calls: Vec<ToolCall>,
     pub usage: Option<Usage>,
+    pub strategic_reasoning_and_analysis: String,
+    pub tool_invocation_payload: String,
 }
 
 impl<T> StructuredTurnResult<T> {
     fn from_turn(data: T, attempts: Vec<StructuredOutputAttempt>, turn: TurnResult) -> Self {
+        let reasoning = turn.reasoning.clone();
         Self {
             data,
             attempts,
@@ -104,6 +112,8 @@ impl<T> StructuredTurnResult<T> {
             reasoning: turn.reasoning,
             tool_calls: turn.tool_calls,
             usage: turn.usage,
+            strategic_reasoning_and_analysis: reasoning,
+            tool_invocation_payload: String::new(),
         }
     }
 }
@@ -249,7 +259,14 @@ impl JcodeClient {
         let mut attempts = Vec::new();
         let mut prompt = build_structured_prompt(content, &options.schema);
 
-        for attempt_number in 1..=options.max_retries.saturating_add(1) {
+        // Strict attempt ceiling: maximum 2 attempts.
+        const MAX_STRUCTURED_ATTEMPTS: usize = 2;
+        let attempt_ceiling = options
+            .max_retries
+            .saturating_add(1)
+            .min(MAX_STRUCTURED_ATTEMPTS);
+
+        for attempt_number in 1..=attempt_ceiling {
             let turn = self.run(session_id, &prompt, options.run_options())?;
             let validation =
                 validate_structured_text::<T>(&turn.final_text, &validator, &options.schema);
@@ -266,7 +283,7 @@ impl JcodeClient {
 
             match validation {
                 Ok(data) => return Ok(StructuredTurnResult::from_turn(data, attempts, turn)),
-                Err(_) if attempt_number <= options.max_retries => {
+                Err(_) if attempt_number < attempt_ceiling => {
                     prompt = build_structured_correction_prompt(&options.schema, &attempt);
                 }
                 Err(_) => break,
@@ -533,6 +550,24 @@ mod tests {
             parse_json_from_text("Result: [1, {\"text\": \"a ] brace\"}] done").unwrap(),
             json!([1, {"text": "a ] brace"}])
         );
+    }
+
+    /// The turn options must carry the caller's real schema. This is the only
+    /// place the SDK decides what the provider sees, so a placeholder here
+    /// would silently downgrade every structured call to prompt-only.
+    #[test]
+    fn run_options_carry_the_declared_schema_object() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"title": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}},
+            "required": ["title"],
+            "additionalProperties": false,
+        });
+        let options = RunStructuredOptions::new(schema.clone());
+        let run = options.run_options();
+        let sent = run.response_schema.expect("no schema reached the provider");
+        assert_eq!(sent, schema, "the schema was rewritten before sending");
+        assert_eq!(sent["properties"]["tags"]["items"]["type"], "string");
     }
 
     #[test]

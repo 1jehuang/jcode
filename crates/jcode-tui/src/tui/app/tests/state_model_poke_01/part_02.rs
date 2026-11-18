@@ -228,7 +228,10 @@ fn test_removed_pinned_diff_config_renders_inline_without_side_pane() {
                 "file_path": "src/demo.rs",
                 "content": "fn demo() {}\n"
             }),
-            intent: None, thought_signature: None, }),
+            intent: None,
+            thought_signature: None,
+            ..Default::default()
+        }),
     }];
     app.bump_display_messages_version();
 
@@ -243,7 +246,10 @@ fn test_removed_pinned_diff_config_renders_inline_without_side_pane() {
             .is_none(),
         "removed pinned mode must not allocate a side pane"
     );
-    assert!(text.contains("fn demo() {}"), "inline diff must remain visible: {text}");
+    assert!(
+        text.contains("fn demo() {}"),
+        "inline diff must remain visible: {text}"
+    );
     assert!(!text.contains("side Pinned"), "rendered text: {text}");
 }
 
@@ -269,7 +275,10 @@ fn test_file_diff_uses_left_splitter_instead_of_rounded_box() {
                 "file_path": file_path.display().to_string(),
                 "content": "fn demo() {\n    println!(\"hi\");\n}\n"
             }),
-            intent: None, thought_signature: None, }),
+            intent: None,
+            thought_signature: None,
+            ..Default::default()
+        }),
     }];
     app.bump_display_messages_version();
 

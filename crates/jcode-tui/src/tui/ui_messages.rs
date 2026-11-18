@@ -4356,6 +4356,7 @@ pub(crate) fn render_tool_message(
                 input: params,
                 intent,
                 thought_signature: None,
+                ..Default::default()
             };
 
             let sub_result = sub_results.get(&(i + 1));

@@ -678,6 +678,7 @@ impl Agent {
                                     input: serde_json::Value::Null,
                                     intent: None,
                                     thought_signature: None,
+                                    ..Default::default()
                                 },
                                 String::new(),
                             )
@@ -1600,7 +1601,7 @@ impl Agent {
                 // Spawn independently so automatic and Alt+B handoffs keep it running.
                 let registry_clone = self.registry.clone();
                 let tool_name_for_spawn = tc.name.clone();
-                let tool_input_for_spawn = tc.input.clone();
+                let tool_input_for_spawn = tc.execution_input();
                 let tool_handle =
                     crate::runtime_activity::spawn_session(&self.session.id, async move {
                         registry_clone

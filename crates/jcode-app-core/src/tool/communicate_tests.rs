@@ -461,6 +461,11 @@ impl RawClient {
             system_reminder: None,
             active_skill: None,
             no_reply: false,
+            response_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"ok": {"type": "boolean"}},
+                "required": ["ok"],
+            })),
         })
         .await
     }

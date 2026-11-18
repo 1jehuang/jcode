@@ -13,5 +13,6 @@ async-trait = "0.1"
 jcode-agent-runtime = { path = "../jcode-agent-runtime" }
 jcode-message-types = { path = "../jcode-message-types" }
 jcode-tool-types = { path = "../jcode-tool-types" }
+jcode-usage-types = { path = "../jcode-usage-types" }
 serde_json = "1"
 tokio = { version = "1", features = ["sync"] }

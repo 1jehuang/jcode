@@ -166,6 +166,7 @@ pub(super) async fn spawn_tracked_live_turn(
                         system_reminder,
                         event_tx.clone(),
                         Some(display_role),
+                        None,
                     )
                     .await
             } else {

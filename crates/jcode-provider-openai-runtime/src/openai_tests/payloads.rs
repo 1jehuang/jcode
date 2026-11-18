@@ -12,6 +12,7 @@ fn test_build_response_request_includes_stream_for_http() {
         None,
         None,
         None,
+        None,
     );
     assert_eq!(request["stream"], serde_json::json!(true));
     assert_eq!(request["store"], serde_json::json!(false));
@@ -26,6 +27,7 @@ fn test_websocket_payload_strips_stream_and_background() {
         &[],
         false,
         Some(DEFAULT_MAX_OUTPUT_TOKENS),
+        None,
         None,
         None,
         None,
@@ -70,6 +72,7 @@ fn test_websocket_payload_preserves_required_fields() {
         None,
         None,
         None,
+        None,
     );
 
     let obj = request.as_object_mut().expect("request is object");
@@ -107,6 +110,7 @@ fn test_websocket_continuation_request_excludes_transport_fields() {
         Some("jcode-test-cache"),
         Some("24h"),
         Some(160_000),
+        None,
     );
 
     let mut continuation = serde_json::json!({
@@ -439,6 +443,7 @@ fn max_and_swarm_efforts_are_preserved_at_the_strongest_api_level() {
         None,
         None,
         None,
+        None,
     );
     assert_eq!(request["reasoning"]["effort"], serde_json::json!("max"));
     assert_eq!(request["reasoning"]["summary"], serde_json::json!("auto"));
@@ -506,6 +511,7 @@ fn gpt_5_6_sol_defaults_to_low_reasoning_effort() {
         None,
         None,
         None,
+        None,
     );
     assert_eq!(request["reasoning"]["effort"], serde_json::json!("low"));
 }
@@ -529,6 +535,7 @@ fn test_build_response_request_passes_system_prompt_through_verbatim() {
             &[],
             is_chatgpt_mode,
             Some(DEFAULT_MAX_OUTPUT_TOKENS),
+            None,
             None,
             None,
             None,
@@ -576,6 +583,7 @@ async fn configured_swarm_root_effort_resolves_without_changing_stored_mode() {
                 None,
                 None,
                 None,
+                None,
             );
             assert_eq!(request["reasoning"]["effort"], expected);
             assert_eq!(provider.reasoning_effort().as_deref(), Some(mode));
@@ -596,6 +604,7 @@ async fn configured_swarm_root_effort_resolves_without_changing_stored_mode() {
             false,
             Some(DEFAULT_MAX_OUTPUT_TOKENS),
             effort.as_deref(),
+            None,
             None,
             None,
             None,
@@ -658,6 +667,7 @@ fn configured_swarm_root_effort_reads_real_config() {
             false,
             Some(DEFAULT_MAX_OUTPUT_TOKENS),
             effort.as_deref(),
+            None,
             None,
             None,
             None,

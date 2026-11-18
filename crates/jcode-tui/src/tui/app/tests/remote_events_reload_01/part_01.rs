@@ -798,6 +798,7 @@ fn test_handle_server_event_history_same_session_rewind_then_late_done_does_not_
         input: serde_json::json!({}),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     });
     // The client-side /rewind path arms the pending notice before the server's
     // History redelivery arrives (remote/key_handling.rs).
@@ -1208,6 +1209,7 @@ fn test_handle_server_event_interrupted_clears_stream_state_and_sets_idle() {
         input: serde_json::Value::Null,
         intent: None,
         thought_signature: None,
+        ..Default::default()
     });
     app.interleave_message = Some("queued interrupt".to_string());
     app.pending_soft_interrupts
@@ -1723,7 +1725,10 @@ fn test_reload_recovery_turn_runs_before_user_queued_followups() {
     ));
 
     rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
-    assert!(app.is_processing, "recovery continuation should start a turn");
+    assert!(
+        app.is_processing,
+        "recovery continuation should start a turn"
+    );
     assert!(app.hidden_queued_system_messages.is_empty());
     assert_eq!(
         app.queued_messages(),

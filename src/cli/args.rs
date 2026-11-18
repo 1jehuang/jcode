@@ -275,6 +275,10 @@ pub(crate) enum Command {
         /// Environment variable name to store/use for an OpenAI-compatible API key.
         #[arg(long)]
         api_key_env: Option<String>,
+
+        /// Target organization UUID for Claude OAuth login (or set JCODE_CLAUDE_ORG_UUID / CLAUDE_CODE_ORGANIZATION_UUID)
+        #[arg(long, value_name = "ORG_UUID")]
+        org_uuid: Option<String>,
     },
 
     /// Log in to and manage your Jcode account

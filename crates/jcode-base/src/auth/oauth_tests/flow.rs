@@ -317,6 +317,79 @@ fn claude_auth_url_with_dynamic_redirect_uri() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn claude_auth_url_with_explicit_org_uuid() -> Result<()> {
+    let auth_url = claude_auth_url_with_org(
+        claude::REDIRECT_URI,
+        "challenge123",
+        "verifier123",
+        Some("42a3f9dc-31c3-4a04-9c47-643f0cb01c55"),
+    );
+    let parsed = url::Url::parse(&auth_url).map_err(|e| anyhow!(e))?;
+    let params: HashMap<String, String> = parsed
+        .query_pairs()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    assert_eq!(
+        require_param(&params, "orgUUID")?,
+        "42a3f9dc-31c3-4a04-9c47-643f0cb01c55"
+    );
+    Ok(())
+}
+
+#[test]
+fn claude_auth_url_with_org_from_jcode_env() -> Result<()> {
+    let _lock = super::lock_env();
+    let _guard = super::EnvVarGuard::set_str("JCODE_CLAUDE_ORG_UUID", "test-jcode-org-uuid-1111");
+    let auth_url = claude_auth_url(claude::REDIRECT_URI, "challenge123", "verifier123");
+    let parsed = url::Url::parse(&auth_url).map_err(|e| anyhow!(e))?;
+    let params: HashMap<String, String> = parsed
+        .query_pairs()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    assert_eq!(
+        require_param(&params, "orgUUID")?,
+        "test-jcode-org-uuid-1111"
+    );
+    Ok(())
+}
+
+#[test]
+fn claude_auth_url_with_org_from_claude_code_env() -> Result<()> {
+    let _lock = super::lock_env();
+    let _clean_jcode = super::EnvVarGuard::remove("JCODE_CLAUDE_ORG_UUID");
+    let _guard = super::EnvVarGuard::set_str(
+        "CLAUDE_CODE_ORGANIZATION_UUID",
+        "test-claude-code-org-uuid-2222",
+    );
+    let auth_url = claude_auth_url(claude::REDIRECT_URI, "challenge123", "verifier123");
+    let parsed = url::Url::parse(&auth_url).map_err(|e| anyhow!(e))?;
+    let params: HashMap<String, String> = parsed
+        .query_pairs()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    assert_eq!(
+        require_param(&params, "orgUUID")?,
+        "test-claude-code-org-uuid-2222"
+    );
+    Ok(())
+}
+
+#[test]
+fn claude_auth_url_without_org_omits_org_uuid() -> Result<()> {
+    let _lock = super::lock_env();
+    let _clean_jcode = super::EnvVarGuard::remove("JCODE_CLAUDE_ORG_UUID");
+    let _clean_claude = super::EnvVarGuard::remove("CLAUDE_CODE_ORGANIZATION_UUID");
+    let auth_url = claude_auth_url(claude::REDIRECT_URI, "challenge123", "verifier123");
+    let parsed = url::Url::parse(&auth_url).map_err(|e| anyhow!(e))?;
+    let params: HashMap<String, String> = parsed
+        .query_pairs()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    assert!(!params.contains_key("orgUUID"));
+    Ok(())
+}
+
 // ========================
 // Code parsing (plain code, URL, code#state)
 // ========================

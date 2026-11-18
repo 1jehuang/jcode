@@ -603,6 +603,7 @@ fn handle_server_event_inner(
                 input: serde_json::Value::Null,
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             });
             eager_stream_redraw
         }
@@ -634,6 +635,7 @@ fn handle_server_event_inner(
                 input: parsed_input.clone(),
                 intent: ToolCall::intent_from_input(&parsed_input),
                 thought_signature: None,
+                ..Default::default()
             };
             if let Some(key) = App::experimental_feature_key_for_tool(&tool_call) {
                 app.note_experimental_feature_use(key);

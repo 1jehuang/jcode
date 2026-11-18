@@ -50,6 +50,8 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("CancelSoftInterrupts", Covered),
     ("Clear", Covered),
     ("ClientDebugResponse", ClientInternal),
+    // Window visibility only controls this TUI connection's stream batching.
+    ("ClientFocus", ClientInternal),
     ("Compact", Covered),
     ("ConfigureTools", Covered),
     ("CycleModel", ClientInternal),

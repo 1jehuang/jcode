@@ -362,6 +362,28 @@ pub trait Provider: Send + Sync {
         vec![]
     }
 
+    /// Constrain the *next* completion to a JSON Schema using the provider's
+    /// native structured-output field, when it has one.
+    ///
+    /// This is per-turn on purpose. [`Provider::complete_split`] is called once
+    /// per iteration of the agent's tool loop, so a schema held across the
+    /// whole turn would also constrain the intermediate tool-calling steps,
+    /// which must stay free-form. Callers set it immediately before the
+    /// completion they want shaped and clear it afterwards.
+    ///
+    /// The default is a no-op returning `false`, which is what makes this safe
+    /// to add to a trait with many implementations: a provider with no native
+    /// field simply reports that it did not take the schema, and the caller
+    /// keeps its own validation-and-retry loop. A `true` return claims the
+    /// field was attached, never that the model obeyed it, so callers must
+    /// still validate the response.
+    fn set_response_schema(&self, _schema: &serde_json::Value) -> bool {
+        false
+    }
+
+    /// Drop any schema set by [`Provider::set_response_schema`].
+    fn clear_response_schema(&self) {}
+
     /// Get the active service tier override (if applicable).
     fn service_tier(&self) -> Option<String> {
         None

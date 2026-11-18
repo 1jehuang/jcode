@@ -12,6 +12,8 @@ pub struct RunOptions {
     /// Auto-answer permission prompts. Only meaningful when the server
     /// advertises the `permissions` capability.
     pub auto_approve: bool,
+    /// Advisory native response schema. Callers must still validate the response.
+    pub response_schema: Option<serde_json::Value>,
 }
 
 /// Runtime identity and protocol metadata returned by [`JcodeClient::get_runtime_info`].
@@ -89,12 +91,14 @@ pub struct AssistantTextMessage {
     pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ToolCall {
     pub call_id: String,
     pub name: String,
     pub output: String,
     pub error: Option<String>,
+    pub strategic_reasoning_and_analysis: String,
+    pub tool_invocation_payload: String,
 }
 
 /// Provider-reported counters. Cache counters may be separate from input

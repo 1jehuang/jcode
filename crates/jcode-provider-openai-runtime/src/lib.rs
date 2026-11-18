@@ -699,6 +699,9 @@ pub struct OpenAIProvider {
     model_reasoning_efforts: Arc<StdRwLock<HashMap<String, Vec<String>>>>,
     model_service_tiers: Arc<StdRwLock<HashMap<String, Vec<String>>>>,
     service_tier: Arc<StdRwLock<Option<String>>>,
+    /// Schema for the next completion only, set by
+    /// `Provider::set_response_schema`. Already strict-normalized when stored.
+    response_schema: Arc<StdRwLock<Option<Value>>>,
     native_compaction_mode: OpenAINativeCompactionMode,
     native_compaction_threshold_tokens: usize,
     transport_mode: Arc<RwLock<OpenAITransportMode>>,
@@ -862,6 +865,7 @@ impl OpenAIProvider {
                 jcode_base::provider::cached_openai_service_tiers_for_scope(&catalog_scope)
                     .unwrap_or_default(),
             )),
+            response_schema: Arc::new(StdRwLock::new(None)),
             service_tier: Arc::new(StdRwLock::new(service_tier)),
             native_compaction_mode,
             native_compaction_threshold_tokens,
@@ -1372,6 +1376,11 @@ impl OpenAIProvider {
         let service_tier = self.effective_service_tier(model_id);
         let native_compaction_threshold =
             self.native_compaction_threshold_for_context_window(self.context_window());
+        let response_schema = self
+            .response_schema
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         Self::build_response_request(
             model_id,
             system.to_string(),
@@ -1384,6 +1393,7 @@ impl OpenAIProvider {
             Some(&self.cache_routing_key()),
             self.prompt_cache_retention.as_deref(),
             native_compaction_threshold,
+            response_schema.as_ref(),
         )
     }
 
@@ -1403,6 +1413,7 @@ impl OpenAIProvider {
         prompt_cache_key: Option<&str>,
         prompt_cache_retention: Option<&str>,
         native_compaction_threshold: Option<usize>,
+        response_schema: Option<&Value>,
     ) -> Value {
         let mut tools = api_tools.to_vec();
         // The hosted `image_generation` tool is only available to general
@@ -1435,6 +1446,22 @@ impl OpenAIProvider {
         // The provider filters against the actual request model before building.
         if let Some(service_tier) = service_tier {
             request["service_tier"] = serde_json::json!(service_tier);
+        }
+
+        // Native structured output. The Responses API carries this as
+        // `text.format`, not the Chat Completions `response_format`. The caller
+        // has already rejected schemas that cannot be strict, so anything
+        // arriving here is sent with `strict: true` and therefore enforced by
+        // the provider rather than merely requested in the prompt.
+        if let Some(schema) = response_schema {
+            request["text"] = serde_json::json!({
+                "format": {
+                    "type": "json_schema",
+                    "name": "structured_output",
+                    "strict": true,
+                    "schema": schema,
+                }
+            });
         }
 
         if let Some(compact_threshold) = native_compaction_threshold {

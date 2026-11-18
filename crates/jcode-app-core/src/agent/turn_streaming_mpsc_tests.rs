@@ -23,6 +23,7 @@ fn tool_call(name: &str, input: serde_json::Value) -> ToolCall {
         input,
         intent: None,
         thought_signature: None,
+        ..Default::default()
     }
 }
 

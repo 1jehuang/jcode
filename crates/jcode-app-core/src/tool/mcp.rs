@@ -343,6 +343,10 @@ impl Tool for McpCallTool {
         "mcp_call"
     }
 
+    fn category(&self) -> jcode_tool_core::TelemetryToolCategory {
+        jcode_tool_core::TelemetryToolCategory::Mcp
+    }
+
     fn description(&self) -> &str {
         "Internal compatibility alias for mcp action=call."
     }

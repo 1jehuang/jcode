@@ -992,6 +992,7 @@ fn bash_exposure_collects_file_and_line_hits() {
         }),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
     let content = "src/tool/lsp.rs:42:let status = auth_status();\n";
 

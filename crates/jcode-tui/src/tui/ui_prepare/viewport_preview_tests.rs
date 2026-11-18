@@ -72,6 +72,7 @@ fn tool_fixture() -> Vec<DisplayMessage> {
         input: serde_json::json!({"file_path":"src/main.rs", "old_string":"let old = 1;", "new_string":"let new = 2;"}),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     });
     messages.push(edit);
     messages.push(message("system", "Saved context".into()));

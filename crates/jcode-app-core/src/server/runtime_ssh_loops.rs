@@ -443,6 +443,7 @@ pub(super) async fn run_reserved_followups(
             result,
             None,
             event_tx.clone(),
+            None,
         )
         .await;
         if let Err(error) = &result {

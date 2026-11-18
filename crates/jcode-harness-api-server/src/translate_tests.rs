@@ -4100,3 +4100,46 @@ fn account_label_follows_the_daemons_routed_account() {
     state.note_models(&json!({"provider_oauth_account_label": null}));
     assert!(state.current_account.is_none());
 }
+
+/// The SDK asks for native structured output on `send_message`; the daemon
+/// only sees the legacy `message` frame, so the schema has to survive this
+/// hop. If it is dropped here the request silently degrades to prompt-and-pray
+/// while every layer above reports success.
+#[test]
+fn send_message_forwards_response_schema_to_legacy_message() {
+    let mut state = state_with_session();
+    let schema = json!({
+        "type": "object",
+        "properties": {"title": {"type": "string"}},
+        "required": ["title"],
+        "additionalProperties": false,
+    });
+    let out = state.api_request_to_legacy(&json!({
+        "req": "send_message",
+        "id": 2,
+        "session_id": "s1",
+        "content": "hi",
+        "response_schema": schema,
+    }));
+    let Outbound::Legacy(message) = &out[0] else {
+        panic!("expected legacy outbound");
+    };
+    assert_eq!(message["response_schema"], schema);
+}
+
+/// A turn that sets no schema must not gain the key at all, so the legacy
+/// frame stays byte-identical for every existing caller.
+#[test]
+fn send_message_without_schema_omits_the_key() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(
+        &json!({"req": "send_message", "id": 2, "session_id": "s1", "content": "hi"}),
+    );
+    let Outbound::Legacy(message) = &out[0] else {
+        panic!("expected legacy outbound");
+    };
+    assert!(
+        message.get("response_schema").is_none(),
+        "unschemaed message gained the key: {message}"
+    );
+}

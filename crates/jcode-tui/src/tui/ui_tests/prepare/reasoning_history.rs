@@ -126,6 +126,7 @@ fn test_prepare_messages_restored_history_matches_live_tool_rows() {
             input: serde_json::json!({"command": "git status"}),
             intent: Some("Check repo state".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
     let assistant = |tool_calls: Vec<String>| DisplayMessage {

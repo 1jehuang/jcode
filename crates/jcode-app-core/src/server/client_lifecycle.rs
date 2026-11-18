@@ -106,6 +106,7 @@ struct ProcessingMessage {
     active_skill: Option<String>,
     /// Retry on the next pool account after a usage limit (API clients).
     server_failover: bool,
+    response_schema: Option<serde_json::Value>,
 }
 
 // A client request ID is not a turn identity: clients can reuse it after cancel.
@@ -1164,6 +1165,7 @@ pub(super) async fn handle_client(
                 system_reminder,
                 active_skill,
                 no_reply,
+                response_schema,
             } => {
                 if no_reply {
                     append_context_message(
@@ -1200,6 +1202,7 @@ pub(super) async fn handle_client(
                         system_reminder,
                         active_skill,
                         server_failover: supports_server_failover,
+                        response_schema,
                     },
                     &client_session_id,
                     &mut ProcessingState {
@@ -1310,6 +1313,7 @@ pub(super) async fn handle_client(
                             system_reminder: None,
                             active_skill: None,
                             server_failover: supports_server_failover,
+                            response_schema: None,
                         },
                         &client_session_id,
                         &mut ProcessingState {
@@ -2483,7 +2487,7 @@ pub(super) async fn handle_client(
                             start_processing_message(
                                 ProcessingMessage {
                                     id, content, images: Vec::new(), system_reminder: None,
-                                    active_skill: None, server_failover: true,
+                                    active_skill: None, server_failover: true, response_schema: None,
                                 },
                                 &client_session_id,
                                 &mut ProcessingState {
@@ -3496,9 +3500,37 @@ pub(super) async fn process_message_streaming_mpsc(
     system_reminder: Option<String>,
     event_tx: tokio::sync::mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<()> {
+    process_message_streaming_mpsc_with_schema(
+        agent,
+        content,
+        images,
+        system_reminder,
+        event_tx,
+        None,
+    )
+    .await
+}
+
+/// As [`process_message_streaming_mpsc`], asking the provider to enforce
+/// `response_schema` natively for this turn when it supports it.
+pub(super) async fn process_message_streaming_mpsc_with_schema(
+    agent: Arc<Mutex<Agent>>,
+    content: &str,
+    images: Vec<(String, String)>,
+    system_reminder: Option<String>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<ServerEvent>,
+    response_schema: Option<serde_json::Value>,
+) -> Result<()> {
     let mut agent = agent.lock().await;
-    process_locked_message_streaming_mpsc(&mut agent, content, images, system_reminder, event_tx)
-        .await
+    process_locked_message_streaming_mpsc_with_schema(
+        &mut agent,
+        content,
+        images,
+        system_reminder,
+        event_tx,
+        response_schema,
+    )
+    .await
 }
 
 /// Same as [`process_message_streaming_mpsc`] for a caller that already holds
@@ -3524,6 +3556,27 @@ pub(super) async fn process_locked_message_streaming_mpsc(
     .await
 }
 
+pub(super) async fn process_locked_message_streaming_mpsc_with_schema(
+    agent: &mut Agent,
+    content: &str,
+    images: Vec<(String, String)>,
+    system_reminder: Option<String>,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+    response_schema: Option<serde_json::Value>,
+) -> Result<()> {
+    let lease = agent.claim_server_turn()?;
+    process_reserved_message_streaming_mpsc_with_schema(
+        agent,
+        &lease,
+        content,
+        images,
+        system_reminder,
+        event_tx,
+        response_schema,
+    )
+    .await
+}
+
 /// Execute only with this runtime's non-cloneable turn reservation.
 pub(super) async fn process_reserved_message_streaming_mpsc(
     agent: &mut Agent,
@@ -3533,10 +3586,39 @@ pub(super) async fn process_reserved_message_streaming_mpsc(
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<()> {
+    process_reserved_message_streaming_mpsc_with_schema(
+        agent,
+        lease,
+        content,
+        images,
+        system_reminder,
+        event_tx,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn process_reserved_message_streaming_mpsc_with_schema(
+    agent: &mut Agent,
+    lease: &crate::agent::TurnLease,
+    content: &str,
+    images: Vec<(String, String)>,
+    system_reminder: Option<String>,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+    response_schema: Option<serde_json::Value>,
+) -> Result<()> {
     agent.validate_server_turn(lease)?;
     let session_id = agent.session_id().to_string();
     let result = agent
-        .run_reserved_streaming_mpsc(lease, content, images, system_reminder, event_tx, None)
+        .run_reserved_streaming_mpsc(
+            lease,
+            content,
+            images,
+            system_reminder,
+            event_tx,
+            None,
+            response_schema,
+        )
         .await;
     if result.is_ok() {
         crate::runtime_memory_log::emit_event(

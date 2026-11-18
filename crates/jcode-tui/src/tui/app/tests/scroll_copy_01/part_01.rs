@@ -170,6 +170,7 @@ fn create_tool_error_copy_test_app() -> (App, ratatui::Terminal<ratatui::backend
                 input: serde_json::json!({"command": "cat /root/secret"}),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             },
         ),
     ];
@@ -199,6 +200,7 @@ fn create_tool_failed_output_copy_test_app()
                 input: serde_json::json!({"command": "cat /root/secret"}),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             },
         ),
     ];

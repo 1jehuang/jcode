@@ -176,6 +176,8 @@ export type ApiRequest =
       images?: ImageAttachment[];
       no_reply?: boolean;
       system_reminder?: string;
+      /** Advisory: providers ignore it when they have no native structured-output field. */
+      response_schema?: Record<string, unknown>;
     }
   | { req: "cancel"; session_id: string }
   | {

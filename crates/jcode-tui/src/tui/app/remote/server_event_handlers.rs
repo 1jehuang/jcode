@@ -32,6 +32,7 @@ pub(super) fn handle_tool_done(
         input: serde_json::Value::Null,
         intent: None,
         thought_signature: None,
+        ..Default::default()
     });
     app.commit_pending_streaming_assistant_message();
     crate::tui::mermaid::clear_streaming_preview_diagram();
@@ -81,6 +82,7 @@ pub(super) fn handle_generated_image(
         input,
         intent: Some("OpenAI native image generation".to_string()),
         thought_signature: None,
+        ..Default::default()
     };
     let summary = crate::message::generated_image_summary(
         &path,

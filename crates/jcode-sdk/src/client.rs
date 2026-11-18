@@ -869,6 +869,7 @@ impl JcodeClient {
             system_reminder: Some(reminder.to_string()),
             images: Vec::new(),
             no_reply: false,
+            response_schema: None,
         })
     }
 
@@ -889,9 +890,7 @@ impl JcodeClient {
         self.send_message_with_reminder(session_id, content, images, None, wait_for_accept)
     }
 
-    /// [`send_message`](Self::send_message) with a hidden system reminder
-    /// for this turn only, such as a collection's instructions. The reminder
-    /// guides the model without appearing in the visible transcript.
+    /// Send a message with a hidden reminder for this turn only.
     pub fn send_message_with_reminder(
         &self,
         session_id: &str,
@@ -899,6 +898,44 @@ impl JcodeClient {
         images: Vec<(String, String)>,
         system_reminder: Option<&str>,
         wait_for_accept: Option<Duration>,
+    ) -> Result<()> {
+        self.send_message_with_options(
+            session_id,
+            content,
+            images,
+            system_reminder,
+            wait_for_accept,
+            None,
+        )
+    }
+
+    /// Ask the provider to enforce a response schema for this turn when supported.
+    fn send_message_with_schema(
+        &self,
+        session_id: &str,
+        content: &str,
+        images: Vec<(String, String)>,
+        wait_for_accept: Option<Duration>,
+        response_schema: Option<serde_json::Value>,
+    ) -> Result<()> {
+        self.send_message_with_options(
+            session_id,
+            content,
+            images,
+            None,
+            wait_for_accept,
+            response_schema,
+        )
+    }
+
+    fn send_message_with_options(
+        &self,
+        session_id: &str,
+        content: &str,
+        images: Vec<(String, String)>,
+        system_reminder: Option<&str>,
+        wait_for_accept: Option<Duration>,
+        response_schema: Option<serde_json::Value>,
     ) -> Result<()> {
         // Subscribe *before* writing: an ack that lands between the write and
         // the subscribe would otherwise be missed and time out a healthy turn.
@@ -912,6 +949,7 @@ impl JcodeClient {
                 .map(str::to_owned),
             images,
             no_reply: false,
+            response_schema,
         })?;
         if let (Some(stream), Some(timeout)) = (stream, wait_for_accept) {
             let deadline = std::time::Instant::now() + timeout;
@@ -992,7 +1030,13 @@ impl JcodeClient {
         {
             ApiEvent::History {
                 messages, images, ..
-            } => Ok((messages, images)),
+            } => {
+                let pruned = messages
+                    .into_iter()
+                    .map(|msg| msg.prune_conversational_commentary())
+                    .collect();
+                Ok((pruned, images))
+            }
             other => Err(unexpected("history", &other)),
         }
     }
@@ -1009,7 +1053,13 @@ impl JcodeClient {
             })?
             .event
         {
-            ApiEvent::History { messages, .. } => Ok(messages),
+            ApiEvent::History { messages, .. } => {
+                let pruned = messages
+                    .into_iter()
+                    .map(|msg| msg.prune_conversational_commentary())
+                    .collect();
+                Ok(pruned)
+            }
             other => Err(unexpected("history", &other)),
         }
     }
@@ -1586,11 +1636,12 @@ impl JcodeClient {
     /// of one turn out. Streaming consumers should use `events()` instead.
     pub fn run(&self, session_id: &str, content: &str, options: RunOptions) -> Result<TurnResult> {
         let stream = self.events(Some(session_id));
-        self.send_message(
+        self.send_message_with_schema(
             session_id,
             content,
             options.images.clone(),
             Some(Duration::from_secs(10)),
+            options.response_schema.clone(),
         )?;
         let mut result = TurnResult::default();
         let mut text_stream = TextCollector::default();
@@ -1626,6 +1677,8 @@ impl JcodeClient {
                     name,
                     output,
                     error,
+                    strategic_reasoning_and_analysis: String::new(),
+                    tool_invocation_payload: String::new(),
                 }),
                 ApiEvent::TokenUsage {
                     input,

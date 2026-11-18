@@ -106,7 +106,12 @@ pub(super) async fn start_scriptable_login(
             let label = auth::claude::login_target_label(account_label)?;
             let (verifier, challenge) = auth::oauth::generate_pkce_public();
             let redirect_uri = auth::oauth::claude::REDIRECT_URI.to_string();
-            let auth_url = auth::oauth::claude_auth_url(&redirect_uri, &challenge, &verifier);
+            let auth_url = auth::oauth::claude_auth_url_with_org(
+                &redirect_uri,
+                &challenge,
+                &verifier,
+                options.org_uuid.as_deref(),
+            );
             (
                 PendingScriptableLogin::Claude {
                     account_label: label,

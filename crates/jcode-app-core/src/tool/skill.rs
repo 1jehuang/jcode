@@ -30,7 +30,7 @@ impl SkillTool {
 
 #[derive(Deserialize)]
 struct SkillInput {
-    /// Action to perform: load (default), list, reload, reload_all, read.
+    /// Action to perform: load (default), list, reload, reload_all, read, cache.
     /// `list` shows both loaded skills and the jcode-endorsed catalog.
     #[serde(default = "default_action")]
     action: String,
@@ -38,6 +38,9 @@ struct SkillInput {
     #[serde(alias = "skill")]
     #[serde(default)]
     name: Option<String>,
+    /// Optional subcommand for cache.
+    #[serde(default)]
+    subcommand: Option<String>,
     /// Optional Claude-compatible Skill wrapper argument. The skill loader only
     /// needs to load the prompt, so args are currently accepted and ignored.
     #[serde(default)]
@@ -65,12 +68,17 @@ impl Tool for SkillTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "enum": ["load", "list", "reload", "reload_all", "read"],
+                    "enum": ["load", "list", "reload", "reload_all", "read", "cache"],
                     "description": "Action."
                 },
                 "name": {
                     "type": "string",
                     "description": "Skill name."
+                },
+                "subcommand": {
+                    "type": "string",
+                    "enum": ["add", "remove", "clear", "list"],
+                    "description": "Subcommand for cache action."
                 }
             }
         })
@@ -94,8 +102,12 @@ impl Tool for SkillTool {
                 self.read_skill(params.name, ctx.working_dir.as_deref())
                     .await
             }
+            "cache" => {
+                self.cache_skill(params.subcommand, params.name, ctx.working_dir.as_deref())
+                    .await
+            }
             _ => Ok(ToolOutput::new(format!(
-                "Unknown action: {}. Use 'load', 'list', 'reload', 'reload_all', or 'read'.",
+                "Unknown action: {}. Use 'load', 'list', 'reload', 'reload_all', 'read', or 'cache'.",
                 params.action
             ))),
         }
@@ -110,6 +122,47 @@ impl Tool for SkillTool {
 }
 
 impl SkillTool {
+    async fn cache_skill(
+        &self,
+        subcommand: Option<String>,
+        name: Option<String>,
+        _working_dir: Option<&std::path::Path>,
+    ) -> Result<ToolOutput> {
+        let subcommand = subcommand
+            .ok_or_else(|| anyhow::anyhow!("'subcommand' is required for cache action"))?;
+        match subcommand.as_str() {
+            "add" => {
+                let name = normalize_skill_name(name, "add")?;
+                let mut registry = self.registry.write().await;
+                registry.add_to_cache(&name)?;
+                Ok(ToolOutput::new(format!("Added skill '{}' to cache.", name)))
+            }
+            "remove" => {
+                let name = normalize_skill_name(name, "remove")?;
+                let mut registry = self.registry.write().await;
+                registry.remove_from_cache(&name)?;
+                Ok(ToolOutput::new(format!(
+                    "Removed skill '{}' from cache.",
+                    name
+                )))
+            }
+            "clear" => {
+                let mut registry = self.registry.write().await;
+                registry.clear_cache()?;
+                Ok(ToolOutput::new("Cache cleared.".to_string()))
+            }
+            "list" => {
+                let registry = self.registry.read().await;
+                let skills = registry.list_cache()?;
+                Ok(ToolOutput::new(format!("Cached skills: {:?}", skills)))
+            }
+            _ => Ok(ToolOutput::new(format!(
+                "Unknown subcommand: {}. Use 'add', 'remove', 'clear', or 'list'.",
+                subcommand
+            ))),
+        }
+    }
+
     async fn load_skill(
         &self,
         name: Option<String>,

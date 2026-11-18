@@ -63,6 +63,11 @@ pub enum Request {
         /// acknowledges it without starting a model turn.
         #[serde(default, skip_serializing_if = "is_false")]
         no_reply: bool,
+        /// JSON Schema the provider should enforce natively for this turn.
+        /// Advisory: providers without a native structured-output field ignore
+        /// it, so the client still validates the response.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        response_schema: Option<serde_json::Value>,
     },
 
     /// Cancel current generation

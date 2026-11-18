@@ -202,6 +202,7 @@ fn localhost_native_harness() {
             images: vec![],
             system_reminder: None,
             no_reply: true,
+            response_schema: None,
         })
         .unwrap();
     assert!(matches!(stored.event, crate::ApiEvent::Ok));

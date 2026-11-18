@@ -14,6 +14,7 @@ fn discovery_message(content: &str, input: serde_json::Value) -> DisplayMessage 
             input,
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     }
 }
@@ -102,6 +103,7 @@ fn batched_discovery_renders_without_disclosure_notice() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 

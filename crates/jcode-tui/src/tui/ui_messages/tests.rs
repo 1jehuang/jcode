@@ -121,6 +121,7 @@ fn render_tool_message_compacts_every_multi_file_diff_header() {
             )}),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
     for width in [40, 72, 120] {
@@ -2109,6 +2110,7 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
             input: serde_json::json!({ "todos": todos, "goals": goals }),
             intent: Some("Track todo card work".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -2193,6 +2195,7 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
             input: serde_json::Value::Null,
             intent: Some("Refine the todo feedback loop".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -2310,6 +2313,7 @@ fn render_todo_plan_update_card_shows_only_changed_intent_fields() {
             input: serde_json::Value::Null,
             intent: Some("Reassess the user's intent".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -2433,6 +2437,7 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
             input: serde_json::Value::Null,
             intent: Some("Track implementation and browser verification".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     );
     assert!(initial.contains("pelican-bike-animation"), "{initial}");
@@ -2533,6 +2538,7 @@ fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
                 "Inspect starter files and strengthen measurable visual goals".to_string(),
             ),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -2614,6 +2620,7 @@ fn render_ownership_gated_todo_result_keeps_the_full_card() {
             input: serde_json::json!({ "todos": todos, "goals": goals }),
             intent: Some("Complete the full user outcome".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -2697,7 +2704,7 @@ fn render_tool_message_uses_scheduled_card() {
                 "wake_in_minutes": 1,
                 "target": "resume"
             }),
-            intent: None, thought_signature: None, }),
+            intent: None, thought_signature: None,  ..Default::default() }),
     };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off);
@@ -3070,6 +3077,7 @@ fn render_tool_message_prefers_subagent_title_with_model() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -3101,6 +3109,7 @@ fn render_tool_message_shows_intent_and_technical_preview_on_one_line() {
             }),
             intent: Some("Verify compact progress card".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -3132,6 +3141,7 @@ fn render_tool_message_hides_technical_preview_by_default() {
             }),
             intent: Some("Verify compact progress card".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -3167,6 +3177,7 @@ fn render_tool_message_keeps_error_summary_when_details_hidden() {
             }),
             intent: Some("Run the test suite".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -3206,6 +3217,7 @@ fn render_tool_message_shows_token_badge() {
             input: serde_json::json!({"file_path": "src/main.rs"}),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -3251,6 +3263,7 @@ fn render_tool_message_failures_keep_normal_headers_and_muted_reasons() {
                     input: input.clone(),
                     intent: intent.map(str::to_string),
                     thought_signature: None,
+                    ..Default::default()
                 }),
             };
             let lines = render_tool_message(&msg, 140, crate::config::DiffDisplayMode::Inline);
@@ -3328,6 +3341,7 @@ fn render_tool_message_mixed_batch_keeps_call_labels_and_nested_failure_reason()
                 {"tool": "read", "parameters": {"file_path": "文件.rs"}, "intent": "Read 文件"},
                 {"tool": "bash", "parameters": {"command": "true"}, "intent": "Check success"}
             ]}), intent: None, thought_signature: None,
+            ..Default::default()
         }),
     };
     let lines = render_tool_message(&msg, 140, crate::config::DiffDisplayMode::Off);
@@ -3380,6 +3394,7 @@ fn render_tool_message_batch_level_failure_does_not_invent_successful_children()
             input: serde_json::json!({"tool_calls": [{"tool": "read"}]}),
             intent: Some("Inspect sources".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -3399,6 +3414,7 @@ fn compact_error_rows_normalize_logged_wrappers_and_align_under_status() {
         input: serde_json::json!({"action": "build"}),
         intent: Some("Build UI".to_string()),
         thought_signature: None,
+        ..Default::default()
     });
     let lines = render_tool_message(&msg, 180, crate::config::DiffDisplayMode::Off);
     assert_eq!(lines.len(), 2);
@@ -3504,6 +3520,7 @@ fn render_tool_message_hides_bash_output() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -3529,6 +3546,7 @@ fn render_tool_message_shows_bash_output_when_enabled() {
             input: serde_json::json!({"command": "printf output"}),
             intent: Some("Print output".to_string()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -3576,6 +3594,7 @@ fn render_batch_tool_message_shows_flat_and_nested_subcall_intents() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 

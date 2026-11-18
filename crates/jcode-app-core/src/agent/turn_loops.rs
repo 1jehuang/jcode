@@ -420,6 +420,7 @@ impl Agent {
                                     input: serde_json::Value::Null,
                                     intent: None,
                                     thought_signature: None,
+                                    ..Default::default()
                                 },
                                 String::new(),
                             )
@@ -1244,7 +1245,7 @@ impl Agent {
                 let result = super::turn_streaming_mpsc::execute_with_background(
                     self.registry.clone(),
                     tc.name.clone(),
-                    tc.input.clone(),
+                    tc.execution_input(),
                     ctx,
                 )
                 .await;

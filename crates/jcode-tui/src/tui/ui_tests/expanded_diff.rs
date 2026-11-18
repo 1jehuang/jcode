@@ -17,6 +17,7 @@ fn expanded_diff_full_terminal_preserves_indentation_gutters_and_long_source() {
                         input: serde_json::json!({"file_path": "src/example.rs"}),
                         intent: Some("Update nested code".into()),
                         thought_signature: None,
+                        ..Default::default()
                     },
                 )],
                 messages_version: 2000 + u64::from(width) + u64::from(centered_mode),

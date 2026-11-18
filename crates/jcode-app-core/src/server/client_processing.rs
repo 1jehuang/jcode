@@ -201,6 +201,7 @@ pub(super) async fn start_processing_message(
         mut system_reminder,
         active_skill,
         server_failover,
+        response_schema,
     } = message;
     if server_reload_starting() {
         crate::logging::info(&format!(
@@ -359,6 +360,7 @@ pub(super) async fn start_processing_message(
                 system_reminder,
                 event_tx,
                 server_failover,
+                response_schema,
             ),
         ))
         .catch_unwind()

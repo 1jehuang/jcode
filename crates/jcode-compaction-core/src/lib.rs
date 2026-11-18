@@ -778,11 +778,6 @@ pub fn emergency_truncate_large_payloads(
     truncated
 }
 
-/// Whether a provider error is a deterministic rejection of an inline image
-/// (a 400 `invalid_request_error` naming an image block: unsupported
-/// `media_type`, undecodable data, dimension or animation limits). The same
-/// history would be rejected on every retry, so the agent strips images and
-/// retries once instead of leaving the session permanently broken (#1712).
 pub fn is_image_rejection_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     if is_request_payload_too_large_error(&lower) {
@@ -823,6 +818,124 @@ pub fn strip_all_images_in_contents(contents: &mut [&mut Vec<ContentBlock>]) -> 
         }
     }
     stripped
+}
+
+/// Files whose tool results are never folded, matched on any string in the
+/// originating `ToolUse` input. These files already reach the model through
+/// the system prompt every request; this keeps an explicit read of them
+/// verbatim in history as well.
+pub const FOLD_PROTECTED_FILES: [&str; 2] = ["prompt-overlay.md", "RUNTIME-CONTRACT.md"];
+
+/// Max chars kept from the head, signal and tail lines of a folded result.
+const FOLD_LINE_CHARS: usize = 120;
+
+/// Fold tool results older than the last `keep_recent` messages into one-line
+/// snapshots in the request view. Only `ToolResult` text is rewritten: user and
+/// assistant text, tool calls, reasoning, images and the system prompt (which
+/// carries the prompt overlays) are outside this function's reach by type.
+/// Error results and results of calls naming a `FOLD_PROTECTED_FILES` entry
+/// stay verbatim. Deterministic, so a folded prefix is byte-stable across
+/// turns and stays cache-warm. Returns the number of folded blocks.
+pub fn fold_old_tool_results(
+    messages: &mut [Message],
+    keep_recent: usize,
+    max_chars: usize,
+) -> usize {
+    if max_chars == 0 || messages.len() <= keep_recent {
+        return 0;
+    }
+    let protected: HashSet<String> = messages
+        .iter()
+        .flat_map(|msg| msg.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse { id, input, .. }
+                if FOLD_PROTECTED_FILES
+                    .iter()
+                    .any(|file| input.to_string().contains(file)) =>
+            {
+                Some(id.clone())
+            }
+            _ => None,
+        })
+        .collect();
+
+    // Pin the boundary to the start of a user turn. A boundary that slides one
+    // message per call folds a result the provider cached verbatim on the
+    // previous call, invalidating the whole prefix after it every turn
+    // (measured: 70k cache_write per call). Turn starts move only when the
+    // user speaks, so between those points the folded view is byte-stable.
+    let fold_end = messages[..messages.len() - keep_recent]
+        .iter()
+        .rposition(|msg| {
+            msg.role == Role::User
+                && msg
+                    .content
+                    .iter()
+                    .all(|block| !matches!(block, ContentBlock::ToolResult { .. }))
+        })
+        .unwrap_or(0);
+    let mut folded = 0;
+    for msg in &mut messages[..fold_end] {
+        for block in &mut msg.content {
+            if let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } = block
+                && !matches!(is_error, Some(true))
+                && content.len() > max_chars
+                && !protected.contains(tool_use_id)
+            {
+                *content = fold_tool_result(content);
+                folded += 1;
+            }
+        }
+    }
+    folded
+}
+
+/// One-line snapshot: size, first line, first error/exit/failure line, last line.
+fn fold_tool_result(content: &str) -> String {
+    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+    let clip = |line: &str| -> String {
+        let line = line.trim();
+        if line.chars().count() > FOLD_LINE_CHARS {
+            format!(
+                "{}…",
+                line.chars().take(FOLD_LINE_CHARS).collect::<String>()
+            )
+        } else {
+            line.to_string()
+        }
+    };
+    let head = lines.first().map(|l| clip(l)).unwrap_or_default();
+    let tail = lines.last().filter(|_| lines.len() > 1).map(|l| clip(l));
+    let signal = lines
+        .iter()
+        .find(|l| {
+            let low = l.to_ascii_lowercase();
+            low.contains("exit code")
+                || low.contains("error")
+                || low.contains("panicked")
+                || low.contains("failed")
+        })
+        .map(|l| clip(l))
+        .filter(|s| *s != head && tail.as_ref() != Some(s));
+    let mut out = format!(
+        "[folded tool result: {} chars, {} lines] {}",
+        content.len(),
+        lines.len(),
+        head
+    );
+    if let Some(signal) = signal {
+        out.push_str(" | ");
+        out.push_str(&signal);
+    }
+    if let Some(tail) = tail {
+        out.push_str(" … ");
+        out.push_str(&tail);
+    }
+    out
 }
 
 /// Whether a provider error indicates the *serialized request body* was too
@@ -1034,3 +1147,168 @@ mod tests;
 #[cfg(test)]
 #[path = "image_rejection_tests.rs"]
 mod image_rejection_tests;
+
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+
+    fn tool_pair(id: &str, input: &str, result: &str, is_error: bool) -> [Message; 2] {
+        [
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: id.to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({ "command": input }),
+                    thought_signature: None,
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: id.to_string(),
+                    content: result.to_string(),
+                    is_error: if is_error { Some(true) } else { None },
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+        ]
+    }
+
+    fn result_text(msg: &Message) -> &str {
+        match &msg.content[0] {
+            ContentBlock::ToolResult { content, .. } => content,
+            _ => panic!("not a tool result"),
+        }
+    }
+
+    fn user_turn(text: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn fold_rewrites_only_old_large_ok_tool_results() {
+        let big = (0..50)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut msgs: Vec<Message> = Vec::new();
+        msgs.extend(tool_pair("old", "cargo build", &big, false)); // 0,1
+        msgs.extend(tool_pair("err", "cargo test", &big, true)); // 2,3
+        msgs.push(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: big.clone(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        }); // 4
+        msgs.push(user_turn("next")); // 5: fold boundary
+        msgs.extend(tool_pair("recent", "ls", &big, false)); // 6,7
+
+        let folded = fold_old_tool_results(&mut msgs, 2, 100);
+        assert_eq!(folded, 1);
+        let snap = result_text(&msgs[1]);
+        assert!(snap.starts_with("[folded tool result: "), "{snap}");
+        assert!(
+            snap.contains("line 0") && snap.contains("line 49"),
+            "{snap}"
+        );
+        assert!(snap.len() < 200);
+        assert_eq!(result_text(&msgs[3]), big, "error results stay verbatim");
+        assert!(
+            matches!(&msgs[4].content[0], ContentBlock::Text { text, .. } if *text == big),
+            "assistant text is never folded"
+        );
+        assert_eq!(result_text(&msgs[7]), big, "recent results stay verbatim");
+    }
+
+    #[test]
+    fn fold_keeps_protected_overlay_files_verbatim() {
+        let big = "x".repeat(5_000);
+        let mut msgs: Vec<Message> = Vec::new();
+        for file in FOLD_PROTECTED_FILES {
+            msgs.extend(tool_pair(file, &format!("cat .jcode/{file}"), &big, false));
+        }
+        msgs.extend(tool_pair("plain", "cat README.md", &big, false));
+        msgs.push(user_turn("next"));
+        msgs.extend(tool_pair("tail", "pwd", "/", false));
+
+        let folded = fold_old_tool_results(&mut msgs, 2, 100);
+        assert_eq!(folded, 1, "only the unprotected read folds");
+        assert_eq!(result_text(&msgs[1]), big);
+        assert_eq!(result_text(&msgs[3]), big);
+        assert!(result_text(&msgs[5]).starts_with("[folded tool result: "));
+    }
+
+    #[test]
+    fn fold_boundary_is_pinned_to_a_user_turn_while_the_tail_grows() {
+        let big = "y".repeat(5_000);
+        let mut msgs: Vec<Message> = tool_pair("a", "x", &big, false).into();
+        msgs.push(user_turn("turn 2")); // 2
+        msgs.extend(tool_pair("b", "x", &big, false)); // 3,4
+        msgs.push(user_turn("turn 3")); // 5: open turn
+        let keep = 3;
+        // The open turn keeps producing tool calls. A sliding window would
+        // fold one more result on every call; the pinned boundary moves once
+        // (when "turn 3" is `keep` messages back) and the open turn's own
+        // results never fold.
+        let mut b_flips = 0;
+        let mut b_folded = false;
+        for i in 0..6 {
+            msgs.extend(tool_pair(&format!("c{i}"), "x", &big, false));
+            let mut view = msgs.clone();
+            fold_old_tool_results(&mut view, keep, 100);
+            let now = result_text(&view[4]).starts_with("[folded tool result: ");
+            if now != b_folded {
+                b_flips += 1;
+                b_folded = now;
+            }
+            for j in 0..=i {
+                assert_eq!(
+                    result_text(&view[7 + 2 * j]),
+                    big,
+                    "c{j} verbatim on call {i}"
+                );
+            }
+        }
+        assert_eq!(
+            b_flips, 1,
+            "boundary moves once per turn, not once per call"
+        );
+        assert!(
+            b_folded,
+            "previous turn folds once the open turn is `keep` deep"
+        );
+    }
+
+    #[test]
+    fn fold_is_deterministic_and_disabled_at_zero() {
+        let big = "a\nerror: boom\nb\n".repeat(100);
+        let mut a: Vec<Message> = tool_pair("t", "x", &big, false).into();
+        a.push(user_turn("next"));
+        a.extend(tool_pair("tail", "pwd", "/", false));
+        let mut b = a.clone();
+        assert_eq!(fold_old_tool_results(&mut a, 2, 100), 1);
+        assert_eq!(fold_old_tool_results(&mut b, 2, 100), 1);
+        assert_eq!(result_text(&a[1]), result_text(&b[1]));
+        assert!(result_text(&a[1]).contains("error: boom"));
+        let mut c: Vec<Message> = tool_pair("t", "x", &big, false).into();
+        c.push(user_turn("next"));
+        c.extend(tool_pair("tail", "pwd", "/", false));
+        assert_eq!(fold_old_tool_results(&mut c, 2, 0), 0);
+        assert_eq!(result_text(&c[1]), big);
+    }
+}

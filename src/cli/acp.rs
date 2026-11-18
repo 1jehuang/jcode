@@ -1194,6 +1194,7 @@ impl AcpRuntime {
                 system_reminder: None,
                 active_skill,
                 no_reply: false,
+                response_schema: None,
             })
             .await;
         if let Err(err) = send_result {

@@ -42,6 +42,7 @@ pub struct LoginOptions {
     pub openai_compatible_api_key: Option<String>,
     pub openai_compatible_api_key_env: Option<String>,
     pub openai_compatible_default_model: Option<String>,
+    pub org_uuid: Option<String>,
 }
 
 impl LoginOptions {
@@ -349,9 +350,13 @@ pub async fn run_login_provider(
             LoginProviderTarget::Jcode => login_jcode_flow(options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
-            LoginProviderTarget::Claude => login_claude_flow(account_label, options.no_browser)
-                .await
-                .map(|_| LoginFlowOutcome::Completed),
+            LoginProviderTarget::Claude => login_claude_flow(
+                account_label,
+                options.no_browser,
+                options.org_uuid.as_deref(),
+            )
+            .await
+            .map(|_| LoginFlowOutcome::Completed),
             LoginProviderTarget::ClaudeApiKey => {
                 login_anthropic_api_key_flow().map(|_| LoginFlowOutcome::Completed)
             }
@@ -608,30 +613,47 @@ fn login_openai_api_key_flow() -> Result<()> {
     Ok(())
 }
 
-async fn login_claude_flow(requested_label: Option<&str>, no_browser: bool) -> Result<()> {
+async fn login_claude_flow(
+    requested_label: Option<&str>,
+    no_browser: bool,
+    org_uuid: Option<&str>,
+) -> Result<()> {
     let label = auth::claude::login_target_label(requested_label)?;
     eprintln!("Logging in to Claude (account: {})...", label);
-    let tokens = auth::oauth::login_claude(no_browser).await?;
+    let tokens = auth::oauth::login_claude_with_org(no_browser, org_uuid).await?;
     auth::oauth::save_claude_tokens_for_account(&tokens, &label)?;
-    let profile_email =
-        match auth::oauth::update_claude_account_profile(&label, &tokens.access_token).await {
-            Ok(email) => email,
-            Err(e) => {
-                eprintln!(
-                    "Warning: logged in but failed to fetch profile metadata: {}",
-                    e
-                );
-                None
-            }
-        };
+    let profile_meta = match auth::oauth::fetch_claude_profile(&tokens.access_token).await {
+        Ok(meta) => {
+            let _ = auth::claude::update_account_profile(&label, meta.email.clone());
+            Some(meta)
+        }
+        Err(e) => {
+            eprintln!(
+                "Warning: logged in but failed to fetch profile metadata: {}",
+                e
+            );
+            None
+        }
+    };
     eprintln!("Successfully logged in to Claude!");
     eprintln!(
         "Account '{}' stored at {}",
         label,
         auth::claude::jcode_path()?.display()
     );
-    if let Some(email) = profile_email {
-        eprintln!("Profile email: {}", email);
+    if let Some(meta) = profile_meta {
+        if let Some(email) = meta.email {
+            eprintln!("Profile email: {}", email);
+        }
+        if let Some(org_name) = meta.organization_name {
+            if let Some(org_uuid) = meta.organization_uuid {
+                eprintln!("Organization: {} ({})", org_name, org_uuid);
+            } else {
+                eprintln!("Organization: {}", org_name);
+            }
+        } else if let Some(org_uuid) = meta.organization_uuid {
+            eprintln!("Organization UUID: {}", org_uuid);
+        }
     }
     crate::telemetry::record_auth_success("claude", "oauth");
     Ok(())

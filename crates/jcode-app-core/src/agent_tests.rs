@@ -3193,3 +3193,138 @@ async fn resume_heals_stale_credential_route_after_credential_type_change() {
         "workers inheriting the healed session must target the live credential"
     );
 }
+
+/// Records every native structured-output attach/clear so a test can prove the
+/// per-turn schema is released, including when the turn itself fails.
+struct SchemaRecordingProvider {
+    supports_strict: bool,
+    attached: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    clears: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl SchemaRecordingProvider {
+    fn new(supports_strict: bool) -> Self {
+        Self {
+            supports_strict,
+            attached: Arc::new(std::sync::Mutex::new(Vec::new())),
+            clears: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl Clone for SchemaRecordingProvider {
+    fn clone(&self) -> Self {
+        Self {
+            supports_strict: self.supports_strict,
+            attached: Arc::clone(&self.attached),
+            clears: Arc::clone(&self.clears),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for SchemaRecordingProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        anyhow::bail!("upstream refused the turn")
+    }
+
+    fn name(&self) -> &str {
+        "openrouter"
+    }
+
+    fn model(&self) -> String {
+        "test/model".to_string()
+    }
+
+    fn set_response_schema(&self, schema: &serde_json::Value) -> bool {
+        if !self.supports_strict {
+            return false;
+        }
+        self.attached.lock().unwrap().push(schema.clone());
+        true
+    }
+
+    fn clear_response_schema(&self) {
+        self.clears
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+/// A schema is per-turn state on the provider. If the turn fails, the schema
+/// must still come off, or every later completion on that session is silently
+/// constrained by a rejected request's schema.
+#[tokio::test]
+async fn failed_schema_turn_still_clears_the_provider_schema() {
+    let _guard = crate::storage::lock_test_env();
+    let recording = Arc::new(SchemaRecordingProvider::new(true));
+    let attached = Arc::clone(&recording.attached);
+    let clears = Arc::clone(&recording.clears);
+    let provider: Arc<dyn Provider> = recording;
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {"title": {"type": "string"}},
+        "required": ["title"],
+    });
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let result = agent
+        .run_once_streaming_mpsc_with_schema(
+            "give me a title",
+            Vec::new(),
+            None,
+            tx,
+            Some(schema.clone()),
+        )
+        .await;
+
+    assert!(result.is_err(), "the provider error must reach the caller");
+    assert_eq!(
+        attached.lock().unwrap().as_slice(),
+        [schema],
+        "the real schema never reached the provider"
+    );
+    assert_eq!(
+        clears.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the failed turn leaked its schema into later completions"
+    );
+}
+
+/// A provider without the capability must be asked once, refused, and never
+/// cleared: the caller's validation loop is the only guarantee in that case.
+#[tokio::test]
+async fn unsupported_provider_never_attaches_a_schema() {
+    let _guard = crate::storage::lock_test_env();
+    let recording = Arc::new(SchemaRecordingProvider::new(false));
+    let attached = Arc::clone(&recording.attached);
+    let clears = Arc::clone(&recording.clears);
+    let provider: Arc<dyn Provider> = recording;
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let _ = agent
+        .run_once_streaming_mpsc_with_schema(
+            "give me a title",
+            Vec::new(),
+            None,
+            tx,
+            Some(serde_json::json!({"type": "object", "properties": {}})),
+        )
+        .await;
+
+    assert!(attached.lock().unwrap().is_empty());
+    assert_eq!(clears.load(std::sync::atomic::Ordering::SeqCst), 0);
+}

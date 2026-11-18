@@ -1,6 +1,10 @@
 use super::*;
 use std::ffi::OsString;
 
+fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+    crate::storage::lock_test_env()
+}
+
 struct EnvVarGuard {
     key: &'static str,
     previous: Option<OsString>,
@@ -10,6 +14,18 @@ impl EnvVarGuard {
     fn set(key: &'static str, value: &std::path::Path) -> Self {
         let previous = std::env::var_os(key);
         crate::env::set_var(key, value);
+        Self { key, previous }
+    }
+
+    fn set_str(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, previous }
+    }
+
+    fn remove(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        crate::env::remove_var(key);
         Self { key, previous }
     }
 }

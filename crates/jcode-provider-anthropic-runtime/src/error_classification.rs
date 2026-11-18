@@ -36,6 +36,14 @@ pub(super) fn should_retry_recoverable_rate_limit(
         && retry_after.is_none_or(|delay| delay <= std::time::Duration::from_secs(5))
 }
 
+/// Account-wide API limits must reach the outer account failover layer.
+pub(super) fn is_account_rate_limit_error(error_str: &str) -> bool {
+    let normalized = error_str.to_lowercase().replace('’', "'");
+    normalized.contains("rate_limit_error")
+        && (normalized.contains("would exceed your account")
+            || normalized.contains("account's rate limit"))
+}
+
 /// Check if an error is transient and should be retried
 pub(super) fn is_retryable_error(error_str: &str) -> bool {
     jcode_provider_core::is_transient_transport_error(error_str)

@@ -331,6 +331,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             api_base,
             api_key,
             api_key_env,
+            org_uuid,
         }) => {
             let mut options = login::LoginOptions {
                 no_browser,
@@ -346,6 +347,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 openai_compatible_api_key: api_key,
                 openai_compatible_api_key_env: api_key_env,
                 openai_compatible_default_model: args.model.clone(),
+                org_uuid,
                 ..Default::default()
             };
             google.apply(&mut options)?;

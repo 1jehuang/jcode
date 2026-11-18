@@ -746,6 +746,7 @@ fn pinned_todos_hide_todo_tool_messages_from_the_transcript() {
                 input: serde_json::json!({"todos": []}),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             },
         ),
         DisplayMessage::tool(
@@ -756,6 +757,7 @@ fn pinned_todos_hide_todo_tool_messages_from_the_transcript() {
                 input: serde_json::json!({"file_path": "README.md"}),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             },
         ),
     ];
@@ -1253,7 +1255,11 @@ fn expanded_pinned_todo_band_scrolls_when_taller_than_budget() {
     crate::tui::ui::viewport::reset_pinned_todo_scroll();
 
     let (lines, _) = crate::tui::ui::viewport::pinned_todo_band_lines(&app, 80, 30);
-    assert!(lines.len() <= 21, "expanded band is bounded: {}", lines.len());
+    assert!(
+        lines.len() <= 21,
+        "expanded band is bounded: {}",
+        lines.len()
+    );
     assert!(lines[0].to_string().contains("scroll"));
     crate::tui::ui::viewport::publish_pinned_todo_scroll_for_test();
     assert!(crate::tui::ui::viewport::scroll_pinned_todos(3));

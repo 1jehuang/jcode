@@ -366,6 +366,7 @@ fn validate_auth_test_tool_smoke_transcript(
         input: input.clone(),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
     if let Some(error) = tool_call.validation_error() {
         anyhow::bail!("tool smoke emitted invalid tool call: {error}");

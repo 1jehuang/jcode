@@ -614,6 +614,7 @@ fn batch_progress_spans_show_running_subcall_detail() {
                 input: serde_json::json!({"command": "cargo test -p jcode"}),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             }],
             subcalls: Vec::new(),
         }),
@@ -645,6 +646,7 @@ fn batch_progress_spans_show_multiple_running_subcalls() {
                     input: serde_json::json!({"pattern": "foo", "path": "src"}),
                     intent: None,
                     thought_signature: None,
+                    ..Default::default()
                 },
                 crate::message::ToolCall {
                     id: "batch-1-bash".to_string(),
@@ -652,6 +654,7 @@ fn batch_progress_spans_show_multiple_running_subcalls() {
                     input: serde_json::json!({"command": "cargo build --release --workspace"}),
                     intent: None,
                     thought_signature: None,
+                    ..Default::default()
                 },
                 crate::message::ToolCall {
                     id: "batch-3-read".to_string(),
@@ -659,6 +662,7 @@ fn batch_progress_spans_show_multiple_running_subcalls() {
                     input: serde_json::json!({"file_path": "README.md"}),
                     intent: None,
                     thought_signature: None,
+                    ..Default::default()
                 },
             ],
             subcalls: Vec::new(),

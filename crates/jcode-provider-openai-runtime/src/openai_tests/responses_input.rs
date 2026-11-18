@@ -4,7 +4,9 @@ fn assistant_tool_use(id: &str, name: &str, input: serde_json::Value) -> ChatMes
         content: vec![ContentBlock::ToolUse {
             id: id.to_string(),
             name: name.to_string(),
-            input, thought_signature: None, }],
+            input,
+            thought_signature: None,
+        }],
         timestamp: None,
         tool_duration_ms: None,
     }
@@ -82,6 +84,7 @@ fn build_test_response_request(
         prompt_cache_key,
         prompt_cache_retention,
         native_compaction_threshold,
+        None,
     )
 }
 
@@ -208,8 +211,8 @@ fn test_build_responses_input_keeps_image_context_after_tool_output() {
 
 #[test]
 fn test_build_responses_input_replaces_oversized_native_compaction_with_text() {
-    let oversized =
-        "x".repeat(jcode_base::provider::openai_request::OPENAI_ENCRYPTED_CONTENT_SAFE_MAX_CHARS + 1);
+    let oversized = "x"
+        .repeat(jcode_base::provider::openai_request::OPENAI_ENCRYPTED_CONTENT_SAFE_MAX_CHARS + 1);
     let messages = vec![ChatMessage {
         role: Role::User,
         content: vec![ContentBlock::OpenAICompaction {
@@ -498,4 +501,203 @@ fn test_oauth_requests_never_send_api_cache_retention_controls() {
             assert!(request.get("prompt_cache_options").is_none(), "{model}");
         }
     }
+}
+
+/// The whole point of the native path: a schema handed to the request builder
+/// must leave as the Responses API's `text.format` json_schema block with
+/// `strict: true`. Without that field the request is prompt-and-pray, which is
+/// indistinguishable in a passing test unless the field itself is asserted.
+#[test]
+fn test_build_response_request_emits_native_json_schema_format() {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {"title": {"type": "string"}},
+        "required": ["title"],
+        "additionalProperties": false,
+    });
+    let request = OpenAIProvider::build_response_request(
+        "gpt-5.6-sol",
+        "system".to_string(),
+        &[],
+        &[],
+        false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&schema),
+    );
+
+    let format = &request["text"]["format"];
+    assert_eq!(format["type"], serde_json::json!("json_schema"));
+    assert_eq!(format["strict"], serde_json::json!(true));
+    assert_eq!(format["schema"]["properties"]["title"]["type"], "string");
+}
+
+/// A turn with no schema must be byte-identical to today's request: the native
+/// field is opt-in, so every ordinary turn keeps its existing shape.
+#[test]
+fn test_build_response_request_omits_text_format_without_schema() {
+    let request =
+        build_test_response_request("gpt-5.6-sol", false, None, None, None, None, None, None);
+    assert!(
+        request.get("text").is_none(),
+        "unschemaed turn gained a text field: {request}"
+    );
+}
+
+/// The graceful-fallback decision lives in `set_response_schema`'s return
+/// value: `false` is what sends the caller back to its own validate-and-retry
+/// loop. A schema OpenAI cannot enforce strictly must therefore be refused
+/// rather than sent in a mode that only asks for JSON, and an accepted one must
+/// come back normalized (so a strict request is never rejected for a missing
+/// `required`/`additionalProperties`).
+#[test]
+fn test_set_response_schema_refuses_schemas_strict_mode_cannot_enforce() {
+    let creds = CodexCredentials {
+        access_token: "test".to_string(),
+        refresh_token: String::new(),
+        id_token: None,
+        account_id: None,
+        expires_at: None,
+    };
+    let provider = OpenAIProvider::new(creds);
+
+    // `additionalProperties: true` is legal JSON Schema but not strictly
+    // enforceable, so the gate must close.
+    let unenforceable = serde_json::json!({
+        "type": "object",
+        "properties": {"title": {"type": "string"}},
+        "additionalProperties": true,
+    });
+    assert!(
+        !provider.set_response_schema(&unenforceable),
+        "an unenforceable schema was accepted, so the caller will never fall back"
+    );
+
+    let enforceable = serde_json::json!({
+        "type": "object",
+        "properties": {"title": {"type": "string"}},
+    });
+    assert!(
+        provider.set_response_schema(&enforceable),
+        "a strictly enforceable schema was refused, so the native path is dead code"
+    );
+    let stored = provider
+        .response_schema
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+        .expect("accepted schema was not stored");
+    assert_eq!(
+        stored["additionalProperties"],
+        serde_json::json!(false),
+        "accepted schema was stored un-normalized: {stored}"
+    );
+    assert_eq!(stored["required"], serde_json::json!(["title"]));
+
+    provider.clear_response_schema();
+    assert!(
+        provider
+            .response_schema
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_none(),
+        "clear left the schema attached, so the next turn would be constrained"
+    );
+}
+
+/// The request the runtime actually sends, built from provider state rather
+/// than from a directly-passed argument. This is the only assertion that
+/// covers the whole emit path: `set_response_schema` -> provider field ->
+/// `response_request_for_model` -> serialized body.
+#[test]
+fn test_generated_request_body_carries_json_schema_format_from_provider_state() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let creds = CodexCredentials {
+        access_token: "test".to_string(),
+        refresh_token: String::new(),
+        id_token: None,
+        account_id: None,
+        expires_at: None,
+    };
+    let provider = OpenAIProvider::new(creds);
+
+    let baseline = provider.response_request_for_model(
+        "gpt-5.6-sol",
+        &[serde_json::json!({"role": "user", "content": "hi"})],
+        &[],
+        "system",
+        false,
+    );
+    assert!(
+        baseline.get("text").is_none(),
+        "unstructured turn already carries a text field: {baseline}"
+    );
+
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["title"],
+    });
+    assert!(provider.set_response_schema(&schema));
+
+    let request = provider.response_request_for_model(
+        "gpt-5.6-sol",
+        &[serde_json::json!({"role": "user", "content": "hi"})],
+        &[],
+        "system",
+        false,
+    );
+
+    let format = &request["text"]["format"];
+    assert_eq!(
+        format["type"],
+        serde_json::json!("json_schema"),
+        "json_schema was not populated in the generated body: {request}"
+    );
+    assert_eq!(format["strict"], serde_json::json!(true));
+    assert_eq!(format["name"], serde_json::json!("structured_output"));
+    assert_eq!(
+        format["schema"]["properties"]["title"]["type"],
+        serde_json::json!("string"),
+        "the caller's schema did not survive into the body: {request}"
+    );
+    assert_eq!(
+        format["schema"]["properties"]["tags"]["items"]["type"],
+        serde_json::json!("string"),
+        "a nested schema node was lost: {request}"
+    );
+    // Strict mode requires every declared property listed as required and no
+    // open object, so normalization must already have expanded `required`
+    // beyond what the caller wrote (they listed only `title`).
+    assert_eq!(
+        format["schema"]["required"],
+        serde_json::json!(["tags", "title"]),
+        "strict normalization did not expand required: {request}"
+    );
+    assert_eq!(
+        format["schema"]["additionalProperties"],
+        serde_json::json!(false)
+    );
+
+    // Per-turn state: after the turn the next request must be plain again, or
+    // every later completion would be silently constrained.
+    provider.clear_response_schema();
+    let after = provider.response_request_for_model(
+        "gpt-5.6-sol",
+        &[serde_json::json!({"role": "user", "content": "hi"})],
+        &[],
+        "system",
+        false,
+    );
+    assert!(
+        after.get("text").is_none(),
+        "the schema leaked into the next turn: {after}"
+    );
 }

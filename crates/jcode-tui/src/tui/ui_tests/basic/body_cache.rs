@@ -889,6 +889,7 @@ fn read_tool_call(tool_id: &str) -> crate::message::ToolCall {
         input: serde_json::json!({"file_path": "shot.png"}),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     }
 }
 
@@ -1093,9 +1094,18 @@ fn test_full_prep_cache_drops_superseded_streaming_frames() {
     cache.insert(key_for(10, 80), prepared());
     cache.insert(key_for(20, 80), prepared());
 
-    assert!(cache.get_exact(&key_for(0, 80)).is_some(), "settled frame kept");
-    assert!(cache.get_exact(&key_for(10, 80)).is_none(), "stale stream frame dropped");
-    assert!(cache.get_exact(&key_for(20, 80)).is_some(), "newest stream frame kept");
+    assert!(
+        cache.get_exact(&key_for(0, 80)).is_some(),
+        "settled frame kept"
+    );
+    assert!(
+        cache.get_exact(&key_for(10, 80)).is_none(),
+        "stale stream frame dropped"
+    );
+    assert!(
+        cache.get_exact(&key_for(20, 80)).is_some(),
+        "newest stream frame kept"
+    );
 }
 
 #[test]

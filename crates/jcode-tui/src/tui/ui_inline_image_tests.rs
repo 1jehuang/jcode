@@ -680,6 +680,7 @@ fn unplaced_items_falls_back_for_missing_anchor_targets() {
         input: serde_json::Value::Null,
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
     let messages = vec![
         DisplayMessage::user("show me"),

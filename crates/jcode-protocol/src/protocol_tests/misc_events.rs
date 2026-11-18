@@ -578,6 +578,11 @@ fn test_message_request_roundtrip_preserves_images_and_system_reminder() -> Resu
         system_reminder: Some("be concise".to_string()),
         active_skill: Some("verification".to_string()),
         no_reply: true,
+        response_schema: Some(serde_json::json!({
+            "type": "object",
+            "properties": {"summary": {"type": "string"}},
+            "required": ["summary"],
+        })),
     };
     let json = serde_json::to_string(&req)?;
     let decoded = parse_request_json(&json)?;
@@ -588,6 +593,7 @@ fn test_message_request_roundtrip_preserves_images_and_system_reminder() -> Resu
         system_reminder,
         active_skill,
         no_reply,
+        response_schema,
     } = decoded
     else {
         return Err(anyhow!("expected Message"));
@@ -600,6 +606,13 @@ fn test_message_request_roundtrip_preserves_images_and_system_reminder() -> Resu
     assert_eq!(system_reminder.as_deref(), Some("be concise"));
     assert_eq!(active_skill.as_deref(), Some("verification"));
     assert!(no_reply);
+    // Present with the turn are both a system reminder and a schema; the
+    // schema must survive alongside the reminder rather than be dropped.
+    assert_eq!(
+        response_schema.expect("the schema was dropped by the wire roundtrip")["properties"]["summary"]
+            ["type"],
+        "string"
+    );
     Ok(())
 }
 
@@ -761,7 +774,13 @@ fn context_cap_wire_roundtrip() -> Result<()> {
 #[test]
 fn subscribe_and_resume_client_name_is_optional_and_compatible() {
     let old: Request = serde_json::from_str(r#"{"type":"subscribe","id":1}"#).unwrap();
-    assert!(matches!(old, Request::Subscribe { client_name: None, .. }));
+    assert!(matches!(
+        old,
+        Request::Subscribe {
+            client_name: None,
+            ..
+        }
+    ));
     let new: Request =
         serde_json::from_str(r#"{"type":"subscribe","id":1,"client_name":"jcode-ios/1.0"}"#)
             .unwrap();
@@ -772,7 +791,13 @@ fn subscribe_and_resume_client_name_is_optional_and_compatible() {
         r#"{"type":"resume_session","id":2,"session_id":"s","client_name":"jcode-ios/1.0"}"#,
     )
     .unwrap();
-    assert!(matches!(resume, Request::ResumeSession { client_name: Some(_), .. }));
+    assert!(matches!(
+        resume,
+        Request::ResumeSession {
+            client_name: Some(_),
+            ..
+        }
+    ));
     let json = serde_json::to_string(&old).unwrap();
     assert!(!json.contains("client_name"));
 }

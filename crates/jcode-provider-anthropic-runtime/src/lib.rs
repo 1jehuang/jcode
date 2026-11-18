@@ -2137,6 +2137,15 @@ async fn run_stream_with_retries(
                     continue;
                 }
 
+                // This account-scoped response is not a transient transport
+                // failure. Stop retrying this account, but preserve the
+                // original error so the outer provider failover layer can
+                // classify it and try another configured account.
+                if is_account_rate_limit_error(&error_str) {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+
                 // Check if this is a transient/retryable error
                 let since_first_failure = first_failure_at
                     .get_or_insert_with(std::time::Instant::now)

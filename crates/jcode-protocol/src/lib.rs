@@ -281,6 +281,38 @@ pub struct HistoryMessage {
     pub tool_data: Option<ToolCall>,
 }
 
+impl HistoryMessage {
+    /// Return a pruned copy with conversational commentary stripped, retaining
+    /// only machine-verifiable data structures between execution turns.
+    pub fn prune_conversational_commentary(&self) -> Self {
+        let pruned_content = if self.tool_data.is_some() || self.tool_calls.is_some() {
+            self.content
+                .lines()
+                .filter(|line| {
+                    let trimmed = line.trim();
+                    trimmed.starts_with('{')
+                        || trimmed.starts_with('[')
+                        || trimmed.contains("exit code")
+                        || trimmed.contains("status")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else if self.role == "system" {
+            self.content.clone()
+        } else {
+            String::new()
+        };
+
+        Self {
+            response_stats: self.response_stats.clone(),
+            role: self.role.clone(),
+            content: pruned_content,
+            tool_calls: self.tool_calls.clone(),
+            tool_data: self.tool_data.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionActivitySnapshot {
     pub is_processing: bool,

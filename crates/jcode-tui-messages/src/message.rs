@@ -463,6 +463,7 @@ mod tests {
                 input,
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             }),
         }
     }

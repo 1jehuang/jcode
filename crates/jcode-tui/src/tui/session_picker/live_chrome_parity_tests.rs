@@ -45,6 +45,7 @@ fn picker_history_uses_identical_live_message_rendering_and_wrapping() {
                 input: serde_json::json!({"command": "echo hello"}),
                 intent: Some("Check the preview".into()),
                 thought_signature: None,
+                ..Default::default()
             }),
         },
     );

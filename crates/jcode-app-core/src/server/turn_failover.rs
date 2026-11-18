@@ -173,6 +173,7 @@ pub(super) async fn process_message_with_server_failover(
         system_reminder,
         event_tx,
         enabled,
+        None,
     )
     .await
 }
@@ -186,22 +187,32 @@ pub(super) async fn process_reserved_message_with_server_failover(
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
     enabled: bool,
+    response_schema: Option<serde_json::Value>,
 ) -> anyhow::Result<()> {
     let reminder = system_reminder.clone();
     let mut guard = agent.lock().await;
-    let result = super::client_lifecycle::process_reserved_message_streaming_mpsc(
+    let result = super::client_lifecycle::process_reserved_message_streaming_mpsc_with_schema(
         &mut guard,
         lease,
         content,
         images,
         system_reminder,
         event_tx.clone(),
+        response_schema.clone(),
     )
     .await;
     if !enabled && result.is_err() {
         return result;
     }
-    retry_turn_with_server_failover(&mut guard, lease, result, reminder, event_tx.clone()).await?;
+    retry_turn_with_server_failover(
+        &mut guard,
+        lease,
+        result,
+        reminder,
+        event_tx.clone(),
+        response_schema,
+    )
+    .await?;
     super::runtime_ssh_loops::run_reserved_followups(&mut guard, lease, event_tx).await
 }
 
@@ -247,7 +258,7 @@ pub(super) async fn process_reserved_locked_message_with_server_failover(
         event_tx.clone(),
     )
     .await;
-    retry_turn_with_server_failover(agent, lease, result, reminder, event_tx.clone()).await?;
+    retry_turn_with_server_failover(agent, lease, result, reminder, event_tx.clone(), None).await?;
     super::runtime_ssh_loops::run_reserved_followups(agent, lease, event_tx).await
 }
 
@@ -281,6 +292,7 @@ pub(super) async fn retry_turn_with_server_failover(
     mut result: anyhow::Result<()>,
     reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
+    response_schema: Option<serde_json::Value>,
 ) -> anyhow::Result<()> {
     agent.validate_server_turn(lease)?;
     let mut attempts = 0;
@@ -307,7 +319,12 @@ pub(super) async fn retry_turn_with_server_failover(
         }
         attempts += 1;
         result = agent
-            .continue_turn_after_failover(lease, reminder.clone(), event_tx.clone())
+            .continue_turn_after_failover(
+                lease,
+                reminder.clone(),
+                event_tx.clone(),
+                response_schema.clone(),
+            )
             .await;
     }
     result

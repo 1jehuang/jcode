@@ -1778,6 +1778,22 @@ fn detects_live_fable_scoped_limit_errors_without_misrouting_other_limits() {
 }
 
 #[test]
+fn detects_account_scoped_rate_limit_errors_without_misrouting_other_limits() {
+    assert!(is_account_rate_limit_error(
+        r#"Anthropic API error (429 Too Many Requests): {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Please try again later."}}"#,
+    ));
+    assert!(is_account_rate_limit_error(
+        "rate_limit_error: this request would exceed your account’s rate limit",
+    ));
+    assert!(!is_account_rate_limit_error(
+        "429 overloaded_error: service temporarily overloaded",
+    ));
+    assert!(!is_account_rate_limit_error(
+        r#"429 {"type":"rate_limit_error","message":"You have reached your weekly Fable limit"}"#,
+    ));
+}
+
+#[test]
 fn ping_keepalive_emits_streaming_phase_event() {
     // Issue #451: during silent reasoning phases, `ping` events can be the
     // only upstream traffic. They must surface as a StreamEvent so the client

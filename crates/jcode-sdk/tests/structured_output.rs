@@ -245,6 +245,39 @@ fn exhaustion_reports_every_bounded_attempt_and_last_parse_error() {
 }
 
 #[test]
+fn max_retries_is_strictly_capped_at_two_attempts() {
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&prompts);
+    let client = fake_harness(move |frame, writer| {
+        if let ApiRequest::SendMessage {
+            session_id,
+            content,
+            ..
+        } = &frame.request
+        {
+            seen.lock().unwrap().push(content.clone());
+            send_turn(writer, session_id, "invalid json format");
+        }
+    });
+    let mut options = RunStructuredOptions::new(schema());
+    options.max_retries = 10;
+
+    let error = client
+        .run_structured::<Summary>("s1", "Return a summary", options)
+        .expect_err("must exhaust after ceiling");
+
+    let RunStructuredError::InvalidOutput(error) = error else {
+        panic!("expected invalid output error");
+    };
+    assert_eq!(error.attempts.len(), 2, "must not exceed 2 attempts");
+    assert_eq!(
+        prompts.lock().unwrap().len(),
+        2,
+        "must not issue more than 2 prompts"
+    );
+}
+
+#[test]
 fn invalid_schema_fails_before_any_model_turn() {
     let requests = Arc::new(Mutex::new(0usize));
     let seen = Arc::clone(&requests);

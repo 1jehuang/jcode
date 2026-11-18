@@ -613,6 +613,7 @@ fn send_system_reminder_is_hidden_and_does_not_wait_for_acceptance() {
             system_reminder: Some("continue task".into()),
             images: vec![],
             no_reply: false,
+            response_schema: None,
         }
     );
 }
@@ -1247,4 +1248,68 @@ fn tool_names_arrive_before_any_arguments_and_interleaved_inputs_keep_call_ids()
             matches!(events.next_timeout(Duration::from_secs(5)), Some(ApiEvent::ToolInputDelta { call_id, delta, .. }) if call_id == id && delta == fragment)
         );
     }
+}
+
+/// The reason this feature exists: the provider must receive the caller's real
+/// schema, not a placeholder. A `None` on the wire leaves the model
+/// unconstrained and the local validate-and-retry loop remains the only
+/// guarantee, so this asserts the JSON Schema itself arrives intact.
+#[test]
+fn run_structured_sends_the_callers_schema_on_the_wire() {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {"title": {"type": "string"}},
+        "required": ["title"],
+        "additionalProperties": false,
+    });
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = std::sync::Arc::clone(&seen);
+    let client = fake_harness(move |frame, writer| {
+        captured
+            .lock()
+            .expect("request log")
+            .push(frame.request.clone());
+        reply(frame, ApiEvent::Ok, writer);
+        push(
+            ApiEvent::TextDelta {
+                session_id: "s1".to_string(),
+                text: "{\"title\":\"ok\"}".to_string(),
+                message_id: None,
+            },
+            writer,
+        );
+        push(
+            ApiEvent::TurnDone {
+                session_id: "s1".to_string(),
+                pending_soft_interrupts: None,
+            },
+            writer,
+        );
+    });
+
+    let result = client
+        .run_structured::<serde_json::Value>(
+            "s1",
+            "give me a title",
+            jcode_sdk::RunStructuredOptions::new(schema.clone()),
+        )
+        .expect("a valid model answer must succeed");
+
+    assert_eq!(result.data["title"], serde_json::json!("ok"));
+
+    let requests = seen.lock().expect("request log");
+    let sent = requests
+        .iter()
+        .find_map(|request| match request {
+            ApiRequest::SendMessage {
+                response_schema, ..
+            } => Some(response_schema.clone()),
+            _ => None,
+        })
+        .expect("no SendMessage frame was sent");
+    assert_eq!(
+        sent,
+        Some(schema),
+        "the caller's schema did not reach the harness; the provider cannot enforce it"
+    );
 }

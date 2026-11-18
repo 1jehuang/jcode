@@ -1029,6 +1029,7 @@ impl Server {
                     Some(reminder),
                     events.sender(),
                     true,
+                    None,
                 )
                 .await;
 

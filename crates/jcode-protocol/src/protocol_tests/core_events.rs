@@ -135,10 +135,31 @@ fn test_request_roundtrip() -> Result<()> {
         system_reminder: None,
         active_skill: Some("verification".to_string()),
         no_reply: false,
+        response_schema: Some(serde_json::json!({
+            "type": "object",
+            "properties": {"title": {"type": "string"}},
+            "required": ["title"],
+        })),
     };
     let json = serde_json::to_string(&req)?;
     let decoded = parse_request_json(&json)?;
     assert_eq!(decoded.id(), 1);
+    // The schema is only useful if the far side can read it back; a field that
+    // serializes but does not survive parsing is a silently unenforced turn.
+    match decoded {
+        Request::Message {
+            response_schema, ..
+        } => assert_eq!(
+            response_schema,
+            Some(serde_json::json!({
+                "type": "object",
+                "properties": {"title": {"type": "string"}},
+                "required": ["title"],
+            })),
+            "response_schema was dropped by the wire roundtrip"
+        ),
+        other => return Err(anyhow::anyhow!("expected Message, got {other:?}")),
+    }
     Ok(())
 }
 
@@ -1034,10 +1055,9 @@ fn history_prefix_fingerprint_is_stable_and_streaming_consistent() {
 
 #[test]
 fn history_delta_fields_are_backward_compatible() {
-    let event: ServerEvent = serde_json::from_str(
-        r#"{"type":"history","id":1,"session_id":"s","messages":[]}"#,
-    )
-    .expect("legacy History without messages_base_count");
+    let event: ServerEvent =
+        serde_json::from_str(r#"{"type":"history","id":1,"session_id":"s","messages":[]}"#)
+            .expect("legacy History without messages_base_count");
     let ServerEvent::History {
         messages_base_count,
         ..

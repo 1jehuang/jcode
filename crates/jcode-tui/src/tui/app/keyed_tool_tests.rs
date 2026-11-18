@@ -7,6 +7,7 @@ fn tool(id: &str) -> ToolCall {
         input: serde_json::Value::Null,
         intent: None,
         thought_signature: None,
+        ..Default::default()
     }
 }
 

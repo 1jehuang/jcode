@@ -1253,6 +1253,7 @@ fn test_submit_input_commits_pending_streaming_assistant_text_before_user_messag
             input: serde_json::json!({"file_path": "src/main.rs"}),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         },
     ));
     app.bump_display_messages_version();

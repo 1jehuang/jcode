@@ -57,6 +57,7 @@ fn fingerprint_changes_on_content_role_count_and_tool_data() {
         input: serde_json::json!({"command": "ls"}),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     });
     assert_ne!(fp, history_payload_fingerprint(&tool));
 

@@ -323,6 +323,7 @@ fn benchmark_resume_content_matrix() {
                                 input: json!({"command":"synthetic benchmark output", "intent":"benchmark fixture, never executed"}),
                                 intent: None,
                                 thought_signature: None,
+                                ..Default::default()
                             });
                         }
                         _ => {
@@ -337,6 +338,7 @@ fn benchmark_resume_content_matrix() {
                                 input: json!({"file_path":"src/example.rs", "old_string":"let previous = 1;\n".repeat(120), "new_string":"let updated = 2;\n".repeat(120)}),
                                 intent: None,
                                 thought_signature: None,
+                                ..Default::default()
                             });
                         }
                     }

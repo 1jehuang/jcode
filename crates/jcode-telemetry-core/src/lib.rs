@@ -924,37 +924,32 @@ fn update_active_days(id: &str) -> (u32, u32) {
         return (0, 0);
     };
     let today = Utc::now().date_naive();
-    let mut days = std::fs::read_to_string(&path)
-        .ok()
-        .into_iter()
-        .flat_map(|text| {
-            text.lines()
-                .map(str::trim)
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .filter_map(|line| NaiveDate::parse_from_str(&line, "%Y-%m-%d").ok())
-        .collect::<Vec<_>>();
-    days.push(today);
-    days.sort_unstable();
-    days.dedup();
-    let rendered = days
-        .iter()
-        .map(NaiveDate::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
-    write_private_file(&path, &rendered);
-    let days_7 = days
-        .iter()
-        .filter(|day| (today.signed_duration_since(**day).num_days()) < 7)
-        .count()
-        .min(u32::MAX as usize) as u32;
-    let days_30 = days
-        .iter()
-        .filter(|day| (today.signed_duration_since(**day).num_days()) < 30)
-        .count()
-        .min(u32::MAX as usize) as u32;
-    (days_7, days_30)
+    locked_update(&path, |text| {
+        let mut days = text
+            .lines()
+            .map(str::trim)
+            .filter_map(|line| NaiveDate::parse_from_str(line, "%Y-%m-%d").ok())
+            .collect::<Vec<_>>();
+        days.push(today);
+        days.sort_unstable();
+        days.dedup();
+        let rendered = days
+            .iter()
+            .map(NaiveDate::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let days_7 = days
+            .iter()
+            .filter(|day| (today.signed_duration_since(**day).num_days()) < 7)
+            .count()
+            .min(u32::MAX as usize) as u32;
+        let days_30 = days
+            .iter()
+            .filter(|day| (today.signed_duration_since(**day).num_days()) < 30)
+            .count()
+            .min(u32::MAX as usize) as u32;
+        (rendered, (days_7, days_30))
+    })
 }
 
 fn detect_project_profile() -> ProjectProfile {
@@ -1073,7 +1068,15 @@ fn mark_command_family_usage(state: &mut SessionTelemetry, command: &str) {
 }
 
 fn mark_tool_feature_usage(state: &mut SessionTelemetry, name: &str, input: &Value) {
-    let category = classify_tool_category(name);
+    mark_tool_feature_usage_in(state, classify_tool_category(name), name, input);
+}
+
+fn mark_tool_feature_usage_in(
+    state: &mut SessionTelemetry,
+    category: ToolCategory,
+    name: &str,
+    input: &Value,
+) {
     increment_tool_category(state, category);
     if let Some(turn) = state.current_turn.as_mut() {
         increment_turn_tool_category(turn, category);
@@ -2660,6 +2663,24 @@ pub fn record_todo_gate(kind: TodoGateKind) {
 }
 
 pub fn record_tool_execution(name: &str, input: &Value, succeeded: bool, latency_ms: u64) {
+    record_tool_execution_in(
+        classify_tool_category(name),
+        name,
+        input,
+        succeeded,
+        latency_ms,
+    );
+}
+
+/// Like `record_tool_execution`, with the family supplied by the tool itself
+/// (`Tool::category`) rather than re-derived from its name.
+pub fn record_tool_execution_in(
+    category: ToolCategory,
+    name: &str,
+    input: &Value,
+    succeeded: bool,
+    latency_ms: u64,
+) {
     if let Ok(mut guard) = SESSION_STATE.lock()
         && let Some(ref mut state) = *guard
     {
@@ -2673,7 +2694,7 @@ pub fn record_tool_execution(name: &str, input: &Value, succeeded: bool, latency
             turn.tool_latency_max_ms = turn.tool_latency_max_ms.max(latency_ms);
             update_turn_activity_timestamp(turn, now);
         }
-        match classify_tool_category(name) {
+        match category {
             ToolCategory::Subagent => {
                 state.subagent_task_count = state.subagent_task_count.saturating_add(1);
                 if succeeded {
@@ -2705,7 +2726,7 @@ pub fn record_tool_execution(name: &str, input: &Value, succeeded: bool, latency
             .background_task_count
             .saturating_add(state.subagent_task_count)
             .saturating_add(state.swarm_task_count);
-        mark_tool_feature_usage(state, name, input);
+        mark_tool_feature_usage_in(state, category, name, input);
         if succeeded {
             state.executed_tool_successes += 1;
             if let Some(turn) = state.current_turn.as_mut() {

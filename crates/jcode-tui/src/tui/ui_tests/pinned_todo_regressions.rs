@@ -238,6 +238,7 @@ fn hidden_todo(payload: &str) -> DisplayMessage {
             input: serde_json::json!({}),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     }
 }

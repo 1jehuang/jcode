@@ -1,6 +1,17 @@
 use super::*;
 use crate::{terminal_eprintln as eprintln, terminal_println as println};
 
+/// Clears a per-turn response schema when the turn ends, including on early
+/// return and on panic. Owns a provider handle rather than borrowing it, so the
+/// turn can still take `&mut self`.
+pub(crate) struct ResponseSchemaGuard(Arc<dyn Provider>);
+
+impl Drop for ResponseSchemaGuard {
+    fn drop(&mut self) {
+        self.0.clear_response_schema();
+    }
+}
+
 impl Agent {
     /// Refuse to run a model turn when this session moved to another machine
     /// or this in-memory copy is older than the transcript on disk.
@@ -125,6 +136,27 @@ impl Agent {
         .await
     }
 
+    /// As [`Self::run_once_streaming_mpsc`], asking the provider to enforce
+    /// `response_schema` natively for this turn when it supports it.
+    pub async fn run_once_streaming_mpsc_with_schema(
+        &mut self,
+        user_message: &str,
+        images: Vec<(String, String)>,
+        system_reminder: Option<String>,
+        event_tx: mpsc::UnboundedSender<ServerEvent>,
+        response_schema: Option<serde_json::Value>,
+    ) -> Result<()> {
+        self.run_once_streaming_mpsc_with_display_role_and_schema(
+            user_message,
+            images,
+            system_reminder,
+            event_tx,
+            None,
+            response_schema,
+        )
+        .await
+    }
+
     pub(crate) async fn run_once_streaming_mpsc_with_display_role(
         &mut self,
         user_message: &str,
@@ -132,6 +164,32 @@ impl Agent {
         system_reminder: Option<String>,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
         display_role: Option<crate::session::StoredDisplayRole>,
+    ) -> Result<()> {
+        self.run_once_streaming_mpsc_with_display_role_and_schema(
+            user_message,
+            images,
+            system_reminder,
+            event_tx,
+            display_role,
+            None,
+        )
+        .await
+    }
+
+    /// As [`Self::run_once_streaming_mpsc_with_display_role`], additionally
+    /// asking the provider to enforce `response_schema` natively.
+    ///
+    /// The schema is set immediately before the turn and cleared immediately
+    /// after, on every exit path, because the provider is shared across turns
+    /// and `Provider::complete_split` runs once per tool-loop iteration.
+    pub(crate) async fn run_once_streaming_mpsc_with_display_role_and_schema(
+        &mut self,
+        user_message: &str,
+        images: Vec<(String, String)>,
+        system_reminder: Option<String>,
+        event_tx: mpsc::UnboundedSender<ServerEvent>,
+        display_role: Option<crate::session::StoredDisplayRole>,
+        response_schema: Option<serde_json::Value>,
     ) -> Result<()> {
         let lease = self.claim_server_turn()?;
         self.run_reserved_streaming_mpsc(
@@ -141,6 +199,7 @@ impl Agent {
             system_reminder,
             event_tx,
             display_role,
+            response_schema,
         )
         .await
     }
@@ -154,6 +213,7 @@ impl Agent {
         system_reminder: Option<String>,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
         display_role: Option<crate::session::StoredDisplayRole>,
+        response_schema: Option<serde_json::Value>,
     ) -> Result<()> {
         self.validate_server_turn(lease)?;
         let _runtime_activity =
@@ -209,6 +269,18 @@ impl Agent {
         if let Some(reminder) = system_reminder {
             self.append_turn_system_reminder(&reminder)?;
         }
+        // Native structured output for this turn only. A provider without the
+        // capability returns false and the caller's own validation loop stays
+        // the only guarantee.
+        // Attached after the fallible append, and cleared by a guard rather
+        // than by hand: an early return or a panic inside the turn would
+        // otherwise leave the schema on the provider and silently constrain
+        // every later completion.
+        let _schema_guard = response_schema
+            .as_ref()
+            .filter(|schema| self.provider.set_response_schema(schema))
+            .map(|_| ResponseSchemaGuard(Arc::clone(&self.provider)));
+
         crate::telemetry::record_turn();
         let turn_started_at = Instant::now();
         let start_message_index = self.message_count();
@@ -227,6 +299,7 @@ impl Agent {
         lease: &TurnLease,
         system_reminder: Option<String>,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
+        response_schema: Option<serde_json::Value>,
     ) -> Result<()> {
         self.validate_server_turn(lease)?;
         if self.is_graceful_shutdown() {
@@ -235,6 +308,10 @@ impl Agent {
         // The original attempt already persisted the turn's reminder in the
         // transcript, so the retried request carries it unchanged.
         let _ = system_reminder;
+        let _schema_guard = response_schema
+            .as_ref()
+            .filter(|schema| self.provider.set_response_schema(schema))
+            .map(|_| ResponseSchemaGuard(Arc::clone(&self.provider)));
         let turn_started_at = Instant::now();
         let start_message_index = self.message_count();
         self.fire_turn_start_hook("failover");

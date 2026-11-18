@@ -93,6 +93,7 @@ fn test_prepare_messages_places_live_swarm_card_beneath_matching_spawn_tool_call
                 }),
                 intent: Some("Spawn an authentication reviewer".to_string()),
                 thought_signature: None,
+                ..Default::default()
             }),
         }],
         swarm_members: vec![chat_swarm_member(session_id)],
@@ -186,6 +187,7 @@ fn test_prepare_messages_keeps_transcript_card_stable_with_nested_descendants() 
                 input: serde_json::json!({"action": "spawn", "label": "API reviewer"}),
                 intent: Some("Spawn an authentication reviewer".to_string()),
                 thought_signature: None,
+                ..Default::default()
             }),
         }],
         transcript_swarm_members: Some(vec![
@@ -244,6 +246,7 @@ fn test_prepare_messages_uses_exact_spawn_member_outside_gallery_subtree() {
                 input: serde_json::json!({"action": "spawn", "label": "API reviewer"}),
                 intent: Some("Spawn an authentication reviewer".to_string()),
                 thought_signature: None,
+                ..Default::default()
             }),
         }],
         // Simulate a stale/missing ownership edge excluding the member from the
@@ -281,6 +284,7 @@ fn test_prepare_messages_matches_real_prefixed_spawn_result_without_input_metada
                 input: serde_json::Value::Null,
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             }),
         }],
         swarm_members: vec![chat_swarm_member(session_id)],
@@ -314,6 +318,7 @@ fn test_prepare_messages_does_not_attach_member_to_unmatched_spawn_result() {
                 input: serde_json::json!({"action": "spawn", "label": "reviewer"}),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             }),
         }],
         swarm_members: vec![chat_swarm_member("spawned-session-123")],
@@ -349,6 +354,7 @@ fn test_prepare_messages_matches_spawn_member_by_unique_label_when_result_is_ref
                 input: serde_json::json!({"action": "spawn", "label": "API reviewer"}),
                 intent: Some("Spawn an authentication reviewer".to_string()),
                 thought_signature: None,
+                ..Default::default()
             }),
         }],
         swarm_members: vec![member],
@@ -386,6 +392,7 @@ fn test_prepare_messages_does_not_guess_when_spawn_label_is_ambiguous() {
                 input: serde_json::json!({"action": "spawn", "label": "reviewer"}),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             }),
         }],
         swarm_members: vec![first, second],
@@ -428,6 +435,7 @@ fn test_prepare_messages_live_batch_rows_do_not_soft_wrap_on_narrow_width() {
                 }),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             }],
             subcalls: vec![crate::bus::BatchSubcallProgress {
                 index: 1,
@@ -439,6 +447,7 @@ fn test_prepare_messages_live_batch_rows_do_not_soft_wrap_on_narrow_width() {
                     }),
                     intent: None,
                     thought_signature: None,
+                    ..Default::default()
                 },
                 state: crate::bus::BatchSubcallState::Running,
             }],
@@ -491,6 +500,7 @@ fn test_prepare_messages_centered_live_batch_rows_keep_dedicated_padding_span() 
                 }),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             }],
             subcalls: vec![crate::bus::BatchSubcallProgress {
                 index: 1,
@@ -502,6 +512,7 @@ fn test_prepare_messages_centered_live_batch_rows_keep_dedicated_padding_span() 
                     }),
                     intent: None,
                     thought_signature: None,
+                    ..Default::default()
                 },
                 state: crate::bus::BatchSubcallState::Running,
             }],
@@ -561,6 +572,7 @@ fn test_prepare_messages_shows_live_batch_progress_in_chat_history() {
                 input: serde_json::json!({"command": "cargo build --release --workspace"}),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             }],
             subcalls: vec![
                 crate::bus::BatchSubcallProgress {
@@ -571,6 +583,7 @@ fn test_prepare_messages_shows_live_batch_progress_in_chat_history() {
                         input: serde_json::json!({"file_path": "Cargo.toml"}),
                         intent: None,
                         thought_signature: None,
+                        ..Default::default()
                     },
                     state: crate::bus::BatchSubcallState::Succeeded,
                 },
@@ -582,6 +595,7 @@ fn test_prepare_messages_shows_live_batch_progress_in_chat_history() {
                         input: serde_json::json!({"command": "cargo build --release --workspace"}),
                         intent: None,
                         thought_signature: None,
+                        ..Default::default()
                     },
                     state: crate::bus::BatchSubcallState::Running,
                 },
@@ -651,6 +665,7 @@ fn test_prepare_messages_places_live_batch_after_committed_assistant_text() {
                 input: serde_json::json!({"file_path": "src/main.rs"}),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             }],
             subcalls: vec![crate::bus::BatchSubcallProgress {
                 index: 1,
@@ -660,6 +675,7 @@ fn test_prepare_messages_places_live_batch_after_committed_assistant_text() {
                     input: serde_json::json!({"file_path": "src/main.rs"}),
                     intent: None,
                     thought_signature: None,
+                    ..Default::default()
                 },
                 state: crate::bus::BatchSubcallState::Running,
             }],
@@ -704,6 +720,7 @@ fn test_prepare_messages_live_batch_spinner_advances_between_frames() {
             input: serde_json::json!({"command": "sleep 1"}),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }],
         subcalls: vec![crate::bus::BatchSubcallProgress {
             index: 1,
@@ -713,6 +730,7 @@ fn test_prepare_messages_live_batch_spinner_advances_between_frames() {
                 input: serde_json::json!({"command": "sleep 1"}),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             },
             state: crate::bus::BatchSubcallState::Running,
         }],
@@ -780,6 +798,7 @@ fn test_prepare_messages_live_batch_centered_mode_uses_left_aligned_padding() {
                 input: serde_json::json!({"file_path": "Cargo.toml"}),
                 intent: None,
                 thought_signature: None,
+                ..Default::default()
             }],
             subcalls: vec![crate::bus::BatchSubcallProgress {
                 index: 1,
@@ -789,6 +808,7 @@ fn test_prepare_messages_live_batch_centered_mode_uses_left_aligned_padding() {
                     input: serde_json::json!({"file_path": "Cargo.toml"}),
                     intent: None,
                     thought_signature: None,
+                    ..Default::default()
                 },
                 state: crate::bus::BatchSubcallState::Running,
             }],
@@ -904,6 +924,7 @@ fn test_prepare_messages_tool_row_refreshes_after_message_version_bump() {
         input: serde_json::json!({"file_path": "src/main.rs"}),
         intent: None,
         thought_signature: None,
+        ..Default::default()
     };
 
     let placeholder = DisplayMessage {
@@ -1081,6 +1102,7 @@ fn test_render_tool_message_batch_nested_subcall_params_still_render() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -1118,6 +1140,7 @@ fn test_render_tool_message_batch_flat_grep_subcall_uses_pattern_and_path() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -1157,6 +1180,7 @@ fn test_render_tool_message_batch_subcall_lines_alignment_unset() {
             }),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
     };
 
@@ -1243,6 +1267,7 @@ fn assert_thinking_tool_adjacency(embedded_assistant: bool, compact: bool) {
             input: serde_json::json!({"command": "true"}),
             intent: Some(title.into()),
             thought_signature: None,
+            ..Default::default()
         }),
     };
     let state = TestState {

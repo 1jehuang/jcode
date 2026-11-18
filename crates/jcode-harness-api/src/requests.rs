@@ -100,6 +100,15 @@ pub enum ApiRequest {
         /// Persist the message as context without starting a model turn.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         no_reply: bool,
+        /// JSON Schema the provider should enforce natively for this turn.
+        ///
+        /// Advisory and per-turn: a provider with no native structured-output
+        /// field, or whose field cannot enforce this schema, ignores it, so
+        /// clients must still validate the response. Omitted from the wire
+        /// when absent, which keeps the frame byte-identical for the existing
+        /// callers that never set it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        response_schema: Option<serde_json::Value>,
     },
 
     /// Replace the attached session's tool configuration.

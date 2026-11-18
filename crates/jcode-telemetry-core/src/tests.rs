@@ -1834,3 +1834,85 @@ fn telemetry_categories_gate_events_independently() {
     assert!(content_sharing_enabled());
     assert_eq!(category_settings(), [true; 6]);
 }
+
+/// Re-entry point for `locked_update_survives_parallel_processes`: a child
+/// test process appends one line under the lock and exits. Selected by env so
+/// the same test binary serves as the worker.
+#[test]
+fn locked_update_child_worker() {
+    let Ok(path) = std::env::var("JCODE_TELEMETRY_LOCK_PROBE_PATH") else {
+        return;
+    };
+    let tag = std::env::var("JCODE_TELEMETRY_LOCK_PROBE_TAG").unwrap_or_default();
+    let path = std::path::PathBuf::from(path);
+    locked_update(&path, |text| {
+        // Widen the race window: a sleep between read and write makes an
+        // unlocked implementation lose lines deterministically.
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let mut lines: Vec<&str> = text.lines().collect();
+        lines.push(&tag);
+        (lines.join("\n"), ())
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn locked_update_survives_parallel_processes() {
+    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let path = temp.path().join("telemetry_probe.txt");
+    let exe = std::env::current_exe().expect("test binary path");
+    let workers = 8;
+    let children: Vec<_> = (0..workers)
+        .map(|i| {
+            std::process::Command::new(&exe)
+                .arg("tests::locked_update_child_worker")
+                .arg("--exact")
+                .arg("--quiet")
+                .env("JCODE_TELEMETRY_LOCK_PROBE_PATH", &path)
+                .env("JCODE_TELEMETRY_LOCK_PROBE_TAG", format!("worker-{i}"))
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn worker")
+        })
+        .collect();
+    for mut child in children {
+        assert!(child.wait().expect("wait worker").success());
+    }
+    let text = std::fs::read_to_string(&path).expect("probe file");
+    let mut lines: Vec<&str> = text.lines().collect();
+    lines.sort_unstable();
+    let expected: Vec<String> = (0..workers).map(|i| format!("worker-{i}")).collect();
+    assert_eq!(
+        lines, expected,
+        "every parallel process's line must survive; got:\n{text}"
+    );
+    assert!(
+        path.with_extension("lock").exists(),
+        "sibling lock file is created"
+    );
+}
+
+#[test]
+fn record_tool_execution_in_counts_the_declared_family_not_the_name() {
+    let _guard = lock_telemetry_test_state();
+    if let Ok(mut session) = SESSION_STATE.lock() {
+        *session = None;
+    }
+    begin_session_with_mode("openai", "gpt-5.4", None, false);
+    record_turn();
+    // By name, "mcp_call" is unknown to the table and lands in Other.
+    record_tool_execution("mcp_call", &serde_json::json!({}), true, 1);
+    // By declared family (what the registry now passes from Tool::category).
+    record_tool_execution_in(
+        ToolCategory::Mcp,
+        "mcp_call",
+        &serde_json::json!({}),
+        true,
+        1,
+    );
+    let guard = SESSION_STATE.lock().unwrap();
+    let state = guard.as_ref().expect("session telemetry state");
+    assert_eq!(state.tool_cat_other, 1);
+    assert_eq!(state.tool_cat_mcp, 1);
+}

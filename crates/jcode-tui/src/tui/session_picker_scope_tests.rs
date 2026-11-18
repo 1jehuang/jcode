@@ -124,6 +124,7 @@ fn preview_renders_pinned_todos_global_prompt_numbers_and_hides_todo_tool_cards(
             input: serde_json::json!({"todos": []}),
             intent: None,
             thought_signature: None,
+            ..Default::default()
         }),
         duration_secs: None,
         title: None,

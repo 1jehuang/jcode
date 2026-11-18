@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use jcode_agent_runtime::InterruptSignal;
 use jcode_message_types::ToolDefinition;
 use jcode_tool_types::ToolOutput;
+pub use jcode_usage_types::{TelemetryToolCategory, classify_telemetry_tool_category};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -152,6 +153,14 @@ pub trait Tool: Send + Sync {
 
     /// Execute the tool with the given input.
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput>;
+
+    /// Canonical family for telemetry and policy. The default derives it from
+    /// the registered name so existing tools need no change; a tool whose
+    /// family is not a function of its name (an MCP proxy, a composite
+    /// tool) overrides this instead of growing the name table.
+    fn category(&self) -> TelemetryToolCategory {
+        classify_telemetry_tool_category(self.name())
+    }
 
     /// Convert to API tool definition.
     fn to_definition(&self) -> ToolDefinition {
@@ -309,5 +318,57 @@ mod escape_hatch_tests {
         // ever diverge, the flag would be advertised but never honored, which is
         // worse than not offering it at all.
         assert_eq!(ACCEPT_LARGE_OUTPUT_KEY, "accept_large_output");
+    }
+
+    struct NamedOnly(&'static str);
+    #[async_trait]
+    impl Tool for NamedOnly {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn description(&self) -> &str {
+            ""
+        }
+        fn parameters_schema(&self) -> Value {
+            serde_json::json!({})
+        }
+        async fn execute(&self, _: Value, _: ToolContext) -> Result<ToolOutput> {
+            unreachable!()
+        }
+    }
+
+    struct Declared;
+    #[async_trait]
+    impl Tool for Declared {
+        fn name(&self) -> &str {
+            "mcp_call"
+        }
+        fn category(&self) -> TelemetryToolCategory {
+            TelemetryToolCategory::Mcp
+        }
+        fn description(&self) -> &str {
+            ""
+        }
+        fn parameters_schema(&self) -> Value {
+            serde_json::json!({})
+        }
+        async fn execute(&self, _: Value, _: ToolContext) -> Result<ToolOutput> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn category_defaults_to_the_name_table_and_can_be_declared() {
+        assert_eq!(NamedOnly("bash").category(), TelemetryToolCategory::Shell);
+        assert_eq!(
+            NamedOnly("mcp__gh__pr").category(),
+            TelemetryToolCategory::Mcp
+        );
+        // The name table does not know this name; the trait does.
+        assert_eq!(
+            NamedOnly("mcp_call").category(),
+            TelemetryToolCategory::Other
+        );
+        assert_eq!(Declared.category(), TelemetryToolCategory::Mcp);
     }
 }

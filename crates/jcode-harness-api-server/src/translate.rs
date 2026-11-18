@@ -668,6 +668,9 @@ impl BridgeState {
                 if let Some(reminder) = request["system_reminder"].as_str() {
                     message["system_reminder"] = json!(reminder);
                 }
+                if let Some(schema) = request.get("response_schema").filter(|v| !v.is_null()) {
+                    message["response_schema"] = schema.clone();
+                }
                 if let Some(images) = request["images"].as_array()
                     && !images.is_empty()
                 {
