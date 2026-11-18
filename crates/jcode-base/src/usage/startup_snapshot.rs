@@ -93,6 +93,33 @@ fn socket_identity(_socket: &Path) -> Option<SocketIdentity> {
     None
 }
 
+/// Count the complete compact JSON representation without retaining its bytes.
+/// Keep serialization fallible, including non-UTF-8 socket path errors.
+fn serialized_byte_len(value: &impl Serialize) -> serde_json::Result<u64> {
+    struct Counter(u64);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.write_all(bytes)?;
+            Ok(bytes.len())
+        }
+
+        fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(|| std::io::Error::other("serialized snapshot length overflow"))?;
+            Ok(())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value)?;
+    Ok(counter.0)
+}
+
 impl AccountUsageStartupPublisher {
     pub fn new(socket: &Path, instance_id: &str) -> Option<Self> {
         let socket = normalized_socket(socket)?;
@@ -137,7 +164,7 @@ impl AccountUsageStartupPublisher {
             anthropic: strip_email(anthropic),
             openai: strip_email(openai),
         };
-        if serde_json::to_vec(&snapshot)?.len() as u64 > MAX_BYTES {
+        if serialized_byte_len(&snapshot)? > MAX_BYTES {
             return Ok(());
         }
         // Private directory and private atomic replacement. Quotas and labels
@@ -269,6 +296,10 @@ fn discard_expired_windows(accounts: &mut [AccountUsageSnapshot], now_ms: u64) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "startup_snapshot_sizing_tests.rs"]
+mod sizing_tests;
 
 #[cfg(all(test, unix))]
 mod tests {
