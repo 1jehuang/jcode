@@ -575,16 +575,22 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
         content: vec![ContentBlock::Text {
             text: prompt.to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
 
-    let mut provider_name = provider.name().to_string();
-    let mut model = provider.model();
+    // Cache counter semantics belong to the API transport, not the reseller
+    // or compute backend named by an UpstreamProvider event.
+    let provider_name = provider.name().to_string();
+    let model = provider.model();
     let response = provider.complete(&messages, &[], system, None).await?;
     let mut result = String::new();
-    let mut usage = SimpleCompletionUsage::default();
+    let mut usage = SimpleCompletionUsage {
+        requested_model: Some(model.clone()),
+        ..Default::default()
+    };
     tokio::pin!(response);
 
     while let Some(event) = response.next().await {
@@ -599,7 +605,6 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
                 cache_read_input_tokens,
                 cache_creation_input_tokens,
             }) => {
-                model = provider.model();
                 usage.observe(
                     input_tokens,
                     output_tokens,
@@ -607,7 +612,19 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
                     cache_creation_input_tokens,
                 );
             }
-            Ok(StreamEvent::UpstreamProvider { provider }) => provider_name = provider,
+            Ok(StreamEvent::ResolvedModel { model }) => {
+                if let Some(model) = nonempty_response_model(Some(&model)) {
+                    usage.resolved_model = Some(model.to_owned());
+                }
+            }
+            Ok(StreamEvent::RetryRollback { .. }) => {
+                result.clear();
+                usage = SimpleCompletionUsage {
+                    requested_model: Some(model.clone()),
+                    ..Default::default()
+                };
+            }
+            Ok(StreamEvent::UpstreamProvider { .. }) => {}
             Ok(StreamEvent::MessageEnd { stop_reason })
                 if is_guardrail_stop_reason(stop_reason.as_deref()) =>
             {
@@ -668,6 +685,8 @@ pub fn is_guardrail_stop_reason(stop_reason: Option<&str>) -> bool {
 #[derive(Debug)]
 pub struct SimpleCompletionError {
     pub usage: SimpleCompletionUsage,
+    /// Request API transport, retained for correct usage/cache normalization.
+    /// This is not the upstream compute vendor returned by a gateway.
     pub provider: String,
     pub model: String,
     source: anyhow::Error,
@@ -707,12 +726,21 @@ impl std::error::Error for SimpleCompletionError {
 /// input tokens and a final event with output tokens). Each field keeps the
 /// latest value reported, matching how the agent turn loop treats repeated
 /// `TokenUsage` events (they are cumulative snapshots, not deltas).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SimpleCompletionUsage {
+    /// Model requested before the call, including private routing aliases.
+    pub requested_model: Option<String>,
+    /// Actual model explicitly reported by this response, never inferred.
+    pub resolved_model: Option<String>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cache_read_input_tokens: Option<u64>,
     pub cache_creation_input_tokens: Option<u64>,
+}
+
+/// Normalize optional response metadata without falling back to a configured ID.
+pub fn nonempty_response_model(model: Option<&str>) -> Option<&str> {
+    model.map(str::trim).filter(|model| !model.is_empty())
 }
 
 impl SimpleCompletionUsage {
@@ -845,84 +873,11 @@ impl NativeToolResult {
 
 /// Canonical User-Agent for generic outbound Jcode HTTP requests.
 pub const JCODE_USER_AGENT: &str = concat!("jcode/", env!("CARGO_PKG_VERSION"));
-
-/// Read an HTTP error body without hiding failures behind an empty string.
-///
-/// This is useful after a non-success status when the response is about to be
-/// converted into an error. If reading the body itself fails, the returned text
-/// preserves that failure so callers can include it in their error message.
-pub async fn http_error_body(response: reqwest::Response, context: &str) -> String {
-    match response.text().await {
-        Ok(body) => body,
-        Err(err) => format!("<failed to read {context} response body: {err}>"),
-    }
-}
-
-/// Shared HTTP client for all generic provider requests. Creating a `reqwest::Client` is expensive
-/// (~10ms due to TLS init, connection pool setup), so we reuse a single instance. Provider-specific
-/// transports may override the User-Agent on individual requests when they intentionally need to
-/// match an official client.
-pub fn shared_http_client() -> reqwest::Client {
-    use std::sync::OnceLock;
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .user_agent(JCODE_USER_AGENT)
-                .connect_timeout(Duration::from_secs(15))
-                .tcp_keepalive(Some(Duration::from_secs(30)))
-                // Proactively detect half-dead pooled HTTP/2 connections before we
-                // reuse them. Without keepalive pings, a stale multiplexed connection
-                // (common behind NAT/VPN/proxy or flaky Wi-Fi) surfaces as
-                // "http2 error: stream error received: unspecific protocol error".
-                // Pinging while idle lets reqwest drop the connection instead.
-                .http2_keep_alive_interval(Some(Duration::from_secs(30)))
-                .http2_keep_alive_timeout(Duration::from_secs(15))
-                .http2_keep_alive_while_idle(true)
-                .pool_idle_timeout(Duration::from_secs(90))
-                .pool_max_idle_per_host(8)
-                .build()
-                .unwrap_or_else(|err| {
-                    eprintln!("jcode: failed to build shared provider HTTP client: {err}");
-                    match reqwest::Client::builder()
-                        .user_agent(JCODE_USER_AGENT)
-                        .build()
-                    {
-                        Ok(client) => client,
-                        Err(fallback_err) => {
-                            eprintln!(
-                                "jcode: failed to build fallback provider HTTP client: {fallback_err}"
-                            );
-                            reqwest::Client::new()
-                        }
-                    }
-                })
-        })
-        .clone()
-}
-
-/// Fresh HTTP client for transport-fault retries.
-///
-/// Retrying on the shared pooled client can reuse *other* idle connections
-/// established through the same broken network path (corrupting middlebox,
-/// flaky NAT/VPN) that produced a TLS fault like `BadRecordMac` - so the
-/// retry fails the same way. This client disables connection pooling, which
-/// guarantees the retry opens a brand-new TCP+TLS connection (the property
-/// that makes transport-fault retries actually succeed). Building a client
-/// costs ~10ms, which is fine on a retry path that already backs off >=1s.
-pub fn fresh_transport_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .user_agent(JCODE_USER_AGENT)
-        .connect_timeout(Duration::from_secs(15))
-        .tcp_keepalive(Some(Duration::from_secs(30)))
-        .http2_keep_alive_interval(Some(Duration::from_secs(30)))
-        .http2_keep_alive_timeout(Duration::from_secs(15))
-        .http2_keep_alive_while_idle(true)
-        // No pooled reuse: every request gets a fresh connection.
-        .pool_max_idle_per_host(0)
-        .build()
-        .unwrap_or_else(|_| shared_http_client())
-}
+#[path = "lib_http_client.rs"]
+mod http_client;
+pub use http_client::fresh_transport_client;
+pub use http_client::http_error_body;
+pub use http_client::shared_http_client;
 
 #[derive(Debug, Clone)]
 pub struct NativeCompactionResult {

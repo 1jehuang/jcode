@@ -12,6 +12,231 @@ fn uncached_mobile_state() -> MobileSyncState {
 }
 
 #[test]
+fn generated_images_are_bounded_private_thumbnails() {
+    use base64::Engine;
+    let _lock = storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _env = TestEnv::set(&[("JCODE_HOME", home.path().as_os_str())]);
+    let root = home.path().join("generated-images");
+    std::fs::create_dir(&root).unwrap();
+    let image_path = root.join("generated.png");
+    image::RgbImage::from_pixel(1500, 1200, image::Rgb([30, 80, 200]))
+        .save(&image_path)
+        .unwrap();
+    let markdown = format!("![Generated image]({})", image_path.display());
+    let images = generated_images(&format!("{markdown}\n{markdown}"));
+    assert_eq!(
+        images.len(),
+        1,
+        "duplicate references must not duplicate bytes"
+    );
+    assert_eq!(images[0].media_type, "image/jpeg");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&images[0].data)
+        .unwrap();
+    assert!(bytes.len() <= 256 * 1024);
+    let decoded = image::load_from_memory(&bytes).unwrap();
+    assert!(decoded.width() <= 1024 && decoded.height() <= 1024);
+    let outside = home.path().join("private.png");
+    std::fs::copy(&image_path, &outside).unwrap();
+    assert!(generated_images(&format!("![private]({})", outside.display())).is_empty());
+    assert!(generated_images(&format!("![private]({}/../private.png)", root.display())).is_empty());
+    #[cfg(unix)]
+    {
+        let link = root.join("escape.png");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert!(generated_images(&format!("![escape]({})", link.display())).is_empty());
+    }
+    assert!(generated_images(&format!("[not an image]({})", image_path.display())).is_empty());
+    let mut session = Session::create_with_id("generated-test".into(), None, None);
+    session.add_message(Role::User, vec![text_block(markdown.clone())]);
+    session.add_message(Role::Assistant, vec![text_block(markdown)]);
+    let messages = wire_messages(&session, 0);
+    assert!(messages[0].images.is_empty());
+    assert_eq!(messages[1].images.len(), 1);
+}
+
+fn attachment_block() -> ContentBlock {
+    use base64::Engine;
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::RgbImage::from_pixel(1400, 1100, image::Rgb([10, 80, 170]))
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .unwrap();
+    ContentBlock::Image {
+        media_type: "image/png".into(),
+        data: base64::engine::general_purpose::STANDARD.encode(bytes.into_inner()),
+    }
+}
+
+#[test]
+fn gif_and_webp_attachments_are_decoded_into_bounded_wire_thumbnails() {
+    use base64::Engine;
+    for (format, media_type) in [
+        (image::ImageFormat::Gif, "image/gif"),
+        (image::ImageFormat::WebP, "image/webp"),
+    ] {
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(1400, 1100, image::Rgba([10, 80, 170, 255]))
+            .write_to(&mut encoded, format)
+            .unwrap();
+        let encoded = encoded.into_inner();
+        assert_eq!(image::guess_format(&encoded).unwrap(), format);
+        let mut session = Session::create_with_id("encoded-attachments-test".into(), None, None);
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Image {
+                media_type: media_type.into(),
+                data: base64::engine::general_purpose::STANDARD.encode(encoded),
+            }],
+        );
+        let messages = wire_messages(&session, 0);
+        assert_eq!(messages.len(), 1, "{media_type} image-only row disappeared");
+        assert_eq!(messages[0].images.len(), 1, "{media_type} was discarded");
+        let thumbnail = &messages[0].images[0];
+        assert_eq!(thumbnail.media_type, "image/jpeg");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&thumbnail.data)
+            .unwrap();
+        assert!(bytes.len() <= 256 * 1024);
+        assert_eq!(
+            image::guess_format(&bytes).unwrap(),
+            image::ImageFormat::Jpeg
+        );
+        let decoded = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (1024, 805));
+    }
+}
+
+#[test]
+fn visible_user_tool_and_image_only_attachments_survive_wire_serialization() {
+    use base64::Engine;
+    let mut session = Session::create_with_id("attachments-test".into(), None, None);
+    let image = attachment_block();
+    session.add_message(
+        Role::User,
+        vec![image.clone(), text_block("My screenshot".into())],
+    );
+    session.add_message(Role::User, vec![image.clone()]);
+    // This is the real tool_output_to_content_blocks persistence format.
+    session.add_message(
+        Role::User,
+        vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "read-photo".into(),
+                content: "Loaded image".into(),
+                is_error: None,
+            },
+            image.clone(),
+        ],
+    );
+    session.add_message(Role::Assistant, vec![image]);
+    let messages = wire_messages(&session, 0);
+    assert_eq!(messages.len(), 4);
+    assert_eq!(
+        messages.iter().map(|m| m.role).collect::<Vec<_>>(),
+        ["user", "user", "tool", "assistant"]
+    );
+    assert_eq!(messages[1].text, "");
+    assert_eq!(messages[2].tool_results[0].tool_use_id, "read-photo");
+    for (seq, message) in messages.iter().enumerate() {
+        assert_eq!(message.seq, seq);
+        assert_eq!(message.images.len(), 1);
+        assert_eq!(message.images[0].media_type, "image/jpeg");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&message.images[0].data)
+            .unwrap();
+        assert!(bytes.len() <= 256 * 1024);
+        let decoded = image::load_from_memory(&bytes).unwrap();
+        assert!(decoded.width() <= 1024 && decoded.height() <= 1024);
+        let json = serde_json::to_value(message).unwrap();
+        assert_eq!(json["images"][0]["media_type"], "image/jpeg");
+    }
+    assert_eq!(wire_messages(&session, 2).len(), 2);
+}
+
+#[test]
+fn hidden_visual_context_and_invalid_attachments_are_not_uploaded() {
+    let mut session = Session::create_with_id("hidden-attachments".into(), None, None);
+    session.add_message(
+        Role::User,
+        vec![
+            text_block(
+                "  <system-reminder>\nGenerated image visual context</system-reminder>".into(),
+            ),
+            attachment_block(),
+        ],
+    );
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: "not base64".into(),
+        }],
+    );
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: "aGVsbG8=".into(),
+        }],
+    );
+    assert!(wire_messages(&session, 0).is_empty());
+    let mut blocks = vec![attachment_block(); 5];
+    assert_eq!(attached_images(&blocks).len(), 4);
+    if let ContentBlock::Image { media_type, .. } = &mut blocks[0] {
+        *media_type = "application/octet-stream".into();
+    }
+    assert!(attached_images(&blocks[..1]).is_empty());
+}
+
+#[test]
+fn attachment_wire_upgrade_replays_previously_uploaded_sessions() {
+    let mut session = Session::create_with_id("attachment-upgrade".into(), None, None);
+    session.add_message(
+        Role::User,
+        vec![attachment_block(), text_block("Photo".into())],
+    );
+    let current = wire_messages(&session, 0);
+    let progress = SessionProgress {
+        wire_version: WIRE_VERSION - 1,
+        uploaded: 1,
+        fingerprint: Some(wire_fingerprint(&current, 1)),
+        ..SessionProgress::default()
+    };
+    let (replayed, _) = incremental_messages(&session, &progress);
+    assert_eq!(replayed, current);
+    let progress = SessionProgress {
+        wire_version: WIRE_VERSION,
+        ..progress
+    };
+    assert!(incremental_messages(&session, &progress).0.is_empty());
+}
+
+#[test]
+fn image_upload_chunks_obey_byte_budget() {
+    let message = WireMessage {
+        seq: 0,
+        role: "assistant",
+        text: "x".repeat(100_000),
+        display_text: None,
+        tool_calls: Vec::new(),
+        tool_results: Vec::new(),
+        images: vec![WireImage {
+            media_type: "image/jpeg".into(),
+            data: "A".repeat(1_398_104),
+        }],
+        created_at: None,
+    };
+    let messages = vec![message; 10];
+    let chunks = message_chunks(&messages);
+    assert!(chunks.len() > 1);
+    assert_eq!(chunks.iter().map(|c| c.len()).sum::<usize>(), 10);
+    for chunk in chunks {
+        assert!(serde_json::to_vec(chunk).unwrap().len() < 4 * 1024 * 1024);
+    }
+}
+
+#[test]
 fn parsed_state_reuse_matches_old_output_and_reads_current_bytes() {
     let _lock = storage::lock_test_env();
     let home = tempfile::tempdir().unwrap();
@@ -123,6 +348,7 @@ fn benchmark_exact_state_reuse() {
             state.sessions.insert(
                 format!("session-{i:04}"),
                 SessionProgress {
+                    wire_version: WIRE_VERSION,
                     uploaded: 200,
                     mtime_ms: 123456789,
                     revision: Some([123456789, 10000, 123456790, 1000]),
@@ -173,242 +399,7 @@ fn benchmark_exact_state_reuse() {
     }
 }
 
-#[tokio::test]
-#[ignore = "manual local filesystem reconciliation benchmark"]
-async fn benchmark_unchanged_reconciliation() {
-    let _lock = storage::lock_test_env();
-    let home = tempfile::tempdir().unwrap();
-    let _env = TestEnv::set(&[
-        ("JCODE_HOME", home.path().as_os_str()),
-        (
-            "JCODE_API_KEY",
-            std::ffi::OsStr::new("benchmark-no-network"),
-        ),
-        ("JCODE_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:1")),
-    ]);
-    DIRTY_SESSIONS.lock().unwrap().clear();
-    let dir = home.path().join("sessions");
-    std::fs::create_dir_all(&dir).unwrap();
-    let mut state = MobileSyncState {
-        enabled: true,
-        ..Default::default()
-    };
-    for index in 0..1300 {
-        let id = format!("benchmark-{index:04}");
-        let path = dir.join(format!("{id}.json"));
-        // An unchanged revision must never need to deserialize a transcript.
-        std::fs::write(&path, b"{}").unwrap();
-        state.sessions.insert(
-            id,
-            SessionProgress {
-                uploaded: 100,
-                mtime_ms: session_mtime_ms(&path),
-                revision: Some(session_revision(&path)),
-                fingerprint: Some(42),
-            },
-        );
-    }
-    save_state(&state).unwrap();
-    // Enabling increments the fence, so seed progress in the current generation.
-    state.generation = load_state().generation;
-    save_state(&state).unwrap();
-    let client = reqwest::Client::new();
-    let mut elapsed = Vec::new();
-    for _ in 0..7 {
-        let started = Instant::now();
-        assert_eq!(sync_once(&client).await.unwrap(), SyncReport::default());
-        elapsed.push(started.elapsed().as_micros());
-    }
-    elapsed.sort_unstable();
-    eprintln!(
-        "unchanged reconciliation: candidates=1300 passes=7 median_us={} max_us={} samples_us={elapsed:?}",
-        elapsed[3], elapsed[6]
-    );
-}
-
-#[test]
-fn sync_timing_records_only_static_fields_and_elapsed_milliseconds() {
-    let mut timing = SyncTiming::new("test_stage");
-    timing.started = Instant::now() - Duration::from_millis(12);
-    for outcome in ["success", "error", "skipped_disabled", "incomplete"] {
-        timing.outcome = outcome;
-        let record = timing.record();
-        let fields: Vec<_> = record.split_whitespace().collect();
-        assert_eq!(fields.len(), 4);
-        assert_eq!(fields[0], "mobile_sync");
-        assert_eq!(fields[1], "stage=test_stage");
-        assert_eq!(fields[2], format!("outcome={outcome}"));
-        let elapsed: u128 = fields[3]
-            .strip_prefix("duration_ms=")
-            .unwrap()
-            .parse()
-            .unwrap();
-        assert!(elapsed >= 12);
-    }
-}
-
-#[tokio::test]
-async fn upload_failure_does_not_retain_private_server_response() {
-    let secret = "private-transcript-and-auth-token";
-    let (base, request) = mock_listing("500 Internal Server Error", secret).await;
-    let body = UploadBody {
-        title: Some(secret),
-        source: "local",
-        host: None,
-        cwd: None,
-        model: None,
-        created_at: String::new(),
-        updated_at: String::new(),
-        messages: &[],
-    };
-    let error = upload(&reqwest::Client::new(), &base, secret, "test", &body)
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("500"));
-    assert!(!format!("{error:#}").contains(secret));
-    request.await.unwrap();
-}
-
 struct TestEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
-
-#[tokio::test]
-async fn unchanged_pass_and_identical_commit_do_not_rewrite_state() {
-    let _lock = storage::lock_test_env();
-    let home = tempfile::tempdir().unwrap();
-    let _env = TestEnv::set(&[
-        ("JCODE_HOME", home.path().as_os_str()),
-        ("JCODE_API_KEY", std::ffi::OsStr::new("no-network")),
-        ("JCODE_API_BASE", std::ffi::OsStr::new("http://127.0.0.1:1")),
-    ]);
-    DIRTY_SESSIONS.lock().unwrap().clear();
-    let path = home.path().join("sessions/unchanged.json");
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, b"not a transcript").unwrap();
-    save_state(&MobileSyncState {
-        enabled: true,
-        ..Default::default()
-    })
-    .unwrap();
-    let generation = load_state().generation;
-    let updates = BTreeMap::from([(
-        "unchanged".into(),
-        SessionProgress {
-            revision: Some(session_revision(&path)),
-            ..Default::default()
-        },
-    )]);
-    commit_progress(generation, &updates).unwrap();
-    let state = state_path().unwrap();
-    std::fs::File::open(&state)
-        .unwrap()
-        .set_times(std::fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(100)))
-        .unwrap();
-    let before = session_revision(&state);
-    commit_progress(generation, &updates).unwrap();
-    assert_eq!(
-        session_revision(&state),
-        before,
-        "identical merge must not write"
-    );
-    std::fs::remove_file(home.path().join("mobile_sync.lock")).unwrap();
-    for reconcile in [true, false] {
-        assert_eq!(
-            sync_pass(&reqwest::Client::new(), reconcile).await.unwrap(),
-            SyncReport::default()
-        );
-        assert_eq!(
-            session_revision(&state),
-            before,
-            "no-op pass must not write"
-        );
-        assert!(
-            !home.path().join("mobile_sync.lock").exists(),
-            "no-op pass must not acquire cross-process lock"
-        );
-    }
-}
-
-#[tokio::test]
-async fn disable_reenable_during_upload_fences_remaining_chunks_and_progress() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let _lock = storage::lock_test_env();
-    let home = tempfile::tempdir().unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let _env = TestEnv::set(&[
-        ("JCODE_HOME", home.path().as_os_str()),
-        ("JCODE_API_KEY", std::ffi::OsStr::new("test-key")),
-        ("JCODE_API_BASE", std::ffi::OsStr::new(&base)),
-    ]);
-    DIRTY_SESSIONS.lock().unwrap().clear();
-    save_state(&MobileSyncState {
-        enabled: true,
-        ..Default::default()
-    })
-    .unwrap();
-    let mut session = Session::create_with_id("generation-cycle".into(), None, None);
-    session.messages = (0..MAX_MESSAGES_PER_UPLOAD + 1)
-        .map(|index| {
-            let mut message = msg(
-                Role::User,
-                vec![ContentBlock::Text {
-                    text: "visible".into(),
-                    cache_control: None,
-                }],
-            );
-            message.id = format!("message-{index}");
-            message
-        })
-        .collect();
-    session.save().unwrap();
-    let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let mut bytes = Vec::new();
-        let mut buffer = [0; 8192];
-        loop {
-            let count = socket.read(&mut buffer).await.unwrap();
-            assert_ne!(count, 0);
-            bytes.extend_from_slice(&buffer[..count]);
-            if let Some(start) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
-                let header = String::from_utf8_lossy(&bytes[..start]);
-                let length: usize = header
-                    .lines()
-                    .find_map(|line| {
-                        line.to_ascii_lowercase()
-                            .strip_prefix("content-length:")
-                            .map(|n| n.trim().parse().unwrap())
-                    })
-                    .unwrap();
-                if bytes.len() >= start + 4 + length {
-                    break;
-                }
-            }
-        }
-        save_state(&MobileSyncState::default()).unwrap();
-        save_state(&MobileSyncState {
-            enabled: true,
-            ..Default::default()
-        })
-        .unwrap();
-        socket
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
-            .await
-            .unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(250), listener.accept())
-                .await
-                .is_err(),
-            "old generation must not send its second chunk"
-        );
-    });
-    let report = sync_once(&reqwest::Client::new()).await.unwrap();
-    assert_eq!(report.messages_uploaded, MAX_MESSAGES_PER_UPLOAD);
-    assert_eq!(report.sessions_uploaded, 0);
-    server.await.unwrap();
-    assert!(load_state().enabled);
-    assert!(load_state().sessions.is_empty());
-    DIRTY_SESSIONS.lock().unwrap().clear();
-}
 
 impl TestEnv {
     fn set(values: &[(&'static str, &std::ffi::OsStr)]) -> Self {
@@ -437,351 +428,6 @@ impl Drop for TestEnv {
     }
 }
 
-#[test]
-fn disabled_dirty_hints_are_bounded_without_reading_sync_state() {
-    let _lock = storage::lock_test_env();
-    let home = tempfile::tempdir().unwrap();
-    let _env = TestEnv::set(&[("JCODE_HOME", home.path().as_os_str())]);
-    DIRTY_SESSIONS.lock().unwrap().clear();
-    for index in 0..MAX_DIRTY_SESSIONS * 2 {
-        notify_session_persisted(&format!("disabled-{index}"));
-    }
-    notify_session_persisted("../invalid");
-    let mut dirty = DIRTY_SESSIONS.lock().unwrap();
-    assert_eq!(dirty.len(), MAX_DIRTY_SESSIONS);
-    assert!(dirty.contains(&format!("disabled-{}", MAX_DIRTY_SESSIONS * 2 - 1)));
-    assert!(!home.path().join("mobile_sync.json").exists());
-    dirty.clear();
-}
-
-#[test]
-fn state_commits_merge_concurrent_progress_and_never_reenable() {
-    let _lock = storage::lock_test_env();
-    let home = tempfile::tempdir().unwrap();
-    let _env = TestEnv::set(&[("JCODE_HOME", home.path().as_os_str())]);
-    save_state(&MobileSyncState {
-        enabled: true,
-        ..Default::default()
-    })
-    .unwrap();
-    let generation = load_state().generation;
-    let progress = |uploaded, mtime_ms| SessionProgress {
-        uploaded,
-        mtime_ms,
-        ..Default::default()
-    };
-    let stale = BTreeMap::from([("first".into(), progress(1, 1))]);
-    commit_progress(
-        generation,
-        &BTreeMap::from([("second".into(), progress(2, 2))]),
-    )
-    .unwrap();
-    commit_progress(generation, &stale).unwrap();
-    assert_eq!(load_state().sessions.len(), 2);
-    commit_progress(
-        generation,
-        &BTreeMap::from([("first".into(), progress(3, 3))]),
-    )
-    .unwrap();
-    commit_progress(generation, &stale).unwrap();
-    assert_eq!(load_state().sessions["first"].uploaded, 3);
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
-    let writers: Vec<_> = (0..8)
-        .map(|index| {
-            let barrier = barrier.clone();
-            std::thread::spawn(move || {
-                barrier.wait();
-                commit_progress(
-                    generation,
-                    &BTreeMap::from([(format!("parallel-{index}"), progress(index, 10))]),
-                )
-                .unwrap();
-            })
-        })
-        .collect();
-    for writer in writers {
-        writer.join().unwrap();
-    }
-    assert_eq!(load_state().sessions.len(), 10);
-    save_state(&MobileSyncState::default()).unwrap();
-    commit_progress(generation, &stale).unwrap();
-    assert!(!load_state().enabled);
-    assert!(load_state().sessions.is_empty());
-    save_state(&MobileSyncState {
-        enabled: true,
-        ..Default::default()
-    })
-    .unwrap();
-    commit_progress(generation, &stale).unwrap();
-    assert!(
-        load_state().sessions.is_empty(),
-        "old opt-in generation cannot restore wiped progress"
-    );
-}
-
-#[tokio::test]
-async fn persistence_notifications_upload_under_one_second_and_retain_inflight_writes() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let _lock = storage::lock_test_env();
-    let home = tempfile::tempdir().unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let _env = TestEnv::set(&[
-        ("JCODE_HOME", home.path().as_os_str()),
-        ("JCODE_API_KEY", std::ffi::OsStr::new("test-key")),
-        ("JCODE_API_BASE", std::ffi::OsStr::new(&base)),
-    ]);
-    let (requests_tx, mut requests) = tokio::sync::mpsc::channel(8);
-    let server = tokio::spawn(async move {
-        loop {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut bytes = Vec::new();
-            let mut buffer = [0; 4096];
-            let body_start = loop {
-                let count = socket.read(&mut buffer).await.unwrap();
-                assert_ne!(count, 0);
-                bytes.extend_from_slice(&buffer[..count]);
-                if let Some(index) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
-                    break index + 4;
-                }
-            };
-            let header = String::from_utf8_lossy(&bytes[..body_start]);
-            let length: usize = header
-                .lines()
-                .find_map(|line| {
-                    line.to_ascii_lowercase()
-                        .strip_prefix("content-length:")
-                        .map(|s| s.trim().parse().unwrap())
-                })
-                .unwrap();
-            while bytes.len() < body_start + length {
-                let count = socket.read(&mut buffer).await.unwrap();
-                assert_ne!(count, 0);
-                bytes.extend_from_slice(&buffer[..count]);
-            }
-            let body: serde_json::Value =
-                serde_json::from_slice(&bytes[body_start..body_start + length]).unwrap();
-            let (release, wait) = tokio::sync::oneshot::channel::<()>();
-            requests_tx.send((body, release)).await.unwrap();
-            wait.await.unwrap();
-            socket
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
-                .await
-                .unwrap();
-        }
-    });
-    let background = tokio::spawn(background_sync());
-    // Consume the initial reconciliation while disabled.
-    tokio::time::sleep(Duration::from_millis(30)).await;
-    let mut session = Session::create_with_id("event-sync".into(), None, None);
-    session.add_message(
-        Role::User,
-        vec![ContentBlock::Text {
-            text: "first".into(),
-            cache_control: None,
-        }],
-    );
-    session.save().unwrap();
-    assert!(!is_enabled());
-    assert!(
-        tokio::time::timeout(Duration::from_millis(220), requests.recv())
-            .await
-            .is_err()
-    );
-    save_state(&MobileSyncState {
-        enabled: true,
-        ..Default::default()
-    })
-    .unwrap();
-    let started = std::time::Instant::now();
-    session.add_message(
-        Role::Assistant,
-        vec![ContentBlock::Text {
-            text: "second".into(),
-            cache_control: None,
-        }],
-    );
-    session.save().unwrap();
-    for title in ["coalesce one", "coalesce two", "coalesce final"] {
-        session.custom_title = Some(title.into());
-        session.save().unwrap();
-    }
-    let (first, release) = tokio::time::timeout(Duration::from_secs(1), requests.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    eprintln!(
-        "mobile persistence-to-upload notification: {}ms",
-        started.elapsed().as_millis()
-    );
-    assert!(started.elapsed() < Duration::from_secs(1));
-    assert_eq!(first["messages"].as_array().unwrap().len(), 2);
-    assert_eq!(first["title"], "coalesce final");
-    // Persist while the first upload is still blocked in the network.
-    session.add_message(
-        Role::User,
-        vec![ContentBlock::Text {
-            text: "during-upload".into(),
-            cache_control: None,
-        }],
-    );
-    session.save().unwrap();
-    release.send(()).unwrap();
-    let (second, release) = tokio::time::timeout(Duration::from_secs(1), requests.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(second["messages"].as_array().unwrap().len(), 1);
-    assert_eq!(second["messages"][0]["seq"], 2);
-    assert_eq!(second["messages"][0]["text"], "during-upload");
-    release.send(()).unwrap();
-    // Progress persistence itself must not schedule another upload.
-    assert!(
-        tokio::time::timeout(Duration::from_millis(350), requests.recv())
-            .await
-            .is_err()
-    );
-    assert_eq!(load_state().sessions["event-sync"].uploaded, 3);
-    // Simulate a writer in another process: no notification hook in this
-    // process, so only the reconciliation path can discover the update.
-    session.add_message(
-        Role::User,
-        vec![ContentBlock::Text {
-            text: "external writer".into(),
-            cache_control: None,
-        }],
-    );
-    let path = home.path().join("sessions/event-sync.json");
-    storage::write_json_fast(&path, &session).unwrap();
-    session = Session::load_from_path(&path).unwrap();
-    let reconcile = tokio::spawn(async { sync_once(&reqwest::Client::new()).await.unwrap() });
-    let (external, release) = tokio::time::timeout(Duration::from_secs(1), requests.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(external["messages"].as_array().unwrap().len(), 1);
-    assert_eq!(external["messages"][0]["text"], "external writer");
-    release.send(()).unwrap();
-    assert_eq!(reconcile.await.unwrap().messages_uploaded, 1);
-    // Old snapshots have no local dirty hints, as with another process's
-    // backlog. Block the first old upload, then durably save a fresh session.
-    for id in ["old-a", "old-b", "old-c"] {
-        let mut old = Session::create_with_id(id.into(), None, None);
-        old.custom_title = Some(id.into());
-        old.messages = vec![msg(
-            Role::User,
-            vec![ContentBlock::Text {
-                text: id.into(),
-                cache_control: None,
-            }],
-        )];
-        storage::write_json_fast(&home.path().join(format!("sessions/{id}.json")), &old).unwrap();
-    }
-    let reconcile = tokio::spawn(async { sync_once(&reqwest::Client::new()).await.unwrap() });
-    let (old, release) = tokio::time::timeout(Duration::from_secs(1), requests.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    let old_id = old["title"].as_str().unwrap().to_owned();
-    assert!(old_id.starts_with("old-"));
-    let mut fresh = Session::create_with_id("fresh-save".into(), None, None);
-    fresh.custom_title = Some("fresh-save".into());
-    fresh.messages = vec![msg(
-        Role::User,
-        vec![ContentBlock::Text {
-            text: "fresh".into(),
-            cache_control: None,
-        }],
-    )];
-    fresh.save().unwrap();
-    release.send(()).unwrap();
-    let (next, release) = tokio::time::timeout(Duration::from_secs(1), requests.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        next["title"], "fresh-save",
-        "fresh save must bypass old backlog"
-    );
-    assert_eq!(reconcile.await.unwrap().sessions_uploaded, 1);
-    assert_eq!(load_state().sessions[&old_id].uploaded, 1);
-    release.send(()).unwrap();
-    tokio::time::sleep(Duration::from_millis(220)).await;
-    // The next periodic-style pass resumes the unvisited backlog, without
-    // uploading the completed old session again.
-    let resume = tokio::spawn(async { sync_once(&reqwest::Client::new()).await.unwrap() });
-    for _ in 0..2 {
-        let (remaining, release) = tokio::time::timeout(Duration::from_secs(1), requests.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(remaining["title"].as_str().unwrap().starts_with("old-"));
-        assert_ne!(remaining["title"], old_id);
-        release.send(()).unwrap();
-    }
-    assert_eq!(resume.await.unwrap().sessions_uploaded, 2);
-    session.custom_title = Some("metadata only".into());
-    session.save().unwrap();
-    let (metadata, release) = tokio::time::timeout(Duration::from_secs(1), requests.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(metadata["title"], "metadata only");
-    assert!(metadata["messages"].as_array().unwrap().is_empty());
-    // A disable racing an upload must not be undone by its completion.
-    save_state(&MobileSyncState::default()).unwrap();
-    release.send(()).unwrap();
-    tokio::time::sleep(Duration::from_millis(220)).await;
-    assert!(!load_state().enabled);
-    assert!(load_state().sessions.is_empty());
-    session.add_message(
-        Role::Assistant,
-        vec![ContentBlock::Text {
-            text: "disabled".into(),
-            cache_control: None,
-        }],
-    );
-    session.save().unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(250), requests.recv())
-            .await
-            .is_err()
-    );
-    background.abort();
-    server.abort();
-    let _ = background.await;
-    let _ = server.await;
-}
-
-#[test]
-fn reconciliation_does_not_starve_old_candidates_or_miss_same_millisecond_writes() {
-    let _lock = storage::lock_test_env();
-    let home = tempfile::tempdir().unwrap();
-    let _env = TestEnv::set(&[("JCODE_HOME", home.path().as_os_str())]);
-    let sessions = home.path().join("sessions");
-    std::fs::create_dir_all(&sessions).unwrap();
-    for index in 0..205 {
-        std::fs::write(sessions.join(format!("session-{index}.json")), b"{}").unwrap();
-    }
-    assert_eq!(candidate_sessions(0).unwrap().len(), 205);
-    let path = sessions.join("session-0.json");
-    let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-    let original = file.metadata().unwrap().modified().unwrap();
-    let before = session_revision(&path);
-    let before_ms = session_mtime_ms(&path);
-    std::fs::write(&path, b"{\"changed\":true}").unwrap();
-    file.set_times(std::fs::FileTimes::new().set_modified(original))
-        .unwrap();
-    assert_eq!(session_mtime_ms(&path), before_ms);
-    assert_ne!(session_revision(&path), before);
-    let journal = crate::session::session_journal_path_from_snapshot(&path);
-    std::fs::write(&journal, b"journal update\n").unwrap();
-    let with_journal = session_revision(&path);
-    std::fs::remove_file(journal).unwrap();
-    assert_ne!(session_revision(&path), with_journal);
-    assert_eq!(SYNC_INTERVAL, Duration::from_secs(20));
-}
-
 async fn mock_listing(status: &str, body: &str) -> (String, tokio::task::JoinHandle<String>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -804,36 +450,6 @@ async fn mock_listing(status: &str, body: &str) -> (String, tokio::task::JoinHan
         String::from_utf8(request).unwrap()
     });
     (base, task)
-}
-
-#[tokio::test]
-async fn cloud_session_listing_filters_and_preserves_metadata() {
-    let body = serde_json::json!({"sessions": [
-        {"session_id": "cloud-1", "source": "cloud", "title": "Title",
-         "host": "worker", "cwd": "/repo", "updated_at": "updated", "created_at": "created"},
-        {"session_id": "cloud-2", "source": "cloud"},
-        {"session_id": "local-1", "source": "local"},
-        {"session_id": "../unsafe", "source": "cloud"},
-        {"session_id": "", "source": "cloud"},
-        {"session_id": "x".repeat(129), "source": "cloud"}
-    ]})
-    .to_string();
-    let (base, request) = mock_listing("200 OK", &body).await;
-    let sessions = list_cloud_sessions_with_endpoint(&reqwest::Client::new(), &base, "test-key")
-        .await
-        .unwrap();
-    assert_eq!(sessions.len(), 2);
-    assert_eq!(sessions[0].session_id, "cloud-1");
-    assert_eq!(sessions[0].title.as_deref(), Some("Title"));
-    assert_eq!(sessions[0].host.as_deref(), Some("worker"));
-    assert_eq!(sessions[0].cwd.as_deref(), Some("/repo"));
-    assert_eq!(sessions[0].updated_at.as_deref(), Some("updated"));
-    assert_eq!(sessions[0].created_at.as_deref(), Some("created"));
-    assert_eq!(sessions[1].title, None);
-    assert_eq!(sessions[1].created_at, None);
-    let request = request.await.unwrap().to_ascii_lowercase();
-    assert!(request.starts_with("get /mobile/sessions?limit=500 http/1.1\r\n"));
-    assert!(request.contains("\r\nauthorization: bearer test-key\r\n"));
 }
 
 #[tokio::test]
@@ -867,7 +483,7 @@ fn msg(role: Role, content: Vec<ContentBlock>) -> StoredMessage {
     StoredMessage {
         id: "m".into(),
         role,
-        content,
+        content: content.into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -936,6 +552,268 @@ fn session_ids_are_validated() {
     assert!(!valid_session_id(""));
 }
 
+#[test]
+fn structured_wire_matches_mobile_cloud_card_fixture_and_hides_reasoning() {
+    let mut session = Session::create_with_id("tool-fixture".into(), None, None);
+    let call = |id: &str| ContentBlock::ToolUse {
+        id: id.into(),
+        name: "bash".into(),
+        input: serde_json::json!({"command":"ls"}),
+        thought_signature: Some("private signature".into()),
+    };
+    session.messages = vec![
+        msg(Role::User, vec![text_block("go".into())]),
+        msg(
+            Role::Assistant,
+            vec![ContentBlock::Reasoning {
+                text: "private thinking".into(),
+            }],
+        ),
+        msg(
+            Role::Assistant,
+            vec![
+                text_block("on it".into()),
+                call("a"),
+                call("b"),
+                text_block("<system-reminder>private reminder</system-reminder>".into()),
+            ],
+        ),
+        msg(
+            Role::User,
+            vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "a".into(),
+                    content: "x".into(),
+                    is_error: None,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "b".into(),
+                    content: "y".into(),
+                    is_error: Some(false),
+                },
+            ],
+        ),
+        msg(Role::Assistant, vec![text_block("**done**".into())]),
+    ];
+    let actual = serde_json::to_value(wire_messages(&session, 0)).unwrap();
+    // Same fixture as mobile's structured_sync_matches_cloud_history_tool_phases.
+    let expected = serde_json::json!([
+        {"seq":0,"role":"user","text":"go"},
+        {"seq":2,"role":"assistant","text":"on it\n\n🔧 bash: ls\n\n🔧 bash: ls",
+         "display_text":"on it","tool_calls":[
+             {"id":"a","name":"bash","input":{"command":"ls"}},
+             {"id":"b","name":"bash","input":{"command":"ls"}}]},
+        {"seq":3,"role":"tool","text":"x\n\ny","display_text":"","tool_results":[
+            {"tool_use_id":"a","content":"x","is_error":false},
+            {"tool_use_id":"b","content":"y","is_error":false}]},
+        {"seq":4,"role":"assistant","text":"**done**"}
+    ]);
+    assert_eq!(actual, expected);
+    assert!(!actual.to_string().contains("private"));
+    session.messages[3].content = vec![ContentBlock::ToolResult {
+        tool_use_id: "a".into(),
+        content: "failed".into(),
+        is_error: Some(true),
+    }]
+    .into();
+    assert!(wire_messages(&session, 3)[0].tool_results[0].is_error);
+}
+
+#[test]
+fn structured_wire_bounds_inputs_counts_ids_and_total_bytes() {
+    let ordinary = serde_json::json!({"path":"界🦀/file","limit":7});
+    assert_eq!(bounded_tool_input(&ordinary), ordinary);
+    let huge = serde_json::json!({"command":"界🦀".repeat(MAX_TOOL_INPUT_BYTES)});
+    let preview = bounded_tool_input(&huge);
+    assert!(preview.as_str().unwrap().ends_with("(truncated)"));
+    assert!(serde_json::to_vec(&preview).unwrap().len() < 2 * MAX_TOOL_INPUT_BYTES + 128);
+    let call = |id: String, input: serde_json::Value| ContentBlock::ToolUse {
+        id,
+        name: "bash".into(),
+        input,
+        thought_signature: None,
+    };
+    let mut session = Session::create_with_id("tool-bounds".into(), None, None);
+    session.messages = vec![msg(Role::Assistant, vec![call("a".into(), huge)])];
+    let wire = wire_messages(&session, 0);
+    assert_eq!(wire[0].tool_calls[0].input, preview);
+    for blocks in [
+        vec![call(
+            "x".repeat(MAX_TOOL_ID_BYTES + 1),
+            serde_json::Value::Null,
+        )],
+        (0..=MAX_STRUCTURED_TOOLS)
+            .map(|i| call(i.to_string(), serde_json::Value::Null))
+            .collect(),
+        (0..MAX_STRUCTURED_TOOLS)
+            .map(|i| ContentBlock::ToolResult {
+                tool_use_id: i.to_string(),
+                content: "🦀".repeat(MAX_TOOL_RESULT_CHARS + 10),
+                is_error: None,
+            })
+            .collect(),
+    ] {
+        session.messages[0].content = blocks.into();
+        let wire = wire_messages(&session, 0);
+        assert_eq!(
+            wire[0].display_text, None,
+            "oversized metadata must retain legacy summaries"
+        );
+        assert!(wire[0].tool_calls.is_empty() && wire[0].tool_results.is_empty());
+        assert!(!wire[0].text.is_empty());
+    }
+    session.messages[0].content = vec![ContentBlock::ToolResult {
+        tool_use_id: "a".into(),
+        content: "🦀".repeat(MAX_TOOL_RESULT_CHARS + 10),
+        is_error: Some(true),
+    }]
+    .into();
+    let wire = wire_messages(&session, 0);
+    assert!(wire[0].tool_results[0].content.ends_with("(truncated)"));
+    assert!(wire[0].tool_results[0].content.chars().count() < MAX_TOOL_RESULT_CHARS + 32);
+}
+
+#[test]
+fn structured_wire_epoch_invalidates_image_only_progress_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("snapshot.json");
+    std::fs::write(&path, b"{}").unwrap();
+    let current = session_revision(&path);
+    let mut image_only = current;
+    image_only[1] ^= 1_u64 << 62;
+    assert_ne!(
+        current, image_only,
+        "old unchanged progress must reupload tools"
+    );
+    assert_eq!(current[1], 2 ^ (3_u64 << 62));
+    assert_eq!(
+        session_revision(&path),
+        current,
+        "new epoch is stable after upload"
+    );
+}
+
+#[tokio::test]
+async fn structured_wire_version_replays_unchanged_snapshots_once() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let _lock = storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let _env = TestEnv::set(&[
+        ("JCODE_HOME", home.path().as_os_str()),
+        ("JCODE_API_KEY", std::ffi::OsStr::new("test-key")),
+        ("JCODE_API_BASE", std::ffi::OsStr::new(&base)),
+    ]);
+    let mut session = Session::create_with_id("schema-replay".into(), None, None);
+    session.messages = vec![msg(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "call-read".into(),
+            name: "read".into(),
+            input: serde_json::json!({"path":"README.md"}),
+            thought_signature: None,
+        }],
+    )];
+    session.save().unwrap();
+    DIRTY_SESSIONS.lock().unwrap().clear();
+    let path = home.path().join("sessions/schema-replay.json");
+    let revision = session_revision(&path);
+    // Even an identical fingerprint must not suppress a schema upgrade replay.
+    let fingerprint = wire_fingerprint(&wire_messages(&session, 0), 1);
+    let progress: SessionProgress = serde_json::from_value(serde_json::json!({
+        "uploaded": 1, "mtime_ms": session_mtime_ms(&path),
+        "revision": revision, "fingerprint": fingerprint,
+    }))
+    .unwrap();
+    assert_eq!(progress.wire_version, 0);
+    save_state(&MobileSyncState {
+        enabled: true,
+        ..Default::default()
+    })
+    .unwrap();
+    commit_progress(
+        load_state().generation,
+        &BTreeMap::from([(session.id.clone(), progress)]),
+    )
+    .unwrap();
+    assert_eq!(load_state().sessions[&session.id].revision, Some(revision));
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 4096];
+        let body = loop {
+            let count = socket.read(&mut buffer).await.unwrap();
+            assert_ne!(count, 0);
+            bytes.extend_from_slice(&buffer[..count]);
+            if let Some(index) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                let start = index + 4;
+                let header = String::from_utf8_lossy(&bytes[..index]);
+                let length: usize = header
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|value| value.trim().parse().unwrap())
+                    })
+                    .unwrap();
+                if bytes.len() >= start + length {
+                    break serde_json::from_slice::<serde_json::Value>(
+                        &bytes[start..start + length],
+                    )
+                    .unwrap();
+                }
+            }
+        };
+        assert_eq!(body["messages"][0]["seq"], 0);
+        assert_eq!(
+            body["messages"][0]["tool_calls"][0]["input"]["path"],
+            "README.md"
+        );
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+            .await
+            .unwrap();
+        listener
+    });
+    let client = reqwest::Client::new();
+    let report = tokio::time::timeout(Duration::from_secs(5), sync_once(&client))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.messages_uploaded, 1);
+    assert_eq!(report.sessions_uploaded, 1);
+    let listener = server.await.unwrap();
+    let state = load_state();
+    assert_eq!(state.sessions[&session.id].wire_version, WIRE_VERSION);
+    assert_eq!(state.sessions[&session.id].revision, Some(revision));
+    assert_eq!(session_revision(&path), revision);
+    assert_eq!(sync_once(&client).await.unwrap(), SyncReport::default());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
+    DIRTY_SESSIONS.lock().unwrap().clear();
+}
+
+#[test]
+fn structured_input_changes_invalidate_synced_fingerprint_without_changing_legacy_summary() {
+    let mut session = Session::create_with_id("tool-hash".into(), None, None);
+    let call = |limit: usize| ContentBlock::ToolUse {
+        id: "a".into(),
+        name: "read".into(),
+        input: serde_json::json!({"intent":"inspect file","limit":limit}),
+        thought_signature: None,
+    };
+    session.messages = vec![msg(Role::Assistant, vec![call(10)])];
+    let before = wire_messages(&session, 0);
+    session.messages[0].content = vec![call(20)].into();
+    let after = wire_messages(&session, 0);
+    assert_eq!(before[0].text, after[0].text);
+    assert_ne!(wire_fingerprint(&before, 1), wire_fingerprint(&after, 1));
+}
+
 // Deliberately retain the original full-copy conversion as an independent
 // semantic oracle and a baseline for the ignored representative benchmark.
 fn old_wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
@@ -1000,6 +878,10 @@ fn old_wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
             Some(WireMessage {
                 seq,
                 role,
+                images: Vec::new(),
+                display_text: None,
+                tool_calls: Vec::new(),
+                tool_results: Vec::new(),
                 text: old_truncate(&parts.join("\n\n"), MAX_TEXT_CHARS),
                 created_at: message.timestamp.map(|t| t.to_rfc3339()),
             })
@@ -1106,7 +988,14 @@ fn bounded_wire_conversion_matches_original_unicode_and_boundaries() {
     session.messages[1].timestamp = Some(chrono::Utc::now());
     for start in [0, 1, 3, session.messages.len(), session.messages.len() + 1] {
         let expected = old_wire_messages(&session, start);
-        let actual = wire_messages(&session, start);
+        let mut actual = wire_messages(&session, start);
+        // New metadata is additive. The independent oracle still verifies every
+        // legacy text byte, role, stored sequence and timestamp unchanged.
+        for message in &mut actual {
+            message.display_text = None;
+            message.tool_calls.clear();
+            message.tool_results.clear();
+        }
         assert_eq!(actual, expected, "start={start}");
         for end in [0, 1, session.messages.len() / 2, session.messages.len()] {
             assert_eq!(
@@ -1217,6 +1106,7 @@ fn incremental_updates_replay_rewritten_and_shrunk_prefixes() {
     let (initial, fingerprint) = incremental_messages(&session, &SessionProgress::default());
     assert_eq!(initial.len(), 2);
     let progress = SessionProgress {
+        wire_version: WIRE_VERSION,
         uploaded: 2,
         fingerprint: Some(fingerprint),
         ..Default::default()
@@ -1235,10 +1125,39 @@ fn incremental_updates_replay_rewritten_and_shrunk_prefixes() {
     session.messages[0].content = vec![ContentBlock::Text {
         text: "rewritten".into(),
         cache_control: None,
-    }];
+    }]
+    .into();
     let rewritten = incremental_messages(&session, &progress).0;
     assert_eq!(rewritten.len(), 3);
     assert_eq!(rewritten[0].text, "rewritten");
     session.truncate_messages(1);
     assert_eq!(incremental_messages(&session, &progress).0.len(), 1);
 }
+
+#[test]
+fn phone_message_opt_out_survives_sync_saves_and_disable() {
+    let _lock = storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _env = TestEnv::set(&[("JCODE_HOME", home.path().as_os_str())]);
+    save_state(&MobileSyncState {
+        enabled: true,
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(!uncached_mobile_state().phone_messages_off);
+    let stale = uncached_mobile_state();
+
+    assert!(set_phone_messages_off(true).unwrap().phone_messages_off);
+    // A writer holding an older read must not turn messages back on.
+    save_state(&stale).unwrap();
+    assert!(uncached_mobile_state().phone_messages_off);
+    assert!(uncached_mobile_state().enabled);
+    save_state(&MobileSyncState::default()).unwrap();
+    assert!(uncached_mobile_state().phone_messages_off);
+
+    assert!(!set_phone_messages_off(false).unwrap().phone_messages_off);
+    assert!(!uncached_mobile_state().phone_messages_off);
+}
+
+#[path = "mobile_sync_tests_additional_tests.rs"]
+mod additional_benchmark_unchanged_reconciliation;

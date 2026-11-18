@@ -18,8 +18,20 @@ fn stable_hash_json<T: serde::Serialize + ?Sized>(value: &T) -> u64 {
     stable_hash_str(&encode_json(value))
 }
 
-pub(super) fn stable_json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
+#[cfg(test)]
+fn stable_json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
     encode_json(value).len()
+}
+
+/// The array envelope is independent of each message's cached immutable
+/// content. Include current metadata, but do not encode whole transcripts
+/// again just to count bytes already accounted for by `SharedContent`.
+fn messages_json_len(messages: &[Message]) -> usize {
+    2 + messages.len().saturating_sub(1)
+        + messages
+            .iter()
+            .map(Message::serialized_json_bytes)
+            .sum::<usize>()
 }
 
 fn json_hash_and_len<T: serde::Serialize + ?Sized>(value: &T) -> (u64, usize) {
@@ -86,7 +98,7 @@ pub(super) fn kv_cache_request_event(
         tool_count: eager_tools.len(),
         system_static_chars: system_static.chars().count(),
         tools_json_chars,
-        messages_json_chars: stable_json_len(messages),
+        messages_json_chars: messages_json_len(messages),
         ephemeral_hash,
         ephemeral_chars,
         ephemeral_message_count: ephemeral_messages.len(),

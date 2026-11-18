@@ -3,7 +3,8 @@
 //! Holding the Copilot key while a Jcode CLI terminal is focused records the
 //! microphone, transcribes through Nari, and sends the text to that session,
 //! exactly like Desktop's CLI capture. Opt-in: needs `[dictation]
-//! global_devices` and a Nari key.
+//! global_devices` (or the keyboards picked in Desktop, `[desktop.voice]
+//! global_devices`) and a Nari key.
 //!
 //! When Jcode Desktop is running it shares the same routing registry
 //! (`$XDG_RUNTIME_DIR/jcode-global-voice-v1`), and the most recently focused
@@ -43,10 +44,7 @@ pub struct VoiceIndicators {
 }
 
 pub fn spawn(indicators: VoiceIndicators) {
-    let devices = jcode_base::config::config()
-        .dictation
-        .global_devices
-        .clone();
+    let devices = jcode_base::config::config().global_voice_devices();
     if devices.is_empty() {
         return;
     }

@@ -84,61 +84,9 @@ fn should_debounce_attach_model_prefetch(provider_name: &str) -> bool {
     false
 }
 
-fn history_provider_name_from_session(session: &crate::session::Session) -> Option<String> {
-    let key = session.provider_key.as_deref()?.trim();
-    if key.is_empty() {
-        return None;
-    }
-
-    let label = match key.to_ascii_lowercase().as_str() {
-        "openai" => "OpenAI".to_string(),
-        "claude" | "anthropic" => "Anthropic".to_string(),
-        "openrouter" => "OpenRouter".to_string(),
-        "copilot" => "GitHub Copilot".to_string(),
-        "cursor" => "Cursor".to_string(),
-        "gemini" => "Gemini".to_string(),
-        "bedrock" => "Bedrock".to_string(),
-        "antigravity" => "Antigravity".to_string(),
-        "jcode" => "Jcode".to_string(),
-        // A direct OpenAI-compatible profile is persisted either bare
-        // (`deepseek`, the session vocabulary) or as its source key
-        // (`openai-compatible:deepseek`). Both name the same profile, so report
-        // its display name like every other arm here; a raw key would otherwise
-        // reach the header, and `source_key_for_provider_label` maps the
-        // prefixed shape away from `openai:api-key` only by accident (#1286).
-        other => {
-            // Import-source codes are stored in the same field but are not
-            // profile routes; `opencode` in particular collides with the
-            // `OpenCode Zen` profile id, so it must stay verbatim.
-            const IMPORT_SOURCE_CODES: &[&str] = &["opencode", "claude-code", "openai-codex"];
-            if IMPORT_SOURCE_CODES.contains(&other) {
-                other.to_string()
-            } else {
-                let profile_id = other.strip_prefix("openai-compatible:").unwrap_or(other);
-                crate::provider_catalog::openai_compatible_profile_by_id(profile_id)
-                    .map(|profile| profile.display_name.to_string())
-                    .unwrap_or_else(|| other.to_string())
-            }
-        }
-    };
-
-    Some(label)
-}
-
-/// The provider name a `History` payload reports.
-///
-/// The persisted session key wins when there is one. Otherwise ask for the
-/// profile-aware label: `Provider::name()` is the stable machine id for the
-/// provider *class* (`OpenRouter` for the multiplexing slot, `openrouter` for
-/// a concrete runtime instance), and that slot also serves every direct
-/// OpenAI-compatible profile, so it must not be shown as this session's
-/// provider (issue #1286).
-fn history_provider_name(
-    session: &crate::session::Session,
-    provider: &dyn Provider,
-) -> Option<String> {
-    history_provider_name_from_session(session).or_else(|| Some(provider.display_name()))
-}
+#[path = "history_provider_label.rs"]
+mod history_provider_label;
+use history_provider_label::*;
 
 pub(super) async fn handle_get_state(
     id: u64,
@@ -762,16 +710,22 @@ fn session_interrupted_by_reload(session: &Session) -> bool {
         .map(|message| message.role == Role::User)
         .unwrap_or(false);
     let marker_active = crate::server::reload_marker_active(RELOAD_RESTORE_MARKER_MAX_AGE);
+    let pending_turn = last_is_user
+        || session
+            .messages
+            .last()
+            .is_some_and(super::client_session::last_message_has_pending_tool);
     let interrupted = matches!(session.status, SessionStatus::Crashed { .. })
-        || (matches!(session.status, SessionStatus::Active) && last_is_user && marker_active)
-        || (matches!(session.status, SessionStatus::Closed) && last_is_user && marker_active)
+        || (matches!(session.status, SessionStatus::Active) && pending_turn && marker_active)
+        || (matches!(session.status, SessionStatus::Closed) && pending_turn && marker_active)
         || persisted_session_has_reload_interruption_marker(session);
 
     crate::logging::info(&format!(
-        "history_reload_recovery_snapshot: fallback inspect session={} status={} last_is_user={} marker_active={} interrupted={}",
+        "history_reload_recovery_snapshot: fallback inspect session={} status={} last_is_user={} pending_turn={} marker_active={} interrupted={}",
         session_id,
         session.status.display(),
         last_is_user,
+        pending_turn,
         marker_active,
         interrupted
     ));

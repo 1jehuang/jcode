@@ -1192,6 +1192,7 @@ const SCROLL_CHURN_GRACE: Duration = Duration::from_millis(1500);
 /// into visible up/down flicker. Standing down through a short linger converts
 /// the churn into "strip stays hidden"; a genuine dock removal only delays the
 /// strip's return by this much, once.
+#[cfg_attr(not(test), allow(dead_code))]
 const SWARM_STRIP_STAND_DOWN_LINGER: Duration = Duration::from_millis(2000);
 
 /// Whether the SwarmStatus dock widget is engaged: either actually placed, or
@@ -1220,6 +1221,7 @@ fn swarm_dock_engaged(state: &WidgetsState) -> bool {
 /// placement churn cannot toggle the strip row on and off, which resizes the
 /// bottom chrome and makes the whole transcript jump up and down (flicker).
 /// One frame of overlap when the dock first appears is visually harmless.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn swarm_strip_stands_down_for_dock() -> bool {
     let guard = get_or_init_state();
     let Some(state) = guard.as_ref() else {

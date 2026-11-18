@@ -327,8 +327,8 @@ mod tests {
             details: Some("worker-authored details".into()),
             group: Some("server output reports".into()),
             stage: Some(9),
-            completely_blocked: None,
-            external_blocker: None,
+            requires_user_auth: None,
+            waiting_reason: None,
             waiting_on: vec!["worker-task".into()],
             ..Default::default()
         }];
@@ -388,8 +388,8 @@ mod tests {
         let todo = crate::TodoItem {
             id: "validate".into(),
             status: "pending".into(),
-            completely_blocked: None,
-            external_blocker: None,
+            requires_user_auth: None,
+            waiting_reason: None,
             waiting_on: vec![
                 "running".into(),
                 "finished".into(),

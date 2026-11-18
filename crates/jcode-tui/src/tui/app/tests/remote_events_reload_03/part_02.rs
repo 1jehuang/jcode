@@ -85,7 +85,8 @@ fn test_metadata_only_history_preserves_fast_restored_startup_state() {
         content: vec![crate::message::ContentBlock::Text {
             text: "restored locally before connect".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -303,13 +304,16 @@ fn test_local_compacted_history_marker_scroll_expands_from_session() {
             cache_control: None,
         }],
     );
-    app.session.compaction = Some(crate::session::StoredCompactionState {
-        summary_text: "old prompts and responses".to_string(),
-        openai_encrypted_content: None,
-        covers_up_to_turn: TURNS,
-        original_turn_count: TURNS,
-        compacted_count,
-    });
+    app.session.compaction = Some(
+        crate::session::StoredCompactionState {
+            summary_text: "old prompts and responses".to_string(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: TURNS,
+            original_turn_count: TURNS,
+            compacted_count,
+        }
+        .into(),
+    );
 
     let (rendered_messages, _images, _compacted_info) =
         crate::session::render_messages_and_images_with_compacted_history(&app.session, 0);
@@ -376,7 +380,9 @@ fn test_compacted_history_event_applies_expanded_window() {
     app.remote_session_id = Some("session_lazy_history".to_string());
     app.push_display_message(DisplayMessage::assistant("existing tail"));
     app.scroll_offset = 12;
-    app.auto_scroll_paused = false;
+    // Scrolling up to load older messages pauses tail-following. Background
+    // prompt-history backfills while following the tail preserve that mode.
+    app.auto_scroll_paused = true;
 
     let needs_redraw = app.handle_server_event(
         crate::protocol::ServerEvent::CompactedHistory {
@@ -499,10 +505,7 @@ fn test_service_tier_reported_deduplicates_and_does_not_confirm_old_request() {
     assert_eq!(app.display_messages().len(), before + 1);
     assert_eq!(app.remote_service_tier.as_deref(), Some("ultrafast"));
     let badge = app.info_widget_data().service_tier.unwrap();
-    assert_eq!(
-        badge,
-        "default ← Ultrafast"
-    );
+    assert_eq!(badge, "default ← Ultrafast");
     assert!(!badge.contains("applied"));
     assert!(!badge.split_whitespace().any(|word| word == "confirmed"));
     assert!(
@@ -578,33 +581,42 @@ fn test_service_tier_reported_fast_alias_matches_and_badge_tracks_reports() {
     app.is_remote = true;
     app.remote_service_tier = Some("fast".into());
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    assert_eq!(app.info_widget_data().service_tier.as_deref(), Some("Fast ?"));
+    assert_eq!(
+        app.info_widget_data().service_tier.as_deref(),
+        Some("Fast ?")
+    );
     app.handle_server_event(
         crate::protocol::ServerEvent::ServiceTierReported {
-            requested: Some("priority".into()), tier: "default".into(),
-        }, &mut remote,
+            requested: Some("priority".into()),
+            tier: "default".into(),
+        },
+        &mut remote,
     );
     let badge = app.info_widget_data().service_tier.unwrap();
-    assert_eq!(
-        badge,
-        "default ← Fast"
-    );
+    assert_eq!(badge, "default ← Fast");
     assert!(!badge.contains("applied"));
     assert!(!badge.split_whitespace().any(|word| word == "confirmed"));
     app.handle_server_event(
         crate::protocol::ServerEvent::ServiceTierReported {
-            requested: Some("priority".into()), tier: "priority".into(),
-        }, &mut remote,
+            requested: Some("priority".into()),
+            tier: "priority".into(),
+        },
+        &mut remote,
     );
     assert_eq!(app.info_widget_data().service_tier.as_deref(), Some("fast"));
     app.remote_service_tier = None;
     app.remote_reported_service_tier = None;
     app.remote_service_tier_confirmation_pending = true;
-    assert_eq!(app.info_widget_data().service_tier.as_deref(), Some("Standard ?"));
+    assert_eq!(
+        app.info_widget_data().service_tier.as_deref(),
+        Some("Standard ?")
+    );
     app.handle_server_event(
         crate::protocol::ServerEvent::ServiceTierReported {
-            requested: None, tier: "default".into(),
-        }, &mut remote,
+            requested: None,
+            tier: "default".into(),
+        },
+        &mut remote,
     );
     assert_eq!(app.info_widget_data().service_tier, None);
 }
@@ -656,7 +668,8 @@ fn check_history_panel_snapshot(authoritative: bool, session_changed: bool) {
         provider_model,
         available_models,
         ..
-    } = &mut event {
+    } = &mut event
+    {
         // False still counts as a present identity field on full History.
         *is_canary = authoritative.then_some(false);
         *provider_name = Some("openai".to_string());
@@ -801,7 +814,10 @@ fn test_delta_history_without_prefix_requests_full_history() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    app.handle_server_event(delta_history_event("ses_delta", vec![], Some(5)), &mut remote);
+    app.handle_server_event(
+        delta_history_event("ses_delta", vec![], Some(5)),
+        &mut remote,
+    );
     assert!(app.idle_hibernation.history_reload_needed);
     assert!(!remote.has_loaded_history());
 }

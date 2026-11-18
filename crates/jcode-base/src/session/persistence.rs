@@ -266,8 +266,7 @@ impl Session {
     /// Replace every stored inline image with a text note, after a provider
     /// deterministically rejected an image (#1712). Persisted on next save.
     pub fn strip_all_images(&mut self) -> usize {
-        let mut contents: Vec<&mut Vec<crate::message::ContentBlock>> =
-            self.messages.iter_mut().map(|m| &mut m.content).collect();
+        let mut contents: Vec<_> = self.messages.iter_mut().map(|m| &mut m.content).collect();
         let stripped = jcode_compaction_core::strip_all_images_in_contents(&mut contents);
         if stripped > 0 {
             self.mark_memory_profile_dirty();

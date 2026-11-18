@@ -19,6 +19,20 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 const QUERY_INTERVAL: Duration = Duration::from_secs(5);
+/// Query cadence once the terminal reported FocusLost. Regaining focus queries
+/// immediately, so a background pane only needs an occasional refresh. Dozens
+/// of parked clients each asking the terminal every five seconds also woke the
+/// terminal emulator for every one of them.
+const UNFOCUSED_QUERY_INTERVAL: Duration = Duration::from_secs(60);
+/// A client with no user input for this long is treated like a background
+/// pane for query cadence. Focus reports alone are not enough: a terminal may
+/// not send them, and a client that missed FocusLost believes it is focused
+/// forever. Each query also costs a reply that wakes the input thread and the
+/// event loop, which measured about one wakeup a second per parked client.
+const INPUT_IDLE_AFTER: Duration = Duration::from_secs(60);
+/// How often to re-check whether runtime queries became enabled (config
+/// change) when nothing else needs the timer.
+const DISABLED_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 const PREFIX_TIMEOUT: Duration = Duration::from_millis(250);
 const REPORT_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_REPORT_LEN: usize = 40;
@@ -60,16 +74,18 @@ impl ColorReports {
         self.split_escape = false;
     }
 
-    fn expire(&mut self, now: Instant) {
+    /// When the in-flight report (if any) must be expired.
+    fn deadline(&self) -> Option<Instant> {
         let timeout = if self.recognized() {
             REPORT_TIMEOUT
         } else {
             PREFIX_TIMEOUT
         };
-        if self
-            .started
-            .is_some_and(|started| now.duration_since(started) >= timeout)
-        {
+        self.started.map(|started| started + timeout)
+    }
+
+    fn expire(&mut self, now: Instant) {
+        if self.deadline().is_some_and(|deadline| now >= deadline) {
             // Replay an ordinary Alt+] chord, but never replay half a report.
             self.reset(!self.recognized());
         }
@@ -199,11 +215,72 @@ struct RuntimeTheme {
     reports: ColorReports,
     last_query: Option<Instant>,
     cache_query_at: Option<Instant>,
+    /// Result of the last `runtime_queries_enabled` check, so computing the
+    /// next wake does not repeat its isatty/env probes on every poll.
+    queries_enabled: bool,
+    /// True once the terminal reported FocusLost. Terminals without focus
+    /// reporting never send it, so they keep the focused cadence.
+    unfocused: bool,
+    /// When the last user event was delivered. Color reports never count.
+    last_input: Option<Instant>,
+}
+
+impl RuntimeTheme {
+    fn note_focus(&mut self, event: &Event) {
+        match event {
+            Event::FocusGained => self.unfocused = false,
+            Event::FocusLost => self.unfocused = true,
+            _ => {}
+        }
+    }
+
+    fn note_input(&mut self, event: &Event, now: Instant) {
+        if *event != Event::FocusLost {
+            self.last_input = Some(now);
+        }
+    }
+
+    fn timer_query_interval(&self, now: Instant) -> Duration {
+        let input_idle = self
+            .last_input
+            .is_none_or(|at| now.saturating_duration_since(at) >= INPUT_IDLE_AFTER);
+        if self.unfocused || input_idle {
+            UNFOCUSED_QUERY_INTERVAL
+        } else {
+            QUERY_INTERVAL
+        }
+    }
+
+    /// Earliest instant the timer has work to do: expire a held report, read
+    /// the tmux cache, or send the next periodic query. An idle client used to
+    /// tick every 250ms forever just in case one of these was pending.
+    fn next_wake(&self, now: Instant) -> Instant {
+        let mut at = now + DISABLED_RECHECK_INTERVAL;
+        if let Some(deadline) = self.reports.deadline() {
+            at = at.min(deadline);
+        }
+        if let Some(cache_query_at) = self.cache_query_at {
+            at = at.min(cache_query_at);
+        }
+        if self.queries_enabled {
+            at = at.min(
+                self.last_query
+                    .map_or(now, |last| last + self.timer_query_interval(now)),
+            );
+        }
+        at
+    }
 }
 
 fn runtime() -> &'static Mutex<RuntimeTheme> {
     static RUNTIME: OnceLock<Mutex<RuntimeTheme>> = OnceLock::new();
-    RUNTIME.get_or_init(|| Mutex::new(RuntimeTheme::default()))
+    RUNTIME.get_or_init(|| {
+        Mutex::new(RuntimeTheme {
+            // A re-executed background client stays on the slow query cadence.
+            unfocused: !crate::tui::focus_carryover::initial_focus(),
+            ..RuntimeTheme::default()
+        })
+    })
 }
 
 fn background_query(passthrough: bool) -> &'static [u8] {
@@ -264,7 +341,8 @@ fn tmux_passthrough_enabled() -> bool {
 }
 
 fn query_if_due(state: &mut RuntimeTheme, now: Instant, focused: bool) {
-    if !super::theme_detect::runtime_queries_enabled() {
+    state.queries_enabled = super::theme_detect::runtime_queries_enabled();
+    if !state.queries_enabled {
         return;
     }
     if state.cache_query_at.is_some_and(|at| now >= at) {
@@ -278,7 +356,7 @@ fn query_if_due(state: &mut RuntimeTheme, now: Instant, focused: bool) {
     let interval = if focused {
         Duration::from_secs(1)
     } else {
-        QUERY_INTERVAL
+        state.timer_query_interval(now)
     };
     if state
         .last_query
@@ -320,7 +398,9 @@ fn take_event(state: &mut RuntimeTheme) -> Option<Event> {
             return Some(Event::Resize(width, height));
         }
     }
-    state.reports.ready.pop_front()
+    let event = state.reports.ready.pop_front()?;
+    state.note_input(&event, Instant::now());
+    Some(event)
 }
 
 /// Nonblocking burst drain with the same report filter as [`EventStream`].
@@ -337,6 +417,7 @@ pub(super) fn try_read() -> io::Result<Option<Event>> {
         }
         let event = crossterm::event::read()?;
         let now = Instant::now();
+        state.note_focus(&event);
         if event == Event::FocusGained {
             query_if_due(&mut state, now, true);
         }
@@ -353,6 +434,8 @@ pub(super) fn try_read() -> io::Result<Option<Event>> {
 pub(super) struct EventStream {
     inner: crossterm::event::EventStream,
     tick: Pin<Box<tokio::time::Sleep>>,
+    /// Deadline `tick` is currently armed for.
+    armed: Instant,
 }
 
 impl EventStream {
@@ -360,29 +443,34 @@ impl EventStream {
         Self {
             inner: crossterm::event::EventStream::new(),
             tick: Box::pin(tokio::time::sleep(Duration::ZERO)),
+            armed: Instant::now(),
         }
     }
-}
 
-impl Stream for EventStream {
-    type Item = io::Result<Event>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut state = runtime().lock().unwrap_or_else(|error| error.into_inner());
-        // Poll the timer first so a continuously-ready stream of input cannot
-        // starve a theme refresh. It only writes a tiny query every five seconds.
-        if self.tick.as_mut().poll(cx).is_ready() {
-            let now = Instant::now();
-            state.reports.expire(now);
-            query_if_due(&mut state, now, false);
-            self.tick
-                .as_mut()
-                .reset(tokio::time::Instant::now() + PREFIX_TIMEOUT);
-            if self.tick.as_mut().poll(cx).is_ready() {
-                cx.waker().wake_by_ref();
-            }
+    /// Arm the timer for the next instant it has work. `fired` re-arms
+    /// unconditionally. Otherwise the timer only moves earlier (a report just
+    /// started being held), so an armed deadline is not reset on every poll.
+    fn rearm(&mut self, state: &RuntimeTheme, fired: bool, cx: &mut Context<'_>) {
+        let now = Instant::now();
+        let want = state.next_wake(now);
+        if !fired && want >= self.armed {
+            return;
         }
-        if let Some(event) = take_event(&mut state) {
+        self.armed = want;
+        self.tick
+            .as_mut()
+            .reset(tokio::time::Instant::from_std(want));
+        if self.tick.as_mut().poll(cx).is_ready() {
+            cx.waker().wake_by_ref();
+        }
+    }
+
+    fn poll_events(
+        &mut self,
+        state: &mut RuntimeTheme,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<io::Result<Event>>> {
+        if let Some(event) = take_event(state) {
             return Poll::Ready(Some(Ok(event)));
         }
         // Bound the work per poll while draining the key-shaped color report.
@@ -390,11 +478,12 @@ impl Stream for EventStream {
             match Pin::new(&mut self.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(event))) => {
                     let now = Instant::now();
+                    state.note_focus(&event);
                     if event == Event::FocusGained {
-                        query_if_due(&mut state, now, true);
+                        query_if_due(state, now, true);
                     }
                     state.reports.push(event, now);
-                    if let Some(event) = take_event(&mut state) {
+                    if let Some(event) = take_event(state) {
                         return Poll::Ready(Some(Ok(event)));
                     }
                 }
@@ -403,6 +492,28 @@ impl Stream for EventStream {
         }
         cx.waker().wake_by_ref();
         Poll::Pending
+    }
+}
+
+impl Stream for EventStream {
+    type Item = io::Result<Event>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        let mut state = runtime().lock().unwrap_or_else(|error| error.into_inner());
+        // Poll the timer first so a continuously-ready stream of input cannot
+        // starve a theme refresh. It only writes a tiny query every five seconds.
+        let fired = this.tick.as_mut().poll(cx).is_ready();
+        if fired {
+            let now = Instant::now();
+            state.reports.expire(now);
+            query_if_due(&mut state, now, false);
+        }
+        let result = this.poll_events(&mut state, cx);
+        // Arm after draining input: a report that just started being held needs
+        // its expiry timer, and a query just sent moves the next one out.
+        this.rearm(&state, fired, cx);
+        result
     }
 }
 
@@ -418,6 +529,59 @@ mod tests {
     }
     use super::*;
     use crossterm::event::KeyEvent;
+
+    #[test]
+    fn idle_timer_sleeps_until_the_next_query_instead_of_polling() {
+        let now = Instant::now();
+        let mut state = RuntimeTheme::default();
+        // Queries disabled and nothing held: only the slow enablement recheck.
+        assert_eq!(state.next_wake(now), now + DISABLED_RECHECK_INTERVAL);
+
+        state.queries_enabled = true;
+        assert_eq!(state.next_wake(now), now, "first query is due at once");
+        state.last_query = Some(now);
+        // No user input yet: a parked client keeps the slow cadence even if it
+        // believes it is focused.
+        assert_eq!(state.next_wake(now), now + UNFOCUSED_QUERY_INTERVAL);
+        state.note_input(&key('x', KeyModifiers::NONE), now);
+        assert_eq!(state.next_wake(now), now + QUERY_INTERVAL);
+        assert!(QUERY_INTERVAL > PREFIX_TIMEOUT * 4);
+        // Input went quiet: back to the slow cadence. Typing again makes the
+        // overdue query due at once.
+        let later = now + INPUT_IDLE_AFTER;
+        assert_eq!(state.next_wake(later), now + UNFOCUSED_QUERY_INTERVAL);
+        state.note_input(&key('x', KeyModifiers::NONE), later);
+        assert_eq!(state.next_wake(later), now + QUERY_INTERVAL);
+        state.note_input(&Event::FocusLost, later + INPUT_IDLE_AFTER);
+        assert_eq!(state.last_input, Some(later), "losing focus is not input");
+        state.note_input(&key('x', KeyModifiers::NONE), now);
+
+        state.note_focus(&Event::FocusLost);
+        assert_eq!(state.next_wake(now), now + UNFOCUSED_QUERY_INTERVAL);
+        state.note_focus(&Event::FocusGained);
+        assert_eq!(state.next_wake(now), now + QUERY_INTERVAL);
+    }
+
+    #[test]
+    fn held_report_and_tmux_cache_read_pull_the_timer_in() {
+        let now = Instant::now();
+        let mut state = RuntimeTheme {
+            queries_enabled: true,
+            last_query: Some(now),
+            last_input: Some(now),
+            ..RuntimeTheme::default()
+        };
+        // An Alt+] chord is held as a possible report prefix and must be
+        // replayed after PREFIX_TIMEOUT even if no further input arrives.
+        state.reports.push(key(']', KeyModifiers::ALT), now);
+        assert_eq!(state.next_wake(now), now + PREFIX_TIMEOUT);
+        state.reports.expire(now + PREFIX_TIMEOUT);
+        assert_eq!(state.reports.ready.len(), 1);
+        assert_eq!(state.next_wake(now), now + QUERY_INTERVAL);
+
+        state.cache_query_at = Some(now + Duration::from_millis(100));
+        assert_eq!(state.next_wake(now), now + Duration::from_millis(100));
+    }
 
     fn key(ch: char, modifiers: KeyModifiers) -> Event {
         Event::Key(KeyEvent::new(KeyCode::Char(ch), modifiers))

@@ -22,6 +22,9 @@ pub struct SessionToolDefinition {
 /// Replaces the session SDK overlay. None inherits normal selection.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionToolConfig {
+    /// Session-only instructions owned by the configuring connection, not persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt_append: Option<String>,
     #[serde(default)]
     pub enabled: Option<Vec<String>>,
     #[serde(default)]
@@ -34,6 +37,13 @@ pub struct SessionToolConfig {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {
+    /// Passive latest-state metadata. Never starts a turn or cancels generation.
+    #[serde(rename = "screen_context")]
+    ScreenContext {
+        id: u64,
+        session_id: String,
+        action: ScreenContextAction,
+    },
     #[serde(rename = "configure_tools")]
     ConfigureTools { id: u64, tools: SessionToolConfig },
     #[serde(rename = "list_tools")]
@@ -124,6 +134,21 @@ pub enum Request {
     /// Fetch the attached session's todo card without locking its agent.
     #[serde(rename = "get_todos")]
     GetTodos { id: u64 },
+
+    /// Report whether this client's window has focus. Sent only to servers
+    /// that advertise [`crate::CLIENT_FOCUS_CAPABILITY`]; never acknowledged.
+    ///
+    /// `hidden` says an unfocused window is known to be out of sight (another
+    /// workspace, a background multiplexer window, the display off), which
+    /// lets the server batch its stream more coarsely. Absent means not known
+    /// to be hidden, so older clients and servers interoperate unchanged.
+    #[serde(rename = "client_focus")]
+    ClientFocus {
+        id: u64,
+        focused: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        hidden: bool,
+    },
 
     /// Execute a debug command (debug socket only)
     #[serde(rename = "debug_command")]

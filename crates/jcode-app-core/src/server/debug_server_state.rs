@@ -21,6 +21,65 @@ const MEMORY_CRITICAL_GROWTH_BYTES: u64 = 1024 * 1024 * 1024;
 const MEMORY_WARNING_LIVE_SESSIONS: usize = 128;
 const MEMORY_CRITICAL_LIVE_SESSIONS: usize = 512;
 
+#[derive(Default)]
+struct CompactionMemoryTotals {
+    summary_text_bytes: u64,
+    encrypted_content_bytes: u64,
+    retained_payload_capacity_bytes: u64,
+    persisted_metadata_payload_capacity_bytes: u64,
+    sessions: Vec<serde_json::Value>,
+}
+
+impl CompactionMemoryTotals {
+    fn observe(&mut self, session_id: &str, profile: &serde_json::Value) {
+        let compaction = &profile["compaction"];
+        let bytes = |field: &str| compaction[field].as_u64().unwrap_or(0);
+        let summary = bytes("summary_text_bytes");
+        let encrypted = bytes("encrypted_content_bytes");
+        let retained = bytes("retained_payload_capacity_bytes");
+        let metadata = bytes("persisted_metadata_payload_capacity_bytes");
+        self.summary_text_bytes = self.summary_text_bytes.saturating_add(summary);
+        self.encrypted_content_bytes = self.encrypted_content_bytes.saturating_add(encrypted);
+        self.retained_payload_capacity_bytes = self
+            .retained_payload_capacity_bytes
+            .saturating_add(retained);
+        self.persisted_metadata_payload_capacity_bytes = self
+            .persisted_metadata_payload_capacity_bytes
+            .saturating_add(metadata);
+        self.sessions.push(serde_json::json!({
+            "session_id": session_id,
+            "summary_text_bytes": summary,
+            "encrypted_content_bytes": encrypted,
+            "retained_payload_capacity_bytes": retained,
+            "persisted_metadata_payload_capacity_bytes": metadata,
+            "total_retained_payload_capacity_bytes": retained.saturating_add(metadata),
+        }));
+    }
+
+    fn into_json(mut self) -> serde_json::Value {
+        self.sessions.sort_by(|left, right| {
+            right["total_retained_payload_capacity_bytes"]
+                .as_u64()
+                .cmp(&left["total_retained_payload_capacity_bytes"].as_u64())
+                .then_with(|| {
+                    left["session_id"]
+                        .as_str()
+                        .cmp(&right["session_id"].as_str())
+                })
+        });
+        self.sessions.truncate(12);
+        serde_json::json!({
+            "summary_text_bytes": self.summary_text_bytes,
+            "encrypted_content_bytes": self.encrypted_content_bytes,
+            "retained_payload_capacity_bytes": self.retained_payload_capacity_bytes,
+            "persisted_metadata_payload_capacity_bytes": self.persisted_metadata_payload_capacity_bytes,
+            "total_retained_payload_capacity_bytes": self.retained_payload_capacity_bytes
+                .saturating_add(self.persisted_metadata_payload_capacity_bytes),
+            "top_by_retained_payload_capacity_bytes": self.sessions,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MemoryIncidentDecision {
     severity: &'static str,
@@ -401,6 +460,35 @@ fn classify_memory_incident(metrics: MemoryIncidentMetrics) -> MemoryIncidentDec
     }
 }
 
+struct MemoryIncidentTrend<'a> {
+    current_timestamp_ms: u128,
+    baseline: Option<&'a crate::process_memory::ProcessMemoryHistoryEntry>,
+    sample_count: usize,
+}
+
+fn memory_incident_trend(
+    history: &[crate::process_memory::ProcessMemoryHistoryEntry],
+) -> MemoryIncidentTrend<'_> {
+    // History is currently newest-first. Select by timestamps rather than
+    // relying on its storage order, including when a caller reverses it.
+    let current_timestamp_ms = history
+        .iter()
+        .map(|entry| entry.timestamp_ms)
+        .max()
+        .unwrap_or_default();
+    let window_start_ms = current_timestamp_ms.saturating_sub(MEMORY_INCIDENT_WINDOW_MS);
+    let mut window = history
+        .iter()
+        .filter(|entry| entry.timestamp_ms >= window_start_ms);
+    let baseline = window.clone().min_by_key(|entry| entry.timestamp_ms);
+    let sample_count = window.by_ref().count();
+    MemoryIncidentTrend {
+        current_timestamp_ms,
+        baseline,
+        sample_count,
+    }
+}
+
 async fn build_server_memory_incident_payload(
     sessions: &SessionAgents,
     client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
@@ -414,15 +502,8 @@ async fn build_server_memory_incident_payload(
     let process = crate::process_memory::snapshot_with_source("server:memory-incident");
     let diagnostics = crate::runtime_memory_log::build_process_diagnostics(&process);
     let history = crate::process_memory::history(512);
-    let latest_timestamp_ms = history
-        .last()
-        .map(|entry| entry.timestamp_ms)
-        .unwrap_or_default();
-    let window_start_ms = latest_timestamp_ms.saturating_sub(MEMORY_INCIDENT_WINDOW_MS);
-    let baseline = history
-        .iter()
-        .find(|entry| entry.timestamp_ms >= window_start_ms)
-        .or_else(|| history.first());
+    let trend = memory_incident_trend(&history);
+    let baseline = trend.baseline;
     let current_pss_bytes = process
         .os
         .as_ref()
@@ -626,10 +707,10 @@ async fn build_server_memory_incident_payload(
         "trend_15m": {
             "baseline_timestamp_ms": baseline.map(|entry| entry.timestamp_ms),
             "baseline_pss_bytes": baseline_pss_bytes,
-            "current_timestamp_ms": latest_timestamp_ms,
+            "current_timestamp_ms": trend.current_timestamp_ms,
             "current_pss_bytes": current_pss_bytes,
             "pss_growth_bytes": pss_growth_bytes,
-            "sample_count": history.iter().filter(|entry| entry.timestamp_ms >= window_start_ms).count(),
+            "sample_count": trend.sample_count,
         },
         "population": {
             "live_sessions": live_session_ids.len(),
@@ -700,17 +781,20 @@ async fn build_server_memory_payload(
     let mut session_provider_cache_large_blob_bytes = 0u64;
     let mut locked_session_count = 0usize;
     let mut contended_session_count = 0usize;
+    let mut compaction_memory = CompactionMemoryTotals::default();
     for (session_id, agent_arc) in sessions_guard.iter() {
         if let Ok(agent) = agent_arc.try_lock() {
             locked_session_count += 1;
-            let profile = agent.debug_memory_profile();
-            let session_profile = profile.get("session").cloned().unwrap_or_default();
-            let totals = session_profile.get("totals").cloned().unwrap_or_default();
-            let messages = session_profile.get("messages").cloned().unwrap_or_default();
-            let provider_cache = session_profile
-                .get("provider_messages_cache")
-                .cloned()
-                .unwrap_or_default();
+            // The compact snapshot omits compaction capacity attribution. Read
+            // the same session profile as agent:memory without its discarded
+            // process, interrupt, and frozen-snapshot diagnostics.
+            let session_profile = agent.session_for_split().debug_memory_profile();
+            // Only profiles obtained through try_lock contribute. Capacity is
+            // attribution, not serialized length or an estimate of RSS savings.
+            compaction_memory.observe(session_id, &session_profile);
+            let totals = &session_profile["totals"];
+            let messages = &session_profile["messages"];
+            let provider_cache = &session_profile["provider_messages_cache"];
             let json_bytes = totals
                 .get("json_bytes")
                 .and_then(|value| value.as_u64())
@@ -1004,6 +1088,7 @@ async fn build_server_memory_payload(
             "total_provider_cache_tool_result_bytes": session_provider_cache_tool_result_bytes,
             "total_large_blob_bytes": session_large_blob_bytes,
             "total_provider_cache_large_blob_bytes": session_provider_cache_large_blob_bytes,
+            "compaction": compaction_memory.into_json(),
             "top_by_json_bytes": top_sessions,
         },
         "swarm": {
@@ -1165,105 +1250,9 @@ fn path_len(path: &std::path::Path) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
+#[path = "debug_server_state_tests.rs"]
+mod tests;
 
-    #[tokio::test]
-    async fn connected_session_snapshot_releases_connections_before_waiting_for_sessions() {
-        let sessions = Arc::new(crate::server::session_manager::SessionManager::new());
-        let client_connections = Arc::new(RwLock::new(HashMap::new()));
-        let swarm_members = Arc::new(RwLock::new(HashMap::new()));
-
-        let sessions_gate = sessions.write_for_test().await;
-        let snapshot = connected_session_snapshot(&sessions, &client_connections, &swarm_members);
-        tokio::pin!(snapshot);
-        tokio::select! {
-            _ = &mut snapshot => panic!("snapshot unexpectedly completed"),
-            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
-        }
-
-        let connections_guard =
-            tokio::time::timeout(Duration::from_millis(100), client_connections.write())
-                .await
-                .expect("debug snapshot retained connections while waiting for sessions");
-        drop(connections_guard);
-
-        drop(sessions_gate);
-        let (connected_agents, members) =
-            tokio::time::timeout(Duration::from_secs(1), &mut snapshot)
-                .await
-                .expect("debug snapshot deadlocked");
-        assert!(connected_agents.is_empty());
-        assert!(members.is_empty());
-    }
-
-    #[test]
-    fn spawned_swarm_agent_count_only_includes_live_owned_sessions() {
-        let live_session_ids = HashSet::from([
-            "root".to_string(),
-            "worker-running".to_string(),
-            "worker-ready".to_string(),
-        ]);
-        let spawned_session_ids = [
-            "worker-running".to_string(),
-            "worker-ready".to_string(),
-            "worker-stale".to_string(),
-        ];
-
-        assert_eq!(
-            count_live_spawned_swarm_agents(&live_session_ids, spawned_session_ids.iter()),
-            2
-        );
-    }
-
-    #[test]
-    fn memory_incident_classifies_runaway_live_sessions_before_allocator_retention() {
-        let decision = classify_memory_incident(MemoryIncidentMetrics {
-            pss_bytes: 4 * 1024 * 1024 * 1024,
-            pss_growth_bytes: 3 * 1024 * 1024 * 1024,
-            allocator_live_bytes: 3_800 * 1024 * 1024,
-            allocator_retained_resident_bytes: 300 * 1024 * 1024,
-            live_sessions: 1_145,
-            headless_live_sessions: 1_140,
-            connected_clients: 5,
-        });
-
-        assert_eq!(decision.severity, "critical");
-        assert_eq!(decision.primary_cause, "runaway_live_session_population");
-        assert_eq!(decision.confidence, "high");
-    }
-
-    #[test]
-    fn memory_incident_classifies_allocator_retention_when_live_heap_is_small() {
-        let decision = classify_memory_incident(MemoryIncidentMetrics {
-            pss_bytes: 1_500 * 1024 * 1024,
-            pss_growth_bytes: 400 * 1024 * 1024,
-            allocator_live_bytes: 500 * 1024 * 1024,
-            allocator_retained_resident_bytes: 600 * 1024 * 1024,
-            live_sessions: 8,
-            headless_live_sessions: 3,
-            connected_clients: 5,
-        });
-
-        assert_eq!(decision.severity, "warning");
-        assert_eq!(decision.primary_cause, "allocator_retention");
-        assert_eq!(decision.confidence, "high");
-    }
-
-    #[test]
-    fn memory_incident_reports_healthy_baseline() {
-        let decision = classify_memory_incident(MemoryIncidentMetrics {
-            pss_bytes: 220 * 1024 * 1024,
-            pss_growth_bytes: 12 * 1024 * 1024,
-            allocator_live_bytes: 150 * 1024 * 1024,
-            allocator_retained_resident_bytes: 20 * 1024 * 1024,
-            live_sessions: 5,
-            headless_live_sessions: 1,
-            connected_clients: 4,
-        });
-
-        assert_eq!(decision.severity, "healthy");
-        assert_eq!(decision.primary_cause, "within_normal_operating_range");
-    }
-}
+#[cfg(test)]
+#[path = "debug_server_memory_efficiency_tests.rs"]
+mod efficiency_tests;

@@ -1,5 +1,9 @@
 use super::*;
 
+#[cfg(test)]
+#[path = "dispatch_estimation_tests.rs"]
+mod estimation_tests;
+
 #[derive(Clone, Copy)]
 pub(super) enum CompletionMode<'a> {
     Unified {
@@ -33,12 +37,30 @@ impl MultiProvider {
         tools: &[ToolDefinition],
         mode: CompletionMode<'_>,
     ) -> (usize, usize) {
-        let mut chars = serde_json::to_string(messages)
-            .map(|value| value.len())
-            .unwrap_or(0)
-            + serde_json::to_string(tools)
-                .map(|value| value.len())
-                .unwrap_or(0);
+        // Count model context, not transport JSON. In particular, base64 images
+        // and opaque native compaction payloads are not tokenized as text.
+        let mut chars: usize = messages
+            .iter()
+            .map(jcode_compaction_core::message_char_count)
+            .sum();
+        let referenced_tools: std::collections::HashSet<&str> = messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                crate::message::ContentBlock::ToolReference { tool_name, .. } => {
+                    Some(tool_name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        // Native deferred catalogs travel over the wire but enter model context
+        // only when referenced. Non-native routes already strip deferred tools
+        // before dispatch, so do not charge their full unloaded catalogs here.
+        chars += tools
+            .iter()
+            .filter(|tool| !tool.defer_loading || referenced_tools.contains(tool.name.as_str()))
+            .map(ToolDefinition::prompt_chars)
+            .sum::<usize>();
         match mode {
             CompletionMode::Unified { system } => {
                 chars += system.len();

@@ -198,7 +198,7 @@ test("nightly scheduled retention removes only expired private account records",
     bind() { return this; }, async run() { return { meta: { changes: 0 } }; }, async all() { return { results: [] }; },
   };
   const waited = [];
-  await worker.scheduled({}, env, { waitUntil(promise) { waited.push(promise); } });
+  await worker.scheduled({ cron: "17 4 * * *" }, env, { waitUntil(promise) { waited.push(promise); } });
   await Promise.all(waited);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM oauth_accounts").get().count, 1);
   assert.equal(db.prepare("SELECT provider FROM oauth_accounts").get().provider, "anthropic");

@@ -1,58 +1,3 @@
-/// Regression: the completion-gate circuit breaker clears
-/// `auto_poke_incomplete_todos`, and the only restore used to live in the
-/// all-complete branch. Since the breaker can only trip while every todo is
-/// complete, an agent that added open work immediately afterwards left
-/// auto-poke disarmed for the rest of the session, and the guard at the top
-/// of `schedule_auto_poke_followup_if_needed` returned false immediately.
-#[test]
-fn test_open_work_rearms_auto_poke_after_completion_gate_breaker() {
-    with_temp_jcode_home(|| {
-        let mut app = create_test_app();
-
-        crate::todo::save_todos(
-            &app.session.id,
-            &[crate::todo::TodoItem {
-                lane_after: None,
-                lane_owner: None,
-                stage: None,
-                details: None,
-                group: None,
-                id: "open".to_string(),
-                content: "Still open".to_string(),
-                status: "in_progress".to_string(),
-                priority: "high".to_string(),
-                blocked_by: Vec::new(),
-                assigned_to: None,
-                confidence: None,
-                completion_confidence: None,
-                confidence_history: Vec::new(),
-                external_blocker: None,
-                completely_blocked: None,
-                waiting_on: Vec::new(),
-            }],
-        )
-        .expect("save todos");
-
-        // The exact state the circuit breaker leaves behind: flag cleared,
-        // configured default still on, nothing else touched.
-        app.auto_poke_default_on = true;
-        app.auto_poke_incomplete_todos = false;
-        app.last_auto_poke_fingerprint = None;
-        app.final_response_todo_fingerprint = None;
-        app.todo_final_response_requested = false;
-        app.pending_queued_dispatch = false;
-        app.pending_turn = false;
-
-        let poked = app.schedule_auto_poke_followup_if_needed();
-
-        assert!(
-            app.auto_poke_incomplete_todos,
-            "open work must re-arm auto-poke after the completion-gate breaker"
-        );
-        assert!(poked, "open work must still produce a poke");
-    });
-}
-
 include!("model_picker_startup_tests.rs");
 
 #[test]
@@ -77,8 +22,8 @@ fn test_cloud_handoff_defers_turn_end_auto_poke_without_disarming_it() {
                     confidence: None,
                     completion_confidence: None,
                     confidence_history: Vec::new(),
-                    external_blocker: None,
-                    completely_blocked: None,
+                    waiting_reason: None,
+                    requires_user_auth: None,
                     waiting_on: Vec::new(),
                 }],
             )
@@ -2356,8 +2301,8 @@ fn test_poke_arms_auto_poke_until_todos_are_done() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
-                external_blocker: None,
-                completely_blocked: None,
+                waiting_reason: None,
+                requires_user_auth: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -2396,8 +2341,8 @@ fn test_poke_status_reports_current_state() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
-                external_blocker: None,
-                completely_blocked: None,
+                waiting_reason: None,
+                requires_user_auth: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -2457,8 +2402,8 @@ fn test_poke_off_disarms_and_clears_queued_followup() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
-                external_blocker: None,
-                completely_blocked: None,
+                waiting_reason: None,
+                requires_user_auth: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -2513,8 +2458,8 @@ fn test_poke_queues_when_turn_is_in_progress() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
-                external_blocker: None,
-                completely_blocked: None,
+                waiting_reason: None,
+                requires_user_auth: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -2556,8 +2501,8 @@ fn test_poke_queues_when_turn_is_in_progress() {
                     confidence: None,
                     completion_confidence: None,
                     confidence_history: Vec::new(),
-                    external_blocker: None,
-                    completely_blocked: None,
+                    waiting_reason: None,
+                    requires_user_auth: None,
                     waiting_on: Vec::new(),
                 },
                 crate::todo::TodoItem {
@@ -2575,8 +2520,8 @@ fn test_poke_queues_when_turn_is_in_progress() {
                     confidence: None,
                     completion_confidence: None,
                     confidence_history: Vec::new(),
-                    external_blocker: None,
-                    completely_blocked: None,
+                    waiting_reason: None,
+                    requires_user_auth: None,
                     waiting_on: Vec::new(),
                 },
             ],
@@ -2635,8 +2580,8 @@ fn test_finish_turn_auto_pokes_again_when_todos_remain() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
-                external_blocker: None,
-                completely_blocked: None,
+                waiting_reason: None,
+                requires_user_auth: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -2677,8 +2622,8 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
                         80,
                     )),
                     confidence_history: Vec::new(),
-                    external_blocker: None,
-                    completely_blocked: None,
+                    waiting_reason: None,
+                    requires_user_auth: None,
                     waiting_on: Vec::new(),
                 },
                 crate::todo::TodoItem {
@@ -2698,8 +2643,8 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
                         95,
                     )),
                     confidence_history: Vec::new(),
-                    external_blocker: None,
-                    completely_blocked: None,
+                    waiting_reason: None,
+                    requires_user_auth: None,
                     waiting_on: Vec::new(),
                 },
             ],
@@ -2814,8 +2759,8 @@ fn test_todo_completion_gate_detects_abrupt_confidence_increase() {
         priority: "high".to_string(),
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(0)),
         completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
-        external_blocker: None,
-        completely_blocked: None,
+        waiting_reason: None,
+        requires_user_auth: None,
         waiting_on: Vec::new(),
         confidence_history: vec![
             crate::todo::ConfidenceState::from_legacy_score(0),
@@ -2837,8 +2782,8 @@ fn test_todo_completion_gate_allows_evidence_backed_confidence_steps() {
         priority: "high".to_string(),
         confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
         completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
-        external_blocker: None,
-        completely_blocked: None,
+        waiting_reason: None,
+        requires_user_auth: None,
         waiting_on: Vec::new(),
         confidence_history: vec![
             crate::todo::ConfidenceState::Speculative,
@@ -2869,8 +2814,8 @@ fn test_finish_turn_challenges_confidence_spike_once() {
                 priority: "high".to_string(),
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
-                external_blocker: None,
-                completely_blocked: None,
+                waiting_reason: None,
+                requires_user_auth: None,
                 waiting_on: Vec::new(),
                 confidence_history: vec![
                     crate::todo::ConfidenceState::Speculative,
@@ -2982,8 +2927,8 @@ fn test_finish_turn_without_auto_poke_does_not_queue_confidence_summary() {
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(90)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(90)),
                 confidence_history: Vec::new(),
-                external_blocker: None,
-                completely_blocked: None,
+                waiting_reason: None,
+                requires_user_auth: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -3024,8 +2969,8 @@ fn test_finish_turn_auto_poke_preserves_visible_turn_started() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
-                external_blocker: None,
-                completely_blocked: None,
+                waiting_reason: None,
+                requires_user_auth: None,
                 waiting_on: Vec::new(),
             }],
         )
@@ -3090,8 +3035,8 @@ fn test_finish_turn_does_not_challenge_moderate_or_unrecorded_confidence_jumps()
                     status: "completed".into(),
                     confidence: Some(planning),
                     completion_confidence: Some(completion),
-                    external_blocker: None,
-                    completely_blocked: None,
+                    waiting_reason: None,
+                    requires_user_auth: None,
                     waiting_on: Vec::new(),
                     confidence_history: history,
                     ..Default::default()
@@ -3130,3 +3075,6 @@ fn test_finish_turn_does_not_challenge_moderate_or_unrecorded_confidence_jumps()
 
 #[path = "state_model_poke_03/prompt_history_keys.rs"]
 mod prompt_history_keys;
+
+#[path = "state_model_poke_03_additional_tests.rs"]
+mod additional_test_open_work_rearms_auto_poke_after_completion_gate_breaker;

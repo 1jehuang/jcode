@@ -2624,6 +2624,11 @@ Re-run with `--force` if you really want to stop the server.";
     Ok(())
 }
 
+/// Run a standalone, in-process agent, including its local continuation loop.
+///
+/// Even when a daemon is available (or started on demand for swarm tools), it
+/// does not own this agent or receive its turns. Daemon-owned auto-poke applies
+/// only to daemon sessions, so these local loops must remain enabled here.
 pub async fn run_single_message_command(
     choice: &super::provider_init::ProviderChoice,
     model: Option<&str>,
@@ -2859,8 +2864,8 @@ fn run_command_auto_poke_limit_reached(turns_completed: usize, max_turns: Option
 mod todo_followup;
 use todo_followup::{
     RunAutoPokeFollowUp, build_run_auto_poke_follow_up_from_todos, prepare_run_todo_follow_up,
-    run_actionable_poke_message, run_blocked_notice, run_completely_blocked_notice,
-    run_external_blocker_notice, run_todos, take_run_gate_digest_if_turn_ended,
+    run_actionable_poke_message, run_blocked_notice, run_cannot_complete_notice, run_goals,
+    run_todos, run_user_auth_notice, take_run_gate_digest_if_turn_ended,
 };
 #[cfg(test)]
 use todo_followup::{run_actionable_todos, take_run_gate_digest};
@@ -2898,7 +2903,7 @@ async fn run_single_message_command_plain_with_auto_poke(
         if todos.iter().any(crate::todo::is_incomplete_todo)
             && !actionable_todos.iter().any(crate::todo::is_incomplete_todo)
         {
-            eprintln!("{}", run_blocked_notice(&todos).unwrap_or_else(||
+            eprintln!("{}", run_blocked_notice(&todos, &run_goals(agent.session_id())).unwrap_or_else(||
                 "Stopped at the turn limit with unfinished todos waiting on background dependencies.".into()
             ));
             break;
@@ -3016,7 +3021,7 @@ async fn run_single_message_command_capture_with_auto_poke(
         if todos.iter().any(crate::todo::is_incomplete_todo)
             && !actionable_todos.iter().any(crate::todo::is_incomplete_todo)
         {
-            eprintln!("{}", run_blocked_notice(&todos).unwrap_or_else(||
+            eprintln!("{}", run_blocked_notice(&todos, &run_goals(agent.session_id())).unwrap_or_else(||
                 "Stopped at the turn limit with unfinished todos waiting on background dependencies.".into()
             ));
             break;
@@ -3203,11 +3208,10 @@ async fn run_single_message_command_ndjson(
                 &serde_json::json!({
                     "type": "auto_poke_stopped",
                     "session_id": session_id,
-                    "reason": if run_completely_blocked_notice(&todos).is_some() { "completely_blocked" } else if run_external_blocker_notice(&todos).is_some() { "external_blocker" } else { "turn_limit" },
-                    "message": run_blocked_notice(&todos),
-                    "completely_blocked": todos.iter().any(crate::todo::todo_completely_blocked),
+                    "reason": if run_user_auth_notice(&todos).is_some() { "requires_user_auth" } else if run_cannot_complete_notice(&todos, &run_goals(&session_id)).is_some() { "cannot_complete" } else { "turn_limit" },
+                    "message": run_blocked_notice(&todos, &run_goals(&session_id)),
+                    "requires_user_auth": todos.iter().any(crate::todo::todo_requires_user_auth),
                     "waiting_on_background": todos.iter().any(|todo| !todo.waiting_on.is_empty()),
-                    "waiting_on_external": todos.iter().any(crate::todo::todo_has_external_blocker),
                     "max_turns": max_turns,
                 }),
             )?;
@@ -3371,227 +3375,9 @@ pub(super) fn unwrap_turn_event(
     event
 }
 
-fn emit_ndjson_event(
-    stdout: &mut impl Write,
-    state: &mut NdjsonRunState,
-    event: crate::protocol::ServerEvent,
-) -> Result<()> {
-    use crate::protocol::ServerEvent;
-
-    match unwrap_turn_event(event) {
-        ServerEvent::TextDelta { text } => {
-            state.text.push_str(&text);
-            write_json_line(
-                stdout,
-                &serde_json::json!({ "type": "text_delta", "text": text }),
-            )
-        }
-        ServerEvent::TextReplace { text } => {
-            state.text = text.clone();
-            write_json_line(
-                stdout,
-                &serde_json::json!({ "type": "text_replace", "text": text }),
-            )
-        }
-        ServerEvent::TextSuffixReplace { old_text, new_text } => {
-            crate::message::replace_text_suffix(&mut state.text, &old_text, &new_text);
-            write_json_line(
-                stdout,
-                &serde_json::json!({
-                    "type": "text_suffix_replace", "old_text": old_text, "new_text": new_text,
-                }),
-            )
-        }
-        ServerEvent::ToolStart { id, name } => write_json_line(
-            stdout,
-            &serde_json::json!({ "type": "tool_start", "id": id, "name": name }),
-        ),
-        ServerEvent::ToolInput { delta, .. } => write_json_line(
-            stdout,
-            &serde_json::json!({ "type": "tool_input", "delta": delta }),
-        ),
-        ServerEvent::ToolExec { id, name } => write_json_line(
-            stdout,
-            &serde_json::json!({ "type": "tool_exec", "id": id, "name": name }),
-        ),
-        ServerEvent::ToolDone {
-            id,
-            name,
-            output,
-            error,
-        } => write_json_line(
-            stdout,
-            &serde_json::json!({
-                "type": "tool_done",
-                "id": id,
-                "name": name,
-                "output": output,
-                "error": error,
-            }),
-        ),
-        ServerEvent::TokenUsage {
-            input,
-            output,
-            cache_read_input,
-            cache_creation_input,
-            ..
-        } => {
-            state.usage = crate::agent::TokenUsage {
-                input_tokens: input,
-                output_tokens: output,
-                cache_read_input_tokens: cache_read_input,
-                cache_creation_input_tokens: cache_creation_input,
-            };
-            write_json_line(
-                stdout,
-                &serde_json::json!({
-                    "type": "tokens",
-                    "input": input,
-                    "output": output,
-                    "cache_read_input": cache_read_input,
-                    "cache_creation_input": cache_creation_input,
-                }),
-            )
-        }
-        ServerEvent::ServiceTierReported { requested, tier } => {
-            state.requested_service_tier = requested.clone();
-            state.served_service_tier = Some(tier.clone());
-            write_json_line(
-                stdout,
-                &serde_json::json!({
-                    "type": "service_tier",
-                    "requested": requested,
-                    "tier": tier,
-                    "report_status": state.service_tier_report_status(),
-                }),
-            )
-        }
-        ServerEvent::ConnectionType { connection } => {
-            state.connection_type = Some(connection.clone());
-            write_json_line(
-                stdout,
-                &serde_json::json!({ "type": "connection_type", "connection": connection }),
-            )
-        }
-        ServerEvent::ConnectionPhase { phase } => {
-            state.connection_phase = Some(phase.clone());
-            write_json_line(
-                stdout,
-                &serde_json::json!({ "type": "connection_phase", "phase": phase }),
-            )
-        }
-        ServerEvent::StatusDetail { detail } => {
-            state.status_detail = Some(detail.clone());
-            write_json_line(
-                stdout,
-                &serde_json::json!({ "type": "status_detail", "detail": detail }),
-            )
-        }
-        ServerEvent::MessageEnd { stop_reason } => write_json_line(
-            stdout,
-            &serde_json::json!({ "type": "message_end", "stop_reason": stop_reason }),
-        ),
-        ServerEvent::UpstreamProvider { provider } => {
-            state.upstream_provider = Some(provider.clone());
-            write_json_line(
-                stdout,
-                &serde_json::json!({ "type": "upstream_provider", "provider": provider }),
-            )
-        }
-        ServerEvent::SessionId { session_id } => {
-            state.session_id = Some(session_id.clone());
-            write_json_line(
-                stdout,
-                &serde_json::json!({ "type": "session", "session_id": session_id }),
-            )
-        }
-        ServerEvent::Compaction {
-            trigger,
-            pre_tokens,
-            messages_dropped,
-            post_tokens,
-            tokens_saved,
-            duration_ms,
-            messages_compacted,
-            summary_chars,
-            active_messages,
-        } => write_json_line(
-            stdout,
-            &serde_json::json!({
-                "type": "compaction",
-                "trigger": trigger,
-                "pre_tokens": pre_tokens,
-                "messages_dropped": messages_dropped,
-                "post_tokens": post_tokens,
-                "tokens_saved": tokens_saved,
-                "duration_ms": duration_ms,
-                "messages_compacted": messages_compacted,
-                "summary_chars": summary_chars,
-                "active_messages": active_messages,
-            }),
-        ),
-        ServerEvent::MemoryInjected {
-            count,
-            prompt_chars,
-            computed_age_ms,
-            ..
-        } => write_json_line(
-            stdout,
-            &serde_json::json!({
-                "type": "memory_injected",
-                "count": count,
-                "prompt_chars": prompt_chars,
-                "computed_age_ms": computed_age_ms,
-            }),
-        ),
-        ServerEvent::Interrupted => {
-            write_json_line(stdout, &serde_json::json!({ "type": "interrupted" }))
-        }
-        ServerEvent::SoftInterruptInjected {
-            content,
-            display_role,
-            point,
-            tools_skipped,
-            client_ids,
-        } => write_json_line(
-            stdout,
-            &serde_json::json!({
-                "type": "soft_interrupt_injected",
-                "content": content,
-                "display_role": display_role,
-                "point": point,
-                "tools_skipped": tools_skipped,
-                "client_ids": client_ids,
-            }),
-        ),
-        ServerEvent::BatchProgress { progress } => write_json_line(
-            stdout,
-            &serde_json::json!({ "type": "batch_progress", "progress": progress }),
-        ),
-        ServerEvent::Error {
-            message,
-            retry_after_secs,
-            ..
-        } => write_json_line(
-            stdout,
-            &serde_json::json!({
-                "type": "error",
-                "message": message,
-                "retry_after_secs": retry_after_secs,
-            }),
-        ),
-        ServerEvent::Ack { .. } | ServerEvent::Done { .. } | ServerEvent::Pong { .. } => Ok(()),
-        _ => Ok(()),
-    }
-}
-
-fn write_json_line(stdout: &mut impl Write, value: &impl Serialize) -> Result<()> {
-    serde_json::to_writer(&mut *stdout, value)?;
-    stdout.write_all(b"\n")?;
-    stdout.flush()?;
-    Ok(())
-}
-
+#[path = "commands_json_output.rs"]
+mod json_output;
+use json_output::*;
 #[path = "commands/model_listing.rs"]
 mod model_listing;
 

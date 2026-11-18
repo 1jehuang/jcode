@@ -6,8 +6,8 @@ use crate::auth;
 mod accessors;
 mod account_fetch;
 pub use account_fetch::fetch_oauth_account_usage;
-mod anthropic_reset;
 mod anthropic_fable_reset;
+mod anthropic_reset;
 pub(crate) use anthropic_fable_reset::auto_reset_fable_usage;
 mod anthropic_response;
 pub(crate) use anthropic_response::invalidate_auth_failure as invalidate_anthropic_usage_auth_failure;
@@ -34,6 +34,7 @@ pub use anthropic_reset::{
     invalidate_anthropic_usage_reset_state, prepare_anthropic_limit_reset,
 };
 use api_keys::enqueue_api_key_usage_tasks;
+pub(crate) use cache::hydrate_persisted_account_usage;
 use cache::*;
 pub use cache::{
     account_known_exhausted, cached_account_usage_snapshot, cached_account_usage_status_snapshot,

@@ -48,11 +48,43 @@ pub struct SessionStatus {
     pub state: AgentState,
     pub detail: String,
     pub since: u64,
+    /// Plan name (todo plan title), when the session has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub todos: Option<TodoProgress>,
+}
+
+/// Compact todo progress for the bubble row: `done` completed, `active`
+/// in progress, out of `total` (cancelled items excluded).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct TodoProgress {
+    pub done: u32,
+    pub active: u32,
+    pub total: u32,
+}
+
+impl TodoProgress {
+    pub fn from_items(items: &[jcode_task_types::TodoItem]) -> Option<Self> {
+        let mut p = Self::default();
+        for item in items {
+            match item.status.as_str() {
+                "cancelled" => continue,
+                "completed" => p.done += 1,
+                "in_progress" => p.active += 1,
+                _ => {}
+            }
+            p.total += 1;
+        }
+        (p.total > 0).then_some(p)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Snapshot {
     pub host: String,
+    /// Human label for where these sessions run ("Cloud", "XPS 14").
+    pub origin: String,
     pub sessions: Vec<SessionStatus>,
 }
 
@@ -60,6 +92,10 @@ pub struct Snapshot {
 #[derive(Debug, Default)]
 pub struct Tracker {
     sessions: HashMap<String, Entry>,
+    /// Plan name and todo progress, kept across turns.
+    plans: HashMap<String, (Option<String>, Option<TodoProgress>)>,
+    /// Swarm worker sessions: their coordinator's row covers them.
+    workers: std::collections::HashSet<String>,
     /// First unsent change (debounce anchor).
     dirty_since: Option<Instant>,
     last_sent: Option<Instant>,
@@ -135,6 +171,29 @@ impl Tracker {
         }
     }
 
+    /// Exclude a swarm worker session from the snapshot.
+    pub fn mark_worker(&mut self, id: &str, now: Instant) {
+        if self.workers.insert(id.to_string()) && self.sessions.contains_key(id) {
+            self.mark(now);
+        }
+    }
+
+    pub fn plan_updated(
+        &mut self,
+        id: &str,
+        plan: Option<&str>,
+        todos: Option<TodoProgress>,
+        now: Instant,
+    ) {
+        let value = (plan.map(|p| clip(p, TITLE_MAX)), todos);
+        if self.plans.get(id) != Some(&value) {
+            self.plans.insert(id.to_string(), value);
+            if self.sessions.contains_key(id) {
+                self.mark(now);
+            }
+        }
+    }
+
     pub fn turn_started(&mut self, id: &str, title: &str, now: Instant) {
         self.sessions.remove(id);
         self.set(id, AgentState::Running, Some(title), "", now);
@@ -172,6 +231,8 @@ impl Tracker {
     }
 
     pub fn session_closed(&mut self, id: &str, now: Instant) {
+        self.plans.remove(id);
+        self.workers.remove(id);
         if self.sessions.remove(id).is_some() {
             self.mark(now);
         }
@@ -200,12 +261,22 @@ impl Tracker {
         let mut sessions: Vec<SessionStatus> = self
             .sessions
             .iter()
-            .map(|(id, e)| SessionStatus {
-                session_id: id.clone(),
-                title: e.title.clone(),
-                state: e.state,
-                detail: e.detail.clone(),
-                since: e.since,
+            .filter(|(id, _)| !self.workers.contains(*id))
+            .map(|(id, e)| {
+                // An absent entry means no plan has been published for this session.
+                let (plan, todos) = match self.plans.get(id) {
+                    Some(value) => value.clone(),
+                    None => (None, None),
+                };
+                SessionStatus {
+                    session_id: id.clone(),
+                    title: e.title.clone(),
+                    state: e.state,
+                    detail: e.detail.clone(),
+                    since: e.since,
+                    plan,
+                    todos,
+                }
             })
             .collect();
         let rank = |s: AgentState| match s {
@@ -222,6 +293,7 @@ impl Tracker {
         sessions.truncate(MAX_SESSIONS);
         Snapshot {
             host: host.to_string(),
+            origin: crate::mobile_push::origin_label().to_string(),
             sessions,
         }
     }
@@ -295,6 +367,33 @@ fn with_tracker(f: impl FnOnce(&mut Tracker, Instant)) {
 
 pub fn turn_started(session_id: &str, title: &str) {
     with_tracker(|t, now| t.turn_started(session_id, title, now));
+}
+pub fn mark_worker(session_id: &str) {
+    with_tracker(|t, now| t.mark_worker(session_id, now));
+}
+/// Refresh a session's plan name and todo progress from its saved todos.
+pub fn todos_updated(session_id: &str, todos: &[jcode_task_types::TodoItem]) {
+    if !crate::mobile_push::enabled() {
+        return;
+    }
+    let plan = match crate::todo::load_plan(session_id) {
+        Ok(plan) => plan,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Cannot load plan for agents status session {session_id}: {error}"
+            ));
+            Default::default()
+        }
+    };
+    let title = crate::todo::derive_session_title(todos, &plan);
+    let progress = TodoProgress::from_items(todos);
+    with_tracker(|t, now| t.plan_updated(session_id, title.as_deref(), progress, now));
+}
+/// Seed plan info from disk (turn start, after a restart).
+pub fn load_plan_from_disk(session_id: &str) {
+    if let Ok(todos) = crate::todo::load_todos(session_id) {
+        todos_updated(session_id, &todos);
+    }
 }
 pub fn tool_started(session_id: &str, tool: &str) {
     with_tracker(|t, now| t.tool_started(session_id, tool, now));
@@ -483,6 +582,30 @@ mod tests {
         let json = serde_json::to_value(&snap).unwrap();
         assert_eq!(json["sessions"][1]["state"], "error");
         assert_eq!(json["host"], "host1");
+        assert!(!json["origin"].as_str().unwrap_or("").is_empty());
+    }
+
+    #[test]
+    fn plan_progress_and_worker_exclusion() {
+        let mut t = Tracker::default();
+        let now = Instant::now();
+        t.turn_started("root", "Root", now);
+        t.turn_started("w", "Worker", now);
+        t.mark_worker("w", now);
+        let p = TodoProgress {
+            done: 2,
+            active: 1,
+            total: 5,
+        };
+        t.plan_updated("root", Some("Live Activity"), Some(p), now);
+        t.turn_finished("root", Some("x"), now);
+        t.turn_started("root", "Root", now);
+        let snap = t.snapshot("h");
+        assert_eq!(snap.sessions.len(), 1);
+        assert_eq!(snap.sessions[0].plan.as_deref(), Some("Live Activity"));
+        assert_eq!(snap.sessions[0].todos, Some(p));
+        let json = serde_json::to_value(&snap).unwrap();
+        assert_eq!(json["sessions"][0]["todos"]["total"], 5);
     }
 
     #[test]

@@ -17,6 +17,11 @@ git -C "$work/source" checkout --quiet --detach FETCH_HEAD
   echo 'hosted justrust source revision mismatch' >&2
   exit 1
 }
+# Apply only the reviewed managed-artifact fix, not an unrelated client upgrade.
+# Fail closed if the exact source pin can no longer accept the backport.
+patch=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/justrust-hosted-artifact-toolchain.patch
+git -C "$work/source" apply --check "$patch"
+git -C "$work/source" apply "$patch"
 # This small client bootstrap is local. Application release compilation is
 # required to be hosted by build_preview_linux_hosted.sh, with no fallback.
 JUSTRUST_RELEASE_BUILD=0 CARGO_TARGET_DIR="$work/target" \
@@ -27,5 +32,5 @@ JUSTRUST_RELEASE_BUILD=0 CARGO_TARGET_DIR="$work/target" \
 if [[ -n ${GITHUB_PATH:-} ]]; then
   printf '%s\n' "$work/install/bin" >> "$GITHUB_PATH"
 fi
-printf 'Hosted justrust client source: %s\n' "$revision"
+printf 'Hosted justrust client source: %s + managed-artifact backport\n' "$revision"
 printf 'Hosted justrust client binary: %s\n' "$work/install/bin/justrust"

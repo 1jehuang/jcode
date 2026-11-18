@@ -3,60 +3,6 @@ use crate::todo::TodoItem;
 
 #[path = "ui_todo_stages_tests/layout_and_prerequisites.rs"]
 mod layout_and_prerequisites;
-#[test]
-fn self_owned_todos_have_amber_pips_and_you_badges() {
-    let local = assigned(todo("local", "Local task", "in_progress", Some(1)), "@self");
-    let unknown = todo("unknown", "Unknown task", "in_progress", Some(1));
-    let worker = assigned(todo("worker", "Worker task", "in_progress", Some(1)), "fox");
-    let amber = Some(rgb(255, 200, 100));
-    assert_eq!(pip_span(&local).style.fg, amber);
-    assert_eq!(pip_span(&unknown).style.fg, Some(asap_color()));
-    assert_eq!(pip_span(&worker).style.fg, Some(asap_color()));
-    assert_eq!(
-        lane_item_statuses(&[&local], &[]),
-        [("self_in_progress", false)]
-    );
-    let (chip, _) = lane_agent_chip(&[&local, &local], &[]);
-    assert_eq!(Line::from(chip.clone()).to_string(), "you");
-    assert_eq!(chip[0].style.fg, amber);
-    assert!(agent_roster_spans(&[&local], &[]).is_empty());
-
-    for width in 0..100 {
-        let mut lines = Vec::new();
-        push_stage_lines(
-            &mut lines,
-            &[&local, &unknown, &worker],
-            &[],
-            &[],
-            "",
-            width,
-        );
-        assert!(
-            lines.iter().all(|line| line.width() <= width),
-            "width {width}: {lines:?}"
-        );
-    }
-    let mut lines = Vec::new();
-    push_stage_lines(&mut lines, &[&local], &[], &[], "", 100);
-    assert!(lines.iter().any(|line| line.to_string().contains("you")));
-
-    let mut flat = local.clone();
-    flat.stage = None;
-    flat.group = None;
-    let mut overview = Vec::new();
-    push_stage_pips(&mut overview, &[&flat], 1);
-    assert_eq!(overview[0].style.fg, amber);
-    let line = render_todo_item_line(&flat, &[], "", 100);
-    assert!(line.to_string().contains("you"));
-    assert!(
-        line.spans
-            .iter()
-            .any(|span| span.content.contains('●') && span.style.fg == amber)
-    );
-    for width in 0..100 {
-        assert!(render_todo_item_line(&flat, &[], "", width).width() <= width);
-    }
-}
 
 #[test]
 fn self_ownership_does_not_override_blocked_or_finished_states() {
@@ -72,7 +18,7 @@ fn self_ownership_does_not_override_blocked_or_finished_states() {
 #[test]
 fn mixed_complete_blocker_lane_keeps_independent_peer_visible() {
     let mut paused = assigned(todo("paused", "Approve", "in_progress", Some(1)), "fox");
-    paused.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+    paused.requires_user_auth = Some(crate::todo::TodoUserAuth {
         reason: "Owner only".into(),
     });
     let active = assigned(todo("active", "Test", "in_progress", Some(1)), "wolf");
@@ -171,7 +117,7 @@ fn lane_live_status_omits_transport_and_preserves_stop_precedence() {
     push_lane_status_lines(&mut rows, &[&item], std::slice::from_ref(&worker), "", 160);
     assert!(rows[0].to_string().contains("Waiting for hosted build"));
     assert!(!rows[0].to_string().contains(LIVE_DOT_SENTINEL));
-    item.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+    item.requires_user_auth = Some(crate::todo::TodoUserAuth {
         reason: "Owner only".into(),
     });
     rows.clear();
@@ -467,7 +413,7 @@ fn complete_blocker_overrides_live_workers_and_has_two_cell_phase_and_lane_pips(
     );
     item.group = Some("Setup".into());
     item.blocked_by = vec!["dependency".into()];
-    item.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+    item.requires_user_auth = Some(crate::todo::TodoUserAuth {
         reason: "Only the account owner can approve access".into(),
     });
     let mut worker = agent("fox", "running", Some("Working"), Some(1));
@@ -476,7 +422,7 @@ fn complete_blocker_overrides_live_workers_and_has_two_cell_phase_and_lane_pips(
     assert_eq!(pip_span(&item).content, "✋");
     assert_eq!(pip_span(&item).width(), 2);
     let statuses = lane_item_statuses(&[&item], &workers);
-    assert_eq!(statuses, vec![("completely_blocked", false)]);
+    assert_eq!(statuses, vec![("requires_user_auth", false)]);
     let strip = lane_strip_spans(&statuses, 2);
     assert_eq!(strip[0].content, "✋");
     assert_eq!(width_of(&strip), 4);
@@ -486,7 +432,7 @@ fn complete_blocker_overrides_live_workers_and_has_two_cell_phase_and_lane_pips(
         "blocked state already appears in the phase pips"
     );
     let note = Line::from(lane_note_spans(&[&item], &workers)).to_string();
-    assert_eq!(note, "Completely blocked");
+    assert_eq!(note, "Needs your login");
     for width in 0..120 {
         let mut pips = Vec::new();
         push_stage_pips(&mut pips, &[&item], width);
@@ -496,7 +442,7 @@ fn complete_blocker_overrides_live_workers_and_has_two_cell_phase_and_lane_pips(
             assert!(!row.contains(LIVE_DOT_SENTINEL));
         }
     }
-    item.completely_blocked = None;
+    item.requires_user_auth = None;
     assert_eq!(todo_pip_status(&item), "blocked");
     item.blocked_by.clear();
     assert_eq!(lane_item_statuses(&[&item], &workers).len(), 2);
@@ -506,12 +452,12 @@ fn complete_blocker_overrides_live_workers_and_has_two_cell_phase_and_lane_pips(
 fn complete_blocker_requires_reason_and_never_marks_terminal_todos() {
     let mut item = todo("1", "Activation", "pending", Some(1));
     for (reason, marked) in [("Owner only", true), (" ", false), ("\n", false)] {
-        item.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+        item.requires_user_auth = Some(crate::todo::TodoUserAuth {
             reason: reason.into(),
         });
         assert_eq!(pip_span(&item).content == "✋", marked);
     }
-    item.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+    item.requires_user_auth = Some(crate::todo::TodoUserAuth {
         reason: "Owner only".into(),
     });
     for status in ["completed", "cancelled"] {
@@ -521,51 +467,39 @@ fn complete_blocker_requires_reason_and_never_marks_terminal_todos() {
         assert!(
             !Line::from(lane_note_spans(&[&item], &[]))
                 .to_string()
-                .contains("Completely blocked")
+                .contains("Needs your login")
         );
     }
 }
 
 #[test]
 fn blocked_todos_have_distinct_phase_and_lane_pips() {
-    for external in [false, true] {
-        let mut item = todo("1", "Activation", "pending", Some(2));
-        item.group = Some("activation".into());
-        if external {
-            item.external_blocker = Some(crate::todo::TodoExternalBlocker {
-                reason: "Need user authorization".into(),
-                review_at: chrono::Utc::now() + chrono::Duration::hours(1),
-            });
-        } else {
-            item.blocked_by = vec!["dependency".into()];
+    let mut item = todo("1", "Activation", "pending", Some(2));
+    item.group = Some("activation".into());
+    item.blocked_by = vec!["dependency".into()];
+    assert_eq!(pip_span(&item).content, "⊘");
+    let statuses = lane_item_statuses(&[&item], &[]);
+    assert_eq!(statuses, vec![("blocked", false)]);
+    assert_eq!(lane_strip_spans(&statuses, 1)[0].content, "⊘");
+    let mut header = Vec::new();
+    push_stage_pips(&mut header, &[&item], 80);
+    assert!(Line::from(header).to_string().contains('⊘'));
+    for width in 1..80 {
+        for row in render(&[item.clone()], &[], width) {
+            assert!(row.width() <= usize::from(width), "{width}: {row:?}");
         }
-        assert_eq!(pip_span(&item).content, "⊘");
-        let statuses = lane_item_statuses(&[&item], &[]);
-        assert_eq!(statuses, vec![("blocked", false)]);
-        assert_eq!(lane_strip_spans(&statuses, 1)[0].content, "⊘");
-        let mut header = Vec::new();
-        push_stage_pips(&mut header, &[&item], 80);
-        assert!(Line::from(header).to_string().contains('⊘'));
-        for width in 1..80 {
-            for row in render(&[item.clone()], &[], width) {
-                assert!(row.width() <= usize::from(width), "{width}: {row:?}");
-            }
-        }
-        for status in ["completed", "cancelled"] {
-            item.status = status.into();
-            assert_ne!(pip_span(&item).content, "⊘");
-            assert_ne!(lane_item_statuses(&[&item], &[])[0].0, "blocked");
-        }
+    }
+    for status in ["completed", "cancelled"] {
+        item.status = status.into();
+        assert_ne!(pip_span(&item).content, "⊘");
+        assert_ne!(lane_item_statuses(&[&item], &[])[0].0, "blocked");
     }
 }
 
 #[test]
-fn blocked_marker_overrides_live_worker_and_clears_when_review_is_due() {
+fn blocked_marker_overrides_live_worker_and_clears_with_the_dependency() {
     let mut item = assigned(todo("1", "Activation", "in_progress", Some(1)), "fox");
-    item.external_blocker = Some(crate::todo::TodoExternalBlocker {
-        reason: "Need user authorization".into(),
-        review_at: chrono::Utc::now() + chrono::Duration::hours(1),
-    });
+    item.blocked_by = vec!["dependency".into()];
     let mut worker = agent("fox", "running", Some("Working"), Some(1));
     worker.todo_statuses = vec!["in_progress".into(), "pending".into()];
     let workers = [worker];
@@ -576,8 +510,10 @@ fn blocked_marker_overrides_live_worker_and_clears_when_review_is_due() {
     assert_eq!(strip[0].style.fg, Some(rgb(225, 165, 90)));
     assert!(!Line::from(strip).to_string().contains(LIVE_DOT_SENTINEL));
 
-    item.external_blocker.as_mut().unwrap().review_at =
-        chrono::Utc::now() - chrono::Duration::seconds(1);
+    // A todo that is only waiting on a task is not blocked work.
+    item.blocked_by.clear();
+    item.waiting_on = vec!["build".into()];
+    item.waiting_reason = Some("Build still running".into());
     assert_eq!(todo_pip_status(&item), "in_progress");
     assert_eq!(lane_item_statuses(&[&item], &workers).len(), 2);
     assert_ne!(pip_span(&item).content, "⊘");
@@ -1222,3 +1158,22 @@ fn waiting_worker_reason_shares_its_todo_row() {
         assert_fits(&render_at(width), width);
     }
 }
+
+#[test]
+fn lane_name_shared_by_every_lane_is_not_drawn() {
+    let same = [
+        laned("a", "completed", 1, "main"),
+        laned("b", "pending", 2, "main"),
+    ];
+    let rows = render(&same, &[], 120);
+    assert!(rows.iter().all(|row| !row.contains("main")), "{rows:?}");
+    let distinct = [
+        laned("a", "completed", 1, "parser"),
+        laned("b", "pending", 2, "ship"),
+    ];
+    let rows = render(&distinct, &[], 120).join("\n");
+    assert!(rows.contains("parser") && rows.contains("ship"), "{rows}");
+}
+
+#[path = "ui_todo_stages_tests_additional_tests.rs"]
+mod additional_self_owned_todos_have_amber_pips_and_you_badges;

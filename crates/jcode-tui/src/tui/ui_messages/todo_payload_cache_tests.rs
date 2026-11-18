@@ -5,7 +5,7 @@ fn fixture(count: usize) -> String {
     serde_json::json!({"todos": (0..count).map(|i| serde_json::json!({
         "id": format!("task-{i}"), "content": format!("Task {i} 恢复"),
         "status": "pending", "priority": "high",
-        "external_blocker": {"reason": "Approve rollout", "review_at": "2099-01-01T00:00:00Z"}
+        "requires_user_auth": {"reason": "Approve rollout"}
     })).collect::<Vec<_>>()})
     .to_string()
 }
@@ -47,36 +47,33 @@ fn todo_payload_cache_does_not_retain_oversized_payloads() {
 }
 
 #[test]
-fn todo_payload_cache_preserves_live_expiry_and_width_rendering() {
+fn todo_payload_cache_preserves_width_rendering_and_resolution() {
     let content = fixture(1);
-    let before = "2098-12-31T23:59:59Z".parse().unwrap();
-    let at_expiry = "2099-01-01T00:00:00Z".parse().unwrap();
     let parsed = cached_todo_payload(&content).unwrap();
-    let wide = todo_blocker_footer_at(Some(&content), 120, before);
+    let wide = todo_blocker_footer(Some(&content), 120);
     assert_eq!(wide.len(), 1);
     for width in [0, 1, 8, 24, 80] {
-        let narrow = todo_blocker_footer_at(Some(&content), width, before);
+        let narrow = todo_blocker_footer(Some(&content), width);
         assert_eq!(narrow.len(), 1);
         assert!(narrow[0].width() <= usize::from(width));
         if width > 0 {
             assert_eq!(narrow[0].style.fg, Some(todo_warning_color()));
         }
     }
-    assert!(todo_blocker_footer_at(Some(&content), 120, at_expiry).is_empty());
     assert!(Arc::ptr_eq(
         &parsed,
         &cached_todo_payload(&content).unwrap()
     ));
-    assert_eq!(wide, todo_blocker_footer_at(Some(&content), 120, before));
+    assert_eq!(wide, todo_blocker_footer(Some(&content), 120));
     let resolved = content.replace("pending", "completed");
-    assert!(todo_blocker_footer_at(Some(&resolved), 120, before).is_empty());
+    assert!(todo_blocker_footer(Some(&resolved), 120).is_empty());
 }
 
 #[test]
 fn todo_payload_cache_preserves_legacy_notes_and_resolved_content() {
     let content = serde_json::json!([{
         "id": "task", "content": "Device", "status": "pending", "priority": "high",
-        "completely_blocked": {"reason": "Connect hardware"}
+        "requires_user_auth": {"reason": "Connect hardware"}
     }])
     .to_string();
     for _ in 0..2 {
@@ -94,7 +91,6 @@ fn todo_payload_cache_preserves_legacy_notes_and_resolved_content() {
 fn benchmark_todo_payload_cache_footer() {
     use std::hint::black_box;
     use std::time::Instant;
-    let now = "2098-12-31T23:59:59Z".parse().unwrap();
     for (count, blocked) in [(1, 1), (32, 1), (128, 1), (128, 128)] {
         let mut value: serde_json::Value = serde_json::from_str(&fixture(count)).unwrap();
         for todo in value["todos"]
@@ -103,25 +99,25 @@ fn benchmark_todo_payload_cache_footer() {
             .iter_mut()
             .skip(blocked)
         {
-            todo.as_object_mut().unwrap().remove("external_blocker");
+            todo.as_object_mut().unwrap().remove("requires_user_auth");
         }
         let content = value.to_string();
         let iterations = 1000;
         let parsed: TodoCardPayload = serde_json::from_str(&content).unwrap();
         assert_eq!(
-            render_todo_blocker_footer(&parsed, 80, now),
-            todo_blocker_footer_at(Some(&content), 80, now)
+            render_todo_blocker_footer(&parsed, 80),
+            todo_blocker_footer(Some(&content), 80)
         );
         let start = Instant::now();
         for _ in 0..iterations {
             let parsed: TodoCardPayload = serde_json::from_str(black_box(&content)).unwrap();
-            black_box(render_todo_blocker_footer(&parsed, 80, now));
+            black_box(render_todo_blocker_footer(&parsed, 80));
         }
         let uncached = start.elapsed();
-        todo_blocker_footer_at(Some(&content), 80, now);
+        todo_blocker_footer(Some(&content), 80);
         let start = Instant::now();
         for _ in 0..iterations {
-            black_box(todo_blocker_footer_at(Some(black_box(&content)), 80, now));
+            black_box(todo_blocker_footer(Some(black_box(&content)), 80));
         }
         let cached = start.elapsed();
         eprintln!(

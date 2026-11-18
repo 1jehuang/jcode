@@ -86,3 +86,16 @@ fn resume_identity_search_does_not_promote_partial_identity_or_fake_cloud_mentio
         (false, false, false)
     );
 }
+
+#[test]
+fn resume_identity_search_does_not_treat_topic_title_as_identity() {
+    let mut session = make_session("bug", "elephant", false, SessionStatus::Closed);
+    session.title = "Desktop rendering bug".into();
+    let tokens = loading::search_query_tokens("render");
+    assert_eq!(
+        super::super::identity_search::rank(&session, &tokens),
+        (false, false, false),
+    );
+    session.save_label = Some("render".into());
+    assert!(super::super::identity_search::rank(&session, &tokens).0);
+}

@@ -1,6 +1,98 @@
 use super::*;
 
 #[test]
+fn startup_pool_hydrates_disk_only_exhaustion_before_route_and_request_guards() {
+    const WORKER: &str = "JCODE_TEST_COLD_QUOTA_ROUTING";
+    if std::env::var_os(WORKER).is_none() {
+        // Cold process is essential: other provider tests enable the TUI-only
+        // remote usage mirror and populate the process-global quota caches.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "provider::tests::startup_pool::startup_pool_hydrates_disk_only_exhaustion_before_route_and_request_guards", "--nocapture"])
+            .env(WORKER, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    with_clean_provider_test_env(|| {
+        enter_test_runtime().block_on(async {
+            for label in ["claude-otter", "claude-fox"] {
+                let saved = auth::claude::upsert_account(auth::claude::AnthropicAccount {
+                    label: label.into(),
+                    access: "fixture-access".into(),
+                    refresh: "fixture-refresh".into(),
+                    expires: chrono::Utc::now().timestamp_millis() + 86_400_000,
+                    email: None,
+                    subscription_type: Some("max".into()),
+                    scopes: vec![],
+                })
+                .unwrap();
+                assert_eq!(saved, label);
+            }
+            auth::claude::set_active_account_override(Some("claude-fox".into()));
+            crate::config::Config::set_default_model(None, None).unwrap();
+            let pool = crate::auth::account_pool::AccountPool {
+                members: vec!["claude:claude-fox".into(), "claude:claude-otter".into()],
+                ..Default::default()
+            };
+            pool.save().unwrap();
+            // The old sample is past the polling deadline, but its weekly
+            // reset is still in the future. No usage endpoint may be needed.
+            let persisted = serde_json::json!({"label:claude-fox": {
+                "last_good": {
+                    "fetched_unix_ms": chrono::Utc::now().timestamp_millis() - 3_600_000,
+                    "five_hour": 0.1, "five_hour_resets_at": null,
+                    "seven_day": 1.0, "seven_day_resets_at": "2999-01-01T00:00:00Z",
+                    "seven_day_opus": null, "model_scoped": [], "extra_usage_enabled": false
+                }, "error": null, "error_unix_ms": null
+            }});
+            crate::usage::import_limits_snapshot(&serde_json::to_vec(&persisted).unwrap());
+            let kind = crate::usage::MultiAccountProviderKind::Anthropic;
+            assert!(!crate::usage::account_known_exhausted(kind, "claude-fox"));
+            let router = MultiProvider::new_fast();
+            assert!(crate::usage::account_known_exhausted(kind, "claude-fox"));
+            assert!(!crate::usage::account_known_exhausted(kind, "claude-otter"));
+            assert_eq!(
+                router.oauth_account_label().as_deref(),
+                Some("claude-otter")
+            );
+            assert_eq!(
+                auth::claude::active_account_label().as_deref(),
+                Some("claude-fox")
+            );
+            assert_eq!(crate::auth::account_pool::AccountPool::load(), pool);
+            let model = router.model();
+            router
+                .set_model(&format!("claude-oauth@claude-fox:{model}"))
+                .unwrap();
+            for split in [false, true] {
+                let result = if split {
+                    router
+                        .complete_split(&[], &[], "static", "dynamic", None)
+                        .await
+                } else {
+                    router.complete(&[], &[], "system", None).await
+                };
+                let error = result
+                    .err()
+                    .expect("persisted spent pin must be stopped before the stub runtime");
+                assert!(
+                    error.to_string().contains("OAuth usage exhausted"),
+                    "{error}"
+                );
+                assert!(!error.to_string().contains("does not stream"), "{error}");
+                assert_eq!(router.oauth_account_label().as_deref(), Some("claude-fox"));
+            }
+        });
+    });
+}
+
+#[test]
 fn startup_pool_tiers_override_last_account_then_fall_back_when_exhausted() {
     with_clean_provider_test_env(|| {
         let runtime = enter_test_runtime();

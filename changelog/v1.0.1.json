@@ -1,0 +1,13 @@
+{
+  "version": "1.0.1",
+  "date": "2026-11-18",
+  "title": "Model catalog fix",
+  "highlights": [
+    "Newly released models such as GPT-6.2 Sol appear in the model picker even when live catalog updates arrive while an agent is busy"
+  ],
+  "improvements": [],
+  "fixes": [
+    "Retain model catalog updates that arrive while agents are busy instead of dropping them",
+    "Update lettre, anyhow, event-listener, and tokio for new RustSec advisories"
+  ]
+}
