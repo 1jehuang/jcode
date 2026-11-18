@@ -22,35 +22,54 @@ fn deterministic_noise(len: usize) -> Vec<u8> {
 }
 
 #[test]
-fn large_gzip_bodies_roundtrip_with_bounded_spare_capacity() {
+fn large_gzip_bodies_roundtrip_and_selected_bodies_have_bounded_capacity() {
     for raw in [
         jsonish(8 * 1024 * 1024),
         vec![b'a'; 8 * 1024 * 1024],
         deterministic_noise(8 * 1024 * 1024),
     ] {
         let compressed = gzip_fast(&raw).unwrap();
-        assert!(
-            compressed.capacity() <= compressed.len() + 64 * 1024,
-            "len={} capacity={}",
-            compressed.len(),
-            compressed.capacity()
-        );
         let mut decoded = Vec::new();
         flate2::read::GzDecoder::new(compressed.as_slice())
             .read_to_end(&mut decoded)
             .unwrap();
         assert_eq!(decoded, raw);
+        let (decision, selected) =
+            decide(&raw, CompressionMode::Always, Some(BodyEncoding::Gzip), 1e6);
+        if compressed.len() < raw.len() {
+            assert_eq!(
+                decision,
+                Decision::Gzip {
+                    compressed_len: compressed.len()
+                }
+            );
+            let selected = selected.unwrap();
+            assert_eq!(selected, compressed);
+            assert!(selected.capacity() <= selected.len() + 64 * 1024);
+        } else {
+            assert_eq!(decision, Decision::Raw("low-ratio"));
+            assert!(selected.is_none());
+        }
     }
 }
 
 /// Run explicitly with --ignored --nocapture. Compare on the same host and
 /// alternate input and policy order to reduce warm-cache/order bias.
 /// Policies: 0 = original half-raw allocation, 1 = 64 KiB initial cap,
-/// 2 = original allocation followed by final shrink (production).
+/// 2 = original allocation followed by final shrink (accepted gzip bodies).
+/// 3/4 = zstd before/after final shrink. Noise and repeated zstd bodies are
+/// codec-only controls: rejected bodies do not pay shrink cost in production.
 #[test]
 #[ignore = "allocation and latency benchmark"]
 fn gzip_allocation_benchmark() {
     fn encode(raw: &[u8], policy: usize) -> Vec<u8> {
+        if policy >= 3 {
+            let mut bytes = zstd_fast(raw).unwrap();
+            if policy == 4 {
+                bytes.shrink_to_fit();
+            }
+            return bytes;
+        }
         let capacity = if policy == 1 {
             (raw.len() / 2).min(64 * 1024)
         } else {
@@ -89,13 +108,13 @@ fn gzip_allocation_benchmark() {
         ("conversation", conversation),
         ("noise", noise),
     ];
-    let mut timings = vec![vec![Vec::new(); 3]; inputs.len()];
+    let mut timings = vec![vec![Vec::new(); 5]; inputs.len()];
     for round in 0..13 {
         for offset in 0..inputs.len() {
             let input = (round + offset) % inputs.len();
             let (name, raw) = &inputs[input];
-            for offset in 0..3 {
-                let policy = (round + offset) % 3;
+            for offset in 0..5 {
+                let policy = (round + offset) % 5;
                 let started = Instant::now();
                 let bytes = std::hint::black_box(encode(std::hint::black_box(raw), policy));
                 let elapsed = started.elapsed().as_secs_f64() * 1000.0;
@@ -106,7 +125,24 @@ fn gzip_allocation_benchmark() {
                         bytes.len(),
                         bytes.capacity()
                     );
-                    assert_eq!(bytes, gzip_fast(raw).unwrap());
+                    let expected = if policy >= 3 {
+                        zstd_fast(raw).unwrap()
+                    } else {
+                        gzip_fast(raw).unwrap()
+                    };
+                    assert_eq!(bytes, expected);
+                    if *name == "conversation" && matches!(policy, 2 | 4) {
+                        let encoding = if policy == 4 {
+                            BodyEncoding::Zstd
+                        } else {
+                            BodyEncoding::Gzip
+                        };
+                        let (_, selected) =
+                            decide(raw, CompressionMode::Always, Some(encoding), 1e6);
+                        let selected = selected.expect("conversation must be accepted");
+                        assert_eq!(selected, bytes);
+                        assert!(selected.capacity() <= selected.len() + 64 * 1024);
+                    }
                 } else {
                     timings[input][policy].push(elapsed);
                 }
@@ -114,7 +150,7 @@ fn gzip_allocation_benchmark() {
         }
     }
     for (input, (name, _)) in inputs.iter().enumerate() {
-        for policy in 0..3 {
+        for policy in 0..5 {
             let values = &mut timings[input][policy];
             values.sort_by(f64::total_cmp);
             eprintln!(
@@ -423,6 +459,10 @@ fn zstd_roundtrips_and_beats_gzip_ratio() {
     };
     let bytes = bytes.unwrap();
     assert_eq!(bytes.len(), compressed_len);
+    let unshrunk = zstd_fast(&big).unwrap();
+    assert_eq!(bytes, unshrunk);
+    assert!(unshrunk.capacity() > unshrunk.len() + 64 * 1024);
+    assert!(bytes.capacity() <= bytes.len() + 64 * 1024);
     assert!(big.len() / compressed_len < MAX_ZSTD_EXPANSION);
     assert_eq!(zstd::bulk::decompress(&bytes, big.len()).unwrap(), big);
     let gzip_len = gzip_fast(&big).unwrap().len();
@@ -437,6 +477,19 @@ fn zstd_respects_openai_expansion_limit() {
     // Pure repetition compresses far past OpenAI's ~100x expansion limit
     // (live probe: 82x accepted, 142x rejected with HTTP 413).
     let padding = vec![b'a'; 2_000_000];
+    for mode in [CompressionMode::Always, CompressionMode::Auto] {
+        let (decision, bytes) = decide(&padding, mode, Some(BodyEncoding::Zstd), 1e6);
+        assert_eq!(decision, Decision::Raw("expansion-limit"));
+        assert!(bytes.is_none());
+    }
+    let noise = deterministic_noise(2_000_000);
+    for encoding in [BodyEncoding::Gzip, BodyEncoding::Zstd] {
+        for mode in [CompressionMode::Always, CompressionMode::Auto] {
+            let (decision, bytes) = decide(&noise, mode, Some(encoding), 1e6);
+            assert_eq!(decision, Decision::Raw("low-ratio"));
+            assert!(bytes.is_none());
+        }
+    }
     assert_eq!(
         decide(
             &padding,
