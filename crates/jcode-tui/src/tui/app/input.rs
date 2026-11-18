@@ -94,6 +94,17 @@ fn merge_turn_reminders(a: Option<String>, b: Option<String>) -> Option<String> 
     }
 }
 
+/// Raw argument text after `/skill-name`, with the user's quoting intact so a
+/// skill `command:` line can split it with shell rules.
+pub(super) fn skill_command_args<'a>(input: &'a str, skill_name: &str) -> &'a str {
+    input
+        .trim()
+        .strip_prefix('/')
+        .and_then(|rest| rest.strip_prefix(skill_name))
+        .unwrap_or("")
+        .trim()
+}
+
 pub(super) fn extract_input_shell_command(input: &str) -> Option<&str> {
     input.trim().strip_prefix('!').map(str::trim)
 }
@@ -3390,6 +3401,39 @@ impl App {
         retrieve_pending_message_for_edit(self)
     }
 
+    /// Run `command` through the local input-line shell, echoing `raw_input`
+    /// as the user line. Shared by `!` input and skills with a `command:`
+    /// frontmatter key.
+    fn run_input_shell_line(&mut self, raw_input: String, command: &str) {
+        self.push_display_message(DisplayMessage::user(raw_input));
+
+        if command.is_empty() {
+            self.push_display_message(DisplayMessage::system(
+                "Shell command cannot be empty after !.",
+            ));
+            self.set_status_notice("Shell command is empty");
+            return;
+        }
+
+        if self.is_remote {
+            self.push_display_message(DisplayMessage::system(
+                "Input-line ! shell commands are only available in a local jcode TUI session.",
+            ));
+            self.set_status_notice("Local shell unavailable in remote mode");
+            return;
+        }
+
+        self.set_status_notice(format!(
+            "Running local shell: {}",
+            crate::util::truncate_str(command, 48)
+        ));
+        spawn_input_shell_command(
+            self.session.id.clone(),
+            command.to_string(),
+            self.session.working_dir.clone(),
+        );
+    }
+
     pub(super) fn send_action(&self, shift: bool) -> SendAction {
         send_action(self, shift)
     }
@@ -3809,33 +3853,7 @@ impl App {
         }
 
         if let Some(command) = extract_input_shell_command(&input) {
-            self.push_display_message(DisplayMessage::user(raw_input));
-
-            if command.is_empty() {
-                self.push_display_message(DisplayMessage::system(
-                    "Shell command cannot be empty after !.",
-                ));
-                self.set_status_notice("Shell command is empty");
-                return;
-            }
-
-            if self.is_remote {
-                self.push_display_message(DisplayMessage::system(
-                    "Input-line ! shell commands are only available in a local jcode TUI session.",
-                ));
-                self.set_status_notice("Local shell unavailable in remote mode");
-                return;
-            }
-
-            self.set_status_notice(format!(
-                "Running local shell: {}",
-                crate::util::truncate_str(command, 48)
-            ));
-            spawn_input_shell_command(
-                self.session.id.clone(),
-                command.to_string(),
-                self.session.working_dir.clone(),
-            );
+            self.run_input_shell_line(raw_input, command);
             return;
         }
 
@@ -3861,6 +3879,16 @@ impl App {
             if skill.is_none() {
                 self.refresh_skills_snapshot();
                 skill = self.current_skills_snapshot().get(&skill_name).cloned();
+            }
+
+            // Skills with a `command:` frontmatter key run locally like a
+            // `!` input line: no model turn, no skill activation.
+            if let Some(command) = skill
+                .as_ref()
+                .and_then(|skill| skill.command_line(skill_command_args(&input, &skill_name)))
+            {
+                self.run_input_shell_line(raw_input, &command);
+                return;
             }
 
             if let Some(skill) = skill {

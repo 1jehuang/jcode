@@ -327,6 +327,22 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
         return Ok(());
     };
 
+    // Skills with a `command:` frontmatter key run like a `!` input line on
+    // the session's shell: no model turn.
+    let command_skill = snapshot.get(invocation.name).cloned().or_else(|| {
+        app.refresh_skills_snapshot();
+        app.current_skills_snapshot().get(invocation.name).cloned()
+    });
+    if let Some(command) = command_skill.and_then(|skill| {
+        skill.command_line(input::skill_command_args(
+            &prepared.expanded,
+            invocation.name,
+        ))
+    }) {
+        submit_remote_input_shell(app, remote, prepared.raw_input, command).await?;
+        return Ok(());
+    }
+
     let Some(trailing_prompt) = invocation.prompt else {
         app.input = raw_input;
         app.cursor_pos = app.input.len();
