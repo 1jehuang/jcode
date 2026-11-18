@@ -45,7 +45,7 @@
     "crates/jcode-import-core/src/lib.rs": 1645,
     "crates/jcode-message-types/src/lib.rs": 1220,
     "crates/jcode-provider-anthropic-runtime/src/lib.rs": 2525,
-    "crates/jcode-provider-anthropic/src/lib.rs": 1211,
+    "crates/jcode-provider-anthropic/src/lib.rs": 1241,
     "crates/jcode-provider-bedrock/src/lib.rs": 1550,
     "crates/jcode-provider-core/src/lib.rs": 1614,
     "crates/jcode-provider-cursor-runtime/src/agent_transport.rs": 1873,

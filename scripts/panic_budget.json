@@ -1,6 +1,7 @@
 {
-  "total": 153,
+  "total": 158,
   "tracked_files": {
+    "crates/jcode-app-core/examples/tool_projection_probe.rs": 1,
     "crates/jcode-app-core/src/agent/provider.rs": 1,
     "crates/jcode-app-core/src/screen_context.rs": 1,
     "crates/jcode-app-core/src/session_launch.rs": 1,
@@ -12,6 +13,7 @@
     "crates/jcode-app-core/src/tool/discover.rs": 1,
     "crates/jcode-app-core/src/tool/mod.rs": 1,
     "crates/jcode-app-core/src/tool/sdk.rs": 1,
+    "crates/jcode-app-core/src/tool/session_search/searchable_text.rs": 2,
     "crates/jcode-app-core/src/tool/withheld_identity.rs": 2,
     "crates/jcode-base/src/auth/account_store.rs": 1,
     "crates/jcode-base/src/hooks.rs": 2,
@@ -22,6 +24,7 @@
     "crates/jcode-harness-api-server/src/translate.rs": 2,
     "crates/jcode-harness-api-server/src/translate/session_files.rs": 1,
     "crates/jcode-harness-api/examples/harness_repl.rs": 15,
+    "crates/jcode-provider-anthropic/src/repair_cow_probe.rs": 2,
     "crates/jcode-provider-core/src/model_names.rs": 1,
     "crates/jcode-provider-cursor-runtime/src/wire.rs": 1,
     "crates/jcode-provider-openai/src/stream.rs": 3,
