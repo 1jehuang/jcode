@@ -317,7 +317,10 @@ async fn native_tool_call_resets_the_stop_hook_streak_in_both_loops() {
         agent.memory_enabled = false;
         if streaming {
             let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-            agent.run_once_streaming_mpsc("go", vec![], None, tx).await.unwrap();
+            agent
+                .run_once_streaming_mpsc("go", vec![], None, tx)
+                .await
+                .unwrap();
         } else {
             agent.run_once_capture("go").await.unwrap();
         }
