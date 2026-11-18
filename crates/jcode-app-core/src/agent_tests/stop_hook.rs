@@ -28,6 +28,42 @@ impl Provider for CountingProvider {
     }
 }
 
+/// Provider whose second response starts with a native (SDK-executed) tool call.
+#[derive(Clone)]
+struct NativeToolProvider(Arc<std::sync::atomic::AtomicUsize>);
+
+#[async_trait]
+impl Provider for NativeToolProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        let call = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut events = Vec::new();
+        if call == 1 {
+            events.push(Ok(StreamEvent::NativeToolCall {
+                request_id: "native-1".into(),
+                tool_name: "missing_tool".into(),
+                input: serde_json::json!({}),
+            }));
+        }
+        events.push(Ok(StreamEvent::TextDelta("answer".into())));
+        events.push(Ok(StreamEvent::MessageEnd {
+            stop_reason: Some("end_turn".into()),
+        }));
+        Ok(Box::pin(futures::stream::iter(events)))
+    }
+    fn name(&self) -> &str {
+        "stop-hook-native-test"
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
 struct Env(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
 impl Env {
@@ -260,4 +296,42 @@ async fn stop_hook_continues_streaming_turns_and_turn_end_fires_once() {
         1,
         "turn_end fires once at the real end"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn native_tool_call_resets_the_stop_hook_streak_in_both_loops() {
+    let _guard = crate::storage::lock_test_env();
+    for streaming in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let _env = Env::set(&[
+            ("JCODE_HOME", home.path().display().to_string()),
+            ("JCODE_HOOK_STOP", counting_hook(home.path(), 1)),
+        ]);
+        let mut agent = Agent::new_with_session(
+            Arc::new(NativeToolProvider(Arc::default())),
+            Registry::empty(),
+            Session::create(None, None),
+            None,
+        );
+        agent.memory_enabled = false;
+        if streaming {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            agent.run_once_streaming_mpsc("go", vec![], None, tx).await.unwrap();
+        } else {
+            agent.run_once_capture("go").await.unwrap();
+        }
+        let log = std::fs::read_to_string(home.path().join("stdin.log")).unwrap();
+        let docs: Vec<serde_json::Value> = log
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(docs.len(), 2, "streaming={streaming}");
+        assert_eq!(docs[0]["stop_hook_active"], false);
+        assert_eq!(
+            docs[1]["stop_hook_active"], false,
+            "a native tool call after the continuation ends the streak (streaming={streaming})"
+        );
+    }
 }

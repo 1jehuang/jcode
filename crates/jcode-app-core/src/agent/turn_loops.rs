@@ -718,6 +718,8 @@ impl Agent {
                         tool_name,
                         input,
                     } => {
+                        // The model is calling a tool, so any stop-hook streak is over.
+                        crate::hooks::reset_stop_continuations(&self.session.id);
                         // Execute native tool and send result back to SDK bridge
                         if trace {
                             eprintln!(
