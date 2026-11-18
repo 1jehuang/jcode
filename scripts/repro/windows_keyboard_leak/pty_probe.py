@@ -186,6 +186,12 @@ def main() -> int:
     ap.add_argument("--inject-mode", choices=["atomic", "chars"], default="atomic",
                     help="atomic = one write of the whole report, like a terminal; "
                          "chars = one byte at a time, kept for comparison")
+    ap.add_argument("--inject-attempts", type=int, default=3,
+                    help="how many times to deliver the report in atomic mode; a stale "
+                         "terminal keeps emitting, and one lost burst must not decide the run")
+    ap.add_argument("--inject-attempt-gap", type=float, default=0.35,
+                    help="seconds between repeated deliveries (stays under the 750ms "
+                         "burst window so the delivery contract is unchanged)")
     # Defaults to the session name encoded in the fixture filename, so any saved
     # session can be used, not only the one this harness was written against.
     ap.add_argument("--resume-arg", default="")
@@ -322,11 +328,24 @@ def main() -> int:
         gaps: list[float] = []
         last = time.monotonic()
         if args.inject_mode == "atomic":
-            if proc.isalive():
+            # A stale terminal keeps sending these, and a single delivery can be
+            # lost to console timing: measured runs alternated between a logged
+            # strip and a clean screen with no strip, on the same binary. Repeating
+            # the identical write keeps the simulation faithful (a terminal that is
+            # armed keeps emitting) and stops one lost burst from deciding a verdict.
+            sends = 0
+            for attempt in range(max(1, args.inject_attempts)):
+                if not proc.isalive():
+                    result["notes"].append(
+                        "terminal was already gone before every report was sent")
+                    break
                 proc.write(LEAK)
+                sends += 1
                 gaps.append((time.monotonic() - last) * 1000.0)
-            else:
-                result["notes"].append("terminal was already gone before the report was sent")
+                last = time.monotonic()
+                if attempt + 1 < max(1, args.inject_attempts):
+                    time.sleep(args.inject_attempt_gap)
+            result["injections_sent"] = sends
         else:
             for char in LEAK:
                 if not proc.isalive():
