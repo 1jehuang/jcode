@@ -1,7 +1,7 @@
 {
   "threshold_loc": 1200,
   "tracked_files": {
-    "crates/jcode-app-core/src/agent_tests.rs": 3275,
+    "crates/jcode-app-core/src/agent_tests.rs": 3279,
     "crates/jcode-app-core/src/server/client_lifecycle_tests.rs": 1621,
     "crates/jcode-app-core/src/server/comm_session_tests.rs": 1306,
     "crates/jcode-app-core/src/server/provider_control_tests.rs": 1310,
@@ -24,7 +24,7 @@
     "crates/jcode-sdk/tests/client_behavior.rs": 1206,
     "crates/jcode-telemetry-core/src/tests.rs": 1799,
     "crates/jcode-tui/src/tui/app/commands_cloud_tests.rs": 1288,
-    "crates/jcode-tui/src/tui/app/remote_tests.rs": 1312,
+    "crates/jcode-tui/src/tui/app/remote_tests.rs": 1355,
     "crates/jcode-tui/src/tui/app/tests.rs": 1915,
     "crates/jcode-tui/src/tui/app/tests/commands_accounts_01/part_01.rs": 1589,
     "crates/jcode-tui/src/tui/app/tests/commands_accounts_02/part_01.rs": 1215,
