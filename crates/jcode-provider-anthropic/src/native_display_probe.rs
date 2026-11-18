@@ -131,7 +131,15 @@ fn assert_same(blocks: &[ContentBlock]) {
     for oauth in [false, true] {
         for replay in [false, true] {
             let old = legacy_format_content_blocks_with_native(blocks, oauth, replay);
+            let accepted =
+                super::native_display_accepted::accepted_format_content_blocks_with_native(
+                    blocks, oauth, replay,
+                );
             let new = format_content_blocks_with_native(blocks, oauth, replay);
+            assert_eq!(
+                serde_json::to_value(&accepted).unwrap(),
+                serde_json::to_value(&new).unwrap()
+            );
             assert_eq!(
                 serde_json::to_value(&old).unwrap(),
                 serde_json::to_value(&new).unwrap()
@@ -182,6 +190,28 @@ fn native_display_frozen_legacy_exact_outputs() {
                 )]);
             }
         }
+    }
+    // Missing/malformed raw inputs must overwrite the previous same-id query,
+    // and fallback starts can replace borrowed entries before another raw call.
+    for input in [
+        None,
+        Some(Value::Null),
+        Some(json!(42)),
+        Some(json!({"query":""})),
+        Some(json!({"query":"新しい"})),
+    ] {
+        let mut call = json!({"type":"server_tool_use","id":"same"});
+        if let Some(input) = input {
+            call["input"] = input;
+        }
+        let mut sequence = cases().pop().unwrap().1;
+        sequence.extend([
+            native("anthropic", call),
+            native("anthropic", json!({"type":"web_search_tool_result","tool_use_id":"same","content":[]})),
+            native("openai", json!({"type":"web_search_call","id":"same","status":"in_progress","action":{"query":"owned replacement"}})),
+            native("anthropic", json!({"type":"web_search_tool_result","tool_use_id":"same","content":[]})),
+        ]);
+        assert_same(&sequence);
     }
     // Downgrade also receives arbitrary raw items, not just formatter-produced ones.
     let mut old = vec![
@@ -274,6 +304,75 @@ fn native_display_actual_cpu_allocation_probe() {
                 totals[0],
                 totals[1]
             );
+        }
+    }
+}
+
+#[test]
+#[ignore = "optimized three-way actual thread CPU/allocation probe"]
+#[cfg(target_os = "linux")]
+fn borrowed_replay_actual_cpu_allocation_probe() {
+    assert!(!cfg!(debug_assertions));
+    let iterations = 2000;
+    for (name, blocks) in cases() {
+        for replay in [false, true] {
+            let formatters = [
+                legacy_format_content_blocks_with_native,
+                super::native_display_accepted::accepted_format_content_blocks_with_native,
+                format_content_blocks_with_native,
+            ];
+            for formatter in formatters {
+                for _ in 0..40 {
+                    black_box(formatter(black_box(&blocks), false, replay));
+                }
+            }
+            let mut totals = [(0u64, 0u64, 0u64); 3];
+            let mut samples = [[0u64; 18]; 3];
+            let mut sample_counts = [0usize; 3];
+            // Balanced six permutations avoid favoring any implementation by order.
+            for order in [
+                [0, 1, 2],
+                [2, 1, 0],
+                [1, 2, 0],
+                [0, 2, 1],
+                [2, 0, 1],
+                [1, 0, 2],
+            ]
+            .into_iter()
+            .cycle()
+            .take(18)
+            {
+                for index in order {
+                    let start = thread_cpu_ns();
+                    let (_, (calls, bytes)) = measure_allocations(|| {
+                        for _ in 0..iterations {
+                            black_box(formatters[index](black_box(&blocks), false, replay));
+                        }
+                    });
+                    let cpu = thread_cpu_ns() - start;
+                    samples[index][sample_counts[index]] = cpu;
+                    sample_counts[index] += 1;
+                    totals[index].0 += cpu;
+                    totals[index].1 += calls;
+                    totals[index].2 += bytes;
+                }
+            }
+            eprintln!(
+                "borrow-probe {name}/replay={replay} n={} original={:?} accepted3de375bd4={:?} borrowed={:?} (cpu_ns,alloc_calls,requested_bytes)",
+                iterations * 18,
+                totals[0],
+                totals[1],
+                totals[2]
+            );
+            let medians = samples.map(|mut row| {
+                row.sort_unstable();
+                (row[8] + row[9]) / 2
+            });
+            eprintln!(
+                "borrow-probe {name}/replay={replay} median_batch_cpu_ns original/accepted/borrowed={medians:?}"
+            );
+            assert!(totals[2].1 <= totals[1].1);
+            assert!(totals[2].2 <= totals[1].2);
         }
     }
 }

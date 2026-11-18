@@ -394,8 +394,9 @@ pub fn format_content_blocks_with_native(
 ) -> Vec<ApiContentBlock> {
     let mut result: Vec<ApiContentBlock> = Vec::new();
     // Inputs of server tool calls seen so far, so a downgraded result can name
-    // the query that produced it.
-    let mut native_call_inputs: std::collections::HashMap<String, Value> =
+    // the query that produced it. Raw replay inputs borrow the source blocks,
+    // while synthesized cross-provider inputs stay owned by this local map.
+    let mut native_call_inputs: std::collections::HashMap<String, std::borrow::Cow<'_, Value>> =
         std::collections::HashMap::new();
     for block in blocks {
         match block {
@@ -416,7 +417,7 @@ pub fn format_content_blocks_with_native(
                     {
                         native_call_inputs.insert(
                             id.to_string(),
-                            item.get("input").cloned().unwrap_or(Value::Null),
+                            std::borrow::Cow::Borrowed(item.get("input").unwrap_or(&Value::Null)),
                         );
                     }
                     result.push(ApiContentBlock::Raw(item.clone()));
@@ -427,12 +428,20 @@ pub fn format_content_blocks_with_native(
                     && display.output.is_none()
                     && let Some(input) = display.input.take()
                 {
-                    native_call_inputs.insert(display.id.clone(), input);
+                    native_call_inputs.insert(
+                        std::mem::take(&mut display.id),
+                        std::borrow::Cow::Owned(input),
+                    );
+                    // A call start has no fallback output. Its id and input can
+                    // move into the map instead of cloning an otherwise unused id.
+                    continue;
                 }
                 if let Some(display) = &display
                     && let Some(text) = provider_native::provider_native_display_text_fallback(
                         display,
-                        native_call_inputs.get(&display.id),
+                        native_call_inputs
+                            .get(&display.id)
+                            .map(|input| input.as_ref()),
                     )
                 {
                     result.push(ApiContentBlock::Text {
@@ -1224,6 +1233,8 @@ mod native_web_search_repair_tests;
 #[path = "deferred_tools_tests.rs"]
 mod deferred_tools_tests;
 
+#[cfg(test)]
+mod native_display_accepted;
 #[cfg(test)]
 mod native_display_legacy;
 #[cfg(test)]
