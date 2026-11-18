@@ -69,14 +69,16 @@ class WorkflowGraphTests(unittest.TestCase):
             "publish-windows": ["create-release", "build-windows"],
             "build-freebsd": ["create-release", "recovery-preflight"],
             "ci-gate": ["create-release"],
-            "release": ["create-release", "ci-gate", "build-linux-macos", "publish-windows"],
+            "build-linux-hosted": ["create-release", "recovery-preflight"],
+            "linux-arm-runtime": ["create-release", "build-linux-hosted"],
+            "release": ["create-release", "ci-gate", "build-linux-hosted", "build-linux-macos", "publish-windows"],
         })
         self.assertIn("github.repository == '1jehuang/jcode'", self.conditions["create-release"])
         self.assertEqual(self.conditions["recovery-preflight"],
                          "github.event_name == 'workflow_dispatch' && inputs.recovery == 'windows-listener'")
 
     def test_all_terminal_ancestor_results(self):
-        for job in ("build-linux-macos", "build-windows", "build-freebsd",
+        for job in ("build-linux-macos", "build-linux-hosted", "build-windows", "build-freebsd",
                     "publish-windows", "release"):
             ancestors = sorted(self.ancestors(job))
             for statuses in itertools.product(("success", "skipped", "failure", "cancelled"),
@@ -276,20 +278,20 @@ class RecoveryTests(unittest.TestCase):
     def test_workflow_identity_and_publication_gates(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         self.assertNotIn("GITHUB_REF_NAME", workflow)
-        self.assertEqual(workflow.count("ref: ${{ needs.create-release.outputs.tag_sha }}"), 6)
-        self.assertEqual(workflow.count("name: Apply reviewed release source recovery"), 6)
+        self.assertEqual(workflow.count("ref: ${{ needs.create-release.outputs.tag_sha }}"), 7)
+        self.assertEqual(workflow.count("name: Apply reviewed release source recovery"), 7)
         self.assertIn("Require successful exact-commit CI for unpatched source", workflow)
         self.assertIn("Check and test exact repaired companion source", workflow)
         self.assertIn("Release tag no longer matches the triggering commit", workflow)
-        self.assertEqual(workflow.count("needs: [create-release, recovery-preflight]"), 3)
-        self.assertEqual(workflow.count("Verify release build preserved Cargo.lock"), 2)
+        self.assertEqual(workflow.count("needs: [create-release, recovery-preflight]"), 4)
+        self.assertEqual(workflow.count("Verify release build preserved Cargo.lock"), 3)
         self.assertIn("cancel-in-progress: false", workflow)
         self.assertEqual(workflow.count('--check-public-state "$RELEASE_TAG"'), 2)
         self.assertIn('gh release upload "${RELEASE_TAG}" release-provenance.json --clobber', workflow)
         # Every asset upload (linux/macos matrix, Windows, FreeBSD, finalize)
         # refreshes SHA256SUMS so late async platforms stay covered.
-        self.assertEqual(workflow.count("scripts/release_refresh_checksums.sh"), 4)
-        self.assertIn("needs: [create-release, ci-gate, build-linux-macos, publish-windows]", workflow)
+        self.assertEqual(workflow.count("scripts/release_refresh_checksums.sh"), 6)
+        self.assertIn("needs: [create-release, ci-gate, build-linux-hosted, build-linux-macos, publish-windows]", workflow)
         self.assertIn("Get-AuthenticodeSignature", workflow)
         windows = workflow.split("  build-windows:\n", 1)[1].split("  publish-windows:\n", 1)[0]
         preflight = workflow.split("  recovery-preflight:\n", 1)[1].split("  build-linux-macos:\n", 1)[0]

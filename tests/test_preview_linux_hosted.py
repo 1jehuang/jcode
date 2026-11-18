@@ -196,11 +196,19 @@ else:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.records()[-1]["env"]["JCODE_BUILD_GIT_DIRTY"], "true")
 
+    def test_stable_release_semver_is_accepted(self):
+        for value in ("v1.0.1", "v2.13.0", "v0.99.1"):
+            with self.subTest(value=value):
+                result = self.run_script(JCODE_BUILD_SEMVER=value)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_invalid_inputs_fail_before_hosted_dispatch(self):
         for key, value in [("JCODE_BUILD_SEMVER", ""), ("JCODE_BUILD_SEMVER", "v1.0.0-preview.0"),
                            ("JCODE_BUILD_SEMVER", "v1.0.0-preview.01"),
                            ("JCODE_BUILD_SEMVER", "v1.0.0-preview.18446744073709551616"),
                            ("JCODE_BUILD_SEMVER", "v1.1.0-preview.2"),
+                           ("JCODE_BUILD_SEMVER", "v1.0"), ("JCODE_BUILD_SEMVER", "v01.0.1"),
+                           ("JCODE_BUILD_SEMVER", "1.0.1"), ("JCODE_BUILD_SEMVER", "v1.0.1-rc.1"),
                            ("RUSTFLAGS", "-Ztls-model=emulated"),
                            ("CARGO_ENCODED_RUSTFLAGS", "-Clinker=mold"), ("RUSTC_BOOTSTRAP", "1"),
                            ("CARGO_TARGET_DIR", "other"), ("CARGO_BUILD_TARGET_DIR", "other"),
