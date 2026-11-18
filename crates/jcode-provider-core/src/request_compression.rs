@@ -232,7 +232,13 @@ fn gzip_fast(raw: &[u8]) -> Option<Vec<u8>> {
         flate2::Compression::fast(),
     );
     encoder.write_all(raw).ok()?;
-    encoder.finish().ok()
+    let mut compressed = encoder.finish().ok()?;
+    // The wire body owns this Vec until upload completes. Do not retain the
+    // raw-size estimate (or growth slack) for that entire time. Shrinking once
+    // also handles moderately compressible bodies, unlike capping only the
+    // initial allocation, without changing the encoded bytes or encode policy.
+    compressed.shrink_to_fit();
+    Some(compressed)
 }
 
 /// Conservative compression ratio assumed when a decision must be made before
