@@ -342,18 +342,19 @@ pub fn downgrade_native_replay(messages: &mut [ApiMessage]) -> bool {
             };
             changed = true;
             let provider = provider_native::PROVIDER_NATIVE_ANTHROPIC;
-            let display = provider_native::provider_native_display(provider, item);
-            if let Some(display) = &display
+            let mut display = provider_native::provider_native_display(provider, item);
+            if let Some(display) = &mut display
                 && display.output.is_none()
-                && let Some(input) = &display.input
+                && let Some(input) = display.input.take()
             {
-                call_inputs.insert(display.id.clone(), input.clone());
+                call_inputs.insert(display.id.clone(), input);
             }
-            if let Some(text) = provider_native::provider_native_text_fallback(
-                provider,
-                item,
-                display.as_ref().and_then(|d| call_inputs.get(&d.id)),
-            ) {
+            if let Some(display) = &display
+                && let Some(text) = provider_native::provider_native_display_text_fallback(
+                    display,
+                    call_inputs.get(&display.id),
+                )
+            {
                 out.push(ApiContentBlock::Text {
                     text,
                     cache_control: None,
@@ -400,27 +401,40 @@ pub fn format_content_blocks_with_native(
         match block {
             ContentBlock::ProviderNative { provider, item } => {
                 use jcode_message_types::provider_native;
-                let display = provider_native::provider_native_display(provider, item);
-                if let Some(display) = &display
-                    && display.output.is_none()
-                    && let Some(input) = &display.input
-                {
-                    native_call_inputs.insert(display.id.clone(), input.clone());
-                }
-                let is_anthropic_block = provider == provider_native::PROVIDER_NATIVE_ANTHROPIC
+                // Replay raw blocks without constructing discarded result summaries.
+                // Call starts must still update the shared same-id map, including
+                // collisions with later cross-provider items.
+                let replay = native_replay
+                    && provider == provider_native::PROVIDER_NATIVE_ANTHROPIC
                     && item
                         .get("type")
                         .and_then(Value::as_str)
                         .is_some_and(provider_native::is_anthropic_server_tool_block);
-                if native_replay && is_anthropic_block {
+                if replay {
+                    if item.get("type").and_then(Value::as_str) == Some("server_tool_use")
+                        && let Some(id) = item.get("id").and_then(Value::as_str)
+                    {
+                        native_call_inputs.insert(
+                            id.to_string(),
+                            item.get("input").cloned().unwrap_or(Value::Null),
+                        );
+                    }
                     result.push(ApiContentBlock::Raw(item.clone()));
-                } else if let Some(text) = provider_native::provider_native_text_fallback(
-                    provider,
-                    item,
-                    display
-                        .as_ref()
-                        .and_then(|display| native_call_inputs.get(&display.id)),
-                ) {
+                    continue;
+                }
+                let mut display = provider_native::provider_native_display(provider, item);
+                if let Some(display) = &mut display
+                    && display.output.is_none()
+                    && let Some(input) = display.input.take()
+                {
+                    native_call_inputs.insert(display.id.clone(), input);
+                }
+                if let Some(display) = &display
+                    && let Some(text) = provider_native::provider_native_display_text_fallback(
+                        display,
+                        native_call_inputs.get(&display.id),
+                    )
+                {
                     result.push(ApiContentBlock::Text {
                         text,
                         cache_control: None,
@@ -1209,3 +1223,8 @@ mod native_web_search_repair_tests;
 #[cfg(test)]
 #[path = "deferred_tools_tests.rs"]
 mod deferred_tools_tests;
+
+#[cfg(test)]
+mod native_display_legacy;
+#[cfg(test)]
+mod native_display_probe;
