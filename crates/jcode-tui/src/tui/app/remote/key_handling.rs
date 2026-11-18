@@ -2,60 +2,15 @@
 mod rewind;
 mod update;
 use rewind::*;
+#[path = "key_handling_runtime_commands.rs"]
+mod runtime_commands;
+use runtime_commands::apply_remote_effort_direction;
+use runtime_commands::ssh_runtime_command;
 
 use super::*;
 use crate::tui::app as app_mod;
 use crate::tui::app::PendingRemoteRewindNotice;
 use crate::tui::core;
-
-/// Canonical runtime commands never run the similarly named laptop handler.
-/// Keep argument validation and destructive-action confirmation on the daemon.
-fn ssh_runtime_command(input: &str) -> Option<(&'static str, Vec<String>)> {
-    if let Some(command) = super::ssh_host::command(input) {
-        return Some(command);
-    }
-    let mut words = input.split_whitespace();
-    let token = words.next()?;
-    let command = match token {
-        "/poke" => "poke",
-        "/improve" => "improve",
-        "/refactor" => "refactor",
-        "/fix" => "fix",
-        "/skills" => "skills",
-        "/refresh-model-list" => "refresh_model_list",
-        "/context" => "context",
-        "/info" => "info",
-        "/cache" => "cache",
-        "/agents" => "agents",
-        "/subagent-model" => "subagent_model",
-        "/autoreview" => "autoreview",
-        "/autojudge" => "autojudge",
-        "/review" => "review",
-        "/judge" => "judge",
-        "/subagent" => "subagent",
-        "/telemetry" => "telemetry",
-        "/subscription" => "subscription",
-        "/overnight" => "overnight",
-        "/productivity" | "/wrapped" => "productivity",
-        "/initiatives" | "/goals" => "initiatives",
-        "/auth" => "auth",
-        "/logout" => "logout",
-        "/remote" => "remote",
-        "/provider-test-coverage" | "/model-status" => "provider_test_coverage",
-        "/z" | "/zz" | "/zzz" | "/zstatus" => "premium",
-        _ => return None,
-    };
-    let mut args = Vec::new();
-    match token {
-        "/z" => args.push("normal".to_string()),
-        "/zz" => args.push("toggle-one".to_string()),
-        "/zzz" => args.push("toggle-zero".to_string()),
-        "/zstatus" => args.push("status".to_string()),
-        _ => {}
-    }
-    args.extend(words.map(str::to_string));
-    Some((command, args))
-}
 
 #[cfg(test)]
 mod ssh_runtime_routing_tests {
@@ -143,59 +98,6 @@ async fn request_remote_service_tier(
         app_mod::service_tier_display_label(tier)
     ));
     remote.set_service_tier(tier).await
-}
-
-async fn apply_remote_effort_direction(
-    app: &mut App,
-    remote: &mut RemoteConnection,
-    direction: i8,
-) -> Result<()> {
-    // Use the best-known provider/model identity (server-reported when
-    // available, header hints during the pre-History bootstrap window) so
-    // effort cycling works immediately after spawn instead of claiming the
-    // provider does not support it until the History payload settles.
-    let (provider_name, provider_model) = app.remote_effort_identity();
-    let efforts =
-        app_mod::inferred_reasoning_efforts(provider_name.as_deref(), provider_model.as_deref());
-    if efforts.is_empty() {
-        app.set_status_notice("Reasoning effort not available for this provider");
-        return Ok(());
-    }
-    let current = app.remote_reasoning_effort_hint();
-    let current = current.as_deref();
-    let current_index = current
-        .and_then(|c| efforts.iter().position(|e| *e == c))
-        .unwrap_or(efforts.len() - 1);
-    let len = efforts.len();
-    let next_index = if direction > 0 {
-        if current_index + 1 >= len {
-            current_index
-        } else {
-            current_index + 1
-        }
-    } else if current_index == 0 {
-        0
-    } else {
-        current_index - 1
-    };
-    let next_effort = efforts[next_index];
-    if Some(next_effort) == current {
-        let label = app_mod::effort_display_label(next_effort);
-        app.set_status_notice(format!(
-            "Effort: {} (already at {})",
-            label,
-            if direction > 0 { "max" } else { "min" }
-        ));
-    } else {
-        app.remote_reasoning_effort = Some(next_effort.to_string());
-        app.invalidate_model_picker_cache();
-        app.set_status_notice(format!(
-            "Effort: {} (will apply to next request)",
-            app_mod::effort_display_label(next_effort)
-        ));
-        remote.set_reasoning_effort(next_effort).await?;
-    }
-    Ok(())
 }
 
 impl App {
@@ -441,8 +343,8 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
         if super::ssh_sessions::handle_command(app, remote, trimmed).await? {
             return Ok(());
         }
-        if crate::tui::is_ssh_remote()
-            && let Some((command, args)) = ssh_runtime_command(trimmed)
+        if let Some((command, args)) = ssh_runtime_command(trimmed)
+            && (crate::tui::is_ssh_remote() || command == "poke")
         {
             remote.runtime_command(command, args).await?;
             app.set_status_notice(format!("Requested remote {command}"));
@@ -1732,61 +1634,6 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     "Premium mode: {}. Toggle off with /z. (saved to config)",
                     label,
                 )));
-            }
-            return Ok(());
-        }
-
-        if let Some(command) = app_mod::commands::parse_poke_command(trimmed) {
-            match command {
-                Err(error) => app.push_display_message(DisplayMessage::error(error)),
-                Ok(app_mod::commands::PokeCommand::Status) => {
-                    app.push_display_message(DisplayMessage::system(
-                        app_mod::commands::poke_status_message(app),
-                    ));
-                }
-                Ok(app_mod::commands::PokeCommand::Off) => {
-                    let cleared = app_mod::commands::disable_auto_poke(app);
-                    app.set_status_notice("Poke: OFF");
-                    app.push_display_message(DisplayMessage::system(
-                        app_mod::commands::poke_disabled_message(cleared),
-                    ));
-                }
-                Ok(app_mod::commands::PokeCommand::Trigger)
-                | Ok(app_mod::commands::PokeCommand::On) => {
-                    match app_mod::commands::activate_auto_poke(app) {
-                        app_mod::commands::PokeActivation::EnabledNoIncomplete => {
-                            app.push_display_message(DisplayMessage::system(
-                                app_mod::commands::poke_enabled_without_incomplete_message(),
-                            ));
-                        }
-                        app_mod::commands::PokeActivation::Queued => {
-                            app.push_display_message(DisplayMessage::system(
-                                app_mod::commands::poke_queued_display_message(),
-                            ));
-                        }
-                        app_mod::commands::PokeActivation::SendNow {
-                            incomplete_count,
-                            poke_msg,
-                        } => {
-                            app.push_display_message(DisplayMessage::system(
-                                app_mod::commands::poke_triggered_display_message(incomplete_count),
-                            ));
-
-                            let _ = begin_remote_send(
-                                app,
-                                remote,
-                                poke_msg,
-                                vec![],
-                                true,
-                                None,
-                                true,
-                                0,
-                            )
-                            .await;
-                            app.visible_turn_started = Some(Instant::now());
-                        }
-                    }
-                }
             }
             return Ok(());
         }

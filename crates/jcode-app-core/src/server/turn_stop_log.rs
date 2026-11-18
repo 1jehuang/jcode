@@ -56,7 +56,7 @@ impl StopLog {
             }
             ServerEvent::ProviderGuardrail { .. } => self.reason = Some("guardrail"),
             ServerEvent::Done { id } | ServerEvent::Error { id, .. } => {
-                let reason = self.reason.unwrap_or_else(|| {
+                let reason = self.reason.unwrap_or({
                     if matches!(event, ServerEvent::Error { .. }) {
                         "failure"
                     } else {

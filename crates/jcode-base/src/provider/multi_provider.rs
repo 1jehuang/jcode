@@ -136,6 +136,18 @@ impl MultiProvider {
         } else {
             tokens
         };
+        let openai_context_limit = models::openai_route_context_limit_resolver();
+        // Use the same eligibility policy for saved-account and catalog
+        // candidates, without leaking Codex capacity into API-key routes.
+        let model_fits = |model: &str, provider: &str, api_method: &str| {
+            let limit = if provider == "openai" {
+                openai_context_limit(model, api_method)
+            } else {
+                models::context_limit_for_model_with_provider(model, Some(provider))
+            };
+            models::is_agent_model_for_failover(model, provider)
+                && limit.is_some_and(|limit| limit >= required_context)
+        };
         if let Some(current) = from_label
             .as_deref()
             .filter(|_| !context_only && same_provider_account_failover_enabled())
@@ -151,7 +163,7 @@ impl MultiProvider {
             {
                 let spec = format!("{method}@{label}:{}", self.model());
                 if Self::is_failover_route_pool_approved(&spec)
-                    && Self::failover_model_fits(&self.model(), from_provider, required_context)
+                    && model_fits(&self.model(), from_provider, &format!("{method}@{label}"))
                 {
                     candidates.push((
                         crate::auth::account_pool::account_key(from_provider, Some(&label)),
@@ -186,10 +198,10 @@ impl MultiProvider {
                 jcode_provider_core::RuntimeKey::OpenRouter => ActiveProvider::OpenRouter,
                 _ => continue,
             };
-            if !Self::failover_model_fits(
+            if !model_fits(
                 &route.model,
                 Self::provider_key(target_provider),
-                required_context,
+                &route.api_method,
             ) || route.detail.contains("no tools")
             {
                 continue;

@@ -12,14 +12,17 @@ const TODOS_VIEW_TITLE: &str = "Todos";
 /// Display-message role used by the inline chat todo card.
 const TODO_CARD_ROLE: &str = "todos";
 
+#[path = "todos_remote_cache.rs"]
+pub(super) mod remote_cache;
+
 impl App {
     fn current_todo_state(
         &self,
-    ) -> (
+    ) -> std::sync::Arc<(
         Vec<TodoItem>,
         crate::todo::TodoPlan,
         Vec<crate::todo::TodoGoal>,
-    ) {
+    )> {
         // A session-bound remote snapshot can arrive before History. SSH still
         // never reads local todo files, including for the requested resume id.
         let session_id = self
@@ -30,38 +33,14 @@ impl App {
                 .remote_todos_payload
                 .as_ref()
                 .filter(|(id, _)| Some(id.as_str()) == session_id)
-                .and_then(|(_, payload)| {
-                    serde_json::from_str::<serde_json::Value>(payload).map_or_else(
-                        |error| {
-                            crate::logging::debug(&format!(
-                                "Invalid remote todo snapshot: {error}"
-                            ));
-                            None
-                        },
-                        Some,
-                    )
-                })
-                .unwrap_or_default();
-            return (
-                serde_json::from_value(payload["todos"].clone()).unwrap_or_else(|error| {
-                    crate::logging::debug(&format!("Invalid remote todos: {error}"));
-                    Vec::new()
-                }),
-                serde_json::from_value(payload["plan"].clone()).unwrap_or_else(|error| {
-                    crate::logging::debug(&format!("Invalid remote todo plan: {error}"));
-                    crate::todo::TodoPlan::default()
-                }),
-                serde_json::from_value(payload["goals"].clone()).unwrap_or_else(|error| {
-                    crate::logging::debug(&format!("Invalid remote todo goals: {error}"));
-                    Vec::new()
-                }),
-            );
+                .map(|(_, payload)| payload.as_str());
+            return remote_cache::load(&self.remote_todos_cache, payload);
         }
-        (
+        std::sync::Arc::new((
             load_current_session_todos(session_id),
             load_current_session_plan(session_id),
             load_current_session_goals(session_id),
-        )
+        ))
     }
 
     pub(super) fn remote_todos_refresh_due(&mut self) -> bool {
@@ -169,11 +148,12 @@ impl App {
     /// transcript keeps at most one card so repeated toggles don't stack.
     pub(super) fn show_todo_card(&mut self) {
         let session_id = self.active_client_session_id().map(str::to_string);
-        let (todos, plan, goals) = self.current_todo_state();
-        let tasks = self.todo_card_background_tasks(&todos);
-        let content = with_background_tasks(todo_card_payload_json(&todos, &plan, &goals), &tasks);
+        let state = self.current_todo_state();
+        let (todos, plan, goals) = &*state;
+        let tasks = self.todo_card_background_tasks(todos);
+        let content = with_background_tasks(todo_card_payload_json(todos, plan, goals), &tasks);
         self.todo_card_rendered_hash =
-            hash_todos_payload(session_id.as_deref(), &todos, &plan, &goals)
+            hash_todos_payload(session_id.as_deref(), todos, plan, goals)
                 ^ hash_background_tasks(&tasks);
 
         if let Some(idx) = self.latest_todo_card_index() {
@@ -194,15 +174,16 @@ impl App {
             return false;
         };
         let session_id = self.active_client_session_id().map(str::to_string);
-        let (todos, plan, goals) = self.current_todo_state();
-        let tasks = self.todo_card_background_tasks(&todos);
-        let next_hash = hash_todos_payload(session_id.as_deref(), &todos, &plan, &goals)
+        let state = self.current_todo_state();
+        let (todos, plan, goals) = &*state;
+        let tasks = self.todo_card_background_tasks(todos);
+        let next_hash = hash_todos_payload(session_id.as_deref(), todos, plan, goals)
             ^ hash_background_tasks(&tasks);
         if next_hash == self.todo_card_rendered_hash {
             return false;
         }
         self.todo_card_rendered_hash = next_hash;
-        let content = with_background_tasks(todo_card_payload_json(&todos, &plan, &goals), &tasks);
+        let content = with_background_tasks(todo_card_payload_json(todos, plan, goals), &tasks);
         self.replace_display_message_content(idx, content)
     }
 
@@ -231,7 +212,8 @@ impl App {
         }
         self.pinned_todos_checked_at = Some(Instant::now());
         let session_id = self.active_client_session_id().map(str::to_string);
-        let (todos, plan, goals) = self.current_todo_state();
+        let state = self.current_todo_state();
+        let (todos, plan, goals) = &*state;
         if todos.is_empty() {
             if self.pinned_todos_payload.is_some() {
                 self.pinned_todos_payload = None;
@@ -240,9 +222,9 @@ impl App {
             }
             return false;
         }
-        let agents = self.todo_card_agents(&todos);
-        let tasks = self.todo_card_background_tasks(&todos);
-        let next_hash = hash_todos_payload(session_id.as_deref(), &todos, &plan, &goals)
+        let agents = self.todo_card_agents(todos);
+        let tasks = self.todo_card_background_tasks(todos);
+        let next_hash = hash_todos_payload(session_id.as_deref(), todos, plan, goals)
             ^ hash_todo_card_agents(&agents)
             ^ hash_background_tasks(&tasks);
         if next_hash == self.pinned_todos_rendered_hash && self.pinned_todos_payload.is_some() {
@@ -250,7 +232,7 @@ impl App {
         }
         self.pinned_todos_rendered_hash = next_hash;
         self.pinned_todos_payload = Some(with_background_tasks(
-            todo_card_payload_json_with_agents(&todos, &plan, &goals, &agents),
+            todo_card_payload_json_with_agents(todos, plan, goals, &agents),
             &tasks,
         ));
         true
@@ -441,13 +423,14 @@ impl App {
 
     fn refresh_todos_view_cache(&mut self, force: bool) -> bool {
         let session_id = self.active_client_session_id();
-        let (todos, plan, goals) = self.current_todo_state();
-        let next_hash = hash_todos_payload(session_id, &todos, &plan, &goals);
+        let state = self.current_todo_state();
+        let (todos, plan, goals) = &*state;
+        let next_hash = hash_todos_payload(session_id, todos, plan, goals);
         if !force && self.todos_view_rendered_hash == next_hash {
             return false;
         }
 
-        self.todos_view_markdown = build_todos_view_markdown(session_id, &todos, &plan, &goals);
+        self.todos_view_markdown = build_todos_view_markdown(session_id, todos, plan, goals);
         self.todos_view_updated_at_ms = now_ms();
         self.todos_view_rendered_hash = next_hash;
         true

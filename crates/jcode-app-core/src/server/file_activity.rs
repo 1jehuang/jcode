@@ -17,7 +17,15 @@ pub(crate) fn parse_file_activity_line_range(summary: Option<&str>) -> Option<(u
             break;
         }
     }
-    let start = digits.parse::<u64>().ok()?;
+    let start = match digits.parse::<u64>() {
+        Ok(start) => start,
+        Err(error) => {
+            crate::logging::info(&format!(
+                "Invalid file activity line start {digits:?}: {error}"
+            ));
+            return None;
+        }
+    };
     if chars.peek() == Some(&'-') {
         chars.next();
         let mut end_digits = String::new();
@@ -29,10 +37,44 @@ pub(crate) fn parse_file_activity_line_range(summary: Option<&str>) -> Option<(u
                 break;
             }
         }
-        let end = end_digits.parse::<u64>().ok().unwrap_or(start);
+        let end = match end_digits.parse::<u64>() {
+            Ok(end) => end,
+            Err(error) => {
+                crate::logging::info(&format!(
+                    "Invalid file activity line end {end_digits:?}: {error}"
+                ));
+                return None;
+            }
+        };
         Some((start.min(end), start.max(end)))
     } else {
         Some((start, start))
+    }
+}
+
+#[cfg(test)]
+mod line_range_tests {
+    use super::parse_file_activity_line_range;
+
+    #[test]
+    fn rejects_missing_or_overflowing_range_endpoints() {
+        for summary in [
+            "lines 5-",
+            "line -2",
+            "lines 5-18446744073709551616",
+            "line 18446744073709551616",
+        ] {
+            assert_eq!(
+                parse_file_activity_line_range(Some(summary)),
+                None,
+                "{summary}"
+            );
+        }
+        assert_eq!(
+            parse_file_activity_line_range(Some("lines 9-3")),
+            Some((3, 9))
+        );
+        assert_eq!(parse_file_activity_line_range(Some("line 5")), Some((5, 5)));
     }
 }
 
