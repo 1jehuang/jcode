@@ -36,14 +36,6 @@ pub(in crate::tui::app) async fn begin_remote_send(
     // fallback resends and same-route retries behave identically.
     const EXECUTION_RETRY_PREFIX: &str = "<system-reminder>Retry the interrupted execution of the previous turn. Continue from the current conversation and completed tool results without repeating completed work.</system-reminder>\n\n";
     let recovery = app.cloud_recovery_reminder();
-    let system_reminder = if crate::tui::jarvis::enabled() {
-        Some(match system_reminder {
-            Some(reminder) => format!("{reminder}\n\n{}", crate::tui::jarvis::REMINDER),
-            None => crate::tui::jarvis::REMINDER.to_owned(),
-        })
-    } else {
-        system_reminder
-    };
     let system_reminder = match (system_reminder, recovery.as_ref()) {
         (Some(reminder), Some(recovery)) => Some(format!("{reminder}\n\n{recovery}")),
         (None, Some(recovery)) => Some(recovery.clone()),
