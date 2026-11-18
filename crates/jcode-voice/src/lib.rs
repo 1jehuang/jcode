@@ -17,6 +17,8 @@ use serde::Deserialize;
 use std::{fmt, time::Duration};
 
 #[cfg(feature = "desktop-config")]
+pub mod continuous;
+#[cfg(feature = "desktop-config")]
 pub mod dictation;
 #[cfg(feature = "desktop-config")]
 pub mod global;

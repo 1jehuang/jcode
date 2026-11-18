@@ -302,6 +302,25 @@ impl JevClient {
     /// Never retries using another provider or account after an auth/billing
     /// failure. Callers own the relevance threshold and uncertainty policy.
     pub async fn evaluate(&self, state: Value, questions: Map<String, Value>) -> Result<Value> {
+        self.evaluate_policy(state, questions, true).await
+    }
+
+    /// A single bounded classification, with no hedging or transient retries.
+    /// Retains the same provider binding, entitlement and typed-answer checks.
+    pub async fn evaluate_once(
+        &self,
+        state: Value,
+        questions: Map<String, Value>,
+    ) -> Result<Value> {
+        self.evaluate_policy(state, questions, false).await
+    }
+
+    async fn evaluate_policy(
+        &self,
+        state: Value,
+        questions: Map<String, Value>,
+        retry: bool,
+    ) -> Result<Value> {
         let body = request_body_with_model(
             self.purpose,
             self.provider,
@@ -334,10 +353,17 @@ impl JevClient {
                 self.purpose.capability()
             );
         }
-        if self.purpose == JevPurpose::Voice {
+        if retry && self.purpose == JevPurpose::Voice {
             return self.send_hedged(body, &questions).await;
         }
-        let value = self.send(&self.endpoint, body).await?;
+        let value = if retry {
+            self.send(&self.endpoint, body).await?
+        } else {
+            let response = self
+                .send_once(&self.client, &self.endpoint, body.into())
+                .await?;
+            read_response(response, MAX_RESPONSE_BYTES, self.provider).await?
+        };
         validate_answers(&value, &questions).with_context(|| {
             format!(
                 "Jev model '{}' returned an incompatible Decisions response",
@@ -1521,6 +1547,20 @@ mod tests {
             }
         });
         (base, seen)
+    }
+
+    #[tokio::test]
+    async fn voice_evaluate_once_never_hedges_or_retries() {
+        for status in [200, 429, 503] {
+            let (base, seen) = concurrent_mock(vec![(Duration::from_millis(250), status); 8]);
+            let mut client = mock_client(&base, JevProvider::TypeSafe);
+            client.purpose = JevPurpose::Voice;
+            let result = client
+                .evaluate_once(json!({"transcript":"synthetic"}), questions())
+                .await;
+            assert_eq!(result.is_ok(), status == 200);
+            assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
     }
 
     #[tokio::test]
