@@ -4336,6 +4336,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bytes",
  "chrono",
  "jcode-base",
  "jcode-message-types",

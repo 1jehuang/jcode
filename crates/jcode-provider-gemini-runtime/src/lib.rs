@@ -282,8 +282,7 @@ impl GeminiProvider {
     ) -> Result<T> {
         let tokens = gemini_auth::load_or_refresh_tokens().await?;
         let url = format!("{}:{method}", Self::base_url());
-        let body_value =
-            serde_json::to_value(body).context("Failed to serialize Gemini request body")?;
+        let body_bytes = replayable_json_body(body)?;
         // Code Assist enforces a short-window burst limiter that returns 429
         // RESOURCE_EXHAUSTED with "quota will reset after 0s" even when the
         // daily bucket has plenty left. Those clear within seconds, so retry
@@ -300,7 +299,7 @@ impl GeminiProvider {
                             .post(&url)
                             .bearer_auth(&tokens.access_token)
                             .header(reqwest::header::CONTENT_TYPE, "application/json")
-                            .json(&body_value)
+                            .body(body_bytes.clone())
                     },
                     &url,
                 )
@@ -356,8 +355,7 @@ impl GeminiProvider {
         body: &impl Serialize,
         label: &str,
     ) -> Result<T> {
-        let body_value =
-            serde_json::to_value(body).context("Failed to serialize Gemini request body")?;
+        let body_bytes = replayable_json_body(body)?;
         let resp = self
             .send_with_retry(
                 |client| {
@@ -365,7 +363,7 @@ impl GeminiProvider {
                         .post(url)
                         .header("x-goog-api-key", api_key)
                         .header(reqwest::header::CONTENT_TYPE, "application/json")
-                        .json(&body_value)
+                        .body(body_bytes.clone())
                 },
                 url,
             )
@@ -559,6 +557,18 @@ impl GeminiProvider {
     }
 }
 
+// Serialize through Value to retain the legacy recursively sorted object order.
+// Keep only replayable bytes across HTTP awaits, rather than a second JSON tree.
+fn replayable_json_body(body: &impl Serialize) -> Result<bytes::Bytes> {
+    let value = serde_json::to_value(body).context("Failed to serialize Gemini request body")?;
+    serde_json::to_vec(&value)
+        .map(bytes::Bytes::from)
+        .context("Failed to serialize Gemini request body")
+}
+
+#[cfg(test)]
+mod request_body_tests;
+
 fn canonical_payload(request: &CodeAssistGenerateRequest) -> Value {
     let mut payload = json!({
         "model": &request.model,
@@ -660,6 +670,10 @@ mod canonical_input_tests {
                 },
             };
             let original_wire = serde_json::to_vec(&request).unwrap();
+            assert_eq!(
+                replayable_json_body(&request).unwrap().as_ref(),
+                serde_json::to_vec(&serde_json::to_value(&request).unwrap()).unwrap()
+            );
             let contents = serde_json::to_value(&request.request.contents).unwrap();
             let system = request
                 .request
