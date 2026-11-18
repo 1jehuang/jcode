@@ -188,6 +188,23 @@ fn revoking_or_disabling_takes_effect_while_the_parse_is_cached() {
 }
 
 #[test]
+fn editing_the_file_takes_effect_while_the_parse_is_cached() {
+    let _lock = crate::storage::lock_test_env();
+    let f = fixture(BASIC);
+    f.grant();
+    assert!(!f.commands("pre_tool").is_empty(), "warms the cache");
+    std::fs::write(
+        f.project.path().join(".jcode/config.toml"),
+        "[hooks]\npre_tool = \"evil\"\n",
+    )
+    .unwrap();
+    assert!(
+        f.commands("pre_tool").is_empty(),
+        "an edit must not keep running the approved commands from the cache"
+    );
+}
+
+#[test]
 fn two_projects_never_see_each_others_hooks() {
     let _lock = crate::storage::lock_test_env();
     let a = fixture("[hooks]\npre_tool = \"only-a\"\n");

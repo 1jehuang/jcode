@@ -233,7 +233,13 @@ pub(crate) fn maybe_prompt_for_project_trust(command: Option<&Command>) -> Resul
         return Ok(());
     }
     let path = std::env::current_dir()?;
+    let hooks_enabled = crate::hooks::project_hooks_enabled();
     for review in scope_reviews(&path)? {
+        // Disabled project hooks never run, so there is nothing to approve.
+        // `jcode trust show` still lists them.
+        if review.scope == Scope::Hooks && !hooks_enabled {
+            continue;
+        }
         if project_trust::trust_state(&path, review.scope, &review.digest)? == TrustState::Trusted {
             continue;
         }

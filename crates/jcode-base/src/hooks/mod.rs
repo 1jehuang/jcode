@@ -463,7 +463,9 @@ pub use gate::{GateDecision, GateOutcome, run_pre_tool_gate, transform_tool_inpu
 pub use json_output::{CommandResult, Verdict, interpret};
 pub use json_runner::run_json_commands;
 pub use payload::{TEXT_FIELD_LIMIT, common_payload, jcode_object, truncate_marked};
-pub use project::{CommandScope, ScopedCommand, hooks_scope_review, project_hooks_digest};
+pub use project::{
+    CommandScope, ScopedCommand, hooks_scope_review, project_hooks_digest, project_hooks_enabled,
+};
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
