@@ -1242,7 +1242,23 @@ fn estimate_debug_job_bytes(job: &DebugJob) -> usize {
 }
 
 fn estimate_swarm_event_bytes(event: &SwarmEvent) -> usize {
-    format!("{:?}", event).len()
+    struct ByteCount(usize);
+    impl std::fmt::Write for ByteCount {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            self.0 += text.len();
+            Ok(())
+        }
+
+        fn write_char(&mut self, ch: char) -> std::fmt::Result {
+            self.0 += ch.len_utf8();
+            Ok(())
+        }
+    }
+
+    let mut count = ByteCount(0);
+    std::fmt::write(&mut count, format_args!("{event:?}"))
+        .expect("formatting a SwarmEvent into a byte counter cannot fail");
+    count.0
 }
 
 fn path_len(path: &std::path::Path) -> usize {
