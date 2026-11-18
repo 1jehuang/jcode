@@ -1346,7 +1346,8 @@ fn queued_human_prompt_keeps_human_origin() {
 
 #[test]
 fn queued_poke_is_marked_auto() {
-    let poke = "You have 2 incomplete todos. Continue working, then update the todo tool.";
+    // The completion follow-up is never dropped as a stale incomplete-todo poke.
+    let poke = crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE;
     assert_eq!(queued_message_origin(&[poke]).as_deref(), Some("auto"));
 }
 
