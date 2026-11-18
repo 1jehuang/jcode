@@ -402,3 +402,59 @@ auth = "none"
         ProviderChoice::OpenaiCompatible
     ));
 }
+
+#[test]
+fn model_from_session_skips_sessions_with_no_chosen_model() {
+    assert_eq!(
+        model_request_for_saved_route(None, Some("claude"), None),
+        None
+    );
+    assert_eq!(
+        model_request_for_saved_route(Some("unknown"), Some("claude"), None),
+        None
+    );
+    assert_eq!(model_request_for_saved_route(Some("  "), None, None), None);
+}
+
+#[test]
+fn model_from_session_keeps_the_saved_route() {
+    // An `@provider` pin is an OpenRouter route whatever the stale key says.
+    assert_eq!(
+        model_request_for_saved_route(Some("z-ai/glm-5.2@Novita"), Some("openai-api"), None)
+            .as_deref(),
+        Some("openrouter:z-ai/glm-5.2@Novita"),
+    );
+    // The saved OAuth route survives instead of falling back to the default.
+    assert_eq!(
+        model_request_for_saved_route(
+            Some("claude-opus-5-5"),
+            Some("claude"),
+            Some("claude-oauth")
+        )
+        .as_deref(),
+        Some("claude-oauth:claude-opus-5-5"),
+    );
+}
+
+#[test]
+fn model_from_session_conflicts_with_resume_and_model() {
+    use clap::Parser;
+    // Rendering a clap error for this Args overflows the default 2 MiB test stack.
+    std::thread::Builder::new()
+        .stack_size(16 << 20)
+        .spawn(|| {
+            assert!(
+                Args::try_parse_from(["jcode", "--model-from-session", "x", "--resume", "y"])
+                    .is_err()
+            );
+            assert!(
+                Args::try_parse_from(["jcode", "--model-from-session", "x", "-m", "y"]).is_err()
+            );
+            let args = Args::try_parse_from(["jcode", "--no-update", "--model-from-session", "x"])
+                .unwrap();
+            assert_eq!(args.model_from_session.as_deref(), Some("x"));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
