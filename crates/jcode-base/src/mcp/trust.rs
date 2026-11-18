@@ -155,6 +155,25 @@ fn key_looks_secret(key: &str) -> bool {
     .any(|word| key.contains(word))
 }
 
+/// Hide secret-looking command-line arguments: known token shapes, the value
+/// of `--secret-flag=value`, and the argument following a bare `--secret-flag`.
+fn redact_arg(arg: &str, follows_secret_flag: bool) -> String {
+    if follows_secret_flag && !arg.starts_with('-') {
+        return "[redacted]".to_string();
+    }
+    let shown = crate::message::redact_secrets(arg);
+    if shown != arg {
+        return shown;
+    }
+    if arg.starts_with('-')
+        && let Some((flag, _)) = arg.split_once('=')
+        && key_looks_secret(flag)
+    {
+        return format!("{flag}=[redacted]");
+    }
+    shown
+}
+
 /// What the `mcp` scope would let `path`'s project run, for `jcode trust`.
 pub fn mcp_scope_review(path: &Path) -> Result<Option<crate::project_trust::ScopeReview>> {
     let Some(review) = project_mcp_review(path)? else {
@@ -168,12 +187,14 @@ pub fn mcp_scope_review(path: &Path) -> Result<Option<crate::project_trust::Scop
         lines.push(format!("    command: {:?}", safe(&server.command)));
         if !server.args.is_empty() {
             lines.push("    arguments:".to_string());
-            lines.extend(
-                server
-                    .args
-                    .iter()
-                    .map(|arg| format!("      - {:?}", safe(arg))),
-            );
+            let mut previous_flag_is_secret = false;
+            for arg in &server.args {
+                let shown = redact_arg(arg, previous_flag_is_secret);
+                redacted |= shown != *arg;
+                previous_flag_is_secret =
+                    arg.starts_with('-') && !arg.contains('=') && key_looks_secret(arg);
+                lines.push(format!("      - {:?}", safe(&shown)));
+            }
         }
         if !server.env.is_empty() {
             lines.push("    environment:".to_string());
@@ -449,6 +470,31 @@ mod shared_store_tests {
             shown.contains("MODE=fast"),
             "non-secret values stay visible: {shown}"
         );
+        assert!(review.redacted);
+    }
+
+    #[test]
+    fn secret_looking_arguments_are_redacted() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join(".mcp.json"),
+            r#"{"mcpServers":{"t":{"command":"tool","args":["--token","opaque-arg-1","--api-key=opaque-arg-2","--mode","fast","ghp_abcdefghijklmnopqrstuvwxyz0123456789"]}}}"#,
+        )
+        .unwrap();
+        let review = mcp_scope_review(project.path()).unwrap().unwrap();
+        match previous {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+        let shown = review.lines.join("\n");
+        for leaked in ["opaque-arg-1", "opaque-arg-2", "ghp_abcdefgh"] {
+            assert!(!shown.contains(leaked), "{leaked} leaked: {shown}");
+        }
+        assert!(shown.contains("fast"), "non-secret args stay visible: {shown}");
         assert!(review.redacted);
     }
 
