@@ -97,14 +97,15 @@ the error and restarting the mode, rather than an automatic retry loop.
 
 For a graphical meter instead of text glyphs, the Jstack Waybar fork provides
 `waveform/jarvis`, a GTK drawing area rendered with Cairo. The helper's `--native`
-mode supplies bounded numeric amplitude history. Waybar draws and interpolates
-that measured envelope using its frame clock, not a fake sine animation. It does
+mode supplies bounded numeric amplitude history. Waybar renders seven rounded
+vertical pills whose heights smoothly follow measured audio levels using its
+frame clock, not a fake sine animation. It does
 not open a microphone or send audio anywhere.
 
 ```json
 "waveform/jarvis": {
   "exec": "python3 /path/to/jcode/scripts/waybar/jarvis-voice-status.py --native",
-  "width": 150,
+  "width": 86,
   "height": 18,
   "fps": 60,
   "on-click": "python3 /path/to/jcode/scripts/waybar/jarvis-voice-status.py --toggle"
