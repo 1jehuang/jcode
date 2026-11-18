@@ -14,10 +14,12 @@ An isolated normal optimized executable, `startup-release-control-20261118-jcode
 
 The existing full-package integration scanner `every_provider_sends_clean_schemas` still expects an Anthropic dialect call in an old source file. That unrelated preexisting failure is not counted as passing. Existing unrelated base test-only strict-lint diagnostics are not suppressed.
 
-## Explicit remaining gates
+## Final activation and stopping gate
 
-1. Concurrent-peak profiling found serialized JSON buffer capacity substantially exceeds wire length. A dedicated CPU/allocation/byte-equivalence experiment is in progress. Reject it if memory savings require repeatable CPU regression.
-2. Finish coordinated build/activation of accepted source, verify current/shared daemon identity, and run its isolated representative fixture.
-3. Challenge the stopping gate against concrete remaining owners. The bounded longevity results and fresh startup controls do not prove leak freedom, global optimization exhaustion, or a lower total RSS.
+1. Concurrent-peak profiling found substantial serialized JSON capacity slack. Probes `a532814cc` and `b36c547da` tested ordinary shrinking, 1.5x buffer growth, and conditional large-only shrinking with exact bytes/error/boundary checks. All were rejected as pure efficiencies: unconditional shrink added 46–49% tiny-body CPU, growth regressed CPU/allocation, and conditional shrink added ~2.8% tiny-body CPU plus one realloc for each triggered body. Large native-shaped retained capacity fell by about 8 MiB, but that is a tradeoff, not an accepted fix. Production serialization remains unchanged. See `examples/wire_capacity_probe/README.md` and raw results.
+2. Coordinated hosted build of **b36c547da** succeeded. Its freshly rebuilt selfdev binary passed **16 sessions x two simultaneous-request waves**, verifying all **32 exact streamed and persisted answers**, complete prior history and owner release after disconnect. Fixture: `broader-final-selfdev-20261118`. This is a correctness/ownership test, not a before/after CPU or RSS comparison. The shared daemon was then activated. `selfdev status` confirms running/current/shared **b36c547da**, and `server:info` independently returns that hash.
+3. The explicit deeper gates produced additional accepted fixes, then rejected remaining measured strategies on CPU/allocation evidence. No further validated pure improvement was identified among the examined owners. This is a scoped stopping point, not proof of global exhaustion, leak freedom or a lower total RSS. A concrete new profile finding should reopen investigation automatically. The bounded longevity results and startup controls retain their documented limits.
+
+Combined hosted provider-core regression suite also passed **210 tests**, with four ignored probes (`20261118-060438694-2722052`). All implementation workers were awaited and stopped. No experimental parser profile, production cache eviction, transcript reduction or concurrency reduction was activated.
 
 Fresh daemon attribution and rejected parser-profile experiment are in `server-fresh-daemon-memory-2026-11-18.md`. Long-lived and 32-session peak attribution are in `server-longevity-concurrency-2026-11-18.md`.
