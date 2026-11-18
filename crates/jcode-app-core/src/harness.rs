@@ -28,7 +28,7 @@ const STOP_WORDS: &[&str] = &[
     "test", "tests", "update", "fix", "make", "plan", "release", "deploy", "install",
     "setup", "init", "talk", "hero", "design", "data", "search", "review", "debug",
     "web", "page", "image", "video", "text", "api", "tool", "tools", "skill", "skills",
-    "log", "logs", "git", "app", "ui", "doc", "docs", "report", "audit", "memory",
+    "log", "logs", "git", "app", "ui", "doc", "docs", "report", "audit", "memory", "understand",
 ];
 const MAX_CONSTRAINT_LINES: usize = 8;
 
@@ -561,6 +561,17 @@ mod tests {
         assert!(route_score("use code mode", "code-mode", &v(&["code mode"])) >= MIN_ROUTE_SCORE);
         assert!(is_system_message("## Previous Conversation Summary\nx"));
         assert!(!is_system_message("use code mode"));
+    }
+
+    #[test]
+    fn understand_requires_architectural_intent() {
+        let triggers = ["understand codebase", "knowledge graph", "map codebase", "architecture graph", "analyze repository structure"].map(str::to_string);
+        for prompt in ["help me understand this", "explain this diff", "fix css button"] {
+            assert!(route_score(prompt, "understand", &triggers) < MIN_ROUTE_SCORE, "{prompt}");
+        }
+        for prompt in &triggers {
+            assert!(route_score(prompt, "understand", &triggers) >= MIN_ROUTE_SCORE, "{prompt}");
+        }
     }
 
     #[test]
