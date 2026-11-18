@@ -21,6 +21,7 @@ pub mod dictation;
 #[cfg(feature = "desktop-config")]
 pub mod global;
 mod nari;
+pub mod speech;
 pub mod timing;
 pub use nari::{
     NARI_PCM_CHUNK_SAMPLES, NARI_USD_PER_AUDIO_HOUR, NariEvent, NariSession, correct_transcript,
