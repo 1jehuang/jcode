@@ -348,6 +348,45 @@ fn remote_skill_invocation_with_prompt_sends_remote_turn() {
 }
 
 #[test]
+fn remote_skill_arguments_come_from_expanded_paste_not_label() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+    let temp = tempfile::tempdir().expect("create skill dir");
+    let skill_dir = temp.path().join(".jcode/skills/remote-skill");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: remote-skill\ndescription: Paste regression skill\n---\nUse $ARGUMENTS.\n",
+    )
+    .expect("write skill");
+    app.session.working_dir = Some(temp.path().to_string_lossy().to_string());
+    app.remote_model_switch_in_flight = true;
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    rt.block_on(crate::tui::app::remote::submit_remote_slash_input(
+        &mut app,
+        &mut remote,
+        crate::tui::app::input::PreparedInput {
+            raw_input: "/remote-skill [Pasted text #1 +5 lines]".to_string(),
+            expanded: "/remote-skill \"two words\" b\nc\nd\ne".to_string(),
+            images: vec![],
+        },
+    ))
+    .expect("remote skill prompt should be accepted");
+
+    let args = app
+        .pending_skill_arguments_after_model_switch
+        .as_deref()
+        .expect("arguments deferred with the prompt");
+    assert!(!args.contains("Pasted text"), "label leaked: {args}");
+    assert!(args.starts_with("\"two words\" b"), "{args}");
+}
+
+#[test]
 fn process_remote_followups_auto_submits_staged_startup_prompt() {
     // Regression for issues #267/#268/#76: a headed swarm spawn stages its
     // initial prompt into `app.input` with `submit_input_on_startup = true`

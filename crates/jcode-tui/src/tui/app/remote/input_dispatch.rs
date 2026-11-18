@@ -364,8 +364,11 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
 
     // Arguments keep the quoting the user typed so `"two words"` stays one
     // argument; only the prompt sent to the model has its quotes stripped.
+    // Take the tail from the expanded text: `raw_input` may hold a compact
+    // paste label where the model receives the pasted content.
     app.pending_skill_arguments = Some(
-        raw_input
+        prepared
+            .expanded
             .trim()
             .strip_prefix('/')
             .and_then(|rest| rest.get(skill_name.len()..))
