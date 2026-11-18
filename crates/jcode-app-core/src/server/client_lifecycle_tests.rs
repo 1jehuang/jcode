@@ -7,6 +7,9 @@ use futures::stream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+#[path = "client_lifecycle_daemon_continuation_socket_tests.rs"]
+mod daemon_continuation_socket_tests;
+
 fn turn_payload(event: ServerEvent) -> ServerEvent {
     match event {
         ServerEvent::TurnEvent { event, .. } => *event,
