@@ -180,8 +180,8 @@ fn should_render_mermaid_block(lang: Option<&str>) -> bool {
 }
 pub use render_support::{highlight_file_lines, highlight_line, render_table_with_width};
 
-// Syntax highlighting resources (loaded once)
-static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
+// Syntax highlighting resources (loaded once); callers pass lines without terminators.
+static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_nonewlines);
 static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 
 // Syntax highlighting cache - keyed by (code content hash, language)
