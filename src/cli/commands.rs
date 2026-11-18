@@ -2624,6 +2624,11 @@ Re-run with `--force` if you really want to stop the server.";
     Ok(())
 }
 
+/// Run a standalone, in-process agent, including its local continuation loop.
+///
+/// Even when a daemon is available (or started on demand for swarm tools), it
+/// does not own this agent or receive its turns. Daemon-owned auto-poke applies
+/// only to daemon sessions, so these local loops must remain enabled here.
 pub async fn run_single_message_command(
     choice: &super::provider_init::ProviderChoice,
     model: Option<&str>,
