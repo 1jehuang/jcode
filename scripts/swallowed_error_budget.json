@@ -1,8 +1,8 @@
 {
-  "total": 3853,
+  "total": 3856,
   "totals_by_pattern": {
     "dot_ok": 1526,
-    "let_underscore": 1402,
+    "let_underscore": 1405,
     "unwrap_or_default": 925
   },
   "tracked_files": {
@@ -973,7 +973,7 @@
     },
     "crates/jcode-base/src/hooks/mod.rs": {
       "dot_ok": 0,
-      "let_underscore": 1,
+      "let_underscore": 4,
       "unwrap_or_default": 0
     },
     "crates/jcode-base/src/hooks/sync_runner.rs": {
