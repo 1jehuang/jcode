@@ -28,6 +28,81 @@ pub struct McpHandle {
     tools: Arc<std::sync::RwLock<Vec<McpToolDef>>>,
     /// Reply timeout applied to every request on this server.
     request_timeout: std::time::Duration,
+    channel_route: Arc<std::sync::Mutex<ChannelRoute>>,
+}
+
+/// Where `notifications/claude/channel` messages go. Messages that arrive
+/// before the owning session is known wait in `pending`.
+#[derive(Default)]
+struct ChannelRoute {
+    owner: Option<String>,
+    pending: Vec<String>,
+}
+
+const CLAUDE_CHANNEL_METHOD: &str = "notifications/claude/channel";
+
+fn publish_channel_message(session_id: &str, notification: String) {
+    crate::bus::Bus::global().publish(crate::bus::BusEvent::PeerMessageReceived(
+        crate::bus::PeerMessageReceived {
+            session_id: session_id.to_string(),
+            notification,
+        },
+    ));
+}
+
+/// Render a channel push the way Claude Code shows it to the model, so server
+/// instructions that refer to `<channel source=...>` blocks still apply.
+fn format_channel_message(server: &str, params: Option<&Value>) -> String {
+    let attr = |value: &str| value.replace('&', "&amp;").replace('"', "&quot;");
+    let mut tag = format!("<channel source=\"{}\"", attr(server));
+    if let Some(meta) = params
+        .and_then(|p| p.get("meta"))
+        .and_then(Value::as_object)
+    {
+        for (key, value) in meta {
+            let value = value
+                .as_str()
+                .map_or_else(|| value.to_string(), str::to_string);
+            tag.push_str(&format!(" {}=\"{}\"", attr(key), attr(&value)));
+        }
+    }
+    let content = params
+        .and_then(|p| p.get("content"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    format!("{tag}>\n{content}\n</channel>")
+}
+
+fn handle_server_notification(
+    server: &str,
+    line: &str,
+    capabilities: &std::sync::RwLock<ServerCapabilities>,
+    route: &std::sync::Mutex<ChannelRoute>,
+) {
+    let Ok(message) = serde_json::from_str::<Value>(line) else {
+        return;
+    };
+    if message.get("method").and_then(Value::as_str) != Some(CLAUDE_CHANNEL_METHOD) {
+        return;
+    }
+    if !capabilities
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .is_channel_server()
+    {
+        crate::logging::warn(&format!(
+            "MCP [{server}]: ignoring channel message from a server that did not declare {CLAUDE_CHANNEL_CAPABILITY}"
+        ));
+        return;
+    }
+    let notification = format_channel_message(server, message.get("params"));
+    let mut route = route
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match route.owner.clone() {
+        Some(owner) => publish_channel_message(&owner, notification),
+        None => route.pending.push(notification),
+    }
 }
 
 /// Removes waiters on timeout, send failure and cancellation of the caller.
@@ -126,6 +201,27 @@ impl McpHandle {
 
     /// Whether the transport can no longer deliver replies. Closed handles
     /// must be replaced by a fresh connection, never used to replay a call.
+    /// Whether the server declared the `claude/channel` capability.
+    pub fn is_channel_server(&self) -> bool {
+        self.capabilities
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_channel_server()
+    }
+
+    /// Route this server's channel messages to `session_id`, flushing any
+    /// that arrived before the owner was known.
+    pub fn set_channel_owner(&self, session_id: &str) {
+        let mut route = self
+            .channel_route
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        route.owner = Some(session_id.to_string());
+        for notification in route.pending.drain(..) {
+            publish_channel_message(session_id, notification);
+        }
+    }
+
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst) || self.writer_tx.is_closed()
     }
@@ -311,6 +407,10 @@ impl McpClient {
         });
 
         // Spawn reader task
+        let capabilities = Arc::new(std::sync::RwLock::new(ServerCapabilities::default()));
+        let channel_route = Arc::new(std::sync::Mutex::new(ChannelRoute::default()));
+        let reader_capabilities = Arc::clone(&capabilities);
+        let reader_route = Arc::clone(&channel_route);
         let pending_clone = Arc::clone(&pending);
         let closed = Arc::new(AtomicBool::new(false));
         let closed_clone = Arc::clone(&closed);
@@ -332,6 +432,13 @@ impl McpClient {
                                 if let Some(tx) = pending.remove(&id) {
                                     let _ = tx.send(response);
                                 }
+                            } else {
+                                handle_server_notification(
+                                    &reader_name,
+                                    &line,
+                                    &reader_capabilities,
+                                    &reader_route,
+                                );
                             }
                         } else {
                             let trimmed = line.trim();
@@ -363,9 +470,10 @@ impl McpClient {
             writer_tx,
             server_info: Arc::new(std::sync::RwLock::new(None)),
             instructions: Arc::new(std::sync::RwLock::new(None)),
-            capabilities: Arc::new(std::sync::RwLock::new(ServerCapabilities::default())),
+            capabilities,
             tools: Arc::new(std::sync::RwLock::new(Vec::new())),
             request_timeout: request_timeout_for(config),
+            channel_route,
         };
 
         let mut client = Self {
@@ -411,6 +519,7 @@ impl McpClient {
             capabilities: Arc::new(std::sync::RwLock::new(ServerCapabilities::default())),
             tools: Arc::new(std::sync::RwLock::new(Vec::new())),
             request_timeout: request_timeout_for(config),
+            channel_route: Arc::default(),
         }
     }
 

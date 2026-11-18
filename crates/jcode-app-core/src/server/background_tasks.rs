@@ -388,6 +388,49 @@ pub(super) async fn dispatch_swarm_worker_report(
     }
 }
 
+/// Deliver a message an MCP channel server (claude-peers) pushed to this
+/// session: start a turn when idle, otherwise queue it like a swarm DM.
+pub(super) async fn dispatch_peer_message(
+    event: &crate::bus::PeerMessageReceived,
+    sessions: &SessionAgents,
+    soft_interrupt_queues: &SessionInterruptQueues,
+    swarm: LiveTurnSwarmContext,
+) {
+    if emit_external_wake(
+        &event.session_id,
+        "peer_message",
+        &event.notification,
+        &swarm.members,
+    )
+    .await
+    {
+        return;
+    }
+    if !run_live_turn_if_idle(
+        &event.session_id,
+        &event.notification,
+        Some("Another agent on this machine sent you this message. Reply with the tool from the server named in source, using the sender's from_id, then continue.".to_string()),
+        sessions,
+        swarm,
+    )
+    .await
+        && !queue_soft_interrupt_for_session(
+            &event.session_id,
+            event.notification.clone(),
+            false,
+            SoftInterruptSource::System,
+            soft_interrupt_queues,
+            sessions,
+        )
+        .await
+    {
+        crate::logging::warn(&format!(
+            "Failed to deliver peer message to session {}",
+            event.session_id
+        ));
+    }
+}
+
 pub(super) async fn dispatch_background_task_progress(
     task: &crate::bus::BackgroundTaskProgressEvent,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
