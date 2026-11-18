@@ -243,3 +243,121 @@ silently treated as transcript leakage or proof of leak freedom.
 5. One 128-turn session and eight 32-session waves are bounded acceptance cases,
    not a multi-hour soak or a proof that every retained owner is bounded. No
    source changes are made based on a merely unexplained residual.
+
+## Follow-up: concurrent request peak allocation stacks
+
+The previously unexplained active-request peak now has a concrete stack-level
+attribution. This is an attribution run, not a normal-versus-profiling speed or
+memory comparison. No runtime source was changed or rebuilt by this exercise.
+
+The dedicated fixture gained `--binary` and `--profile`. Profiling asserts the
+pinned executable digest, requests dumps using the existing attached
+`session_broader_00`, and sets a private final-profile prefix. The same private
+home, runtime directory, temporary directory, test-session flag, wire assertions,
+history assertions, persisted base-plus-journal checks, and teardown are retained.
+
+```bash
+cd /home/jeremy/.jcode/scratch/ram-fork
+python3 broader-runtime-probe.py broader-concurrent32-profile-20261118 \
+  --binary "$PWD/owned-history-20261118-prof-jcode" --profile \
+  --sessions 32 --waves 2 --seed-kib 1024 --disconnect-waits 0,5,35,70
+python3 broader-profile-summary.py
+```
+
+Pinned binary SHA-256:
+`3d312fee01b1ada46dab7863a26f16a042600068b4ecf7132a6652f881b605b1`.
+Updated fixture SHA-256:
+`0a0d523a4a46c0c79e88b8f84898c4c139f68559ebe2124f4b4ca25a8329fd41`.
+The earlier fixture digest above describes the earlier normal-binary acceptance.
+The profiling environment is
+`prof:true,prof_active:true,lg_prof_sample:15,prof_accum:true,prof_final:true`
+plus `prof_prefix:<private-work>/postdisconnect` in `MALLOC_CONF`.
+
+The bounded run exited zero: 64 exact streamed answers, 64 independently verified
+persisted answers, no provider errors, 32 requests held concurrently in each of
+two waves, and all final owner-release assertions passed. Wire request bodies
+were 1,050,490 through 1,050,744 bytes. The daemon exited and emitted
+`postdisconnect.2662604.0.f.heap`. This final dump occurs during graceful process
+exit after the 70-second disconnect observation, not at the exact instant of the
+last debug snapshot.
+
+### Live versus cumulative attribution
+
+Each heap was analyzed with `jeprof --text --show_bytes <binary> <heap>` and
+again with `--alloc_space`. Reports are beside their heaps under the private
+`broader-concurrent32-profile-20261118` directory. Cumulative values measure all
+sampled allocation traffic up to that stage, including freed and reallocated
+buffers. They must not be added to live values or treated as retained memory.
+Function cumulative columns also overlap their callees.
+
+| Stage | sampled live bytes | cumulative allocated bytes |
+| --- | ---: | ---: |
+| active wave 1 | 168,567,479 | 958,462,625 |
+| active wave 2 | 169,638,518 | 1,460,092,024 |
+| both waves completed, attached | 47,064,435 | 1,472,195,533 |
+| final process-exit dump | 5,423,706 | 1,583,457,018 |
+
+The active wave-2 sampled live owners include:
+
+- **83,886,080 bytes (80 MiB)** below
+  `jcode_provider_core::request_compression::json_body`, specifically
+  `serde_json::ser::to_vec`, string serialization, and buffer growth. The same
+  allocation path is 251,756,547 cumulative bytes after two waves. These are
+  serialization allocation stacks, not proof of a second hidden transcript.
+- **33,752,646 bytes** below
+  `jcode_provider_openai::request::build_responses_input_with_logger`, the
+  native Responses JSON input owner. Its cumulative traffic is 134,713,244
+  bytes after two waves. The `serde_json::value::to_value` child is part of this
+  owner and is not another independent 32 MiB to add.
+- **33,587,424 bytes** below restored canonical session-history loading, still
+  live when attached after completion. This is the intentional 32-session seed
+  history, not a candidate for deleting transcript content.
+
+Both request-building and wire-serialization owners disappear from the attached
+completed live profile. The sampled active-to-completed drop is 122,574,083
+bytes. Those two request paths explain 117,638,726 bytes of it, about 96%.
+The canonical history owner then disappears from the final exit profile too.
+This identifies the principal phase-specific owners without claiming every
+small diagnostic/runtime allocation has been exhaustively explained.
+
+### Concrete next implementation target
+
+`crates/jcode-provider-core/src/request_compression.rs:293` serializes with
+`serde_json::to_vec`. The compressed branch already calls `shrink_to_fit` at
+line 219, while the raw branch moves the untrimmed `Vec` into the wire body at
+lines 311 and 331. This local custom endpoint correctly does not compress.
+The actual combined wire content is about 32.1 MiB, but its sampled backing
+allocations occupy 80 MiB. Roughly 47.9 MiB is capacity beyond content at this
+phase, including allocator size-class rounding. The body remains live while the provider has read the request but has
+not returned headers. That capacity is a concrete redundant allocation target,
+not required history or an inherently necessary extra copy of payload text.
+
+The narrow next candidate is compacting excessive raw wire-buffer capacity
+before handing it to reqwest, preserving exact bytes and retry behavior.
+It requires tests covering uncompressed/custom endpoints, eligible compression,
+and request replay, followed by the same isolated 32-request runtime check.
+No reduction, speedup, or safe production fix is claimed until that experiment
+is implemented and validated. The request `Value` passed by reference through
+`crates/jcode-provider-openai-runtime/src/openai_stream_http.rs:7,68-80` is a
+separate native-input owner. Removing it would require analyzing retry and
+fallback semantics, not simply dropping the canonical transcript.
+
+### Profiling caveats and residuals
+
+Process allocator counters in this profiling build were 187,644,552 bytes at
+active wave 2, 66,173,912 attached after completion, and 25,226,088 after 70
+seconds disconnected. RSS/PSS at those stages were 297.547/292.583,
+278.137/273.173, and 190.605/185.643 MiB. CPU rose from 5.36 to 5.94 seconds
+during disconnect observation and threads returned from 35 to 20. Profiling
+metadata, allocator implementation/capacity classes, diagnostic timing, and
+sample estimation prevent direct equality with sampled heaps or the earlier
+normal system-allocator numbers. The final exit heap also follows teardown.
+
+The final sampled live heap has no large transcript/request owner. Its remaining
+small owners include broadcast-channel storage (917,504 bytes cumulative on that
+live stack), runtime/task state, parsers, regex caches, and TLS/library state.
+These observations are not a complete attribution of the normal build's earlier
+post-disconnect residual, nor proof of an hours-long plateau or global
+optimization exhaustion. One initial jeprof batch exceeded its 240-second
+symbolization budget, so unfinished reports were regenerated with a longer
+budget. The daemon workload itself passed on its first profiling invocation.
