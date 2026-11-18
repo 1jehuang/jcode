@@ -1,3 +1,5 @@
+#[path = "debug_dm_fixture.rs"]
+mod dm_fixture;
 #[path = "debug_picker_state.rs"]
 mod picker_state;
 use super::*;
@@ -258,6 +260,8 @@ impl App {
                 provider: "openai".to_string(),
             });
             serde_json::json!({"ok": true, "fixture": "login-progress-exchange"}).to_string()
+        } else if cmd == "dm-fixture" {
+            self.show_debug_dm_fixture()
         } else if cmd == "expand-badge-fixture" {
             let old_string = (0..24)
                 .map(|idx| format!("old fixture line {idx}\n"))
@@ -1156,6 +1160,7 @@ fn attach_redraw_schedule_debug(payload: &mut serde_json::Value, app: &App) {
             "idle_animation_area": crate::tui::ui::last_idle_animation_area()
                 .map(|a| serde_json::json!([a.x, a.y, a.width, a.height])),
             "client_focused": crate::tui::TuiState::client_focused(app),
+            "window_visibility": crate::tui::window_visibility::current().label(),
             "wake_sources": super::wake_stats::snapshot(),
             "periodic_redraw_required": crate::tui::periodic_redraw_required(app),
             // Unlike `idle_animation.last_full_frame_reason`, which is sticky,

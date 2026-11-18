@@ -1,9 +1,12 @@
 //! Names and locations describe the session itself, unlike transcript mentions.
-use super::{SessionInfo, transcript_search::lowercase_field};
+#[cfg(test)]
+use super::SessionInfo;
+use super::transcript_search::lowercase_field;
 
 /// Complete structured matches lead. An exact animal/name and actual cloud
 /// ownership break ties, so `swan cloud` finds the cloud swan even if renamed.
 /// Partial identity matches must not elevate unrelated transcript results.
+#[cfg(test)]
 pub(super) fn rank(session: &SessionInfo, tokens: &[String]) -> (bool, bool, bool) {
     rank_fields(
         [
@@ -23,14 +26,18 @@ pub(super) fn rank_fields(fields: [&str; 6], cloud: bool, tokens: &[String]) -> 
     if tokens.is_empty() {
         return (false, false, false);
     }
-    let fields = fields.map(lowercase_field);
+    // A generated conversation title is topical evidence, not a structured
+    // identity. Including it here made any title substring outrank even strong
+    // user-prompt evidence before SearchRank was ever compared. Title matches
+    // remain searchable and ranked by the normal metadata scorer.
+    let [id, name, _title, label, directory, server] = fields.map(lowercase_field);
+    let fields = [&id, &name, &label, &directory, &server];
     let complete = tokens.iter().all(|token| {
         (cloud && token == "cloud") || fields.iter().any(|field| field.contains(token.as_str()))
     });
     if !complete {
         return (false, false, false);
     }
-    let name = &fields[1];
     let exact_name = tokens.iter().any(|token| token == name.as_ref());
     let cloud_location = cloud && tokens.iter().any(|token| token == "cloud");
     (true, exact_name, cloud_location)

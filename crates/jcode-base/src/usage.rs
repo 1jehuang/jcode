@@ -6,7 +6,12 @@ use crate::auth;
 mod accessors;
 mod account_fetch;
 pub use account_fetch::fetch_oauth_account_usage;
+mod anthropic_fable_reset;
 mod anthropic_reset;
+pub(crate) use anthropic_fable_reset::auto_reset_fable_usage;
+mod anthropic_response;
+pub(crate) use anthropic_response::invalidate_auth_failure as invalidate_anthropic_usage_auth_failure;
+pub use anthropic_response::record_anthropic_response_limits;
 mod api_keys;
 mod banked;
 pub use banked::{AccountBankedResets, cached_account_banked_resets};
@@ -18,6 +23,7 @@ mod local_activity;
 mod model;
 mod openai_helpers;
 mod openai_reset;
+pub(crate) use openai_reset::auto_reset_weekly_usage;
 mod provider_fetch;
 mod remote_accounts;
 mod startup_snapshot;
@@ -32,6 +38,7 @@ use cache::*;
 pub use cache::{
     account_known_exhausted, cached_account_usage_snapshot, cached_account_usage_status_snapshot,
 };
+pub(crate) use cache::hydrate_persisted_account_usage;
 pub use disk_cache::{
     export_last_good as export_limits_snapshot, import_last_good as import_limits_snapshot,
 };

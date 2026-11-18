@@ -140,8 +140,41 @@ pub struct DisplayConfig {
     /// (message/activity/opened/created, default: message).
     #[serde(deserialize_with = "crate::serde_lenient::lenient_enum")]
     pub resume_time: ResumeTimeMode,
+    /// What Resume does when the picked session is already shown by another
+    /// local client window (off/move/replace, default: off).
+    #[serde(deserialize_with = "crate::serde_lenient::lenient_enum")]
+    pub resume_open_elsewhere: ResumeOpenElsewhere,
     /// Usage percentage wording: "left" (default) or "used".
     pub usage_display: String,
+}
+
+/// Resume behavior for a session another local client window already shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResumeOpenElsewhere {
+    /// Attach a second client and leave the other window alone (default).
+    #[default]
+    #[serde(alias = "none", alias = "duplicate")]
+    Off,
+    /// Bring the existing window to the current workspace and focus it instead
+    /// of attaching again. Needs compositor support (niri); otherwise behaves
+    /// like `replace`.
+    #[serde(alias = "bring")]
+    Move,
+    /// Resume as usual and close the other window's client.
+    #[serde(alias = "close")]
+    Replace,
+}
+
+impl ResumeOpenElsewhere {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" | "duplicate" => Some(Self::Off),
+            "move" | "bring" => Some(Self::Move),
+            "replace" | "close" => Some(Self::Replace),
+            _ => None,
+        }
+    }
 }
 
 /// Timestamp used for Resume's "x ago" label and recency ordering.
@@ -214,6 +247,7 @@ impl Default for DisplayConfig {
             resume_project_scope: false,
             resume_recent_close_seconds: 30,
             resume_time: ResumeTimeMode::default(),
+            resume_open_elsewhere: ResumeOpenElsewhere::default(),
             usage_display: "left".to_string(),
         }
     }
@@ -306,6 +340,28 @@ mod tests {
         let bogus: DisplayConfig =
             serde_json::from_value(serde_json::json!({ "resume_time": "bogus" })).unwrap();
         assert_eq!(bogus.resume_time, ResumeTimeMode::Message);
+    }
+
+    #[test]
+    fn resume_open_elsewhere_defaults_to_off_and_parses_modes() {
+        use super::ResumeOpenElsewhere;
+        let missing: DisplayConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(missing.resume_open_elsewhere, ResumeOpenElsewhere::Off);
+        for (raw, mode) in [
+            ("off", ResumeOpenElsewhere::Off),
+            ("move", ResumeOpenElsewhere::Move),
+            ("replace", ResumeOpenElsewhere::Replace),
+        ] {
+            let config: DisplayConfig =
+                serde_json::from_value(serde_json::json!({ "resume_open_elsewhere": raw }))
+                    .unwrap();
+            assert_eq!(config.resume_open_elsewhere, mode);
+            assert_eq!(ResumeOpenElsewhere::parse(raw), Some(mode));
+        }
+        let bogus: DisplayConfig =
+            serde_json::from_value(serde_json::json!({ "resume_open_elsewhere": "bogus" }))
+                .unwrap();
+        assert_eq!(bogus.resume_open_elsewhere, ResumeOpenElsewhere::Off);
     }
 
     #[test]

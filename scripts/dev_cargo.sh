@@ -26,6 +26,11 @@ case "$(pwd -P)" in
   *) exec cargo "$@" ;;
 esac
 
+# Self-dev builds launched by the daemon may not carry JCODE_SESSION_ID.
+# Explicitly ask the installed justrust Cargo shim to apply hosted routing,
+# while preserving caller opt-outs and nested-run recursion protection.
+export JUSTRUST_CARGO_ROUTE="${JUSTRUST_CARGO_ROUTE:-1}"
+
 # shellcheck source=scripts/remote_config.sh
 source "$repo_root/scripts/remote_config.sh"
 jcode_load_remote_config
@@ -541,6 +546,15 @@ select_build_jobs() {
 # reintroduce per-build churn; the publish guard validates dirty builds via the
 # source fingerprint / mtime path instead of the embedded flag.
 export_git_build_metadata() {
+  # Hosted snapshots have no Git history. Describe against the package's base
+  # tag so build.rs can recover exactly the same commit offset remotely.
+  if [[ -z "${JCODE_BUILD_GIT_TAG+x}" ]] && command -v git >/dev/null 2>&1; then
+    local base_version description
+    base_version="$(awk '/^\[package\]/{package=1; next} /^\[/{package=0} package && /^version *=/{gsub(/"/, "", $3); print $3; exit}' "$repo_root/Cargo.toml")"
+    if [[ -n "$base_version" ]] && description="$(git -C "$repo_root" describe --tags --long --match "v${base_version}" HEAD 2>/dev/null)"; then
+      export JCODE_BUILD_GIT_TAG="$description"
+    fi
+  fi
   # Hosted source snapshots do not include .git. Forward the history alongside
   # the identity metadata so /changelog is populated in hosted self-dev builds.
   # Preserve explicit caller overrides, including an intentionally empty one.

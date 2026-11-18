@@ -158,9 +158,16 @@ pub(super) fn runtime_queries_enabled() -> bool {
         && std::io::stdin().is_terminal()
         && std::io::stdout().is_terminal()
         && terminal_background_query_supported(
-            std::env::var("TERM").ok().as_deref(),
-            std::env::var("TERM_PROGRAM").ok().as_deref(),
-            std::env::var("LC_TERMINAL").ok().as_deref(),
+            // These optional hints must be valid UTF-8 to match known terminal names.
+            std::env::var_os("TERM")
+                .as_deref()
+                .and_then(std::ffi::OsStr::to_str),
+            std::env::var_os("TERM_PROGRAM")
+                .as_deref()
+                .and_then(std::ffi::OsStr::to_str),
+            std::env::var_os("LC_TERMINAL")
+                .as_deref()
+                .and_then(std::ffi::OsStr::to_str),
         )
 }
 
@@ -303,10 +310,22 @@ fn cache_silent_terminal_at(path: Option<&std::path::Path>, identity: &str) {
     let Some(path) = path else {
         return;
     };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    if let Some(parent) = path.parent()
+        && let Err(error) = std::fs::create_dir_all(parent)
+    {
+        crate::logging::debug(&format!(
+            "Failed to create terminal cache directory: {error}"
+        ));
+        return;
     }
-    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let existing = match std::fs::read_to_string(path) {
+        Ok(existing) => existing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            crate::logging::debug(&format!("Failed to read terminal cache: {error}"));
+            return;
+        }
+    };
     if existing.lines().any(|line| line == identity) {
         return;
     }
@@ -323,7 +342,9 @@ fn cache_silent_terminal_at(path: Option<&std::path::Path>, identity: &str) {
     }
     out.push_str(identity);
     out.push('\n');
-    let _ = std::fs::write(path, out);
+    if let Err(error) = std::fs::write(path, out) {
+        crate::logging::debug(&format!("Failed to save terminal cache: {error}"));
+    }
 }
 
 /// Reject terminal classes that cannot answer OSC 11 before entering the

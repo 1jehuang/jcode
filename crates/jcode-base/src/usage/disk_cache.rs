@@ -255,6 +255,24 @@ pub(super) fn fresh(key: &str) -> Option<UsageData> {
     (deadline(&entry)? > now_ms()).then(|| entry_usage(&entry))
 }
 
+/// Cold-start routing can reuse a dated last-good quota even after the polling
+/// deadline expired. Never import token scopes or error-only zero placeholders.
+/// The caller runs outside rendering and only fills missing in-memory entries.
+pub(super) fn saved_account_last_good() -> HashMap<String, UsageData> {
+    load()
+        .into_iter()
+        .filter_map(|(key, entry)| {
+            let label = key.strip_prefix("label:")?;
+            if label.trim().is_empty() || label == "default" {
+                return None;
+            }
+            let good = entry.last_good.as_ref()?;
+            (age(good.fetched_unix_ms) < LAST_GOOD_MAX_AGE)
+                .then(|| (key, entry_usage(&entry)))
+        })
+        .collect()
+}
+
 /// Last good limits for a failed request, if any are recent enough to show.
 #[cfg(test)]
 pub(super) fn last_good(key: &str) -> Option<UsageData> {
@@ -262,8 +280,72 @@ pub(super) fn last_good(key: &str) -> Option<UsageData> {
     (age(good.fetched_unix_ms) < LAST_GOOD_MAX_AGE).then(|| to_usage(&good, None))
 }
 
+#[cfg(test)]
 pub(super) fn store_success(key: &str, data: &UsageData) -> UsageData {
     store_success_with_reset_status(key, data, None)
+}
+
+/// Model responses carry quota telemetry independently of the usage endpoint.
+/// Refresh the two observed windows without treating old model-scoped quotas
+/// as newly observed or forgetting learned backoff.
+pub(super) fn store_response_limits(
+    key: &str,
+    five: (f32, String),
+    seven: (f32, String),
+) -> UsageData {
+    let entry = update(key, |entry| {
+        // Freeze any outstanding probe deadline before replacing last_good.
+        entry.retry_not_before_ms = deadline(entry);
+        let extra_usage_enabled = entry
+            .last_good
+            .as_ref()
+            .is_some_and(|good| good.extra_usage_enabled);
+        entry.last_good = Some(Snapshot {
+            fetched_unix_ms: now_ms(),
+            five_hour: five.0,
+            five_hour_resets_at: Some(five.1),
+            seven_day: seven.0,
+            seven_day_resets_at: Some(seven.1),
+            extra_usage_enabled,
+            ..Default::default()
+        });
+        entry.error = None;
+        entry.error_unix_ms = None;
+        // These headers did not observe reset eligibility or availability.
+        entry.reset_status = None;
+    });
+    entry_usage(&entry)
+}
+
+pub(super) fn clear_auth_failure(key: &str) {
+    // Avoid creating a cache entry or writing on every normal token refresh.
+    if !load()
+        .get(key)
+        .and_then(|entry| entry.error.as_deref())
+        .is_some_and(super::anthropic_response::is_auth_failure)
+    {
+        return;
+    }
+    update(key, |entry| {
+        if entry
+            .error
+            .as_deref()
+            .is_some_and(super::anthropic_response::is_auth_failure)
+        {
+            // Preserve a longer provider deadline inherited from an earlier
+            // 429, but discard the ordinary authentication retry floor.
+            let auth_deadline = entry
+                .error_unix_ms
+                .unwrap_or_else(now_ms)
+                .saturating_add(ERROR_BACKOFF.as_millis() as i64);
+            entry.retry_not_before_ms = entry.retry_not_before_ms.filter(|at| *at > auth_deadline);
+            entry.error = None;
+            entry.error_unix_ms = None;
+            // A new login must not inherit the rejected login's quotas.
+            entry.last_good = None;
+            entry.reset_status = None;
+        }
+    });
 }
 
 pub(super) fn store_success_with_reset_status(
@@ -589,6 +671,33 @@ mod tests {
     }
 
     #[test]
+    fn routing_hydration_only_imports_recent_saved_last_good_samples() {
+        with_home(|| {
+            let mut good = sample();
+            good.seven_day = 1.0;
+            good.seven_day_resets_at = Some("2999-01-01T00:00:00Z".into());
+            for key in ["label:routing-dated", "label:routing-old", "label:default", "label:", "token:external"] {
+                store_success(key, &good);
+            }
+            update("label:routing-dated", |entry| {
+                entry.last_good.as_mut().unwrap().fetched_unix_ms -= 3_600_000;
+            });
+            update("label:routing-old", |entry| {
+                entry.last_good.as_mut().unwrap().fetched_unix_ms -= 86_401_000;
+            });
+            store_error_with_hint("label:routing-dated", "Usage API error (429)", Some("7200"));
+            store_error("label:routing-error-only", "Usage API error (401)");
+            let imported = saved_account_last_good();
+            assert_eq!(imported.len(), 1);
+            let usage = &imported["label:routing-dated"];
+            assert_eq!(usage.seven_day, 1.0);
+            assert!(usage.last_success_at.unwrap().elapsed() >= Duration::from_secs(3600));
+            assert!(usage.last_error.as_deref().unwrap().contains("429"));
+            assert!(usage.refresh_after.unwrap().duration_since(Instant::now()) > Duration::from_secs(7198));
+        });
+    }
+
+    #[test]
     fn anthropic_normal_polling_is_fifteen_minutes_and_openai_stays_five() {
         let at = Instant::now() - Duration::from_secs(600);
         let anthropic = UsageData {
@@ -601,6 +710,33 @@ mod tests {
         };
         assert!(!anthropic.is_stale());
         assert!(openai.is_stale());
+    }
+
+    #[test]
+    fn new_credentials_clear_auth_errors_but_not_inherited_rate_limit_deadlines() {
+        with_home(|| {
+            let key = "label:relogin-policy";
+            store_error_with_hint(key, "Usage API error (429)", Some("3600"));
+            let deadline = load()[key].retry_not_before_ms;
+            store_error(key, "Usage API error (401)");
+            clear_auth_failure(key);
+            let entry = load().remove(key).unwrap();
+            assert_eq!(entry.retry_not_before_ms, deadline);
+            assert_eq!(entry.adaptive_interval_secs, 1800);
+            assert!(entry.error.is_none());
+            assert!(fresh(key).is_some());
+
+            let key = "label:relogin-auth-only";
+            store_success(key, &sample());
+            store_error(key, "Usage API error (401)");
+            clear_auth_failure(key);
+            assert!(fresh(key).is_none());
+            assert!(
+                load()
+                    .get(key)
+                    .is_none_or(|entry| entry.last_good.is_none())
+            );
+        });
     }
 
     #[test]

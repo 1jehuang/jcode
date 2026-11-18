@@ -337,6 +337,7 @@ struct Inner {
     next_id: AtomicU64,
     next_sub: AtomicU64,
     closed: AtomicBool,
+    disconnect_reason: Mutex<Option<Error>>,
     request_timeout: Option<Duration>,
     socket_path: std::path::PathBuf,
     client_name: String,
@@ -522,6 +523,7 @@ impl JcodeClient {
             next_id: AtomicU64::new(1),
             next_sub: AtomicU64::new(1),
             closed: AtomicBool::new(false),
+            disconnect_reason: Mutex::new(None),
             request_timeout: options.request_timeout,
             socket_path,
             client_name: options.client_name.clone(),
@@ -639,7 +641,25 @@ impl JcodeClient {
         })
     }
 
+    /// The terminal reader failure, once known. Malformed frames carry
+    /// `ErrorKind::Protocol` so callers can stop retrying corrupt history.
+    /// An ordinary EOF remains reconnectable (`ErrorKind::Disconnected`).
+    pub fn disconnect_reason(&self) -> Option<Error> {
+        // A poisoned lock still holds the recorded cause. Report it rather
+        // than degrading to a generic disconnect.
+        match self.inner.disconnect_reason.lock() {
+            Ok(reason) => reason.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
     fn disconnect_error(&self) -> Error {
+        if let Some(mut error) = self.disconnect_reason() {
+            if let Some(process) = &self.inner.ssh_process {
+                error.message = format!("{}; {}", error.message, process.diagnostic());
+            }
+            return error;
+        }
         match &self.inner.ssh_process {
             Some(process) => Error::new(ErrorKind::Disconnected, process.diagnostic()),
             None => closed_error(),
@@ -1703,60 +1723,9 @@ impl TextCollector {
 mod global_session_workers;
 use global_session_workers::discover_global_sessions;
 
-/// The reader thread: correlates replies, fans stream events out.
-fn spawn_reader(inner: Arc<Inner>, mut reader: Box<dyn BufRead + Send>) {
-    std::thread::spawn(move || {
-        while let Ok(frame) = read_frame::<_, ServerFrame>(&mut reader) {
-            // Unknown kinds are skipped silently, per the protocol's
-            // forward-compatibility rule.
-            if matches!(frame.event, ApiEvent::Unknown) {
-                continue;
-            }
-            if let Some(reply_to) = frame.reply_to {
-                let waiter = inner
-                    .pending
-                    .lock()
-                    .ok()
-                    .and_then(|mut pending| pending.remove(&reply_to));
-                if let Some(waiter) = waiter {
-                    let _ = waiter.send(frame);
-                    continue;
-                }
-            }
-            // Not a reply anyone is waiting on: a stream event. Dead
-            // subscriptions are dropped here as well as in `EventStream::drop`,
-            // so a leaked stream cannot grow the fan-out list forever.
-            if let Ok(mut subs) = inner.subscribers.lock() {
-                let session = event_session(&frame.event);
-                subs.retain(|(_, filter, sink)| {
-                    match (filter, session) {
-                        // A filtered subscription only wants its own session's
-                        // events. Events that name *no* session still go to it:
-                        // `error` is the one that matters, since the harness
-                        // sends it instead of `turn_done`, and dropping it
-                        // leaves a turn waiting forever for an end that will
-                        // never come.
-                        (Some(want), Some(got)) if want != got => true,
-                        _ => sink.send(frame.event.clone()).is_ok(),
-                    }
-                });
-            }
-        }
-        if let Some(shutdown) = &inner.shutdown {
-            shutdown();
-        }
-        inner.closed.store(true, Ordering::Relaxed);
-        // Fail everything in flight rather than leaving callers blocked on a
-        // reply that can never arrive.
-        if let Ok(mut pending) = inner.pending.lock() {
-            pending.clear();
-        }
-        if let Ok(mut subs) = inner.subscribers.lock() {
-            subs.clear();
-        }
-    });
-}
-
+#[path = "client_reader.rs"]
+mod reader;
+use reader::*;
 /// The session an event belongs to, when it names one.
 fn event_session(event: &ApiEvent) -> Option<&str> {
     use ApiEvent::*;

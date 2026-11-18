@@ -74,75 +74,6 @@ fn nested_chat_swarm_member(
 }
 
 #[test]
-fn test_prepare_messages_places_live_swarm_card_beneath_matching_spawn_tool_call() {
-    let session_id = "spawned-session-123";
-    let state = TestState {
-        display_messages: vec![DisplayMessage {
-            role: "tool".to_string(),
-            content: format!("Spawned new agent: {session_id}"),
-            tool_calls: Vec::new(),
-            duration_secs: None,
-            title: None,
-            tool_data: Some(ToolCall {
-                id: "call-spawn".to_string(),
-                name: "swarm".to_string(),
-                input: serde_json::json!({
-                    "action": "spawn",
-                    "label": "API reviewer",
-                    "prompt": "Review the authentication flow"
-                }),
-                intent: Some("Spawn an authentication reviewer".to_string()),
-                thought_signature: None,
-            }),
-        }],
-        swarm_members: vec![chat_swarm_member(session_id)],
-        anim_elapsed: 0.16,
-        ..Default::default()
-    };
-
-    let prepared = prepare::prepare_messages(&state, 110, 30);
-    let rendered = prepared
-        .materialize_all_lines()
-        .iter()
-        .map(extract_line_text)
-        .collect::<Vec<_>>();
-    let tool_row = rendered
-        .iter()
-        .position(|line| line.contains("Spawn an authentication reviewer"))
-        .expect("missing swarm tool row");
-    let card_row = rendered
-        .iter()
-        .position(|line| line.contains("🐄 ● API reviewer"))
-        .expect("missing live member card");
-    let all = rendered.join("\n");
-
-    assert_eq!(
-        card_row,
-        tool_row + 1,
-        "card must directly follow tool: {all}"
-    );
-    // Transcript cards are deliberately stable one-liners: no elapsed time,
-    // todos, or tool progress (those live on the dedicated swarm page), so
-    // old chat rows do not move while the user is reading them.
-    assert!(
-        rendered[card_row].contains("🐄 ● API reviewer · Working"),
-        "stable card line missing: {all}"
-    );
-    assert!(
-        !all.contains("00:18"),
-        "elapsed time must not render in transcript cards: {all}"
-    );
-    assert!(
-        !all.contains("Test token refresh flow"),
-        "todos must not render in transcript cards: {all}"
-    );
-    assert!(
-        !all.contains("Run targeted authentication tests"),
-        "tool progress must not render in transcript cards: {all}"
-    );
-}
-
-#[test]
 fn test_prepare_messages_keeps_transcript_card_stable_with_nested_descendants() {
     let root_id = "root-reviewer";
     let child_a = nested_chat_swarm_member(
@@ -1342,3 +1273,6 @@ mod reasoning_history;
 
 #[path = "prepare_error_tests.rs"]
 mod error_rows;
+
+#[path = "prepare_additional_tests.rs"]
+mod additional_streaming_hash_default_fallback_invalidates_same_length_frame;

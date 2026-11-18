@@ -18,6 +18,11 @@ use std::os::unix::net::UnixStream;
 use std::sync::mpsc::channel;
 use std::time::Duration;
 
+#[path = "client_behavior/protocol_disconnect.rs"]
+mod protocol_disconnect;
+#[path = "client_behavior/protocol_partial_disconnect.rs"]
+mod protocol_partial_disconnect;
+
 /// A socket-pair transport, so the test drives the client over the same code
 /// path a real connection uses.
 struct PairTransport(UnixStream);
@@ -106,58 +111,11 @@ fn push(event: ApiEvent, writer: &mut dyn Write) {
     write_frame(&mut { writer }, &out).expect("push");
 }
 
-/// The handshake populates the server identity and capabilities, which is how
-/// a client decides what it may depend on.
-#[test]
-fn the_handshake_reports_the_server_and_its_capabilities() {
-    let client = fake_harness(|_, _| {});
-    assert_eq!(client.server, "fake-harness/1.0");
-    assert!(client.supports("sessions"));
-    assert!(
-        !client.supports("permissions"),
-        "a capability the server did not advertise must not be claimed"
-    );
-}
-
 #[path = "client_behavior/soft_interrupt_tests.rs"]
 mod soft_interrupt_tests;
 
 #[path = "client_behavior/runtime_and_files.rs"]
 mod runtime_and_files;
-
-/// Replies must go to the request that asked for them, not to whichever one
-/// happens to be waiting. Answered out of order on purpose: in-order delivery
-/// would pass even with the correlation removed entirely.
-#[test]
-fn out_of_order_replies_reach_the_right_waiter() {
-    let client = fake_harness(|frame, writer| match &frame.request {
-        // Delay the first request's reply so the second overtakes it.
-        ApiRequest::AttachSession { session_id } => {
-            let id = session_id.clone();
-            std::thread::sleep(Duration::from_millis(120));
-            reply(
-                frame,
-                ApiEvent::Attached {
-                    session: session(&id),
-                },
-                writer,
-            );
-        }
-        ApiRequest::Ping => reply(frame, ApiEvent::Pong, writer),
-        _ => {}
-    });
-
-    let slow = {
-        let client = client.clone();
-        std::thread::spawn(move || client.attach_session("slow-session"))
-    };
-    std::thread::sleep(Duration::from_millis(20));
-    client
-        .ping()
-        .expect("the fast request must not wait on the slow one");
-    let attached = slow.join().expect("thread").expect("attach must succeed");
-    assert_eq!(attached.session_id, "slow-session");
-}
 
 /// An error frame becomes a typed failure with the wire code, so a caller can
 /// branch on the cause rather than matching on prose.
@@ -465,6 +423,7 @@ fn a_lost_connection_fails_requests_in_flight() {
         .ping()
         .expect_err("a dropped harness must fail the request");
     assert_eq!(error.code(), "disconnected");
+    assert_eq!(client.disconnect_reason().unwrap().code(), "disconnected");
 }
 
 #[test]
@@ -1242,3 +1201,6 @@ fn tool_names_arrive_before_any_arguments_and_interleaved_inputs_keep_call_ids()
         );
     }
 }
+
+#[path = "client_behavior/additional_tests.rs"]
+mod additional_the_handshake_reports_the_server_and_its_capabilities;

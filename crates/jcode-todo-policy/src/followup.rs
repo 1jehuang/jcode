@@ -1,23 +1,21 @@
 //! Turn-end follow-up policy: auto-poke and the todo quality gates.
 //!
-//! This is the client-side state machine that decides, after a turn ends, what
-//! (if anything) to send next: the incomplete-todo poke, the one-shot
-//! long-session review, the ownership gate, the completion-confidence and
-//! confidence-spike checks, and the final-response
-//! handoff. It is a faithful port of the TUI's `schedule_auto_poke_followup`
-//! so every client (TUI, Desktop, SDK users) runs the same policy.
+//! This state machine decides, after a model turn ends, what (if anything)
+//! should run next: incomplete-todo pokes, the one-shot long-session review,
+//! ownership, completion-confidence and confidence-spike checks, and the final
+//! response handoff. The daemon owns it for connected sessions, so clients must
+//! not independently dispatch these follow-ups. Standalone embeddings may use
+//! the same pure policy when they own their agent runtime.
 //!
-//! It is pure: callers fetch a [`TodoSnapshot`] (the SDK's `todo_state`),
-//! call [`FollowUpPolicy::decide`], send the returned message, and apply the
-//! returned [`TodoEffects`] (the SDK's `ack_todo_follow_up`).
+//! Callers load a [`TodoSnapshot`], call [`FollowUpPolicy::decide`], run the
+//! returned message, and apply [`TodoEffects`] before deciding again.
 
 use crate::{
     ConfidenceState, GateObservation, TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE,
     TODO_LONG_SESSION_REVIEW_MESSAGE, TodoGoal, TodoItem, TodoPlan, build_actionable_poke_message,
-    build_todo_completion_continuation_message, build_todo_confidence_spike_continuation_message,
-    build_todo_ownership_continuation_message, completed_groups_have_sufficient_delivery,
-    completion_confidence_passes, spike_completed_todos, todo_status_is_cancelled,
-    todo_status_is_completed,
+    build_todo_confidence_spike_continuation_message, build_todo_ownership_continuation_message,
+    completed_groups_have_sufficient_delivery, completion_confidence_passes, spike_completed_todos,
+    todo_status_is_cancelled, todo_status_is_completed,
 };
 use serde::{Deserialize, Serialize};
 
@@ -92,26 +90,34 @@ pub fn todo_waits_on_running_task(
     todo.waiting_on.iter().any(|task_id| is_running(task_id))
 }
 
-/// Explicit external waits remain incomplete. Their review time only restores
-/// actionability so the agent can reassess, never marks them done.
-pub fn todo_has_external_blocker_at(todo: &TodoItem, now: chrono::DateTime<chrono::Utc>) -> bool {
-    is_incomplete_todo(todo)
-        && todo
-            .external_blocker
-            .as_ref()
-            .is_some_and(|blocker| !blocker.reason.trim().is_empty() && blocker.review_at > now)
+/// The declared reason a goal is impossible to complete, if any.
+pub fn goal_cannot_complete(goal: &TodoGoal) -> Option<&str> {
+    goal.cannot_complete
+        .as_deref()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
 }
 
-pub fn todo_has_external_blocker(todo: &TodoItem) -> bool {
-    todo_has_external_blocker_at(todo, chrono::Utc::now())
+/// Items carry no block of their own. Unfinished work stops being continued
+/// only when its whole goal was declared impossible to complete.
+pub fn todo_goal_cannot_complete(todo: &TodoItem, goals: &[TodoGoal]) -> bool {
+    is_incomplete_todo(todo) && todo_cannot_complete_reason(todo, goals).is_some()
 }
 
-/// Only valid, incomplete complete blockers suppress work. Programmatically
-/// constructed snapshots may bypass the persisted type's field validation.
-pub fn todo_completely_blocked(todo: &TodoItem) -> bool {
+pub fn todo_cannot_complete_reason<'a>(todo: &TodoItem, goals: &'a [TodoGoal]) -> Option<&'a str> {
+    let group = crate::normalized_group(todo.group.as_deref());
+    goals
+        .iter()
+        .find(|goal| crate::normalized_group(goal.group.as_deref()) == group)
+        .and_then(goal_cannot_complete)
+}
+
+/// Only a valid authorization request on unfinished work pauses it.
+/// Programmatically constructed snapshots may bypass field validation.
+pub fn todo_requires_user_auth(todo: &TodoItem) -> bool {
     is_incomplete_todo(todo)
         && todo
-            .completely_blocked
+            .requires_user_auth
             .as_ref()
             .is_some_and(|required| !required.reason.trim().is_empty())
 }
@@ -292,8 +298,8 @@ impl FollowUpPolicy {
             .iter()
             .copied()
             .filter(|todo| {
-                !todo_completely_blocked(todo)
-                    && !todo_has_external_blocker(todo)
+                !todo_requires_user_auth(todo)
+                    && !todo_goal_cannot_complete(todo, goals)
                     && !todo_waits_on_running_task(todo, |id| {
                         snapshot
                             .running_background_tasks
@@ -380,13 +386,16 @@ impl FollowUpPolicy {
         let summary = ConfidenceSummary::of(todos);
         let needs_spike_challenge =
             self.gate_digest_enabled && summary.spike_detected && !self.spike_challenged;
-        let needs_validation = self.gate_digest_enabled && summary.needs_validation;
+        // Goals that document why validation stopped exempt their todos:
+        // asking again cannot change an exhausted constraint.
+        let validation_targets = crate::todos_needing_validation(todos, goals);
+        let needs_validation = self.gate_digest_enabled && !validation_targets.is_empty();
         if (needs_validation || needs_spike_challenge) && gate_budget_left {
             self.gate_attempts = self.gate_attempts.saturating_add(1);
-            let decision = if summary.needs_validation {
+            let decision = if needs_validation {
                 Decision::send(
                     FollowUpKind::CompletionValidation,
-                    build_todo_completion_continuation_message(todos),
+                    crate::build_todo_validation_continuation_message(&validation_targets),
                     "🔍 Double-checking confidence for you...",
                 )
             } else {

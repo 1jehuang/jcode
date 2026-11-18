@@ -134,13 +134,16 @@ fn clone_split_session_uses_persisted_session_state() {
             cache_control: None,
         }],
     );
-    parent.compaction = Some(crate::session::StoredCompactionState {
-        summary_text: "summary".to_string(),
-        openai_encrypted_content: None,
-        covers_up_to_turn: 1,
-        original_turn_count: 1,
-        compacted_count: 1,
-    });
+    parent.compaction = Some(
+        crate::session::StoredCompactionState {
+            summary_text: "summary".to_string(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: 1,
+            original_turn_count: 1,
+            compacted_count: 1,
+        }
+        .into(),
+    );
     parent.save().expect("save parent");
 
     let mut unsaved_parent = parent.clone();
@@ -383,8 +386,8 @@ fn transfer_preserves_system_prompt_including_empty_override() {
                 id: "validate".into(),
                 content: "Validate source build".into(),
                 status: "pending".into(),
-                completely_blocked: None,
-                external_blocker: None,
+                requires_user_auth: None,
+                waiting_reason: None,
                 waiting_on: vec!["source-build".into()],
                 ..Default::default()
             }],

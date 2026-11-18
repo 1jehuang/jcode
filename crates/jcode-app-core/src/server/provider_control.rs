@@ -239,62 +239,9 @@ pub(super) async fn handle_cycle_model(
     }
 }
 
-fn premium_mode_label(mode: crate::provider::copilot::PremiumMode) -> &'static str {
-    use crate::provider::copilot::PremiumMode;
-    match mode {
-        PremiumMode::Zero => "zero premium requests",
-        PremiumMode::OnePerSession => "one premium per session",
-        PremiumMode::Normal => "normal",
-    }
-}
-
-fn apply_set_premium_mode(
-    id: u64,
-    mode: u8,
-    premium_mode: crate::provider::copilot::PremiumMode,
-    agent: &Agent,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
-) {
-    agent.set_premium_mode(premium_mode);
-    crate::logging::info(&format!(
-        "Server: premium mode set to {} ({})",
-        mode,
-        premium_mode_label(premium_mode)
-    ));
-    if let Err(error) = client_event_tx.send(ServerEvent::Ack { id }) {
-        crate::logging::debug(&format!(
-            "Model change acknowledgement client disconnected: {error}"
-        ));
-    }
-}
-
-pub(super) async fn handle_set_premium_mode(
-    id: u64,
-    mode: u8,
-    agent: &Arc<Mutex<Agent>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
-) {
-    use crate::provider::copilot::PremiumMode;
-
-    let premium_mode = match mode {
-        2 => PremiumMode::Zero,
-        1 => PremiumMode::OnePerSession,
-        _ => PremiumMode::Normal,
-    };
-    if let Ok(agent_guard) = agent.try_lock() {
-        apply_set_premium_mode(id, mode, premium_mode, &agent_guard, client_event_tx);
-    } else {
-        spawn_deferred_agent_mutation(
-            "set_premium_mode",
-            id,
-            Arc::clone(agent),
-            client_event_tx.clone(),
-            move |agent_guard, client_event_tx| {
-                apply_set_premium_mode(id, mode, premium_mode, agent_guard, client_event_tx);
-            },
-        );
-    }
-}
+#[path = "premium_mode_control.rs"]
+mod premium_mode_control;
+pub(super) use premium_mode_control::handle_set_premium_mode;
 
 fn apply_set_model(
     id: u64,
@@ -930,6 +877,7 @@ pub(super) async fn handle_notify_auth_changed(
             return;
         }
         let activation = crate::auth::lifecycle::activate_auth_change(&activation_request);
+        super::account_usage::request_after_auth_change(id, client_event_tx_clone.clone());
         if let Some(provider_id) = activation.provider_id.as_deref() {
             // A renewed login must get a real request instead of inheriting the
             // previous credential's cached runtime failure.
@@ -1022,6 +970,13 @@ pub(super) async fn handle_notify_auth_changed(
                         let _ = client_event_tx_clone.send(available_models_snapshot_into_event(latest_snapshot.clone()));
                     }
                 }
+                // ModelsUpdated is a catalog-change hint, not a completion wake:
+                // MultiProvider's PendingGuard clears pending without publishing
+                // on failure, and success publishes before the guard drops. An
+                // event-only wait could therefore stall until the 10 s ceiling,
+                // even after successful work. Keep polling until providers expose
+                // a completion notification ordered after clearing pending on
+                // every exit path (including failures and cancellation).
                 _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
             }
         }
@@ -1162,6 +1117,7 @@ pub(super) async fn handle_unbound_notify_auth_changed(
         provider_hint,
         auth,
     ));
+    super::account_usage::request_after_auth_change(id, client_event_tx.clone());
     if let Some(provider_id) = activation.provider_id.as_deref() {
         crate::provider::clear_provider_unavailable_for_account(provider_id);
     }

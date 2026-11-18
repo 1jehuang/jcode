@@ -704,6 +704,16 @@ pub fn list_sessions() -> Result<()> {
         crate::terminal_launch::spawn_command_in_new_terminal(&command, cwd)
     }
 
+    /// Apply `display.resume_open_elsewhere`. True when the session's existing
+    /// window was brought here, so no new client should attach.
+    fn moved_existing_window(target: &jcode_tui_session_picker::ResumeTarget) -> bool {
+        let jcode_tui_session_picker::ResumeTarget::JcodeSession { session_id } = target else {
+            return false;
+        };
+        crate::session_window::apply_resume_open_elsewhere(session_id)
+            == crate::session_window::OpenElsewhereOutcome::Moved
+    }
+
     match tui::session_picker::pick_session()? {
         Some(tui::session_picker::PickerResult::TakeOverClaude(target)) => {
             let resolved_target = crate::import::take_over_live_claude_session(&target)?;
@@ -753,6 +763,9 @@ pub fn list_sessions() -> Result<()> {
                 {
                     session_cwd = std::path::PathBuf::from(dir);
                 }
+                if moved_existing_window(&resolved_target) {
+                    return Ok(());
+                }
                 let (program, args) = build_resume_target_command(&exe, &resolved_target);
                 let err = crate::platform::replace_process(
                     ProcessCommand::new(&program)
@@ -784,6 +797,10 @@ pub fn list_sessions() -> Result<()> {
                         session_cwd = std::path::PathBuf::from(dir);
                     }
 
+                    if moved_existing_window(&resolved_target) {
+                        spawned += 1;
+                        continue;
+                    }
                     match spawn_target_in_new_terminal(&resolved_target, &exe, &session_cwd) {
                         Ok(true) => spawned += 1,
                         Ok(false) => {
@@ -838,6 +855,10 @@ pub fn list_sessions() -> Result<()> {
                     session_cwd = std::path::PathBuf::from(dir);
                 }
 
+                if moved_existing_window(&resolved_target) {
+                    spawned += 1;
+                    continue;
+                }
                 match spawn_target_in_new_terminal(&resolved_target, &exe, &session_cwd) {
                     Ok(true) => spawned += 1,
                     Ok(false) => {

@@ -1,5 +1,71 @@
 use super::*;
 
+#[test]
+fn registry_snapshots_share_immutable_skill_payloads() {
+    let mut registry = SkillRegistry::default();
+    let body = "Large immutable skill body.\n".repeat(8192);
+    registry.insert_loaded_skill(test_skill("shared", "shared description", &body));
+    let snapshots: Vec<_> = (0..48).map(|_| registry.clone()).collect();
+    let original = registry.get("shared").unwrap();
+    for snapshot in &snapshots {
+        let skill = snapshot.get("shared").unwrap();
+        assert!(std::ptr::eq(original, skill));
+        assert_eq!(skill.content, body);
+        assert_eq!(
+            snapshot.get("shared").unwrap().get_prompt(),
+            original.get_prompt()
+        );
+    }
+    // Every retained snapshot refers to the same body and normalized search
+    // allocation, rather than merely avoiding a transient clone operation.
+    assert_eq!(
+        Arc::strong_count(registry.skills.get("shared").unwrap()),
+        49
+    );
+}
+
+#[test]
+fn reloading_skill_replaces_only_the_mutated_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = write_skill_file(
+        temp.path(),
+        "reloadable",
+        "---\nname: reloadable\ndescription: Original\n---\n\nOriginal body\n",
+    );
+    let mut registry = SkillRegistry::default();
+    registry.insert_loaded_skill(SkillRegistry::parse_skill(&path).unwrap());
+    let snapshot = registry.clone();
+    let old_prompt = snapshot.get("reloadable").unwrap().get_prompt();
+    std::fs::write(
+        &path,
+        "---\nname: reloadable\ndescription: Updated\n---\n\nUpdated body\n",
+    )
+    .unwrap();
+    assert!(registry.reload("reloadable").unwrap());
+    assert!(
+        registry
+            .get("reloadable")
+            .unwrap()
+            .content
+            .contains("Updated body")
+    );
+    assert!(
+        snapshot
+            .get("reloadable")
+            .unwrap()
+            .content
+            .contains("Original body")
+    );
+    assert_eq!(snapshot.get("reloadable").unwrap().get_prompt(), old_prompt);
+    assert!(!std::ptr::eq(
+        registry.get("reloadable").unwrap(),
+        snapshot.get("reloadable").unwrap()
+    ));
+    std::fs::remove_file(path).unwrap();
+    assert!(!registry.reload("reloadable").unwrap());
+    assert!(snapshot.get("reloadable").is_some());
+}
+
 fn test_skill(name: &str, description: &str, content: &str) -> Skill {
     Skill {
         name: name.to_string(),
@@ -175,7 +241,7 @@ fn list_is_sorted_by_name_regardless_of_insertion_order() {
     for name in names {
         reg_a
             .skills
-            .insert(name.to_string(), test_skill(name, "d", "c"));
+            .insert(name.to_string(), test_skill(name, "d", "c").into());
     }
 
     // Build a second registry with the reverse insertion order to maximize
@@ -184,7 +250,7 @@ fn list_is_sorted_by_name_regardless_of_insertion_order() {
     for name in names.iter().rev() {
         reg_b
             .skills
-            .insert(name.to_string(), test_skill(name, "d", "c"));
+            .insert(name.to_string(), test_skill(name, "d", "c").into());
     }
 
     let order_a: Vec<&str> = reg_a.list().iter().map(|s| s.name.as_str()).collect();
@@ -243,7 +309,7 @@ fn project_skill_precedence_covers_all_source_combinations() {
         let mut global = SkillRegistry::default();
         global
             .skills
-            .insert("demo".into(), test_skill("demo", "global", "global"));
+            .insert("demo".into(), test_skill("demo", "global", "global").into());
         let effective = SkillRegistry::effective_for_working_dir(&global, Some(temp.path()));
         assert_eq!(effective.get("demo").unwrap().content, expected);
         // The combined loader uses the same ordering, even atop globals.
@@ -343,7 +409,7 @@ fn malformed_skill_does_not_block_directory_loaders() {
     write_skill_file(
         &skills_dir,
         "malformed",
-        "---\nname: malformed\ndescription: Triggers: invalid yaml\n---\n\nBroken.\n",
+        "---\nname: malformed\nsummary: Triggers: invalid yaml\n---\n\nBroken.\n",
     );
 
     let mut registry = SkillRegistry::default();
@@ -352,6 +418,7 @@ fn malformed_skill_does_not_block_directory_loaders() {
         .expect("load skills while skipping malformed file");
     assert!(registry.contains("valid"));
     assert!(!registry.contains("malformed"));
+    assert_eq!(registry.load_errors().len(), 1);
 
     let mut counted_registry = SkillRegistry::default();
     let count = counted_registry
@@ -382,7 +449,7 @@ fn project_overlay_is_session_scoped_and_composes_over_globals() {
     let mut base = SkillRegistry::default();
     base.skills.insert(
         "session-skill".to_string(),
-        test_skill("session-skill", "global variant", "global body"),
+        test_skill("session-skill", "global variant", "global body").into(),
     );
     let effective = SkillRegistry::effective_for_working_dir(&base, Some(temp.path()));
     let skill = effective
@@ -683,4 +750,86 @@ fn plugin_skill_dirs_empty_for_missing_root() {
     let temp = tempfile::tempdir().expect("tempdir");
     let missing = temp.path().join("does-not-exist");
     assert!(SkillRegistry::plugin_skill_dirs_under(&missing).is_empty());
+}
+
+/// Field report: a third-party skill whose long unquoted description contained
+/// `: ` ("Also covers 0.17.0-dev deltas: b.args...") was dropped by
+/// `reload_all` with no error. The description length was a red herring; the
+/// colon made the frontmatter invalid YAML.
+#[test]
+fn long_unquoted_description_containing_a_colon_still_loads() {
+    let temp = tempfile::tempdir().unwrap();
+    let description = format!(
+        "Up-to-date Zig patterns for 0.17.0-dev. {} Also covers 0.17.0-dev deltas: b.args→run_cmd.addPassthruArgs(), std.gpu→std.spirv.",
+        "Use when writing, reviewing, or debugging Zig code. ".repeat(24)
+    );
+    assert!(description.chars().count() > 1024);
+    let path = write_skill_file(
+        temp.path(),
+        "zig",
+        &format!(
+            "---\nname: zig\ndescription: {description}\nlicense: MIT\ncompatibility:\n  - claude-code\n  - codex\nmetadata:\n  version: \"0.17.0-dev\"\n  note: nested: colon\nallowed-tools:\n  - bash\n  - read\n---\n\n# Zig\n"
+        ),
+    );
+    let skill = SkillRegistry::parse_skill(&path).expect("skill should load");
+    assert_eq!(skill.name, "zig");
+    assert_eq!(skill.description, description);
+    assert_eq!(
+        skill.allowed_tools,
+        Some(vec!["bash".to_string(), "read".to_string()])
+    );
+    assert_eq!(skill.content, "# Zig");
+}
+
+#[test]
+fn lenient_frontmatter_handles_quotes_and_inline_tools() {
+    let (frontmatter, _) = SkillRegistry::parse_frontmatter(
+        "---\nname: \"quoted\"\ndescription: first: part\n  continued line\nallowed-tools: bash, read\nbroken: [unclosed\n---\nbody",
+    )
+    .unwrap();
+    assert_eq!(frontmatter.name, "quoted");
+    assert_eq!(frontmatter.description, "first: part continued line");
+    assert!(matches!(
+        frontmatter.allowed_tools,
+        Some(AllowedTools::CommaDelimited(ref tools)) if tools == "bash, read"
+    ));
+}
+
+#[test]
+fn unloadable_skills_are_reported_instead_of_silently_skipped() {
+    let temp = tempfile::tempdir().unwrap();
+    write_skill_file(
+        temp.path(),
+        "good",
+        "---\nname: good\ndescription: Works\n---\n\nbody\n",
+    );
+    let broken = write_skill_file(temp.path(), "broken", "---\nname: broken\n---\n\nbody\n");
+    let no_frontmatter = write_skill_file(temp.path(), "plain", "# just markdown\n");
+
+    let mut registry = SkillRegistry::default();
+    assert_eq!(registry.load_from_dir_count(temp.path()).unwrap(), 1);
+    assert!(registry.get("good").is_some());
+    let errors = registry.load_errors();
+    assert_eq!(errors.len(), 2);
+    assert_eq!(errors[0].path, broken);
+    assert!(
+        errors[0].error.contains("description"),
+        "{}",
+        errors[0].error
+    );
+    assert_eq!(errors[1].path, no_frontmatter);
+    assert!(errors[1].error.contains("Missing YAML frontmatter"));
+
+    // Fixing the file clears its error on the next load, and snapshots that
+    // merge an overlay carry the overlay's errors along.
+    std::fs::write(
+        &broken,
+        "---\nname: broken\ndescription: Fixed\n---\n\nbody\n",
+    )
+    .unwrap();
+    let mut merged = SkillRegistry::default();
+    merged.merge_overlay(registry.clone());
+    assert_eq!(merged.load_errors().len(), 2);
+    assert_eq!(registry.load_from_dir_count(temp.path()).unwrap(), 2);
+    assert_eq!(registry.load_errors().len(), 1);
 }

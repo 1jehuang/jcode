@@ -80,12 +80,18 @@ pub(super) fn prefetch(paths: Vec<PathBuf>) {
                 if GENERATION.load(Ordering::Relaxed) != generation {
                     return;
                 }
-                if !text_cache::is_cached_hint(&path) {
-                    let _ = text_cache::segments(&path, &cancel);
+                if !text_cache::is_cached_hint(&path)
+                    && text_cache::segments(&path, &cancel).is_none()
+                {
+                    crate::logging::debug("Transcript prefetch deferred to streaming search");
                 }
             }
         });
-    let _ = super::super::preview_result(spawned, "search prefetch startup");
+    if let Err(error) = spawned {
+        crate::logging::debug(&format!(
+            "Transcript search prefetch startup failed: {error}"
+        ));
+    }
 }
 
 #[cfg(test)]

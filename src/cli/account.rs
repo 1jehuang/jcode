@@ -168,6 +168,29 @@ pub(crate) async fn run_mobile(action: super::args::MobileCommand) -> Result<()>
                 if state.enabled { "on" } else { "off" },
                 state.sessions.len()
             );
+            if state.enabled {
+                println!(
+                    "Messages from the phone to sessions running here: {}",
+                    if state.phone_messages_off {
+                        "off"
+                    } else {
+                        "on"
+                    }
+                );
+            }
+        }
+        MobileCommand::Messages { state: wanted } => {
+            let off = wanted == super::args::MobileMessagesState::Off;
+            let state = mobile_sync::set_phone_messages_off(off)?;
+            if off {
+                println!("This computer no longer accepts messages from the jcode app.");
+            } else if state.enabled {
+                println!(
+                    "The jcode app can message sessions running on this computer while jcode is open."
+                );
+            } else {
+                println!("Allowed, but mobile sync is off. Run `jcode mobile enable` to use it.");
+            }
         }
         MobileCommand::Sync => {
             let report = mobile_sync::sync_once(&client).await?;

@@ -279,6 +279,43 @@ async fn sdk_socket_cancel_workflow(
         identity_capability,
         "bootstrap must be negotiated"
     );
+    {
+        // A stored todo change reaches the attached client without a
+        // `get_todos` request, and tells it that polling is unnecessary.
+        let session_id = sessions.read().await.keys().next().unwrap().clone();
+        let todos: Vec<crate::todo::TodoItem> = serde_json::from_value(json!([
+            {"id":"pushed","content":"Pushed without a poll","priority":"high","status":"in_progress"}
+        ]))
+        .unwrap();
+        crate::todo::save_todos(&session_id, &todos).unwrap();
+        let pushed = until(&mut client_reader, |event| {
+            matches!(event, ServerEvent::Todos { .. })
+        })
+        .await;
+        assert!(
+            matches!(&pushed, ServerEvent::Todos { session_id: id, payload, pushes: true }
+                if *id == session_id && payload.contains("Pushed without a poll")),
+            "unexpected todo push: {pushed:?}"
+        );
+        // Another session's write must not reach this client. Bus events are
+        // delivered in order, so a leaked push would arrive before the push
+        // for the write to this session that follows it.
+        crate::todo::save_todos("some-other-session", &todos).unwrap();
+        let second: Vec<crate::todo::TodoItem> = serde_json::from_value(json!([
+            {"id":"pushed","content":"Second push","priority":"high","status":"completed"}
+        ]))
+        .unwrap();
+        crate::todo::save_todos(&session_id, &second).unwrap();
+        let next = until(&mut client_reader, |event| {
+            matches!(event, ServerEvent::Todos { .. })
+        })
+        .await;
+        assert!(
+            matches!(&next, ServerEvent::Todos { session_id: id, payload, .. }
+                if *id == session_id && payload.contains("Second push")),
+            "expected only this session's second write, got: {next:?}"
+        );
+    }
     if catalog_failure {
         let session_id = sessions.read().await.keys().next().unwrap().clone();
         terminal_provider
@@ -589,6 +626,14 @@ async fn sdk_socket_cancel_workflow(
             .unwrap();
         return;
     }
+    // A catalog/startup task can hold the Agent without an active turn. Tool
+    // registration must wait for that work, not return a spurious busy error.
+    let startup_agent = sessions.read().await.values().next().unwrap().clone();
+    let startup_guard = startup_agent.lock_owned().await;
+    let release_startup = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(startup_guard);
+    });
     send(&mut client_writer, json!({"type":"configure_tools","id":2,"tools":{"enabled":[],"custom":[{"name":"read","description":"SDK read callback","parameters":{"type":"object"}}]}})).await;
     let configured = until(&mut client_reader, |e| {
         matches!(
@@ -597,6 +642,7 @@ async fn sdk_socket_cancel_workflow(
         )
     })
     .await;
+    release_startup.await.unwrap();
     assert!(
         matches!(configured, ServerEvent::Ack { .. }),
         "{configured:?}"
@@ -721,7 +767,8 @@ async fn sdk_socket_cancel_workflow(
             content: vec![ContentBlock::Text {
                 text: format!("history {index}"),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,

@@ -8,7 +8,7 @@ mod power;
 mod session;
 pub use session::{HibernationMode, SessionConfig};
 pub use {
-    display::{DisplayConfig, ResumeTimeMode},
+    display::{DisplayConfig, ResumeOpenElsewhere, ResumeTimeMode},
     menubar::MenubarConfig,
     power::PowerConfig,
 };
@@ -526,17 +526,6 @@ pub struct AgentsConfig {
     pub swarm_root_effort: Option<String>,
     /// Default terminal mode for swarm-created agents.
     pub swarm_spawn_mode: SwarmSpawnMode,
-    /// Maximum percentage (1-90) of the chat column height the inline swarm
-    /// gallery band may occupy. Leave unset to use the built-in default (40%).
-    /// Lower values keep more of the transcript visible; set near the minimum
-    /// to effectively collapse the gallery to a thin strip.
-    pub swarm_gallery_max_pct: Option<u8>,
-    /// Layout of the inline swarm strip above the status line:
-    /// `"vertical"` (default) lists one agent per row (session icon + status
-    /// glyph + task), capped to a few lines; `"horizontal"` packs all agents
-    /// as chips on a single row.
-    #[serde(default)]
-    pub swarm_strip_layout: SwarmStripLayout,
     /// Jev Decisions provider for recall: auto, openrouter, typesafe, laya,
     /// aimlapi, or jcode. Auto uses a provider-specific BYOK credential before Jcode.
     #[serde(default = "default_memory_jev_provider")]
@@ -638,75 +627,8 @@ fn default_memory_rerank_min_agree() -> usize {
     2
 }
 
-impl Default for AgentsConfig {
-    fn default() -> Self {
-        Self {
-            swarm_model: None,
-            swarm_model_selection: false,
-            swarm_model_allowlist: Vec::new(),
-            swarm_effort: None,
-            swarm_root_effort: None,
-            swarm_spawn_mode: SwarmSpawnMode::default(),
-            swarm_gallery_max_pct: None,
-            swarm_strip_layout: SwarmStripLayout::default(),
-            memory_jev_provider: default_memory_jev_provider(),
-            memory_jev_model: None,
-            browser_jev_model: None,
-            voice_jev_model: None,
-            memory_jev_threshold: default_memory_jev_threshold(),
-            memory_model: None,
-            memory_sidecar_enabled: default_memory_sidecar_enabled(),
-            memory_rerank_cadence: default_memory_rerank_cadence(),
-            memory_rerank_votes: default_memory_rerank_votes(),
-            memory_rerank_min_agree: default_memory_rerank_min_agree(),
-            memory_embedding_backend: default_memory_embedding_backend(),
-            memory_embedding_model: None,
-            memory_embedding_base_url: None,
-            memory_embedding_dim: None,
-            swarm_max_concurrent_agents: default_swarm_max_concurrent_agents(),
-            swarm_stall_after_secs: default_swarm_stall_after_secs(),
-            swarm_stall_nudge: false,
-        }
-    }
-}
-
-impl AgentsConfig {
-    /// Validate an agent-supplied override before resolving any provider route.
-    /// Matching is exact: a bare model never authorizes another provider's route.
-    pub fn validate_swarm_model_request(&self, model: Option<&str>) -> Result<(), &'static str> {
-        let Some(model) = model else {
-            return Ok(());
-        };
-        if !self.swarm_model_selection {
-            return Err(
-                "Agent-selected swarm models are disabled. Omit model to use the user-configured default.",
-            );
-        }
-        if model.trim().is_empty()
-            || !self
-                .swarm_model_allowlist
-                .iter()
-                .any(|allowed| allowed == model)
-        {
-            return Err(
-                "Requested swarm model is not in agents.swarm_model_allowlist. Omit model to use the user-configured default.",
-            );
-        }
-        Ok(())
-    }
-
-    /// Resolve swarm mode's root effort without allowing the orchestration
-    /// sentinel to recurse into itself. Unknown values use the low-effort
-    /// default without invalidating other settings.
-    pub fn root_effort_for_swarm(&self) -> &'static str {
-        let value = self.swarm_root_effort.as_deref().unwrap_or("low").trim();
-        ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
-            .into_iter()
-            .find(|level| level.eq_ignore_ascii_case(value))
-            .unwrap_or("low")
-    }
-}
-
+#[path = "lib_agents_defaults.rs"]
+mod agents_defaults;
 /// How swarm-created agents should be spawned.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -741,36 +663,6 @@ impl SwarmSpawnMode {
             Self::Headless => "headless",
             Self::Inline => "inline",
             Self::Auto => "auto",
-        }
-    }
-}
-
-/// Layout of the inline swarm strip shown above the status line.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum SwarmStripLayout {
-    /// One agent per row: session icon + status glyph + task label, capped to
-    /// a few lines with a `+N more` overflow marker.
-    #[default]
-    Vertical,
-    /// All agents packed as chips on a single row (the historical layout).
-    Horizontal,
-}
-
-impl SwarmStripLayout {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "vertical" | "list" => Some(Self::Vertical),
-            "horizontal" | "chips" | "strip" => Some(Self::Horizontal),
-            _ => None,
-        }
-    }
-
-    /// Canonical lowercase string for this layout (matches config/env values).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Vertical => "vertical",
-            Self::Horizontal => "horizontal",
         }
     }
 }
@@ -1251,9 +1143,24 @@ pub struct ProviderConfig {
     pub preserve_reasoning_context: bool,
     /// How to handle cross-provider failover when the same input would be resent elsewhere.
     pub cross_provider_failover: CrossProviderFailoverMode,
+    /// Skip the cross-provider countdown for definitive exhausted usage only.
+    /// Manual cross-provider failover still disables automatic switching.
+    pub exhausted_usage_immediate_failover: bool,
+    /// Prefer bounded same-account retries for recoverable Anthropic rate limits
+    /// before rotating to another account. Long reset delays still yield.
+    pub anthropic_retry_recoverable_rate_limits: bool,
     /// Whether jcode should automatically try another account on the same provider
     /// before falling back to a different provider.
     pub same_provider_account_failover: bool,
+    /// Automatically redeem an earned OpenAI banked reset when weekly OAuth
+    /// usage is exhausted. Never purchases credits. Enabled by default.
+    pub openai_auto_banked_reset: bool,
+    /// Automatically redeem earned Anthropic Fable resets for exhausted weekly
+    /// OAuth usage. Never purchases credits. Disabled by default.
+    pub anthropic_auto_fable_reset: bool,
+    /// Preserve earned resets while the account pool router has another ready route.
+    /// Applies to both OpenAI and Anthropic automatic resets. Default: true.
+    pub auto_reset_only_when_no_routes: bool,
     /// Copilot premium request mode: "normal", "one", or "zero"
     /// "zero" means all requests are free (no premium requests consumed)
     pub copilot_premium: Option<String>,
@@ -1306,7 +1213,12 @@ impl Default for ProviderConfig {
             openai_native_compaction_threshold_tokens: 200_000,
             preserve_reasoning_context: true,
             cross_provider_failover: CrossProviderFailoverMode::Countdown,
+            exhausted_usage_immediate_failover: true,
+            anthropic_retry_recoverable_rate_limits: true,
             same_provider_account_failover: true,
+            openai_auto_banked_reset: true,
+            anthropic_auto_fable_reset: false,
+            auto_reset_only_when_no_routes: true,
             copilot_premium: None,
             gemini_force_oauth: false,
             gemini_project: None,
@@ -1578,3 +1490,32 @@ pub struct LaunchHotkeysConfig {
 #[cfg(test)]
 #[path = "reasoning_display_defaults_tests.rs"]
 mod reasoning_display_defaults_tests;
+
+#[cfg(test)]
+mod exhausted_usage_failover_tests {
+    use super::*;
+
+    #[test]
+    fn exhaustion_immediate_defaults_on_and_is_independent_of_manual_mode() {
+        let defaults: ProviderConfig = serde_json::from_str("{}").unwrap();
+        assert!(defaults.exhausted_usage_immediate_failover);
+        assert!(defaults.anthropic_retry_recoverable_rate_limits);
+        let rotate: ProviderConfig =
+            serde_json::from_str(r#"{"anthropic_retry_recoverable_rate_limits":false}"#).unwrap();
+        assert!(!rotate.anthropic_retry_recoverable_rate_limits);
+        let countdown: ProviderConfig =
+            serde_json::from_str(r#"{"exhausted_usage_immediate_failover":false}"#).unwrap();
+        assert!(!countdown.exhausted_usage_immediate_failover);
+        assert_eq!(
+            countdown.cross_provider_failover,
+            CrossProviderFailoverMode::Countdown
+        );
+        let manual: ProviderConfig =
+            serde_json::from_str(r#"{"cross_provider_failover":"manual"}"#).unwrap();
+        assert!(manual.exhausted_usage_immediate_failover);
+        assert_eq!(
+            manual.cross_provider_failover,
+            CrossProviderFailoverMode::Manual
+        );
+    }
+}

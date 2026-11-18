@@ -28,6 +28,25 @@ import {
 } from "../src/model-pricing.js";
 const DB = "jcode-telemetry";
 
+// D1 sheds load with error 7429 when its ten-second resource window is full,
+// which is routine while a dashboard recompute is running. Every statement
+// here is a read or an idempotent upsert, so wait out the window and retry.
+function wrangler(argv) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return execFileSync("npx", argv, {
+        encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (err) {
+      const detail = [err?.stdout, err?.stderr, err?.message].filter(Boolean).join("\n");
+      if (attempt >= 5 || !/\b7429\b|is overloaded/i.test(detail)) throw err;
+      const waitMs = 12000 * (attempt + 1);
+      console.warn(`D1 overloaded; retrying in ${waitMs / 1000}s (attempt ${attempt + 2}/6)`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, waitMs);
+    }
+  }
+}
+
 const args = process.argv.slice(2);
 const dryRun = args.includes("--dry-run");
 const reportArg = args.find((a) => a.startsWith("--report-json="));
@@ -49,22 +68,14 @@ function runWranglerFile(sqlText, label) {
   const dir = mkdtempSync(join(tmpdir(), "model-prices-"));
   const file = join(dir, `${label}.sql`);
   writeFileSync(file, sqlText);
-  const out = execFileSync(
-    "npx",
-    ["wrangler", "d1", "execute", DB, "--remote", "--json", `--file=${file}`],
-    { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
-  );
+  const out = wrangler(["wrangler", "d1", "execute", DB, "--remote", "--json", `--file=${file}`]);
   return out;
 }
 
 // Reads must use `--command`: the `--file` import path reports only
 // rows-read/rows-written counters and discards the actual result set.
 function queryRows(sql) {
-  const raw = execFileSync(
-    "npx",
-    ["wrangler", "d1", "execute", DB, "--remote", "--json", "--command", sql],
-    { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
-  );
+  const raw = wrangler(["wrangler", "d1", "execute", DB, "--remote", "--json", "--command", sql]);
   const start = raw.indexOf("[");
   if (start < 0) throw new Error(`unexpected wrangler output:\n${raw}`);
   const parsed = JSON.parse(raw.slice(start));

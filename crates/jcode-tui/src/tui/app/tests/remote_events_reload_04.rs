@@ -1,57 +1,3 @@
-#[test]
-fn test_remote_fast_status_tracks_history_tier_including_explicit_off() {
-    with_temp_jcode_home(|| {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let _guard = rt.enter();
-        let mut app = create_test_app();
-        let mut remote = crate::tui::backend::RemoteConnection::dummy();
-        app.is_remote = true;
-        app.remote_session_id = Some("session_fast_status".to_string());
-        remote.mark_history_loaded();
-
-        // Bootstrap, catalog refresh, explicit off, then on again. An absent
-        // tier is authoritative Standard, not an invitation to use the saved
-        // default or preserve a stale priority badge.
-        for tier in [Some("priority"), Some("priority"), None, Some("priority")] {
-            let history = serde_json::from_value(serde_json::json!({
-                "type": "history",
-                "id": 1,
-                "session_id": "session_fast_status",
-                "messages": [],
-                "provider_name": "OpenAI",
-                "provider_model": "gpt-future-model",
-                "service_tier": tier
-            }))
-            .expect("history fixture");
-            app.handle_server_event(history, &mut remote);
-            assert_eq!(app.remote_service_tier.as_deref(), tier);
-            // Until the provider reports the applied tier, the widget is honest
-            // that the requested tier is unconfirmed.
-            assert_eq!(
-                crate::tui::TuiState::info_widget_data(&app)
-                    .service_tier
-                    .as_deref(),
-                tier.map(|_| "Fast ?")
-            );
-
-            app.input = "/fast status".to_string();
-            rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
-                .expect("fast status");
-            let status = &app
-                .display_messages()
-                .last()
-                .expect("status message")
-                .content;
-            let expected = if tier.is_some() {
-                "Fast mode is on."
-            } else {
-                "Fast mode is off."
-            };
-            assert!(status.starts_with(expected), "{status}");
-        }
-    });
-}
-
 #[path = "remote_events_reload_04/debug_frames.rs"]
 mod debug_frames;
 #[test]
@@ -735,7 +681,8 @@ fn test_new_for_remote_uses_startup_stub_without_loading_full_transcript() {
         content: vec![crate::message::ContentBlock::Text {
             text: "hello from persisted history".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -2621,61 +2568,8 @@ fn test_remote_model_changed_updates_reasoning_effort() {
     );
 }
 
-#[test]
-fn test_remote_known_model_keeps_server_context_after_local_refresh() {
-    // A model-family guess must not overwrite the running endpoint's smaller limit.
-    let mut app = create_test_app();
-    app.is_remote = true;
-    app.remote_provider_name = Some("strata".to_string());
-    let model = "qwen3.8-flash-next-ud-q4_k_xl-abliterated";
-    app.remote_provider_model = Some(model.to_string());
+#[path = "remote_events_reload_04_additional_tests.rs"]
+mod additional_test_remote_fast_status_tracks_history_tier_including_explicit_off;
 
-    app.update_context_limit_for_model(model, Some(196_608));
-    app.update_context_limit_for_model(model, None);
-    assert_eq!(app.context_limit, 196_608);
-    assert_eq!(
-        app.registry.compaction().try_read().unwrap().token_budget(),
-        196_608
-    );
-
-    // A server update remains authoritative when switching to another model.
-    app.update_context_limit_for_model("another-model", Some(65_536));
-    app.remote_provider_model = Some("another-model".to_string());
-    app.update_context_limit_for_model("another-model", None);
-    assert_eq!(app.context_limit, 65_536);
-}
-
-#[test]
-fn test_remote_context_window_does_not_follow_a_different_model() {
-    // Changing models invalidates the window reported for the previous model.
-    let mut app = create_test_app();
-    app.is_remote = true;
-    app.remote_provider_name = Some("strata".to_string());
-    let model = "qwen3.8-flash-next-ud-q4_k_xl-abliterated";
-    app.update_context_limit_for_model(model, Some(196_608));
-
-    app.update_context_limit_for_model("gpt-5.4", None);
-    assert_eq!(app.context_limit, 1_000_000);
-    app.update_context_limit_for_model(model, None);
-    assert_eq!(app.context_limit, 262_144);
-}
-
-#[test]
-fn test_remote_context_window_is_cleared_when_provider_changes() {
-    // The same model name can have a different limit on another provider.
-    let mut app = create_test_app();
-    app.is_remote = true;
-    app.remote_provider_name = Some("strata".to_string());
-    let model = "qwen3.8-flash-next-ud-q4_k_xl-abliterated";
-    app.remote_provider_model = Some(model.to_string());
-    app.update_context_limit_for_model(model, Some(196_608));
-
-    app.replace_remote_model_catalog_snapshot(jcode_provider_core::ModelCatalogSnapshot::new(
-        Some("other".to_string()),
-        Some(model.to_string()),
-        Vec::new(),
-        Vec::new(),
-    ));
-    app.update_context_limit_for_model(model, None);
-    assert_eq!(app.context_limit, 262_144);
-}
+#[path = "remote_context_window.rs"]
+mod remote_context_window;

@@ -8,24 +8,6 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::ffi::OsString;
 
-#[test]
-fn base_tools_do_not_expose_invalid_reporting_tool() {
-    let skills = Arc::new(RwLock::new(crate::skill::SkillRegistry::default()));
-    let tools = Registry::base_tools(&skills);
-    assert!(!tools.contains_key("invalid"));
-    assert!(tools.contains_key("bash"));
-}
-
-#[test]
-fn base_tools_exclude_replace_and_keep_other_editing_tools() {
-    let skills = Arc::new(RwLock::new(crate::skill::SkillRegistry::default()));
-    let tools = Registry::base_tools(&skills);
-    assert!(!tools.contains_key("replace"));
-    for name in ["edit", "write", "apply_patch"] {
-        assert!(tools.contains_key(name), "missing editing tool: {name}");
-    }
-}
-
 struct TestHomeGuard {
     previous: Option<OsString>,
 }
@@ -97,129 +79,6 @@ async fn register_empty_mcp_tools(registry: &Registry, working_dir: &std::path::
             Some(working_dir.to_path_buf()),
         )
         .await;
-}
-
-#[tokio::test]
-async fn mcp_list_remains_available_while_background_connect_is_handshaking() {
-    let _env_lock = crate::storage::lock_test_env();
-    let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
-    let _home_guard = TestHomeGuard::new(home.path());
-    let working_dir = tempfile::tempdir().expect("create isolated MCP working directory");
-
-    std::fs::write(
-        home.path().join("mcp.json"),
-        r#"{
-            "mcpServers": {
-                "slow": {
-                    "command": "/bin/sh",
-                    "args": ["-c", "sleep 2"],
-                    "timeout_secs": 86400
-                }
-            }
-        }"#,
-    )
-    .expect("write slow MCP config");
-
-    let registry = Registry::empty();
-    registry
-        .register_mcp_tools_for_dir(None, None, None, Some(working_dir.path().to_path_buf()))
-        .await;
-
-    // Let the background connection task acquire its read guard and enter the
-    // slow initialize handshake before asking the management tool to list.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let output = tokio::time::timeout(
-        std::time::Duration::from_millis(500),
-        registry.execute(
-            "mcp",
-            serde_json::json!({"action": "list"}),
-            mcp_test_context(working_dir.path()),
-        ),
-    )
-    .await
-    .expect("mcp list must not wait for a slow background handshake")
-    .expect("mcp list should succeed");
-
-    assert!(
-        output.output.contains("slow"),
-        "unexpected output: {}",
-        output.output
-    );
-}
-
-#[tokio::test]
-async fn real_mcp_registration_does_not_retain_registry_tool_map() {
-    let _env_lock = crate::storage::lock_test_env();
-    let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
-    let _home_guard = TestHomeGuard::new(home.path());
-    let working_dir = tempfile::tempdir().expect("create isolated MCP working directory");
-    let registry = Registry::empty();
-    let tools = Arc::downgrade(&registry.tools);
-
-    register_empty_mcp_tools(&registry, working_dir.path()).await;
-    assert!(registry.tool_names().await.iter().any(|name| name == "mcp"));
-
-    drop(registry);
-
-    assert!(
-        tools.upgrade().is_none(),
-        "McpManagementTool must not strongly retain the registry tool map that owns it"
-    );
-}
-
-#[tokio::test]
-async fn mcp_management_upgrades_registry_through_surviving_clone() {
-    let _env_lock = crate::storage::lock_test_env();
-    let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
-    let _home_guard = TestHomeGuard::new(home.path());
-    let working_dir = tempfile::tempdir().expect("create isolated MCP working directory");
-    let registry = Registry::empty();
-    let tools = Arc::downgrade(&registry.tools);
-
-    register_empty_mcp_tools(&registry, working_dir.path()).await;
-    let surviving_clone = registry.clone();
-    drop(registry);
-
-    let stale_tool = surviving_clone
-        .tools
-        .read()
-        .await
-        .get("mcp")
-        .cloned()
-        .expect("MCP management tool should be registered");
-    surviving_clone
-        .register("mcp__lifetime__sentinel".to_string(), stale_tool)
-        .await;
-
-    let output = surviving_clone
-        .execute(
-            "mcp",
-            serde_json::json!({"action": "reload"}),
-            mcp_test_context(working_dir.path()),
-        )
-        .await
-        .expect("MCP management should upgrade through the surviving registry clone");
-    assert!(output.output.contains("No servers found in config"));
-    assert!(
-        !surviving_clone
-            .tool_names()
-            .await
-            .iter()
-            .any(|name| name == "mcp__lifetime__sentinel"),
-        "reload should mutate the surviving registry through the weak handle"
-    );
-    assert!(
-        surviving_clone
-            .tool_names()
-            .await
-            .iter()
-            .any(|name| name == "mcp"),
-        "reload should preserve the MCP management tool"
-    );
-    assert!(tools.upgrade().is_some());
-
-    drop(surviving_clone);
-    assert!(tools.upgrade().is_none());
 }
 
 #[tokio::test]
@@ -403,7 +262,7 @@ fn tool_definitions_auto_inject_required_intent() {
 }
 
 #[tokio::test]
-async fn first_party_tool_definitions_require_intent_with_display_only_docs() {
+async fn first_party_tool_definitions_require_an_undescribed_intent() {
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
     registry.register_ambient_tools().await;
@@ -423,12 +282,11 @@ async fn first_party_tool_definitions_require_intent_with_display_only_docs() {
             "{} should explicitly define optional intent in its schema",
             def.name
         );
+        // The name is self-explanatory, and a description would be repeated in
+        // every tool schema on every request.
         assert!(
-            schema["properties"]["intent"]["description"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("shown in the UI"),
-            "{} intent description should say it is UI-display-only",
+            schema["properties"]["intent"].get("description").is_none(),
+            "{} should not spend tokens describing intent",
             def.name
         );
         let required = schema["required"].as_array().cloned().unwrap_or_default();
@@ -464,6 +322,55 @@ fn test_resolve_tool_name_oauth_aliases() {
     assert_eq!(Registry::resolve_tool_name("functions.shell_exec"), "bash");
     assert_eq!(Registry::resolve_tool_name("batch"), "batch");
     assert_eq!(Registry::resolve_tool_name("memory"), "memory");
+}
+
+#[tokio::test]
+async fn model_facing_definitions_advertise_canonical_names_only() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    let definitions = registry.definitions(None).await;
+    assert!(!definitions.is_empty());
+    for definition in &definitions {
+        assert_eq!(
+            Registry::resolve_tool_name(&definition.name),
+            definition.name,
+            "advertised tool-name alias {}",
+            definition.name
+        );
+        let props = &definition.input_schema["properties"];
+        let hidden_fields: &[&str] = match definition.name.as_str() {
+            "swarm" => &["target_session", "initial_message"],
+            "edit" => &["old_string", "new_string", "replace_all"],
+            "bg" => &["lines"],
+            "agentgrep" => &["pattern", "file_path", "include"],
+            "codemode" => &["script", "source", "js"],
+            "load_tools" => &["tools", "name"],
+            _ => &[],
+        };
+        for field in hidden_fields {
+            assert!(
+                props.get(*field).is_none(),
+                "{} exposes alias {field}",
+                definition.name
+            );
+        }
+        let forbidden_enum_values: &[(&str, &str)] = match definition.name.as_str() {
+            "bg" => &[("action", "watch"), ("action", "subscribe")],
+            "gmail" => &[("action", "list")],
+            "mcp" => &[("transport", "streamable-http")],
+            "desktop_selfdev" => &[("action", "build-reload")],
+            _ => &[],
+        };
+        for (field, alias) in forbidden_enum_values {
+            if let Some(values) = props[*field]["enum"].as_array() {
+                assert!(
+                    !values.contains(&serde_json::json!(alias)),
+                    "{} exposes {field} alias {alias}",
+                    definition.name
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -717,7 +624,7 @@ async fn tool_descriptions_stay_under_token_cap() {
     // user, so planning happens proactively rather than only when prompted.
     // applet carries the whole view-node vocabulary inline, since the model has
     // no other way to learn which node types and props the host renders.
-    // codemode documents its sandbox API; compile_remote a credit/consent notice.
+    // codemode documents its sandbox API.
     const EXEMPT: &[&str] = &[
         "integration_tools",
         "swarm",
@@ -726,7 +633,6 @@ async fn tool_descriptions_stay_under_token_cap() {
         "todo",
         "applet",
         "codemode",
-        "compile_remote",
     ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
@@ -790,11 +696,23 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
     // applet placement lists every shorthand so the model can pick a surface
     // without a round trip. desktop_selfdev action carries a safety warning:
     // killing the harness bridge by hand strands the calling session.
+    // The todo pause fields carry the rules for when an agent may stop
+    // working, which live on the fields because the tool description is one
+    // sentence. Each is stated once (on add), not per route.
     const EXEMPT: &[(&str, &str)] = &[
         (
             "todo",
             "$.properties.goals.items.properties.feedback_loop_relevance",
         ),
+        (
+            "todo",
+            "$.properties.add.items.properties.requires_user_auth",
+        ),
+        (
+            "todo",
+            "$.properties.goals.items.properties.cannot_complete",
+        ),
+        ("todo", "$.properties.phases"),
         ("applet", "$.properties.placement"),
         ("desktop_selfdev", "$.properties.action"),
     ];
@@ -1447,6 +1365,14 @@ impl Tool for BigOutputTool {
 }
 
 async fn execute_big_output(input: Value) -> String {
+    // A fresh session per call: repeating a withheld call accepts its cost, so
+    // tests sharing a session would accept each other's refusals.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    execute_big_output_in(&format!("test-context-guard-execute-{id}"), input).await
+}
+
+async fn execute_big_output_in(session_id: &str, input: Value) -> String {
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
     {
@@ -1461,7 +1387,7 @@ async fn execute_big_output(input: Value) -> String {
         .await;
 
     let ctx = ToolContext {
-        session_id: "test-context-guard-execute".to_string(),
+        session_id: session_id.to_string(),
         message_id: "test".to_string(),
         tool_call_id: "test".to_string(),
         working_dir: Some(std::env::temp_dir()),
@@ -1526,10 +1452,10 @@ async fn test_execute_ignores_a_non_boolean_accept_flag() {
 }
 
 #[tokio::test]
-async fn test_every_tool_advertises_the_large_output_escape_hatch() {
-    // The guard applies to every tool, so every tool must document the way out.
-    // Asserted over the real definition list rather than per tool, because the
-    // failure mode is a new tool nobody remembered to annotate.
+async fn test_no_tool_schema_carries_the_large_output_flag() {
+    // A property on every schema is paid on every request, forever. The refusal
+    // message names the flag instead, and repeating the call also accepts, so
+    // no schema needs to advertise it.
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
     registry.register_ambient_tools().await;
@@ -1541,53 +1467,57 @@ async fn test_every_tool_advertises_the_large_output_escape_hatch() {
         defs.len()
     );
 
-    let mut missing = Vec::new();
-    for def in &defs {
-        let flag = &def.input_schema["properties"][jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY];
-        if flag.get("type").and_then(Value::as_str) != Some("boolean") {
-            missing.push(def.name.clone());
-        }
-        // Advertising it as required would force the model to answer a question
-        // about token budgets on every single call.
-        if let Some(required) = def.input_schema["required"].as_array() {
-            assert!(
-                !required
-                    .iter()
-                    .any(|v| v.as_str() == Some(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY)),
-                "{} must not require accept_large_output",
-                def.name
-            );
-        }
-    }
+    let advertising: Vec<&str> = defs
+        .iter()
+        .filter(|def| {
+            def.input_schema["properties"]
+                .get(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY)
+                .is_some()
+        })
+        .map(|def| def.name.as_str())
+        .collect();
     assert!(
-        missing.is_empty(),
-        "tools missing the accept_large_output escape hatch: {missing:?}"
+        advertising.is_empty(),
+        "tools paying for the accept_large_output property: {advertising:?}"
     );
 }
 
 #[tokio::test]
-async fn test_large_output_flag_costs_little_across_the_whole_tool_set() {
-    // Adding a property to every schema is paid on every request, forever. Keep
-    // the total honest: ~20 tokens per tool is acceptable, a paragraph is not.
-    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
-    let registry = Registry::new(provider).await;
-    registry.register_ambient_tools().await;
-    let defs = registry.definitions(None).await;
-
-    let property =
-        serde_json::to_string(&crate::tool::accept_large_output_schema_property_for_test())
-            .expect("serializable");
-    let per_tool = crate::util::estimate_tokens(&property);
-    let total = per_tool * defs.len();
-
+async fn test_repeating_a_withheld_call_accepts_its_cost() {
+    // Strict-schema providers cannot send an undeclared key, so the repeat is
+    // their only way to opt in. The reworded intent must not break the match.
+    let session = "test-context-guard-repeat";
+    let first = execute_big_output_in(session, serde_json::json!({ "intent": "look" })).await;
+    assert!(first.contains("OUTPUT WITHHELD"), "got: {first}");
     assert!(
-        per_tool <= 25,
-        "per-tool cost {per_tool} tokens is too high: {property}"
+        first.contains("repeat the same call"),
+        "refusal must explain the repeat: {first}"
     );
+
+    let second =
+        execute_big_output_in(session, serde_json::json!({ "intent": "look again" })).await;
     assert!(
-        total < 1_500,
-        "{} tools x {per_tool} tokens = {total} tokens of permanent prompt overhead",
-        defs.len()
+        second.contains("OUTPUT TRUNCATED"),
+        "repeat should return the payload, got: {}",
+        &second[..second.len().min(200)]
+    );
+
+    // One refusal buys one accepted repeat, not a standing permission.
+    let third = execute_big_output_in(session, serde_json::json!({ "intent": "look" })).await;
+    assert!(third.contains("OUTPUT WITHHELD"), "got: {third}");
+}
+
+#[tokio::test]
+async fn test_a_different_call_does_not_accept_a_withheld_one() {
+    let session = "test-context-guard-different";
+    let first = execute_big_output_in(session, serde_json::json!({ "intent": "a" })).await;
+    assert!(first.contains("OUTPUT WITHHELD"));
+    let other =
+        execute_big_output_in(session, serde_json::json!({ "intent": "a", "query": "x" })).await;
+    assert!(
+        other.contains("OUTPUT WITHHELD"),
+        "changed arguments are a new call, got: {}",
+        &other[..other.len().min(200)]
     );
 }
 
@@ -1877,7 +1807,10 @@ async fn only_the_known_open_world_tools_are_ineligible_for_openai_strict_mode()
     /// before the #711/#713 eligibility changes, so this is pre-existing.
     // applet and swarm used to be ineligible only because of a root combiner;
     // root combiners are now flattened (OpenAI rejects them outright).
-    const KNOWN_OPEN_WORLD_TOOLS: &[&str] = &["batch", "browser"];
+    // todo's update items are open on purpose: repeating every item field a
+    // third time cost ~230 tokens per request. apply_todo_patch rejects
+    // unknown fields instead.
+    const KNOWN_OPEN_WORLD_TOOLS: &[&str] = &["batch", "browser", "todo"];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
@@ -1974,3 +1907,30 @@ async fn post_tool_feedback_hook_appends_stdout_to_tool_result() {
     );
     assert!(output.contains("stdin-ok"), "{output}");
 }
+
+/// Dump every model-visible tool definition as JSON so a real tokenizer can
+/// measure the always-on prompt cost. Run with
+/// `cargo test -p jcode-app-core --lib dump_tool_definitions -- --ignored --nocapture`
+/// and read the line after `TOOL_DEFS_JSON`.
+#[tokio::test]
+#[ignore = "manual measurement helper"]
+async fn dump_tool_definitions() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    let defs: Vec<Value> = registry
+        .definitions(None)
+        .await
+        .into_iter()
+        .map(|def| {
+            serde_json::json!({
+                "name": def.name,
+                "description": def.description,
+                "input_schema": def.input_schema,
+            })
+        })
+        .collect();
+    println!("TOOL_DEFS_JSON\n{}", serde_json::to_string(&defs).unwrap());
+}
+
+#[path = "tests_additional_tests.rs"]
+mod additional_base_tools_do_not_expose_invalid_reporting_tool;

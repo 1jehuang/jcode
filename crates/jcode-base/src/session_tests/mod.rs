@@ -41,3 +41,4 @@ mod cases;
 mod tool_image_decay;
 
 mod compaction_elision;
+mod export_sharing;

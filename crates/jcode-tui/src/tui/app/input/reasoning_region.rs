@@ -55,7 +55,7 @@ impl App {
             // snap to the nearest boundary at or below `new_len` instead of
             // trusting the recorded length (see issues #632/#633/#635).
             let new_len = floor_char_boundary(&self.streaming.streaming_text, new_len);
-            self.streaming.streaming_text.truncate(new_len);
+            self.streaming.streaming_text_mut().truncate(new_len);
             self.reasoning_partial_len = 0;
         }
     }
@@ -85,12 +85,12 @@ impl App {
             }
         }
         if !committed.is_empty() {
-            self.streaming.streaming_text.push_str(&committed);
+            self.streaming.streaming_text_mut().push_str(&committed);
         }
         // Re-append the live tail for the in-progress (partial) line.
         let partial = jcode_tui_markdown::reasoning_partial_markup(&self.reasoning_pending_line);
         self.reasoning_partial_len = partial.len();
-        self.streaming.streaming_text.push_str(&partial);
+        self.streaming.streaming_text_mut().push_str(&partial);
         self.refresh_split_view_if_needed();
     }
 
@@ -106,7 +106,7 @@ impl App {
         let pending = std::mem::take(&mut self.reasoning_pending_line);
         if !pending.is_empty() {
             self.streaming
-                .streaming_text
+                .streaming_text_mut()
                 .push_str(&jcode_tui_markdown::reasoning_line_markup(&pending));
         }
         self.reasoning_streaming = false;
@@ -126,9 +126,9 @@ impl App {
         // renders as a normal paragraph.
         if !self.streaming.streaming_text.ends_with("\n\n") {
             if self.streaming.streaming_text.ends_with('\n') {
-                self.streaming.streaming_text.push('\n');
+                self.streaming.streaming_text_mut().push('\n');
             } else {
-                self.streaming.streaming_text.push_str("\n\n");
+                self.streaming.streaming_text_mut().push_str("\n\n");
             }
         }
         self.refresh_split_view_if_needed();
@@ -158,11 +158,11 @@ impl App {
         let block_start = floor_char_boundary(&self.streaming.streaming_text, block_start);
         // Everything from the block start onward is the reasoning markup. Split it
         // off so the preceding answer text (if any) stays in the live stream.
-        let block = self.streaming.streaming_text.split_off(block_start);
+        let block = self.streaming.streaming_text_mut().split_off(block_start);
         // Drop the separator the open path added before the reasoning block so the
         // surrounding answer text rejoins cleanly.
         while self.streaming.streaming_text.ends_with('\n') {
-            self.streaming.streaming_text.pop();
+            self.streaming.streaming_text_mut().pop();
         }
         let block = block.trim_matches('\n').to_string();
         if block.is_empty() {

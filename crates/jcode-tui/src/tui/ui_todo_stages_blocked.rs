@@ -15,7 +15,7 @@ pub(crate) fn blocked_phase_spans(
     let stage = &stages[current];
     if stage
         .item_indices()
-        .any(|i| crate::todo::todo_completely_blocked(todos[i]))
+        .any(|i| crate::todo::todo_requires_user_auth(todos[i]))
     {
         // The phase pip already replaces this todo's dot with ✋.
         // Repeating a blocked phase label adds no information.

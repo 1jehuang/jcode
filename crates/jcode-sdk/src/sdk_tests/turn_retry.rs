@@ -194,6 +194,8 @@ fn cancellation_and_other_clients_drop_a_pending_retry() {
     };
     assert_eq!(retry.observe(&cancelled, now), RetryDecision::Cancelled);
 
+    // Fresh input, not a late error from the cancelled provider request.
+    retry.user_sent();
     retry.observe(&error("timed out"), now);
     let accepted = ApiEvent::MessageAccepted {
         session_id: "s".into(),
@@ -281,4 +283,133 @@ fn failed_send_reschedules() {
         retry.pending(),
         Some(now + RetryPolicy::default().base_delay)
     );
+}
+
+#[test]
+fn structured_rate_limit_hints_ignore_sibling_limits() {
+    for (message, seconds) in [
+        (
+            r#"API error 429: {"max_rpm":1200,"retry_after_seconds":17}"#,
+            17,
+        ),
+        (
+            r#"429: {"error":{"retry_after_seconds":2.3}} diagnostics"#,
+            3,
+        ),
+        (r#"429: {"errors":[{"retry_after_seconds":9}]}"#, 9),
+    ] {
+        assert_eq!(
+            classify_failure(message, None),
+            FailureKind::RateLimited {
+                retry_after: Some(Duration::from_secs(seconds))
+            },
+            "{message}"
+        );
+    }
+    for value in ["-1", "0", "\"20\"", "null"] {
+        let message =
+            format!(r#"429: {{"retry_after_seconds":{value},"max_rpm":1200}} retry in 1 second"#);
+        assert_eq!(
+            classify_failure(&message, None),
+            FailureKind::RateLimited { retry_after: None }
+        );
+    }
+}
+
+#[test]
+fn day_hints_do_not_become_short_retries() {
+    let now = Instant::now();
+    for message in [
+        "429 rate limit, retry after 2 days",
+        "429 rate limit, retry in 1d",
+        r#"429: {"retry_after_seconds":1e100}"#,
+    ] {
+        let mut retry = TurnRetry::default();
+        assert!(
+            matches!(
+                retry.observe(&error(message), now),
+                RetryDecision::GaveUp { .. }
+            ),
+            "{message}"
+        );
+        assert_eq!(retry.pending(), None);
+    }
+}
+
+#[test]
+fn failover_consent_and_invalid_requests_override_transient_words() {
+    for message in [
+        r#"[jcode-provider-failover]{"reason":"503 temporarily unavailable"}"#,
+        "unsupported_value: server error for invalid option",
+        "invalid tool schema, try again",
+        "body too large: network request rejected",
+        "refresh token has already been used, connection closed",
+        "model does not support the coding plan: 503",
+    ] {
+        assert_eq!(
+            classify_failure(message, None),
+            FailureKind::Permanent,
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn cancellation_stays_cancelled_when_late_errors_arrive() {
+    let now = Instant::now();
+    for status in ["cancelled", "canceled", "interrupted", "crashed"] {
+        let mut retry = TurnRetry::default();
+        retry.observe(&error("timed out"), now);
+        assert_eq!(
+            retry.observe(
+                &ApiEvent::SessionStatus {
+                    session_id: "s".into(),
+                    status: status.into(),
+                    pending_soft_interrupts: None,
+                },
+                now
+            ),
+            RetryDecision::Cancelled
+        );
+        retry.observe(&done(), now);
+        assert!(matches!(
+            retry.observe(&error("connection reset"), now),
+            RetryDecision::GaveUp {
+                exhausted: false,
+                ..
+            }
+        ));
+        assert!(!retry.take_due(now + Duration::from_secs(60)), "{status}");
+        retry.user_sent();
+        assert!(scheduled(&retry.observe(&error("timed out"), now)).is_some());
+    }
+}
+
+#[test]
+fn terminal_stop_drops_existing_retry_without_needing_an_error() {
+    let now = Instant::now();
+    for reason in [
+        TurnStopReason::Interrupted,
+        TurnStopReason::Crash,
+        TurnStopReason::ProviderGuardrail,
+        TurnStopReason::LimitReached,
+    ] {
+        let mut retry = TurnRetry::default();
+        retry.observe(&error("timed out"), now);
+        assert_eq!(
+            retry.observe(&stopped(reason), now),
+            RetryDecision::Cancelled
+        );
+        assert!(!retry.take_due(now + Duration::from_secs(60)));
+    }
+}
+
+#[test]
+fn permanent_error_disarms_previously_scheduled_retry() {
+    let now = Instant::now();
+    let mut retry = TurnRetry::default();
+    retry.observe(&error("timed out"), now);
+    retry.observe(&error("401 Unauthorized"), now);
+    assert_eq!(retry.pending(), None);
+    assert!(!retry.take_due(now + Duration::from_secs(60)));
 }
