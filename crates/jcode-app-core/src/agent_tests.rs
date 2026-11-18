@@ -2779,6 +2779,7 @@ async fn sdk_custom_compile_remote_schema_survives_locked_refresh() {
         crate::protocol::SessionToolConfig {
             enabled: Some(vec![]),
             disabled: vec![],
+            system_prompt_append: None,
             custom: vec![crate::protocol::SessionToolDefinition {
                 name: "compile_remote".into(),
                 description: "SDK override".into(),
@@ -2842,6 +2843,72 @@ fn system_prompt_override_restores_and_does_not_leak_across_sessions() {
         let attached = Agent::new_with_session(provider, Registry::empty(), loaded, None);
         assert_eq!(attached.build_system_prompt_split(None).static_part, prompt);
     }
+}
+
+#[test]
+fn sdk_system_prompt_append_is_session_local_static_and_cleared() {
+    let _lock = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let mut agent = Agent::new(provider.clone(), Registry::empty());
+    let other = Agent::new(provider, Registry::empty());
+    let baseline = agent.build_system_prompt_split(None);
+    let other_baseline = other.build_system_prompt_split(None).static_part;
+    let id = agent.session_id().to_owned();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let suffix = "Unique SDK session instructions";
+    let configure = || {
+        crate::tool::sdk::configure(
+            &id,
+            "prompt-agent-owner",
+            crate::protocol::SessionToolConfig {
+                system_prompt_append: Some(suffix.into()),
+                ..Default::default()
+            },
+            tx.clone(),
+        )
+        .unwrap();
+    };
+    configure();
+    for _ in 0..3 {
+        let split = agent.build_system_prompt_split(None);
+        assert_eq!(
+            split.static_part,
+            format!("{}\n\n{suffix}", baseline.static_part)
+        );
+        assert_eq!(split.static_part.matches(suffix).count(), 1);
+        assert_eq!(split.dynamic_part, baseline.dynamic_part);
+    }
+    assert_eq!(
+        other.build_system_prompt_split(None).static_part,
+        other_baseline
+    );
+    assert!(agent.session.system_prompt.is_none());
+    assert!(
+        !serde_json::to_string(&agent.session)
+            .unwrap()
+            .contains(suffix)
+    );
+    agent.session.system_prompt = Some("Explicit override".into());
+    let split = agent.build_system_prompt_split(Some("do not add memory to override"));
+    assert_eq!(split.static_part, format!("Explicit override\n\n{suffix}"));
+    assert!(split.dynamic_part.is_empty());
+    agent.session.system_prompt = Some(String::new());
+    assert_eq!(agent.build_system_prompt_split(None).static_part, suffix);
+    agent.session.system_prompt = None;
+    crate::tool::sdk::configure(&id, "prompt-agent-owner", Default::default(), tx.clone()).unwrap();
+    assert_eq!(
+        agent.build_system_prompt_split(None).static_part,
+        baseline.static_part
+    );
+    configure();
+    drop(crate::tool::sdk::ConnectionGuard(
+        "prompt-agent-owner".into(),
+    ));
+    assert!(crate::tool::sdk::config(&id).is_none());
+    assert_eq!(
+        agent.build_system_prompt_split(None).static_part,
+        baseline.static_part
+    );
 }
 
 /// Test provider advertising provider-native deferred tool loading.

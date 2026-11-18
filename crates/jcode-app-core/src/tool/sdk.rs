@@ -27,14 +27,19 @@ pub(crate) struct ConnectionGuard(pub String);
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         let mut state = STATE.write().unwrap_or_else(|e| e.into_inner());
-        // Unlike general SDK restrictions, this temporary bridge has no
-        // built-in override to protect after disconnect. Keeping it would
-        // permanently block reload if its grant expires before reconnect.
+        // Instructions are authorized only while their client is attached.
+        // Tool restrictions below remain fail-closed after disconnection.
+        for overlay in state.overlays.values_mut().filter(|o| o.owner == self.0) {
+            overlay.config.system_prompt_append = None;
+        }
+        // Prompt-only overlays and temporary bridges have no built-in override
+        // to protect after disconnect. Keeping them would permanently block
+        // reload if their grant expires before reconnect. `all` intentionally
+        // includes the empty custom-tool list of a prompt-only overlay.
         state.overlays.retain(|_, overlay| {
             !(overlay.owner == self.0
                 && overlay.config.enabled.is_none()
                 && overlay.config.disabled.is_empty()
-                && !overlay.config.custom.is_empty()
                 && overlay
                     .config
                     .custom
@@ -63,6 +68,15 @@ pub(crate) fn configure(
     config: SessionToolConfig,
     sender: mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<()> {
+    if let Some(prompt) = &config.system_prompt_append {
+        anyhow::ensure!(
+            !prompt.is_empty()
+                && prompt.trim() == prompt
+                && prompt.len() <= 16 * 1024
+                && !prompt.contains('\0'),
+            "System prompt append must be nonempty, trimmed, NUL-free, and at most 16 KiB"
+        );
+    }
     let valid_name = |name: &str| {
         !name.is_empty()
             && name.len() <= 128
@@ -100,7 +114,11 @@ pub(crate) fn configure(
         anyhow::ensure!(valid_name(name), "Invalid tool name: {name}");
     }
     let mut state = STATE.write().unwrap_or_else(|e| e.into_inner());
-    if config.enabled.is_none() && config.disabled.is_empty() && config.custom.is_empty() {
+    if config.enabled.is_none()
+        && config.disabled.is_empty()
+        && config.custom.is_empty()
+        && config.system_prompt_append.is_none()
+    {
         if let Some(previous) = state.overlays.get(session) {
             anyhow::ensure!(
                 previous.owner == owner,
@@ -368,6 +386,7 @@ mod tests {
                     custom: names.iter().map(|name| custom_definition(name)).collect(),
                     enabled: enabled.clone(),
                     disabled: disabled.clone(),
+                    system_prompt_append: None,
                 },
                 tx.clone(),
             )

@@ -22,6 +22,9 @@ pub struct SessionToolDefinition {
 /// Replaces the session SDK overlay. None inherits normal selection.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionToolConfig {
+    /// Session-only instructions owned by the configuring connection, not persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt_append: Option<String>,
     #[serde(default)]
     pub enabled: Option<Vec<String>>,
     #[serde(default)]
