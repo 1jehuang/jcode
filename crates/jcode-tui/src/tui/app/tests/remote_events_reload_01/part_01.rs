@@ -1322,7 +1322,7 @@ fn test_remote_done_recovers_stranded_soft_interrupt_as_queued_followup() {
 }
 
 #[test]
-fn test_remote_done_auto_pokes_again_when_todos_remain() {
+fn test_remote_done_does_not_duplicate_daemon_pokes() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1363,9 +1363,9 @@ fn test_remote_done_auto_pokes_again_when_todos_remain() {
             app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
 
         assert!(needs_redraw);
-        assert!(app.pending_queued_dispatch);
-        assert_eq!(app.queued_messages().len(), 1);
-        assert!(app.queued_messages()[0].contains("Continue working, or update the todo tool."));
+        assert!(!app.pending_queued_dispatch);
+        assert!(app.queued_messages().is_empty());
+        assert!(!app.is_processing);
     });
 }
 

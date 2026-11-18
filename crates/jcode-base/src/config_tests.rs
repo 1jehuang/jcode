@@ -14,6 +14,35 @@ fn restore_env_var(key: &str, previous: Option<OsString>) {
     }
 }
 
+#[test]
+fn jarvis_speech_endpoint_override_and_cache_fingerprint() {
+    let _guard = crate::storage::lock_test_env();
+    struct Restore(Option<OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            restore_env_var("JCODE_JARVIS_SPEECH_ENDPOINT", self.0.take());
+        }
+    }
+    let _restore = Restore(std::env::var_os("JCODE_JARVIS_SPEECH_ENDPOINT"));
+    crate::env::remove_var("JCODE_JARVIS_SPEECH_ENDPOINT");
+    let before = config_env_fingerprint();
+    crate::env::set_var(
+        "JCODE_JARVIS_SPEECH_ENDPOINT",
+        "http://127.0.0.1:8765/v1/audio/speech",
+    );
+    assert_ne!(before, config_env_fingerprint());
+    let mut config: Config =
+        toml::from_str("[jarvis.speech]\nendpoint = 'http://old.example/tts'").unwrap();
+    config.apply_env_overrides();
+    assert_eq!(
+        config.jarvis.speech.endpoint.as_deref(),
+        Some("http://127.0.0.1:8765/v1/audio/speech")
+    );
+    crate::env::set_var("JCODE_JARVIS_SPEECH_ENDPOINT", "");
+    config.apply_env_overrides();
+    assert_eq!(config.jarvis.speech.endpoint.as_deref(), Some(""));
+}
+
 struct GeminiConfigEnv {
     _home: tempfile::TempDir,
     previous: Vec<(&'static str, Option<OsString>)>,
@@ -189,6 +218,21 @@ fn swarm_spawn_mode_parses_supported_values() {
     let cfg: Config = toml::from_str("[agents]\nswarm_spawn_mode = \"visible\"\n")
         .expect("visible swarm_spawn_mode should parse");
     assert_eq!(cfg.agents.swarm_spawn_mode, SwarmSpawnMode::Visible);
+}
+
+#[test]
+fn retired_swarm_strip_settings_are_ignored() {
+    for layout in ["vertical", "horizontal", "obsolete"] {
+        let cfg: Config = toml::from_str(&format!(
+            "[agents]\nswarm_strip_layout = {layout:?}\nswarm_gallery_max_pct = 40\nswarm_spawn_mode = \"headless\"\n"
+        ))
+        .expect("retired swarm settings should be ignored in existing configs");
+        assert_eq!(cfg.agents.swarm_spawn_mode, SwarmSpawnMode::Headless);
+
+        let serialized = toml::to_string(&cfg).expect("config should serialize");
+        assert!(!serialized.contains("swarm_strip_layout"));
+        assert!(!serialized.contains("swarm_gallery_max_pct"));
+    }
 }
 
 #[test]

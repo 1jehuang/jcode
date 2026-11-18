@@ -1440,8 +1440,9 @@ impl App {
         if self.is_replay {
             return false;
         }
-        // SSH workflow state and todo reads belong to the remote daemon.
-        // Even the guardrail/report checks below consult laptop session files.
+        // SSH campaign state and todo reads belong to the remote daemon.
+        // A local daemon still uses the explicit TUI overnight campaign below,
+        // separately from daemon-owned ordinary todo continuation.
         if crate::tui::is_ssh_remote() {
             return false;
         }
@@ -1459,6 +1460,12 @@ impl App {
         // merged into it (or sent ahead of it) after an Esc redirect.
         if self.has_pending_user_followup() {
             return false;
+        }
+        if self.is_remote {
+            // Ordinary todo follow-ups belong to the daemon. Explicit local
+            // /overnight campaigns retain their independent scheduler until
+            // campaign ownership is migrated as well.
+            return self.schedule_overnight_poke_followup_if_needed();
         }
         if self.all_open_todos_are_paused() {
             self.last_auto_poke_fingerprint = None;
@@ -1481,7 +1488,7 @@ impl App {
         if self.is_replay {
             return false;
         }
-        if crate::tui::is_ssh_remote() {
+        if self.is_remote || crate::tui::is_ssh_remote() {
             return false;
         }
         // Completion is visible even with /poke off, and never needs another
@@ -2452,15 +2459,12 @@ pub(super) fn handle_pre_control_shortcuts(
         return true;
     }
 
-    // Swarm views: Alt+N cycles chat → inline controls → full live page → chat.
-    // Selection/open/prompt stay available; plain typing still goes to chat.
+    // Alt+N toggles the dedicated swarm page. Passive worker status lives in
+    // pinned todos rather than a separate inline controls strip.
     if app.toggle_keys.swarm_panel_focus.matches(code, modifiers) {
         match app.cycle_swarm_panel_view() {
             super::tui_state::SwarmPanelView::Chat => {
                 app.set_status_notice("Swarm view closed");
-            }
-            super::tui_state::SwarmPanelView::Controls => {
-                app.set_status_notice(crate::tui::keybind::swarm_view_hint("full page"));
             }
             super::tui_state::SwarmPanelView::FullPage => {
                 app.set_status_notice(crate::tui::keybind::swarm_page_hint());

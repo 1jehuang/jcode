@@ -54,7 +54,10 @@ mod todo;
 mod user_response;
 mod webfetch;
 mod websearch;
+mod withheld_identity;
 mod write;
+
+use withheld_identity::withheld_call_key;
 
 use crate::compaction::CompactionManager;
 use crate::provider::Provider;
@@ -297,22 +300,6 @@ static WITHHELD_CALLS: LazyLock<StdRwLock<HashMap<String, Vec<u64>>>> =
 /// Withheld calls remembered per session. A batch can have several sub-calls
 /// withheld at once, so one slot is not enough.
 const WITHHELD_CALLS_PER_SESSION: usize = 8;
-
-/// Identity of a call for repeat detection. `intent` is a display label the
-/// model rewords freely, so it is not part of the identity.
-fn withheld_call_key(tool: &str, input: &Value) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut input = input.clone();
-    if let Some(object) = input.as_object_mut() {
-        object.remove("intent");
-        object.remove(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY);
-        object.retain(|_, value| !value.is_null());
-    }
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    tool.hash(&mut hasher);
-    input.to_string().hash(&mut hasher);
-    hasher.finish()
-}
 
 /// True when this call repeats one that was withheld for the session. The
 /// record is consumed, so each refusal buys exactly one accepted repeat.

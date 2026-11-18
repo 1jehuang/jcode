@@ -504,6 +504,26 @@ pub fn tokenize_session_search_query(query: &str) -> Vec<String> {
     terms
 }
 
+/// Tokenize text already lowercased as a whole, preserving index Unicode boundaries.
+/// Ordinary queries intentionally retain split-then-lowercase behavior.
+pub fn tokenize_prelowercased_session_search_text(text: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    for token in text.split(|c: char| !c.is_alphanumeric()) {
+        if token.is_empty() || is_session_search_stop_word(token) {
+            continue;
+        }
+        let keep = token.chars().count() >= 2 || token.chars().all(|c| c.is_ascii_digit());
+        if keep && seen.insert(token) {
+            terms.push(token.to_owned());
+        }
+    }
+    terms
+}
+
+#[cfg(test)]
+mod prelowercased_tokenization_tests;
+
 pub fn is_session_search_stop_word(token: &str) -> bool {
     matches!(
         token,

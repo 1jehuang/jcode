@@ -1,15 +1,14 @@
 //! Turn-end follow-up policy: auto-poke and the todo quality gates.
 //!
-//! This is the client-side state machine that decides, after a turn ends, what
-//! (if anything) to send next: the incomplete-todo poke, the one-shot
-//! long-session review, the ownership gate, the completion-confidence and
-//! confidence-spike checks, and the final-response
-//! handoff. It is a faithful port of the TUI's `schedule_auto_poke_followup`
-//! so every client (TUI, Desktop, SDK users) runs the same policy.
+//! This state machine decides, after a model turn ends, what (if anything)
+//! should run next: incomplete-todo pokes, the one-shot long-session review,
+//! ownership, completion-confidence and confidence-spike checks, and the final
+//! response handoff. The daemon owns it for connected sessions, so clients must
+//! not independently dispatch these follow-ups. Standalone embeddings may use
+//! the same pure policy when they own their agent runtime.
 //!
-//! It is pure: callers fetch a [`TodoSnapshot`] (the SDK's `todo_state`),
-//! call [`FollowUpPolicy::decide`], send the returned message, and apply the
-//! returned [`TodoEffects`] (the SDK's `ack_todo_follow_up`).
+//! Callers load a [`TodoSnapshot`], call [`FollowUpPolicy::decide`], run the
+//! returned message, and apply [`TodoEffects`] before deciding again.
 
 use crate::{
     ConfidenceState, GateObservation, TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE,

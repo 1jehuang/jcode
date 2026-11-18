@@ -90,6 +90,9 @@ mod idle_hibernation;
 mod inline_interactive;
 mod input;
 mod input_help;
+mod jarvis;
+mod jarvis_listen;
+mod jarvis_status;
 mod local;
 mod misc_ui;
 mod model_context;
@@ -1459,6 +1462,8 @@ pub struct App {
     // Current session ID (from server in remote mode)
     remote_session_id: Option<String>,
     cloud_environment: cloud_environment::CloudEnvironment,
+    jarvis_speech: Option<jcode_voice::speech::SpeechPlayer>,
+    jarvis_listener: jarvis_listen::AlwaysListening,
     // All sessions on the server (remote mode only)
     remote_sessions: Vec<String>,
     remote_side_pane_images: Vec<crate::session::RenderedImage>,

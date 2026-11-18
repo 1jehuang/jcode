@@ -526,17 +526,6 @@ pub struct AgentsConfig {
     pub swarm_root_effort: Option<String>,
     /// Default terminal mode for swarm-created agents.
     pub swarm_spawn_mode: SwarmSpawnMode,
-    /// Maximum percentage (1-90) of the chat column height the inline swarm
-    /// gallery band may occupy. Leave unset to use the built-in default (40%).
-    /// Lower values keep more of the transcript visible; set near the minimum
-    /// to effectively collapse the gallery to a thin strip.
-    pub swarm_gallery_max_pct: Option<u8>,
-    /// Layout of the inline swarm strip above the status line:
-    /// `"vertical"` (default) lists one agent per row (session icon + status
-    /// glyph + task), capped to a few lines; `"horizontal"` packs all agents
-    /// as chips on a single row.
-    #[serde(default)]
-    pub swarm_strip_layout: SwarmStripLayout,
     /// Jev Decisions provider for recall: auto, openrouter, typesafe, laya,
     /// aimlapi, or jcode. Auto uses a provider-specific BYOK credential before Jcode.
     #[serde(default = "default_memory_jev_provider")]
@@ -674,36 +663,6 @@ impl SwarmSpawnMode {
             Self::Headless => "headless",
             Self::Inline => "inline",
             Self::Auto => "auto",
-        }
-    }
-}
-
-/// Layout of the inline swarm strip shown above the status line.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum SwarmStripLayout {
-    /// One agent per row: session icon + status glyph + task label, capped to
-    /// a few lines with a `+N more` overflow marker.
-    #[default]
-    Vertical,
-    /// All agents packed as chips on a single row (the historical layout).
-    Horizontal,
-}
-
-impl SwarmStripLayout {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "vertical" | "list" => Some(Self::Vertical),
-            "horizontal" | "chips" | "strip" => Some(Self::Horizontal),
-            _ => None,
-        }
-    }
-
-    /// Canonical lowercase string for this layout (matches config/env values).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Vertical => "vertical",
-            Self::Horizontal => "horizontal",
         }
     }
 }

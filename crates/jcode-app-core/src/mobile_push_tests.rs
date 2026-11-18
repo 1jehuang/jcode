@@ -180,6 +180,7 @@ fn mobile_push_title_leads_with_origin_repo_and_run_time() {
         origin: Some("XPS 14".to_string()),
         repo: Some("jcode-mobile".to_string()),
         elapsed: Some(Duration::from_secs(252)),
+        todos: None,
     };
     let p = build_payload_with(
         PushKind::TurnDone,
@@ -471,4 +472,105 @@ fn mobile_push_ios_sessions_and_cancel_markers() {
     mark_cancelled(c);
     clear_cancelled(c);
     assert!(!take_cancelled(c));
+}
+
+#[test]
+fn mobile_push_todo_indicators_are_bounded_and_keep_counts() {
+    use crate::agents_status::TodoProgress;
+    for (done, active, total, expected) in [
+        (0, 0, 0, None),
+        (2, 1, 5, Some("●●◐○○ 2/5")),
+        (8, 0, 8, Some("●●●●●●●● 8/8")),
+        (50, 1, 100, Some("▰▰▰▰▱▱▱▱ 50/100")),
+        (100, 0, 100, Some("▰▰▰▰▰▰▰▰ 100/100")),
+    ] {
+        assert_eq!(
+            todo_indicator(TodoProgress {
+                done,
+                active,
+                total
+            })
+            .as_deref(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn mobile_push_todos_exclude_cancelled_and_empty_plans() {
+    use crate::agents_status::TodoProgress;
+    use jcode_task_types::TodoItem;
+    let items: Vec<_> = ["completed", "in_progress", "pending", "cancelled"]
+        .into_iter()
+        .map(|status| TodoItem {
+            status: status.into(),
+            ..Default::default()
+        })
+        .collect();
+    let progress = TodoProgress::from_items(&items).unwrap();
+    assert_eq!(todo_indicator(progress).as_deref(), Some("●◐○ 1/3"));
+    assert_eq!(TodoProgress::from_items(&items[3..]), None);
+    assert_eq!(TodoProgress::from_items(&[]), None);
+    assert_eq!(
+        PushLabels::for_session("not-a-real-session", None, None),
+        PushLabels::default()
+    );
+}
+
+#[test]
+fn mobile_push_progress_only_labels_requested_finished_turns() {
+    let labels = PushLabels {
+        elapsed: Some(Duration::from_secs(252)),
+        todos: Some(crate::agents_status::TodoProgress {
+            done: 1,
+            active: 1,
+            total: 3,
+        }),
+        ..Default::default()
+    };
+    for body in ["Finished.", "Should I deploy now?"] {
+        let payload = build_payload_with(PushKind::TurnDone, "s", None, body, None, &labels);
+        let headline = payload.session_title.unwrap();
+        assert!(headline.contains("●◐○ 1/3"), "{headline}");
+        assert!(headline.ends_with("4m 12s"), "{headline}");
+        assert_eq!(
+            payload.kind,
+            if body.ends_with('?') {
+                PushKind::NeedsInput
+            } else {
+                PushKind::TurnDone
+            }
+        );
+    }
+    for kind in [PushKind::Wake, PushKind::TurnError, PushKind::NeedsInput] {
+        let payload = build_payload_with(kind, "s", None, "Update", None, &labels);
+        assert!(!payload.session_title.unwrap().contains("1/3"));
+    }
+}
+
+#[test]
+fn mobile_push_long_labels_preserve_progress_and_runtime() {
+    let labels = PushLabels {
+        origin: Some(" machine\n\t".repeat(100)),
+        repo: Some(" repository\n\t".repeat(100)),
+        elapsed: Some(Duration::from_secs(u64::MAX)),
+        todos: Some(crate::agents_status::TodoProgress {
+            done: u32::MAX,
+            active: 0,
+            total: u32::MAX,
+        }),
+    };
+    let payload = build_payload_with(PushKind::TurnDone, "s", None, "Continue?", None, &labels);
+    let headline = payload.session_title.unwrap();
+    assert!(headline.chars().count() <= TITLE_MAX_CHARS, "{headline}");
+    assert!(!headline.contains(['\n', '\t']));
+    assert!(
+        headline.contains("▰▰▰▰▰▰▰▰ 4294967295/4294967295"),
+        "{headline}"
+    );
+    assert!(
+        headline.ends_with(&humanize_duration(labels.elapsed.unwrap())),
+        "{headline}"
+    );
+    assert!(headline.contains("Needs input"));
 }

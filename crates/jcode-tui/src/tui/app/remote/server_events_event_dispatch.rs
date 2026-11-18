@@ -7,6 +7,25 @@ pub(in crate::tui::app) fn handle_server_event(
     event: ServerEvent,
     remote: &mut impl RemoteEventState,
 ) -> bool {
+    // Local capability registration is control traffic, even when a turn is
+    // active. Process its acknowledgment before the scoped-turn terminal fence.
+    if let ServerEvent::Ack { id } = &event
+        && remote.finish_local_tools_request(*id, true)
+    {
+        if crate::tui::jarvis::enabled() {
+            app.set_status_notice("Jarvis voice replies ready");
+            return true;
+        }
+        return false;
+    }
+    if let ServerEvent::Error { id, message, .. } = &event
+        && remote.finish_local_tools_request(*id, false)
+    {
+        app.push_display_message(DisplayMessage::error(format!(
+            "Local tool registration failed: {message}. Voice replies are not ready."
+        )));
+        return true;
+    }
     // Route mutation errors are control responses, not failed conversation
     // turns. Handle them before the scoped-turn terminal fence.
     if let ServerEvent::Error { id, message, .. } = &event

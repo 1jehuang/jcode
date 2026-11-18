@@ -30,6 +30,7 @@ fn project_pinned_todo_card<R>(
 /// Exact card visibility, without cloning cached lines, spinner animation, or
 /// assembling a collapsed/expanded band. Malformed payloads still use the
 /// renderer's system-message fallback rather than a separate JSON heuristic.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn pinned_todo_card_has_lines(
     payload: Option<&str>,
     diff_mode: crate::config::DiffDisplayMode,

@@ -2206,16 +2206,15 @@ impl crate::tui::TuiState for App {
     }
 }
 
-/// The three Alt+N swarm views. Repeated presses cycle in declaration order.
+/// The two Alt+N swarm views.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SwarmPanelView {
     Chat,
-    Controls,
     FullPage,
 }
 
 impl App {
-    /// Cycle chat → inline controls → full live swarm page → chat.
+    /// Cycle chat → full live swarm page → chat.
     pub(crate) fn cycle_swarm_panel_view(&mut self) -> SwarmPanelView {
         if !self.inline_swarm_gallery_active() {
             self.swarm_panel_focused = false;
@@ -2223,18 +2222,14 @@ impl App {
             return SwarmPanelView::Chat;
         }
 
-        let next = match (self.swarm_panel_focused, self.swarm_panel_full_page) {
-            (false, _) => SwarmPanelView::Controls,
-            (true, false) => SwarmPanelView::FullPage,
-            (true, true) => SwarmPanelView::Chat,
+        let next = if self.swarm_panel_full_page {
+            SwarmPanelView::Chat
+        } else {
+            SwarmPanelView::FullPage
         };
         match next {
             SwarmPanelView::Chat => {
                 self.swarm_panel_focused = false;
-                self.swarm_panel_full_page = false;
-            }
-            SwarmPanelView::Controls => {
-                self.swarm_panel_focused = true;
                 self.swarm_panel_full_page = false;
             }
             SwarmPanelView::FullPage => {

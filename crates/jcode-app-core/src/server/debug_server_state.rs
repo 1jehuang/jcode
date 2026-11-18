@@ -785,17 +785,16 @@ async fn build_server_memory_payload(
     for (session_id, agent_arc) in sessions_guard.iter() {
         if let Ok(agent) = agent_arc.try_lock() {
             locked_session_count += 1;
-            let profile = agent.debug_memory_profile();
-            let session_profile = profile.get("session").cloned().unwrap_or_default();
+            // The compact snapshot omits compaction capacity attribution. Read
+            // the same session profile as agent:memory without its discarded
+            // process, interrupt, and frozen-snapshot diagnostics.
+            let session_profile = agent.session_for_split().debug_memory_profile();
             // Only profiles obtained through try_lock contribute. Capacity is
             // attribution, not serialized length or an estimate of RSS savings.
             compaction_memory.observe(session_id, &session_profile);
-            let totals = session_profile.get("totals").cloned().unwrap_or_default();
-            let messages = session_profile.get("messages").cloned().unwrap_or_default();
-            let provider_cache = session_profile
-                .get("provider_messages_cache")
-                .cloned()
-                .unwrap_or_default();
+            let totals = &session_profile["totals"];
+            let messages = &session_profile["messages"];
+            let provider_cache = &session_profile["provider_messages_cache"];
             let json_bytes = totals
                 .get("json_bytes")
                 .and_then(|value| value.as_u64())
@@ -1253,3 +1252,7 @@ fn path_len(path: &std::path::Path) -> usize {
 #[cfg(test)]
 #[path = "debug_server_state_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "debug_server_memory_efficiency_tests.rs"]
+mod efficiency_tests;

@@ -2,6 +2,10 @@
 
 use super::*;
 
+#[cfg(test)]
+#[path = "registry_lifecycle_tests.rs"]
+mod tests;
+
 impl Registry {
     pub(super) fn tool_lifecycle_fields(
         phase: &str,
@@ -15,7 +19,8 @@ impl Registry {
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "none".to_string());
-        let input_json = serde_json::to_string(input).unwrap_or_default();
+        // Telemetry needs only the length, not another owned copy of the input.
+        let input_json_bytes = crate::process_memory::estimate_json_bytes(input);
         let mut fields = vec![
             ("phase".to_string(), phase.to_string()),
             ("tool_name".to_string(), requested_name.to_string()),
@@ -28,11 +33,11 @@ impl Registry {
                 format!("{:?}", ctx.execution_mode),
             ),
             ("cwd".to_string(), cwd),
-            ("input_json_bytes".to_string(), input_json.len().to_string()),
+            ("input_json_bytes".to_string(), input_json_bytes.to_string()),
         ];
 
         if let Some(object) = input.as_object() {
-            let mut keys = object.keys().cloned().collect::<Vec<_>>();
+            let mut keys = object.keys().map(String::as_str).collect::<Vec<_>>();
             keys.sort();
             fields.push(("input_keys".to_string(), keys.join(",")));
 
@@ -83,10 +88,7 @@ impl Registry {
             .session_id(ctx.session_id.clone())
             .field("TOOL_NAME", resolved_name)
             .field("TOOL_CALL_ID", ctx.tool_call_id.clone())
-            .field(
-                "TOOL_INPUT",
-                crate::hooks::truncate_tool_input(&input.to_string()),
-            )
+            .field("TOOL_INPUT", crate::hooks::tool_input_json_prefix(input))
             .field("TOUCHED_PATHS", unique_paths.join("\n"))
             .field("STATUS", if result.is_ok() { "ok" } else { "error" })
             .field("DURATION_MS", latency_ms.to_string());

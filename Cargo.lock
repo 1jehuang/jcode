@@ -4694,6 +4694,7 @@ dependencies = [
  "image",
  "jcode-app-core",
  "jcode-build-meta",
+ "jcode-companion",
  "jcode-config-types",
  "jcode-core",
  "jcode-fuzzy",

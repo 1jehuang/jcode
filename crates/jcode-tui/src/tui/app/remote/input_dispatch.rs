@@ -16,7 +16,7 @@ pub(in crate::tui::app) async fn begin_remote_send(
     auto_retry: bool,
     retry_attempts: u8,
 ) -> Result<u64> {
-    if let Err(error) = app.prepare_cloud_environment(remote).await {
+    if let Err(error) = app.prepare_local_tools(remote).await {
         crate::logging::info(&format!(
             "RECOVERY_SEND_FAILED session_id={:?} previous_request_id={:?} request_id=unassigned phase=prepare content_bytes={} images={} retry_attempts={}",
             app.remote_session_id,
