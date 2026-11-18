@@ -660,29 +660,10 @@ fn configure_tool_scratch(command: &mut TokioCommand) {
 }
 
 #[cfg(unix)]
-struct ProcessGroupKillGuard {
-    pid: Option<u32>,
-}
-
+#[path = "bash_process_group.rs"]
+mod process_group;
 #[cfg(unix)]
-impl ProcessGroupKillGuard {
-    fn new(pid: Option<u32>) -> Self {
-        Self { pid }
-    }
-
-    fn disarm(&mut self) {
-        self.pid = None;
-    }
-}
-
-#[cfg(unix)]
-impl Drop for ProcessGroupKillGuard {
-    fn drop(&mut self) {
-        if let Some(pid) = self.pid {
-            let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
-        }
-    }
-}
+use process_group::ProcessGroupKillGuard;
 
 fn build_shell_command(cmd_str: &str) -> TokioCommand {
     #[cfg(windows)]
