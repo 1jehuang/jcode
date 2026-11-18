@@ -93,6 +93,33 @@ fn socket_identity(_socket: &Path) -> Option<SocketIdentity> {
     None
 }
 
+/// Count the complete compact JSON representation without retaining its bytes.
+/// Keep serialization fallible, including non-UTF-8 socket path errors.
+fn serialized_byte_len(value: &impl Serialize) -> serde_json::Result<u64> {
+    struct Counter(u64);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.write_all(bytes)?;
+            Ok(bytes.len())
+        }
+
+        fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(|| std::io::Error::other("serialized snapshot length overflow"))?;
+            Ok(())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value)?;
+    Ok(counter.0)
+}
+
 impl AccountUsageStartupPublisher {
     pub fn new(socket: &Path, instance_id: &str) -> Option<Self> {
         let socket = normalized_socket(socket)?;
@@ -137,7 +164,7 @@ impl AccountUsageStartupPublisher {
             anthropic: strip_email(anthropic),
             openai: strip_email(openai),
         };
-        if serde_json::to_vec(&snapshot)?.len() as u64 > MAX_BYTES {
+        if serialized_byte_len(&snapshot)? > MAX_BYTES {
             return Ok(());
         }
         // Private directory and private atomic replacement. Quotas and labels
@@ -270,6 +297,10 @@ fn discard_expired_windows(accounts: &mut [AccountUsageSnapshot], now_ms: u64) {
     }
 }
 
+#[cfg(test)]
+#[path = "startup_snapshot_sizing_tests.rs"]
+mod sizing_tests;
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -353,9 +384,11 @@ mod tests {
         let second = dir.path().join("other.sock");
         let _other = UnixListener::bind(&second).unwrap();
         assert!(read_snapshot(&second, &publisher.path).is_none());
-        drop(listener);
         std::fs::remove_file(&socket).unwrap();
+        // Keep the old socket alive until replacement so its inode cannot be
+        // recycled within the filesystem's timestamp resolution.
         let _replacement = UnixListener::bind(&socket).unwrap();
+        drop(listener);
         publisher.publish(&[], &[]).unwrap();
         assert_eq!(read_private(&publisher.path).unwrap(), bytes);
         assert!(read_snapshot(&publisher.socket, &publisher.path).is_none());
@@ -368,10 +401,22 @@ mod tests {
         let _listener = UnixListener::bind(&socket).unwrap();
         let mut before_chmod = AccountUsageStartupPublisher::new(&socket, "before-chmod").unwrap();
         before_chmod.path = dir.path().join("old-usage.json");
-        // Ensure the metadata change is visible even on coarse test clocks.
-        std::thread::sleep(Duration::from_millis(2));
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let current = socket_identity(&socket).unwrap();
+        // Observe the chmod transition rather than assuming a fixed sleep
+        // exceeds the filesystem's ctime resolution. The deadline diagnoses
+        // a missing transition without allowing a hung test.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let current = loop {
+            std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let current = socket_identity(&socket).unwrap();
+            if current != before_chmod.identity {
+                break current;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "chmod did not change the socket generation within five seconds"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
         assert_eq!(before_chmod.identity.inode, current.inode);
         assert_ne!(before_chmod.identity, current);
         before_chmod.publish(&[], &[]).unwrap();

@@ -17,7 +17,15 @@ pub(crate) fn parse_file_activity_line_range(summary: Option<&str>) -> Option<(u
             break;
         }
     }
-    let start = digits.parse::<u64>().ok()?;
+    let start = match digits.parse::<u64>() {
+        Ok(start) => start,
+        Err(error) => {
+            crate::logging::info(&format!(
+                "Invalid file activity line start {digits:?}: {error}"
+            ));
+            return None;
+        }
+    };
     if chars.peek() == Some(&'-') {
         chars.next();
         let mut end_digits = String::new();
@@ -29,10 +37,44 @@ pub(crate) fn parse_file_activity_line_range(summary: Option<&str>) -> Option<(u
                 break;
             }
         }
-        let end = end_digits.parse::<u64>().ok().unwrap_or(start);
+        let end = match end_digits.parse::<u64>() {
+            Ok(end) => end,
+            Err(error) => {
+                crate::logging::info(&format!(
+                    "Invalid file activity line end {end_digits:?}: {error}"
+                ));
+                return None;
+            }
+        };
         Some((start.min(end), start.max(end)))
     } else {
         Some((start, start))
+    }
+}
+
+#[cfg(test)]
+mod line_range_tests {
+    use super::parse_file_activity_line_range;
+
+    #[test]
+    fn rejects_missing_or_overflowing_range_endpoints() {
+        for summary in [
+            "lines 5-",
+            "line -2",
+            "lines 5-18446744073709551616",
+            "line 18446744073709551616",
+        ] {
+            assert_eq!(
+                parse_file_activity_line_range(Some(summary)),
+                None,
+                "{summary}"
+            );
+        }
+        assert_eq!(
+            parse_file_activity_line_range(Some("lines 9-3")),
+            Some((3, 9))
+        );
+        assert_eq!(parse_file_activity_line_range(Some("line 5")), Some((5, 5)));
     }
 }
 
@@ -139,8 +181,9 @@ fn format_file_activity_entry(entry: &FileActivityEntry) -> String {
         })
         .unwrap_or_default();
     format!(
-        "{} {} {}{}",
+        "{} {} {} {}{}",
         entry.agent,
+        entry.operation,
         entry.path,
         facts.join(" "),
         intent
@@ -148,13 +191,14 @@ fn format_file_activity_entry(entry: &FileActivityEntry) -> String {
 }
 
 /// Model-facing notice, one line per peer and file:
-/// `agent path +A-R [xN] [Lstart-end] [overlap] [earlier][: intent]`.
+/// `agent edited path +A-R [xN] [Lstart-end] [overlap] [earlier][: intent]`.
 /// `xN` is the number of edits merged, `overlap` means the change touches
 /// lines the recipient edited, and `earlier` means it predates the
-/// recipient's own first edit. The diff itself is never included.
+/// recipient's own first edit. The diff itself is never included, and there
+/// is no prefix: the notice is identified by its interrupt source.
 pub(crate) fn format_file_activity_notice(entries: &[FileActivityEntry]) -> String {
     let lines: Vec<String> = entries.iter().map(format_file_activity_entry).collect();
-    format!("⚠ File activity: {}", lines.join("\n"))
+    lines.join("\n")
 }
 
 /// `path` relative to the recipient's working directory when it is inside it.
@@ -186,6 +230,21 @@ pub(crate) async fn deliver_file_activity_notice(
     queues: &super::state::SessionInterruptQueues,
     sessions: &super::SessionAgents,
 ) {
+    // Keep only notices that are still waiting in a live session's queue, so
+    // the map never outgrows the sessions with an undelivered notice.
+    if !pending.is_empty() {
+        let queues = queues.read().await;
+        pending.retain(|session_id, notice| {
+            queues.get(session_id).is_some_and(|queue| {
+                queue.lock().is_ok_and(|queued| {
+                    queued.iter().any(|message| {
+                        message.source == jcode_agent_runtime::SoftInterruptSource::FileActivity
+                            && message.content == notice.content
+                    })
+                })
+            })
+        });
+    }
     if let Some(notice) = pending.get_mut(recipient) {
         let mut entries = notice.entries.clone();
         merge_file_activity_entry(&mut entries, entry.clone());
@@ -211,7 +270,7 @@ pub(crate) async fn deliver_file_activity_notice(
         recipient,
         content.clone(),
         false,
-        jcode_agent_runtime::SoftInterruptSource::System,
+        jcode_agent_runtime::SoftInterruptSource::FileActivity,
         queues,
         sessions,
     )

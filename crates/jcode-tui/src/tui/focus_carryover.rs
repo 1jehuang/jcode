@@ -16,7 +16,26 @@ const UNFOCUSED_ENV: &str = "JCODE_CLIENT_UNFOCUSED_PID";
 const CONFIRMED_ENV: &str = "JCODE_CLIENT_FOCUS_KNOWN_PID";
 
 fn marker_matches(value: Option<&str>, pid: u32) -> bool {
-    value.and_then(|v| v.trim().parse::<u32>().ok()) == Some(pid)
+    value.is_some_and(|value| match value.trim().parse::<u32>() {
+        Ok(marker) => marker == pid,
+        Err(error) => {
+            crate::logging::debug(&format!(
+                "Ignoring invalid terminal focus PID marker: {error}"
+            ));
+            false
+        }
+    })
+}
+
+fn environment_marker_matches(name: &str, pid: u32) -> bool {
+    match std::env::var(name) {
+        Ok(value) => marker_matches(Some(&value), pid),
+        Err(std::env::VarError::NotPresent) => false,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            crate::logging::debug("Ignoring non-Unicode terminal focus PID marker");
+            false
+        }
+    }
 }
 
 /// Record a focus change so a later re-exec of this process can restore it.
@@ -42,7 +61,7 @@ pub(crate) fn confirm() {
         return;
     }
     let pid = std::process::id();
-    if !marker_matches(std::env::var(CONFIRMED_ENV).ok().as_deref(), pid) {
+    if !environment_marker_matches(CONFIRMED_ENV, pid) {
         crate::env::set_var(CONFIRMED_ENV, pid.to_string());
     }
 }
@@ -50,17 +69,13 @@ pub(crate) fn confirm() {
 /// Whether this process learned its real focus state before it re-executed.
 pub(crate) fn initial_confirmed() -> bool {
     let pid = std::process::id();
-    marker_matches(std::env::var(CONFIRMED_ENV).ok().as_deref(), pid)
-        || marker_matches(std::env::var(UNFOCUSED_ENV).ok().as_deref(), pid)
+    environment_marker_matches(CONFIRMED_ENV, pid) || environment_marker_matches(UNFOCUSED_ENV, pid)
 }
 
 /// Focus state a freshly started client should assume: unfocused only when
 /// this very process recorded losing focus before it re-executed.
 pub(crate) fn initial_focus() -> bool {
-    !marker_matches(
-        std::env::var(UNFOCUSED_ENV).ok().as_deref(),
-        std::process::id(),
-    )
+    !environment_marker_matches(UNFOCUSED_ENV, std::process::id())
 }
 
 #[cfg(test)]

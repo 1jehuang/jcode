@@ -494,17 +494,6 @@ pub(crate) fn diagram_pane_visibility_key_label() -> String {
         .unwrap_or_else(|| jcode_tui_core::keybind::alt_chord("Shift+M"))
 }
 
-/// Status-line hint shown when the inline swarm controls open.
-pub(crate) fn swarm_view_hint(next: &str) -> String {
-    use jcode_tui_core::keybind::alt_chord_lower;
-    format!(
-        "Swarm: {} {next} · {} select · {} open · esc",
-        alt_chord_lower("n"),
-        alt_chord_lower("↑/↓"),
-        alt_chord_lower("o"),
-    )
-}
-
 /// Status-line hint shown when the full swarm page opens.
 pub(crate) fn swarm_page_hint() -> String {
     use jcode_tui_core::keybind::alt_chord_lower;
@@ -514,19 +503,6 @@ pub(crate) fn swarm_page_hint() -> String {
         alt_chord_lower("↑/↓"),
         alt_chord_lower("o"),
     )
-}
-
-/// Human-friendly label for the configured swarm-panel focus chord (e.g.
-/// "Alt+N"), used in the inline swarm strip's enter-controls hint.
-pub(crate) fn swarm_panel_focus_key_label() -> String {
-    let cfg = config();
-    let default = swarm_panel_focus_default();
-    let default_label = format_binding(&default);
-    let (binding, _) = parse_optional(&cfg.keybindings.swarm_panel_focus, default, &default_label);
-    match binding {
-        Some(b) => format_binding(&b),
-        None => default_label,
-    }
 }
 
 /// Human-friendly label for the configured todo-card toggle chord (e.g.

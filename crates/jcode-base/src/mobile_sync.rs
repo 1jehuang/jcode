@@ -10,8 +10,9 @@
 //!
 //! Only user-visible text is uploaded: user/assistant text, tool calls as a
 //! one-line summary, and tool results truncated. Assistant markdown images in
-//! the generated-image store become bounded thumbnails. Hidden reasoning,
-//! arbitrary local files and provider-native blobs are never sent.
+//! the generated-image store and visible image attachments become bounded
+//! thumbnails. Hidden reasoning, arbitrary local files and provider-native
+//! blobs are never sent.
 
 use crate::session::Session;
 use crate::storage;
@@ -69,7 +70,7 @@ const MAX_TOOL_ID_BYTES: usize = 256;
 const MAX_STRUCTURED_BYTES: usize = 240 * 1024;
 // Bump when existing cloud rows need replaying, even if snapshot bytes and
 // visible-message fingerprints are unchanged. Missing versions deserialize as 0.
-const WIRE_VERSION: u32 = 1;
+const WIRE_VERSION: u32 = 2;
 /// Only sessions touched within this window are synced on enable.
 const BACKFILL_WINDOW: Duration = Duration::from_secs(14 * 24 * 3600);
 const SYNC_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -79,6 +80,58 @@ const MAX_DIRTY_SESSIONS: usize = 1024;
 static PERSISTED: tokio::sync::Notify = tokio::sync::Notify::const_new();
 static DIRTY_SESSIONS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 static SYNC_PASS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static FAILURE_BACKOFF: Mutex<Option<FailureBackoff>> = Mutex::new(None);
+
+// Process-local only: restarting, changing account/endpoint/home, or toggling
+// sync starts fresh. Failed uploads never advance durable successful progress.
+#[derive(Default)]
+struct FailureBackoff {
+    scope: (PathBuf, u64, String, u64),
+    sessions: BTreeMap<String, FailedSession>,
+}
+
+struct FailedSession {
+    revision: [u64; 4],
+    attempts: u32,
+    retry_at: Instant,
+}
+
+impl FailureBackoff {
+    fn deferred(&mut self, id: &str, revision: [u64; 4], fresh: bool, now: Instant) -> bool {
+        if fresh
+            || self
+                .sessions
+                .get(id)
+                .is_some_and(|failure| failure.revision != revision)
+        {
+            self.sessions.remove(id);
+        }
+        self.sessions
+            .get(id)
+            .is_some_and(|failure| now < failure.retry_at)
+    }
+
+    fn failed(&mut self, id: &str, revision: [u64; 4], now: Instant) {
+        let attempts = self
+            .sessions
+            .get(id)
+            .map_or(1, |f| f.attempts.saturating_add(1));
+        if self.sessions.len() >= MAX_DIRTY_SESSIONS && !self.sessions.contains_key(id) {
+            self.sessions.pop_first();
+        }
+        let seconds = 20u64
+            .saturating_mul(1u64 << attempts.saturating_sub(1).min(4))
+            .min(300);
+        self.sessions.insert(
+            id.to_owned(),
+            FailedSession {
+                revision,
+                attempts,
+                retry_at: now + Duration::from_secs(seconds),
+            },
+        );
+    }
+}
 
 /// Called only after a durable session write, never after sync-state writes.
 /// Notify retains a permit while an upload is running. The set also retains
@@ -356,16 +409,7 @@ fn merge_progress(
 ) -> bool {
     let mut changed = false;
     for (id, progress) in updates {
-        let version = |p: &SessionProgress| {
-            p.revision
-                .map(|r| r[0].max(r[2]))
-                .unwrap_or(p.mtime_ms.saturating_mul(1_000_000))
-        };
-        if state.sessions.get(id).is_none_or(|old| {
-            old != progress
-                && (version(old) < version(progress)
-                    || (version(old) == version(progress) && old.uploaded <= progress.uploaded))
-        }) {
+        if progress::replaces(state.sessions.get(id), progress) {
             state.sessions.insert(id.clone(), progress.clone());
             changed = true;
         }
@@ -378,10 +422,9 @@ fn commit_progress(generation: u64, updates: &BTreeMap<String, SessionProgress>)
         return Ok(());
     }
     let _lock = state_lock()?;
-    let mut current = load_state();
-    if current.enabled && current.generation == generation && merge_progress(&mut current, updates)
-    {
-        storage::write_json_secret(&state_path()?, &current)?;
+    let current = load_state_snapshot();
+    if let Some(commit) = progress::ProgressCommit::new(&current, generation, updates) {
+        storage::write_json_secret(&state_path()?, &commit)?;
     }
     Ok(())
 }
@@ -516,7 +559,13 @@ fn bounded_tool_input(input: &serde_json::Value) -> serde_json::Value {
     }
     let mut preview = Preview(Vec::new());
     if serde_json::to_writer(&mut preview, input).is_ok() {
-        serde_json::from_slice(&preview.0).unwrap_or_default()
+        match serde_json::from_slice(&preview.0) {
+            Ok(messages) => messages,
+            Err(error) => {
+                crate::logging::debug(&format!("Cannot decode mobile preview cache: {error}"));
+                serde_json::Value::Null
+            }
+        }
     } else {
         serde_json::Value::String(format!(
             "{}\n… (truncated)",
@@ -524,6 +573,40 @@ fn bounded_tool_input(input: &serde_json::Value) -> serde_json::Value {
         ))
     }
 }
+
+// Use the same serializer as the wire representation without allocating and
+// copying a JSON buffer that would immediately be discarded.
+fn serialized_byte_len(value: &impl Serialize) -> serde_json::Result<usize> {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+
+        fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            // This sink always consumes a complete slice and cannot return
+            // Interrupted or WriteZero. Avoid the generic partial-write loop.
+            self.0 += bytes.len();
+            Ok(())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value)?;
+    Ok(counter.0)
+}
+
+#[cfg(test)]
+#[path = "mobile_sync_byte_count_tests.rs"]
+mod byte_count_tests;
+
+#[cfg(test)]
+#[path = "mobile_sync_direct_count_tests.rs"]
+mod direct_count_tests;
 
 fn structured_tools(
     blocks: &[ContentBlock],
@@ -596,203 +679,27 @@ fn structured_tools(
     }
     // Backend limits are UTF-16 code units for prose and 256 KiB serialized
     // metadata. Reserve room for the JSON property names/envelope.
-    if prose.text.encode_utf16().count() > 200_000
-        || serde_json::to_vec(&(&calls, &results)).ok()?.len() > MAX_STRUCTURED_BYTES
-    {
+    if prose.text.encode_utf16().count() > 200_000 {
+        return None;
+    }
+    let structured_bytes = match serialized_byte_len(&(&calls, &results)) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            crate::logging::debug(&format!("Cannot serialize mobile tool metadata: {error}"));
+            return None;
+        }
+    };
+    if structured_bytes > MAX_STRUCTURED_BYTES {
         return None;
     }
     Some((prose.text, calls, results))
 }
-
-/// Convert stored messages into the mobile wire format. One stored message
-/// becomes at most one wire message; `seq` is the stored index so uploads are
-/// stable and idempotent.
-pub fn wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
-    session
-        .messages
-        .iter()
-        .enumerate()
-        .skip(start)
-        .filter_map(|(seq, message)| {
-            let mut text = BoundedText::new(MAX_TEXT_CHARS);
-            let mut has_parts = false;
-            let mut is_tool_result = false;
-            for block in &message.content {
-                // Even after the text limit, later tool results change the role.
-                if matches!(block, ContentBlock::ToolResult { .. }) {
-                    is_tool_result = true;
-                }
-                if text.truncated {
-                    continue;
-                }
-                let part = match block {
-                    ContentBlock::Text { text, .. }
-                        if !text.trim_start().is_empty()
-                            && !text.trim_start().starts_with("<system-reminder>") =>
-                    {
-                        std::borrow::Cow::Borrowed(text.as_str())
-                    }
-                    ContentBlock::ToolUse { name, input, .. } => {
-                        if has_parts {
-                            text.push("\n\n");
-                        }
-                        append_tool_summary(&mut text, name, input);
-                        has_parts = true;
-                        continue;
-                    }
-                    ContentBlock::ToolResult { content, .. } => {
-                        std::borrow::Cow::Owned(truncate(content, MAX_TOOL_RESULT_CHARS))
-                    }
-                    _ => continue,
-                };
-                if has_parts {
-                    text.push("\n\n");
-                }
-                text.push(&part);
-                has_parts = true;
-            }
-            if !has_parts {
-                return None;
-            }
-            let role = if is_tool_result {
-                "tool"
-            } else if message.display_role.is_some() {
-                "system"
-            } else {
-                match message.role {
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                }
-            };
-            let structured = structured_tools(&message.content);
-            let (display_text, tool_calls, tool_results) = match structured {
-                Some((prose, calls, results)) => (Some(prose), calls, results),
-                None => (None, Vec::new(), Vec::new()),
-            };
-            Some(WireMessage {
-                seq,
-                role,
-                display_text,
-                tool_calls,
-                tool_results,
-                images: if role == "assistant" {
-                    generated_images(&text.text)
-                } else {
-                    Vec::new()
-                },
-                text: text.text,
-                created_at: message.timestamp.map(|t| t.to_rfc3339()),
-            })
-        })
-        .collect()
-}
-
-fn message_chunks(messages: &[WireMessage]) -> Vec<&[WireMessage]> {
-    let mut chunks = Vec::new();
-    let mut start = 0;
-    let mut bytes = 0;
-    for (index, message) in messages.iter().enumerate() {
-        let size = serde_json::to_vec(message).map_or(0, |v| v.len());
-        if index > start
-            && (bytes + size > 3 * 1024 * 1024 || index - start >= MAX_MESSAGES_PER_UPLOAD)
-        {
-            chunks.push(&messages[start..index]);
-            start = index;
-            bytes = 0;
-        }
-        bytes += size;
-    }
-    if start < messages.len() {
-        chunks.push(&messages[start..]);
-    }
-    chunks
-}
-
-// Only explicit markdown image destinations under the generated-image store
-// are eligible. Canonicalization rejects traversal and symlink escapes.
-fn generated_images(text: &str) -> Vec<WireImage> {
-    use base64::Engine;
-    let Ok(root) =
-        storage::jcode_dir().and_then(|p| Ok(p.join("generated-images").canonicalize()?))
-    else {
-        return Vec::new();
-    };
-    let mut seen = BTreeSet::new();
-    let mut images = Vec::new();
-    for fragment in text.split("![").skip(1).take(64) {
-        let Some((_, destination)) = fragment.split_once("](") else {
-            continue;
-        };
-        let Some((destination, _)) = destination.split_once(')') else {
-            continue;
-        };
-        let path = Path::new(destination.trim().trim_start_matches("file://"));
-        let Ok(path) = path.canonicalize() else {
-            continue;
-        };
-        if !path.starts_with(&root) || !seen.insert(path.clone()) {
-            continue;
-        }
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            // Do not follow a file swapped to a symlink after canonicalization,
-            // and never let a special file block the transcript sync worker.
-            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-        }
-        let Ok(file) = options.open(&path) else {
-            continue;
-        };
-        let Ok(meta) = file.metadata() else {
-            continue;
-        };
-        if !meta.is_file() || meta.len() > 16 * 1024 * 1024 {
-            continue;
-        }
-        let Ok(mut reader) =
-            image::ImageReader::new(std::io::BufReader::new(file)).with_guessed_format()
-        else {
-            continue;
-        };
-        let mut limits = image::Limits::default();
-        limits.max_image_width = Some(8192);
-        limits.max_image_height = Some(8192);
-        limits.max_alloc = Some(128 * 1024 * 1024);
-        reader.limits(limits);
-        let Ok(image) = reader.decode() else {
-            continue;
-        };
-        let mut thumbnail = image.thumbnail(1024, 1024).to_rgb8();
-        loop {
-            let mut bytes = Vec::new();
-            if image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 75)
-                .encode_image(&thumbnail)
-                .is_err()
-            {
-                break;
-            }
-            if bytes.len() <= 256 * 1024 {
-                images.push(WireImage {
-                    media_type: "image/jpeg".into(),
-                    data: base64::engine::general_purpose::STANDARD.encode(bytes),
-                });
-                break;
-            }
-            thumbnail = image::imageops::thumbnail(
-                &thumbnail,
-                thumbnail.width() / 2,
-                thumbnail.height() / 2,
-            );
-        }
-        if images.len() == 4 {
-            break;
-        }
-    }
-    images
-}
-
+#[path = "mobile_sync/wire_payload.rs"]
+mod wire_payload;
+pub use wire_payload::wire_messages;
+#[cfg(test)]
+use wire_payload::{attached_images, generated_images};
+use wire_payload::{image_thumbnail, message_chunks};
 fn wire_fingerprint(messages: &[WireMessage], end: usize) -> u64 {
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     for message in messages.iter().take_while(|message| message.seq < end) {
@@ -801,16 +708,11 @@ fn wire_fingerprint(messages: &[WireMessage], end: usize) -> u64 {
     hash.finish()
 }
 
+#[path = "mobile_sync_incremental_cache.rs"]
+mod incremental_cache;
+
 fn incremental_messages(session: &Session, progress: &SessionProgress) -> (Vec<WireMessage>, u64) {
-    let mut messages = wire_messages(session, 0);
-    let fingerprint = wire_fingerprint(&messages, session.messages.len());
-    let unchanged_prefix = progress.wire_version == WIRE_VERSION
-        && progress.uploaded <= session.messages.len()
-        && progress.fingerprint == Some(wire_fingerprint(&messages, progress.uploaded));
-    if unchanged_prefix {
-        messages.retain(|message| message.seq >= progress.uploaded);
-    }
-    (messages, fingerprint)
+    incremental_cache::messages(session, progress)
 }
 
 fn mtime_ms(path: &Path) -> u64 {
@@ -899,6 +801,24 @@ pub struct SyncReport {
     pub errors: usize,
 }
 
+// Fixed labels distinguish actionable failures without logging response bodies,
+// account identity, endpoint URLs, or credentials.
+fn upload_http_outcome(status: reqwest::StatusCode) -> &'static str {
+    match status.as_u16() {
+        401 => "unauthorized",
+        403 => "forbidden",
+        404 => "route_missing",
+        413 => "payload_too_large",
+        429 => "rate_limited",
+        500..=599 => "server_error",
+        _ => "http_error",
+    }
+}
+
+#[cfg(test)]
+#[path = "mobile_sync_diagnostics_tests.rs"]
+mod diagnostics_tests;
+
 async fn upload(
     client: &reqwest::Client,
     api_base: &str,
@@ -907,7 +827,7 @@ async fn upload(
     body: &UploadBody<'_>,
 ) -> Result<()> {
     let mut timing = SyncTiming::new("http_upload");
-    timing.outcome = "error";
+    timing.outcome = "transport_error";
     let url = format!(
         "{}/mobile/sessions/{}",
         api_base.trim_end_matches('/'),
@@ -920,10 +840,19 @@ async fn upload(
         .timeout(Duration::from_secs(30))
         .send()
         .await
+        .inspect_err(|error| {
+            timing.outcome = if error.is_timeout() {
+                "timeout"
+            } else if error.is_connect() {
+                "connect_error"
+            } else {
+                "transport_error"
+            };
+        })
         .context("mobile sync upload failed")?;
     let status = response.status();
     if !status.is_success() {
-        timing.outcome = "http_error";
+        timing.outcome = upload_http_outcome(status);
         // Response bodies can echo private content or credentials.
         anyhow::bail!("mobile sync upload returned {status}");
     }
@@ -993,14 +922,34 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
         "pass_incremental"
     });
     timing.outcome = "error";
-    let state = load_state();
+    // Keep the parsed inventory shared across unchanged passes and fences.
+    let state = load_state_snapshot();
     if !state.enabled {
         timing.outcome = "skipped_disabled";
         return Ok(SyncReport::default());
     }
-    let api_key = crate::subscription_catalog::configured_api_key()
-        .context("mobile sync needs a Jcode account: run `jcode account login`")?;
+    let api_key = crate::subscription_catalog::configured_api_key().with_context(|| {
+        timing.outcome = "missing_account";
+        "mobile sync needs a Jcode account: run `jcode account login`"
+    })?;
     let api_base = subscription_api::configured_api_base();
+    let mut credential_hash = std::collections::hash_map::DefaultHasher::new();
+    api_key.hash(&mut credential_hash);
+    let scope = (
+        storage::jcode_dir()?,
+        state.generation,
+        api_base.clone(),
+        credential_hash.finish(),
+    );
+    let mut failures = FAILURE_BACKOFF
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .filter(|cache| cache.scope == scope)
+        .unwrap_or_else(|| FailureBackoff {
+            scope,
+            ..Default::default()
+        });
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -1015,7 +964,11 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
         Vec::new()
     };
     let dirty = std::mem::take(&mut *DIRTY_SESSIONS.lock().unwrap_or_else(|e| e.into_inner()));
-    for id in &dirty {
+    let mut pending = dirty.clone();
+    if reconcile {
+        pending.extend(failures.sessions.keys().cloned());
+    }
+    for id in &pending {
         if valid_session_id(id) && !candidates.iter().any(|(candidate, _, _)| candidate == id) {
             let path = storage::jcode_dir()?
                 .join("sessions")
@@ -1040,6 +993,10 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
             .cloned()
             .unwrap_or_else(SessionProgress::default);
         let revision = session_revision(&path);
+        if failures.deferred(&id, revision, dirty.contains(&id), Instant::now()) {
+            unchanged_count += 1;
+            continue;
+        }
         if progress.wire_version == WIRE_VERSION
             && progress.revision == Some(revision)
             && !dirty.contains(&id)
@@ -1059,11 +1016,12 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
             Ok(s) => s,
             Err(_) => {
                 upload_timing.outcome = "load_error";
-                mark_dirty(&id);
+                failures.failed(&id, revision, Instant::now());
                 continue;
             }
         };
         if session.is_debug || session.messages.is_empty() {
+            failures.sessions.remove(&id);
             upload_timing.outcome = "skipped_empty_or_debug";
             updates.insert(
                 id,
@@ -1114,6 +1072,7 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
             report.messages_uploaded += chunk.len();
         }
         if ok {
+            failures.sessions.remove(&id);
             upload_timing.outcome = "success";
             report.sessions_uploaded += 1;
             updates.insert(
@@ -1126,7 +1085,10 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
                     fingerprint: Some(fingerprint),
                 },
             );
+        } else if upload_timing.outcome == "error" {
+            failures.failed(&id, revision, Instant::now());
         } else {
+            // A generation fence is not an upload failure. Preserve fresh work.
             mark_dirty(&id);
         }
         if reconcile
@@ -1149,6 +1111,7 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
     // Merge under a cross-process lock, never write a stale enabled flag or
     // overwrite another process's unrelated session progress.
     let mut commit = SyncTiming::new("progress_commit");
+    *FAILURE_BACKOFF.lock().unwrap_or_else(|e| e.into_inner()) = Some(failures);
     commit.outcome = "error";
     commit_progress(state.generation, &updates)?;
     commit.outcome = if updates.is_empty() {
@@ -1220,6 +1183,15 @@ async fn background_sync() {
     }
 }
 
+#[path = "mobile_sync_progress.rs"]
+mod progress;
+
+#[path = "mobile_sync_thumbnail_cache.rs"]
+mod thumbnail_cache;
+
+#[cfg(test)]
+#[path = "mobile_sync_backoff_tests.rs"]
+mod backoff_tests;
 #[cfg(test)]
 #[path = "mobile_sync_http_tests.rs"]
 mod http_tests;

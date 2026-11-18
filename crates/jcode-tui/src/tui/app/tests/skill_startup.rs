@@ -120,6 +120,11 @@ fn skill_startup_minimal_clients_keep_project_overlays_separate() {
 
 #[test]
 fn skill_startup_ssh_history_replaces_warmed_empty_candidates_without_local_skills() {
+    if super::commands_dispatch::ssh_test_runs_in_child(
+        "skill_startup_ssh_history_replaces_warmed_empty_candidates_without_local_skills",
+    ) {
+        return;
+    }
     with_skill_startup_home(|home| {
         write_startup_skill(home, "startup-local-secret");
         crate::env::set_var("JCODE_SSH_REMOTE", "fixture-host");

@@ -20,6 +20,7 @@ class HostedClientBootstrapTests(unittest.TestCase):
 printf '%s\\n' "$*" >> "$BOOTSTRAP_LOG"
 case "$*" in
   *"rev-parse HEAD"*) printf '%s\\n' "${RETURNED_REVISION}" ;;
+  *" apply "*) exit "${PATCH_STATUS:-0}" ;;
 esac
 ''')
         self.write_tool("cargo", '''#!/bin/sh
@@ -54,6 +55,10 @@ chmod +x "$root/bin/justrust"
         self.assertIn("/scripts/sign-release.py", calls)
         self.assertIn("+1.99.0 install --path", calls)
         self.assertIn("--locked --root", calls)
+        patch = ROOT / "scripts/justrust-hosted-artifact-toolchain.patch"
+        self.assertIn(f"apply --check {patch}", calls)
+        self.assertIn(f"apply {patch}", calls)
+        self.assertLess(calls.index("apply --check"), calls.index("+1.99.0 install"))
         self.assertNotIn("toolchain/", calls)
         self.assertTrue((self.root / "path").read_text().strip().endswith("/install/bin"))
 
@@ -61,6 +66,13 @@ chmod +x "$root/bin/justrust"
         result = self.run_installer(RETURNED_REVISION="0" * 40)
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("install --path", (self.root / "calls").read_text())
+        self.assertFalse((self.root / "path").exists())
+
+    def test_backport_failure_never_compiles_or_activates(self):
+        self.assertEqual(self.run_installer(PATCH_STATUS="9").returncode, 9)
+        calls = (self.root / "calls").read_text()
+        self.assertIn("apply --check", calls)
+        self.assertNotIn("install --path", calls)
         self.assertFalse((self.root / "path").exists())
 
     def test_compiler_failure_never_activates(self):

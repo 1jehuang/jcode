@@ -11,15 +11,29 @@ pub(crate) fn get_cached_message_lines<F>(
 where
     F: FnOnce(&DisplayMessage, u16, crate::config::DiffDisplayMode) -> Vec<Line<'static>>,
 {
+    project_cached_message_lines(msg, width, diff_mode, render, <[Line<'static>]>::to_vec)
+}
+
+pub(crate) fn project_cached_message_lines<F, P, R>(
+    msg: &DisplayMessage,
+    width: u16,
+    diff_mode: crate::config::DiffDisplayMode,
+    render: F,
+    project: P,
+) -> R
+where
+    F: FnOnce(&DisplayMessage, u16, crate::config::DiffDisplayMode) -> Vec<Line<'static>>,
+    P: FnOnce(&[Line<'static>]) -> R,
+{
     // Relative call ages change even when the notification content does not.
     if msg.role == "background_task" && msg.content.contains("_Called at:_ `") {
-        return render(msg, width, diff_mode);
+        return project(&render(msg, width, diff_mode));
     }
     // Finished todo reports show a relative "finished Xm ago" age.
     if msg.title.as_deref() == Some("Todo completion") && msg.content.contains("\"completed_at\"") {
-        return render(msg, width, diff_mode);
+        return project(&render(msg, width, diff_mode));
     }
-    jcode_tui_messages::get_cached_message_lines(
+    jcode_tui_messages::project_cached_message_lines(
         msg,
         width,
         diff_mode,
@@ -38,12 +52,57 @@ where
             show_link_urls: crate::config::config().display.show_link_urls,
         },
         render,
+        project,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projection_shares_rendered_lines_with_owned_api() {
+        let msg = DisplayMessage::assistant("projection_shares_rendered_lines_with_owned_api");
+        let visible = project_cached_message_lines(
+            &msg,
+            81,
+            crate::config::DiffDisplayMode::Off,
+            |_, _, _| vec![Line::from("shared projection")],
+            |lines| !lines.is_empty(),
+        );
+        assert!(visible);
+        let owned =
+            get_cached_message_lines(&msg, 81, crate::config::DiffDisplayMode::Off, |_, _, _| {
+                panic!("projection must populate the same cache")
+            });
+        assert_eq!(owned[0].to_string(), "shared projection");
+    }
+
+    #[test]
+    fn projection_preserves_relative_age_cache_bypasses() {
+        let mut background = DisplayMessage::assistant("_Called at:_ `projection bypass`");
+        background.role = "background_task".into();
+        let mut completed = DisplayMessage::todos(r#"{"completed_at":123}"#);
+        completed.title = Some("Todo completion".into());
+        for msg in [background, completed] {
+            for expected in [false, true, false] {
+                let visible = project_cached_message_lines(
+                    &msg,
+                    83,
+                    crate::config::DiffDisplayMode::Off,
+                    |_, _, _| {
+                        if expected {
+                            vec![Line::from("fresh age")]
+                        } else {
+                            Vec::new()
+                        }
+                    },
+                    |lines| !lines.is_empty(),
+                );
+                assert_eq!(visible, expected);
+            }
+        }
+    }
 
     #[test]
     fn mermaid_expand_transition_invalidates_cached_message_lines() {
