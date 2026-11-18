@@ -253,6 +253,11 @@ impl Provider for OpenRouterProvider {
             let responses_effort = reasoning_effort.as_deref().map(|effort| {
                 jcode_base::prompt::swarm_root_reasoning_effort(effort).unwrap_or(effort)
             });
+            // Opted-in compatible endpoints may need an explicit `none` to
+            // turn thinking off; everyone else keeps the Chat path behaviour
+            // and omits the field.
+            let responses_effort = responses_effort
+                .filter(|effort| *effort != "none" || self.reasoning_effort_support == Some(true));
             request = super::opencode_go_responses::build_request(
                 &effective_messages,
                 tools,
@@ -260,6 +265,7 @@ impl Provider for OpenRouterProvider {
                 &model,
                 responses_effort,
                 self.max_tokens,
+                allow_image_input,
                 jcode_provider_openrouter::request::sanitize_tool_parameters_schema,
             );
             if let Some(extra) = self.extra_body.as_ref()
