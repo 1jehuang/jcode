@@ -17,30 +17,37 @@
 /// the mismatch (2 paths consume the message, only 1 takes the images).
 #[test]
 fn every_interleave_send_path_carries_the_staged_images() {
-    let source = include_str!("../remote.rs");
-
-    let takes = source.matches("interleave_message.take()").count();
+    let sources = [
+        ("remote.rs", include_str!("../remote.rs")),
+        (
+            "remote_followups.rs",
+            include_str!("../remote_followups.rs"),
+        ),
+    ];
+    let mut total_takes = 0;
+    for (file, source) in sources {
+        let takes = source.matches("interleave_message.take()").count();
+        total_takes += takes;
+        let image_takes = source
+            .matches("std::mem::take(&mut app.interleave_images)")
+            .count();
+        assert_eq!(
+            image_takes, takes,
+            "every interleave send path in {file} must take the staged images \
+             ({takes} paths consume interleave_message but only {image_takes} \
+             take interleave_images). A path that omits this silently drops \
+             the user's attachments while still compiling."
+        );
+        assert!(
+            !source.contains("interleave_msg, vec![], false"),
+            "an interleave send in {file} is passing an empty image vector \
+             instead of the staged attachments, which silently drops them"
+        );
+    }
     assert!(
-        takes > 0,
-        "expected at least one interleave send path in remote.rs; if this moved, \
-         move this guard with it rather than deleting it"
-    );
-
-    let image_takes = source
-        .matches("std::mem::take(&mut app.interleave_images)")
-        .count();
-    assert_eq!(
-        image_takes, takes,
-        "every interleave send path must take the staged images ({takes} paths \
-         consume interleave_message but only {image_takes} take \
-         interleave_images). A path that omits this silently drops the user's \
-         attachments while still compiling."
-    );
-
-    assert!(
-        !source.contains("interleave_msg, vec![], false"),
-        "an interleave send is passing an empty image vector instead of the \
-         staged attachments, which silently drops them"
+        total_takes > 0,
+        "expected at least one interleave send path in the guarded remote \
+         modules; if this moved, move this guard with it rather than deleting it"
     );
 }
 

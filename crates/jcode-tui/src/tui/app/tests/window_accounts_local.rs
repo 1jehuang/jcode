@@ -270,7 +270,7 @@ fn claude_window(label: &str, pinned: bool) -> crate::protocol::SessionAccountIn
     }
 }
 
-fn store_two_claude_accounts() -> (String, String) {
+pub(super) fn store_two_claude_accounts() -> (String, String) {
     let account = |n: &str| crate::auth::claude::AnthropicAccount {
         label: String::new(),
         access: format!("access-{n}"),

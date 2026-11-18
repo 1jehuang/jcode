@@ -2,61 +2,21 @@ use super::*;
 use crate::cli::provider_init::ProviderChoice;
 
 #[test]
-fn cloud_lifecycle_commands_parse_their_contracts() {
-    for command in ["send", "status", "wait", "logs", "inspect", "run-detached"] {
-        let mut argv = vec!["jcode", "cloud", command, "--session", "session_test"];
-        if matches!(command, "send" | "run-detached") {
-            argv.push("continue the task");
-        }
-        assert!(Args::try_parse_from(argv).is_ok(), "{command}");
-        assert!(
-            Args::try_parse_from(["jcode", "cloud", command]).is_err(),
-            "{command} requires a session"
-        );
-    }
-    let args = Args::try_parse_from([
-        "jcode",
-        "cloud",
-        "wait",
-        "--session",
-        "s",
-        "--timeout",
-        "0",
-        "--messages",
-        "3",
-        "--json",
-    ])
-    .unwrap();
-    assert!(
-        matches!(args.command, Some(Command::Cloud(CloudCommand::Wait { session, timeout: 0, messages: 3, json: true })) if session == "s")
-    );
-    let args = Args::try_parse_from([
-        "jcode",
-        "cloud",
-        "fork",
-        "--session",
-        "parent",
-        "--prompt",
-        "child task",
-        "--host",
-        "my-box",
-        "--json",
-    ])
-    .unwrap();
-    assert!(
-        matches!(args.command, Some(Command::Cloud(CloudCommand::Fork { session: Some(parent), prompt: Some(prompt), target, json: true })) if parent == "parent" && prompt == "child task" && target.host.as_deref() == Some("my-box"))
-    );
-    assert!(Args::try_parse_from(["jcode", "cloud", "fork"]).is_ok());
-    assert!(Args::try_parse_from(["jcode", "cloud", "doctor", "--json"]).is_ok());
-    let args =
-        Args::try_parse_from(["jcode", "cloud", "problems", "--limit", "0", "--json"]).unwrap();
-    assert!(matches!(
-        args.command,
-        Some(Command::Cloud(CloudCommand::Problems {
-            limit: 0,
-            json: true
-        }))
-    ));
+fn jarvis_is_explicitly_opt_in_and_supports_resume() {
+    assert!(!Args::try_parse_from(["jcode"]).unwrap().jarvis);
+    let args = Args::try_parse_from(["jcode", "--jarvis", "--resume", "voice-session"]).unwrap();
+    assert!(args.jarvis);
+    assert_eq!(args.resume.as_deref(), Some("voice-session"));
+}
+
+#[test]
+fn continuous_jarvis_and_screen_feed_are_separate_opt_ins() {
+    let ordinary = Args::try_parse_from(["jcode"]).unwrap();
+    assert!(!ordinary.jarvis_always_on && !ordinary.jarvis_screen);
+    let voice = Args::try_parse_from(["jcode", "--jarvis-always-on"]).unwrap();
+    assert!(voice.jarvis_always_on && !voice.jarvis_screen);
+    let both = Args::try_parse_from(["jcode", "--jarvis-always-on", "--jarvis-screen"]).unwrap();
+    assert!(both.jarvis_always_on && both.jarvis_screen);
 }
 
 #[test]
@@ -1622,3 +1582,6 @@ fn update_channel_cli_is_explicit_and_limited_to_preview_and_stable() {
         assert!(Args::try_parse_from(["jcode", "update", "--channel", channel]).is_err());
     }
 }
+
+#[path = "tests_additional_tests.rs"]
+mod additional_cloud_lifecycle_commands_parse_their_contracts;

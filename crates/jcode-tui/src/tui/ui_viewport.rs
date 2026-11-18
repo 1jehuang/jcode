@@ -1,5 +1,9 @@
 use super::*;
 use ratatui::widgets::{Block, BorderType, Borders};
+#[path = "ui_viewport_todo_margins.rs"]
+mod todo_margins;
+pub(crate) use todo_margins::compute_visible_margins;
+
 use std::fmt::Write as _;
 use unicode_width::UnicodeWidthStr;
 
@@ -216,85 +220,6 @@ pub(crate) fn copy_badge_reserved_width(
         reserved = reserved.saturating_add(UnicodeWidthStr::width("✓ Copied! "));
     }
     reserved
-}
-
-pub(crate) fn compute_visible_margins(
-    lines: &[Line],
-    visible_user_indices: &[usize],
-    area: Rect,
-    centered: bool,
-) -> info_widget::Margins {
-    let visible_height = area.height as usize;
-    let mut visible_user_cursor = 0usize;
-
-    let mut right_widths = Vec::with_capacity(visible_height);
-    let mut left_widths = Vec::with_capacity(visible_height);
-
-    for row in 0..visible_height {
-        while visible_user_cursor < visible_user_indices.len()
-            && visible_user_indices[visible_user_cursor] < row
-        {
-            visible_user_cursor += 1;
-        }
-        let is_user_line = visible_user_cursor < visible_user_indices.len()
-            && visible_user_indices[visible_user_cursor] == row;
-
-        if row < lines.len() {
-            let mut used = lines[row].width().min(area.width as usize) as u16;
-            if is_user_line && area.width > 0 {
-                used = used.saturating_add(1).min(area.width);
-            }
-
-            // Compute the true free space on each side from the line's *rendered*
-            // alignment. This matters even in left-aligned mode: the header lines
-            // (`server:`/`client:`/model/version, auth status, mcp list, changelog
-            // box, etc.) are always centered regardless of mode, so a centered line
-            // of width `used` leaves only ~half the slack on the right. Reporting
-            // the full `area.width - used` here would let a right-side info widget
-            // overlap the centered header text.
-            let total_margin = area.width.saturating_sub(used);
-            let default_alignment = if centered {
-                Alignment::Center
-            } else {
-                Alignment::Left
-            };
-            let effective_alignment = lines[row].alignment.unwrap_or(default_alignment);
-            let (left_margin, right_margin) = match effective_alignment {
-                Alignment::Left => (0, total_margin),
-                Alignment::Center => {
-                    let left = total_margin / 2;
-                    let right = total_margin.saturating_sub(left);
-                    (left, right)
-                }
-                Alignment::Right => (total_margin, 0),
-            };
-
-            if centered {
-                left_widths.push(left_margin);
-                right_widths.push(right_margin);
-            } else {
-                // Left-aligned mode never places left-side widgets (content is
-                // flush-left), so the left gap is reported as 0; the right gap
-                // still respects per-line alignment so widgets clear the header.
-                left_widths.push(0);
-                right_widths.push(right_margin);
-            }
-        } else if centered {
-            let half = area.width / 2;
-            left_widths.push(half);
-            right_widths.push(area.width.saturating_sub(half));
-        } else {
-            left_widths.push(0);
-            right_widths.push(area.width);
-        }
-    }
-
-    info_widget::Margins {
-        right_widths,
-        left_widths,
-        centered,
-        ..Default::default()
-    }
 }
 
 pub(crate) fn reserve_copy_badge_margins(
@@ -1413,24 +1338,6 @@ pub(super) fn draw_messages(
 mod viewport_margins;
 pub(super) use viewport_margins::{INFO_WIDGET_LOOKAHEAD_ROWS, windowed_min};
 
-/// Passive worker status lives in the todo lanes. The focused swarm panel
-/// remains available for keyboard navigation and its transcript controls.
-pub(crate) fn pinned_todos_show_workers(app: &dyn TuiState, width: u16) -> bool {
-    crate::config::config().display.pin_todos
-        && app.pinned_todos_payload().is_some()
-        && app.inline_swarm_gallery_active()
-        && !app.inline_swarm_members().is_empty()
-        && !pinned_todo_band_lines_for_payload(
-            app.pinned_todos_payload(),
-            app.pinned_todos_expanded(),
-            app.diff_mode(),
-            width,
-            3,
-        )
-        .0
-        .is_empty()
-}
-
 /// Pinned status band: an optional bordered todo card followed by exactly one
 /// compact row per relevant background task (unboxed, below the card).
 #[derive(Default)]
@@ -1907,6 +1814,7 @@ pub(crate) use prompt_preview::toggle_prompt_history_expanded;
 #[path = "ui_viewport_tests.rs"]
 mod tests;
 
+#[cfg(test)]
 pub(crate) fn pinned_todo_band_lines_for_payload(
     payload: Option<&str>,
     expanded: bool,

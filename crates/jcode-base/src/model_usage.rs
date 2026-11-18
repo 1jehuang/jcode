@@ -355,31 +355,38 @@ pub fn serving_route(provider: &dyn Provider, selected_method: Option<&str>) -> 
         ("antigravity", _) => Some("antigravity-https"),
         _ => None,
     };
+    let expected_method = expected_method.map(ModelRouteApiMethod::parse);
+    let catalog_model = crate::provider::openrouter_catalog_model_id(&model);
     let pin = provider.explicit_provider_pin_for_current_model();
     let mut candidates: Vec<_> = provider
         .model_routes()
         .into_iter()
         .filter(|route| {
-            let same_model = route.model == model
-                || (route.api_method_kind().is_openrouter()
-                    && crate::provider::openrouter_catalog_model_id(&model).as_deref()
-                        == Some(route.model.as_str()));
+            // Reject unrelated models before parsing methods or provider labels.
+            let exact_model = route.model == model;
+            if !exact_model && catalog_model.as_deref() != Some(route.model.as_str()) {
+                return false;
+            }
+            let method = route.api_method_kind();
+            if !exact_model && !method.is_openrouter() {
+                return false;
+            }
             let same_provider = if let Some(pin) = pin.as_ref() {
-                route.api_method_kind().is_openrouter() && route.provider.eq_ignore_ascii_case(pin)
+                method.is_openrouter() && route.provider.eq_ignore_ascii_case(pin)
             } else {
                 jcode_provider_core::model_route_provider_labels_match(&route.provider, &display)
             };
-            same_model
-                && same_provider
-                && expected_method.is_none_or(|method| {
-                    route.api_method_kind() == ModelRouteApiMethod::parse(method)
-                })
+            same_provider
+                && expected_method
+                    .as_ref()
+                    .is_none_or(|expected| method == *expected)
         })
         .collect();
     if candidates.len() > 1
         && let Some(method) = selected_method
     {
-        candidates.retain(|route| route.api_method_kind() == ModelRouteApiMethod::parse(method));
+        let method = ModelRouteApiMethod::parse(method);
+        candidates.retain(|route| route.api_method_kind() == method);
     }
     (candidates.len() == 1).then(|| candidates.remove(0))
 }
@@ -396,6 +403,9 @@ pub fn record_turn(turn_id: &str, route: &ModelRoute) -> Result<ModelUsage> {
     }
     Ok(usage)
 }
+
+#[cfg(test)]
+mod serving_route_tests;
 
 #[cfg(test)]
 mod tests {

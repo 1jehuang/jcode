@@ -2,6 +2,7 @@ use super::*;
 
 mod cloud_directories;
 mod codemode_preview;
+mod compact_agent_dms;
 mod preview_redraw_schedule;
 mod queued_reminders;
 mod resume_parity;

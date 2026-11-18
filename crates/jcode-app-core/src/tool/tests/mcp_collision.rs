@@ -347,6 +347,7 @@ async fn sdk_custom_collision_alias_cannot_bypass_legacy_deny() {
         crate::protocol::SessionToolConfig {
             enabled: Some(vec!["batch".into()]),
             disabled: vec![legacy],
+            system_prompt_append: None,
             custom: vec![crate::protocol::SessionToolDefinition {
                 name: aliases[0].clone(),
                 description: "SDK collision override".into(),

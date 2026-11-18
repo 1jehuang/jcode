@@ -22,6 +22,8 @@ include!("tests/state_model_poke_01/part_02.rs");
 include!("tests/state_model_poke_02/part_01.rs");
 include!("tests/state_model_poke_02/part_02.rs");
 include!("tests/state_model_poke_03.rs");
+#[path = "tests/daemon_poke.rs"]
+mod daemon_poke;
 include!("tests/remote_startup_input_01/part_01.rs");
 include!("tests/remote_startup_input_01/part_02.rs");
 include!("tests/remote_startup_input_02/part_01.rs");
@@ -100,75 +102,6 @@ include!("tests/prompt_history_cross_session.rs");
 include!("tests/prompt_history_lifecycle.rs");
 include!("tests/ssh_remote.rs");
 include!("tests/skill_startup.rs");
-include!("tests/resume_search_first.rs");
-include!("tests/usage_limit_resume.rs");
-include!("tests/credentials_changed_resend.rs");
-include!("tests/window_accounts_local.rs");
-#[test]
-fn materialized_provider_messages_share_payload_and_detach_on_edit() {
-    let mut app = create_test_app();
-    app.messages = vec![Message::assistant_text("retained provider payload")];
-
-    let mut materialized = app.materialized_provider_messages();
-    assert!(
-        materialized[0]
-            .content
-            .shares_storage_with(&app.messages[0].content)
-    );
-
-    let original = serde_json::to_string(&app.messages[0]).unwrap();
-    if let ContentBlock::Text { text, .. } = &mut materialized[0].content[0] {
-        text.push_str(" independently edited");
-    } else {
-        panic!("expected text payload");
-    }
-    assert!(
-        !materialized[0]
-            .content
-            .shares_storage_with(&app.messages[0].content)
-    );
-    assert_eq!(serde_json::to_string(&app.messages[0]).unwrap(), original);
-    assert_ne!(serde_json::to_string(&materialized[0]).unwrap(), original);
-}
-
-#[test]
-fn kv_cache_signature_prefix_match_allows_appended_messages() {
-    let baseline_messages = vec![
-        crate::message::Message::user("first prompt"),
-        crate::message::Message::assistant_text("first answer"),
-    ];
-    let mut current_messages = baseline_messages.clone();
-    current_messages.push(crate::message::Message::user("follow up"));
-
-    let baseline = App::kv_cache_request_signature(&baseline_messages, &[], "system", "memory a");
-    let current = App::kv_cache_request_signature(&current_messages, &[], "system", "memory b");
-
-    assert!(App::kv_cache_signatures_prefix_match(&current, &baseline));
-    assert_eq!(
-        App::kv_cache_common_prefix_messages(&current, &baseline),
-        baseline_messages.len()
-    );
-    assert_ne!(baseline.ephemeral_hash, current.ephemeral_hash);
-}
-
-#[test]
-fn kv_cache_signature_prefix_match_detects_prefix_mutation() {
-    let baseline_messages = vec![
-        crate::message::Message::user("first prompt"),
-        crate::message::Message::assistant_text("first answer"),
-    ];
-    let current_messages = vec![
-        crate::message::Message::user("changed first prompt"),
-        crate::message::Message::assistant_text("first answer"),
-        crate::message::Message::user("follow up"),
-    ];
-
-    let baseline = App::kv_cache_request_signature(&baseline_messages, &[], "system", "");
-    let current = App::kv_cache_request_signature(&current_messages, &[], "system", "");
-
-    assert!(!App::kv_cache_signatures_prefix_match(&current, &baseline));
-    assert_eq!(App::kv_cache_common_prefix_messages(&current, &baseline), 0);
-}
 
 #[test]
 fn kv_cache_signature_ignores_non_transmitted_message_metadata() {
@@ -2106,3 +2039,7 @@ include!("tests/clear_runtime_state.rs");
 include!("tests/kv_cache_provider_identity.rs");
 include!("tests/cache_retention_routes.rs");
 include!("tests/cache_prompt_accounting.rs");
+
+#[path = "tests_additional_tests.rs"]
+mod additional_materialized_provider_messages_share_payload_and_detach_on_edit;
+use additional_materialized_provider_messages_share_payload_and_detach_on_edit::store_two_claude_accounts;

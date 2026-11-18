@@ -8,7 +8,13 @@
 
 ## 🐝 A swarm that works from a plan
 
-Plans now have **phases, parallel lanes, and tasks**, with workers starting automatically as their dependencies finish. Independent parts of a job run together, the coordinator receives progress and results automatically, and you can follow the whole team in one pinned view.
+jcode now builds parallel work into the plan. It breaks larger jobs into **phases and independent lanes**, brings in workers as tasks become ready, and coordinates their results as the work moves forward.
+
+Ready worker lanes **start automatically as their dependencies finish**, rather than relying on the model to explicitly spawn every agent. The coordinator stays focused on the overall job while workers tackle separate pieces.
+
+In our own jcode development sessions, **worker launches nearly doubled, from 88 to 174**, comparing November 2–8 with November 9–15. That averaged **roughly 3× as many worker dispatches per active session**.
+
+**More work in parallel, less babysitting.** Follow the plan and the whole team’s progress in one pinned view.
 
 ## Message 2: official cloud launch
 
@@ -76,7 +82,7 @@ jcode v1 is here. I wanted coding agents that could work as a team without makin
 
 ## Optional reply 1: swarms
 
-The swarm works from phases, parallel lanes, and tasks. Workers start as dependencies finish, and progress comes back to the coordinator. Independent work runs in parallel, with the whole team visible in one pinned view.
+Ready worker lanes now start automatically as dependencies finish. In our own jcode development, worker launches nearly doubled week over week, averaging roughly 3× as many dispatches per active session. Follow the plan and the whole team in one pinned view.
 
 ## Optional reply 2: official cloud launch
 

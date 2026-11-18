@@ -70,6 +70,10 @@ impl MultiProvider {
 
     pub(super) fn new_with_auth_status(auth_status: auth::AuthStatus) -> Self {
         let provider_init_start = std::time::Instant::now();
+        // A restarted/reexec'd daemon has no usage RAM yet. Restore dated,
+        // account-scoped last-good limits before choosing or binding a route.
+        // Render-time quota accessors remain strictly memory-only.
+        crate::usage::hydrate_persisted_account_usage();
         let cfg = crate::config::config();
         let provider_state = ProviderState::from_parts(cfg, &auth_status);
         let initial_provider = Self::initial_provider_from_env();

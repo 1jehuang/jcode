@@ -10,6 +10,9 @@ use runtime_identity::{
 };
 
 use super::*;
+#[path = "server_events_event_dispatch.rs"]
+mod event_dispatch;
+pub(in crate::tui::app) use event_dispatch::handle_server_event;
 
 #[cfg(test)]
 #[path = "turn_identity_tests.rs"]
@@ -46,183 +49,6 @@ use history_fingerprint::should_skip_identical_history_payload;
 #[cfg(test)]
 #[path = "server_events/history_dedup_tests.rs"]
 mod history_dedup_tests;
-
-pub(in crate::tui::app) fn handle_server_event(
-    app: &mut App,
-    event: ServerEvent,
-    remote: &mut impl RemoteEventState,
-) -> bool {
-    // Route mutation errors are control responses, not failed conversation
-    // turns. Handle them before the scoped-turn terminal fence.
-    if let ServerEvent::Error { id, message, .. } = &event
-        && app.pending_automatic_failover_request_id == Some(*id)
-    {
-        super::fail_pending_automatic_failover(app, message);
-        return true;
-    }
-    let (event, identity) = match event {
-        ServerEvent::TurnState {
-            session_id,
-            runtime_generation,
-            turn_id,
-            latest_turn_id,
-        } => {
-            if app.remote_turn_fence.bootstrap(
-                session_id,
-                runtime_generation,
-                latest_turn_id,
-                turn_id,
-            ) {
-                if !app
-                    .deferred_stream_done_identity
-                    .as_ref()
-                    .is_some_and(|identity| app.remote_turn_fence.is_latest(identity))
-                {
-                    app.deferred_stream_done_id = None;
-                    app.deferred_stream_done_identity = None;
-                }
-                if app.remote_turn_fence.active.is_none()
-                    && app.current_message_id.is_none()
-                    && app.deferred_stream_done_id.is_none()
-                {
-                    let changed = app.is_processing;
-                    app.is_processing = false;
-                    app.status = ProcessingStatus::Idle;
-                    app.processing_started = None;
-                    app.remote_resume_activity = None;
-                    return changed;
-                }
-            }
-            return false;
-        }
-        ServerEvent::TurnStarted { identity } => {
-            let same_turn = app.remote_turn_fence.accepts(&identity);
-            if !app.remote_turn_fence.start(&identity) {
-                return false;
-            }
-            if !same_turn {
-                app.deferred_stream_done_id = None;
-                app.deferred_stream_done_identity = None;
-            }
-            app.is_processing = true;
-            app.processing_started.get_or_insert_with(Instant::now);
-            app.last_stream_activity = Some(Instant::now());
-            app.status = ProcessingStatus::Streaming;
-            return true;
-        }
-        ServerEvent::TurnEvent { identity, event } => {
-            let paced_replay = matches!(&*event, ServerEvent::Done { .. })
-                && app.deferred_stream_done_identity.as_ref() == Some(&identity)
-                && app.remote_turn_fence.is_latest(&identity);
-            if !app.remote_turn_fence.accepts(&identity)
-                && !paced_replay
-                && !(matches!(&*event, ServerEvent::Interrupted)
-                    && app.remote_turn_fence.is_latest(&identity))
-            {
-                return false;
-            }
-            // Nested scopes could otherwise bypass this one validation boundary.
-            if matches!(
-                &*event,
-                ServerEvent::TurnState { .. }
-                    | ServerEvent::TurnStarted { .. }
-                    | ServerEvent::TurnEvent { .. }
-            ) {
-                return false;
-            }
-            (*event, Some(identity))
-        }
-        event => (event, None),
-    };
-    if identity.is_none()
-        && app.remote_turn_fence.scoped()
-        && matches!(
-            &event,
-            ServerEvent::Interrupted
-                | ServerEvent::TextDelta { .. }
-                | ServerEvent::TextReplace { .. }
-                | ServerEvent::TextSuffixReplace { .. }
-                | ServerEvent::ReasoningDelta { .. }
-                | ServerEvent::ReasoningDone { .. }
-                | ServerEvent::ToolStart { .. }
-                | ServerEvent::ToolInput { .. }
-                | ServerEvent::ToolExec { .. }
-                | ServerEvent::ToolDone { .. }
-                | ServerEvent::BatchProgress { .. }
-                | ServerEvent::ConnectionPhase { .. }
-                | ServerEvent::StatusDetail { .. }
-        )
-    {
-        return false;
-    }
-    let terminal = matches!(&event, ServerEvent::Done { .. } | ServerEvent::Error { .. });
-    // Legacy control errors still use Error. Let their request-owned handlers
-    // run, but never let an unscoped terminal settle an identity-aware turn.
-    if terminal && identity.is_none() && app.remote_turn_fence.scoped() {
-        if let ServerEvent::Error { id, message, .. } = &event {
-            if app.pending_agent_model_request_id == Some(*id) {
-                return handle_server_event_inner(app, event, remote);
-            }
-            if remote.finish_runtime_command(*id) {
-                app.push_display_message(DisplayMessage::error(message.clone()));
-                return true;
-            }
-        }
-        if let ServerEvent::Done { id } | ServerEvent::Error { id, .. } = &event {
-            if app.current_message_id == Some(*id) {
-                if app.remote_turn_fence.active.is_none() {
-                    // Validation/auth failures and synthetic control completions
-                    // occur before turn acceptance, so they have no turn scope.
-                    let rejected_id = *id;
-                    let redraw = handle_server_event_inner(app, event, remote);
-                    if !app.is_processing && app.current_message_id == Some(rejected_id) {
-                        app.current_message_id = None;
-                    }
-                    return redraw;
-                }
-                if let ServerEvent::Error { message, .. } = &event {
-                    let recovered = recover_rejected_queued_continuation(app);
-                    if !recovered {
-                        app.restore_failed_input_to_box();
-                    }
-                    app.clear_pending_remote_retry();
-                    app.current_message_id = None;
-                    remote.clear_pending();
-                    // The rejected request never acquired this running turn.
-                    // Preserve its stream, timing and identity-owned busy state.
-                    app.is_processing = true;
-                    if matches!(app.status, ProcessingStatus::Sending) {
-                        app.status = ProcessingStatus::Thinking(Instant::now());
-                    }
-                    app.remote_resume_activity = Some(RemoteResumeActivity {
-                        session_id: app.remote_session_id.as_deref().unwrap_or("").to_owned(),
-                        observed_at: Instant::now(),
-                        current_tool_name: None,
-                    });
-                    app.push_display_message(DisplayMessage::error(message.clone()));
-                    return true;
-                }
-            }
-            if app.usage_reset.invalidate_requests.remove(id).is_some() {
-                app.usage_reset.refresh_usage = true;
-                return true;
-            }
-        }
-        return false;
-    }
-    let redraw = handle_server_event_inner(app, event, remote);
-    if let Some(identity) = identity
-        && terminal
-    {
-        if app.deferred_stream_done_id.is_some() {
-            app.deferred_stream_done_identity = Some(identity);
-        } else {
-            app.remote_turn_fence.complete(&identity);
-            app.deferred_stream_done_identity = None;
-        }
-    }
-    redraw
-}
 
 fn handle_server_event_inner(
     app: &mut App,
@@ -1697,6 +1523,7 @@ fn handle_server_event_inner(
             false
         }
         ServerEvent::SessionId { session_id } => {
+            app.jarvis_session_changed(&session_id);
             if app.remote_session_id.as_ref() != Some(&session_id) {
                 app.remote_available_service_tiers = None;
                 app.invalidate_rewind_ui();
@@ -1998,6 +1825,7 @@ fn handle_server_event_inner(
             }
 
             remote.set_session_id(session_id.clone());
+            app.jarvis_session_changed(&session_id);
             app.set_remote_prompt_history_session(&session_id);
             app.cloud_environment_session_changed(&session_id);
             app.remote_session_id = Some(session_id.clone());

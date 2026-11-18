@@ -105,7 +105,7 @@ jcode-tool-types = { path = "../jcode-tool-types" }
 flate2 = "1"
 tar = "0.4"
 tempfile = "3"
-agentgrep = { git = "https://github.com/1jehuang/agentgrep.git", tag = "v0.2.0" }
+agentgrep = { git = "https://github.com/1jehuang/agentgrep.git", rev = "ff7ba82913f4c3a1d69062767d7661de7de80e4b" }
 
 [features]
 default = ["pdf", "bedrock"]

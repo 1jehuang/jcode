@@ -1,6 +1,9 @@
 #[path = "navigation_diagram_fit.rs"]
 mod diagram_fit;
 use super::*;
+#[path = "navigation_repository_links.rs"]
+mod repository_links;
+
 use crate::tui::ui::input_ui;
 use ratatui::layout::Rect;
 
@@ -235,7 +238,35 @@ impl App {
         let Some(msg_idx) = super::super::ui::swarm_expand_target_from_screen(column, row) else {
             return false;
         };
-        self.toggle_swarm_message_expand(msg_idx)
+        let is_dm = |message: &DisplayMessage| {
+            message.effective_role() == "swarm"
+                && message
+                    .title
+                    .as_deref()
+                    .is_some_and(|title| title.starts_with("DM from "))
+        };
+        if self.display_messages.get(msg_idx).is_some_and(is_dm) {
+            let collapsed =
+                super::super::ui::is_collapsed_agent_dm(&self.display_messages[msg_idx]);
+            let same_state = |message: &DisplayMessage| {
+                is_dm(message) && super::super::ui::is_collapsed_agent_dm(message) == collapsed
+            };
+            let mut start = msg_idx;
+            while start > 0 && same_state(&self.display_messages[start - 1]) {
+                start -= 1;
+            }
+            let mut end = msg_idx + 1;
+            while end < self.display_messages.len() && same_state(&self.display_messages[end]) {
+                end += 1;
+            }
+            let mut toggled = false;
+            for index in start..end {
+                toggled |= self.toggle_swarm_message_expand(index);
+            }
+            toggled
+        } else {
+            self.toggle_swarm_message_expand(msg_idx)
+        }
     }
 
     /// Toggle the collapsed/expanded state of the swarm notification at
@@ -249,7 +280,18 @@ impl App {
         if message.role != "swarm" && !oauth {
             return false;
         }
-        let normalized = jcode_tui_messages::collapse_long_swarm_content(&message.content);
+        let mut normalized = jcode_tui_messages::collapse_long_swarm_content(&message.content);
+        if message
+            .title
+            .as_deref()
+            .is_some_and(|title| title.starts_with("DM from "))
+            && jcode_tui_messages::parse_collapsible_swarm_content(&normalized).is_none()
+        {
+            normalized = jcode_tui_messages::encode_collapsible_swarm_content(
+                "Direct message",
+                &message.content,
+            );
+        }
         let Some(toggled) = jcode_tui_messages::toggle_collapsible_swarm_content(&normalized)
         else {
             return false;
@@ -306,77 +348,6 @@ impl App {
             Ok(()) => self.set_status_notice(format!("Opened link: {}", target)),
             Err(e) => self.set_status_notice(format!("Failed to open link: {}", e)),
         }
-        true
-    }
-
-    pub(super) fn try_open_repository_markdown_link(&mut self, target: &str) -> bool {
-        if crate::tui::is_ssh_remote() {
-            return false;
-        }
-        let path_target = target.split(['#', '?']).next().unwrap_or(target);
-        let relative = std::path::Path::new(path_target);
-        if relative.is_absolute()
-            || path_target.contains("://")
-            || !relative
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
-        {
-            return false;
-        }
-
-        let repository = self
-            .session
-            .working_dir
-            .as_deref()
-            .map(std::path::PathBuf::from)
-            .or_else(|| std::env::current_dir().ok());
-        let Some(repository) = repository.and_then(|path| path.canonicalize().ok()) else {
-            return false;
-        };
-        let Ok(path) = repository.join(relative).canonicalize() else {
-            self.set_status_notice(format!("Markdown file not found: {}", path_target));
-            return true;
-        };
-        if !path.starts_with(&repository) {
-            self.set_status_notice("Refused to open a Markdown file outside the repository");
-            return true;
-        }
-
-        let content = match std::fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(error) => {
-                self.set_status_notice(format!("Failed to read Markdown file: {}", error));
-                return true;
-            }
-        };
-        let title = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(path_target)
-            .to_string();
-        let id = format!("linked-markdown:{}", path.display());
-        let page = crate::side_panel::SidePanelPage {
-            id: id.clone(),
-            title: title.clone(),
-            file_path: path.to_string_lossy().into_owned(),
-            format: crate::side_panel::SidePanelPageFormat::Markdown,
-            pdf_data: None,
-            source: crate::side_panel::SidePanelPageSource::LinkedFile,
-            content,
-            updated_at_ms: 0,
-        };
-
-        let mut snapshot = self.side_panel.clone();
-        if let Some(existing) = snapshot.pages.iter_mut().find(|existing| existing.id == id) {
-            *existing = page;
-        } else {
-            snapshot.pages.push(page);
-        }
-        snapshot.focused_page_id = Some(id);
-        self.side_panel_user_hidden = false;
-        self.apply_side_panel_snapshot(snapshot);
-        self.set_diff_pane_focus(true);
-        self.set_status_notice(format!("Opened Markdown: {}", title));
         true
     }
 

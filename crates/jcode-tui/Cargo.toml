@@ -23,6 +23,7 @@ path = "src/bin/replay_frames.rs"
 required-features = ["dev-bins"]
 
 [dependencies]
+jcode-companion = { path = "../jcode-companion" }
 clap = { version = "4", features = ["derive"], optional = true }
 # Application core (server, agent, provider, auth, session, tool, config, ...).
 # Re-exported via `pub use jcode_app_core::*` in lib.rs. default-features=false

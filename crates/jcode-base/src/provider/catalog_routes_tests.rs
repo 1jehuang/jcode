@@ -27,6 +27,20 @@ fn chatgpt_web_unknown_routes_never_use_oauth_api_or_openrouter() {
 }
 
 #[test]
+fn names_only_catalog_keeps_future_openai_models_on_direct_routes() {
+    let _guard = EnvGuard::new();
+    let model = "gpt-99.7-future";
+    assert!(!ALL_OPENAI_MODELS.contains(&model));
+    let routes = remote_model_routes_fallback(Some("OpenAI"), &[model.into()]);
+    assert!(
+        routes.iter().any(|route| route.model == model
+            && route.provider == "OpenAI"
+            && route.api_method == "openai-oauth"),
+        "a live catalog discovery must not require a compiled allowlist: {routes:?}"
+    );
+}
+
+#[test]
 fn saved_account_catalogs_keep_work_personal_and_named_accounts_separate() {
     let _guard = EnvGuard::new();
     let home = crate::storage::jcode_dir().unwrap();
