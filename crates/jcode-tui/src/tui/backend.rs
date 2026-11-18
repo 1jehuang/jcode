@@ -259,6 +259,7 @@ pub struct RemoteConnection {
     _dummy_peer: Option<Stream>,
     session_id: Option<String>,
     cloud_authority: Option<std::sync::Weak<std::sync::atomic::AtomicBool>>,
+    pub(crate) jarvis_tools_configured: bool,
     cloud_callbacks: Vec<tokio::task::AbortHandle>,
     client_instance_id: Option<String>,
     next_request_id: u64,
@@ -463,6 +464,7 @@ impl RemoteConnection {
             _dummy_peer: None,
             session_id: None,
             cloud_authority: None,
+            jarvis_tools_configured: false,
             cloud_callbacks: Vec::new(),
             client_instance_id: client_instance_id.map(str::to_string),
             // Keep reattached turn Done distinct from bootstrap acknowledgments.
@@ -741,10 +743,10 @@ impl RemoteConnection {
 
     /// Clear the server-side conversation and replace it with a fresh session.
     pub async fn clear(&mut self) -> Result<u64> {
-        let had_cloud_authority = self.cloud_authority.is_some();
+        let had_cloud_authority = self.cloud_authority.is_some() || self.jarvis_tools_configured;
         self.revoke_cloud_authority();
         if had_cloud_authority {
-            self.configure_cloud_tools(Default::default()).await?;
+            self.clear_local_tools().await?;
         }
         let id = self.next_request_id;
         self.next_request_id += 1;
@@ -945,10 +947,10 @@ impl RemoteConnection {
     /// Resume a specific session by ID
     pub async fn resume_session(&mut self, session_id: &str) -> Result<()> {
         if self.session_id.as_deref() != Some(session_id) {
-            let had_cloud_authority = self.cloud_authority.is_some();
+            let had_cloud_authority = self.cloud_authority.is_some() || self.jarvis_tools_configured;
             self.revoke_cloud_authority();
             if had_cloud_authority {
-                self.configure_cloud_tools(Default::default()).await?;
+                self.clear_local_tools().await?;
             }
         }
         let request = Request::ResumeSession {
@@ -1431,6 +1433,7 @@ impl RemoteConnection {
             _dummy_peer: Some(b),
             session_id: None,
             cloud_authority: None,
+            jarvis_tools_configured: false,
             cloud_callbacks: Vec::new(),
             client_instance_id: None,
             next_request_id: 1,
@@ -1462,6 +1465,9 @@ impl RemoteConnection {
 
     /// Set session ID
     pub fn set_session_id(&mut self, id: String) {
+        if self.session_id.as_deref() != Some(id.as_str()) {
+            self.jarvis_tools_configured = false;
+        }
         self.session_id = Some(id);
     }
 

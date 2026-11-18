@@ -22,10 +22,29 @@ impl RemoteConnection {
         &mut self,
         tools: crate::protocol::SessionToolConfig,
     ) -> Result<()> {
+        let tools = if crate::tui::jarvis::enabled() {
+            crate::tui::jarvis::with_speech(tools)
+        } else {
+            tools
+        };
         let id = self.next_request_id;
         self.next_request_id += 1;
         self.send_request(Request::ConfigureTools { id, tools })
-            .await
+            .await?;
+        self.jarvis_tools_configured = crate::tui::jarvis::enabled();
+        Ok(())
+    }
+
+    pub(super) async fn clear_local_tools(&mut self) -> Result<()> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::ConfigureTools {
+            id,
+            tools: Default::default(),
+        })
+        .await?;
+        self.jarvis_tools_configured = false;
+        Ok(())
     }
 
     pub(crate) fn cloud_callback_sender(

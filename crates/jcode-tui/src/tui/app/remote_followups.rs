@@ -13,7 +13,7 @@ pub(in super::super) async fn process_remote_followups(
         return;
     }
     app.remote_queue_retry_not_before = None;
-    if app.prepare_cloud_environment(remote).await.is_err() {
+    if app.prepare_local_tools(remote).await.is_err() {
         app.revoke_cloud_environment();
         return;
     }

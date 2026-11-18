@@ -310,6 +310,15 @@ fn parse_and_prepare_args(args: Args) -> Result<Args> {
     }
 
     output::set_quiet_enabled(args.quiet);
+    if args.jarvis {
+        anyhow::ensure!(
+            args.command.is_none(),
+            "--jarvis currently supports the interactive TUI only"
+        );
+        // Fail before entering raw terminal mode if no free local voice exists.
+        drop(jcode_voice::speech::SpeechPlayer::new()?);
+        crate::tui::jarvis::enable();
+    }
 
     if let Some(cwd) = &args.cwd {
         std::env::set_current_dir(cwd)?;

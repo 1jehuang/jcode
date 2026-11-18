@@ -2,6 +2,14 @@ use super::*;
 use crate::cli::provider_init::ProviderChoice;
 
 #[test]
+fn jarvis_is_explicitly_opt_in_and_supports_resume() {
+    assert!(!Args::try_parse_from(["jcode"]).unwrap().jarvis);
+    let args = Args::try_parse_from(["jcode", "--jarvis", "--resume", "voice-session"]).unwrap();
+    assert!(args.jarvis);
+    assert_eq!(args.resume.as_deref(), Some("voice-session"));
+}
+
+#[test]
 fn cloud_move_selection_defaults_to_swarm_and_independent_sessions_are_explicit() {
     let args = Args::try_parse_from(["jcode", "cloud", "move"]).unwrap();
     assert!(

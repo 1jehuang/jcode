@@ -1406,6 +1406,7 @@ fn handle_server_event_inner(
             false
         }
         ServerEvent::SessionId { session_id } => {
+            app.jarvis_session_changed(&session_id);
             if app.remote_session_id.as_deref() != Some(session_id.as_str()) {
                 app.remote_available_service_tiers = None;
             }
@@ -1689,6 +1690,7 @@ fn handle_server_event_inner(
             }
 
             remote.set_session_id(session_id.clone());
+            app.jarvis_session_changed(&session_id);
             app.cloud_environment_session_changed(&session_id);
             app.remote_session_id = Some(session_id.clone());
             history_laps.push(("pre_set_session", history_lap.elapsed().as_millis()));

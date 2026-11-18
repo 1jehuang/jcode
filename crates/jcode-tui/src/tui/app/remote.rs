@@ -1162,10 +1162,15 @@ pub(super) async fn handle_remote_event<B: Backend>(
             name,
             input,
         }) => {
-            app.cloud_environment_call(remote, session_id, call_id, name, input);
+            if name == "speak" {
+                app.jarvis_call(remote, session_id, call_id, input);
+            } else {
+                app.cloud_environment_call(remote, session_id, call_id, name, input);
+            }
             Ok((RemoteEventOutcome::Continue, false))
         }
         RemoteRead::Disconnected(reason) => {
+            app.cancel_jarvis_speech();
             app.revoke_cloud_environment();
             if let RemoteDisconnectReason::Protocol(error) = &reason {
                 let detail = format_disconnect_reason(&reason);
