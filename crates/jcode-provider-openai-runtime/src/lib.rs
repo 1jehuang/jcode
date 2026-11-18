@@ -1334,9 +1334,9 @@ impl OpenAIProvider {
 
     /// Shared request settings keep speculative warmup and foreground generation
     /// identical even when reasoning, tools, cache policy, or service tier change.
-    async fn response_request(
+    async fn response_request<'a>(
         &self,
-        input: &[Value],
+        input: impl Into<std::borrow::Cow<'a, [Value]>>,
         tools: &[ToolDefinition],
         system: &str,
     ) -> Value {
@@ -1345,10 +1345,10 @@ impl OpenAIProvider {
         self.response_request_for_model(&model_id, input, tools, system, is_chatgpt_mode)
     }
 
-    fn response_request_for_model(
+    fn response_request_for_model<'a>(
         &self,
         model_id: &str,
-        input: &[Value],
+        input: impl Into<std::borrow::Cow<'a, [Value]>>,
         tools: &[ToolDefinition],
         system: &str,
         is_chatgpt_mode: bool,
@@ -1391,10 +1391,10 @@ impl OpenAIProvider {
         clippy::too_many_arguments,
         reason = "request construction threads explicit per-request OpenAI settings without hidden state"
     )]
-    fn build_response_request(
+    fn build_response_request<'a>(
         model_id: &str,
         instructions: String,
-        input: &[Value],
+        input: impl Into<std::borrow::Cow<'a, [Value]>>,
         api_tools: &[Value],
         is_chatgpt_mode: bool,
         max_output_tokens: Option<u32>,
@@ -1412,10 +1412,11 @@ impl OpenAIProvider {
             tools.push(serde_json::json!({ "type": "image_generation" }));
         }
 
+        let input = input.into();
         let mut request = serde_json::json!({
             "model": model_id,
             "instructions": instructions,
-            "input": input,
+            "input": [],
             "tools": tools,
             "tool_choice": "auto",
             "parallel_tool_calls": false,
@@ -1423,6 +1424,16 @@ impl OpenAIProvider {
             "store": false,
             "include": ["reasoning.encrypted_content"],
         });
+
+        // Insert the owned array directly: json! serializes even owned Values,
+        // which would recursively clone the entire conversation history.
+        // get_mut avoids IndexMut eagerly allocating the existing "input" key.
+        // Empty histories already have their final representation, avoiding
+        // a map lookup on the no-history fast path.
+        if !input.is_empty() {
+            *request.get_mut("input").expect("request input slot") =
+                Value::Array(input.into_owned());
+        }
 
         if !is_chatgpt_mode && let Some(max_output_tokens) = max_output_tokens {
             request["max_output_tokens"] = serde_json::json!(max_output_tokens);
@@ -1588,6 +1599,10 @@ use self::websocket_health::{
     normalize_transport_model, set_websocket_cooldown, websocket_cooldown_for_streak,
     websocket_next_activity_timeout_secs, websocket_remaining_timeout_secs,
 };
+
+#[cfg(test)]
+#[path = "openai_owned_request_tests.rs"]
+mod owned_request_tests;
 
 #[cfg(test)]
 #[path = "openai_tests.rs"]
