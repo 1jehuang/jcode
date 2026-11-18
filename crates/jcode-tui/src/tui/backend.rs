@@ -260,6 +260,7 @@ pub struct RemoteConnection {
     session_id: Option<String>,
     cloud_authority: Option<std::sync::Weak<std::sync::atomic::AtomicBool>>,
     pub(crate) jarvis_tools_configured: bool,
+    pub(crate) local_tools_request: Option<u64>,
     cloud_callbacks: Vec<tokio::task::AbortHandle>,
     client_instance_id: Option<String>,
     next_request_id: u64,
@@ -345,6 +346,9 @@ fn remote_protocol_frame_exceeds_limit(buffered: usize, incoming: usize) -> bool
 }
 
 pub(crate) trait RemoteEventState {
+    fn finish_local_tools_request(&mut self, _id: u64, _accepted: bool) -> bool {
+        false
+    }
     /// Replay has no outstanding control requests. Live connections track IDs.
     fn finish_runtime_command(&mut self, _id: u64) -> bool {
         false
@@ -465,6 +469,7 @@ impl RemoteConnection {
             session_id: None,
             cloud_authority: None,
             jarvis_tools_configured: false,
+            local_tools_request: None,
             cloud_callbacks: Vec::new(),
             client_instance_id: client_instance_id.map(str::to_string),
             // Keep reattached turn Done distinct from bootstrap acknowledgments.
@@ -743,7 +748,9 @@ impl RemoteConnection {
 
     /// Clear the server-side conversation and replace it with a fresh session.
     pub async fn clear(&mut self) -> Result<u64> {
-        let had_cloud_authority = self.cloud_authority.is_some() || self.jarvis_tools_configured;
+        let had_cloud_authority = self.cloud_authority.is_some()
+            || self.jarvis_tools_configured
+            || self.local_tools_request.is_some();
         self.revoke_cloud_authority();
         if had_cloud_authority {
             self.clear_local_tools().await?;
@@ -947,7 +954,9 @@ impl RemoteConnection {
     /// Resume a specific session by ID
     pub async fn resume_session(&mut self, session_id: &str) -> Result<()> {
         if self.session_id.as_deref() != Some(session_id) {
-            let had_cloud_authority = self.cloud_authority.is_some() || self.jarvis_tools_configured;
+            let had_cloud_authority = self.cloud_authority.is_some()
+                || self.jarvis_tools_configured
+                || self.local_tools_request.is_some();
             self.revoke_cloud_authority();
             if had_cloud_authority {
                 self.clear_local_tools().await?;
@@ -1434,6 +1443,7 @@ impl RemoteConnection {
             session_id: None,
             cloud_authority: None,
             jarvis_tools_configured: false,
+            local_tools_request: None,
             cloud_callbacks: Vec::new(),
             client_instance_id: None,
             next_request_id: 1,
@@ -1467,6 +1477,7 @@ impl RemoteConnection {
     pub fn set_session_id(&mut self, id: String) {
         if self.session_id.as_deref() != Some(id.as_str()) {
             self.jarvis_tools_configured = false;
+            self.local_tools_request = None;
         }
         self.session_id = Some(id);
     }

@@ -31,7 +31,8 @@ impl RemoteConnection {
         self.next_request_id += 1;
         self.send_request(Request::ConfigureTools { id, tools })
             .await?;
-        self.jarvis_tools_configured = crate::tui::jarvis::enabled();
+        self.local_tools_request = Some(id);
+        self.jarvis_tools_configured = false;
         Ok(())
     }
 
@@ -43,8 +44,18 @@ impl RemoteConnection {
             tools: Default::default(),
         })
         .await?;
+        self.local_tools_request = None;
         self.jarvis_tools_configured = false;
         Ok(())
+    }
+
+    pub(crate) fn finish_local_tools_request(&mut self, id: u64, accepted: bool) -> bool {
+        if self.local_tools_request != Some(id) {
+            return false;
+        }
+        self.local_tools_request = None;
+        self.jarvis_tools_configured = accepted && crate::tui::jarvis::enabled();
+        true
     }
 
     pub(crate) fn cloud_callback_sender(

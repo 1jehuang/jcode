@@ -33,12 +33,13 @@ impl App {
         if crate::tui::jarvis::enabled() && self.jarvis_speech.is_none() {
             self.jarvis_speech = Some(crate::tui::jarvis::create_speech_player()?);
             self.push_display_message(DisplayMessage::system(
-                "Jarvis mode: local spoken replies enabled. Use /voice or the voice key to talk. Starting voice input interrupts speech.",
+                "Jarvis mode: preparing spoken replies. Use /voice or the voice key to talk. Starting voice input interrupts speech.",
             ));
         }
         self.prepare_cloud_environment(remote).await?;
         if crate::tui::jarvis::enabled()
             && !remote.jarvis_tools_configured
+            && remote.local_tools_request.is_none()
             && self.remote_session_id.is_some()
             && remote.has_loaded_history()
             && !self.is_processing

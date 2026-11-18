@@ -2,6 +2,31 @@ use super::*;
 use std::time::Duration;
 
 #[tokio::test]
+async fn local_tool_registration_requires_ack_and_rejection_allows_retry() {
+    let mut remote = RemoteConnection::dummy();
+    remote
+        .configure_cloud_tools(Default::default())
+        .await
+        .unwrap();
+    let first = remote.local_tools_request.unwrap();
+    assert!(!remote.jarvis_tools_configured);
+    assert!(!remote.finish_local_tools_request(first + 1, true));
+    assert_eq!(remote.local_tools_request, Some(first));
+    assert!(remote.finish_local_tools_request(first, false));
+    assert!(remote.local_tools_request.is_none());
+    assert!(!remote.jarvis_tools_configured);
+    remote
+        .configure_cloud_tools(Default::default())
+        .await
+        .unwrap();
+    let second = remote.local_tools_request.unwrap();
+    assert_ne!(first, second);
+    assert!(!remote.finish_local_tools_request(first, true));
+    assert!(remote.finish_local_tools_request(second, true));
+    assert!(remote.local_tools_request.is_none());
+}
+
+#[tokio::test]
 async fn jarvis_session_switch_clears_old_tool_capability_before_resume() {
     let mut remote = RemoteConnection::dummy();
     let peer = remote.take_dummy_peer().unwrap();
