@@ -442,12 +442,15 @@ pub fn session_search_raw_matches_query(raw: &[u8], query: &SessionSearchQueryPr
         if contains_case_insensitive_bytes(raw, query.normalized.as_bytes()) {
             return true;
         }
-        let matched_terms = query
-            .terms
-            .iter()
-            .filter(|term| contains_case_insensitive_bytes(raw, term.as_bytes()))
-            .count();
-        return matched_terms >= query.min_term_matches;
+        // Public profiles may request zero hits. Avoid underflow, and stop once
+        // enough terms match without changing duplicate or empty-term semantics.
+        return query.min_term_matches == 0
+            || query
+                .terms
+                .iter()
+                .filter(|term| contains_case_insensitive_bytes(raw, term.as_bytes()))
+                .nth(query.min_term_matches - 1)
+                .is_some();
     }
 
     let Ok(raw_text) = std::str::from_utf8(raw) else {
