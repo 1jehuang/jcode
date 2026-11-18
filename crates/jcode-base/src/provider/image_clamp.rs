@@ -228,6 +228,17 @@ fn decoded_image_needs_change(media_type: &str, data_b64: &str, max_edge: u32) -
 }
 
 #[cfg(test)]
+pub(super) fn preflight_probe(media: &str, data: Option<&str>, baseline: bool) -> bool {
+    let Some(data) = data else { return false };
+    data.len() > IMAGE_BASE64_BYTE_LIMIT
+        || if baseline {
+            image_exceeds_edge(data, 8000) || format_needs_fix(media, data)
+        } else {
+            decoded_image_needs_change(media, data, 8000)
+        }
+}
+
+#[cfg(test)]
 fn format_needs_fix(media_type: &str, data_b64: &str) -> bool {
     let Some(bytes) = decode_b64(data_b64) else {
         return true;
