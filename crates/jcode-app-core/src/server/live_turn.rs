@@ -101,6 +101,16 @@ pub(super) async fn idle_live_agent(
     Some(agent)
 }
 
+/// Content and presentation metadata for a server-initiated turn.
+pub(super) struct LiveTurnInput {
+    pub message: String,
+    pub images: Vec<(String, String)>,
+    pub system_reminder: Option<String>,
+    pub display_role: Option<crate::session::StoredDisplayRole>,
+    pub origin: crate::hooks::PromptOrigin,
+    pub status_detail: Option<String>,
+}
+
 /// Spawn `message` as a full tracked turn in a live session.
 ///
 /// Mirrors the client-initiated turn lifecycle: the swarm member is marked
@@ -125,12 +135,14 @@ pub(super) async fn spawn_tracked_live_turn(
     spawn_tracked_live_turn_with_images(
         session_id,
         agent,
-        message,
-        Vec::new(),
-        system_reminder,
-        display_role,
-        origin,
-        status_detail,
+        LiveTurnInput {
+            message,
+            images: Vec::new(),
+            system_reminder,
+            display_role,
+            origin,
+            status_detail,
+        },
         swarm,
     )
     .await
@@ -139,14 +151,17 @@ pub(super) async fn spawn_tracked_live_turn(
 pub(super) async fn spawn_tracked_live_turn_with_images(
     session_id: &str,
     mut agent: OwnedMutexGuard<Agent>,
-    message: String,
-    images: Vec<(String, String)>,
-    system_reminder: Option<String>,
-    display_role: Option<crate::session::StoredDisplayRole>,
-    origin: crate::hooks::PromptOrigin,
-    status_detail: Option<String>,
+    input: LiveTurnInput,
     swarm: LiveTurnSwarmContext,
 ) -> bool {
+    let LiveTurnInput {
+        message,
+        images,
+        system_reminder,
+        display_role,
+        origin,
+        status_detail,
+    } = input;
     let Ok(_admission) = crate::runtime_activity::global().try_enter_session(session_id) else {
         return false;
     };

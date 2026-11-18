@@ -1,5 +1,16 @@
 use super::*;
 
+/// Body of a model-facing `<system-reminder>` block, without its tags.
+/// The tags are wire syntax for the model and must never reach the transcript.
+pub(in crate::tui::app) fn system_reminder_body(content: &str) -> Option<&str> {
+    let rest = content.trim().strip_prefix("<system-reminder>")?;
+    Some(
+        rest.strip_suffix("</system-reminder>")
+            .unwrap_or(rest)
+            .trim(),
+    )
+}
+
 impl App {
     /// Append a hidden `<system-reminder>` message after the turn's prompt.
     /// Per-turn reminders must never go in the system prompt: it precedes the

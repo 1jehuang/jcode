@@ -1340,19 +1340,18 @@ async fn incomplete_todo_followups_stop_after_three_in_all_output_modes() {
                 &[test_todo("open", "pending", "high", None, None)],
             )
             .unwrap();
-            match mode {
-                "plain" => run_single_message_command_plain_with_auto_poke(&mut agent, "go")
-                    .await
-                    .unwrap(),
-                "capture" => {
-                    run_single_message_command_capture_with_auto_poke(&mut agent, "go")
-                        .await
-                        .unwrap();
-                }
-                _ => run_single_message_command_ndjson(&mut agent, provider, "go")
-                    .await
-                    .unwrap(),
-            }
+            // Exercise the actual CLI output dispatcher, not only the local
+            // loop helpers. Daemon-owned continuation must not accidentally
+            // disable this standalone Agent's follow-ups in any output mode.
+            run_single_message_with_agent(
+                &mut agent,
+                provider,
+                "go",
+                mode == "capture",
+                mode == "ndjson",
+            )
+            .await
+            .unwrap();
             if mode != "ndjson" {
                 // Only the person's first message is `user`; generated pokes are not.
                 assert_eq!(

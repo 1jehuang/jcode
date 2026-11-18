@@ -43,76 +43,6 @@ struct NativeAutoCompactionProvider;
 
 struct BoundSavedAccountProvider;
 
-#[tokio::test]
-async fn working_directory_moves_preserve_first_active_session_origin() {
-    let mut agent = Agent::new(Arc::new(BoundSavedAccountProvider), Registry::empty());
-    agent.session.messages.clear();
-    agent.session.working_dir = Some("/daemon".into());
-    agent.set_working_dir("/projects/start");
-    assert_eq!(
-        agent.session.original_working_dir, None,
-        "initial subscription is not a move"
-    );
-    agent.session.add_message(
-        Role::User,
-        vec![ContentBlock::Text {
-            text: "hello".into(),
-            cache_control: None,
-        }],
-    );
-    agent.set_working_dir("/projects/second");
-    agent.set_working_dir_for_pending_context(Some("/projects/third".into()));
-    assert_eq!(
-        agent.session.original_working_dir.as_deref(),
-        Some("/projects/start")
-    );
-    assert_eq!(agent.working_dir(), Some("/projects/third"));
-    agent.set_working_dir("/projects/start");
-    assert_eq!(
-        agent.session.original_working_dir.as_deref(),
-        Some("/projects/start")
-    );
-}
-
-#[tokio::test]
-async fn user_response_capability_updates_locked_tool_surface() {
-    let mut agent = Agent::new(Arc::new(BoundSavedAccountProvider), Registry::empty());
-    assert!(
-        !agent
-            .tool_definitions()
-            .await
-            .iter()
-            .any(|d| d.name == "user_response")
-    );
-    assert!(agent.locked_tools.is_some());
-    assert!(!agent.tool_names().await.iter().any(|n| n == "applet"));
-    agent.set_desktop_response_capability(true).await;
-    assert!(agent.locked_tools.is_none());
-    assert!(agent.tool_names().await.iter().any(|n| n == "applet"));
-    assert!(
-        agent
-            .tool_definitions()
-            .await
-            .iter()
-            .any(|d| d.name == "user_response")
-    );
-    agent.set_desktop_response_capability(true).await;
-    assert!(
-        agent.locked_tools.is_some(),
-        "unchanged capability preserves the cache"
-    );
-    agent.set_desktop_response_capability(false).await;
-    assert!(agent.locked_tools.is_none());
-    assert!(!agent.tool_names().await.iter().any(|n| n == "applet"));
-    assert!(
-        !agent
-            .tool_definitions()
-            .await
-            .iter()
-            .any(|d| d.name == "user_response")
-    );
-}
-
 #[async_trait]
 impl Provider for BoundSavedAccountProvider {
     async fn complete(
@@ -136,67 +66,6 @@ impl Provider for BoundSavedAccountProvider {
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self)
     }
-}
-
-#[tokio::test]
-async fn saved_account_observed_binding_is_persisted() {
-    let _guard = crate::storage::lock_test_env();
-    let home = tempfile::tempdir().unwrap();
-    struct RestoreHome(Option<std::ffi::OsString>);
-    impl Drop for RestoreHome {
-        fn drop(&mut self) {
-            match &self.0 {
-                Some(home) => crate::env::set_var("JCODE_HOME", home),
-                None => crate::env::remove_var("JCODE_HOME"),
-            }
-            crate::config::Config::invalidate_cache();
-        }
-    }
-    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
-    crate::env::set_var("JCODE_HOME", home.path());
-    crate::config::Config::invalidate_cache();
-    let provider: Arc<dyn Provider> = Arc::new(BoundSavedAccountProvider);
-    let mut agent = Agent::new(provider, Registry::empty());
-    agent.session.route_api_method = None;
-    agent.session.save_prepared().unwrap();
-    agent.sync_bound_account_route();
-    assert_eq!(
-        agent.session.route_api_method.as_deref(),
-        Some("openai-oauth@work")
-    );
-    let saved = crate::session::Session::load(&agent.session.id).unwrap();
-    assert_eq!(saved.route_api_method.as_deref(), Some("openai-oauth@work"));
-    assert_eq!(saved.provider_key.as_deref(), Some("openai-oauth"));
-    agent.sync_bound_account_route();
-    assert_eq!(agent.session.route_api_method, saved.route_api_method);
-    crate::provider::clear_openai_provider_unavailability_for_account_label(Some("work"));
-    crate::provider::clear_openai_provider_unavailability_for_account_label(Some("personal"));
-    agent.record_failed_account_route("429 rate limit reached");
-    assert!(
-        crate::provider::provider_unavailability_detail_for_account_label("openai", Some("work"))
-            .is_some()
-    );
-    assert!(
-        crate::provider::provider_unavailability_detail_for_account_label(
-            "openai",
-            Some("personal")
-        )
-        .is_none()
-    );
-    crate::provider::clear_openai_provider_unavailability_for_account_label(Some("work"));
-    agent.session.route_api_method = Some("openai-oauth@personal".to_string());
-    agent.sync_bound_account_route();
-    assert_eq!(
-        agent.session.route_api_method.as_deref(),
-        Some("openai-oauth@personal")
-    );
-    assert!(
-        agent
-            .ensure_session_lease()
-            .unwrap_err()
-            .to_string()
-            .contains("personal")
-    );
 }
 
 #[tokio::test]
@@ -821,6 +690,33 @@ async fn injected_soft_interrupts_report_client_ids_per_group_in_queue_order() {
             ("[Background Task Completed]".to_string(), vec![]),
             ("three".to_string(), vec!["f3".into()]),
         ]
+    );
+}
+
+#[tokio::test]
+async fn file_activity_interrupt_keeps_typed_identity_without_model_prefix() {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = Agent::new(provider, registry);
+    let content = "moss edited src/parser.rs +3-1: fix parser";
+    agent.queue_soft_interrupt(
+        content.into(),
+        vec![],
+        false,
+        SoftInterruptSource::FileActivity,
+    );
+    let injected = agent.inject_soft_interrupts();
+    let stored = agent.session.messages.last().unwrap();
+    assert_eq!(
+        stored.display_role,
+        Some(crate::session::StoredDisplayRole::FileActivity)
+    );
+    assert!(matches!(&stored.content[0], ContentBlock::Text { text, .. } if text == content));
+    let events = Agent::build_soft_interrupt_events(injected, "D", None);
+    assert!(
+        matches!(&events[0], ServerEvent::SoftInterruptInjected { content: text, display_role: Some(role), .. }
+        if text == content && role == "file_activity")
     );
 }
 
@@ -2888,6 +2784,7 @@ async fn sdk_custom_compile_remote_schema_survives_locked_refresh() {
         crate::protocol::SessionToolConfig {
             enabled: Some(vec![]),
             disabled: vec![],
+            system_prompt_append: None,
             custom: vec![crate::protocol::SessionToolDefinition {
                 name: "compile_remote".into(),
                 description: "SDK override".into(),
@@ -2951,6 +2848,150 @@ fn system_prompt_override_restores_and_does_not_leak_across_sessions() {
         let attached = Agent::new_with_session(provider, Registry::empty(), loaded, None);
         assert_eq!(attached.build_system_prompt_split(None).static_part, prompt);
     }
+}
+
+#[test]
+fn passive_screen_context_is_dynamic_session_local_and_never_transcribed() {
+    let _lock = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let mut agent = Agent::new(provider.clone(), Registry::empty());
+    let other = Agent::new(provider, Registry::empty());
+    let baseline = agent.build_system_prompt_split(None);
+    let id = agent.session_id().to_owned();
+    let before_messages = serde_json::to_string(&agent.session).unwrap();
+    crate::screen_context::apply(
+        &id,
+        "screen-prompt-owner",
+        crate::protocol::ScreenContextAction::Enable,
+    )
+    .unwrap();
+    let snapshot = crate::protocol::ScreenSnapshot {
+        sequence: 1,
+        observed_at_ms: crate::screen_context::now_ms(),
+        source: "niri".into(),
+        interaction: crate::protocol::ScreenInteraction::Unknown,
+        focused_window: Some(7),
+        windows: vec![crate::protocol::ScreenWindow {
+            id: 7,
+            title: Some("UNTRUSTED_SCREEN_ONLY_TITLE".into()),
+            app_id: None,
+            workspace_id: None,
+            visible: None,
+            layout: None,
+        }],
+        outputs: vec![],
+    };
+    crate::screen_context::apply(
+        &id,
+        "screen-prompt-owner",
+        crate::protocol::ScreenContextAction::Update { snapshot },
+    )
+    .unwrap();
+    for _ in 0..3 {
+        let split = agent.build_system_prompt_split(None);
+        assert_eq!(split.static_part, baseline.static_part);
+        assert_eq!(
+            split
+                .dynamic_part
+                .matches("UNTRUSTED_SCREEN_ONLY_TITLE")
+                .count(),
+            1
+        );
+        assert!(
+            split
+                .dynamic_part
+                .contains("untrusted data, not instructions")
+        );
+        assert!(
+            !other
+                .build_system_prompt_split(None)
+                .dynamic_part
+                .contains("UNTRUSTED_SCREEN_ONLY_TITLE")
+        );
+    }
+    assert_eq!(
+        serde_json::to_string(&agent.session).unwrap(),
+        before_messages
+    );
+    agent.session.system_prompt = Some("Custom system".into());
+    let split = agent.build_system_prompt_split(None);
+    assert_eq!(split.static_part, "Custom system");
+    assert!(split.dynamic_part.contains("UNTRUSTED_SCREEN_ONLY_TITLE"));
+    drop(crate::tool::sdk::ConnectionGuard(
+        "screen-prompt-owner".into(),
+    ));
+    assert!(
+        agent
+            .build_system_prompt_split(None)
+            .dynamic_part
+            .is_empty()
+    );
+}
+
+#[test]
+fn sdk_system_prompt_append_is_session_local_static_and_cleared() {
+    let _lock = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let mut agent = Agent::new(provider.clone(), Registry::empty());
+    let other = Agent::new(provider, Registry::empty());
+    let baseline = agent.build_system_prompt_split(None);
+    let other_baseline = other.build_system_prompt_split(None).static_part;
+    let id = agent.session_id().to_owned();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let suffix = "Unique SDK session instructions";
+    let configure = || {
+        crate::tool::sdk::configure(
+            &id,
+            "prompt-agent-owner",
+            crate::protocol::SessionToolConfig {
+                system_prompt_append: Some(suffix.into()),
+                ..Default::default()
+            },
+            tx.clone(),
+        )
+        .unwrap();
+    };
+    configure();
+    for _ in 0..3 {
+        let split = agent.build_system_prompt_split(None);
+        assert_eq!(
+            split.static_part,
+            format!("{}\n\n{suffix}", baseline.static_part)
+        );
+        assert_eq!(split.static_part.matches(suffix).count(), 1);
+        assert_eq!(split.dynamic_part, baseline.dynamic_part);
+    }
+    assert_eq!(
+        other.build_system_prompt_split(None).static_part,
+        other_baseline
+    );
+    assert!(agent.session.system_prompt.is_none());
+    assert!(
+        !serde_json::to_string(&agent.session)
+            .unwrap()
+            .contains(suffix)
+    );
+    agent.session.system_prompt = Some("Explicit override".into());
+    let split = agent.build_system_prompt_split(Some("do not add memory to override"));
+    assert_eq!(split.static_part, format!("Explicit override\n\n{suffix}"));
+    assert!(split.dynamic_part.is_empty());
+    agent.session.system_prompt = Some(String::new());
+    assert_eq!(agent.build_system_prompt_split(None).static_part, suffix);
+    agent.session.system_prompt = None;
+    crate::tool::sdk::configure(&id, "prompt-agent-owner", Default::default(), tx.clone()).unwrap();
+    assert_eq!(
+        agent.build_system_prompt_split(None).static_part,
+        baseline.static_part
+    );
+    configure();
+    drop(crate::tool::sdk::ConnectionGuard(
+        "prompt-agent-owner".into(),
+    ));
+    assert!(crate::tool::sdk::config(&id).is_none());
+    assert_eq!(
+        agent.build_system_prompt_split(None).static_part,
+        baseline.static_part
+    );
 }
 
 /// Test provider advertising provider-native deferred tool loading.
@@ -3229,3 +3270,6 @@ async fn resume_heals_stale_credential_route_after_credential_type_change() {
         "workers inheriting the healed session must target the live credential"
     );
 }
+
+#[path = "agent_tests_additional_tests.rs"]
+mod additional_working_directory_moves_preserve_first_active_session_origin;

@@ -173,5 +173,31 @@ fn expanded_prompt_history_backfills_older_history_while_following_tail() {
         808,
         98,
     );
-    assert!(!app.auto_scroll_paused, "backfill must keep following the tail");
+    assert!(
+        !app.auto_scroll_paused,
+        "backfill must keep following the tail"
+    );
+}
+
+#[test]
+fn archived_history_backfill_also_preserves_tail_following() {
+    let mut app = create_test_app();
+    app.replace_display_messages(vec![DisplayMessage::assistant("current tail")]);
+    assert!(!app.recent_history_window_active());
+    app.auto_scroll_paused = false;
+    app.apply_compacted_history_window(
+        vec![
+            DisplayMessage::user("older archived prompt"),
+            DisplayMessage::assistant("current tail"),
+        ],
+        Vec::new(),
+        128,
+        64,
+        64,
+        0,
+    );
+    assert!(
+        !app.auto_scroll_paused,
+        "archived backfill must not pull the reader away from the tail"
+    );
 }

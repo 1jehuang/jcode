@@ -426,20 +426,20 @@ pub(super) fn send_event_to_targets<'a>(
 fn send_event_to_targets_recover<'a>(
     targets: impl IntoIterator<Item = &'a mpsc::UnboundedSender<ServerEvent>>,
     event: ServerEvent,
-) -> Result<usize, ServerEvent> {
+) -> Result<usize, Box<ServerEvent>> {
     let mut targets = targets.into_iter().filter(|tx| !tx.is_closed()).peekable();
     let mut delivered = 0;
     while let Some(tx) = targets.next() {
         if targets.peek().is_none() {
             return match tx.send(event) {
                 Ok(()) => Ok(delivered + 1),
-                Err(error) if delivered == 0 => Err(error.0),
+                Err(error) if delivered == 0 => Err(Box::new(error.0)),
                 Err(_) => Ok(delivered),
             };
         }
         delivered += usize::from(tx.send(event.clone()).is_ok());
     }
-    Err(event)
+    Err(Box::new(event))
 }
 
 // Keep sends outside the session lock without allocating for the usual single
@@ -499,12 +499,12 @@ async fn fanout_session_event_recover(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     session_id: &str,
     event: ServerEvent,
-) -> Result<usize, ServerEvent> {
+) -> Result<usize, Box<ServerEvent>> {
     super::live_status::observe(session_id, &event);
     let targets = {
         let mut members = swarm_members.write().await;
         let Some(member) = members.get_mut(session_id) else {
-            return Err(event);
+            return Err(Box::new(event));
         };
 
         member.event_txs.retain(|_, tx| !tx.is_closed());
@@ -613,7 +613,7 @@ impl TurnEventChannel {
             };
             if let Err(started) = fanout_session_event_recover(&members, &session_id, started).await
             {
-                let _ = fallback.send(started);
+                let _ = fallback.send(*started);
             }
             loop {
                 let event = tokio::select! {
@@ -638,7 +638,7 @@ impl TurnEventChannel {
                 };
                 if let Err(event) = fanout_session_event_recover(&members, &session_id, event).await
                 {
-                    let _ = fallback.send(event);
+                    let _ = fallback.send(*event);
                 }
             }
             while let Some(event) = rx.recv().await {
@@ -649,7 +649,7 @@ impl TurnEventChannel {
                 };
                 if let Err(event) = fanout_session_event_recover(&members, &session_id, event).await
                 {
-                    let _ = fallback.send(event);
+                    let _ = fallback.send(*event);
                 }
             }
             stop_log.finish(&session_id, &identity);
@@ -1038,7 +1038,7 @@ pub(super) async fn queue_soft_interrupt_for_session(
     .await
 }
 
-/// Rewrite a still-queued system notice in place. Returns `false` once the
+/// Rewrite a still-queued file-activity notice in place. Returns `false` once the
 /// notice has been delivered (or was never queued live), so the caller queues
 /// a fresh one instead.
 pub(super) async fn replace_pending_soft_interrupt(
@@ -1054,7 +1054,7 @@ pub(super) async fn replace_pending_soft_interrupt(
         return false;
     };
     match pending.iter_mut().find(|message| {
-        message.source == SoftInterruptSource::System && message.content == previous
+        message.source == SoftInterruptSource::FileActivity && message.content == previous
     }) {
         Some(message) => {
             message.content = content;

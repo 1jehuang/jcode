@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context as TaskContext, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const WEBSOCKET_FALLBACK_NOTICE: &str = "falling back from websockets to https transport";
 static FALLBACK_TOOL_CALL_COUNTER: AtomicU64 = AtomicU64::new(1);
 static NORMALIZED_NULL_TOOL_ARGUMENTS: AtomicU64 = AtomicU64::new(0);
 
@@ -19,26 +18,7 @@ fn truncated_stream_payload_context(data: &str) -> String {
     jcode_core::util::truncate_str(&data.trim().replace("\n", "\\n"), 240).to_string()
 }
 
-fn is_structured_response_event(data: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
-        return false;
-    };
-    let Some(kind) = value.get("type").and_then(|kind| kind.as_str()) else {
-        return false;
-    };
-    kind.starts_with("response.") || kind == "error"
-}
-
-fn is_websocket_fallback_notice(data: &str) -> bool {
-    // The proxy injects the fallback notice as a plain-text control frame, not a
-    // structured Responses API event. A legitimate `response.*`/`error` event can
-    // contain this phrase in model output or tool-call arguments and must still be
-    // parsed normally.
-    if is_structured_response_event(data) {
-        return false;
-    }
-    data.to_lowercase().contains(WEBSOCKET_FALLBACK_NOTICE)
-}
+use crate::websocket_health::{is_structured_response_event, is_websocket_fallback_notice};
 
 fn extract_error_with_retry(
     response: &Option<Value>,
@@ -1101,6 +1081,10 @@ impl Stream for OpenAIResponsesStream {
 #[cfg(test)]
 #[path = "stream_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "stream_benchmarks.rs"]
+mod benchmarks;
 
 #[cfg(test)]
 #[path = "resolved_model_tests.rs"]
