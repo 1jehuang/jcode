@@ -384,7 +384,16 @@ jobs:
 
       - name: Install source-pinned hosted justrust
         shell: bash
-        run: bash scripts/install_justrust_hosted_ci.sh
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Build tooling comes from the workflow commit so older tags build
+          # with the current hosted contract. The tag supplies the sources.
+          for f in install_justrust_hosted_ci.sh build_preview_linux_hosted.sh package_preview_linux_hosted.sh; do
+            git show "$WORKFLOW_SHA:scripts/$f" > "scripts/$f"
+          done
+          bash scripts/install_justrust_hosted_ci.sh
 
       - name: Build on justrust hosted
         shell: bash
