@@ -41,6 +41,12 @@ The layout probe measured an 82,896-byte entry future, 82,912 bytes with the ori
 
 The normal daemon reports the **system allocator**. `MALLOC_CONF=prof:false` is a fixture setting, not evidence that the ordinary executable uses jemalloc. Only the explicitly profiled build uses sampled jemalloc data. Allocation counters, RSS, PSS, executable mappings and post-shutdown sampled retention describe different quantities.
 
+## Matched executable-cache diagnostic
+
+The repeated parser-variant RSS difference was challenged using only private pinned scratch executables. `startup-cache-control.py` reads each entire file before warm controls, or uses `fsync` plus `POSIX_FADV_DONTNEED` on that private file before advisory cold controls. No global cache drop, running production file, or production setting was touched.
+
+Final RSS for control/variant: warm **54.69 / 47.37 MiB**, advisory cold **46.98 / 47.49 MiB**. Live allocator bytes remained **2,400,448 / 2,405,888 / 2,406,928 / 2,390,864**. Raw fixtures: `fresh-{warm,cold}-{control,clap3}-20261118`. Under matched advisory-cold conditions the previously apparent ~20 MiB improvement disappears. This is strong evidence that executable page-cache/fault residency contaminated the original comparison, not evidence of a 20 MiB heap optimization. The advice is not proof of a perfectly cold disk cache. Neither production cache eviction nor delayed useful work is proposed as an optimization.
+
 ## Open gates
 
 - Shared mobile transport is accepted as `bbd9a2d66`, with exact local wire/pooling/auth/cookie coverage, 18 relevant tests and optimized actual thread-CPU/separate allocator measurements. Its 47.4% CPU and 4.64 MiB cumulative-allocation savings describe **the duplicate client-construction primitive**, not the entire daemon or its retained heap. See `startup-mobile-http-2026-11-18.md`.
