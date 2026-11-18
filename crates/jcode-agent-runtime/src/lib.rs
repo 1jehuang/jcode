@@ -18,6 +18,9 @@ pub enum SoftInterruptSource {
     User,
     System,
     BackgroundTask,
+    /// A swarm peer changed a file this agent edited. Typed so clients can
+    /// render it without the notice text carrying an identifying prefix.
+    FileActivity,
 }
 
 /// Thread-safe soft interrupt queue that can be accessed without holding the agent lock.

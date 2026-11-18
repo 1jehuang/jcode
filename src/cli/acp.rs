@@ -1831,53 +1831,9 @@ fn initialize_result(params: &Value, profile: AcpProfile) -> Value {
     })
 }
 
-fn cwd_from_params(params: &Value) -> std::result::Result<PathBuf, String> {
-    let cwd = match params.get("cwd").and_then(Value::as_str) {
-        Some(cwd) if !cwd.trim().is_empty() => PathBuf::from(cwd),
-        _ => std::env::current_dir().map_err(|err| err.to_string())?,
-    };
-    if !cwd.is_absolute() {
-        return Err(format!("ACP cwd must be absolute: {}", cwd.display()));
-    }
-    Ok(cwd)
-}
-
-fn required_session_id(params: &Value) -> std::result::Result<String, String> {
-    params
-        .get("sessionId")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| "Missing required sessionId".to_string())
-}
-
-fn validate_acp_mcp_servers(params: &Value) -> std::result::Result<(), String> {
-    match params.get("mcpServers") {
-        None | Some(Value::Null) => Ok(()),
-        // Session-scoped MCP is not supported yet, but rejecting this required
-        // ACP field prevents hosts with MCP servers from creating a session.
-        Some(Value::Array(_)) => Ok(()),
-        Some(_) => Err("ACP mcpServers must be an array".to_string()),
-    }
-}
-
-/// Read an explicit skill selection from ACP prompt metadata. Accepts
-/// `_meta.jcode.skill`, `_meta.jcode.activeSkill`, `_meta.skill`, and
-/// `_meta.activeSkill`.
-fn explicit_skill_from_params(params: &Value) -> Option<String> {
-    let meta = params.get("_meta")?;
-    [meta.get("jcode"), Some(meta)]
-        .into_iter()
-        .flatten()
-        .flat_map(|object| ["skill", "activeSkill", "active_skill"].map(|key| object.get(key)))
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(|name| name.trim().trim_start_matches(['/', '$']).trim())
-        .find(|name| !name.is_empty())
-        .map(str::to_string)
-}
-
+#[path = "acp_parameter_validation.rs"]
+mod parameter_validation;
+use parameter_validation::*;
 /// Resolve `/name [prompt]` or `$name [prompt]` to a registered skill. Returns
 /// `None` for unknown names and path-like text so it reaches the model as-is.
 fn resolve_acp_skill_invocation(
@@ -1952,109 +1908,9 @@ fn parse_acp_slash_command(text: &str) -> Option<Result<AcpSlashCommand>> {
     }
 }
 
-fn format_model_catalog(current: Option<&str>, models: &[String]) -> String {
-    if models.is_empty() {
-        return match current {
-            Some(current) => format!("Current model: `{current}`. No model catalog was reported."),
-            None => "The active provider did not report a model catalog.".to_string(),
-        };
-    }
-    let mut output = String::from("Available models:\n");
-    for model in models {
-        let selected = if Some(model.as_str()) == current {
-            " (current)"
-        } else {
-            ""
-        };
-        output.push_str(&format!("- `{model}`{selected}\n"));
-    }
-    output.pop();
-    output
-}
-
-fn prompt_from_params(
-    params: &Value,
-) -> std::result::Result<(String, Vec<(String, String)>), String> {
-    let prompt = params
-        .get("prompt")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "Missing required prompt array".to_string())?;
-    let mut text_parts = Vec::new();
-    let mut images = Vec::new();
-
-    for block in prompt {
-        match block.get("type").and_then(Value::as_str) {
-            Some("text") => {
-                if let Some(text) = block.get("text").and_then(Value::as_str) {
-                    text_parts.push(text.to_string());
-                }
-            }
-            Some("image") => {
-                let mime_type = block
-                    .get("mimeType")
-                    .or_else(|| block.get("mime_type"))
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "Image content block missing mimeType".to_string())?;
-                let data = block
-                    .get("data")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "Image content block missing data".to_string())?;
-                images.push((mime_type.to_string(), data.to_string()));
-            }
-            Some("resource") => {
-                if let Some(resource) = block.get("resource") {
-                    text_parts.push(format_resource_block(resource));
-                }
-            }
-            Some("resource_link") => {
-                let uri = block.get("uri").and_then(Value::as_str).unwrap_or("");
-                let name = block.get("name").and_then(Value::as_str).unwrap_or(uri);
-                text_parts.push(format!("[Resource link: {name} <{uri}>]"));
-            }
-            Some(other) => {
-                return Err(format!(
-                    "Unsupported ACP prompt content block type: {other}"
-                ));
-            }
-            None => return Err("Prompt content block missing type".to_string()),
-        }
-    }
-
-    Ok((text_parts.join("\n\n"), images))
-}
-
-fn format_resource_block(resource: &Value) -> String {
-    let uri = resource
-        .get("uri")
-        .and_then(Value::as_str)
-        .unwrap_or("resource");
-    if let Some(text) = resource.get("text").and_then(Value::as_str) {
-        format!("[Embedded resource: {uri}]\n{text}")
-    } else if let Some(blob) = resource.get("blob").and_then(Value::as_str) {
-        let mime = resource
-            .get("mimeType")
-            .or_else(|| resource.get("mime_type"))
-            .and_then(Value::as_str)
-            .unwrap_or("application/octet-stream");
-        format!(
-            "[Embedded binary resource: {uri} ({mime}, {} base64 bytes)]",
-            blob.len()
-        )
-    } else {
-        format!("[Embedded resource: {uri}]")
-    }
-}
-
-fn agent_message_chunk(text: String) -> Value {
-    json!({
-        "sessionUpdate": "agent_message_chunk",
-        "content": {
-            "type": "text",
-            "text": text,
-        }
-    })
-}
-
+#[path = "acp_prompt_content.rs"]
+mod prompt_content;
+use prompt_content::*;
 fn tool_title(name: &str) -> String {
     match name {
         "bash" => "Running shell command".to_string(),
@@ -2063,6 +1919,11 @@ fn tool_title(name: &str) -> String {
         "edit" | "multiedit" | "patch" | "apply_patch" | "replace" => "Editing files".to_string(),
         "agentgrep" | "grep" | "glob" | "ls" => "Searching workspace".to_string(),
         "webfetch" | "websearch" => "Fetching web content".to_string(),
+        "todo" => "Updating plan".to_string(),
+        "bg" => "Managing background tasks".to_string(),
+        "skill_manage" => "Loading skill".to_string(),
+        "swarm" => "Coordinating agents".to_string(),
+        "codemode" => "Running script".to_string(),
         other => other.replace('_', " "),
     }
 }
@@ -2071,9 +1932,11 @@ pub(crate) fn tool_kind(name: &str) -> &'static str {
     match name {
         "read" => "read",
         "write" | "edit" | "multiedit" | "patch" | "apply_patch" | "replace" => "edit",
-        "bash" | "bg" | "selfdev" => "execute",
+        "bash" | "bg" | "selfdev" | "codemode" => "execute",
         "agentgrep" | "grep" | "glob" | "ls" | "session_search" | "conversation_search" => "search",
-        "webfetch" | "websearch" | "codesearch" => "fetch",
+        "webfetch" | "websearch" | "codesearch" | "browser" => "fetch",
+        "skill_manage" => "read",
+        "todo" => "think",
         _ => "other",
     }
 }

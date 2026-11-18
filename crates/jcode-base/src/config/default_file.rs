@@ -123,6 +123,24 @@ swarm_panel_focus = "alt+n"
 # By default Enter resumes in this terminal; Ctrl+Enter performs the alternate action.
 session_picker_enter = "current-terminal"
 
+[jarvis.speech]
+# Optional external OpenAI-compatible speech endpoint used by `jcode --jarvis`.
+# POST {model, voice, input, response_format: "wav"}; returns audio/wav.
+# Model and voice installation belong to the service, never the Jcode repo.
+# Overrides: JCODE_JARVIS_SPEECH_ENDPOINT. Omit endpoint to use local eSpeak.
+# endpoint = "http://127.0.0.1:8765/v1/audio/speech"
+# model = "piper-jarvis"
+# voice = "jarvis"
+# api_key_env = "MY_SPEECH_API_KEY"
+
+# Experimental `jcode --jarvis-always-on` uses local voice detection, Nari,
+# and a single-shot Jev request gate. Settings alone never open the microphone.
+# [jarvis.listening]
+# max_audio_seconds_per_hour = 600
+# max_classifications_per_hour = 120
+# max_agent_turns_per_hour = 20
+# action_probability = 0.97
+
 [dictation]
 # External speech-to-text command.
 # The command should record/transcribe speech and print the final transcript to stdout.
@@ -450,8 +468,8 @@ browser_handoff = false
 # This does not kill tools or change their own execution timeouts.
 auto_background_timeout_ms = 3000
 # Controls which built-in tools are sent to the model.
-# Profiles: "full" (default), "acp", "minimal"/"lite", or "none".
-# acp keeps core coding tools plus batch for generic ACP clients.
+# Profiles: "full" (default), "minimal"/"lite", or "none".
+# "acp" is a legacy name for "full".
 # minimal keeps core coding tools only: bash, read, write, edit, multiedit,
 # apply_patch, patch, agentgrep, glob, grep, and ls.
 profile = "full"
@@ -501,7 +519,8 @@ proactive_floor_tokens = 150000
 profile = "standard"
 # Tool profile requested when `jcode acp` starts the daemon itself.
 # Existing daemons keep their current server-wide tool config.
-tool_profile = "acp"
+# ACP clients get the same tools as the TUI. Use "minimal" to cut them down.
+tool_profile = "full"
 
 [provider]
 # Default model (optional, uses provider default if not set)
@@ -650,18 +669,6 @@ swarm_max_concurrent_agents = 32
 # Env overrides: JCODE_SWARM_STALL_AFTER_SECS, JCODE_SWARM_STALL_NUDGE
 swarm_stall_after_secs = 600
 # swarm_stall_nudge = false
-#
-# Max percentage (1-90) of the chat height the inline swarm gallery band may use.
-# Unset = built-in default (40%). Lower values keep more transcript visible; set
-# near the minimum to collapse the gallery to a thin strip.
-# swarm_gallery_max_pct = 40
-#
-# Layout of the inline swarm strip above the status line:
-#   "vertical"   - one agent per row (session icon + status + task), capped to
-#                  a few rows with a "+N more" overflow marker (default)
-#   "horizontal" - all agents packed as chips on a single row
-# Env override: JCODE_SWARM_STRIP_LAYOUT
-# swarm_strip_layout = "vertical"
 #
 # Recall uses Jev typed Decisions directly, without embeddings or a sidecar LLM.
 # Provider values: auto, jcode, openrouter, typesafe, laya, aimlapi.

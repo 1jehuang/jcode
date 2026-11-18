@@ -1,4 +1,10 @@
 use crate::protocol::NotificationType;
+#[path = "remote_notifications_presentation.rs"]
+mod presentation;
+pub(super) use presentation::file_activity_stack_message;
+use presentation::present_swarm_notification_inner;
+pub(super) use presentation::swarm_delivery_display_message;
+
 use crate::tui::ui::capitalize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +154,19 @@ pub(super) struct FileActivityEdit {
     pub edits: u32,
 }
 
+fn parse_file_activity_count<T: std::str::FromStr>(text: &str) -> Option<T>
+where
+    T::Err: std::fmt::Display,
+{
+    match text.parse() {
+        Ok(count) => Some(count),
+        Err(error) => {
+            crate::logging::debug(&format!("Invalid file activity count: {error}"));
+            None
+        }
+    }
+}
+
 fn non_empty(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -225,107 +244,6 @@ pub(super) fn stack_file_activity_edit(stack: &mut Vec<FileActivityEdit>, edit: 
     }
 }
 
-/// The single transcript row for a stack of peer edits.
-///
-/// One edit shows the agent, its line counts and intent. Several edits show
-/// only each agent's emoji and summed line counts. Paths and diffs stay
-/// behind the expand control.
-pub(super) fn file_activity_stack_message(
-    stack: &[FileActivityEdit],
-    expanded: bool,
-) -> crate::tui::DisplayMessage {
-    let (title, tldr) = match stack {
-        [edit] => (
-            format!(
-                "{} · {}",
-                if edit.is_conflict() {
-                    "File conflict"
-                } else {
-                    "File activity"
-                },
-                edit.sender
-            ),
-            format!(
-                "{}{} · {}",
-                edit.change_label(),
-                if edit.edits > 1 {
-                    format!(" · {} edits", edit.edits)
-                } else {
-                    String::new()
-                },
-                edit.intent
-                    .clone()
-                    .unwrap_or_else(|| compact_swarm_path(&edit.path))
-            ),
-        ),
-        stack => {
-            let mut senders: Vec<&str> = Vec::new();
-            for edit in stack {
-                if !senders.contains(&edit.sender.as_str()) {
-                    senders.push(&edit.sender);
-                }
-            }
-            let parts = senders
-                .iter()
-                .map(|sender| {
-                    let own = stack.iter().filter(|edit| edit.sender == *sender);
-                    let edits: u32 = own.clone().map(|edit| edit.edits).sum();
-                    let delta = own.clone().try_fold((0u64, 0u64), |(a, r), edit| {
-                        edit.delta.map(|(added, removed)| (a + added, r + removed))
-                    });
-                    let mut part = crate::id::session_icon(sender).to_string();
-                    if let Some((added, removed)) = delta {
-                        part.push_str(&format!(" +{added} -{removed}"));
-                    }
-                    if edits > 1 || delta.is_none() {
-                        part.push_str(&format!(
-                            " · {edits} edit{}",
-                            if edits == 1 { "" } else { "s" }
-                        ));
-                    }
-                    part
-                })
-                .collect::<Vec<_>>();
-            ("File activity".to_string(), parts.join("  "))
-        }
-    };
-    let body = stack
-        .iter()
-        .map(|edit| {
-            let mut part = format!(
-                "{} {} · {} · {}",
-                crate::id::session_icon(&edit.sender),
-                edit.sender,
-                compact_swarm_path(&edit.path),
-                edit.change_label()
-            );
-            if let Some(intent) = &edit.intent {
-                part.push_str(&format!("\n\nIntent: {intent}"));
-            }
-            if let Some(detail) = &edit.detail {
-                part.push_str(&format!(
-                    "\n\n```text\n{}\n```",
-                    sanitize_code_fence_content(detail)
-                ));
-            }
-            part
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let tldr = tldr
-        .replace('`', "")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let content = jcode_tui_messages::encode_collapsible_swarm_content(&tldr, &body);
-    let content = if expanded {
-        jcode_tui_messages::toggle_collapsible_swarm_content(&content).unwrap_or(content)
-    } else {
-        content
-    };
-    crate::tui::DisplayMessage::swarm(title, content)
-}
-
 impl super::App {
     /// Show a peer edit. While the newest transcript row is already a
     /// file-activity row, the edit is folded into it. Returns the row when a
@@ -365,10 +283,11 @@ impl super::App {
 }
 
 /// Parse one entry of the model-facing notice:
-/// `agent path +3-1 [x2] [L4-9] [overlap] [earlier][: intent]`.
+/// `agent edited path +3-1 [x2] [L4-9] [overlap] [earlier][: intent]`.
 fn parse_file_activity_notice_entry(line: &str) -> Option<FileActivityEdit> {
     let (sender, rest) = line.trim().split_once(' ')?;
-    if sender.is_empty() {
+    let (operation, rest) = rest.split_once(' ')?;
+    if sender.is_empty() || !matches!(operation, "edited" | "wrote") {
         return None;
     }
     // The counts are the first ` +A-R` token, so paths may contain spaces.
@@ -387,9 +306,8 @@ fn parse_file_activity_notice_entry(line: &str) -> Option<FileActivityEdit> {
     let edits = facts
         .split_whitespace()
         .find_map(|fact| fact.strip_prefix('x'))
-        .and_then(|count| count.parse().ok())
+        .and_then(parse_file_activity_count)
         .unwrap_or(1);
-    let operation = "edited";
     Some(FileActivityEdit {
         sender: compact_swarm_session_label(sender),
         path: path.to_string(),
@@ -397,21 +315,144 @@ fn parse_file_activity_notice_entry(line: &str) -> Option<FileActivityEdit> {
         intent: non_empty(tail.strip_prefix(": ")),
         summary: None,
         detail: None,
-        delta: Some((added.parse().ok()?, removed.parse().ok()?)),
+        delta: Some((
+            parse_file_activity_count(added)?,
+            parse_file_activity_count(removed)?,
+        )),
         edits,
     })
 }
 
 /// Parse a delivered model-facing file-activity notice (one or many entries).
+/// The notice has no prefix. Live deliveries are identified by their
+/// `file_activity` display role in both live delivery and restored history.
 pub(super) fn parse_file_activity_notice(content: &str) -> Option<Vec<FileActivityEdit>> {
-    let rest = content.trim().strip_prefix("⚠ File activity: ")?;
+    let content = content.trim();
+    // Notices delivered before the prefix was dropped.
+    let legacy = content.strip_prefix("⚠ File activity: ");
+    let rest = legacy.unwrap_or(content);
+    let parse_entry = |line: &str| {
+        parse_file_activity_notice_entry(line).or_else(|| {
+            // The earlier dense format omitted the verb, but carried a
+            // prefix. Only try that shape for explicitly prefixed history.
+            legacy?;
+            let (sender, rest) = line.split_once(' ')?;
+            parse_file_activity_notice_entry(&format!("{sender} edited {rest}"))
+        })
+    };
     let mut lines = rest.lines();
     let first = lines.next()?;
-    let mut stack = vec![parse_file_activity_notice_entry(first)?];
+    let mut stack = vec![parse_entry(first)?];
     for line in lines {
-        stack_file_activity_edit(&mut stack, parse_file_activity_notice_entry(line)?);
+        stack_file_activity_edit(&mut stack, parse_entry(line)?);
     }
     Some(stack)
+}
+
+/// A worker completion handoff generated by the server
+/// (`Agent <name> <status>\n\n<details>`).
+struct CompletionNotice<'a> {
+    sender: &'a str,
+    /// `None` for a normal finish, otherwise the abnormal outcome.
+    outcome: Option<&'static str>,
+    details: &'a str,
+}
+
+/// Match the generated envelope, not arbitrary user prose about agents.
+fn parse_completion_notice(trimmed: &str) -> Option<CompletionNotice<'_>> {
+    let rest = trimmed.strip_prefix("Agent ")?;
+    let (intro, details) = rest.split_once("\n\n")?;
+    let (sender, status) = intro.split_once(' ')?;
+    let outcome = match status {
+        "finished their work and is ready for more." | "completed their work." => None,
+        "finished with status failed." => Some("failed"),
+        "stopped." => Some("stopped"),
+        "crashed while working." => Some("crashed"),
+        _ => return None,
+    };
+    if sender.is_empty()
+        || !(details.starts_with("Recent output (automatically captured):\n")
+            || details.starts_with("No recent assistant output was captured. ")
+            || details.starts_with("Lane plan:\n")
+            || details.starts_with("Final response:\n"))
+    {
+        return None;
+    }
+    Some(CompletionNotice {
+        sender,
+        outcome,
+        details,
+    })
+}
+
+/// `lane 1/2` for the worker's lane, `lane 1/2 +1` when it holds several.
+fn completion_lane_label(details: &str) -> Option<String> {
+    let plan = details.strip_prefix("Lane plan:\n")?;
+    let plan = plan.split("\n\nFinal response:\n").next().unwrap_or(plan);
+    let mut lanes = plan.lines().filter_map(|line| {
+        let line = line.trim();
+        if line.starts_with("- ") {
+            return None;
+        }
+        let (name, progress) = line.strip_suffix(" completed")?.rsplit_once(": ")?;
+        let name = match name
+            .strip_prefix("Phase ")
+            .and_then(|rest| rest.split_once(" · "))
+        {
+            Some((number, name)) if number.bytes().all(|b| b.is_ascii_digit()) => name,
+            _ => name,
+        };
+        Some(format!("{} {}", name.trim(), progress.trim()))
+    });
+    let first = lanes.next()?;
+    Some(match lanes.count() {
+        0 => first,
+        more => format!("{first} +{more}"),
+    })
+}
+
+/// First line of what the worker actually said, if anything was captured.
+fn completion_response_line(details: &str) -> Option<String> {
+    let response = details
+        .split_once("Final response:\n")
+        .or_else(|| details.split_once("Recent output (automatically captured):\n"))?
+        .1;
+    let line = jcode_tui_messages::swarm_preview_line(response, usize::MAX);
+    (!line.is_empty()
+        && line != "No final assistant response was captured."
+        && line != "No report captured.")
+        .then_some(line)
+}
+
+/// Collapsed transcript content for a completion handoff. The row already
+/// leads with the agent's emoji, so the preview names the lane and its
+/// progress, then what the worker reported, instead of repeating the same
+/// generic sentence for every finished turn. The full handoff stays behind the
+/// expand control.
+fn completion_notice_content(trimmed: &str, tldr: Option<&str>) -> Option<String> {
+    let notice = parse_completion_notice(trimmed)?;
+    let summary = tldr
+        .map(|tldr| jcode_tui_messages::swarm_preview_line(tldr, usize::MAX))
+        .filter(|tldr| !tldr.is_empty())
+        .or_else(|| completion_response_line(notice.details));
+    let parts: Vec<String> = [
+        completion_lane_label(notice.details),
+        notice.outcome.map(str::to_string),
+        summary,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let preview = jcode_tui_messages::swarm_preview_line(
+        &parts.join(" · "),
+        jcode_tui_messages::SWARM_INLINE_BODY_MAX_CHARS,
+    );
+    Some(jcode_tui_messages::encode_collapsible_swarm_content(
+        &preview, trimmed,
+    ))
 }
 
 pub(super) fn present_swarm_notification(
@@ -422,6 +463,17 @@ pub(super) fn present_swarm_notification(
 ) -> SwarmNotificationPresentation {
     let mut presentation =
         present_swarm_notification_inner(sender, notification_type, message, compact);
+    if let NotificationType::Message { scope, tldr, .. } = notification_type
+        && scope.as_deref() == Some("swarm")
+        && let Some(content) = completion_notice_content(message.trim(), tldr.as_deref())
+    {
+        if let Some(parsed) = jcode_tui_messages::parse_collapsible_swarm_content(&content) {
+            presentation.status_notice =
+                format!("{} · {}", presentation.status_notice, parsed.tldr);
+        }
+        presentation.message = content;
+        return presentation;
+    }
     // Sender-provided tldr: store the full body but render it collapsed to the
     // tldr line with an expand control. The status line shows the tldr too.
     if let NotificationType::Message {
@@ -461,66 +513,8 @@ fn collapses_to_one_row(notification_type: &NotificationType) -> bool {
     }
 }
 
-/// If `content` is the model-facing text of a swarm message delivered to this
-/// session (`DM from X: ...`, `#chan from X: ...`, `broadcast from X: ...`),
-/// return a one-row swarm display message for it instead of the raw text.
-pub(super) fn swarm_delivery_display_message(content: &str) -> Option<crate::tui::DisplayMessage> {
-    let trimmed = content.trim();
-    let (title, body) = if let Some(rest) = trimmed.strip_prefix("Agent ") {
-        // Completion wakes use plain prose rather than the DM wire prefix.
-        // Match the generated envelope, not arbitrary user prose about agents.
-        let (intro, details) = rest.split_once("\n\n")?;
-        let (sender, status) = intro.split_once(' ')?;
-        if sender.is_empty()
-            || !matches!(
-                status,
-                "finished their work and is ready for more."
-                    | "finished with status failed."
-                    | "stopped."
-                    | "crashed while working."
-                    | "completed their work."
-            )
-            || !(details.starts_with("Recent output (automatically captured):\n")
-                || details.starts_with("No recent assistant output was captured. ")
-                || details.starts_with("Lane plan:\n"))
-        {
-            return None;
-        }
-        (format!("Swarm · {sender}"), trimmed)
-    } else if let Some(rest) = trimmed.strip_prefix("Cross-swarm DM from ") {
-        let (sender, body) = rest.split_once(": ")?;
-        (format!("DM from {}", sender.trim()), body)
-    } else if let Some(rest) = trimmed.strip_prefix("DM from ") {
-        let (sender, body) = rest.split_once(": ")?;
-        if sender.contains(char::is_whitespace) {
-            return None;
-        }
-        (format!("DM from {}", sender), body)
-    } else if let Some(rest) = trimmed.strip_prefix("broadcast from ") {
-        let (sender, body) = rest.split_once(": ")?;
-        if sender.contains(char::is_whitespace) {
-            return None;
-        }
-        (format!("Broadcast · {}", sender), body)
-    } else {
-        let rest = trimmed.strip_prefix('#')?;
-        let (head, body) = rest.split_once(": ")?;
-        let (channel, sender) = head.split_once(" from ")?;
-        if channel.contains(char::is_whitespace) {
-            return None;
-        }
-        (format!("#{} · {}", channel, sender.trim()), body)
-    };
-    if title.contains('\n') {
-        return None;
-    }
-    Some(crate::tui::DisplayMessage::swarm(
-        title,
-        jcode_tui_messages::collapse_long_swarm_content(body),
-    ))
-}
-
 /// Full underlying body of swarm display content, collapsed or not.
+#[cfg(test)]
 pub(super) fn swarm_display_full_body(content: &str) -> &str {
     match jcode_tui_messages::parse_collapsible_swarm_content(content) {
         Some(parsed) if !parsed.body.trim().is_empty() => parsed.body.trim(),
@@ -529,13 +523,22 @@ pub(super) fn swarm_display_full_body(content: &str) -> &str {
     }
 }
 
+pub(super) fn typed_file_activity_display_message(
+    content: &str,
+) -> Option<crate::tui::DisplayMessage> {
+    let stack = parse_file_activity_notice(content)?;
+    Some(file_activity_stack_message(&stack, false))
+}
+
 /// Restore the same compact presentation for model-facing file notices that
 /// older transcripts saved without the structured notification payload.
 pub(super) fn file_activity_delivery_display_message(
     content: &str,
 ) -> Option<crate::tui::DisplayMessage> {
     let trimmed = content.trim();
-    if let Some(stack) = parse_file_activity_notice(trimmed) {
+    if trimmed.starts_with("⚠ File activity: ")
+        && let Some(stack) = parse_file_activity_notice(trimmed)
+    {
         return Some(file_activity_stack_message(&stack, false));
     }
     let rest = trimmed
@@ -575,6 +578,14 @@ pub(super) fn file_activity_delivery_display_message(
 /// original notification card is not available.
 pub(super) fn normalize_swarm_delivery_messages(messages: &mut [crate::tui::DisplayMessage]) {
     for message in messages.iter_mut() {
+        if message.role == "file_activity" {
+            if let Some(stack) = parse_file_activity_notice(&message.content) {
+                *message = file_activity_stack_message(&stack, false);
+            } else {
+                message.role = "system".to_string();
+            }
+            continue;
+        }
         if !matches!(message.role.as_str(), "user" | "system") {
             continue;
         }
@@ -590,115 +601,27 @@ pub(super) fn normalize_swarm_delivery_messages(messages: &mut [crate::tui::Disp
     }
 }
 
-fn present_swarm_notification_inner(
-    sender: &str,
-    notification_type: &NotificationType,
-    message: &str,
-    _compact: bool,
-) -> SwarmNotificationPresentation {
-    let trimmed = message.trim();
-    match notification_type {
-        NotificationType::Message { scope, channel, .. } => match scope.as_deref() {
-            Some("dm") => {
-                if let Some(task_body) =
-                    strip_message_prefix(trimmed, "Task assigned to you by coordinator: ")
-                {
-                    SwarmNotificationPresentation {
-                        title: format!("Task · {}", sender),
-                        message: task_body.to_string(),
-                        status_notice: format!("Task assigned by {}", sender),
-                    }
-                } else {
-                    SwarmNotificationPresentation {
-                        title: format!("DM from {}", sender),
-                        message: compact_direct_message_body(trimmed),
-                        status_notice: format!("DM from {}", sender),
-                    }
-                }
-            }
-            Some("channel") => SwarmNotificationPresentation {
-                title: format!("#{} · {}", channel.as_deref().unwrap_or("channel"), sender),
-                message: compact_channel_message_body(trimmed),
-                status_notice: format!(
-                    "Channel message · #{}",
-                    channel.as_deref().unwrap_or("channel")
-                ),
-            },
-            Some("broadcast") => SwarmNotificationPresentation {
-                title: format!("Broadcast · {}", sender),
-                message: compact_broadcast_message_body(trimmed),
-                status_notice: format!("Broadcast from {}", sender),
-            },
-            Some("plan") => SwarmNotificationPresentation {
-                title: format!("Plan · {}", sender),
-                message: compact_plan_message_body(trimmed),
-                status_notice: "Swarm plan updated".to_string(),
-            },
-            Some("swarm") => SwarmNotificationPresentation {
-                title: format!("Swarm · {}", sender),
-                message: trimmed.to_string(),
-                status_notice: "Swarm update".to_string(),
-            },
-            Some("background_task") => SwarmNotificationPresentation {
-                title: if trimmed.starts_with("**Background task progress**") {
-                    "Background task progress".to_string()
-                } else {
-                    "Background task".to_string()
-                },
-                message: trimmed.to_string(),
-                status_notice: if let Some(progress) =
-                    crate::message::parse_background_task_progress_notification_markdown(trimmed)
-                {
-                    format!(
-                        "Background task · {} · {}",
-                        crate::message::background_task_display_label(
-                            &progress.tool_name,
-                            progress.display_name.as_deref()
-                        ),
-                        progress.summary
-                    )
-                } else if trimmed.starts_with("**Background task progress**") {
-                    "Background task progress".to_string()
-                } else {
-                    "Background task update".to_string()
-                },
-            },
-            Some("swarm_await") => SwarmNotificationPresentation {
-                title: "🐝 Swarm await".to_string(),
-                message: crate::tui::ui::compact_swarm_await_summary(trimmed),
-                status_notice: "🐝 Swarm await finished".to_string(),
-            },
-            Some(other) => SwarmNotificationPresentation {
-                title: format!("Swarm · {}", sender),
-                message: trimmed.to_string(),
-                status_notice: format!("{} update", capitalize(other)),
-            },
-            None => SwarmNotificationPresentation {
-                title: format!("Swarm · {}", sender),
-                message: trimmed.to_string(),
-                status_notice: "Swarm update".to_string(),
-            },
-        },
-        NotificationType::SharedContext { key, value } => SwarmNotificationPresentation {
-            title: format!("Shared context · {}", sender),
-            message: format!("{} = {}", key, value).trim().to_string(),
-            status_notice: format!("Shared context: {}", key),
-        },
-        NotificationType::FileConflict { path, .. } => {
-            let edit = FileActivityEdit::from_notification(sender, notification_type)
-                .expect("file conflict notification");
-            let message = file_activity_stack_message(std::slice::from_ref(&edit), false);
-            SwarmNotificationPresentation {
-                title: message.title.unwrap_or_default(),
-                message: message.content,
-                status_notice: format!("File activity · {}", compact_swarm_path(path)),
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn file_activity_counts_reject_overflow_and_invalid_wire_values() {
+        assert_eq!(
+            super::parse_file_activity_count::<u64>("18446744073709551615"),
+            Some(u64::MAX)
+        );
+        assert_eq!(
+            super::parse_file_activity_count::<u64>("18446744073709551616"),
+            None
+        );
+        assert_eq!(
+            super::parse_file_activity_count::<u32>("4294967295"),
+            Some(u32::MAX)
+        );
+        assert_eq!(super::parse_file_activity_count::<u32>("4294967296"), None);
+        assert_eq!(super::parse_file_activity_count::<u64>("-1"), None);
+        assert_eq!(super::parse_file_activity_count::<u64>("unknown"), None);
+    }
+
     use super::{compact_plan_message_body, present_swarm_notification};
     use crate::protocol::NotificationType;
 
@@ -791,6 +714,78 @@ mod tests {
             text
         };
         assert_eq!(render(false), render(true));
+    }
+
+    #[test]
+    fn completion_rows_show_lane_progress_and_report_not_generic_intro() {
+        let tldr_of = |content: &str| {
+            jcode_tui_messages::parse_collapsible_swarm_content(content)
+                .expect("completion is collapsible")
+                .tldr
+                .to_string()
+        };
+        let compact = "Agent tulip finished their work and is ready for more.\n\nFinal response:\nNo report captured.";
+        let compact_row =
+            super::swarm_delivery_display_message(compact).expect("compact completion");
+        assert_eq!(compact_row.title.as_deref(), Some("Swarm · tulip"));
+        assert!(!tldr_of(&compact_row.content).contains("No report captured."));
+        let handoff = "Agent panda finished their work and is ready for more.\n\nLane plan:\nPhase 2 · resident-query-archive: 1/2 completed\n- [completed] Archive\n- [pending] Upload cap\n\nFinal response:\n\nReadback verified.\nMore detail.";
+        let restored = super::swarm_delivery_display_message(handoff).expect("swarm row");
+        assert_eq!(restored.title.as_deref(), Some("Swarm · panda"));
+        assert_eq!(
+            tldr_of(&restored.content),
+            "resident-query-archive 1/2 · Readback verified."
+        );
+        assert_eq!(super::swarm_display_full_body(&restored.content), handoff);
+
+        // Live notifications agree, and a sender tldr replaces the derived line.
+        let live = |tldr: Option<&str>| {
+            present_swarm_notification(
+                "panda",
+                &NotificationType::Message {
+                    scope: Some("swarm".to_string()),
+                    channel: None,
+                    tldr: tldr.map(str::to_string),
+                },
+                handoff,
+                false,
+            )
+        };
+        assert_eq!(live(None).message, restored.content);
+        assert_eq!(
+            tldr_of(&live(Some("Cap raised")).message),
+            "resident-query-archive 1/2 · Cap raised"
+        );
+
+        let lines = crate::tui::ui::render_swarm_message(
+            &restored,
+            60,
+            crate::config::DiffDisplayMode::Off,
+        );
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].width() <= 60);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.starts_with(&format!(
+                "{} resident-query-archive 1/2",
+                crate::id::session_icon("panda")
+            )),
+            "unexpected completion preview: {text:?}"
+        );
+        assert!(!text.contains("finished their work"));
+
+        // Abnormal outcomes stay visible, extra lanes are counted, and a
+        // handoff with nothing to summarize keeps its original wording.
+        let failed = "Agent owl crashed while working.\n\nLane plan:\nparser: 0/1 completed\n- [in_progress] Parse\nPhase 3 · docs: 0/2 completed\n\nFinal response:\nNo final assistant response was captured.";
+        let failed = super::swarm_delivery_display_message(failed).expect("swarm row");
+        assert_eq!(tldr_of(&failed.content), "parser 0/1 +1 · crashed");
+        let bare = "Agent owl finished their work and is ready for more.\n\nLane plan:\nNo lane plan available.\n\nFinal response:\nNo final assistant response was captured.";
+        let bare = super::swarm_delivery_display_message(bare).expect("swarm row");
+        assert_eq!(
+            tldr_of(&bare.content),
+            "Agent owl finished their work and is ready for more."
+        );
+        assert!(super::swarm_delivery_display_message("Agent owl is nice.\n\nReally.").is_none());
     }
 
     #[test]
@@ -1157,20 +1152,35 @@ mod tests {
 
     #[test]
     fn delivered_model_notice_restores_as_the_same_compact_row() {
-        let single = "⚠ File activity: moss src/parser.rs +3-1 L2-9 overlap: fix parser";
-        let mut messages = vec![crate::tui::DisplayMessage::system(single)];
+        let single = "moss edited src/parser.rs +3-1 L2-9 overlap: fix parser";
+        let mut message = crate::tui::DisplayMessage::system(single);
+        message.role = "file_activity".to_string();
+        let mut messages = vec![message];
         super::normalize_swarm_delivery_messages(&mut messages);
         assert_eq!(messages[0].role, "swarm");
         assert_eq!(messages[0].title.as_deref(), Some("File activity · moss"));
         assert_eq!(collapsed(&messages[0]).0, "+3 -1 · fix parser");
 
-        let batch = "⚠ File activity: moss src/my parser.rs +3-1 x2: fix parser\nfox src/lib.rs +10-0 earlier";
+        let batch =
+            "moss edited src/my parser.rs +3-1 x2: fix parser\nfox wrote src/lib.rs +10-0 earlier";
+        for prose in [
+            "moss edited the parser and it works",
+            "Plan proposal received in swarm s1\nFrom: moss",
+            "moss edited a.rs +3-1\nand then some prose",
+        ] {
+            assert!(
+                super::parse_file_activity_notice(prose).is_none(),
+                "{prose}"
+            );
+        }
         let stack = super::parse_file_activity_notice(batch).expect("batch notice parses");
         assert_eq!(stack.len(), 2);
         assert_eq!(stack[0].edits, 2);
         assert_eq!(stack[1].delta, Some((10, 0)));
         assert_eq!(stack[1].intent, None);
-        let mut messages = vec![crate::tui::DisplayMessage::system(batch)];
+        let mut message = crate::tui::DisplayMessage::system(batch);
+        message.role = "file_activity".to_string();
+        let mut messages = vec![message];
         super::normalize_swarm_delivery_messages(&mut messages);
         assert_eq!(messages[0].title.as_deref(), Some("File activity"));
     }

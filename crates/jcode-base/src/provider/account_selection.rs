@@ -37,12 +37,19 @@ impl MultiProvider {
             return Ok(());
         }
         // A freshly spawned session inherits the process-wide account. If that
-        // login is known to be spent (local cooldown, no network IO), start on
-        // the next ready pool member instead of failing the first request.
+        // login is known to be spent (local cooldown or cached quota, no network
+        // IO), start on the next ready pool member instead of failing the first
+        // request. Use the same exact-account usage check as the request guard:
+        // usage reports can establish exhaustion before a request records 429.
         let label = match models::provider_unavailability_detail_for_account_label(
             Self::provider_key(target),
             Some(&label),
-        ) {
+        )
+        .or_else(|| {
+            account_failover::multi_account_provider_kind(target)
+                .filter(|kind| crate::usage::account_known_exhausted(*kind, &label))
+                .map(|_| "OAuth usage exhausted".to_string())
+        }) {
             Some(reason) if same_provider_account_failover_enabled() => {
                 match account_failover::same_provider_account_candidates(target)
                     .into_iter()
