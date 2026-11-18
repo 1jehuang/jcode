@@ -2025,6 +2025,12 @@ impl App {
         app
     }
 
+    /// Ask the server to switch the new session to `spec` once connected, the
+    /// way a `/model` pick does (`--model` alone only reaches a fresh server).
+    pub fn set_startup_model_switch(&mut self, spec: String) {
+        self.pending_model_switch = Some(spec);
+    }
+
     /// Mark that a server was just spawned - run_remote will retry initial connection
     /// instead of failing fatally, allowing the TUI to show while the server starts.
     pub fn set_server_spawning(&mut self) {

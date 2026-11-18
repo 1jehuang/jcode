@@ -132,6 +132,15 @@ pub(crate) struct Args {
     #[arg(short, long, global = true)]
     pub(crate) model: Option<String>,
 
+    /// Start the new session on the model and route a saved session last used.
+    /// Best effort: an unknown session or one with no model starts on the default.
+    #[arg(
+        long = "model-from-session",
+        value_name = "ID",
+        conflicts_with_all = ["resume", "model"]
+    )]
+    pub(crate) model_from_session: Option<String>,
+
     /// Use this saved account for this window/run only (repeatable, one per
     /// provider; `claude-fox`, `openai-otter`, or an account email). Other
     /// windows and the default account are unchanged.

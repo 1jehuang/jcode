@@ -229,6 +229,7 @@ pub async fn run_self_dev(should_build: bool, resume_session: Option<String>) ->
     super::tui_launch::run_tui_client(
         Some(session_id),
         None,
+        None,
         !server_running,
         false,
         None,
