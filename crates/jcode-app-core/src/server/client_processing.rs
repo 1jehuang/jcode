@@ -331,6 +331,11 @@ pub(super) async fn start_processing_message(
         .await
         .get(client_session_id)
         .is_some_and(|member| member.report_back_to_session_id.is_some());
+    if owned_worker {
+        crate::agents_status::mark_worker(client_session_id);
+    } else {
+        crate::agents_status::load_plan_from_disk(client_session_id);
+    }
     let (start_message_index, pending_queue) = {
         let mut agent_guard = agent.lock().await;
         if owned_worker {

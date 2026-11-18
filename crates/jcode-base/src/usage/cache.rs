@@ -31,6 +31,24 @@ pub(super) fn openai_usage_cache() -> &'static std::sync::Mutex<HashMap<String, 
     OPENAI_ACCOUNT_USAGE_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// Prime cold-start account routing with known exhausted quotas from the
+/// authoritative per-account usage cache, not the advisory UI startup snapshot. Call only during provider
+/// initialization, never from a quota accessor or renderer. Live process state
+/// wins over disk, including newer probes and explicit quota resets.
+pub(crate) fn hydrate_persisted_account_usage() {
+    let persisted = super::disk_cache::saved_account_last_good();
+    if persisted.is_empty() {
+        return;
+    }
+    if let Ok(mut cache) = anthropic_usage_cache().lock() {
+        for (key, usage) in persisted {
+            if anthropic_known_exhausted(&usage) {
+                cache.entry(key).or_insert(usage);
+            }
+        }
+    }
+}
+
 /// Read fresh usage attributed to a saved account without probing credentials,
 /// reading files, waiting for a cache lock, or scheduling a network refresh.
 /// Missing, stale, and failed reports are unknown, not zero usage.
@@ -154,6 +172,58 @@ fn openai_known_exhausted(data: &OpenAIUsageData) -> bool {
 mod account_snapshot_tests {
     use super::*;
     use crate::usage::{MultiAccountProviderKind, OpenAIUsageWindow};
+
+    #[test]
+    fn persisted_routing_hydration_honors_resets_and_never_replaces_live_usage() {
+        let _guard = crate::storage::lock_test_env();
+        let dir = tempfile::tempdir().unwrap();
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => crate::env::set_var("JCODE_HOME", value),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", dir.path());
+        for (label, reset) in [
+            ("hydrate-future", "2999-01-01T00:00:00Z"),
+            ("hydrate-reset", "2020-01-01T00:00:00Z"),
+            ("hydrate-invalid", "invalid"),
+            ("hydrate-live", "2999-01-01T00:00:00Z"),
+        ] {
+            super::super::disk_cache::store_success(
+                &format!("label:{label}"),
+                &UsageData {
+                    seven_day: 1.0,
+                    seven_day_resets_at: Some(reset.into()),
+                    ..Default::default()
+                },
+            );
+        }
+        let live = UsageData {
+            seven_day: 0.2,
+            fetched_at: Some(Instant::now()),
+            ..Default::default()
+        };
+        store_anthropic_usage("label:hydrate-live".into(), live.clone());
+        hydrate_persisted_account_usage();
+        let mut cache = anthropic_usage_cache().lock().unwrap();
+        assert!(anthropic_known_exhausted(&cache["label:hydrate-future"]));
+        assert!(!cache.contains_key("label:hydrate-reset"));
+        assert!(!cache.contains_key("label:hydrate-invalid"));
+        assert_eq!(cache["label:hydrate-live"].seven_day, live.seven_day);
+        for label in [
+            "hydrate-future",
+            "hydrate-reset",
+            "hydrate-invalid",
+            "hydrate-live",
+        ] {
+            cache.remove(&format!("label:{label}"));
+        }
+    }
 
     #[test]
     fn stale_samples_stay_exhausted_until_their_window_resets() {

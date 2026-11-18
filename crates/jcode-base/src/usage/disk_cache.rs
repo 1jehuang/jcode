@@ -255,6 +255,23 @@ pub(super) fn fresh(key: &str) -> Option<UsageData> {
     (deadline(&entry)? > now_ms()).then(|| entry_usage(&entry))
 }
 
+/// Cold-start routing can reuse a dated last-good quota even after the polling
+/// deadline expired. Never import token scopes or error-only zero placeholders.
+/// The caller runs outside rendering and only fills missing in-memory entries.
+pub(super) fn saved_account_last_good() -> HashMap<String, UsageData> {
+    load()
+        .into_iter()
+        .filter_map(|(key, entry)| {
+            let label = key.strip_prefix("label:")?;
+            if label.trim().is_empty() || label == "default" {
+                return None;
+            }
+            let good = entry.last_good.as_ref()?;
+            (age(good.fetched_unix_ms) < LAST_GOOD_MAX_AGE).then(|| (key, entry_usage(&entry)))
+        })
+        .collect()
+}
+
 /// Last good limits for a failed request, if any are recent enough to show.
 #[cfg(test)]
 pub(super) fn last_good(key: &str) -> Option<UsageData> {
@@ -650,6 +667,42 @@ mod tests {
             five_hour_resets_at: Some("2999-01-01T00:00:00Z".into()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn routing_hydration_only_imports_recent_saved_last_good_samples() {
+        with_home(|| {
+            let mut good = sample();
+            good.seven_day = 1.0;
+            good.seven_day_resets_at = Some("2999-01-01T00:00:00Z".into());
+            for key in [
+                "label:routing-dated",
+                "label:routing-old",
+                "label:default",
+                "label:",
+                "token:external",
+            ] {
+                store_success(key, &good);
+            }
+            update("label:routing-dated", |entry| {
+                entry.last_good.as_mut().unwrap().fetched_unix_ms -= 3_600_000;
+            });
+            update("label:routing-old", |entry| {
+                entry.last_good.as_mut().unwrap().fetched_unix_ms -= 86_401_000;
+            });
+            store_error_with_hint("label:routing-dated", "Usage API error (429)", Some("7200"));
+            store_error("label:routing-error-only", "Usage API error (401)");
+            let imported = saved_account_last_good();
+            assert_eq!(imported.len(), 1);
+            let usage = &imported["label:routing-dated"];
+            assert_eq!(usage.seven_day, 1.0);
+            assert!(usage.last_success_at.unwrap().elapsed() >= Duration::from_secs(3600));
+            assert!(usage.last_error.as_deref().unwrap().contains("429"));
+            assert!(
+                usage.refresh_after.unwrap().duration_since(Instant::now())
+                    > Duration::from_secs(7198)
+            );
+        });
     }
 
     #[test]

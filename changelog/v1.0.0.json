@@ -1,0 +1,29 @@
+{
+  "version": "1.0.0",
+  "date": "2026-11-17",
+  "title": "Swarms, Cloud, and a lighter terminal",
+  "highlights": [
+    "Reworked swarms plan jobs in phases and parallel lanes, automatically start workers as dependencies finish, and show the whole team's progress in one pinned view",
+    "jcode Cloud officially launches: move a session or coordinated swarm to a VM with /cloud, keep working after disconnecting, and bring the conversation and repository back with /local",
+    "A lighter terminal with lower CPU usage, fewer background wakeups, faster transcript rendering, and less rendered-text memory"
+  ],
+  "improvements": [
+    "In our own jcode development sessions, worker launches increased from 88 to 174 between November 2–8 and November 9–15, averaging roughly three times as many worker dispatches per active session",
+    "A profiled release client used 25% less CPU, idle client wakeups fell from 2.68 to 1.51 per second, and rendered-span memory in a large conversation fell from 20.4 MB to 14.6 MB",
+    "Spinner-frame processing became 3.5 times faster and append-frame processing on a 4,000-message transcript became 8.3 times faster",
+    "Cloud sessions load recent history first and fetch older messages on demand; a 7,000-message session's initial history payload shrank from 14.3 MB to 261 KB",
+    "Search full conversations in /resume with typo tolerance, live previews, and local and cloud sessions in the same picker",
+    "Set account priority tiers, hot-swap accounts with Ctrl+Alt+J/K, inspect refreshed /usage cards, and configure context limits per session",
+    "Follow live and completed codemode calls through bounded JavaScript previews that survive status changes and transcript compaction",
+    "See worker lane progress and final reports in completion messages, with clearer wait and recovery outcomes",
+    "Reduce polling and redraws in background windows, preserve focus state across reloads, and reuse immutable transcript and provider request data instead of repeatedly copying it",
+    "Live voice input includes a waveform and streaming draft transcript; model discovery and response-observed usage attribution are improved"
+  ],
+  "fixes": [
+    "Recover from short network interruptions and HTTP/2 stream errors without prematurely failing the turn or suggesting an unrelated model switch",
+    "Improve account failover acknowledgements, retry cancellation, and protection against stale fallback resends",
+    "Keep the terminal in TUI mode after recovered draw panics, including tiny tmux panes",
+    "Improve cloud handoff recovery, repository replacement safety, reconnection, and in-place runtime reloads",
+    "Avoid repeated redraws for unchanged todo snapshots and repeated reads of completed background-task files"
+  ]
+}

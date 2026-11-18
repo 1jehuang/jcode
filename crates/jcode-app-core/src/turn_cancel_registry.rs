@@ -86,15 +86,14 @@ pub fn active_turn_signals(session_id: &str) -> Vec<InterruptSignal> {
 /// Snapshot the session IDs that currently own at least one running turn.
 /// Unlike swarm status, these registrations follow the actual turn lifetime.
 pub fn active_session_ids() -> Vec<String> {
-    ACTIVE_TURNS
-        .lock()
-        .map(|map| {
-            map.iter()
-                .filter(|(_, turns)| !turns.is_empty())
-                .map(|(session_id, _)| session_id.clone())
-                .collect()
-        })
-        .unwrap_or_default()
+    let map = ACTIVE_TURNS.lock().unwrap_or_else(|error| {
+        crate::logging::warn("Recovering poisoned active-turn registry while listing sessions");
+        error.into_inner()
+    });
+    map.iter()
+        .filter(|(_, turns)| !turns.is_empty())
+        .map(|(session_id, _)| session_id.clone())
+        .collect()
 }
 
 /// Move every in-flight turn registration from `old_session_id` to
