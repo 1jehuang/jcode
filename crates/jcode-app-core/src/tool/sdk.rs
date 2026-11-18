@@ -26,6 +26,7 @@ static NEXT_CALL: AtomicU64 = AtomicU64::new(1);
 pub(crate) struct ConnectionGuard(pub String);
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
+        crate::screen_context::remove_owner(&self.0);
         let mut state = STATE.write().unwrap_or_else(|e| e.into_inner());
         // Instructions are authorized only while their client is attached.
         // Tool restrictions below remain fail-closed after disconnection.
@@ -40,11 +41,12 @@ impl Drop for ConnectionGuard {
             !(overlay.owner == self.0
                 && overlay.config.enabled.is_none()
                 && overlay.config.disabled.is_empty()
-                && overlay
-                    .config
-                    .custom
-                    .iter()
-                    .all(|tool| matches!(tool.name.as_str(), "cloud_environment" | "speak")))
+                && overlay.config.custom.iter().all(|tool| {
+                    matches!(
+                        tool.name.as_str(),
+                        "cloud_environment" | "speak" | "screen_context"
+                    )
+                }))
         });
         for overlay in state.overlays.values_mut().filter(|o| o.owner == self.0) {
             // Retain definitions and denies, but never fall back to a built-in override.
@@ -55,6 +57,7 @@ impl Drop for ConnectionGuard {
 }
 
 pub(crate) fn remove_session(session: &str) {
+    crate::screen_context::remove_session(session);
     let mut state = STATE.write().unwrap_or_else(|e| e.into_inner());
     state.overlays.remove(session);
     state
@@ -129,6 +132,7 @@ pub(crate) fn configure(
                 .pending
                 .retain(|_, pending| pending.session != session);
         }
+        crate::screen_context::remove_session(session);
         return Ok(());
     }
     if let Some(previous) = state.overlays.get(session) {
@@ -141,6 +145,11 @@ pub(crate) fn configure(
         !state.pending.values().any(|p| p.session == session),
         "Session tool callbacks are busy"
     );
+    if config.system_prompt_append.is_none()
+        || !config.custom.iter().any(|tool| tool.name == "speak")
+    {
+        crate::screen_context::remove_session(session);
+    }
     state.overlays.insert(
         session.into(),
         Overlay {
@@ -150,6 +159,21 @@ pub(crate) fn configure(
         },
     );
     Ok(())
+}
+
+/// Screen opt-in is available only to the live Jarvis overlay owner.
+pub(crate) fn owns_jarvis(session: &str, owner: &str) -> bool {
+    let state = STATE.read().unwrap_or_else(|e| e.into_inner());
+    state.overlays.get(session).is_some_and(|overlay| {
+        overlay.owner == owner
+            && overlay.sender.is_some()
+            && overlay.config.system_prompt_append.is_some()
+            && overlay
+                .config
+                .custom
+                .iter()
+                .any(|tool| tool.name == "speak")
+    })
 }
 
 pub(crate) fn config(session: &str) -> Option<SessionToolConfig> {

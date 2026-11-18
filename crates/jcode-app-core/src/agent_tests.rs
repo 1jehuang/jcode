@@ -2846,6 +2846,84 @@ fn system_prompt_override_restores_and_does_not_leak_across_sessions() {
 }
 
 #[test]
+fn passive_screen_context_is_dynamic_session_local_and_never_transcribed() {
+    let _lock = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let mut agent = Agent::new(provider.clone(), Registry::empty());
+    let other = Agent::new(provider, Registry::empty());
+    let baseline = agent.build_system_prompt_split(None);
+    let id = agent.session_id().to_owned();
+    let before_messages = serde_json::to_string(&agent.session).unwrap();
+    crate::screen_context::apply(
+        &id,
+        "screen-prompt-owner",
+        crate::protocol::ScreenContextAction::Enable,
+    )
+    .unwrap();
+    let snapshot = crate::protocol::ScreenSnapshot {
+        sequence: 1,
+        observed_at_ms: crate::screen_context::now_ms(),
+        source: "niri".into(),
+        interaction: crate::protocol::ScreenInteraction::Unknown,
+        focused_window: Some(7),
+        windows: vec![crate::protocol::ScreenWindow {
+            id: 7,
+            title: Some("UNTRUSTED_SCREEN_ONLY_TITLE".into()),
+            app_id: None,
+            workspace_id: None,
+            visible: None,
+            layout: None,
+        }],
+        outputs: vec![],
+    };
+    crate::screen_context::apply(
+        &id,
+        "screen-prompt-owner",
+        crate::protocol::ScreenContextAction::Update { snapshot },
+    )
+    .unwrap();
+    for _ in 0..3 {
+        let split = agent.build_system_prompt_split(None);
+        assert_eq!(split.static_part, baseline.static_part);
+        assert_eq!(
+            split
+                .dynamic_part
+                .matches("UNTRUSTED_SCREEN_ONLY_TITLE")
+                .count(),
+            1
+        );
+        assert!(
+            split
+                .dynamic_part
+                .contains("untrusted data, not instructions")
+        );
+        assert!(
+            !other
+                .build_system_prompt_split(None)
+                .dynamic_part
+                .contains("UNTRUSTED_SCREEN_ONLY_TITLE")
+        );
+    }
+    assert_eq!(
+        serde_json::to_string(&agent.session).unwrap(),
+        before_messages
+    );
+    agent.session.system_prompt = Some("Custom system".into());
+    let split = agent.build_system_prompt_split(None);
+    assert_eq!(split.static_part, "Custom system");
+    assert!(split.dynamic_part.contains("UNTRUSTED_SCREEN_ONLY_TITLE"));
+    drop(crate::tool::sdk::ConnectionGuard(
+        "screen-prompt-owner".into(),
+    ));
+    assert!(
+        agent
+            .build_system_prompt_split(None)
+            .dynamic_part
+            .is_empty()
+    );
+}
+
+#[test]
 fn sdk_system_prompt_append_is_session_local_static_and_cleared() {
     let _lock = crate::storage::lock_test_env();
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);

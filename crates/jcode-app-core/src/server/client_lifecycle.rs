@@ -931,6 +931,26 @@ pub(super) async fn handle_client(
             continue;
         }
 
+        // Passive screen controls must not acquire the Agent mutex or enter
+        // ordinary dispatch: idle observations never start a provider turn.
+        if let Request::ScreenContext { id, session_id, action } = request {
+            let result = if session_id != client_session_id {
+                Err(anyhow::anyhow!("Screen update belongs to a different session attachment"))
+            } else if matches!(action, crate::protocol::ScreenContextAction::Disable)
+                || crate::tool::sdk::owns_jarvis(&client_session_id, &client_connection_id)
+            {
+                crate::screen_context::apply(&client_session_id, &client_connection_id, action)
+            } else {
+                Err(anyhow::anyhow!("Screen context requires the live Jarvis client owner"))
+            };
+            let event = match result {
+                Ok(()) => ServerEvent::Ack { id },
+                Err(error) => ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None },
+            };
+            let _ = client_event_tx.send(event);
+            continue;
+        }
+
         // SDK controls reply only after validation. Callback results must never
         // wait for the Agent mutex held by the turn awaiting that callback.
         if matches!(&request, Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. }) {
@@ -1059,6 +1079,7 @@ pub(super) async fn handle_client(
             connection_client_name = Some(name.clone());
         }
         match request {
+            Request::ScreenContext { .. } => unreachable!("Passive screen control dispatched before acknowledgment"),
             Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. } => unreachable!("SDK controls dispatched before acknowledgment"),
             Request::Message {
                 id,

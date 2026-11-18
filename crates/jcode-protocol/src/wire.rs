@@ -37,6 +37,13 @@ pub struct SessionToolConfig {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {
+    /// Passive latest-state metadata. Never starts a turn or cancels generation.
+    #[serde(rename = "screen_context")]
+    ScreenContext {
+        id: u64,
+        session_id: String,
+        action: ScreenContextAction,
+    },
     #[serde(rename = "configure_tools")]
     ConfigureTools { id: u64, tools: SessionToolConfig },
     #[serde(rename = "list_tools")]

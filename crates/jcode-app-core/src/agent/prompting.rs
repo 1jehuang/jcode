@@ -137,7 +137,7 @@ impl Agent {
         if let Some(ref override_prompt) = self.session.system_prompt {
             return crate::prompt::SplitSystemPrompt {
                 static_part: self.append_session_system_prompt(override_prompt.clone()),
-                dynamic_part: String::new(),
+                dynamic_part: crate::screen_context::dynamic_prompt(self.session_id()),
             };
         }
 
@@ -166,6 +166,9 @@ impl Agent {
         );
 
         split.static_part = self.append_session_system_prompt(split.static_part);
+        split
+            .dynamic_part
+            .push_str(&crate::screen_context::dynamic_prompt(self.session_id()));
         split
     }
 
