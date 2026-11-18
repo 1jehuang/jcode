@@ -1885,6 +1885,21 @@ impl Server {
                     )
                     .await;
                 }
+                BusEvent::PeerMessageReceived(event) => {
+                    background_tasks::dispatch_peer_message(
+                        &event,
+                        &sessions,
+                        &soft_interrupt_queues,
+                        live_turn::LiveTurnSwarmContext::new(
+                            &swarm_members,
+                            &swarms_by_id,
+                            &event_history,
+                            &event_counter,
+                            &swarm_event_tx,
+                        ),
+                    )
+                    .await;
+                }
                 BusEvent::SessionUpdateStatus(status) => {
                     let (session_id, event) = runtime_ssh_host::maintenance_event(status);
                     fanout_session_event(&swarm_members, &session_id, event).await;

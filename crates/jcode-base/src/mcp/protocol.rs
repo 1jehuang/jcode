@@ -104,6 +104,21 @@ pub struct ServerCapabilities {
     pub resources: Option<ResourcesCapability>,
     #[serde(default)]
     pub prompts: Option<PromptsCapability>,
+    #[serde(default)]
+    pub experimental: Option<serde_json::Map<String, Value>>,
+}
+
+/// Capability a server declares to push `notifications/claude/channel`
+/// messages into its session (Claude Code channels, e.g. claude-peers).
+pub const CLAUDE_CHANNEL_CAPABILITY: &str = "claude/channel";
+
+impl ServerCapabilities {
+    /// Channel servers carry per-session identity, so they never run shared.
+    pub fn is_channel_server(&self) -> bool {
+        self.experimental
+            .as_ref()
+            .is_some_and(|experimental| experimental.contains_key(CLAUDE_CHANNEL_CAPABILITY))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

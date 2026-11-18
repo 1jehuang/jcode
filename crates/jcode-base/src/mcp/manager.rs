@@ -205,14 +205,28 @@ impl McpManager {
             .servers
             .iter()
             .filter(|(_, config)| config.is_enabled())
-            .partition(|(_, config)| config.shared && self.pool.is_some());
+            .partition(|(name, config)| {
+                config.shared && self.pool.is_some() && !super::pool::is_per_session_server(name)
+            });
+        let mut owned_servers = owned_servers;
 
         // Connect shared servers via pool
         if let Some(pool) = &self.pool {
             if !shared_servers.is_empty() {
                 let (successes, failures) = pool.connect_all().await;
                 total_successes += successes;
-                total_failures.extend(failures);
+                // Channel servers the pool just refused run per session below.
+                total_failures.extend(
+                    failures
+                        .into_iter()
+                        .filter(|(name, _)| !super::pool::is_per_session_server(name)),
+                );
+                owned_servers.extend(
+                    shared_servers
+                        .iter()
+                        .copied()
+                        .filter(|(name, _)| super::pool::is_per_session_server(name)),
+                );
 
                 // Acquire handles for shared servers only
                 let all_handles = pool.acquire_handles(&self.session_id).await;
@@ -318,16 +332,22 @@ impl McpManager {
                  coarse usage counts are shared per the disclosed policy"
             ));
         }
-        if config.shared {
+        if config.shared && !super::pool::is_per_session_server(name) {
             if let Some(pool) = &self.pool {
-                pool.connect_server(name, config).await?;
-                if let Some(handle) = pool.get_handle(name).await {
-                    self.pool_handles
-                        .write()
-                        .await
-                        .insert(name.to_string(), handle);
+                match pool.connect_server(name, config).await {
+                    Ok(()) => {
+                        if let Some(handle) = pool.get_handle(name).await {
+                            self.pool_handles
+                                .write()
+                                .await
+                                .insert(name.to_string(), handle);
+                        }
+                        return Ok(());
+                    }
+                    // The pool found a channel server: fall through to owned.
+                    Err(_) if super::pool::is_per_session_server(name) => {}
+                    Err(error) => return Err(error),
                 }
-                return Ok(());
             }
         }
 
@@ -402,7 +422,24 @@ impl McpManager {
                     self.project_dir.as_deref(),
                 )?;
             }
-            McpClient::connect_in_dir(name.to_string(), config, self.project_dir.as_deref()).await
+            let mut config = config.clone();
+            if self.pool.is_some() {
+                // Session children descend from the daemon, whose environment
+                // may name the yaran pane that started it. Mark them so yaran
+                // matches this session's claude-peers registration by cwd, and
+                // knows this build delivers channel pushes.
+                // shortcut: no yaran session id, so shared-workspace jcode
+                // agents stay on AMQ; pass the client's id to fix that.
+                config
+                    .env
+                    .entry("YARAN_SESSION_ID".to_string())
+                    .or_default();
+                config.env.insert(
+                    "JCODE_MCP_CHANNEL_SESSION".to_string(),
+                    self.session_id.clone(),
+                );
+            }
+            McpClient::connect_in_dir(name.to_string(), &config, self.project_dir.as_deref()).await
         }
         .await;
 
@@ -410,6 +447,9 @@ impl McpManager {
         let mut clients = self.owned_clients.write().await;
         let result = match connection {
             Ok(client) => {
+                if self.pool.is_some() {
+                    client.handle().set_channel_owner(&self.session_id);
+                }
                 clients.insert(name.to_string(), client);
                 Ok(())
             }
@@ -1293,5 +1333,90 @@ done
 
         manager.disconnect_all().await;
         drop(env_guard);
+    }
+
+    /// claude-peers style server: declares `claude/channel` and pushes one
+    /// channel message right after listing tools.
+    #[tokio::test]
+    async fn channel_server_runs_per_session_and_delivers_to_its_session() {
+        let script = r#"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{"experimental":{"claude/channel":{}}},"serverInfo":{"name":"peers","version":"0"}}}\n' "$id"
+      ;;
+    *'"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}\n' "$id"
+      printf '{"jsonrpc":"2.0","method":"notifications/claude/channel","params":{"content":"ping from peer","meta":{"from_id":"abc123","from_cwd":"/tmp/x \\"q\\"","child":"%s[%s]"}}}\n' "$JCODE_MCP_CHANNEL_SESSION" "$YARAN_SESSION_ID"
+      ;;
+  esac
+done
+"#;
+        let name = format!("peers-test-{}", std::process::id());
+        let session_id = format!("session-{name}");
+        let mut config = McpConfig::default();
+        config.servers.insert(
+            name.clone(),
+            McpServerConfig {
+                command: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), script.to_string()],
+                env: Default::default(),
+                shared: true,
+                transport: None,
+                url: None,
+                headers: HashMap::new(),
+                enabled: None,
+                disabled: None,
+                timeout_secs: Some(10),
+            },
+        );
+        let pool = Arc::new(SharedMcpPool::new(config.clone()));
+        let mut manager = McpManager::with_config(config);
+        manager.pool = Some(Arc::clone(&pool));
+        manager.session_id = session_id.clone();
+        let mut events = crate::bus::Bus::global().subscribe();
+
+        let (_, failures) = manager.connect_all().await.unwrap();
+        assert!(failures.is_empty(), "{failures:?}");
+        assert!(super::super::pool::is_per_session_server(&name));
+        assert!(pool.get_handle(&name).await.is_none());
+        assert!(manager.owned_clients.read().await.contains_key(&name));
+
+        let notification = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Ok(crate::bus::BusEvent::PeerMessageReceived(event)) = events.recv().await
+                    && event.session_id == session_id
+                {
+                    return event.notification;
+                }
+            }
+        })
+        .await
+        .expect("channel message reaches the owning session");
+        assert!(
+            notification.starts_with(&format!("<channel source=\"{name}\" ")),
+            "{notification}"
+        );
+        assert!(
+            notification.contains(r#"from_id="abc123""#),
+            "{notification}"
+        );
+        assert!(
+            notification.contains(r#"from_cwd="/tmp/x &quot;q&quot;""#),
+            "{notification}"
+        );
+        assert!(
+            notification.contains("\nping from peer\n</channel>"),
+            "{notification}"
+        );
+        // Session children are marked for yaran and never carry a yaran id
+        // inherited from the daemon.
+        assert!(
+            notification.contains(&format!(r#"child="{session_id}[]""#)),
+            "{notification}"
+        );
+
+        manager.disconnect_all().await;
     }
 }

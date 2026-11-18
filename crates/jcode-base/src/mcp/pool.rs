@@ -50,6 +50,25 @@ enum ConnectAttempt {
 
 type Connecting = Arc<Mutex<HashMap<String, Arc<Notify>>>>;
 
+/// Servers found to declare `claude/channel`. Their identity is per session
+/// (claude-peers registers one peer per process), so the pool refuses them
+/// and each session runs its own copy.
+static PER_SESSION_SERVERS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Whether `name` was found to be a channel server that must run per session.
+pub fn is_per_session_server(name: &str) -> bool {
+    PER_SESSION_SERVERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(name)
+}
+
+fn per_session_error(name: &str) -> String {
+    format!("MCP server '{name}' is a channel server and runs per session")
+}
+
 /// Clears a leader's `connecting` entry when its future is dropped mid-connect
 /// (e.g. by an outer timeout), so waiters wake and later sessions can retry.
 struct LeaderGuard {
@@ -137,7 +156,7 @@ impl SharedMcpPool {
             }
             // Non-shared servers are owned per-session (with the session cwd)
             // and must never be spawned in the daemon-global pool (issue #557).
-            if !server_config.shared {
+            if !server_config.shared || is_per_session_server(name) {
                 continue;
             }
             let name = name.clone();
@@ -424,6 +443,9 @@ impl SharedMcpPool {
         name: String,
         config: McpServerConfig,
     ) -> std::result::Result<bool, String> {
+        if is_per_session_server(&name) {
+            return Err(per_session_error(&name));
+        }
         if let Some(record) = self.recent_failure(&name).await {
             let retry_after = record
                 .cooldown()
@@ -482,7 +504,18 @@ impl SharedMcpPool {
                     name: name.clone(),
                     notify: Some(Arc::clone(&notify)),
                 };
-                let result = McpClient::connect(name.clone(), &config).await;
+                let result = match McpClient::connect(name.clone(), &config).await {
+                    Ok(mut client) if client.handle().is_channel_server() => {
+                        client.shutdown().await;
+                        PER_SESSION_SERVERS
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .insert(name.clone());
+                        // Dropping the guard clears `connecting` and wakes waiters.
+                        return Err(per_session_error(&name));
+                    }
+                    other => other,
+                };
                 let outcome = match &result {
                     Ok(_) => Ok(true),
                     Err(error) => Err(format!("{:#}", error)),
