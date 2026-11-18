@@ -65,8 +65,8 @@ impl Provider for OpenRouterProvider {
             return self.complete_azure_responses(messages, tools, system).await;
         }
         let model = self.model.read().await.clone();
-        let responses_api =
-            model_uses_responses_api(&self.api_base, self.profile_id.as_deref(), &model);
+        let responses_api = self.named_profile_responses_api
+            || model_uses_responses_api(&self.api_base, self.profile_id.as_deref(), &model);
         let reasoning_effort = self.reasoning_effort();
         let thinking_override = Self::thinking_override();
         // Moonshot's dedicated Kimi coding endpoint enables thinking server-side
@@ -845,6 +845,7 @@ impl Provider for OpenRouterProvider {
             supports_model_catalog: self.supports_model_catalog,
             profile_id: self.profile_id.clone(),
             builtin_azure: self.builtin_azure,
+            named_profile_responses_api: self.named_profile_responses_api,
             reasoning_effort_support: self.reasoning_effort_support,
             disable_reasoning_heuristics: self.disable_reasoning_heuristics,
             static_reasoning_config: self.static_reasoning_config.clone(),
