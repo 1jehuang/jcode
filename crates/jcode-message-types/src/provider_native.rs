@@ -320,12 +320,51 @@ impl ProviderNativeItems {
     }
 
     /// Input of the recorded call start with this id, for rendering its result.
+    #[inline]
     pub fn call_input(&self, id: &str) -> Value {
+        if self.items.is_empty() {
+            return Value::Null;
+        }
+        // Match call starts on borrowed fields before cloning the selected input.
+        // Completed items can have expensive display summaries we never consume.
         self.items
             .iter()
-            .filter_map(|(_, provider, item)| provider_native_display(provider, item))
-            .find(|display| display.id == id && display.output.is_none())
-            .and_then(|display| display.input)
+            .find_map(
+                |(_, provider, item)| match (provider.as_str(), str_field(item, "type")) {
+                    (PROVIDER_NATIVE_ANTHROPIC, Some("server_tool_use"))
+                        if str_field(item, "id") == Some(id) =>
+                    {
+                        Some(item.get("input").cloned().unwrap_or(Value::Null))
+                    }
+                    (PROVIDER_NATIVE_OPENAI, Some("web_search_call"))
+                        if str_field(item, "id").unwrap_or_default() == id
+                            && matches!(
+                                str_field(item, "status"),
+                                Some("in_progress" | "searching")
+                            ) =>
+                    {
+                        let action = item.get("action").unwrap_or(&Value::Null);
+                        let query = str_field(action, "query")
+                            .map(str::to_string)
+                            .or_else(|| {
+                                action
+                                    .get("queries")
+                                    .and_then(Value::as_array)
+                                    .map(|queries| {
+                                        queries
+                                            .iter()
+                                            .filter_map(Value::as_str)
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    })
+                            })
+                            .or_else(|| str_field(action, "url").map(str::to_string))
+                            .unwrap_or_default();
+                        Some(serde_json::json!({ "query": query }))
+                    }
+                    _ => None,
+                },
+            )
             .unwrap_or(Value::Null)
     }
 
@@ -388,6 +427,10 @@ fn format_results<'a>(results: impl Iterator<Item = &'a Value>) -> String {
     }
     out.trim_end().to_string()
 }
+
+#[cfg(test)]
+#[path = "provider_native_lookup_tests.rs"]
+mod lookup_tests;
 
 #[cfg(test)]
 mod tests {
