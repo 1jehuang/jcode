@@ -1451,12 +1451,34 @@ async fn continue_persistent_ws_locked(
     }
 }
 
+// Build only a shallow, sorted view of the wire envelope. The caller retains
+// the original request for retries and HTTPS fallback, without cloning input,
+// tools, images, or encrypted reasoning. BTreeMap preserves serde_json's sorted
+// object-key wire order, including the replacement response.create type.
+fn serialize_fresh_ws_request(
+    object: &serde_json::Map<String, Value>,
+) -> serde_json::Result<String> {
+    let response_type = Value::String("response.create".to_owned());
+    let mut fields = std::collections::BTreeMap::new();
+    for (key, value) in object {
+        if !matches!(key.as_str(), "stream" | "background" | "type") {
+            fields.insert(key.as_str(), value);
+        }
+    }
+    fields.insert("type", &response_type);
+    serde_json::to_string(&fields)
+}
+
+#[cfg(test)]
+#[path = "openai_fresh_ws_wire_tests.rs"]
+mod fresh_ws_wire_tests;
+
 /// Stream response via WebSocket, saving the connection for reuse.
 /// This replaces the old `stream_response_websocket` for the fresh-connection path.
 pub(super) async fn stream_response_websocket_persistent(
     credentials: Arc<RwLock<CodexCredentials>>,
     account_label: Option<String>,
-    request: Value,
+    request: &Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
     persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,
     input_item_count: usize,
@@ -1482,7 +1504,7 @@ pub(super) async fn stream_response_websocket_persistent(
 
 async fn stream_response_websocket_authenticated(
     credentials: Arc<RwLock<CodexCredentials>>,
-    request: Value,
+    request: &Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
     persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,
     input_item_count: usize,
@@ -1524,7 +1546,7 @@ async fn stream_response_websocket_authenticated(
             "OpenAI credentials changed before request, retrying"
         )));
     }
-    let mut usage_recorder = OAuthUsageRecorder::capture(&creds, &request);
+    let mut usage_recorder = OAuthUsageRecorder::capture(&creds, request);
     let catalog_scope = OpenAIProvider::catalog_scope_for(&creds);
     let ws_request = openai_websocket_prewarm::websocket_request(
         &creds,
@@ -1612,33 +1634,19 @@ async fn stream_response_websocket_authenticated(
         .get("prompt_cache_key")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let mut request_event = request;
-    if !request_event.is_object() {
+    let Some(request_object) = request.as_object() else {
         return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
             "Invalid websocket request payload shape; expected an object"
         )));
-    }
-    {
-        let Some(obj) = request_event.as_object_mut() else {
-            return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
-                "Invalid websocket request payload shape; expected an object"
-            )));
-        };
-        obj.insert(
-            "type".to_string(),
-            serde_json::Value::String("response.create".to_string()),
-        );
-        obj.remove("stream");
-        obj.remove("background");
-    }
+    };
 
-    let request_input_stats = request_event
+    let request_input_stats = request
         .get("input")
         .and_then(|value| value.as_array())
         .map(|items| summarize_ws_input(items))
         .unwrap_or_default();
 
-    let request_text = serde_json::to_string(&request_event).map_err(|err| {
+    let request_text = serialize_fresh_ws_request(request_object).map_err(|err| {
         OpenAIStreamFailure::Other(anyhow::anyhow!(
             "Failed to serialize OpenAI websocket request: {}",
             err
@@ -1646,7 +1654,7 @@ async fn stream_response_websocket_authenticated(
     })?;
     let request_send_started_at = Instant::now();
     emit_connection_phase(&tx, ConnectionPhase::SendingRequest).await;
-    let ws_send_timeout = effective_https_idle_timeout(&request_event);
+    let ws_send_timeout = effective_https_idle_timeout(request);
     send_websocket_frame(
         &mut ws_stream,
         WsMessage::Text(request_text),
@@ -1675,10 +1683,7 @@ async fn stream_response_websocket_authenticated(
     let connected_at = Instant::now();
     let mut logged_first_server_event = false;
     let mut response_started = false;
-    let ws_completion_timeout_secs = effective_ws_completion_timeout_secs(&request_event);
-    // Retry ownership lives in the caller. This transformed wire payload is no
-    // longer needed once the frame is sent and its timeout policy is captured.
-    drop(request_event);
+    let ws_completion_timeout_secs = effective_ws_completion_timeout_secs(request);
 
     loop {
         // Only inactivity ends the stream (see the persistent path above):

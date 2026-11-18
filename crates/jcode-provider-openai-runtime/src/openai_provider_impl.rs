@@ -610,7 +610,7 @@ impl Provider for OpenAIProvider {
                         stream_response_websocket_persistent(
                             Arc::clone(&credentials),
                             account_label.clone(),
-                            request.clone(),
+                            &request,
                             attempt_tx,
                             Arc::clone(&persistent_ws),
                             input_item_count,
