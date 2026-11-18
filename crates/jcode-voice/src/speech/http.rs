@@ -1,4 +1,5 @@
 //! Explicitly configured external synthesis. No redirects or implicit service discovery.
+#![allow(clippy::collapsible_if)]
 #[cfg(test)]
 mod tests {
     use super::*;
