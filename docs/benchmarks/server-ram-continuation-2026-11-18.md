@@ -86,3 +86,31 @@ selected-buffer allocation compaction with measured encoding-time limitations,
 not a new whole-process resident RAM claim. Raw JSON buffer shrinking, more
 aggressive allocator trimming, cache eviction and shorter history retention
 are not part of this change.
+
+## Integration and runtime verification
+
+Hosted clippy passed with warnings denied for both touched packages:
+`justrust clippy -p jcode-provider-core -p jcode-base --lib -- -D warnings`
+(run `20261117-212227290-228383`). The coordinated TUI selfdev build completed
+successfully on hosted (run `20261117-212441537-235056`), but its publication was
+correctly marked superseded because concurrent unrelated checkout edits changed
+the source fingerprint before activation. The production daemon was not forcibly
+reloaded or repointed around that safety check.
+
+The successful artifact was pinned independently as
+`~/.jcode/scratch/server-ram-20261118-candidate-jcode`, SHA256
+`ce9748cbc0a1861647dbcfc6db938deb2def424702fa4467fece5a5c1a6bf4f1`.
+It reports `v1.0.52-dev (0b24f81f0)` and includes unrelated concurrent work,
+so it is not a clean memory-only build. The isolated profiler completed startup,
+headless session creation, settled idle and private-only explicit purge with no
+model calls. Dedicated homes, test-session flags, runtime directories and sockets
+kept these checks out of user history. Artifacts are
+`~/.jcode/scratch/server-ram-20261118-before` and `server-ram-20261118-after`.
+
+The old shared executable sampled 36,355 KiB settled PSS and the independently
+pinned candidate 103,700 KiB. These are lifecycle smoke samples, **not comparable
+PSS acceptance measurements**: executable-page sharing differs, startup refresh
+completion was not synchronized, and source changes are not isolated. No new
+idle-floor or production-resident-memory reduction is claimed. The scoped
+changes are committed and pushed, with activation left to the next source-stable
+coordinated rebuild/reload rather than bypassing build identity protection.
