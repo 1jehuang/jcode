@@ -325,16 +325,12 @@ pub(super) async fn handle_remote_key_internal(
         return Ok(());
     }
 
-    // Swarm views: Alt+N cycles chat → inline controls → full live page → chat.
-    // Selection/open/prompt controls stay available in both active views, while
-    // plain typing continues to flow to the chat input.
+    // Alt+N toggles the dedicated swarm page. Passive worker status lives in
+    // pinned todos rather than a separate inline controls strip.
     if app.toggle_keys.swarm_panel_focus.matches(code, modifiers) {
         match app.cycle_swarm_panel_view() {
             app_mod::tui_state::SwarmPanelView::Chat => {
                 app.set_status_notice("Swarm view closed");
-            }
-            app_mod::tui_state::SwarmPanelView::Controls => {
-                app.set_status_notice(crate::tui::keybind::swarm_view_hint("full page"));
             }
             app_mod::tui_state::SwarmPanelView::FullPage => {
                 app.set_status_notice(crate::tui::keybind::swarm_page_hint());
