@@ -476,6 +476,100 @@ async fn run(
 mod tests {
     use super::*;
     #[test]
+    fn rejected_start_never_opens_capture() {
+        assert!(matches!(
+            ContinuousRecording::start_auto(
+                Arc::new(AtomicBool::new(true)),
+                "key",
+                "",
+                ContinuousConfig::default()
+            ),
+            Err(VoiceError::Cancelled)
+        ));
+        assert!(matches!(
+            ContinuousRecording::start_auto(
+                Arc::new(AtomicBool::new(false)),
+                "",
+                "",
+                ContinuousConfig::default()
+            ),
+            Err(VoiceError::NariNotConfigured)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn silent_external_capture_has_heartbeat_suppresses_and_stops_without_network() {
+        // This synthetic recorder emits silence, not microphone audio. An invalid
+        // provider key would fail if the engine accidentally uploaded silence.
+        let recording = ContinuousRecording::start_auto(
+            Arc::new(AtomicBool::new(false)),
+            "synthetic-invalid-key",
+            "while :; do dd if=/dev/zero bs=3200 count=1 2>/dev/null; sleep 0.1; done",
+            ContinuousConfig::default(),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (mut listening, mut heartbeat) = (false, false);
+        while !(listening && heartbeat) && Instant::now() < deadline {
+            while let Some(event) = recording.try_event() {
+                match event {
+                    ContinuousEvent::State(VoiceState::Listening) => listening = true,
+                    ContinuousEvent::Level(value) => {
+                        assert_eq!(value, 0.0);
+                        heartbeat = true;
+                    }
+                    ContinuousEvent::Error(error) => panic!("unexpected capture error: {error}"),
+                    ContinuousEvent::Transcript(_) => panic!("silence was transcribed"),
+                    _ => {}
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            listening && heartbeat,
+            "capture must report real readiness and telemetry"
+        );
+        recording.set_suppressed(true);
+        assert_eq!(recording.audio_level(), 0.0);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut saw_suppressed = false;
+        while !saw_suppressed && Instant::now() < deadline {
+            while let Some(event) = recording.try_event() {
+                if matches!(event, ContinuousEvent::State(VoiceState::Suppressed)) {
+                    saw_suppressed = true;
+                }
+                assert!(!matches!(
+                    event,
+                    ContinuousEvent::Error(_) | ContinuousEvent::Transcript(_)
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(saw_suppressed);
+        recording.set_suppressed(false);
+        let stopped_at = Instant::now();
+        recording.stop();
+        while !recording.is_finished() && stopped_at.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            recording.is_finished(),
+            "stop must tear down recorder promptly"
+        );
+        assert_eq!(recording.audio_level(), 0.0);
+        let mut stopped = false;
+        while let Some(event) = recording.try_event() {
+            assert!(!matches!(
+                event,
+                ContinuousEvent::Error(_) | ContinuousEvent::Transcript(_)
+            ));
+            stopped |= matches!(event, ContinuousEvent::Stopped);
+        }
+        assert!(stopped);
+    }
+
+    #[test]
     fn silence_never_segments() {
         let mut s = Segmenter::default();
         for _ in 0..1000 {
