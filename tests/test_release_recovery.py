@@ -39,7 +39,9 @@ class WorkflowGraphTests(unittest.TestCase):
         return set(self.needs[job]).union(
             *(self.ancestors(parent) for parent in self.needs[job]))
 
-    def eligible(self, job, results):
+    def eligible(self, job, results, inputs=None):
+        # Model a tag-push release by default: inputs are empty.
+        inputs = {"dry_run": False, "recovery": None, **(inputs or {})}
         expression = self.conditions[job].removeprefix("${{ ").removesuffix(" }}")
         # Without a status function, Actions implicitly requires success(),
         # including transitive needs. This is what broke Windows publication.
@@ -47,11 +49,14 @@ class WorkflowGraphTests(unittest.TestCase):
                 results[parent] != "success" for parent in self.ancestors(job)):
             return False
         expression = expression.replace("always()", "True")
+        expression = expression.replace("(inputs.recovery || 'none')",
+                                        repr(inputs["recovery"] or "none"))
+        expression = expression.replace("inputs.dry_run != true", repr(not inputs["dry_run"]))
         expression = re.sub(r"needs\.([\w-]+)\.result",
                             lambda match: repr(results[match.group(1)]), expression)
         expression = expression.replace("&&", "and").replace("||", "or")
         # Reject unexpected syntax rather than executing arbitrary workflow text.
-        residue = re.sub(r"'[^']*'|True|and|or|==|[()\s]", "", expression)
+        residue = re.sub(r"'[^']*'|True|False|and|or|!=|==|[()\s]", "", expression)
         self.assertEqual(residue, "", expression)
         return eval(expression, {"__builtins__": {}})
 
@@ -63,7 +68,8 @@ class WorkflowGraphTests(unittest.TestCase):
             "build-windows": ["create-release", "recovery-preflight"],
             "publish-windows": ["create-release", "build-windows"],
             "build-freebsd": ["create-release", "recovery-preflight"],
-            "release": ["create-release", "build-linux-macos", "publish-windows", "build-freebsd"],
+            "ci-gate": ["create-release"],
+            "release": ["create-release", "ci-gate", "build-linux-macos", "publish-windows"],
         })
         self.assertIn("github.repository == '1jehuang/jcode'", self.conditions["create-release"])
         self.assertEqual(self.conditions["recovery-preflight"],
@@ -81,10 +87,21 @@ class WorkflowGraphTests(unittest.TestCase):
                     expected &= results["recovery-preflight"] in ("success", "skipped")
                 elif job == "publish-windows":
                     expected &= results["build-windows"] == "success"
+                elif job == "release":
+                    # Never publish without exact-commit CI on unpatched source.
+                    expected &= results["ci-gate"] == "success"
                 # Finalization must run after platform failures to diagnose the
                 # incomplete asset set, not silently skip or publish partial sets.
                 with self.subTest(job=job, results=results):
                     self.assertEqual(self.eligible(job, results), expected)
+
+    def test_dry_run_never_finalizes_and_recovery_skips_ci_gate(self):
+        results = {name: "success" for name in self.ancestors("release")}
+        self.assertTrue(self.eligible("release", results))
+        self.assertFalse(self.eligible("release", results, {"dry_run": True}))
+        results["ci-gate"] = "skipped"
+        self.assertFalse(self.eligible("release", results))
+        self.assertTrue(self.eligible("release", results, {"recovery": "windows-listener"}))
 
     def test_missing_status_override_reproduces_skipped_ancestor_bug(self):
         results = {"create-release": "success", "build-windows": "success",
@@ -268,8 +285,11 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(workflow.count("Verify release build preserved Cargo.lock"), 2)
         self.assertIn("cancel-in-progress: false", workflow)
         self.assertEqual(workflow.count('--check-public-state "$RELEASE_TAG"'), 2)
-        self.assertIn("sha256sum release-provenance.json >> SHA256SUMS", workflow)
-        self.assertIn('SHA256SUMS release-provenance.json --clobber', workflow)
+        self.assertIn('gh release upload "${RELEASE_TAG}" release-provenance.json --clobber', workflow)
+        # Every asset upload (linux/macos matrix, Windows, FreeBSD, finalize)
+        # refreshes SHA256SUMS so late async platforms stay covered.
+        self.assertEqual(workflow.count("scripts/release_refresh_checksums.sh"), 4)
+        self.assertIn("needs: [create-release, ci-gate, build-linux-macos, publish-windows]", workflow)
         self.assertIn("Get-AuthenticodeSignature", workflow)
         windows = workflow.split("  build-windows:\n", 1)[1].split("  publish-windows:\n", 1)[0]
         preflight = workflow.split("  recovery-preflight:\n", 1)[1].split("  build-linux-macos:\n", 1)[0]
@@ -282,7 +302,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertIn('JUSTRUST_DISABLE: "1"', companion)
         self.assertIn("justrust check --local --locked -p jcode-companion", companion)
         self.assertIn("Validate complete platform asset set", workflow)
-        self.assertIn("Keeping the release as a draft until every platform succeeds", workflow)
+        self.assertIn("Keeping the release as a draft until every core platform succeeds", workflow)
         self.assertIn("if: github.event_name != 'workflow_dispatch'", workflow)
 
 

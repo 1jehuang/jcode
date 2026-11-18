@@ -194,13 +194,20 @@ mod account_snapshot_tests {
             ("hydrate-invalid", "invalid"),
             ("hydrate-live", "2999-01-01T00:00:00Z"),
         ] {
-            super::super::disk_cache::store_success(&format!("label:{label}"), &UsageData {
-                seven_day: 1.0,
-                seven_day_resets_at: Some(reset.into()),
-                ..Default::default()
-            });
+            super::super::disk_cache::store_success(
+                &format!("label:{label}"),
+                &UsageData {
+                    seven_day: 1.0,
+                    seven_day_resets_at: Some(reset.into()),
+                    ..Default::default()
+                },
+            );
         }
-        let live = UsageData { seven_day: 0.2, fetched_at: Some(Instant::now()), ..Default::default() };
+        let live = UsageData {
+            seven_day: 0.2,
+            fetched_at: Some(Instant::now()),
+            ..Default::default()
+        };
         store_anthropic_usage("label:hydrate-live".into(), live.clone());
         hydrate_persisted_account_usage();
         let mut cache = anthropic_usage_cache().lock().unwrap();
@@ -208,7 +215,12 @@ mod account_snapshot_tests {
         assert!(!cache.contains_key("label:hydrate-reset"));
         assert!(!cache.contains_key("label:hydrate-invalid"));
         assert_eq!(cache["label:hydrate-live"].seven_day, live.seven_day);
-        for label in ["hydrate-future", "hydrate-reset", "hydrate-invalid", "hydrate-live"] {
+        for label in [
+            "hydrate-future",
+            "hydrate-reset",
+            "hydrate-invalid",
+            "hydrate-live",
+        ] {
             cache.remove(&format!("label:{label}"));
         }
     }

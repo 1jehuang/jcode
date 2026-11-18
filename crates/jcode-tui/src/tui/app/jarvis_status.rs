@@ -15,6 +15,8 @@ pub(super) struct CaptureStatus {
     _lease: File,
     levels: VecDeque<f32>,
     written: Option<Instant>,
+    last_state: Option<(bool, String)>,
+    sequence: u64,
 }
 
 impl CaptureStatus {
@@ -73,8 +75,10 @@ impl CaptureStatus {
                 temporary: directory.join(format!("{pid}.tmp")),
                 pause: directory.join(format!("{pid}.paused")),
                 _lease: lease,
-                levels: VecDeque::with_capacity(12),
+                levels: VecDeque::with_capacity(64),
                 written: None,
+                last_state: None,
+                sequence: 0,
             })
         }
         #[cfg(not(unix))]
@@ -115,14 +119,39 @@ impl CaptureStatus {
         level: f32,
         counters: Value,
     ) -> Result<()> {
-        if self
-            .written
-            .is_some_and(|at| at.elapsed() < Duration::from_millis(200))
+        self.publish_at(capturing, state, level, counters, Instant::now())
+    }
+
+    fn publish_at(
+        &mut self,
+        capturing: bool,
+        state: &str,
+        level: f32,
+        counters: Value,
+        now: Instant,
+    ) -> Result<()> {
+        let state_changed = self
+            .last_state
+            .as_ref()
+            .is_none_or(|(old_capture, old_state)| *old_capture != capturing || old_state != state);
+        // The native renderer interpolates these measured samples using the GTK
+        // frame clock. No animation-rate file I/O or second microphone is needed.
+        let interval = if capturing {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_secs(1)
+        };
+        if !state_changed
+            && self
+                .written
+                .is_some_and(|at| now.duration_since(at) < interval)
         {
             return Ok(());
         }
-        self.written = Some(Instant::now());
-        if self.levels.len() == 12 {
+        if !capturing {
+            self.levels.clear();
+        }
+        if self.levels.len() == 64 {
             self.levels.pop_front();
         }
         self.levels.push_back(if capturing && level.is_finite() {
@@ -130,7 +159,8 @@ impl CaptureStatus {
         } else {
             0.0
         });
-        let value = json!({"pid":std::process::id(),"capturing":capturing,"state":state,"levels":self.levels,"counters":counters});
+        self.sequence = self.sequence.saturating_add(1);
+        let value = json!({"pid":std::process::id(),"capturing":capturing,"state":state,"levels":self.levels,"counters":counters,"sequence":self.sequence,"sample_interval_ms":50});
         #[cfg(unix)]
         {
             use std::{io::Write, os::unix::fs::OpenOptionsExt};
@@ -144,6 +174,8 @@ impl CaptureStatus {
             file.write_all(&serde_json::to_vec(&value)?)?;
             fs::rename(&self.temporary, &self.path)?;
         }
+        self.written = Some(now);
+        self.last_state = Some((capturing, state.to_owned()));
         Ok(())
     }
 }
@@ -159,6 +191,73 @@ impl Drop for CaptureStatus {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    #[test]
+    fn native_history_is_bounded_throttled_and_cleared_on_pause() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut status = CaptureStatus::in_directory(&temp.path().join("jarvis")).unwrap();
+        let start = Instant::now();
+        for i in 0..100_u64 {
+            status
+                .publish_at(
+                    true,
+                    "listening",
+                    if i == 99 { f32::NAN } else { 0.04 },
+                    json!({}),
+                    start + Duration::from_millis(i * 50),
+                )
+                .unwrap();
+        }
+        let read =
+            |path: &Path| -> Value { serde_json::from_slice(&fs::read(path).unwrap()).unwrap() };
+        let value = read(&status.path);
+        assert_eq!(value["levels"].as_array().unwrap().len(), 64);
+        assert_eq!(value["levels"][63], 0.0);
+        assert_eq!(value["sample_interval_ms"], 50);
+        assert_eq!(value["sequence"], 100);
+        status
+            .publish_at(
+                true,
+                "listening",
+                0.2,
+                json!({}),
+                start + Duration::from_millis(4951),
+            )
+            .unwrap();
+        assert_eq!(read(&status.path)["sequence"], 100);
+        // Capture/state transitions are immediate, even inside the sampling interval.
+        status
+            .publish_at(
+                false,
+                "paused",
+                1.0,
+                json!({}),
+                start + Duration::from_millis(4952),
+            )
+            .unwrap();
+        assert_eq!(read(&status.path)["levels"], json!([0.0]));
+        status
+            .publish_at(
+                false,
+                "paused",
+                1.0,
+                json!({}),
+                start + Duration::from_millis(5000),
+            )
+            .unwrap();
+        assert_eq!(read(&status.path)["sequence"], 101);
+        status
+            .publish_at(
+                false,
+                "paused",
+                1.0,
+                json!({}),
+                start + Duration::from_millis(6000),
+            )
+            .unwrap();
+        assert_eq!(read(&status.path)["sequence"], 102);
+        assert!(fs::metadata(&status.path).unwrap().len() < 8192);
+    }
+
     #[test]
     fn status_is_private_exclusive_and_cleared_on_drop() {
         let temp = tempfile::tempdir().unwrap();

@@ -171,6 +171,53 @@ if [ -z "$VERSION" ]; then
   fi
 fi
 valid_release_tag "$VERSION" || err "Failed to determine latest version"
+
+# Release assets publish asynchronously per platform, so the latest release may
+# briefly lack this platform's binary or its SHA256SUMS entry. When the version
+# was not pinned, fall back to the newest stable release that has both.
+release_has_artifact() {
+  tag="$1"
+  sums=$(curl -fsSL --retry 2 --connect-timeout 10 \
+    "https://github.com/$REPO/releases/download/$tag/SHA256SUMS" 2>/dev/null || true)
+  for name in "$ARTIFACT.tar.gz" "$ARTIFACT" "$ARTIFACT.exe"; do
+    if printf '%s\n' "$sums" | awk -v a="$name" '$2 == a || $2 == "*" a { f=1 } END { exit !f }' \
+      && curl -fsSIL --retry 2 --connect-timeout 10 -o /dev/null \
+        "https://github.com/$REPO/releases/download/$tag/$name" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+if [ -z "${JCODE_VERSION:-}" ] && ! release_has_artifact "$VERSION"; then
+  info "Release $VERSION has no published $ARTIFACT asset yet; looking for the newest release that does..."
+  FALLBACK_TAGS=$(curl -fsSL --retry 2 --connect-timeout 10 \
+    "https://api.github.com/repos/$REPO/releases?per_page=30" 2>/dev/null |
+    awk '
+      /"tag_name":/ { gsub(/.*"tag_name": *"|".*/, ""); tag=$0 }
+      /"draft": *true/ { draft=1 }
+      /"prerelease":/ { if ($0 ~ /true/ || draft) skip=1; if (tag != "" && !skip) print tag; tag=""; draft=0; skip=0 }
+    ' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -t. -k1.2,1nr -k2,2nr -k3,3nr || true)
+  EXISTING_SEMVER=""
+  for existing_bin in "$INSTALL_DIR/jcode" "$INSTALL_DIR/jcode.exe"; do
+    if [ -x "$existing_bin" ]; then
+      EXISTING_SEMVER=$("$existing_bin" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+      break
+    fi
+  done
+  for tag in $FALLBACK_TAGS; do
+    [ "$tag" = "$VERSION" ] && continue
+    if [ -n "$EXISTING_SEMVER" ]; then
+      # Never downgrade an existing install via fallback.
+      newest=$(printf '%s\n%s\n' "${tag#v}" "$EXISTING_SEMVER" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+      if [ "$newest" = "$EXISTING_SEMVER" ]; then break; fi
+    fi
+    if release_has_artifact "$tag"; then
+      info "Using $tag (newest release with a published $ARTIFACT asset)."
+      VERSION="$tag"
+      break
+    fi
+  done
+fi
 INSTALL_VERSION="${VERSION#v}"
 
 GITHUB_RELEASE_BASE="https://github.com/$REPO/releases/download/$VERSION"

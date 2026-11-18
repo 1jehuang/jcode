@@ -267,8 +267,7 @@ pub(super) fn saved_account_last_good() -> HashMap<String, UsageData> {
                 return None;
             }
             let good = entry.last_good.as_ref()?;
-            (age(good.fetched_unix_ms) < LAST_GOOD_MAX_AGE)
-                .then(|| (key, entry_usage(&entry)))
+            (age(good.fetched_unix_ms) < LAST_GOOD_MAX_AGE).then(|| (key, entry_usage(&entry)))
         })
         .collect()
 }
@@ -676,7 +675,13 @@ mod tests {
             let mut good = sample();
             good.seven_day = 1.0;
             good.seven_day_resets_at = Some("2999-01-01T00:00:00Z".into());
-            for key in ["label:routing-dated", "label:routing-old", "label:default", "label:", "token:external"] {
+            for key in [
+                "label:routing-dated",
+                "label:routing-old",
+                "label:default",
+                "label:",
+                "token:external",
+            ] {
                 store_success(key, &good);
             }
             update("label:routing-dated", |entry| {
@@ -693,7 +698,10 @@ mod tests {
             assert_eq!(usage.seven_day, 1.0);
             assert!(usage.last_success_at.unwrap().elapsed() >= Duration::from_secs(3600));
             assert!(usage.last_error.as_deref().unwrap().contains("429"));
-            assert!(usage.refresh_after.unwrap().duration_since(Instant::now()) > Duration::from_secs(7198));
+            assert!(
+                usage.refresh_after.unwrap().duration_since(Instant::now())
+                    > Duration::from_secs(7198)
+            );
         });
     }
 

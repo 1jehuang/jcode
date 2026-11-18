@@ -96,13 +96,12 @@ impl AlwaysListening {
                 max_audio_seconds_per_hour: cfg.max_audio_seconds_per_hour as u32,
                 max_classifications_per_hour: cfg.max_classifications_per_hour,
                 action_probability: cfg.action_probability,
-                ..Default::default()
             },
         )?;
         self.status = Some(status);
         self.recording = Some(recording);
         self.wake = Some(tokio::spawn(async {
-            let mut tick = tokio::time::interval(Duration::from_millis(200));
+            let mut tick = tokio::time::interval(Duration::from_millis(50));
             loop {
                 tick.tick().await;
                 Bus::global().publish(BusEvent::VoiceInputWake);

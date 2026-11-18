@@ -1,6 +1,12 @@
 mod response_stats;
 
 #[cfg(test)]
+mod final_text_original;
+#[cfg(test)]
+mod image_context_original;
+#[cfg(test)]
+mod image_context_tests;
+#[cfg(test)]
 mod prompt_count_tests;
 
 use super::{Session, StoredDisplayRole};
@@ -519,7 +525,9 @@ pub fn render_messages_and_images_with_compacted_history(
         // *after* the answer on resume/re-render.
         let mut reasoning = String::new();
         let mut tool_calls: Vec<String> = Vec::new();
-        let mut current_tool: Option<ToolCall> = None;
+        // Keep the owning row, not a second copy of its potentially large input.
+        // Native result rows intentionally do not replace this association.
+        let mut current_tool: Option<usize> = None;
         let mut last_image_idx: Option<usize> = None;
         // Images from blocks with no owning tool result (e.g. a pasted user
         // screenshot). Their user-prompt ordinal is only known once we know the
@@ -595,7 +603,7 @@ pub fn render_messages_and_images_with_compacted_history(
                             thought_signature: None,
                         })
                     });
-                    current_tool = tool_data.clone();
+                    current_tool = Some(rendered.len());
 
                     rendered.push(RenderedMessage {
                         response_stats: None,
@@ -612,20 +620,16 @@ pub fn render_messages_and_images_with_compacted_history(
                 }
                 ContentBlock::AnthropicThinking { .. } | ContentBlock::OpenAIReasoning { .. } => {}
                 ContentBlock::Image { media_type, data } => {
-                    let anchor =
-                        image_anchor_for_message(role, current_tool.as_ref(), user_prompt_count);
+                    let current_tool =
+                        current_tool.and_then(|index| rendered[index].tool_data.as_ref());
+                    let anchor = image_anchor_for_message(role, current_tool, user_prompt_count);
                     let is_pending_prompt_anchor = current_tool.is_none() && role == "user";
                     images.push(RenderedImage {
-                        history_message_index: current_tool.as_ref().map(|_| rendered.len()),
+                        history_message_index: current_tool.map(|_| rendered.len()),
                         media_type: media_type.clone(),
                         data: data.clone(),
-                        label: current_tool
-                            .as_ref()
-                            .and_then(fallback_image_label_for_tool),
-                        source: image_source_for_message(
-                            message_role.clone(),
-                            current_tool.as_ref(),
-                        ),
+                        label: current_tool.and_then(fallback_image_label_for_tool),
+                        source: image_source_for_message(message_role.clone(), current_tool),
                         anchor,
                     });
                     last_image_idx = Some(images.len().saturating_sub(1));
@@ -692,11 +696,19 @@ pub fn render_messages_and_images_with_compacted_history(
             }
         }
 
-        let combined = format!("{}{}", reasoning, text);
-        if !combined.is_empty() {
+        if !reasoning.is_empty() || !text.is_empty() {
             if role == "user" && !is_attached_image_label_text(&text) {
                 user_prompt_count += 1;
             }
+            // At EOF the buffers are no longer reused. Move the sole nonempty
+            // buffer rather than copying it into a new allocation.
+            let combined = if reasoning.is_empty() {
+                text
+            } else if text.is_empty() {
+                reasoning
+            } else {
+                format!("{}{}", reasoning, text)
+            };
             rendered.push(RenderedMessage {
                 response_stats: None,
                 tool_duration_ms: None,

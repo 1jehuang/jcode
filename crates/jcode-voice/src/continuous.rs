@@ -1,4 +1,9 @@
 //! Explicitly opted-in continuous listening. Only locally segmented utterances reach Nari.
+#![allow(
+    clippy::collapsible_if,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
 use crate::{NariSession, PcmRecording, VoiceError};
 use std::{
     collections::VecDeque,

@@ -92,7 +92,7 @@ fn legacy_reorder_outputs<F: FnMut(OpenAiRequestLogLevel, &str)>(
                 }
                 continue;
             }
-            if let Some(message_item) = orphan_tool_output_to_user_message(&item, &missing_output) {
+            if let Some(message_item) = orphan_tool_output_to_user_message(&item, missing_output) {
                 ordered.push(message_item);
                 rewritten_orphans += 1;
             } else {

@@ -41,6 +41,35 @@ class StatusTests(unittest.TestCase):
             module.toggle(root)
             self.assertFalse(path.with_suffix(".paused").exists())
 
+    def test_native_stream_is_measured_bounded_and_finite(self):
+        result = module.native_render({"pid": os.getpid(), "capturing": True,
+                                      "state": "listening", "levels": [-1, .25, float("nan"), 3],
+                                      "sequence": 7, "sample_interval_ms": 50})
+        self.assertEqual(result["levels"], [0, .25, 0, 1])
+        self.assertEqual(result["sequence"], 7)
+        self.assertEqual(result["sample_interval_ms"], 50)
+        self.assertEqual(result["text"], "")
+        self.assertNotIn("transcript", result)
+        json.dumps(result, allow_nan=False)
+        result = module.native_render({"capturing": True, "levels": [.5] * 1000})
+        self.assertEqual(len(result["levels"]), 128)
+        self.assertEqual(result["sample_interval_ms"], 200)
+
+    def test_native_pause_and_off_do_not_claim_capture(self):
+        self.assertFalse(module.native_render(None)["capturing"])
+        result = module.native_render({"capturing": False, "state": "paused", "levels": []})
+        self.assertEqual(result["class"], "paused")
+        self.assertFalse(result["capturing"])
+
+    def test_native_metadata_is_clamped(self):
+        result = module.native_render({"capturing": True, "state": "x" * 1000,
+                                      "sequence": -4, "sample_interval_ms": 9000,
+                                      "levels": "not samples"})
+        self.assertEqual(len(result["state"]), 80)
+        self.assertEqual(result["sequence"], 0)
+        self.assertEqual(result["sample_interval_ms"], 1000)
+        self.assertEqual(result["levels"], [])
+
     def test_malformed_status_is_ignored(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

@@ -8,6 +8,29 @@ use super::*;
 #[path = "openai_catalog_prefetch.rs"]
 mod catalog_prefetch;
 
+/// Historical canonical selection, sorted exactly like serde_json's object map.
+fn canonical_request_fields(request: &Value) -> [(&'static str, &Value); 12] {
+    [
+        "context_management",
+        "include",
+        "input",
+        "instructions",
+        "model",
+        "parallel_tool_calls",
+        "prompt_cache_key",
+        "prompt_cache_retention",
+        "reasoning",
+        "service_tier",
+        "tool_choice",
+        "tools",
+    ]
+    .map(|key| (key, request.get(key).unwrap_or(&Value::Null)))
+}
+
+#[cfg(test)]
+#[path = "openai_canonical_logging_tests.rs"]
+mod canonical_logging_tests;
+
 /// Whether a model catalog fetch error is an auth rejection (401/403) that a
 /// token force-refresh may fix, as opposed to a network/server failure.
 fn catalog_error_is_auth_rejection(err: &anyhow::Error) -> bool {
@@ -217,7 +240,8 @@ impl Provider for OpenAIProvider {
             }
         }
         let input_item_count = input.len();
-        let request = self.response_request(&input, tools, system).await;
+        let request = self.response_request(input, tools, system).await;
+        let input = request["input"].as_array().expect("request input array");
         let model_id = openai_request_model(&request);
         let is_chatgpt_mode = Self::is_chatgpt_mode(&*self.credentials.read().await);
 
@@ -262,29 +286,16 @@ impl Provider for OpenAIProvider {
             .as_array()
             .map(|tools| tools.len())
             .unwrap_or(tools.len());
-        let canonical_payload = serde_json::json!({
-            "model": request.get("model"),
-            "instructions": request.get("instructions"),
-            "input": &input,
-            "tools": request.get("tools"),
-            "tool_choice": request.get("tool_choice"),
-            "parallel_tool_calls": request.get("parallel_tool_calls"),
-            "reasoning": request.get("reasoning"),
-            "context_management": request.get("context_management"),
-            "include": request.get("include"),
-            "service_tier": request.get("service_tier"),
-            "prompt_cache_key": request.get("prompt_cache_key"),
-            "prompt_cache_retention": request.get("prompt_cache_retention"),
-        });
+        let canonical_fields = canonical_request_fields(&request);
         let prompt_cache_key_hash = request
             .get("prompt_cache_key")
             .map(jcode_provider_core::fingerprint::stable_hash_json);
-        jcode_provider_core::fingerprint::log_provider_canonical_input(
+        jcode_provider_core::fingerprint::log_provider_canonical_input_fields(
             "openai",
             &model_id,
             "openai_responses_full",
-            &canonical_payload,
-            &input,
+            &canonical_fields,
+            input,
             request_instructions,
             Some(request_tools),
             Some(request_tool_count),
@@ -386,6 +397,7 @@ impl Provider for OpenAIProvider {
 
         tokio::spawn(async move {
             let stream_task = async move {
+                let input = request["input"].as_array().expect("request input array");
                 let mut retry_diagnostics =
                     super::openai_retry_diagnostics::OpenAIRetryDiagnostics::default();
                 // Attempt persistent WebSocket continuation first
@@ -401,7 +413,7 @@ impl Provider for OpenAIProvider {
                             &persistent_ws,
                             &credentials,
                             &request,
-                            &input,
+                            input,
                             input_item_count,
                             &attempt_tx,
                         ),
@@ -487,11 +499,6 @@ impl Provider for OpenAIProvider {
                         }
                     }
                 }
-
-                // The retry request already owns the full input. The separate
-                // array is needed only for the continuation attempt above, not
-                // throughout a fresh HTTPS/WS response or its retries.
-                drop(input);
 
                 // Normal path: fresh connection with full input (with retry logic)
                 let mut last_error = None;
@@ -603,7 +610,7 @@ impl Provider for OpenAIProvider {
                         stream_response_websocket_persistent(
                             Arc::clone(&credentials),
                             account_label.clone(),
-                            request.clone(),
+                            &request,
                             attempt_tx,
                             Arc::clone(&persistent_ws),
                             input_item_count,

@@ -1095,7 +1095,10 @@ mod jarvis_config_tests {
         assert_eq!(limits.max_audio_seconds_per_hour, 600);
         assert_eq!(limits.max_classifications_per_hour, 120);
         assert_eq!(limits.max_agent_turns_per_hour, 20);
-        let config: Config = toml::from_str("[jarvis.listening]\nmax_agent_turns_per_hour = 3\naction_probability = 0.99").unwrap();
+        let config: Config = toml::from_str(
+            "[jarvis.listening]\nmax_agent_turns_per_hour = 3\naction_probability = 0.99",
+        )
+        .unwrap();
         assert_eq!(config.jarvis.listening.max_agent_turns_per_hour, 3);
         assert_eq!(config.jarvis.listening.action_probability, 0.99);
     }

@@ -93,6 +93,33 @@ pause/resume. A pause closes the recorder, rather than merely hiding its meter.
 A fatal provider or indicator error pauses processing and requires resolving
 the error and restarting the mode, rather than an automatic retry loop.
 
+## Native smooth waveform (patched Waybar)
+
+For a graphical meter instead of text glyphs, the Jstack Waybar fork provides
+`waveform/jarvis`, a GTK drawing area rendered with Cairo. The helper's `--native`
+mode supplies bounded numeric amplitude history. Waybar renders seven rounded
+vertical pills whose heights smoothly follow measured audio levels using its
+frame clock, not a fake sine animation. It does
+not open a microphone or send audio anywhere.
+
+```json
+"waveform/jarvis": {
+  "exec": "python3 /path/to/jcode/scripts/waybar/jarvis-voice-status.py --native",
+  "width": 86,
+  "height": 18,
+  "fps": 60,
+  "on-click": "python3 /path/to/jcode/scripts/waybar/jarvis-voice-status.py --toggle"
+}
+```
+
+Replace `custom/jarvis-voice` in the module list with `waveform/jarvis` after
+installing the patched Waybar. Ordinary upstream Waybar can continue using the
+text-module example above. The native helper is backward-compatible with older
+5 Hz Jcode clients. New clients publish up to 20 measured samples per second,
+retain at most 64 amplitudes, and publish only a 1 Hz heartbeat while paused.
+No transcripts are included. A capture/state transition is published immediately.
+The renderer stops animation when capture is off or its feed expires.
+
 ## Screen context
 
 `--jarvis-screen` is a separate explicit metadata-only opt-in. See

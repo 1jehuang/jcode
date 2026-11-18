@@ -488,9 +488,7 @@ fn pick_last_focused(registered: &[String]) -> Option<String> {
         Ok(Some(session)) if registered.contains(&session) => Some(session),
         Ok(_) => None,
         Err(error) => {
-            jcode_base::logging::warn(&format!(
-                "Cannot read last-focused CLI session: {error:#}"
-            ));
+            jcode_base::logging::warn(&format!("Cannot read last-focused CLI session: {error:#}"));
             None
         }
     }
