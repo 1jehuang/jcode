@@ -42,6 +42,14 @@ impl Agent {
         let mut persisted: Vec<String> = names.iter().cloned().collect();
         persisted.sort();
         self.session.tool_allowlist = Some(persisted);
+        // Names alone cannot express "all MCP tools except one": the `mcp`
+        // entry stays allowed, so keep the deny list as live and saved policy.
+        self.disabled_tools.extend(deny.iter().cloned());
+        if !deny.is_empty() {
+            let mut denied: Vec<String> = self.disabled_tools.iter().cloned().collect();
+            denied.sort();
+            self.session.tool_denylist = Some(denied);
+        }
         self.allowed_tools = Some(names);
         self.locked_tools = None;
         // Nested calls (batch and friends) are checked against the registered

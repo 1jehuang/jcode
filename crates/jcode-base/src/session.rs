@@ -129,6 +129,10 @@ pub struct Session {
     /// worker cannot regain tools its definition denied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_allowlist: Option<Vec<String>>,
+    /// Tools an agent definition denied. Kept separately from the allowlist so
+    /// a deny on one MCP tool still holds while the `mcp` entry stays allowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_denylist: Option<Vec<String>>,
     /// Whether this session is a canary session (testing new builds)
     #[serde(default)]
     pub is_canary: bool,
@@ -231,6 +235,8 @@ struct SessionStartupStub {
     #[serde(default)]
     tool_allowlist: Option<Vec<String>>,
     #[serde(default)]
+    tool_denylist: Option<Vec<String>>,
+    #[serde(default)]
     is_canary: bool,
     #[serde(default)]
     testing_build: Option<String>,
@@ -304,6 +310,7 @@ impl Session {
         session.autoreview_enabled = stub.autoreview_enabled;
         session.autojudge_enabled = stub.autojudge_enabled;
         session.tool_allowlist = stub.tool_allowlist;
+        session.tool_denylist = stub.tool_denylist;
         session.is_canary = stub.is_canary;
         session.testing_build = stub.testing_build;
         session.working_dir = stub.working_dir;
@@ -346,6 +353,7 @@ impl Session {
         session.autoreview_enabled = snapshot.autoreview_enabled;
         session.autojudge_enabled = snapshot.autojudge_enabled;
         session.tool_allowlist = snapshot.tool_allowlist;
+        session.tool_denylist = snapshot.tool_denylist;
         session.is_canary = snapshot.is_canary;
         session.testing_build = snapshot.testing_build;
         session.working_dir = snapshot.working_dir;
@@ -554,6 +562,7 @@ impl Session {
             autoreview_enabled: self.autoreview_enabled,
             autojudge_enabled: self.autojudge_enabled,
             tool_allowlist: self.tool_allowlist.clone(),
+            tool_denylist: self.tool_denylist.clone(),
             is_canary: self.is_canary,
             testing_build: self.testing_build.clone(),
             working_dir: self.working_dir.clone(),
@@ -763,6 +772,7 @@ impl Session {
         self.autoreview_enabled = meta.autoreview_enabled;
         self.autojudge_enabled = meta.autojudge_enabled;
         self.tool_allowlist = meta.tool_allowlist;
+        self.tool_denylist = meta.tool_denylist;
         self.is_canary = meta.is_canary;
         self.testing_build = meta.testing_build;
         self.working_dir = meta.working_dir;
@@ -809,6 +819,7 @@ impl Session {
             autoreview_enabled: None,
             autojudge_enabled: None,
             tool_allowlist: None,
+            tool_denylist: None,
             is_canary: false,
             testing_build: None,
             working_dir: current_working_dir_string(),
@@ -870,6 +881,7 @@ impl Session {
             autoreview_enabled: None,
             autojudge_enabled: None,
             tool_allowlist: None,
+            tool_denylist: None,
             is_canary: false,
             testing_build: None,
             working_dir: current_working_dir_string(),
@@ -1756,6 +1768,8 @@ struct RemoteStartupSessionSnapshot {
     autojudge_enabled: Option<bool>,
     #[serde(default)]
     tool_allowlist: Option<Vec<String>>,
+    #[serde(default)]
+    tool_denylist: Option<Vec<String>>,
     #[serde(default)]
     is_canary: bool,
     #[serde(default)]
