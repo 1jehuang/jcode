@@ -5,6 +5,10 @@
 //! -> 96 bytes and 1.95 MB result 3,900,096 -> 96 bytes. Every one of eleven
 //! fixture shapes improved CPU, including tool JSON, intent and nested todos.
 //! Fixture setup is excluded, projection result destruction is included.
+//! A narrower plain-single-block followup eliminated the remaining 96 bytes:
+//! small 54 -> 3 ns, many blocks 3306 -> 1183 ns, empty separators 72 -> 56 ns.
+//! A generic first/second iterator-chain version was rejected because the
+//! empty-separator case regressed 108 -> 144 ns despite fewer allocations.
 use jcode_message_types::ContentBlock;
 use jcode_session_types::StoredMessage;
 #[path = "../src/tool/session_search/searchable_text_fixtures.rs"]

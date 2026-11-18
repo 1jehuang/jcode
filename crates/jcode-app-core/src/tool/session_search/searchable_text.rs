@@ -8,6 +8,17 @@ use std::borrow::Cow;
 mod tests;
 
 pub(super) fn searchable_message_text(msg: &StoredMessage, include_tools: bool) -> Cow<'_, str> {
+    // Plain single-block messages already have their exact searchable text.
+    // Do not allocate a parts vector or copy their payload.
+    if let [block] = msg.content.as_slice() {
+        match block {
+            ContentBlock::Text { text, .. } => return Cow::Borrowed(text),
+            ContentBlock::ToolResult { content, .. } if include_tools => {
+                return Cow::Borrowed(content);
+            }
+            _ => {}
+        }
+    }
     let mut parts: Vec<Cow<'_, str>> = msg
         .content
         .iter()
