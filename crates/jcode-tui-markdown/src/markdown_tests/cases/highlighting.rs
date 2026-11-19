@@ -73,6 +73,31 @@ println(\"hello\")
 }
 
 #[test]
+fn markdown_code_fence_expands_tabs_to_four_cell_stops() {
+    // Ratatui draws `\t` as nothing, so tab-indented code must arrive as spaces.
+    // Stops count from the start of the code line, after wide characters too.
+    let lines = render_markdown("```go\nfunc main() {\n\tif ok {\n\t\treturn\n\t}\n界\tx\nab\tc\n}\n```");
+    let body: Vec<String> = lines
+        .iter()
+        .map(line_to_string)
+        .filter_map(|text| text.trim_start().strip_prefix("│ ").map(str::to_string))
+        .collect();
+    assert_eq!(
+        body,
+        [
+            "func main() {",
+            "    if ok {",
+            "        return",
+            "    }",
+            "界  x",
+            "ab  c",
+            "}",
+        ]
+    );
+    assert!(lines.iter().all(|line| !line_to_string(line).contains('\t')));
+}
+
+#[test]
 fn code_highlighting_keeps_multiline_state_and_ends_hash_comments() {
     // State that must span lines still does; line comments in other languages end.
     let block = crate::render_support::highlight_code("/* a
