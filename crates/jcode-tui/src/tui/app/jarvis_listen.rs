@@ -270,8 +270,8 @@ impl AlwaysListening {
                 && (1..=600).contains(&cfg.max_classifications_per_hour)
                 && (1..=120).contains(&cfg.max_agent_turns_per_hour)
                 && cfg.action_probability.is_finite()
-                && (0.9..=1.0).contains(&cfg.action_probability),
-            "Invalid Jarvis listening limits: audio 1..3600 sec/hour, classifications 1..600/hour, agent turns 1..120/hour, probability 0.9..1"
+                && (0.5..=1.0).contains(&cfg.action_probability),
+            "Invalid Jarvis listening limits: audio 1..3600 sec/hour, classifications 1..600/hour, agent turns 1..120/hour, probability 0.5..1"
         );
         let status = CaptureStatus::new()?;
         let key = jcode_voice::nari_api_key()
@@ -383,6 +383,21 @@ impl App {
         let recording = listener.recording.take();
         if let Some(recording) = &recording {
             recording.set_paused(paused || listener.failed);
+            // Fn tap (companion): act on what was just heard.
+            if listener
+                .status
+                .as_ref()
+                .is_some_and(CaptureStatus::take_wake)
+                && !paused
+                && !listener.failed
+            {
+                if recording.manual_trigger() {
+                    self.set_status_notice("Jarvis: sending what it just heard");
+                } else {
+                    self.set_status_notice("Jarvis hasn't heard anything recently");
+                }
+                changed = true;
+            }
             if !paused
                 && !listener.failed
                 && listener.chat_version != Some(self.display_messages_version)

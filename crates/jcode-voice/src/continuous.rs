@@ -23,7 +23,7 @@ pub struct ContinuousConfig {
     pub max_audio_seconds_per_hour: u32,
     /// Rolling one-shot classifier allowance. Failed/cancelled jobs still count.
     pub max_classifications_per_hour: u32,
-    /// Minimum typed Jev probability for accepting a directed request (0.9..=1).
+    /// Minimum typed Jev probability for accepting a directed request (0.5..=1).
     pub action_probability: f64,
     #[cfg(test)]
     bypass_external_guards: bool,
@@ -73,17 +73,57 @@ pub enum ContinuousEvent {
 #[derive(Default)]
 struct GateContext {
     background: VecDeque<String>,
+    /// When each `background` entry was heard, for manual triggers.
+    heard: VecDeque<Instant>,
+    /// Transcribed caption still waiting on the gate. A manual trigger can
+    /// claim it so speech said right before the tap is not missed.
+    inflight: Option<(u64, String)>,
+    /// Inflight caption a manual trigger already sent. Its gate result is dropped.
+    claimed: Option<u64>,
     chat: Vec<(String, String)>,
 }
+/// A manual trigger only sends speech heard this recently.
+pub const MANUAL_TRIGGER_WINDOW: Duration = Duration::from_secs(120);
 impl GateContext {
     fn remember(&mut self, text: &str) {
+        self.remember_at(text, Instant::now());
+    }
+    fn remember_at(&mut self, text: &str, at: Instant) {
         if self.background.len() == 16 {
             self.background.pop_front();
+            self.heard.pop_front();
         }
         self.background.push_back(text.chars().take(1024).collect());
+        self.heard.push_back(at);
     }
     fn accepted(&mut self, trigger: String) -> String {
+        self.heard.clear();
         serde_json::json!({"background_transcript": std::mem::take(&mut self.background), "trigger": trigger}).to_string()
+    }
+    /// The user asked Jarvis to act on what it just heard, bypassing the gate.
+    /// The latest recent utterance is the trigger and earlier recent ones its
+    /// background. None when nothing was heard within the window.
+    fn manual(&mut self, now: Instant) -> Option<String> {
+        while self
+            .heard
+            .front()
+            .is_some_and(|at| now.duration_since(*at) > MANUAL_TRIGGER_WINDOW)
+        {
+            self.heard.pop_front();
+            self.background.pop_front();
+        }
+        let trigger = match self.inflight.take() {
+            Some((id, text)) => {
+                self.claimed = Some(id);
+                text
+            }
+            None => {
+                let text = self.background.pop_back()?;
+                self.heard.pop_back();
+                text
+            }
+        };
+        Some(self.accepted(trigger))
     }
     fn state(&self, candidate: &str, require_name: bool) -> serde_json::Value {
         let chat: Vec<_> = self
@@ -91,7 +131,17 @@ impl GateContext {
             .iter()
             .map(|(role, text)| serde_json::json!({"role":role,"text":text}))
             .collect();
-        serde_json::json!({"recent_chat":chat,"background_transcript":self.background,"candidate":candidate,"require_explicit_name":require_name})
+        // The gate judges speech as one continuous stream, not isolated
+        // segments: earlier unaccepted speech flows straight into the candidate.
+        let continuous_transcript = self
+            .background
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(candidate.trim()))
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        serde_json::json!({"recent_chat":chat,"continuous_transcript":continuous_transcript,"background_transcript":self.background,"candidate":candidate,"require_explicit_name":require_name})
     }
 }
 struct Events {
@@ -105,7 +155,24 @@ struct ClassifiedCaption {
     score: Option<(f64, bool)>,
 }
 impl Events {
+    /// Queue a manual trigger. Returns false when nothing was heard recently.
+    fn manual_trigger(&mut self) -> bool {
+        match self.context.manual(Instant::now()) {
+            Some(payload) => {
+                self.push(ContinuousEvent::Transcript(payload));
+                true
+            }
+            None => false,
+        }
+    }
     fn classified(&mut self, caption: ClassifiedCaption) {
+        if self.context.inflight.as_ref().is_some_and(|(id, _)| *id == caption.id) {
+            self.context.inflight = None;
+        }
+        if self.context.claimed == Some(caption.id) {
+            self.context.claimed = None;
+            return;
+        }
         if let Some((probability, accepted)) = caption.score {
             self.push(ContinuousEvent::CaptionScore {
                 id: caption.id,
@@ -177,7 +244,7 @@ impl ContinuousRecording {
             || config.max_classifications_per_hour == 0
             || config.max_classifications_per_hour > 600
             || !config.action_probability.is_finite()
-            || !(0.9..=1.0).contains(&config.action_probability)
+            || !(0.5..=1.0).contains(&config.action_probability)
         {
             return Err(VoiceError::InvalidResponse);
         }
@@ -267,8 +334,8 @@ impl ContinuousRecording {
             .into_iter()
             .rev()
             .filter(|(role, _)| matches!(role.as_str(), "user" | "assistant"))
-            .take(8)
-            .map(|(role, text)| (role, text.chars().take(1024).collect()))
+            .take(16)
+            .map(|(role, text)| (role, text.chars().take(2048).collect()))
             .collect();
         output.context.chat.reverse();
     }
@@ -283,6 +350,9 @@ impl ContinuousRecording {
     }
     fn clear_speech_events(&self, clear_chat: bool) {
         let mut output = self.events.lock().unwrap_or_else(|e| e.into_inner());
+        // Aborted gate jobs never report back: forget their pending caption.
+        output.context.inflight = None;
+        output.context.claimed = None;
         if clear_chat {
             output.context = GateContext::default();
         }
@@ -295,6 +365,18 @@ impl ContinuousRecording {
                     | ContinuousEvent::Rejected(_)
             )
         });
+    }
+    /// Send recently heard speech as a request without the semantic gate:
+    /// an explicit user action (Fn tap) replaces the classifier's decision.
+    /// Returns false when nothing was heard in `MANUAL_TRIGGER_WINDOW`.
+    pub fn manual_trigger(&self) -> bool {
+        if self.paused.load(Ordering::SeqCst) || self.cancel.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .manual_trigger()
     }
     pub fn is_capturing(&self) -> bool {
         self.capturing.load(Ordering::SeqCst) && !self.is_finished()
@@ -718,6 +800,7 @@ async fn run(
                                     let mut output = events.lock().unwrap_or_else(|e|e.into_inner());
                                     if stopped.load(Ordering::SeqCst) || generation != epoch.load(Ordering::SeqCst) || paused.load(Ordering::SeqCst) || suppressed.load(Ordering::SeqCst) { return Ok(None); }
                                     output.push(ContinuousEvent::Caption { id, text: text.trim().chars().take(256).collect() });
+                                    output.context.inflight = Some((id, text.chars().take(1024).collect()));
                                     output.context.state(&text,require_jev)
                                 };
                                 let gate = gate.as_ref().ok_or(VoiceError::NotConfigured)?;
@@ -1066,6 +1149,11 @@ mod tests {
         assert_eq!(state["candidate"], trigger);
         assert_eq!(state["recent_chat"][0]["text"], "Which one?");
         assert_eq!(state["background_transcript"][0], "4");
+        // Jev judges one continuous stream ending with the newest segment.
+        assert_eq!(
+            state["continuous_transcript"],
+            "4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 The \"second\" one."
+        );
         let payload: serde_json::Value =
             serde_json::from_str(&ctx.accepted(trigger.into())).unwrap();
         assert_eq!(
@@ -1122,6 +1210,49 @@ mod tests {
             }
             assert!(events.queue.is_empty());
         }
+    }
+    #[test]
+    fn manual_trigger_sends_only_recent_speech() {
+        let mut ctx = GateContext::default();
+        let now = Instant::now();
+        assert!(ctx.manual(now).is_none(), "nothing heard");
+        ctx.remember_at("old", now - MANUAL_TRIGGER_WINDOW - Duration::from_secs(1));
+        ctx.remember_at("first", now - Duration::from_secs(10));
+        ctx.remember_at("latest", now);
+        let payload: serde_json::Value =
+            serde_json::from_str(&ctx.manual(now).unwrap()).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({"trigger":"latest","background_transcript":["first"]})
+        );
+        assert!(ctx.manual(now).is_none(), "each utterance is sent once");
+        // Speech still at the gate is claimed, and its later score dropped.
+        let mut events = Events {
+            context: GateContext::default(),
+            queue: VecDeque::new(),
+            notify: Arc::new(tokio::sync::Notify::new()),
+        };
+        events.context.remember_at("before", now);
+        events.context.inflight = Some((7, "just said".into()));
+        assert!(events.manual_trigger());
+        let Some(ContinuousEvent::Transcript(payload)) = events.queue.pop_front() else {
+            panic!("manual trigger queued nothing")
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&payload).unwrap(),
+            serde_json::json!({"trigger":"just said","background_transcript":["before"]})
+        );
+        events.classified(ClassifiedCaption {
+            id: 7,
+            text: "just said".into(),
+            score: Some((0.99, true)),
+        });
+        assert!(events.queue.is_empty(), "claimed caption is not sent twice");
+        assert!(events.context.background.is_empty());
+        for i in 0..20 {
+            ctx.remember_at(&i.to_string(), now);
+        }
+        assert_eq!((ctx.background.len(), ctx.heard.len()), (16, 16));
     }
     #[test]
     fn bounded_events() {

@@ -72,6 +72,8 @@ pub enum Edge {
     FnRelease,
     /// Abort an Fn hold: a chord key, modifier, or safety failure.
     FnCancel,
+    /// Bare Fn tapped (released before the arming delay, no chord).
+    FnTap,
 }
 
 /// Bare-Fn hold state machine. Lives beside the routed Copilot capture.
@@ -721,11 +723,12 @@ impl Listener {
                 } else {
                     FnHold::Armed(path.to_path_buf(), Instant::now())
                 });
-            } else if value == 0
-                && on_path
-                && let Some(FnHold::Held(..)) = self.fn_hold.take()
-            {
-                edges.push(Edge::FnRelease);
+            } else if value == 0 && on_path {
+                match self.fn_hold.take() {
+                    Some(FnHold::Held(..)) => edges.push(Edge::FnRelease),
+                    Some(FnHold::Armed(..)) => edges.push(Edge::FnTap),
+                    _ => {}
+                }
             } else if value == 2 && on_path {
                 self.fn_repeating = true;
             }
@@ -761,6 +764,7 @@ impl Listener {
                         .is_some_and(|at| at.elapsed() >= FN_REPEAT_LOST) =>
             {
                 self.fn_hold = None;
+                edges.push(Edge::FnTap);
             }
             Some(FnHold::Armed(path, start)) if start.elapsed() >= FN_ARM => {
                 self.fn_hold = Some(FnHold::Held(path.clone(), Instant::now()));

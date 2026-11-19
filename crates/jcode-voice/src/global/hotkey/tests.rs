@@ -407,12 +407,12 @@ fn bare_fn_hold_arms_then_releases() {
     fs::remove_dir_all(dir).unwrap();
 }
 #[test]
-fn quick_fn_tap_and_fn_chords_never_record() {
+fn quick_fn_tap_is_a_tap_and_fn_chords_never_record() {
     // Tap shorter than the arming delay.
     let (mut listener, mut writer, dir) = fn_listener();
     send(&mut writer, 1, KEY_FN as u16, 1);
     send(&mut writer, 1, KEY_FN as u16, 0);
-    assert!(listener.poll().is_empty());
+    assert_eq!(listener.poll(), vec![Edge::FnTap], "short bare tap");
     age_fn(&mut listener);
     assert!(listener.poll().is_empty());
     // Fn+F-key (brightness) before arming.

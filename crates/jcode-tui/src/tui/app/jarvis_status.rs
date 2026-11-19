@@ -12,6 +12,8 @@ pub(super) struct CaptureStatus {
     path: PathBuf,
     temporary: PathBuf,
     pause: PathBuf,
+    /// Created by the companion on an Fn tap: act on recent speech.
+    wake: PathBuf,
     _lease: File,
     levels: VecDeque<f32>,
     written: Option<Instant>,
@@ -74,6 +76,7 @@ impl CaptureStatus {
                 path: directory.join(format!("{pid}.json")),
                 temporary: directory.join(format!("{pid}.tmp")),
                 pause: directory.join(format!("{pid}.paused")),
+                wake: directory.join(format!("{pid}.wake")),
                 _lease: lease,
                 levels: VecDeque::with_capacity(64),
                 written: None,
@@ -83,6 +86,11 @@ impl CaptureStatus {
         }
         #[cfg(not(unix))]
         anyhow::bail!("Always-on capture status currently requires Unix")
+    }
+
+    /// Consume a pending manual trigger request.
+    pub(super) fn take_wake(&self) -> bool {
+        fs::remove_file(&self.wake).is_ok()
     }
 
     pub(super) fn paused(&self) -> bool {
@@ -185,6 +193,7 @@ impl Drop for CaptureStatus {
         let _ = fs::remove_file(&self.path);
         let _ = fs::remove_file(&self.temporary);
         let _ = fs::remove_file(&self.pause);
+        let _ = fs::remove_file(&self.wake);
     }
 }
 

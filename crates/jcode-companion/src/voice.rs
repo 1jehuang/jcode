@@ -160,6 +160,11 @@ fn run(mut listener: Listener, indicators: VoiceIndicators) {
                         capture = start(Source::Copilot, Some(session), indicators);
                     }
                 }
+                Edge::FnTap => {
+                    if capture.is_none() {
+                        fn_tap(indicators);
+                    }
+                }
                 Edge::FnPress => {
                     if capture.is_none() {
                         match crate::jarvis_target::live_jarvis() {
@@ -220,8 +225,26 @@ fn run(mut listener: Listener, indicators: VoiceIndicators) {
 
 fn edge_source(edge: Edge) -> Source {
     match edge {
-        Edge::FnPress | Edge::FnRelease | Edge::FnCancel => Source::JarvisFn,
+        Edge::FnPress | Edge::FnRelease | Edge::FnCancel | Edge::FnTap => Source::JarvisFn,
         _ => Source::Copilot,
+    }
+}
+
+/// Fn tap: ask the running Jarvis to act on what it just heard.
+fn fn_tap(indicators: VoiceIndicators) {
+    let indicator = Indicator::new(indicators.notifications);
+    let Some(target) = crate::jarvis_target::live_jarvis() else {
+        // Nothing has been listening, so there is nothing to send.
+        return;
+    };
+    match crate::jarvis_target::request_wake(target.pid) {
+        Ok(()) => {
+            indicator.show("Jarvis: sending what it heard");
+        }
+        Err(error) => {
+            eprintln!("jcode companion: cannot wake Jarvis: {error:#}");
+            indicator.show("Couldn't reach Jarvis");
+        }
     }
 }
 

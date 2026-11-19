@@ -23,6 +23,20 @@ pub(crate) fn status_dir() -> Option<PathBuf> {
     std::env::var_os("XDG_RUNTIME_DIR").map(|dir| PathBuf::from(dir).join("jcode-jarvis"))
 }
 
+/// Ask Jarvis `pid` to act on recently heard speech (it consumes `<pid>.wake`).
+pub(crate) fn request_wake(pid: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = status_dir().ok_or_else(|| std::io::Error::other("XDG_RUNTIME_DIR unset"))?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(0o400000) // O_NOFOLLOW on Linux
+        .open(dir.join(format!("{pid}.wake")))
+        .map(drop)
+}
+
 /// The most recently active always-on Jarvis client with a registered session.
 pub(crate) fn live_jarvis() -> Option<JarvisTarget> {
     find(
