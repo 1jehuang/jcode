@@ -99,6 +99,7 @@ fn event_for_transport(
 }
 
 struct ProcessingMessage {
+    jarvis_voice: bool,
     id: u64,
     content: String,
     images: Vec<(String, String)>,
@@ -1082,6 +1083,7 @@ pub(super) async fn handle_client(
             Request::ScreenContext { .. } => unreachable!("Passive screen control dispatched before acknowledgment"),
             Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. } => unreachable!("SDK controls dispatched before acknowledgment"),
             Request::Message {
+                jarvis_voice,
                 id,
                 content,
                 images,
@@ -1118,6 +1120,7 @@ pub(super) async fn handle_client(
                 let peer_content = content.clone();
                 start_processing_message(
                     ProcessingMessage {
+                        jarvis_voice,
                         id,
                         content,
                         images,
@@ -1153,8 +1156,13 @@ pub(super) async fn handle_client(
                         &swarm_members,
                         &client_session_id,
                         &client_connection_id,
-                        ServerEvent::PeerUserMessage {
-                            content: peer_content,
+                        if jarvis_voice {
+                            ServerEvent::SoftInterruptInjected {
+                                content: peer_content, display_role: Some("jarvis_user".into()),
+                                point: "turn_start".into(), tools_skipped: None, client_ids: Vec::new(),
+                            }
+                        } else {
+                            ServerEvent::PeerUserMessage { content: peer_content }
                         },
                     )
                     .await;
@@ -1193,6 +1201,7 @@ pub(super) async fn handle_client(
             }
 
             Request::SoftInterrupt {
+                jarvis_voice,
                 id,
                 content,
                 images,
@@ -1228,6 +1237,7 @@ pub(super) async fn handle_client(
                     let accepted_content = content.clone();
                     start_processing_message(
                         ProcessingMessage {
+                            jarvis_voice,
                             id,
                             content,
                             images,
@@ -1262,7 +1272,7 @@ pub(super) async fn handle_client(
                     if processing_message_id == Some(id) {
                         let _ = client_event_tx.send(ServerEvent::SoftInterruptInjected {
                             content: accepted_content,
-                            display_role: None,
+                            display_role: jarvis_voice.then(|| "jarvis_user".to_owned()),
                             point: "turn_start".to_string(),
                             tools_skipped: None,
                             client_ids: client_id.into_iter().collect(),
@@ -1280,6 +1290,7 @@ pub(super) async fn handle_client(
                         content,
                         images,
                         urgent,
+                        jarvis_voice,
                         client_id,
                         &session_control,
                         &client_event_tx,
@@ -2406,6 +2417,7 @@ pub(super) async fn handle_client(
                             }
                             start_processing_message(
                                 ProcessingMessage {
+                                    jarvis_voice: false,
                                     id, content, images: Vec::new(), system_reminder: None,
                                     active_skill: None, server_failover: true,
                                 },
@@ -3578,10 +3590,22 @@ pub(super) async fn process_reserved_message_streaming_mpsc(
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<()> {
+    process_reserved_message_with_role(agent, lease, content, images, system_reminder, event_tx, None).await
+}
+
+pub(super) async fn process_reserved_message_with_role(
+    agent: &mut Agent,
+    lease: &crate::agent::TurnLease,
+    content: &str,
+    images: Vec<(String, String)>,
+    system_reminder: Option<String>,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+    display_role: Option<crate::session::StoredDisplayRole>,
+) -> Result<()> {
     agent.validate_server_turn(lease)?;
     let session_id = agent.session_id().to_string();
     let result = agent
-        .run_reserved_streaming_mpsc(lease, content, images, system_reminder, event_tx, None)
+        .run_reserved_streaming_mpsc(lease, content, images, system_reminder, event_tx, display_role)
         .await;
     if result.is_ok() {
         crate::runtime_memory_log::emit_event(

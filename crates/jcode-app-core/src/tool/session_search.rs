@@ -1735,6 +1735,7 @@ fn is_tool_only_message(msg: &StoredMessage) -> bool {
 fn role_label(msg: &StoredMessage) -> &'static str {
     if let Some(display_role) = msg.display_role {
         return match display_role {
+            crate::session::StoredDisplayRole::JarvisUser => "user",
             crate::session::StoredDisplayRole::System => "system",
             crate::session::StoredDisplayRole::BackgroundTask => "background",
             crate::session::StoredDisplayRole::FileActivity => "file_activity",

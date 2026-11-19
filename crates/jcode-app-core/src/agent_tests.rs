@@ -716,6 +716,33 @@ async fn file_activity_interrupt_keeps_typed_identity_without_model_prefix() {
 }
 
 #[tokio::test]
+async fn jarvis_voice_provenance_survives_history_without_marking_typed_lookalikes() {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = Agent::new(provider, registry);
+    let content = r#"{"trigger":"hello","background_transcript":[]}"#;
+    for source in [SoftInterruptSource::JarvisUser, SoftInterruptSource::User] {
+        agent.queue_soft_interrupt(content.into(), vec![], false, source);
+    }
+    let events = Agent::build_soft_interrupt_events(agent.inject_soft_interrupts(), "D", None);
+    assert_eq!(events.len(), 2);
+    for (event, expected) in events.iter().zip([Some("jarvis_user"), None]) {
+        assert!(matches!(event, ServerEvent::SoftInterruptInjected { content: text, display_role, .. }
+            if text == content && display_role.as_deref() == expected));
+    }
+    let stored = &agent.session.messages[agent.session.messages.len() - 2..];
+    for msg in stored {
+        assert!(matches!(msg.role, Role::User));
+        assert!(matches!(&msg.content[0], ContentBlock::Text { text, .. } if text == content));
+    }
+    let restored = serde_json::from_slice(&serde_json::to_vec(&agent.session).unwrap()).unwrap();
+    let history = crate::session::render_messages(&restored);
+    let rows: Vec<_> = history.iter().filter(|row| row.content == content).map(|row| row.role.as_str()).collect();
+    assert_eq!(rows, ["jarvis_user", "user"]);
+}
+
+#[tokio::test]
 async fn adjacent_notifications_each_emit_a_delivery_event() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let registry = Registry::new(provider.clone()).await;
