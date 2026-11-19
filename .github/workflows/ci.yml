@@ -149,6 +149,8 @@ jobs:
           python3 scripts/test_quick_release.py
           python3 scripts/test_preview_release.py
           python3 tests/test_selfdev_linux_workflow.py
+          python3 scripts/test_selfdev_release_highlights.py
+          python3 scripts/test_refresh_selfdev_discord.py
           python3 scripts/test_reconcile_preview_release.py
           python3 tests/test_preview_linux_hosted.py
           python3 tests/test_package_preview_linux_hosted.py
