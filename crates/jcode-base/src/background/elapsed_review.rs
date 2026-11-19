@@ -4,7 +4,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 const REVIEW_AFTER: Duration = Duration::from_secs(5 * 60);
 
 impl BackgroundTaskManager {
-    fn arm_elapsed_review(&self, tool_name: &str, task_id: &str) {
+    pub(super) fn arm_elapsed_review(&self, tool_name: &str, task_id: &str) {
         // Waiting on a worker or another task is not itself a slow command.
         if !matches!(tool_name, "bash" | "selfdev-build") {
             return;
