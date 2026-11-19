@@ -23,17 +23,21 @@ local, unlocked Linux graphical session. It is not a background startup service.
    actually a request for the assistant. Natural requests need not say a wake
    word. Ambient, quoted, hypothetical and uncertain speech should be rejected.
    Classifier failures fail closed, never forward directly to the agent.
-4. The listening window shows a temporary caption for each transcribed phrase,
-   even if Jev does not accept it. A caption is not a chat message. Only
-   accepted requests reach the ordinary agent conversation.
+4. The listening window shows a running local transcript of finalized phrases.
+   A caption is not a chat message. When Jev accepts a phrase, the ordinary
+   agent receives a voice turn containing the recent `background_transcript`
+   and the exact `trigger`. Only the trigger is a request. Earlier speech may
+   clarify references but cannot authorize an action.
 5. At most one accepted request waits while the agent is busy. It expires after
    30 seconds. Duplicate requests within ten seconds are suppressed. Delivery
    attempts are not automatically retried.
 
 Jev uses the existing voice provider routing and credentials. This path uses
 `evaluate_once`, not interactive voice's speculative hedged requests. It sends
-only a bounded transcript and a small classification policy, not the full coding
-conversation or screen snapshot. A confidence threshold is a policy, not proof
+bounded recent speech and recent user prompts and Jarvis replies to classify
+only the newest phrase. Tool calls, tool results, reasoning and screen snapshots
+are not classifier context. Speech included with an accepted turn becomes part
+of the ordinary conversation history; this is not an unlimited audio archive. A confidence threshold is a policy, not proof
 that a request was intended, correctly transcribed, or spoken by the user.
 Existing tool permissions and irreversible-action approvals still apply.
 
