@@ -86,8 +86,11 @@ fn loading_legacy_transcript_decays_old_screenshots() -> Result<()> {
     }
     // Inflate the payload after append so load sees all 56 MiB intact.
     for message in &mut legacy.messages {
-        let [ContentBlock::ToolResult { .. }, ContentBlock::Image { data, .. }] =
-            message.content.as_mut_slice()
+        let blocks = message.content.as_mut_slice();
+        let [
+            ContentBlock::ToolResult { .. },
+            ContentBlock::Image { data, .. },
+        ] = blocks
         else {
             panic!("expected a tool result with an inline screenshot");
         };
