@@ -136,6 +136,7 @@ jobs:
           cd dist
           sha256sum --check SHA256SUMS
           tag="selfdev-linux-$SHA"
+          title="jcode Linux prerelease · ${SHA:0:9}"
           notes="$RUNNER_TEMP/highlights.md"
           tags="$RUNNER_TEMP/releases.txt"
           existing=false
@@ -147,13 +148,13 @@ jobs:
           fi
           if [[ $existing == false ]]; then
             gh release create "$tag" --target "$SHA" --draft --prerelease --latest=false \
-              --title "Linux self-dev $SHA" --notes-file "$notes"
+              --title "$title" --notes-file "$notes"
           fi
           # Do not modify a published release. A cancelled run may leave a draft.
           gh release view "$tag" --json isDraft,isPrerelease,targetCommitish | \
             jq -e --arg sha "$SHA" '.isDraft and .isPrerelease and .targetCommitish == $sha'
           gh release upload "$tag" "$ARCHIVE" SHA256SUMS --clobber
-          gh release edit "$tag" --notes-file "$notes" --draft=false --prerelease --latest=false
+          gh release edit "$tag" --title "$title" --notes-file "$notes" --draft=false --prerelease --latest=false
 
   announce:
     needs: publish
