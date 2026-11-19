@@ -53,6 +53,8 @@ struct State {
     active: Option<(Child, Instant)>,
     generation: u64,
     synthesizing: bool,
+    awaiting_quiet: bool,
+    authorized: bool,
     last_error: Option<&'static str>,
     stopped: bool,
 }
@@ -81,6 +83,37 @@ impl State {
             let _ = child.wait();
         }
     }
+}
+
+/// Called under the player mutex, immediately before starting a gated player.
+/// Condvar waits release the mutex so the TUI can authorize or cancel safely.
+fn await_quiet<'a>(
+    mut state: std::sync::MutexGuard<'a, State>,
+    wake: &Condvar,
+    generation: u64,
+    gated: bool,
+) -> (std::sync::MutexGuard<'a, State>, bool) {
+    if !gated {
+        let ok = !state.stopped && state.generation == generation;
+        return (state, ok);
+    }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    state.awaiting_quiet = true;
+    while !state.stopped && state.generation == generation && !state.authorized {
+        let now = Instant::now();
+        if now >= deadline {
+            state.last_error = Some("Speech expired while waiting for a quiet microphone");
+            break;
+        }
+        state = wake
+            .wait_timeout(state, deadline.duration_since(now))
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+    }
+    let ok = !state.stopped && state.generation == generation && state.authorized;
+    state.awaiting_quiet = false;
+    state.authorized = false;
+    (state, ok)
 }
 impl Drop for State {
     fn drop(&mut self) {
@@ -151,14 +184,16 @@ impl SpeechPlayer {
     /// Queue one utterance without waiting for playback or queue capacity.
     /// Caps are in UTF-8 bytes and exclude the single active utterance.
     pub fn enqueue(&self, text: &str) -> Result<(), SpeechError> {
-        self.enqueue_traced(text, None)
+        self.enqueue_inner(text, None)
     }
 
-    pub fn enqueue_traced(
-        &self,
-        text: &str,
-        trace: Option<PlaybackTrace>,
-    ) -> Result<(), SpeechError> {
+    /// Prepare audio without suppressing the microphone. A prepared reply
+    /// requires an explicit `authorize_ready` before it can play.
+    pub fn enqueue_gated(&self, text: &str, trace: PlaybackTrace) -> Result<(), SpeechError> {
+        self.enqueue_inner(text, Some(trace))
+    }
+
+    fn enqueue_inner(&self, text: &str, trace: Option<PlaybackTrace>) -> Result<(), SpeechError> {
         if text.len() > MAX_TEXT_BYTES || text.trim().is_empty() || text.contains('\0') {
             return Err(SpeechError::InvalidText);
         }
@@ -181,6 +216,25 @@ impl SpeechPlayer {
         state.queue.is_empty() && state.active.is_none() && !state.synthesizing
     }
 
+    /// Synthesis and waiting for a quiet mic never suppress capture.
+    pub fn owns_audio_output(&self) -> bool {
+        let state = self.shared.0.lock().unwrap_or_else(|e| e.into_inner());
+        state.active.is_some() || state.authorized
+    }
+
+    /// Claim the mic only when audio is ready. The worker starts no child
+    /// until this succeeds. Its spawn is serialized with cancel on this mutex.
+    pub fn authorize_ready(&self, claim: impl FnOnce() -> bool) -> bool {
+        let (lock, wake) = &*self.shared;
+        let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if state.awaiting_quiet && !state.authorized && !state.stopped && claim() {
+            state.authorized = true;
+            wake.notify_all();
+            return true;
+        }
+        false
+    }
+
     /// A redacted asynchronous failure, for the local UI rather than model context.
     pub fn take_error(&self) -> Option<&'static str> {
         self.shared
@@ -196,6 +250,8 @@ impl SpeechPlayer {
         let (lock, wake) = &*self.shared;
         let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
         state.generation = state.generation.wrapping_add(1);
+        state.awaiting_quiet = false;
+        state.authorized = false;
         state.queue.clear();
         state.stop_child();
         wake.notify_one();
@@ -232,6 +288,14 @@ fn run(shared: Arc<(Mutex<State>, Condvar)>, backend: Backend) {
         }
         if state.active.is_none() {
             if let Some((text, trace)) = state.queue.pop_front() {
+                let generation = state.generation;
+                state.synthesizing = true;
+                let ok;
+                (state, ok) = await_quiet(state, wake, generation, trace.is_some());
+                state.synthesizing = false;
+                if !ok {
+                    continue;
+                }
                 // Serialize spawn with cancellation so no stale utterance can
                 // start after cancel has cleared the queue.
                 if let Ok(child) = backend(&text) {

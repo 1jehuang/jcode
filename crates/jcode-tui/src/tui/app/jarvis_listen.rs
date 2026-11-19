@@ -103,6 +103,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn deferred_playback_typed_reply_survives_capture_failure() {
+        let mut listener = AlwaysListening::default();
+        listener.defer_speech("typed reply".into());
+        listener.capture_failure(None);
+        assert_eq!(listener.playback.speech.as_ref().unwrap().0, "typed reply");
+    }
+
+    #[test]
     fn deferred_playback_only_matching_final_releases_or_revises() {
         let mut listener = AlwaysListening::default();
         let partial = r#"{"trigger":"open it","still_speaking":true}"#;
@@ -375,7 +383,9 @@ impl AlwaysListening {
         }
         self.failed = true;
         self.clear_dispatch("capture_failed");
-        self.clear_playback();
+        if self.playback.latest.is_some() {
+            self.clear_playback();
+        }
         self.captions.clear();
         self.triggered_at = None;
         let reason = error
@@ -534,7 +544,7 @@ impl App {
             || self
                 .jarvis_speech
                 .as_ref()
-                .is_some_and(|player| !player.is_idle());
+                .is_some_and(|player| player.owns_audio_output());
         let external_capture = self.external_voice.as_ref().is_some_and(|(activity, at)| {
             matches!(activity, crate::protocol::VoiceActivity::Recording { .. })
                 && at.elapsed() <= Duration::from_secs(3)
@@ -591,7 +601,12 @@ impl App {
                     }
                     ContinuousEvent::Recovering { error, delay } => {
                         listener.clear_dispatch("capture_recovering");
-                        listener.clear_playback();
+                        if listener.playback.latest.is_some() {
+                            listener.clear_playback();
+                            if let Some(player) = &self.jarvis_speech {
+                                player.cancel();
+                            }
+                        }
                         self.set_status_notice(format!("{error}. Microphone released for {}s. Repeat the request when listening resumes.", delay.as_secs()));
                         changed = true;
                     }
@@ -602,6 +617,9 @@ impl App {
                         listener.triggered_at = Some(Instant::now());
                         let outcome = listener.dispatch.enqueue(id, text.clone());
                         if outcome == "queued" {
+                            if let Some(player) = &self.jarvis_speech {
+                                player.cancel();
+                            }
                             listener.playback.trigger(id, &text);
                         }
                         listener.trace(id, outcome);
@@ -620,8 +638,9 @@ impl App {
                         listener.trace(id, "final_suppressed")
                     }
                     ContinuousEvent::Error(error) => {
+                        let voice_reply = listener.playback.latest.is_some();
                         if let Some(notice) = listener.capture_failure(Some(&error)) {
-                            if let Some(player) = &self.jarvis_speech {
+                            if voice_reply && let Some(player) = &self.jarvis_speech {
                                 player.cancel();
                             }
                             self.push_display_message(DisplayMessage::error(notice));
@@ -629,8 +648,9 @@ impl App {
                         changed = true;
                     }
                     ContinuousEvent::Stopped => {
+                        let voice_reply = listener.playback.latest.is_some();
                         if let Some(notice) = listener.capture_failure(None) {
-                            if let Some(player) = &self.jarvis_speech {
+                            if voice_reply && let Some(player) = &self.jarvis_speech {
                                 player.cancel();
                             }
                             self.push_display_message(DisplayMessage::error(notice));
@@ -753,23 +773,30 @@ impl App {
             .partial
             .as_ref()
             .is_some_and(|(_, _, at)| at.elapsed() >= Duration::from_secs(180));
-        if paused
-            || listener.failed
+        let disabled = paused || listener.failed;
+        if (disabled && listener.playback.latest.is_some())
             || external_capture
             || self.voice_input.is_some()
             || orphaned_partial
         {
+            if let Some(player) = &self.jarvis_speech {
+                player.cancel();
+            }
             listener.clear_playback();
-        } else if !speech_busy
-            && listener.playback.partial.is_none()
-            && (listener.playback.ding || listener.playback.speech.is_some())
-            && listener.state == Some(VoiceState::Listening)
-            && listener
-                .recording
-                .as_ref()
-                .is_some_and(ContinuousRecording::suppress_if_quiet)
-        {
-            let ding = std::mem::take(&mut listener.playback.ding);
+        } else if !speech_busy && listener.playback.partial.is_none() {
+            let claim = || {
+                if disabled {
+                    return !listener
+                        .recording
+                        .as_ref()
+                        .is_some_and(ContinuousRecording::is_capturing);
+                }
+                listener.state == Some(VoiceState::Listening)
+                    && listener
+                        .recording
+                        .as_ref()
+                        .is_some_and(ContinuousRecording::suppress_if_quiet)
+            };
             if let Some((text, at)) = listener
                 .playback
                 .speech
@@ -777,14 +804,26 @@ impl App {
                 .filter(|(_, at)| at.elapsed() < Duration::from_secs(30))
             {
                 if let Some(player) = &self.jarvis_speech {
+                    player.cancel(); // replace any synthesized but not yet authorized reply
+                    listener.playback.ding = false;
                     let trace = listener.playback_trace();
                     trace.mark("enqueue", at.elapsed().as_millis());
-                    if let Err(error) = player.enqueue_traced(&text, Some(trace)) {
+                    if let Err(error) = player.enqueue_gated(&text, trace) {
                         self.push_display_message(DisplayMessage::error(error.to_string()));
                         changed = true;
                     }
                 }
-            } else if ding {
+            } else if self
+                .jarvis_speech
+                .as_ref()
+                .is_some_and(|p| p.authorize_ready(claim))
+            {
+                listener.playback_trace().mark("quiet_authorized", 0);
+            } else if listener.playback.ding
+                && self.jarvis_speech.as_ref().is_none_or(|p| p.is_idle())
+                && claim()
+            {
+                listener.playback.ding = false;
                 listener.playback.cue_player = play_trigger_sound().map(|c| {
                     listener.playback_trace().mark("ding_started", 0);
                     (c, Instant::now())
