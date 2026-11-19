@@ -47,7 +47,7 @@ pub(super) async fn handle_workspace_command(
     remote: &mut RemoteConnection,
     trimmed: &str,
 ) -> Result<bool> {
-    if !trimmed.starts_with("/workspace") {
+    if crate::tui::app::commands::slash_command_rest(trimmed, "/workspace").is_none() {
         return Ok(false);
     }
 
