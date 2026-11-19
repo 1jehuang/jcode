@@ -449,7 +449,8 @@ impl Decoder {
 fn chord_keys(trigger: usize) -> impl Iterator<Item = usize> {
     let all = trigger != KEY_FN;
     (1..KEY_BYTES * 8).filter(move |key| {
-        *key != trigger && (CHORD_KEYS.contains(key) || (all && *key < KEY_FN && !KEYS.contains(key)))
+        *key != trigger
+            && (CHORD_KEYS.contains(key) || (all && *key < KEY_FN && !KEYS.contains(key)))
     })
 }
 fn advertised(text: &str, key: usize) -> io::Result<bool> {
@@ -482,7 +483,10 @@ impl Device {
         }
         let mut keys = [0u8; KEY_BYTES];
         ioctl(&file, request(false, 0x21, KEY_BYTES), &mut keys)?; // EVIOCGBIT(EV_KEY)
-        if !bit(&keys, F23) && !bit(&keys, ASSISTANT) && !fn_trigger.is_some_and(|key| bit(&keys, key)) {
+        if !bit(&keys, F23)
+            && !bit(&keys, ASSISTANT)
+            && !fn_trigger.is_some_and(|key| bit(&keys, key))
+        {
             return Ok(None);
         }
         let mut selected = [0u8; KEY_BYTES];
@@ -906,7 +910,8 @@ impl Listener {
         self.devices.retain(|path, _| paths.contains(path));
         for path in paths {
             if let std::collections::btree_map::Entry::Vacant(entry) = self.devices.entry(path)
-                && let Some(device) = Device::open(entry.key(), self.fn_trigger.then_some(self.fn_key))?
+                && let Some(device) =
+                    Device::open(entry.key(), self.fn_trigger.then_some(self.fn_key))?
             {
                 entry.insert(device);
             }

@@ -63,9 +63,8 @@ fn cmd_exists(cmd: &Command) -> bool {
     if program.components().count() > 1 {
         return program.exists();
     }
-    std::env::var_os("PATH").is_some_and(|path| {
-        std::env::split_paths(&path).any(|dir| dir.join(program).is_file())
-    })
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(program).is_file()))
 }
 
 /// `cmd` wrapped as `systemd-run --user --scope --collect --quiet -- <cmd>`,

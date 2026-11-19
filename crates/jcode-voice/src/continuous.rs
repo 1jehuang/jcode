@@ -18,7 +18,9 @@ use std::{
 /// even when multiple utterances are being classified concurrently.
 fn trace_turn(id: u64, stage: &'static str) {
     let ms = crate::timing::monotonic_ms();
-    jcode_base::logging::info(&format!("JARVIS_CAPTURE utterance={id} stage={stage} monotonic_ms={ms}"));
+    jcode_base::logging::info(&format!(
+        "JARVIS_CAPTURE utterance={id} stage={stage} monotonic_ms={ms}"
+    ));
 }
 
 #[derive(Clone, Debug)]
@@ -76,13 +78,22 @@ pub enum ContinuousEvent {
         accepted: bool,
     },
     /// Accepted JSON payload with prior background_transcript strings and the exact trigger.
-    Transcript { id: u64, text: String },
+    Transcript {
+        id: u64,
+        text: String,
+    },
     /// The user finished speaking after an early (partial transcript) trigger.
     /// Carries the full final utterance. Never dispatch without a prior Transcript.
-    Continuation { id: u64, text: String },
+    Continuation {
+        id: u64,
+        text: String,
+    },
     Rejected(String),
     /// Content-free provider diagnostic, never a caption or rejected utterance.
-    Recovering { error: VoiceError, delay: Duration },
+    Recovering {
+        error: VoiceError,
+        delay: Duration,
+    },
     Error(VoiceError),
     Stopped,
 }
@@ -166,13 +177,25 @@ struct QuietWindow {
     last: Option<Instant>,
 }
 impl QuietWindow {
-    fn observe(&mut self, now:Instant, voiced:bool) {
-        if voiced || self.last.is_some_and(|last| now.duration_since(last) > Duration::from_millis(200)) {self.since=None;}
-        self.last=Some(now);
-        if !voiced {self.since.get_or_insert(now);}
+    fn observe(&mut self, now: Instant, voiced: bool) {
+        if voiced
+            || self
+                .last
+                .is_some_and(|last| now.duration_since(last) > Duration::from_millis(200))
+        {
+            self.since = None;
+        }
+        self.last = Some(now);
+        if !voiced {
+            self.since.get_or_insert(now);
+        }
     }
-    fn ready(&self, now:Instant)->bool {
-        self.last.is_some_and(|last|now.duration_since(last)<=Duration::from_millis(200)) && self.since.is_some_and(|at|now.duration_since(at)>=Duration::from_millis(250))
+    fn ready(&self, now: Instant) -> bool {
+        self.last
+            .is_some_and(|last| now.duration_since(last) <= Duration::from_millis(200))
+            && self
+                .since
+                .is_some_and(|at| now.duration_since(at) >= Duration::from_millis(250))
     }
 }
 struct Events {
@@ -195,30 +218,54 @@ impl ContinuousEvent {
         }
     }
     fn expendable(&self) -> bool {
-        matches!(self, Self::Caption { .. } | Self::CaptionScore { .. } | Self::State(_) | Self::Level(_) | Self::Rejected(_))
+        matches!(
+            self,
+            Self::Caption { .. }
+                | Self::CaptionScore { .. }
+                | Self::State(_)
+                | Self::Level(_)
+                | Self::Rejected(_)
+        )
     }
 }
 fn trace_discard(id: u64, stage: &'static str, reason: &'static str) {
     let ms = crate::timing::monotonic_ms();
-    jcode_base::logging::info(&format!("JARVIS_CAPTURE utterance={id} stage={stage} monotonic_ms={ms} reason={reason}"));
+    jcode_base::logging::info(&format!(
+        "JARVIS_CAPTURE utterance={id} stage={stage} monotonic_ms={ms} reason={reason}"
+    ));
 }
 // Tokio cancellation drops this guard even when an in-flight job is aborted.
 struct PendingFinal(Option<u64>);
 impl Drop for PendingFinal {
     fn drop(&mut self) {
-        if let Some(id) = self.0 { trace_discard(id, "continuation_discarded", "stream_aborted"); }
+        if let Some(id) = self.0 {
+            trace_discard(id, "continuation_discarded", "stream_aborted");
+        }
     }
 }
 impl Events {
     fn retain_events(&mut self, reason: &'static str, keep: impl Fn(&ContinuousEvent) -> bool) {
         self.queue.retain(|e| {
-            if keep(e) { return true; }
-            if let Some((id, stage)) = e.discard_marker() { trace_discard(id, stage, reason); }
+            if keep(e) {
+                return true;
+            }
+            if let Some((id, stage)) = e.discard_marker() {
+                trace_discard(id, stage, reason);
+            }
             false
         });
     }
     fn clear_pending_speech(&mut self, reason: &'static str) {
-        self.retain_events(reason, |e| !matches!(e, ContinuousEvent::Transcript { .. } | ContinuousEvent::Continuation { .. } | ContinuousEvent::Caption { .. } | ContinuousEvent::CaptionScore { .. } | ContinuousEvent::Rejected(_)));
+        self.retain_events(reason, |e| {
+            !matches!(
+                e,
+                ContinuousEvent::Transcript { .. }
+                    | ContinuousEvent::Continuation { .. }
+                    | ContinuousEvent::Caption { .. }
+                    | ContinuousEvent::CaptionScore { .. }
+                    | ContinuousEvent::Rejected(_)
+            )
+        });
     }
     /// Queue a manual trigger. Returns false when nothing was heard recently.
     fn manual_trigger(&mut self) -> bool {
@@ -232,7 +279,12 @@ impl Events {
         }
     }
     fn classified(&mut self, caption: ClassifiedCaption) {
-        if self.context.inflight.as_ref().is_some_and(|(id, _)| *id == caption.id) {
+        if self
+            .context
+            .inflight
+            .as_ref()
+            .is_some_and(|(id, _)| *id == caption.id)
+        {
             self.context.inflight = None;
         }
         if self.context.claimed == Some(caption.id) {
@@ -248,7 +300,10 @@ impl Events {
             if accepted {
                 let text = self.context.accepted(caption.text);
                 trace_turn(caption.id, "final_accepted");
-                self.push(ContinuousEvent::Transcript { id: caption.id, text });
+                self.push(ContinuousEvent::Transcript {
+                    id: caption.id,
+                    text,
+                });
                 return;
             }
         }
@@ -264,8 +319,9 @@ impl Events {
                 // Live revisions replace only their own utterance's caption;
                 // scores for other utterances must survive.
                 let id = *id;
-                self.queue
-                    .retain(|e| !matches!(e, ContinuousEvent::Caption { id: old, .. } if *old == id))
+                self.queue.retain(
+                    |e| !matches!(e, ContinuousEvent::Caption { id: old, .. } if *old == id),
+                )
             }
             ContinuousEvent::State(_) => self
                 .queue
@@ -278,7 +334,9 @@ impl Events {
                 self.queue.remove(pos);
             } else if event.expendable() {
                 return;
-            } else if let Some((id, stage)) = self.queue.pop_front().and_then(|e| e.discard_marker()) {
+            } else if let Some((id, stage)) =
+                self.queue.pop_front().and_then(|e| e.discard_marker())
+            {
                 trace_discard(id, stage, "queue_overflow");
             }
         }
@@ -313,7 +371,10 @@ impl ContinuousRecording {
 
     /// Keep the same ledger when a user explicitly retries a stopped listener.
     pub fn start_auto_with_budget(
-        cancel: Arc<AtomicBool>, key: &str, recorder: &str, config: ContinuousConfig,
+        cancel: Arc<AtomicBool>,
+        key: &str,
+        recorder: &str,
+        config: ContinuousConfig,
         budget: ContinuousBudget,
     ) -> Result<Self, VoiceError> {
         if cancel.load(Ordering::SeqCst) {
@@ -394,7 +455,11 @@ impl ContinuousRecording {
                 // Invalidate outstanding completions before publishing terminal events.
                 g.fetch_add(1, Ordering::SeqCst);
                 let mut output = e.lock().unwrap_or_else(|e| e.into_inner());
-                output.clear_pending_speech(if c.load(Ordering::SeqCst) { "stopped" } else { "capture_failed" });
+                output.clear_pending_speech(if c.load(Ordering::SeqCst) {
+                    "stopped"
+                } else {
+                    "capture_failed"
+                });
                 if let Err(error) = result {
                     if error != VoiceError::Cancelled {
                         output.push(ContinuousEvent::Error(error));
@@ -454,7 +519,10 @@ impl ContinuousRecording {
     /// Returns false when nothing was heard in `MANUAL_TRIGGER_WINDOW`.
     pub fn manual_trigger(&self) -> bool {
         let mut output = self.events.lock().unwrap_or_else(|e| e.into_inner());
-        if self.paused.load(Ordering::SeqCst) || self.cancel.load(Ordering::SeqCst) || self.suppressed.load(Ordering::SeqCst) {
+        if self.paused.load(Ordering::SeqCst)
+            || self.cancel.load(Ordering::SeqCst)
+            || self.suppressed.load(Ordering::SeqCst)
+        {
             return false;
         }
         output.manual_trigger()
@@ -462,9 +530,23 @@ impl ContinuousRecording {
     /// Claim a quiet playback window without invalidating pending transcript events.
     pub fn suppress_if_quiet(&self) -> bool {
         let mut output = self.events.lock().unwrap_or_else(|e| e.into_inner());
-        if !self.is_capturing() || !output.quiet.ready(Instant::now()) || output.queue.iter().any(|e| matches!(e, ContinuousEvent::Transcript {..} | ContinuousEvent::Continuation {..} | ContinuousEvent::State(VoiceState::Speaking | VoiceState::Transcribing))) { return false; }
+        if !self.is_capturing()
+            || !output.quiet.ready(Instant::now())
+            || output.queue.iter().any(|e| {
+                matches!(
+                    e,
+                    ContinuousEvent::Transcript { .. }
+                        | ContinuousEvent::Continuation { .. }
+                        | ContinuousEvent::State(VoiceState::Speaking | VoiceState::Transcribing)
+                )
+            })
+        {
+            return false;
+        }
         output.quiet = QuietWindow::default();
-        if !self.suppressed.swap(true, Ordering::SeqCst) { self.epoch.fetch_add(1, Ordering::SeqCst); }
+        if !self.suppressed.swap(true, Ordering::SeqCst) {
+            self.epoch.fetch_add(1, Ordering::SeqCst);
+        }
         true
     }
     pub fn is_capturing(&self) -> bool {
@@ -798,16 +880,30 @@ async fn early_trigger(
         if !live() {
             return None;
         }
-        let state = events.lock().unwrap_or_else(|e| e.into_inner()).context.state(&text, require_jev);
+        let state = events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .context
+            .state(&text, require_jev);
         trace_turn(id, "partial_gate_sent");
-        let Ok(Some((probability, true))) = semantic_gate(&gate, &text, threshold, state).await else {
+        let Ok(Some((probability, true))) = semantic_gate(&gate, &text, threshold, state).await
+        else {
             continue;
         };
         let mut output = events.lock().unwrap_or_else(|e| e.into_inner());
-        if !live() { return None; }
+        if !live() {
+            return None;
+        }
         trace_turn(id, "partial_accepted");
-        output.push(ContinuousEvent::Caption { id, text: text.chars().take(256).collect() });
-        output.push(ContinuousEvent::CaptionScore { id, probability, accepted: true });
+        output.push(ContinuousEvent::Caption {
+            id,
+            text: text.chars().take(256).collect(),
+        });
+        output.push(ContinuousEvent::CaptionScore {
+            id,
+            probability,
+            accepted: true,
+        });
         let payload = output.context.accepted(text.clone());
         // Mark the request provisional: Jarvis may prepare but must not speak
         // until the Continuation with the finished utterance arrives.
@@ -887,7 +983,9 @@ async fn stream_job(
 fn recovery_delay(error: &VoiceError, failures: usize) -> Option<Duration> {
     let delays = match error {
         VoiceError::Http(429) => [15, 60],
-        VoiceError::Network | VoiceError::Timeout | VoiceError::NariRejected
+        VoiceError::Network
+        | VoiceError::Timeout
+        | VoiceError::NariRejected
         | VoiceError::Http(408 | 500..=599) => [2, 8],
         _ => return None,
     };
@@ -897,37 +995,70 @@ fn recovery_delay(error: &VoiceError, failures: usize) -> Option<Duration> {
 #[test]
 fn deliberate_retry_cannot_reset_rolling_audio_or_classification_usage() {
     for (seconds, classifications) in [(1, 10), (3600, 1)] {
-        let config = ContinuousConfig { max_audio_seconds_per_hour: seconds, max_classifications_per_hour: classifications, ..Default::default() };
+        let config = ContinuousConfig {
+            max_audio_seconds_per_hour: seconds,
+            max_classifications_per_hour: classifications,
+            ..Default::default()
+        };
         let original = ContinuousBudget::default();
         let retry = original.clone();
         let now = Instant::now();
         assert!(original.0.lock().unwrap().reserve(now, 16_000, &config));
         drop(original);
         assert!(!retry.0.lock().unwrap().reserve(now, 1, &config));
-        assert!(retry.0.lock().unwrap().reserve(now + Duration::from_secs(3600), 1, &config));
+        assert!(
+            retry
+                .0
+                .lock()
+                .unwrap()
+                .reserve(now + Duration::from_secs(3600), 1, &config)
+        );
     }
 }
 
 #[test]
 fn recovery_is_bounded_and_never_retries_known_permanent_errors() {
-    for error in [VoiceError::Network, VoiceError::NariRejected, VoiceError::Timeout, VoiceError::Http(503), VoiceError::Http(429)] {
+    for error in [
+        VoiceError::Network,
+        VoiceError::NariRejected,
+        VoiceError::Timeout,
+        VoiceError::Http(503),
+        VoiceError::Http(429),
+    ] {
         assert!(recovery_delay(&error, 0) < recovery_delay(&error, 1));
         assert_eq!(recovery_delay(&error, 2), None);
     }
-    for error in [VoiceError::NariNotConfigured, VoiceError::NariCreditsExhausted, VoiceError::Http(400), VoiceError::Cancelled, VoiceError::CaptureFailed] {
+    for error in [
+        VoiceError::NariNotConfigured,
+        VoiceError::NariCreditsExhausted,
+        VoiceError::Http(400),
+        VoiceError::Cancelled,
+        VoiceError::CaptureFailed,
+    ] {
         assert_eq!(recovery_delay(&error, 0), None);
     }
 }
 
 #[tokio::test]
 async fn rejected_warm_session_never_opens_a_second_connection() {
-    for error in [VoiceError::NariNotConfigured, VoiceError::NariCreditsExhausted, VoiceError::NariRejected] {
+    for error in [
+        VoiceError::NariNotConfigured,
+        VoiceError::NariCreditsExhausted,
+        VoiceError::NariRejected,
+    ] {
         let expected = error.clone();
         let failed = tokio::spawn(async move { Err(error) });
         let (_, rx) = tokio::sync::mpsc::unbounded_channel();
         let (partial, _) = tokio::sync::watch::channel(String::new());
         // Empty key makes an unintended fallback fail differently, without network I/O.
-        let result = stream_job(Some(failed), String::new(), rx, Arc::new(AtomicBool::new(false)), partial).await;
+        let result = stream_job(
+            Some(failed),
+            String::new(),
+            rx,
+            Arc::new(AtomicBool::new(false)),
+            partial,
+        )
+        .await;
         assert_eq!(result, Err(expected));
     }
 }
@@ -1241,8 +1372,18 @@ async fn run(
             }
             let mut out = events.lock().unwrap_or_else(|e| e.into_inner());
             let chat = std::mem::take(&mut out.context.chat);
-            out.context = GateContext { chat, ..Default::default() };
-            out.retain_events(if cancel.load(Ordering::SeqCst) { "stopped" } else { "capture_failed" }, |event| matches!(event, ContinuousEvent::State(_) | ContinuousEvent::Level(_)));
+            out.context = GateContext {
+                chat,
+                ..Default::default()
+            };
+            out.retain_events(
+                if cancel.load(Ordering::SeqCst) {
+                    "stopped"
+                } else {
+                    "capture_failed"
+                },
+                |event| matches!(event, ContinuousEvent::State(_) | ContinuousEvent::Level(_)),
+            );
         }
         mic.stop();
         let capture = tokio::task::spawn_blocking(move || mic.finish())
@@ -1258,7 +1399,9 @@ async fn run(
                 handle.abort();
             }
             if let Err(error) = result {
-                let Some(delay) = recovery_delay(&error, consecutive_failures) else { return Err(error); };
+                let Some(delay) = recovery_delay(&error, consecutive_failures) else {
+                    return Err(error);
+                };
                 capture?;
                 consecutive_failures += 1;
                 emit(&events, ContinuousEvent::Recovering { error, delay });
@@ -1283,14 +1426,21 @@ mod tests {
     #[test]
     fn quiet_window_requires_recent_contiguous_silence() {
         use super::*;
-        let start = Instant::now(); let t = |ms| start + Duration::from_millis(ms);
-        let mut quiet=QuietWindow::default();
-        for ms in [0,100,200] {quiet.observe(t(ms),false);}
+        let start = Instant::now();
+        let t = |ms| start + Duration::from_millis(ms);
+        let mut quiet = QuietWindow::default();
+        for ms in [0, 100, 200] {
+            quiet.observe(t(ms), false);
+        }
         assert!(!quiet.ready(t(200)));
-        quiet.observe(t(250),false);assert!(quiet.ready(t(250)));
+        quiet.observe(t(250), false);
+        assert!(quiet.ready(t(250)));
         assert!(!quiet.ready(t(501)));
-        quiet.observe(t(501),false);assert!(!quiet.ready(t(501)));
-        quiet.observe(t(550),true);quiet.observe(t(650),false);assert!(!quiet.ready(t(650)));
+        quiet.observe(t(501), false);
+        assert!(!quiet.ready(t(501)));
+        quiet.observe(t(550), true);
+        quiet.observe(t(650), false);
+        assert!(!quiet.ready(t(650)));
     }
     use super::*;
 
@@ -1655,7 +1805,11 @@ mod tests {
                 );
             }
             if id == 3 {
-                let Some(ContinuousEvent::Transcript { id: 3, text: payload }) = events.queue.pop_front() else {
+                let Some(ContinuousEvent::Transcript {
+                    id: 3,
+                    text: payload,
+                }) = events.queue.pop_front()
+                else {
                     panic!("missing accepted request")
                 };
                 assert_eq!(
@@ -1671,7 +1825,11 @@ mod tests {
         let mut ctx = GateContext::default();
         let now = Instant::now();
         assert!(ctx.manual(now).is_none(), "nothing heard");
-        ctx.remember_at(1, "old", now - MANUAL_TRIGGER_WINDOW - Duration::from_secs(1));
+        ctx.remember_at(
+            1,
+            "old",
+            now - MANUAL_TRIGGER_WINDOW - Duration::from_secs(1),
+        );
         ctx.remember_at(2, "first", now - Duration::from_secs(10));
         ctx.remember_at(3, "latest", now);
         let (id, text) = ctx.manual(now).unwrap();
@@ -1692,7 +1850,11 @@ mod tests {
         events.context.remember_at(6, "before", now);
         events.context.inflight = Some((7, "just said".into()));
         assert!(events.manual_trigger());
-        let Some(ContinuousEvent::Transcript { id: 7, text: payload }) = events.queue.pop_front() else {
+        let Some(ContinuousEvent::Transcript {
+            id: 7,
+            text: payload,
+        }) = events.queue.pop_front()
+        else {
             panic!("manual trigger queued nothing")
         };
         assert_eq!(
@@ -1804,7 +1966,10 @@ mod tests {
     #[ignore = "Live latency e2e: JCODE_TEST_CONTINUOUS_PCM, Nari/Jev accounts, no real microphone"]
     fn live_e2e_latency() {
         let fixture = std::env::var("JCODE_TEST_CONTINUOUS_PCM").unwrap();
-        let rounds: usize = std::env::var("JCODE_TEST_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+        let rounds: usize = std::env::var("JCODE_TEST_ROUNDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3);
         let warm = std::env::var("JCODE_TEST_WARM").map_or(true, |v| v != "0");
         let marker = std::env::temp_dir().join(format!("jcode-e2e-{}", std::process::id()));
         let key = crate::nari_api_key().unwrap();
@@ -1822,13 +1987,22 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             &key,
             &script,
-            ContinuousConfig { action_probability: 0.5, warm_nari: warm, ..Default::default() },
+            ContinuousConfig {
+                action_probability: 0.5,
+                warm_nari: warm,
+                ..Default::default()
+            },
         )
         .unwrap();
         let deadline = Instant::now() + Duration::from_secs(20 * rounds as u64 + 20);
         let mut seen = Vec::new();
         let mut fired: Option<i128> = None;
-        let now_ns = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as i128;
+        let now_ns = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as i128
+        };
         while Instant::now() < deadline && seen.len() < rounds {
             let ends = std::fs::read_to_string(&marker).unwrap_or_default();
             let ends: Vec<i128> = ends.lines().filter_map(|l| l.trim().parse().ok()).collect();
@@ -1836,15 +2010,22 @@ mod tests {
             // fired on a partial before the user stopped talking.
             if let (Some(at), Some(end)) = (fired, ends.get(seen.len())) {
                 let ms = (at - end) / 1_000_000;
-                eprintln!("warm={warm} round {}: speech end -> accepted request {ms} ms", seen.len());
+                eprintln!(
+                    "warm={warm} round {}: speech end -> accepted request {ms} ms",
+                    seen.len()
+                );
                 seen.push(ms);
                 fired = None;
             }
             while let Some(event) = recording.try_event() {
                 match event {
                     ContinuousEvent::Transcript { .. } if fired.is_none() => fired = Some(now_ns()),
-                    ContinuousEvent::Caption { id, text } => eprintln!("caption {id} +{}ms: {text}", now_ns() / 1_000_000 % 100_000),
-                    ContinuousEvent::Continuation { text, .. } => eprintln!("continuation: {} words", text.split_whitespace().count()),
+                    ContinuousEvent::Caption { id, text } => {
+                        eprintln!("caption {id} +{}ms: {text}", now_ns() / 1_000_000 % 100_000)
+                    }
+                    ContinuousEvent::Continuation { text, .. } => {
+                        eprintln!("continuation: {} words", text.split_whitespace().count())
+                    }
                     ContinuousEvent::Error(error) => panic!("pipeline failed: {error}"),
                     _ => {}
                 }
@@ -1857,22 +2038,50 @@ mod tests {
     }
     #[test]
     fn pending_requests_survive_telemetry_but_not_invalidation() {
-        let mut e = Events { context: GateContext::default(), queue: VecDeque::new(), quiet: QuietWindow::default(), notify: Arc::new(tokio::sync::Notify::new()) };
-        let request = |id| ContinuousEvent::Transcript { id, text: "private".into() };
-        let final_text = |id| ContinuousEvent::Continuation { id, text: "private".into() };
+        let mut e = Events {
+            context: GateContext::default(),
+            queue: VecDeque::new(),
+            quiet: QuietWindow::default(),
+            notify: Arc::new(tokio::sync::Notify::new()),
+        };
+        let request = |id| ContinuousEvent::Transcript {
+            id,
+            text: "private".into(),
+        };
+        let final_text = |id| ContinuousEvent::Continuation {
+            id,
+            text: "private".into(),
+        };
         assert_eq!(request(7).discard_marker(), Some((7, "accepted_discarded")));
-        assert_eq!(final_text(7).discard_marker(), Some((7, "continuation_discarded")));
-        for id in 1..=32 { e.push(request(id)); }
-        e.push(ContinuousEvent::Caption { id: 34, text: "ambient".into() });
-        assert_eq!(e.queue.front().unwrap().discard_marker(), Some((1, "accepted_discarded")));
+        assert_eq!(
+            final_text(7).discard_marker(),
+            Some((7, "continuation_discarded"))
+        );
+        for id in 1..=32 {
+            e.push(request(id));
+        }
+        e.push(ContinuousEvent::Caption {
+            id: 34,
+            text: "ambient".into(),
+        });
+        assert_eq!(
+            e.queue.front().unwrap().discard_marker(),
+            Some((1, "accepted_discarded"))
+        );
         e.push(final_text(32));
-        assert_eq!(e.queue.front().unwrap().discard_marker(), Some((2, "accepted_discarded")));
+        assert_eq!(
+            e.queue.front().unwrap().discard_marker(),
+            Some((2, "accepted_discarded"))
+        );
         e.clear_pending_speech("suppressed");
         assert!(e.queue.is_empty());
         e.push(ContinuousEvent::Stopped);
         e.push(final_text(9));
         e.clear_pending_speech("stopped");
-        assert!(matches!(e.queue.pop_front(), Some(ContinuousEvent::Stopped)));
+        assert!(matches!(
+            e.queue.pop_front(),
+            Some(ContinuousEvent::Stopped)
+        ));
         assert!(e.queue.is_empty());
     }
     #[test]
