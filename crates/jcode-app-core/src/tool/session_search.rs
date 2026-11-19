@@ -1706,7 +1706,7 @@ mod searchable_text;
 use searchable_text::searchable_message_text;
 
 fn is_system_like_message(msg: &StoredMessage) -> bool {
-    msg.display_role.is_some()
+    msg.has_context_display_role()
         || msg
             .content
             .iter()
