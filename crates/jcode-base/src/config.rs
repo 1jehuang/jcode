@@ -1010,6 +1010,10 @@ pub struct CompanionConfig {
     /// to talk to the running always-on Jarvis session from any window.
     /// Fn shortcuts (Fn+F-keys, Fn+arrows) never record. Off by default.
     pub jarvis_fn_key: bool,
+    /// Key used by `jarvis_fn_key`: `"fn"` (default) or `"rightshift"`.
+    /// Right Shift helps on laptops whose Fn never reaches Linux. Tap and
+    /// hold work the same; Right Shift with another key types normally.
+    pub jarvis_key: String,
     /// With `jarvis_fn_key`, an Fn hold while no always-on Jarvis runs opens
     /// one in a new terminal, records meanwhile, and sends the words once it
     /// is ready.
@@ -1035,6 +1039,7 @@ impl Default for CompanionConfig {
             voice_waveform: true,
             voice_notifications: true,
             jarvis_fn_key: false,
+            jarvis_key: "fn".to_string(),
             jarvis_fn_launch: true,
             jarvis_fn_launch_args: Vec::new(),
             open: true,

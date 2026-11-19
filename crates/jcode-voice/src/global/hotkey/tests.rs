@@ -211,6 +211,7 @@ fn fake_listener() -> (Listener, File, PathBuf) {
         pending: None,
         adopt_until: None,
         fn_trigger: false,
+        fn_key: KEY_FN,
         fn_hold: None,
         fn_last: None,
         fn_repeating: false,
@@ -519,4 +520,47 @@ fn stuck_fn_press_arrives_as_repeats_and_ends_when_they_stop() {
     assert!(listener.fn_hold.is_none());
     drop(listener);
     fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn right_shift_trigger_taps_holds_and_types_capitals() {
+    let (mut listener, mut writer, dir) = fn_listener();
+    listener.fn_key = KEY_RIGHTSHIFT;
+    let rs = KEY_RIGHTSHIFT as u16;
+    // Bare tap.
+    send(&mut writer, 1, rs, 1);
+    send(&mut writer, 1, rs, 0);
+    assert_eq!(listener.poll(), vec![Edge::FnTap]);
+    // Bare hold.
+    send(&mut writer, 1, rs, 1);
+    assert!(listener.poll().is_empty());
+    age_fn(&mut listener);
+    assert_eq!(listener.poll(), vec![Edge::FnPress]);
+    send(&mut writer, 1, rs, 0);
+    assert_eq!(listener.poll(), vec![Edge::FnRelease]);
+    // Right Shift + a letter (typing a capital) is never a trigger.
+    send(&mut writer, 1, rs, 1);
+    send(&mut writer, 1, 30, 1);
+    send(&mut writer, 1, 30, 0);
+    send(&mut writer, 1, rs, 0);
+    assert!(listener.poll().is_empty());
+    age_fn(&mut listener);
+    assert!(listener.poll().is_empty());
+    // A long capital-letter hold cancels instead of finishing.
+    send(&mut writer, 1, rs, 1);
+    listener.poll();
+    age_fn(&mut listener);
+    assert_eq!(listener.poll(), vec![Edge::FnPress]);
+    send(&mut writer, 1, 30, 1);
+    assert_eq!(listener.poll(), vec![Edge::FnCancel]);
+    send(&mut writer, 1, rs, 0);
+    assert!(listener.poll().is_empty());
+    drop(listener);
+    fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn right_shift_chord_mask_includes_letters_fn_mask_does_not() {
+    assert!(chord_keys(KEY_RIGHTSHIFT).any(|k| k == 30));
+    assert!(!chord_keys(KEY_FN).any(|k| k == 30));
+    assert!(!chord_keys(KEY_RIGHTSHIFT).any(|k| k == KEY_RIGHTSHIFT));
 }

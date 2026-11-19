@@ -908,6 +908,9 @@ voice_notifications = true
 # Fn to reach Linux as KEY_FN on a [dictation] global_devices keyboard (on some
 # laptops via a udev hwdb remap). Fn shortcuts never record.
 jarvis_fn_key = false
+# Key for that: "fn" or "rightshift" (when Fn never reaches Linux). A bare
+# tap sends what Jarvis just heard; Right Shift with another key types normally.
+jarvis_key = "fn"
 # With jarvis_fn_key: when no always-on Jarvis is running, an Fn hold opens one
 # in a new terminal and sends what you said once it is ready.
 jarvis_fn_launch = true

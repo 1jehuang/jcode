@@ -56,8 +56,19 @@ pub struct VoiceIndicators {
     pub waveform: bool,
     /// Bare Fn hold talks to the always-on Jarvis session.
     pub jarvis_fn_key: bool,
+    /// evdev code of that key.
+    pub jarvis_key: usize,
     /// Fn opens an always-on Jarvis when none is running.
     pub jarvis_fn_launch: bool,
+}
+
+/// Config name to evdev code. Unknown names fall back to Fn.
+pub fn jarvis_key_code(name: &str) -> usize {
+    use jcode_voice::global::hotkey::{KEY_FN, KEY_RIGHTSHIFT};
+    match name.trim().to_ascii_lowercase().replace(['_', '-', ' '], "").as_str() {
+        "rightshift" | "rshift" => KEY_RIGHTSHIFT,
+        _ => KEY_FN,
+    }
 }
 
 pub fn spawn(indicators: VoiceIndicators) {
@@ -83,12 +94,16 @@ pub fn spawn(indicators: VoiceIndicators) {
             return;
         }
     };
-    listener.set_fn_trigger(indicators.jarvis_fn_key);
+    listener.set_fn_trigger_key(indicators.jarvis_fn_key, indicators.jarvis_key);
     eprintln!(
         "jcode companion: global voice on {} device(s){}",
         devices.len(),
         if indicators.jarvis_fn_key {
-            ", Fn talks to Jarvis"
+            if indicators.jarvis_key == jcode_voice::global::hotkey::KEY_RIGHTSHIFT {
+                ", Right Shift talks to Jarvis"
+            } else {
+                ", Fn talks to Jarvis"
+            }
         } else {
             ""
         }

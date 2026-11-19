@@ -11,7 +11,9 @@
 //! `FnPress`/`FnRelease`, independent of focus routing. To tell a deliberate
 //! hold from Fn+key shortcuts, non-text function, media, and navigation keys
 //! are also selected, only as a "chord happened" signal. Their identities are
-//! never stored, logged, or reported. Text keys are still never read.
+//! never stored, logged, or reported. Text keys are never read for Fn.
+//! With a modifier trigger (`set_fn_trigger_key`, e.g. Right Shift) every key
+//! is selected, but only as the same anonymous "chord happened" bit.
 #![cfg(target_os = "linux")]
 
 use std::{
@@ -30,7 +32,9 @@ use std::{
 const F23: usize = 193;
 const ASSISTANT: usize = 0x247;
 const KEYS: [usize; 10] = [F23, ASSISTANT, 42, 54, 125, 126, 29, 97, 56, 100];
-const KEY_FN: usize = 464;
+pub const KEY_FN: usize = 464;
+/// Right Shift, an alternative Jarvis trigger when Fn never reaches Linux.
+pub const KEY_RIGHTSHIFT: usize = 54;
 /// Modifiers (Shift, Meta, Ctrl, Alt) that make an Fn press a chord.
 const MODIFIERS: [usize; 8] = [42, 54, 125, 126, 29, 97, 56, 100];
 /// Non-text keys that Fn combines with on laptops (F-row, media, navigation).
@@ -439,6 +443,15 @@ impl Decoder {
     }
 }
 // sysfs prints native unsigned-long bitmap words, most significant first.
+/// Keys that make a trigger press a chord. Fn only combines with non-text
+/// keys. A modifier trigger such as Right Shift is used for capitals, so every
+/// key counts, still only as an anonymous "another key was pressed" signal.
+fn chord_keys(trigger: usize) -> impl Iterator<Item = usize> {
+    let all = trigger != KEY_FN;
+    (1..KEY_BYTES * 8).filter(move |key| {
+        *key != trigger && (CHORD_KEYS.contains(key) || (all && *key < KEY_FN && !KEYS.contains(key)))
+    })
+}
 fn advertised(text: &str, key: usize) -> io::Result<bool> {
     let words = text
         .split_whitespace()
@@ -456,7 +469,7 @@ struct Device {
     decoder: Decoder,
 }
 impl Device {
-    fn open(path: &Path, fn_trigger: bool) -> io::Result<Option<Self>> {
+    fn open(path: &Path, fn_trigger: Option<usize>) -> io::Result<Option<Self>> {
         let file = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOFOLLOW)
@@ -469,15 +482,15 @@ impl Device {
         }
         let mut keys = [0u8; KEY_BYTES];
         ioctl(&file, request(false, 0x21, KEY_BYTES), &mut keys)?; // EVIOCGBIT(EV_KEY)
-        if !bit(&keys, F23) && !bit(&keys, ASSISTANT) && !(fn_trigger && bit(&keys, KEY_FN)) {
+        if !bit(&keys, F23) && !bit(&keys, ASSISTANT) && !fn_trigger.is_some_and(|key| bit(&keys, key)) {
             return Ok(None);
         }
         let mut selected = [0u8; KEY_BYTES];
         for key in KEYS {
             selected[key / 8] |= 1 << (key % 8);
         }
-        if fn_trigger {
-            for key in CHORD_KEYS.into_iter().chain([KEY_FN]) {
+        if let Some(trigger) = fn_trigger {
+            for key in chord_keys(trigger).chain([trigger]) {
                 selected[key / 8] |= 1 << (key % 8);
             }
         }
@@ -511,7 +524,7 @@ impl Device {
     }
     /// After SYN_DROPPED, discard the stale queue and re-read which keys are
     /// down (EVIOCGKEY). Returns whether the trigger key and Fn are still held.
-    fn resync(&mut self) -> io::Result<(bool, bool)> {
+    fn resync(&mut self, fn_key: usize) -> io::Result<(bool, bool)> {
         while let Some(event) = self.read_raw()? {
             if event.kind == 0 && event.code == 0 {
                 break;
@@ -519,7 +532,7 @@ impl Device {
         }
         let mut held = [0u8; KEY_BYTES];
         ioctl(&self.file, request(false, 0x18, KEY_BYTES), &mut held)?;
-        Ok((self.decoder.resync(&held), bit(&held, KEY_FN)))
+        Ok((self.decoder.resync(&held), bit(&held, fn_key)))
     }
     fn read(&mut self) -> io::Result<Option<InputEvent>> {
         self.read_raw()
@@ -592,6 +605,8 @@ pub struct Listener {
     adopt_until: Option<Instant>,
     /// Opt-in bare-Fn hold trigger, independent of focus routing.
     fn_trigger: bool,
+    /// Key code of the Jarvis trigger (`KEY_FN` by default).
+    fn_key: usize,
     fn_hold: Option<FnHold>,
     /// Last KEY_FN event of any value, to spot a fresh press of a key the
     /// kernel still believes is down (it then arrives as a repeat).
@@ -642,6 +657,7 @@ impl Listener {
             pending: None,
             adopt_until: None,
             fn_trigger: false,
+            fn_key: KEY_FN,
             fn_hold: None,
             fn_last: None,
             fn_repeating: false,
@@ -675,8 +691,14 @@ impl Listener {
     /// Fn edges do not use the focus registry or eligibility: the caller
     /// decides where they go. Devices reopen on the next poll.
     pub fn set_fn_trigger(&mut self, enabled: bool) {
-        if self.fn_trigger != enabled {
+        self.set_fn_trigger_key(enabled, KEY_FN);
+    }
+    /// Like `set_fn_trigger`, with another bare key (e.g. `KEY_RIGHTSHIFT`)
+    /// standing in for Fn. Tap/hold/chord semantics are identical.
+    pub fn set_fn_trigger_key(&mut self, enabled: bool, key: usize) {
+        if self.fn_trigger != enabled || self.fn_key != key {
             self.fn_trigger = enabled;
+            self.fn_key = key;
             self.fn_hold = None;
             self.devices.clear();
             self.next_scan = Instant::now();
@@ -700,7 +722,7 @@ impl Listener {
             .fn_hold
             .as_ref()
             .is_some_and(|hold| hold.path() == path);
-        if key == KEY_FN {
+        if key == self.fn_key {
             let silent = self.fn_last.is_none_or(|at| at.elapsed() >= FN_STUCK_GAP);
             self.fn_last = Some(Instant::now());
             let idle = match &self.fn_hold {
@@ -715,7 +737,7 @@ impl Listener {
                 let chorded = self.devices.get(path).is_some_and(|device| {
                     MODIFIERS
                         .iter()
-                        .any(|key| device.decoder.down.contains(key))
+                        .any(|key| *key != self.fn_key && device.decoder.down.contains(key))
                 });
                 self.fn_repeating = false;
                 self.fn_hold = Some(if chorded {
@@ -732,14 +754,16 @@ impl Listener {
             } else if value == 2 && on_path {
                 self.fn_repeating = true;
             }
-            return true;
+            // A modifier trigger stays visible to the Copilot decoder, so
+            // Right Shift+Copilot still opens a window.
+            return !KEYS.contains(&key);
         }
         // Any other selected key pressed during the hold makes it a chord.
         // Only that fact is kept, never which key.
         if value == 1 && on_path {
             self.spoil_fn(edges);
         }
-        CHORD_KEYS.contains(&key)
+        self.fn_key == KEY_FN && CHORD_KEYS.contains(&key)
     }
     fn spoil_fn(&mut self, edges: &mut Vec<Edge>) {
         if let Some(hold) = self.fn_hold.take() {
@@ -874,7 +898,7 @@ impl Listener {
             )?;
             if advertised(&caps, F23)?
                 || advertised(&caps, ASSISTANT)?
-                || (self.fn_trigger && advertised(&caps, KEY_FN)?)
+                || (self.fn_trigger && advertised(&caps, self.fn_key)?)
             {
                 paths.insert(path);
             }
@@ -882,7 +906,7 @@ impl Listener {
         self.devices.retain(|path, _| paths.contains(path));
         for path in paths {
             if let std::collections::btree_map::Entry::Vacant(entry) = self.devices.entry(path)
-                && let Some(device) = Device::open(entry.key(), self.fn_trigger)?
+                && let Some(device) = Device::open(entry.key(), self.fn_trigger.then_some(self.fn_key))?
             {
                 entry.insert(device);
             }
@@ -944,7 +968,7 @@ impl Listener {
                     // key-repeat overflowed the buffer. Resync, never cancel.
                     Ok(Some(event)) if event.kind == 0 && event.code == 3 => {
                         let capturing = self.capture.as_ref().is_some_and(|(p, _, _)| p == &path);
-                        match device.resync() {
+                        match device.resync(self.fn_key) {
                             Ok((held, fn_held)) => {
                                 if self
                                     .fn_hold
