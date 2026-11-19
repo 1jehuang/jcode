@@ -14,6 +14,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// A single monotonic clock lets diagnostics subtract endpoint from gate/final
+/// even when multiple utterances are being classified concurrently.
+fn trace_turn(id: u64, stage: &'static str) {
+    static CLOCK: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let ms = CLOCK.get_or_init(Instant::now).elapsed().as_millis();
+    jcode_base::logging::info(&format!("JARVIS_CAPTURE utterance={id} stage={stage} monotonic_ms={ms}"));
+}
+
 #[derive(Clone, Debug)]
 pub struct ContinuousConfig {
     /// Require a Jarvis/Jev address in addition to semantic request intent.
@@ -69,10 +77,10 @@ pub enum ContinuousEvent {
         accepted: bool,
     },
     /// Accepted JSON payload with prior background_transcript strings and the exact trigger.
-    Transcript(String),
+    Transcript { id: u64, text: String },
     /// The user finished speaking after an early (partial transcript) trigger.
     /// Carries the full final utterance. Never dispatch without a prior Transcript.
-    Continuation(String),
+    Continuation { id: u64, text: String },
     Rejected(String),
     Error(VoiceError),
     Stopped,
@@ -81,7 +89,7 @@ pub enum ContinuousEvent {
 struct GateContext {
     background: VecDeque<String>,
     /// When each `background` entry was heard, for manual triggers.
-    heard: VecDeque<Instant>,
+    heard: VecDeque<(Instant, u64)>,
     /// Transcribed caption still waiting on the gate. A manual trigger can
     /// claim it so speech said right before the tap is not missed.
     inflight: Option<(u64, String)>,
@@ -92,16 +100,16 @@ struct GateContext {
 /// A manual trigger only sends speech heard this recently.
 pub const MANUAL_TRIGGER_WINDOW: Duration = Duration::from_secs(120);
 impl GateContext {
-    fn remember(&mut self, text: &str) {
-        self.remember_at(text, Instant::now());
+    fn remember(&mut self, id: u64, text: &str) {
+        self.remember_at(id, text, Instant::now());
     }
-    fn remember_at(&mut self, text: &str, at: Instant) {
+    fn remember_at(&mut self, id: u64, text: &str, at: Instant) {
         if self.background.len() == 16 {
             self.background.pop_front();
             self.heard.pop_front();
         }
         self.background.push_back(text.chars().take(1024).collect());
-        self.heard.push_back(at);
+        self.heard.push_back((at, id));
     }
     fn accepted(&mut self, trigger: String) -> String {
         self.heard.clear();
@@ -110,27 +118,27 @@ impl GateContext {
     /// The user asked Jarvis to act on what it just heard, bypassing the gate.
     /// The latest recent utterance is the trigger and earlier recent ones its
     /// background. None when nothing was heard within the window.
-    fn manual(&mut self, now: Instant) -> Option<String> {
+    fn manual(&mut self, now: Instant) -> Option<(u64, String)> {
         while self
             .heard
             .front()
-            .is_some_and(|at| now.duration_since(*at) > MANUAL_TRIGGER_WINDOW)
+            .is_some_and(|(at, _)| now.duration_since(*at) > MANUAL_TRIGGER_WINDOW)
         {
             self.heard.pop_front();
             self.background.pop_front();
         }
-        let trigger = match self.inflight.take() {
+        let (id, trigger) = match self.inflight.take() {
             Some((id, text)) => {
                 self.claimed = Some(id);
-                text
+                (id, text)
             }
             None => {
                 let text = self.background.pop_back()?;
-                self.heard.pop_back();
-                text
+                let (_, id) = self.heard.pop_back()?;
+                (id, text)
             }
         };
-        Some(self.accepted(trigger))
+        Some((id, self.accepted(trigger)))
     }
     fn state(&self, candidate: &str, require_name: bool) -> serde_json::Value {
         let chat: Vec<_> = self
@@ -165,8 +173,9 @@ impl Events {
     /// Queue a manual trigger. Returns false when nothing was heard recently.
     fn manual_trigger(&mut self) -> bool {
         match self.context.manual(Instant::now()) {
-            Some(payload) => {
-                self.push(ContinuousEvent::Transcript(payload));
+            Some((id, text)) => {
+                trace_turn(id, "manual_accepted");
+                self.push(ContinuousEvent::Transcript { id, text });
                 true
             }
             None => false,
@@ -187,12 +196,13 @@ impl Events {
                 accepted,
             });
             if accepted {
-                let payload = self.context.accepted(caption.text);
-                self.push(ContinuousEvent::Transcript(payload));
+                let text = self.context.accepted(caption.text);
+                trace_turn(caption.id, "final_accepted");
+                self.push(ContinuousEvent::Transcript { id: caption.id, text });
                 return;
             }
         }
-        self.context.remember(&caption.text);
+        self.context.remember(caption.id, &caption.text);
     }
     fn push(&mut self, event: ContinuousEvent) {
         // Coalesce visual telemetry. Bound even when the consumer stops polling.
@@ -369,7 +379,7 @@ impl ContinuousRecording {
                 event,
                 ContinuousEvent::Caption { .. }
                     | ContinuousEvent::CaptionScore { .. }
-                    | ContinuousEvent::Transcript(_)
+                    | ContinuousEvent::Transcript { .. }
                     | ContinuousEvent::Rejected(_)
             )
         });
@@ -715,14 +725,14 @@ async fn early_trigger(
             return None;
         }
         let state = events.lock().unwrap_or_else(|e| e.into_inner()).context.state(&text, require_jev);
-        super::timing::mark("partial gate sent");
+        trace_turn(id, "partial_gate_sent");
         let Ok(Some((probability, true))) = semantic_gate(&gate, &text, threshold, state).await else {
             continue;
         };
         if !live() {
             return None;
         }
-        super::timing::mark("partial gate accepted");
+        trace_turn(id, "partial_accepted");
         let mut output = events.lock().unwrap_or_else(|e| e.into_inner());
         output.push(ContinuousEvent::Caption { id, text: text.chars().take(256).collect() });
         output.push(ContinuousEvent::CaptionScore { id, probability, accepted: true });
@@ -736,7 +746,7 @@ async fn early_trigger(
             }
             Err(_) => payload,
         };
-        output.push(ContinuousEvent::Transcript(payload));
+        output.push(ContinuousEvent::Transcript { id, text: payload });
         return Some(text);
     }
     None
@@ -984,7 +994,7 @@ async fn run(
                                 let warm_session = warm.take().and_then(Warm::take);
                                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
                                 let _ = tx.send(audio);
-                                live = Some(tx);
+                                live = Some((id, tx));
                                 let (events, epoch, paused, suppressed, stopped) = (events.clone(), epoch.clone(), paused.clone(), suppressed.clone(), cancel.clone());
                                 jobs.push_back((tokio::spawn(async move {
                                     let (partial_tx, partial_rx) = tokio::sync::watch::channel(String::new());
