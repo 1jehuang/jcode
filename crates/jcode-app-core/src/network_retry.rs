@@ -104,12 +104,35 @@ pub fn wait_plan() -> NetworkWaitPlan {
 }
 
 pub async fn wait_until_probably_online() {
+    wait_until_online_with(false, probe_connectivity, wait_for_platform_change_or_delay).await;
+}
+
+/// A reachable internet probe on the first attempt is not a restoration:
+/// a provider-only failure must keep its original backoff.
+pub async fn wait_for_connectivity_restoration() {
+    wait_until_online_with(true, probe_connectivity, wait_for_platform_change_or_delay).await;
+}
+
+async fn wait_until_online_with<P, W>(
+    require_transition: bool,
+    mut probe: impl FnMut() -> P,
+    mut wait: impl FnMut(Duration) -> W,
+) where
+    P: std::future::Future<Output = bool>,
+    W: std::future::Future<Output = ()>,
+{
     let mut delay = Duration::from_secs(1);
+    if probe().await {
+        if require_transition {
+            std::future::pending::<()>().await;
+        }
+        return;
+    }
     loop {
-        if probe_connectivity().await {
+        wait(delay).await;
+        if probe().await {
             return;
         }
-        wait_for_platform_change_or_delay(delay).await;
         delay = (delay * 2).min(Duration::from_secs(30));
     }
 }
@@ -188,6 +211,25 @@ async fn wait_for_command_output(command: &str, args: &[&str]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn restoration_needs_an_offline_probe_then_a_verified_change() {
+        use std::future::{poll_fn, ready};
+        use std::task::Poll;
+        let online = std::cell::Cell::new(false);
+        let change = tokio::sync::Notify::new();
+        let wait = wait_until_online_with(true, || ready(online.get()), |_| change.notified());
+        tokio::pin!(wait);
+        poll_fn(|cx| Poll::Ready(assert!(wait.as_mut().poll(cx).is_pending()))).await;
+        change.notify_one(); // Unrelated route event, still offline.
+        poll_fn(|cx| Poll::Ready(assert!(wait.as_mut().poll(cx).is_pending()))).await;
+        online.set(true);
+        change.notify_one();
+        poll_fn(|cx| Poll::Ready(assert!(wait.as_mut().poll(cx).is_ready()))).await;
+        let provider_only = wait_until_online_with(true, || ready(true), |_| ready(()));
+        tokio::pin!(provider_only);
+        poll_fn(|cx| Poll::Ready(assert!(provider_only.as_mut().poll(cx).is_pending()))).await;
+    }
 
     #[test]
     fn classifies_common_network_errors() {

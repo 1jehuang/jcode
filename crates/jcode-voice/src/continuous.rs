@@ -303,6 +303,8 @@ pub struct ContinuousRecording {
     events: Arc<Mutex<Events>>,
     worker: std::thread::JoinHandle<()>,
 }
+pub type RestorationWait = fn() -> futures::future::BoxFuture<'static, ()>;
+
 impl ContinuousRecording {
     pub fn start_auto(
         cancel: Arc<AtomicBool>,
@@ -310,13 +312,13 @@ impl ContinuousRecording {
         recorder: &str,
         config: ContinuousConfig,
     ) -> Result<Self, VoiceError> {
-        Self::start_auto_with_budget(cancel, key, recorder, config, ContinuousBudget::default())
+        Self::start_auto_with_budget(cancel, key, recorder, config, ContinuousBudget::default(), || Box::pin(std::future::pending()))
     }
 
     /// Keep the same ledger when a user explicitly retries a stopped listener.
     pub fn start_auto_with_budget(
         cancel: Arc<AtomicBool>, key: &str, recorder: &str, config: ContinuousConfig,
-        budget: ContinuousBudget,
+        budget: ContinuousBudget, restoration: RestorationWait,
     ) -> Result<Self, VoiceError> {
         if cancel.load(Ordering::SeqCst) {
             return Err(VoiceError::Cancelled);
@@ -381,6 +383,7 @@ impl ContinuousRecording {
                             recorder,
                             config,
                             budget,
+                            restoration,
                             p,
                             a.clone(),
                             gate,
@@ -904,6 +907,35 @@ async fn stream_job(
     }
 }
 // Retry only on fresh speech, never by replaying or recharging failed audio.
+async fn wait_for_recovery(cancel: &AtomicBool, delay: Duration, watch_network: bool, restoration: impl std::future::Future<Output = ()>) -> Result<(), VoiceError> {
+    tokio::select! {
+        biased;
+        _ = crate::nari::cancelled(cancel) => Err(VoiceError::Cancelled),
+        _ = tokio::time::sleep(delay) => Ok(()),
+        _ = restoration, if watch_network => Ok(()),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn recovery_wake_respects_deadline_and_cancellation() {
+    let stopped = AtomicBool::new(false);
+    let delay = Duration::from_secs(60);
+    for (watch, expected) in [(true, 3), (false, 60)] {
+        let start = tokio::time::Instant::now();
+        wait_for_recovery(&stopped, delay, watch, tokio::time::sleep(Duration::from_secs(3))).await.unwrap();
+        assert_eq!(start.elapsed(), Duration::from_secs(expected));
+    }
+    let start = tokio::time::Instant::now();
+    wait_for_recovery(&stopped, delay, true, std::future::pending()).await.unwrap();
+    assert_eq!(start.elapsed(), delay);
+    let (result, ()) = tokio::join!(wait_for_recovery(&stopped, delay, true, std::future::pending()), async {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        stopped.store(true, Ordering::SeqCst);
+    });
+    assert_eq!(result, Err(VoiceError::Cancelled));
+    assert!(start.elapsed() < delay + Duration::from_secs(2));
+}
+
 fn recovery_delay(error: &VoiceError, failures: usize) -> Option<Duration> {
     let delays = match error {
         VoiceError::Http(429) => [15, 60, 60],
@@ -1009,6 +1041,7 @@ async fn run(
     recorder: String,
     config: ContinuousConfig,
     budget: ContinuousBudget,
+    restoration: RestorationWait,
     paused: Arc<AtomicBool>,
     capturing: Arc<AtomicBool>,
     gate: Option<jcode_base::jev::JevClient>,
@@ -1284,15 +1317,14 @@ async fn run(
                 let Some(delay) = recovery_delay(&error, consecutive_failures) else { return Err(error); };
                 capture?;
                 consecutive_failures = consecutive_failures.saturating_add(1);
+                let watch_network = matches!(error, VoiceError::Network | VoiceError::Timeout);
                 emit(&events, ContinuousEvent::Recovering { error, delay });
                 emit(&events, ContinuousEvent::State(VoiceState::Suppressed));
                 level.store(0, Ordering::Relaxed);
                 segmenter = Segmenter::default();
                 permitted = false;
-                tokio::select! {
-                    _ = crate::nari::cancelled(&cancel) => return Err(VoiceError::Cancelled),
-                    _ = tokio::time::sleep(delay) => continue,
-                }
+                wait_for_recovery(&cancel, delay, watch_network, async { restoration().await }).await?;
+                continue;
             }
             capture?;
         }
