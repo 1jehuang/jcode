@@ -999,7 +999,7 @@ impl crate::tui::TuiState for App {
         self.remote_client_count
     }
 
-    fn jarvis_transcript(&self) -> Option<&std::collections::VecDeque<String>> {
+    fn jarvis_transcript(&self) -> Option<&std::collections::VecDeque<crate::tui::JarvisCaption>> {
         Some(self.jarvis_listener.captions())
     }
 

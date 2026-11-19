@@ -698,6 +698,13 @@ pub(crate) fn hash_rendered_image_signature_fields(
     hash_rendered_image_anchor(image.anchor.as_ref(), hasher);
 }
 
+#[derive(Debug, Clone)]
+pub struct JarvisCaption {
+    pub id: u64,
+    pub text: String,
+    pub score: Option<(f64, bool)>,
+}
+
 /// Trait for TUI state consumed by the shared renderer.
 ///
 /// This is a wide (114-method) presentation interface: the read-only surface the
@@ -944,7 +951,7 @@ pub trait TuiState {
     fn voice_input_status(&self) -> Option<(bool, String)> {
         None
     }
-    fn jarvis_transcript(&self) -> Option<&std::collections::VecDeque<String>> {
+    fn jarvis_transcript(&self) -> Option<&std::collections::VecDeque<crate::tui::JarvisCaption>> {
         None
     }
     /// Voice input rendered in the composer instead of the status line.

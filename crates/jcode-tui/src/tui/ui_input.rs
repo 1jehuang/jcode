@@ -974,6 +974,56 @@ pub(crate) fn openai_reset_status_hint(
     Some(format!("{count} {noun} available · {detail} · /reset"))
 }
 
+fn caption_line(row: &super::JarvisCaption, width: u16) -> Line<'static> {
+    let (prefix, color) = match row.score {
+        None => ("Heard: ".to_owned(), Color::DarkGray),
+        Some((p, accepted)) => {
+            let label = if accepted { "Trigger" } else { "Heard" };
+            let color = if accepted {
+                Color::Green
+            } else if p >= 0.5 {
+                Color::Yellow
+            } else {
+                Color::DarkGray
+            };
+            (format!("{:.0}% {label}: ", p * 100.0), color)
+        }
+    };
+    Line::styled(
+        truncate_cells(&format!("{prefix}{}", row.text), width as usize),
+        Style::default().fg(color),
+    )
+}
+
+#[cfg(test)]
+#[test]
+fn caption_cells_show_score_and_do_not_wrap() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let mut terminal = Terminal::new(TestBackend::new(18, 2)).unwrap();
+    for (score, expected, prefix) in [
+        (None, Color::DarkGray, "Heard:"),
+        (Some((0.12, false)), Color::DarkGray, "12% Heard:"),
+        (Some((0.55, false)), Color::Yellow, "55% Heard:"),
+        (Some((0.94, false)), Color::Yellow, "94% Heard:"),
+        (Some((0.95, true)), Color::Green, "95% Trigger:"),
+    ] {
+        let row = super::JarvisCaption {
+            id: 1,
+            text: "界".repeat(40),
+            score,
+        };
+        terminal
+            .draw(|f| f.render_widget(Paragraph::new(caption_line(&row, 18)), f.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        for (x, c) in prefix.chars().enumerate() {
+            assert_eq!(buffer[(x as u16, 0)].symbol(), c.to_string());
+            assert_eq!(buffer[(x as u16, 0)].fg, expected);
+        }
+        assert!((0..18).all(|x| buffer[(x, 1)].symbol() == " "));
+    }
+}
+
 fn notification_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     let spans = build_notification_spans(app);
     if width == 0 {
@@ -981,7 +1031,7 @@ fn notification_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     }
     let mut lines = Vec::new();
     for row in app.jarvis_transcript().into_iter().flatten() {
-        lines.push(Line::from(truncate_cells(row, width as usize)));
+        lines.push(caption_line(row, width));
     }
     if !spans.is_empty() {
         lines.push(Line::from(spans));

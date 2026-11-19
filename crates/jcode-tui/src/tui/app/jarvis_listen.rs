@@ -1,6 +1,7 @@
 //! Continuous voice remains client-side. Only gated requests become user turns.
 use super::jarvis_status::CaptureStatus;
 use super::*;
+use crate::tui::JarvisCaption;
 use crate::tui::backend::RemoteConnection;
 use jcode_voice::continuous::{ContinuousConfig, ContinuousEvent, ContinuousRecording, VoiceState};
 use serde_json::json;
@@ -72,16 +73,32 @@ mod tests {
     #[test]
     fn caption_is_bounded_terminal_safe_and_never_queued() {
         let mut listener = AlwaysListening::default();
-        listener.update_caption("\x1b[31mhello\x1b[0m\nworld\0\u{202e}");
+        listener.update_caption(1, "\x1b[31mhello\x1b[0m\nworld\0\u{202e}");
         assert_eq!(
-            listener.captions.front().map(String::as_str),
-            Some("Heard: hello world")
+            listener.captions.front().map(|r| r.text.as_str()),
+            Some("hello world")
         );
-        listener.update_caption(&"界".repeat(500));
-        assert_eq!(listener.captions.back().unwrap().chars().count(), 167);
+        listener.update_caption(2, &"界".repeat(500));
+        assert_eq!(listener.captions.back().unwrap().text.chars().count(), 160);
         assert!(listener.pending.is_none() && listener.last_request.is_none());
         listener.detach();
         assert!(listener.captions.is_empty());
+    }
+
+    #[test]
+    fn caption_scores_follow_ids_not_repeated_text_or_position() {
+        let mut listener = AlwaysListening::default();
+        for id in 1..=5 {
+            listener.update_caption(id, "again");
+        }
+        assert!(!listener.score_caption(1, 0.99, true));
+        assert!(listener.score_caption(4, 0.99, true));
+        assert!(listener.score_caption(2, 0.25, false));
+        let scores: Vec<_> = listener.captions.iter().map(|r| r.score).collect();
+        assert_eq!(
+            scores,
+            [Some((0.25, false)), None, Some((0.99, true)), None]
+        );
     }
 
     #[test]
@@ -154,7 +171,7 @@ pub(super) struct AlwaysListening {
     last_request: Option<(String, Instant)>,
     state: Option<VoiceState>,
     failed: bool,
-    captions: VecDeque<String>,
+    captions: VecDeque<JarvisCaption>,
     chat_version: Option<u64>,
     triggered_at: Option<Instant>,
 }
@@ -166,7 +183,7 @@ impl Drop for AlwaysListening {
     }
 }
 impl AlwaysListening {
-    pub(super) fn captions(&self) -> &VecDeque<String> {
+    pub(super) fn captions(&self) -> &VecDeque<JarvisCaption> {
         &self.captions
     }
 
@@ -178,7 +195,7 @@ impl AlwaysListening {
         text.trim().to_owned()
     }
 
-    fn update_caption(&mut self, text: &str) {
+    fn update_caption(&mut self, id: u64, text: &str) {
         let text = Self::caption_text(text);
         if text.is_empty() {
             return;
@@ -186,7 +203,19 @@ impl AlwaysListening {
         if self.captions.len() == 4 {
             self.captions.pop_front();
         }
-        self.captions.push_back(format!("Heard: {text}"));
+        self.captions.push_back(JarvisCaption {
+            id,
+            text,
+            score: None,
+        });
+    }
+
+    fn score_caption(&mut self, id: u64, probability: f64, accepted: bool) -> bool {
+        let Some(row) = self.captions.iter_mut().find(|r| r.id == id) else {
+            return false;
+        };
+        row.score = Some((probability, accepted));
+        true
     }
 
     fn indicator_state(&self, paused: bool, speech_busy: bool, now: Instant) -> &'static str {
@@ -216,18 +245,6 @@ impl AlwaysListening {
         let Some(trigger) = envelope_trigger(&text) else {
             return;
         };
-        let label = Self::caption_text(&trigger);
-        if self
-            .captions
-            .back()
-            .is_some_and(|line| line.strip_prefix("Heard: ") == Some(label.as_str()))
-        {
-            self.captions.pop_back();
-        }
-        if self.captions.len() == 4 {
-            self.captions.pop_front();
-        }
-        self.captions.push_back(format!("Trigger: {label}"));
         if self.pending.is_some() {
             return;
         }
@@ -380,11 +397,18 @@ impl App {
                         listener.state = Some(state);
                     }
                     ContinuousEvent::Level(_) => {}
-                    ContinuousEvent::Caption(text) => {
+                    ContinuousEvent::Caption { id, text } => {
                         if !paused && !listener.failed && !speech_busy && !external_capture {
-                            listener.update_caption(&text);
+                            listener.update_caption(id, &text);
                             changed = true;
                         }
+                    }
+                    ContinuousEvent::CaptionScore {
+                        id,
+                        probability,
+                        accepted,
+                    } => {
+                        changed |= listener.score_caption(id, probability, accepted);
                     }
                     ContinuousEvent::Rejected(_) => {} // Never save ambient speech in chat or logs.
                     ContinuousEvent::Transcript(text)
