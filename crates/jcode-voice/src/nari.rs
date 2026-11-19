@@ -533,6 +533,15 @@ where
                 }
                 return Ok(value);
             }
+            Some(Ok(Message::Close(Some(frame)))) => {
+                // Never retain server-controlled close reasons, which may contain user data.
+                return Err(match u16::from(frame.code) {
+                    4401 | 4403 => VoiceError::NariNotConfigured,
+                    4402 => VoiceError::NariCreditsExhausted,
+                    4429 => VoiceError::Http(429),
+                    _ => VoiceError::Network,
+                });
+            }
             Some(Ok(Message::Ping(_) | Message::Pong(_))) => {
                 // Tungstenite queues automatic pong responses on read.
             }
@@ -1045,6 +1054,19 @@ mod tests {
         );
         assert!(!VoiceError::NariRejected.to_string().contains("secret"));
     }
+    #[tokio::test]
+    async fn nari_transport_categories_expose_no_provider_content() {
+        use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
+        for (code, expected) in [(4401, VoiceError::NariNotConfigured), (4402, VoiceError::NariCreditsExhausted), (4429, VoiceError::Http(429)), (1011, VoiceError::Network)] {
+            let close = CloseFrame { code: CloseCode::from(code), reason: "private provider detail".into() };
+            let mut socket = futures::stream::iter([Ok(Message::Close(Some(close)))]);
+            assert_eq!(receive(&mut socket).await, Err(expected));
+        }
+        for (code, expected) in [("INVALID_API_KEY", VoiceError::NariNotConfigured), ("INSUFFICIENT_CREDITS", VoiceError::NariCreditsExhausted), ("RATE_LIMITED", VoiceError::Http(429)), ("private provider detail", VoiceError::NariRejected)] {
+            assert_eq!(provider_error(&json!({"error":{"code":code,"message":"private"}})), expected);
+        }
+    }
+
     #[test]
     fn handshake_statuses_are_sanitized() {
         use tokio_tungstenite::tungstenite::{Error, http::Response};

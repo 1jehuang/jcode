@@ -81,6 +81,8 @@ pub enum ContinuousEvent {
     /// Carries the full final utterance. Never dispatch without a prior Transcript.
     Continuation { id: u64, text: String },
     Rejected(String),
+    /// Content-free provider diagnostic, never a caption or rejected utterance.
+    Recovering { error: VoiceError, delay: Duration },
     Error(VoiceError),
     Stopped,
 }
@@ -265,6 +267,14 @@ impl ContinuousRecording {
             || !(0.5..=1.0).contains(&config.action_probability)
         {
             return Err(VoiceError::InvalidResponse);
+    ) -> Result<Self, VoiceError> {
+        Self::start_auto_with_budget(cancel, key, recorder, config, ContinuousBudget::default())
+    }
+
+    /// Keep the same ledger when a user explicitly retries a stopped listener.
+    pub fn start_auto_with_budget(
+        cancel: Arc<AtomicBool>, key: &str, recorder: &str, config: ContinuousConfig,
+        budget: ContinuousBudget,
         }
         #[cfg(not(test))]
         let gate =
@@ -328,6 +338,7 @@ impl ContinuousRecording {
                     if error != VoiceError::Cancelled {
                         emit(&e, ContinuousEvent::Error(error));
                     }
+                            budget,
                 }
                 emit(&e, ContinuousEvent::Stopped);
             })
@@ -649,6 +660,9 @@ impl Budget {
         {
             return false;
         }
+#[derive(Default, Clone)]
+pub struct ContinuousBudget(Arc<Mutex<Budget>>);
+
         self.0.push_back((now, samples));
         true
     }
@@ -847,6 +861,20 @@ async fn rejected_warm_session_never_opens_a_second_connection() {
         let expected = error.clone();
         let failed = tokio::spawn(async move { Err(error) });
         let (_, rx) = tokio::sync::mpsc::unbounded_channel();
+#[test]
+fn deliberate_retry_cannot_reset_rolling_audio_or_classification_usage() {
+    for (seconds, classifications) in [(1, 10), (3600, 1)] {
+        let config = ContinuousConfig { max_audio_seconds_per_hour: seconds, max_classifications_per_hour: classifications, ..Default::default() };
+        let original = ContinuousBudget::default();
+        let retry = original.clone();
+        let now = Instant::now();
+        assert!(original.0.lock().unwrap().reserve(now, 16_000, &config));
+        drop(original);
+        assert!(!retry.0.lock().unwrap().reserve(now, 1, &config));
+        assert!(retry.0.lock().unwrap().reserve(now + Duration::from_secs(3600), 1, &config));
+    }
+}
+
         let (partial, _) = tokio::sync::watch::channel(String::new());
         // Empty key makes an unintended fallback fail differently, without network I/O.
         let result = stream_job(Some(failed), String::new(), rx, Arc::new(AtomicBool::new(false)), partial).await;
@@ -925,11 +953,11 @@ async fn run(
     )> = VecDeque::new();
     // Audio sink of the utterance currently streaming to Nari.
     let mut live: Option<(u64, tokio::sync::mpsc::UnboundedSender<Vec<i16>>)> = None;
+    budget: ContinuousBudget,
     let mut warm: Option<Warm> = None;
     let mut warm_retry_at = Instant::now();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
-    // Each device lease rotates before the push-to-talk five-minute safety cap.
-    let mut budget = Budget::default();
+    // Device rotation and manual retry share the listener's original hourly ledger.
     let mut consecutive_failures = 0;
     let mut budget_limited = false;
     let mut permission_at = Instant::now();
@@ -993,7 +1021,7 @@ async fn run(
                                 live = None;
                                 // Bounded: drop speech rather than build an upload backlog.
                                 if jobs.len() >= 2 { continue; }
-                                if !budget.reserve(Instant::now(), audio.len(), &config) {
+                                if !budget.0.lock().unwrap_or_else(|e| e.into_inner()).reserve(Instant::now(), audio.len(), &config) {
                                     budget_limited = true;
                                     emit(&events, ContinuousEvent::State(VoiceState::BudgetLimited));
                                     continue;
@@ -1072,7 +1100,7 @@ async fn run(
                             }
                             Seg::Audio(audio) => {
                                 if let Some((_, tx)) = &live {
-                                    budget.extend(audio.len());
+                                    budget.0.lock().unwrap_or_else(|e| e.into_inner()).extend(audio.len());
                                     if tx.send(audio).is_err() { live = None; }
                                 }
                             }
@@ -1165,7 +1193,7 @@ async fn run(
                 let Some(delay) = recovery_delay(&error, consecutive_failures) else { return Err(error); };
                 capture?;
                 consecutive_failures += 1;
-                emit(&events, ContinuousEvent::Rejected(format!("{error}. Microphone released for {}s. Repeat the request after listening resumes.", delay.as_secs())));
+                emit(&events, ContinuousEvent::Recovering { error, delay });
                 emit(&events, ContinuousEvent::State(VoiceState::Suppressed));
                 level.store(0, Ordering::Relaxed);
                 segmenter = Segmenter::default();
