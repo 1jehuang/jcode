@@ -1,5 +1,6 @@
 //! System prompt management
 
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -33,6 +34,55 @@ pub fn load_base_system_prompt(working_dir: Option<&Path>) -> String {
 
 /// Prompt guidance for the optional Mermaid rendering capability.
 pub const MERMAID_PROMPT: &str = "# Mermaid\n\nRender fenced `mermaid` blocks inline.";
+
+/// Explicit role of a session in the prompt assembly pipeline.
+///
+/// This is set at spawn time on the child session, not inferred from parent
+/// transcript text. Coordinators keep the normal instruction set (including
+/// any operator-level delegation guidance); subagents receive an additional
+/// block that overrides delegation-style instructions with do-the-work rules.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptRole {
+    #[default]
+    Coordinator,
+    Subagent,
+}
+
+impl PromptRole {
+    /// Used with `skip_serializing_if` so legacy coordinator sessions keep
+    /// their existing on-disk representation.
+    pub fn is_coordinator(&self) -> bool {
+        *self == Self::Coordinator
+    }
+}
+
+/// Appended to every subagent system prompt, after all other instruction
+/// sources (including AGENTS.md and prompt overrides), so it wins conflicts.
+pub const SUBAGENT_PROMPT_BLOCK: &str = "\
+## Subagent Role
+You are a subagent executing one assigned unit of work, not a coordinator.
+- Complete the assigned task inline using your own tools. Do the work yourself.
+- Do not delegate, spawn, or ask other agents to do the task.
+- Use `BROKEN` only for a genuine tool, route, or machine failure that blocks all work.
+- Use `OPERATOR NEEDED` only for a decision or credential only the operator can provide.
+- Do not reply with status words such as BROKEN or OPERATOR NEEDED in place of doing the work.";
+
+/// Apply role-specific guidance to an assembled system prompt.
+///
+/// Pure and independent of any parent context: `Subagent` always gets the
+/// block, `Coordinator` is returned unchanged.
+pub fn apply_prompt_role(prompt: String, role: PromptRole) -> String {
+    if role != PromptRole::Subagent {
+        return prompt;
+    }
+    let mut prompt = prompt;
+    if !prompt.is_empty() {
+        prompt.push_str("\n\n");
+    }
+    prompt.push_str(SUBAGENT_PROMPT_BLOCK);
+    prompt
+}
 
 /// Harness capabilities that conditionally contribute prompt modules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
