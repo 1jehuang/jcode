@@ -33,11 +33,13 @@ import os
 import re
 value = os.environ['JCODE_BUILD_SEMVER']
 # Stable releases (vMAJOR.MINOR.PATCH) share this hosted build path.
-if re.fullmatch(r'v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})', value):
+core = r'(?:0|[1-9][0-9]{0,8})'
+stable = rf'v{core}\.{core}\.{core}'
+if re.fullmatch(stable, value):
     raise SystemExit(0)
-match = re.fullmatch(r'v?1\.0\.0-preview\.([1-9][0-9]*)', value)
+match = re.fullmatch(rf'(?:v?1\.0\.0-preview|{stable}-selfdev)\.([1-9][0-9]*)', value)
 if not match or len(match[1]) > 20 or int(match[1]) > 18446744073709551615:
-    raise SystemExit('error: expected JCODE_BUILD_SEMVER=vX.Y.Z or v1.0.0-preview.N with a positive u64 N')
+    raise SystemExit('error: expected vX.Y.Z, vX.Y.Z-selfdev.N, or v1.0.0-preview.N with a positive u64 N')
 PY
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
