@@ -55,6 +55,8 @@ class DiscordReleaseTests(unittest.TestCase):
         self.assertTrue(msg.endswith('[Download & release notes](<https://example.org/download>)'))
         self.assertNotIn('marker', msg)
         self.assertNotIn('What changed', format_notes('Older build without highlights.'))
+        comparison = 'https://github.com/1jehuang/jcode/compare/' + '0' * 40 + '...' + 'ab' * 20
+        self.assertIn(f'[All 19 commits](<{comparison}>)', format_notes(f'## Bundled changes\n\n[View all 19 commits]({comparison})'))
         self.assertLessEqual(len(format_notes('## Highlights\n' + ('- ' + '🙂' * 300 + '\n') * 8).encode('utf-16-le')) // 2, 2000)
 
     def setUp(self) -> None:

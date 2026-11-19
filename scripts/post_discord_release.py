@@ -83,7 +83,11 @@ def format_message(*, tag: str, name: str, body: str, url: str) -> str:
                 for item in bullets[:4]:
                     text = item.strip()
                     lines.append("- " + (text if len(text) <= 160 else text[:159].rstrip() + "…"))
-        lines += ["", f"[Download & release notes](<{url}>)"]
+        links = f"[Download & release notes](<{url}>)"
+        comparison = re.search(r"^\[View all ([0-9]+) commits\]\(https://github\.com/1jehuang/jcode/compare/([0-9a-f]{40})\.\.\.([0-9a-f]{40})\)$", body, re.M)
+        if comparison and comparison[3] == match[1]:
+            links += f" · [All {comparison[1]} commits](<https://github.com/1jehuang/jcode/compare/{comparison[2]}...{match[1]}>)"
+        lines += ["", links]
         return "\n".join(lines)
     if re.fullmatch(r"v1\.0\.0-preview\.[1-9][0-9]*", tag):
         # An arbitrary URL cannot both fit Discord and remain intact. Fall back
