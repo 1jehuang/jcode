@@ -20,6 +20,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant as TokioInstant, MissedTickBehavior};
 
 mod model;
+mod elapsed_review;
 #[path = "background/stall_watchdog.rs"]
 mod stall_watchdog;
 
@@ -408,6 +409,7 @@ impl BackgroundTaskManager {
             stall_wake_seconds: None,
         };
         self.write_status_file(&info.status_file, &status).await;
+        self.arm_elapsed_review(tool_name, &info.task_id);
         Self::publish_task_started_activity(
             &info.task_id,
             tool_name,
@@ -630,6 +632,7 @@ impl BackgroundTaskManager {
             .await
             .insert(task_id.clone(), running_task);
         let _ = registered_tx.send(());
+        self.arm_elapsed_review(tool_name, &task_id);
 
         BackgroundTaskInfo {
             task_id,
@@ -851,6 +854,7 @@ impl BackgroundTaskManager {
             .await
             .insert(task_id.clone(), running_task);
         let _ = registered_tx.send(());
+        self.arm_elapsed_review(tool_name, &task_id);
 
         BackgroundTaskInfo {
             task_id,
