@@ -177,9 +177,21 @@ impl MultiProvider {
             ActiveProvider::Bedrock => {
                 if let Some(bedrock) = self.bedrock_provider() {
                     self.bind_provider_session(bedrock.as_ref());
-                    bedrock
-                        .complete(messages, tools, system, resume_session_id)
-                        .await
+                    // Bedrock does not share the streaming provider's idle
+                    // timeout wrapper. Bound the whole call with the same
+                    // startup budget so a stalled request cannot hang a turn.
+                    let budget = std::time::Duration::from_secs(
+                        crate::config::config()
+                            .provider
+                            .stream_start_timeout_secs
+                            .max(1),
+                    );
+                    tokio::time::timeout(
+                        budget,
+                        bedrock.complete(messages, tools, system, resume_session_id),
+                    )
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Bedrock request timed out"))?
                 } else {
                     Err(anyhow::anyhow!(
                         "AWS Bedrock is not available. Configure AWS credentials and region, or set AWS_PROFILE/AWS_REGION."
