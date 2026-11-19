@@ -41,6 +41,7 @@ pub mod notifications;
 pub mod overnight;
 pub mod perf;
 pub mod replay;
+pub mod resilience;
 pub mod restart_snapshot;
 pub mod running_tool_registry;
 pub mod server;
