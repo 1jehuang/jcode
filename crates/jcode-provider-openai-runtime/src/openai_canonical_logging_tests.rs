@@ -1,5 +1,61 @@
 use super::*;
 
+#[test]
+fn borrowed_request_fingerprint_fields_match_owned_fields() {
+    use jcode_provider_core::fingerprint::stable_hash_json;
+
+    fn fingerprint(value: &Value) -> (u64, usize) {
+        (
+            stable_hash_json(value),
+            serde_json::to_vec(value).unwrap().len(),
+        )
+    }
+
+    for request in [
+        serde_json::json!({}),
+        serde_json::json!({"tools": null, "instructions": null}),
+        serde_json::json!({"tools": [], "instructions": ""}),
+        serde_json::json!({"tools": [{"name": "read", "schema": {"type": "object"}}], "instructions": "日本語\n"}),
+        serde_json::json!({"tools": {"unexpected": true}, "instructions": ["structured"]}),
+    ] {
+        let owned_tools = request
+            .get("tools")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+        let owned_instructions = request.get("instructions").cloned();
+        let empty_tools = serde_json::json!([]);
+        let borrowed_tools = request.get("tools").unwrap_or(&empty_tools);
+        let borrowed_instructions = request.get("instructions");
+        assert_eq!(fingerprint(borrowed_tools), fingerprint(&owned_tools));
+        assert_eq!(
+            borrowed_instructions.map(fingerprint),
+            owned_instructions.as_ref().map(fingerprint)
+        );
+        // Full requests fall back to the caller's tool count, continuations to zero.
+        for fallback_count in [0, 7] {
+            assert_eq!(
+                borrowed_tools
+                    .as_array()
+                    .map(Vec::len)
+                    .unwrap_or(fallback_count),
+                owned_tools
+                    .as_array()
+                    .map(Vec::len)
+                    .unwrap_or(fallback_count)
+            );
+        }
+        if let Some(tools) = request.get("tools") {
+            assert!(std::ptr::eq(borrowed_tools, tools));
+        } else {
+            assert_eq!(borrowed_tools, &serde_json::json!([]));
+        }
+        assert_eq!(
+            borrowed_instructions.is_some(),
+            request.get("instructions").is_some()
+        );
+    }
+}
+
 // Frozen pre-borrow selection. Deliberately independent of the production key list.
 fn original(request: &Value) -> Value {
     serde_json::json!({
