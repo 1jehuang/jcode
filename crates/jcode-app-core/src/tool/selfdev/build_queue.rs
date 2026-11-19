@@ -472,6 +472,10 @@ export -f cargo
                     "`selfdev build` requires a non-empty `reason` so other queued agents can see why the build is needed."
                 )
             })?;
+        let release_notes = release_notes
+            .map(|notes| notes.trim().to_owned())
+            .filter(|notes| !notes.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("`selfdev build` and `build-reload` require nonblank `release_notes` suitable for public release."))?;
         let repo_dir =
             SelfDevTool::resolve_repo_dir(ctx.working_dir.as_deref()).ok_or_else(|| {
                 anyhow::anyhow!("Could not find the jcode repository directory for selfdev build")
@@ -482,9 +486,6 @@ export -f cargo
         let command = SelfDevTool::build_command(&repo_dir, target);
         let dedupe_key = SelfDevTool::build_dedupe_key(&requested_source, &command);
         let blocker = SelfDevTool::newest_active_request(&requested_source.worktree_scope)?;
-        let release_notes = release_notes
-            .map(|notes| notes.trim().to_owned())
-            .filter(|notes| !notes.is_empty());
         let duplicate =
             BuildRequest::find_duplicate_pending(&requested_source.worktree_scope, &dedupe_key)?;
         let (session_short_name, session_title) = SelfDevTool::load_session_labels(&ctx.session_id);
@@ -503,7 +504,7 @@ export -f cargo
                 repo_dir: repo_dir.display().to_string(),
                 repo_scope: requested_source.repo_scope.clone(),
                 worktree_scope: requested_source.worktree_scope.clone(),
-                release_notes: release_notes.clone(),
+                release_notes: Some(release_notes),
                 command: command.display.clone(),
                 requested_at: Utc::now().to_rfc3339(),
                 started_at: None,
@@ -601,7 +602,7 @@ export -f cargo
             repo_dir: repo_dir.display().to_string(),
             repo_scope: requested_source.repo_scope.clone(),
             worktree_scope: requested_source.worktree_scope.clone(),
-            release_notes: release_notes.clone(),
+            release_notes: Some(release_notes),
             command: command.display.clone(),
             requested_at: Utc::now().to_rfc3339(),
             started_at: None,

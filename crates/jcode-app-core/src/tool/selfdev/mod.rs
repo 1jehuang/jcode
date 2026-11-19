@@ -543,8 +543,8 @@ impl SelfDevTool {
                     },
                     "prompt": { "type": "string" },
                     "context": { "type": "string" },
-                    "reason": { "type": "string" },
-                    "release_notes": { "type": "string", "description": "Optional public, user-facing highlights for build/build-reload. Never include private reason, context, or session information." },
+                    "reason": { "type": "string", "description": "Required for build/build-reload: private coordination reason, separate from public release notes." },
+                    "release_notes": { "type": "string", "description": "Required for build/build-reload: nonblank, public-facing build notes. For internal-only builds, state that there are no user-visible changes. Never include private reason, context, or session information." },
                     "target": {
                         "type": "string",
                         "enum": ["auto", "tui", "all"],

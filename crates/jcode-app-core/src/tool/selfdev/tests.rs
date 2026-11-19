@@ -757,6 +757,30 @@ async fn build_requires_reason() {
 }
 
 #[tokio::test]
+async fn build_actions_reject_missing_or_blank_notes_before_creating_queue() {
+    let _storage_guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home_guard = EnvVarGuard::set("JCODE_HOME", home.path());
+    let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+    let repo = create_repo_fixture();
+    let mut session = session::Session::create(None, None);
+    session.is_canary = true;
+    session.save().unwrap();
+    for action in ["build", "build-reload"] {
+        for notes in [None, Some(""), Some(" \t\n")] {
+            let mut input = json!({"action": action, "reason": "private reason"});
+            if let Some(notes) = notes {
+                input["release_notes"] = json!(notes);
+            }
+            let ctx = create_test_context(&session.id, Some(repo.path().to_owned()));
+            let error = SelfDevTool::new().execute(input, ctx).await.unwrap_err();
+            assert!(error.to_string().contains("nonblank `release_notes`"));
+            assert!(!home.path().join("selfdev-build-requests").exists());
+        }
+    }
+}
+
+#[tokio::test]
 async fn build_queues_background_tasks_and_reports_queue_status() {
     let _storage_guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
@@ -775,7 +799,7 @@ async fn build_queues_background_tasks_and_reports_queue_status() {
     let tool = SelfDevTool::new();
     let first = tool
         .execute(
-            json!({"action": "build", "reason": "first reason"}),
+            json!({"action": "build", "reason": "first reason", "release_notes": "First highlight"}),
             create_test_context(&session_one.id, Some(repo.path().to_path_buf())),
         )
         .await
@@ -800,10 +824,10 @@ async fn build_queues_background_tasks_and_reports_queue_status() {
     let parent = BuildRequest::load(first_meta["request_id"].as_str().unwrap())
         .unwrap()
         .unwrap();
-    assert!(parent.release_notes.is_none());
+    assert_eq!(parent.release_notes.as_deref(), Some("First highlight"));
     assert_eq!(
         parent.public_build_notes().as_deref(),
-        Some("From attached session")
+        Some("First highlight\nFrom attached session")
     );
     assert_eq!(first_meta["queue_position"].as_u64(), Some(1));
     assert_eq!(second_meta["deduped"].as_bool(), Some(true));
@@ -930,14 +954,14 @@ async fn build_dedupes_identical_reason_and_version_with_attached_watcher() {
     let tool = SelfDevTool::new();
     let first = tool
         .execute(
-            json!({"action": "build", "reason": "same reason"}),
+            json!({"action": "build", "reason": "same reason", "release_notes": "No user-visible changes."}),
             create_test_context(&session_one.id, Some(repo.path().to_path_buf())),
         )
         .await
         .expect("first build should queue");
     let second = tool
         .execute(
-            json!({"action": "build", "reason": "same reason"}),
+            json!({"action": "build", "reason": "same reason", "release_notes": "No user-visible changes."}),
             create_test_context(&session_two.id, Some(repo.path().to_path_buf())),
         )
         .await
@@ -990,14 +1014,14 @@ async fn cancel_build_marks_request_cancelled_and_removes_it_from_queue() {
     let tool = SelfDevTool::new();
     let first = tool
         .execute(
-            json!({"action": "build", "reason": "keep building"}),
+            json!({"action": "build", "reason": "keep building", "release_notes": "No user-visible changes."}),
             create_test_context(&session_one.id, Some(repo.path().to_path_buf())),
         )
         .await
         .expect("first build should queue");
     let second = tool
         .execute(
-            json!({"action": "build", "reason": "cancel me"}),
+            json!({"action": "build", "reason": "cancel me", "release_notes": "No user-visible changes."}),
             create_test_context(&session_two.id, Some(repo.path().to_path_buf())),
         )
         .await
@@ -1242,7 +1266,7 @@ async fn build_ignores_stale_pending_requests_when_computing_queue_position() {
     let tool = SelfDevTool::new();
     let output = tool
         .execute(
-            json!({"action": "build", "reason": "fresh build"}),
+            json!({"action": "build", "reason": "fresh build", "release_notes": "No user-visible changes."}),
             create_test_context(&live_session.id, Some(repo.path().to_path_buf())),
         )
         .await
