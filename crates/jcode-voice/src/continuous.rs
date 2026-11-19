@@ -768,8 +768,8 @@ async fn stream_job(
     let job = async {
         let session = match warm {
             Some(handle) => match handle.await {
-                Ok(Ok(session)) => session,
-                _ => NariSession::connect(&key, cancel.clone()).await?,
+                Ok(result) => result?,
+                Err(_) => return Err(VoiceError::Network),
             },
             None => NariSession::connect(&key, cancel.clone()).await?,
         };
@@ -820,6 +820,41 @@ impl Warm {
     fn take(mut self) -> Option<tokio::task::JoinHandle<Result<NariSession, VoiceError>>> {
         self.handle.take()
     }
+// Retry only on fresh speech, never by replaying or recharging failed audio.
+fn recovery_delay(error: &VoiceError, failures: usize) -> Option<Duration> {
+    let delays = match error {
+        VoiceError::Http(429) => [15, 60],
+        VoiceError::Network | VoiceError::Timeout | VoiceError::NariRejected
+        | VoiceError::Http(408 | 500..=599) => [2, 8],
+        _ => return None,
+    };
+    delays.get(failures).copied().map(Duration::from_secs)
+}
+
+#[test]
+fn recovery_is_bounded_and_never_retries_known_permanent_errors() {
+    for error in [VoiceError::Network, VoiceError::NariRejected, VoiceError::Timeout, VoiceError::Http(503), VoiceError::Http(429)] {
+        assert!(recovery_delay(&error, 0) < recovery_delay(&error, 1));
+        assert_eq!(recovery_delay(&error, 2), None);
+    }
+    for error in [VoiceError::NariNotConfigured, VoiceError::NariCreditsExhausted, VoiceError::Http(400), VoiceError::Cancelled, VoiceError::CaptureFailed] {
+        assert_eq!(recovery_delay(&error, 0), None);
+    }
+}
+
+#[tokio::test]
+async fn rejected_warm_session_never_opens_a_second_connection() {
+    for error in [VoiceError::NariNotConfigured, VoiceError::NariCreditsExhausted, VoiceError::NariRejected] {
+        let expected = error.clone();
+        let failed = tokio::spawn(async move { Err(error) });
+        let (_, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (partial, _) = tokio::sync::watch::channel(String::new());
+        // Empty key makes an unintended fallback fail differently, without network I/O.
+        let result = stream_job(Some(failed), String::new(), rx, Arc::new(AtomicBool::new(false)), partial).await;
+        assert_eq!(result, Err(expected));
+    }
+}
+
 }
 impl Drop for Warm {
     fn drop(&mut self) {
@@ -895,6 +930,7 @@ async fn run(
         let setup_cancel = Arc::new(AtomicBool::new(false));
         let setup = open_capture(setup_cancel.clone(), recorder.clone());
         let (mic, mut pcm) = tokio::select! {
+    let mut consecutive_failures = 0;
             biased;
             _ = crate::nari::cancelled(&cancel) => { setup_cancel.store(true,Ordering::SeqCst); return Err(VoiceError::Cancelled); },
             result = setup => result?,
@@ -1037,10 +1073,17 @@ async fn run(
                     if Instant::now().duration_since(last_audio) > Duration::from_secs(5) { break Err(VoiceError::CaptureFailed); }
                     // Warm spare: connected but idle, it carries no audio until speech onset.
                     if config.warm_nari && live.is_none() && jobs.is_empty() {
-                        // Recycle before idle timeouts. A failed or dropped spare falls
-                        // back to a cold connect at onset, so staleness costs speed only.
+                        // A spare that failed authentication must not be replaced forever
+                        // while the microphone is idle. Observe its typed failure on expiry.
                         if warm.as_ref().is_some_and(|w| w.since.elapsed() >= WARM_MAX_IDLE) {
-                            warm = None;
+                            if let Some(handle) = warm.take().and_then(Warm::take) {
+                                if !handle.is_finished() { handle.abort(); break Err(VoiceError::Timeout); }
+                                match handle.await {
+                                    Ok(Ok(_)) => {},
+                                    Ok(Err(error)) => break Err(error),
+                                    Err(_) => break Err(VoiceError::Network),
+                                }
+                            }
                         }
                         if warm.is_none() && Instant::now() >= warm_retry_at {
                             warm = Some(Warm::spawn(&key));
@@ -1060,7 +1103,7 @@ async fn run(
                                     }
                                 },
                                 Ok(None) => {},
-                                Err(error) => failed = Some(error), // No automatic network/auth retry loop.
+                                Err(error) => failed = Some(error),
                             }
                         }
                     }
@@ -1082,12 +1125,26 @@ async fn run(
         // Closing the sink commits whatever was said before the device restart.
         live = None;
         if result.is_err() || capture.is_err() {
+                            if result.is_ok() { consecutive_failures = 0; }
             warm = None;
             for (handle, token, _) in jobs.drain(..) {
                 token.store(true, Ordering::SeqCst);
                 handle.abort();
             }
-            result?;
+            if let Err(error) = result {
+                let Some(delay) = recovery_delay(&error, consecutive_failures) else { return Err(error); };
+                capture?;
+                consecutive_failures += 1;
+                emit(&events, ContinuousEvent::Rejected(format!("{error}. Microphone released for {}s. Repeat the request after listening resumes.", delay.as_secs())));
+                emit(&events, ContinuousEvent::State(VoiceState::Suppressed));
+                level.store(0, Ordering::Relaxed);
+                segmenter = Segmenter::default();
+                permitted = false;
+                tokio::select! {
+                    _ = crate::nari::cancelled(&cancel) => return Err(VoiceError::Cancelled),
+                    _ = tokio::time::sleep(delay) => continue,
+                }
+            }
             capture?;
         }
         // Do not join partial speech across a device restart.
