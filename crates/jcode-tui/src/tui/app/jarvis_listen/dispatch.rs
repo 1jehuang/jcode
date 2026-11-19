@@ -92,7 +92,7 @@ impl Dispatch {
             return "unmatched_final";
         };
         self.open.remove(pos);
-        self.queue.push_back(Request {id, at: Instant::now(), text: format!("(The user finished speaking. Full request: {text:?}. Now acknowledge and complete any necessary actions.)"), provisional:false, continuation:true});
+        self.queue.push_back(Request {id, at: Instant::now(), text: format!("(The user finished speaking. Full request: {text:?}. Now complete any necessary actions. Your held acknowledgement plays only if the request is unchanged, so speak again only if it no longer fits or you gave none.)"), provisional:false, continuation:true});
         "queued_final"
     }
     pub fn sent(&mut self, r: &Request) {
