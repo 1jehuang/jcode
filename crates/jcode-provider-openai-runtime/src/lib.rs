@@ -1412,7 +1412,25 @@ impl OpenAIProvider {
             tools.push(serde_json::json!({ "type": "image_generation" }));
         }
 
-        let input = input.into();
+        let mut input = input.into();
+        // GPT-6.2 renders top-level instructions after the cacheable history.
+        // Keep stable guidance in history, including on previous_response_id
+        // continuations. Retain the string field for the ChatGPT endpoint.
+        let instructions = if !instructions.is_empty()
+            && ["gpt-6.2-astra", "gpt-6.2-sol"].iter().any(|family| {
+                model_id == *family
+                    || model_id
+                        .strip_prefix(family)
+                        .is_some_and(|s| s.starts_with('-'))
+            }) {
+            input.to_mut().insert(
+                0,
+                serde_json::json!({"role": "developer", "content": instructions}),
+            );
+            String::new()
+        } else {
+            instructions
+        };
         let mut request = serde_json::json!({
             "model": model_id,
             "instructions": instructions,
