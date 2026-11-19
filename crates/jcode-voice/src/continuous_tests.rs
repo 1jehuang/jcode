@@ -26,17 +26,23 @@ fn deliberate_retry_cannot_reset_rolling_audio_or_classification_usage() {
 fn recovery_is_bounded_and_never_retries_known_permanent_errors() {
     for error in [
         VoiceError::Network,
-        VoiceError::NariRejected,
         VoiceError::Timeout,
         VoiceError::Http(503),
         VoiceError::Http(429),
     ] {
         assert!(recovery_delay(&error, 0) < recovery_delay(&error, 1));
-        assert_eq!(recovery_delay(&error, 2), None);
+        assert_eq!(
+            recovery_delay(&error, usize::MAX),
+            Some(Duration::from_secs(60))
+        );
     }
+    assert_eq!(recovery_delay(&VoiceError::NariRejected, 2), None);
     for error in [
         VoiceError::NariNotConfigured,
         VoiceError::NariCreditsExhausted,
+        VoiceError::Http(401),
+        VoiceError::Http(402),
+        VoiceError::Http(403),
         VoiceError::Http(400),
         VoiceError::Cancelled,
         VoiceError::CaptureFailed,
@@ -375,14 +381,19 @@ fn resumed_speech_cancels_commit_without_opening_another_stream() {
     assert!(s.push_stream(&[0; 16000]).is_empty());
 }
 #[tokio::test]
-async fn pause_resume_commits_one_nari_stream_after_all_audio() {
+async fn long_network_outage_then_pause_resume_commits_only_fresh_audio() {
     use futures::{SinkExt, StreamExt};
     use serde_json::{Value, json};
     use tokio_tungstenite::tungstenite::Message;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}/voice/realtime", listener.local_addr().unwrap());
+    const OFFLINE_ATTEMPTS: usize = 8;
     let server = tokio::spawn(async move {
+        // Drop each TCP connection before the upgrade while the provider is offline.
+        for _ in 0..OFFLINE_ATTEMPTS {
+            drop(listener.accept().await.unwrap().0);
+        }
         let mut ws = tokio_tungstenite::accept_async(listener.accept().await.unwrap().0)
             .await
             .unwrap();
@@ -415,6 +426,23 @@ async fn pause_resume_commits_one_nari_stream_after_all_audio() {
         panic!("stream closed before final commit");
     });
     let cancel = Arc::new(AtomicBool::new(false));
+    for failure in 0..OFFLINE_ATTEMPTS {
+        let endpoint = url.clone();
+        let stopped = cancel.clone();
+        let warm =
+            tokio::spawn(async move { NariSession::connect_to(&endpoint, "test", stopped).await });
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(vec![42; 320]).unwrap();
+        drop(tx);
+        let error = stream_job(Some(warm), String::new(), rx, cancel.clone(), |_| {})
+            .await
+            .unwrap_err();
+        assert_eq!(error, VoiceError::Network);
+        assert_eq!(
+            recovery_delay(&error, failure).unwrap().as_secs(),
+            [2, 8, 60][failure.min(2)]
+        );
+    }
     let connect_cancel = cancel.clone();
     let mut warm = Some(tokio::spawn(async move {
         NariSession::connect_relay(&url, "test", connect_cancel).await

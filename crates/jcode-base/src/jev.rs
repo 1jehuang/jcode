@@ -12,6 +12,23 @@ use std::time::Duration;
 mod laya;
 use laya::{configured_laya_base, laya_endpoint, resolve_laya_with, should_bypass_proxy};
 
+/// Privacy-safe classification for continuous listeners, independent of diagnostic text.
+#[derive(Clone, Copy, Debug)]
+pub enum DecisionTransportFailure {
+    Network,
+    Http(u16),
+}
+
+impl std::fmt::Display for DecisionTransportFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Network => f.write_str("Jev network request failed"),
+            Self::Http(status) => write!(f, "Jev returned HTTP {status}"),
+        }
+    }
+}
+impl std::error::Error for DecisionTransportFailure {}
+
 const PROVIDER_ENV: &str = "JCODE_MEMORY_JEV_PROVIDER";
 const BROWSER_PROVIDER_ENV: &str = "JCODE_BROWSER_JEV_PROVIDER";
 const VOICE_PROVIDER_ENV: &str = "JCODE_VOICE_JEV_PROVIDER";
@@ -337,10 +354,10 @@ impl JevClient {
                 .send()
                 .await
                 .map_err(|_| {
-                    anyhow!(
+                    anyhow!(DecisionTransportFailure::Network).context(format!(
                         "Could not verify Jcode {} entitlement; try again later",
                         self.purpose.name()
-                    )
+                    ))
                 })?;
             let me = read_response(response, MAX_ME_BYTES, self.provider).await?;
             ensure!(
@@ -497,7 +514,7 @@ impl JevClient {
             );
         }
         request.send().await.map_err(|_| {
-            anyhow!("Jev decision request failed or timed out; check the selected provider")
+            anyhow!(DecisionTransportFailure::Network).context("Jev decision request failed or timed out; check the selected provider")
         })
     }
 }
@@ -703,9 +720,9 @@ async fn read_response(
                 crate::subscription_notice::record(quota.clone());
                 return Err(quota.into());
             }
-            bail!(
+            return Err(anyhow!(DecisionTransportFailure::Http(429)).context(
                 "Jev returned HTTP 429: selected provider is rate limited or overloaded; try again later"
-            );
+            ));
         }
         let hint = match status.as_u16() {
             401 => "selected provider credential is invalid or revoked",
@@ -716,7 +733,8 @@ async fn read_response(
             300..=399 => "redirect refused to protect provider credentials",
             _ => "selected provider is unavailable or rejected the request",
         };
-        bail!("Jev returned HTTP {}: {hint}", status.as_u16());
+        return Err(anyhow!(DecisionTransportFailure::Http(status.as_u16()))
+            .context(format!("Jev returned HTTP {}: {hint}", status.as_u16())));
     }
     ensure!(
         !response
@@ -728,7 +746,7 @@ async fn read_response(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|_| anyhow!("Could not read Jev response"))?
+        .map_err(|_| anyhow!(DecisionTransportFailure::Network).context("Could not read Jev response"))?
     {
         ensure!(
             bytes.len().saturating_add(chunk.len()) <= limit,

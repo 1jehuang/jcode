@@ -297,7 +297,7 @@ pub(super) async fn run(
                     return Err(error);
                 };
                 capture?;
-                consecutive_failures += 1;
+                consecutive_failures = consecutive_failures.saturating_add(1);
                 emit(&events, ContinuousEvent::Recovering { error, delay });
                 emit(&events, ContinuousEvent::State(VoiceState::Suppressed));
                 level.store(0, Ordering::Relaxed);

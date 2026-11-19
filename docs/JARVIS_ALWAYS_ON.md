@@ -86,8 +86,10 @@ Local playback waits for a quiet microphone. New input can supersede a held
 reply. In Handterm the default trigger cue says “On it” in the configured
 Jarvis voice instead of playing a ding. A ready spoken reply takes precedence.
 A custom `trigger_sound` still plays its file, and `trigger_sound = ""` disables
-the cue. Temporary provider
-failures release the microphone for a bounded cooldown. Repeat the utterance
+the cue. Network outages release the microphone for 2 seconds, then 8 seconds,
+then 60 seconds between attempts until connectivity returns. Rate limits start
+with a 15-second cooldown. An automatic retry respects pause and screen lock.
+Repeat the utterance
 after listening resumes: failed audio is not replayed. A known credential or
 credit failure stops capture. Correct the issue, then use `/voice` to retry
 without restarting the conversation or resetting the hourly allowance. On updated

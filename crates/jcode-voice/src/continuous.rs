@@ -857,7 +857,17 @@ async fn semantic_gate(
     let response = client
         .evaluate_once(state, questions)
         .await
-        .map_err(|_| VoiceError::Network)?;
+        .map_err(|error| {
+            use jcode_base::jev::DecisionTransportFailure as Failure;
+            match error.downcast_ref::<Failure>() {
+                Some(Failure::Network) => VoiceError::Network,
+                Some(Failure::Http(status)) => VoiceError::Http(*status),
+                None if error.is::<jcode_base::subscription_notice::QuotaExceeded>() => {
+                    VoiceError::Unavailable
+                }
+                None => VoiceError::InvalidResponse,
+            }
+        })?;
     gate_answer(&response, threshold).map(Some)
 }
 
@@ -998,14 +1008,13 @@ async fn stream_job(
 // Retry only on fresh speech, never by replaying or recharging failed audio.
 fn recovery_delay(error: &VoiceError, failures: usize) -> Option<Duration> {
     let delays = match error {
-        VoiceError::Http(429) => [15, 60],
-        VoiceError::Network
-        | VoiceError::Timeout
-        | VoiceError::NariRejected
-        | VoiceError::Http(408 | 500..=599) => [2, 8],
+        VoiceError::Http(429) => [15, 60, 60],
+        VoiceError::Network | VoiceError::Timeout | VoiceError::Http(408 | 500..=599) => [2, 8, 60],
+        // An unrecognized provider rejection may be configuration related.
+        VoiceError::NariRejected => return [2, 8].get(failures).copied().map(Duration::from_secs),
         _ => return None,
     };
-    delays.get(failures).copied().map(Duration::from_secs)
+    Some(Duration::from_secs(delays[failures.min(delays.len() - 1)]))
 }
 
 /// Idle warm sessions are recycled before the provider could drop them.
