@@ -522,19 +522,24 @@ fn gate_separates_candidate_history_and_chat() {
         ctx.remember(i, &i.to_string());
     }
     let trigger = "  The \"second\" one.  ";
-    let state = ctx.state(trigger, false);
+    let wire = ctx.state(trigger, false);
+    let state: serde_json::Value = serde_json::from_str(wire.as_str().unwrap()).unwrap();
     assert_eq!(state["candidate"], trigger);
-    assert_eq!(state["recent_chat"][0]["text"], "Which one?");
-    assert_eq!(state["background_transcript"][0], "4");
-    // Jev judges one continuous stream ending with the newest segment.
+    assert_eq!(state["recent_chat"][0][1], "Which one?");
     assert_eq!(
-        state["continuous_transcript"],
-        "4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 The \"second\" one."
+        state["background_transcript"],
+        serde_json::json!(["16", "17", "18", "19"])
+    );
+    let next = ctx.state("changed", false);
+    let prefix = |s: &str| s.rsplit_once(",\"candidate\":").unwrap().0.to_owned();
+    assert_eq!(
+        prefix(wire.as_str().unwrap()),
+        prefix(next.as_str().unwrap())
     );
     let payload: serde_json::Value = serde_json::from_str(&ctx.accepted(trigger.into())).unwrap();
     assert_eq!(
         payload,
-        serde_json::json!({"background_transcript": state["background_transcript"], "trigger":trigger})
+        serde_json::json!({"background_transcript": (4..20).map(|i| i.to_string()).collect::<Vec<_>>(), "trigger":trigger})
     );
     assert!(ctx.background.is_empty());
     assert_eq!(ctx.chat.len(), 1);
@@ -612,6 +617,16 @@ fn manual_trigger_sends_only_recent_speech() {
         serde_json::json!({"trigger":"latest","background_transcript":["first"]})
     );
     assert!(ctx.manual(now).is_none(), "each utterance is sent once");
+    let probe = |ctx: &GateContext| {
+        let wire = ctx.state("and the second?", false);
+        serde_json::from_str::<serde_json::Value>(wire.as_str().unwrap()).unwrap()
+    };
+    assert_eq!(probe(&ctx)["recent_acceptance"], true);
+    assert_eq!(probe(&ctx)["background_transcript"], serde_json::json!([]));
+    assert!(!probe(&ctx).to_string().contains("latest"));
+    ctx.last_acceptance = Some(now - MANUAL_TRIGGER_WINDOW - Duration::from_secs(1));
+    assert_eq!(probe(&ctx)["recent_acceptance"], false);
+    assert_eq!(probe(&GateContext::default())["recent_acceptance"], false);
     // Speech still at the gate is claimed, and its later score dropped.
     let mut events = Events {
         context: GateContext::default(),
