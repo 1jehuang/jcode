@@ -12,6 +12,7 @@ pub(crate) fn ensure_bound_account_route(provider: &dyn Provider, session: &Sess
     if actual.as_deref() == Some(expected)
         || resolved_bound_account_label(session)
             .is_some_and(|label| actual.as_deref() == Some(label.as_str()))
+        || serves_account_via_cli(provider, expected)
     {
         return Ok(());
     }
@@ -19,6 +20,15 @@ pub(crate) fn ensure_bound_account_route(provider: &dyn Provider, session: &Sess
         "Saved account '{}' could not be restored for this session. Select an available account using /model or /login before sending a request.",
         expected
     );
+}
+
+/// A saved Claude account runs through its Claude Code CLI instance by
+/// default, so a `claude-oauth@<label>` route is honoured by that instance.
+fn serves_account_via_cli(provider: &dyn Provider, label: &str) -> bool {
+    provider.name() == "Claude Code"
+        && crate::auth::claude_code::instance_for_account(label).is_some_and(|instance| {
+            provider.resolved_account_label(AccountProviderKind::ClaudeCode) == Some(instance)
+        })
 }
 
 /// Resolve a persisted saved-account route through the session's identity pin.
@@ -208,5 +218,85 @@ mod tests {
         );
         session.route_api_method = Some("openai-api".into());
         assert_eq!(resolved_bound_account_label(&session), None);
+    }
+
+    /// Stands in for MultiProvider: `name` is the active runtime, and the
+    /// Claude Code instance is reported through the account-pin API.
+    struct CliProvider {
+        name: &'static str,
+        instance: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for CliProvider {
+        async fn complete(
+            &self,
+            _: &[crate::message::Message],
+            _: &[crate::message::ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            anyhow::bail!("route guard tests must not issue provider requests")
+        }
+
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn resolved_account_label(&self, kind: AccountProviderKind) -> Option<String> {
+            (kind == AccountProviderKind::ClaudeCode).then(|| self.instance.to_string())
+        }
+
+        fn fork(&self) -> std::sync::Arc<dyn Provider> {
+            std::sync::Arc::new(Self {
+                name: self.name,
+                instance: self.instance,
+            })
+        }
+    }
+
+    #[test]
+    fn claude_account_route_is_served_by_its_cli_instance() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().unwrap();
+        let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+        let previous_bin = std::env::var_os("JCODE_CLAUDE_CODE_BIN");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        // Any existing file stands in for the `claude` binary; nothing spawns.
+        crate::env::set_var("JCODE_CLAUDE_CODE_BIN", std::env::current_exe().unwrap());
+        for label in ["claude-otter", "claude-fox"] {
+            crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+                label: label.into(),
+                access: "access".into(),
+                refresh: format!("refresh-{label}"),
+                expires: i64::MAX,
+                email: None,
+                subscription_type: None,
+                scopes: Vec::new(),
+            })
+            .unwrap();
+        }
+        let mut session = Session::create(None, None);
+        session.route_api_method = Some("claude-oauth@claude-otter".into());
+        let cli = |name, instance| CliProvider { name, instance };
+        let served = ensure_bound_account_route(&cli("Claude Code", "claude-otter"), &session);
+        let other = ensure_bound_account_route(&cli("Claude Code", "claude-fox"), &session);
+        let native = ensure_bound_account_route(&cli("Claude", "claude-otter"), &session);
+        crate::config::Config::set_claude_account_native("claude-otter", true, None).unwrap();
+        let toggled = ensure_bound_account_route(&cli("Claude Code", "claude-otter"), &session);
+        match previous_bin {
+            Some(value) => crate::env::set_var("JCODE_CLAUDE_CODE_BIN", value),
+            None => crate::env::remove_var("JCODE_CLAUDE_CODE_BIN"),
+        }
+        assert!(served.is_ok(), "{served:?}");
+        assert!(other.is_err(), "another account's CLI must not serve it");
+        assert!(
+            native.is_err(),
+            "the native runtime must not pass on a CLI pin"
+        );
+        assert!(
+            toggled.is_err(),
+            "a native-mode account needs the native runtime"
+        );
     }
 }
