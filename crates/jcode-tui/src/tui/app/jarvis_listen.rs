@@ -230,6 +230,11 @@ impl AlwaysListening {
         if text.is_empty() {
             return;
         }
+        if let Some(row) = self.captions.iter_mut().find(|r| r.id == id) {
+            // Streaming revision of the same utterance: grow in place.
+            row.text = text;
+            return;
+        }
         if self.captions.len() == 4 {
             self.captions.pop_front();
         }
