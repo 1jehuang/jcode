@@ -2,6 +2,23 @@
 
 Official releases have two gates: **successful CI for the exact tagged commit** and **a complete platform asset set before publication**. Local preparation can save build time, but it does not bypass either gate. `.github/workflows/release.yml` owns final publication.
 
+## Linux self-dev prereleases
+
+To share successful TUI self-dev builds from a maintainer checkout, run
+`git config --local jcode.linuxPrerelease true` and authenticate `gh` with
+permission to dispatch Actions in `1jehuang/jcode`. Commit and push your work
+to `master` **before building**. The hook requests a CI build of the public
+commit, not an upload of your workstation binary. Dirty or unpublished work
+stays local. Set the same config key to `false` to turn this off.
+
+Linux x86_64 testers can find `selfdev-linux-<commit>` prereleases with
+`gh release list -R 1jehuang/jcode` and download a chosen build with
+`gh release download <tag> -R 1jehuang/jcode`. Verify the archive against
+`SHA256SUMS`, extract it into a separate directory, and run the extracted
+launcher. This is a manual testing channel, separate from stable updates and
+the cross-platform v1 preview below. Rebuilding a commit does not create a
+second public release.
+
 ## Opt-in v1 preview channel
 
 The separate `.github/workflows/preview.yml` pipeline is **enabled by default** on
