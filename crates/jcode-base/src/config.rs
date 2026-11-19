@@ -1080,7 +1080,7 @@ impl Default for JarvisListeningConfig {
         Self {
             max_audio_seconds_per_hour: 600,
             max_classifications_per_hour: 120,
-            max_agent_turns_per_hour: 20,
+            max_agent_turns_per_hour: 0,
             action_probability: 0.97,
             trigger_sound: "/usr/share/sounds/freedesktop/stereo/message-new-instant.oga".into(),
             warm_nari: false,

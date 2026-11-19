@@ -5,7 +5,7 @@ fn listening_limits_are_bounded_defaults_and_can_be_overridden() {
     let limits = Config::default().jarvis.listening;
     assert_eq!(limits.max_audio_seconds_per_hour, 600);
     assert_eq!(limits.max_classifications_per_hour, 120);
-    assert_eq!(limits.max_agent_turns_per_hour, 20);
+    assert_eq!(limits.max_agent_turns_per_hour, 0);
     let config: Config = toml::from_str(
         "[jarvis.listening]\nmax_agent_turns_per_hour = 3\naction_probability = 0.99",
     )
