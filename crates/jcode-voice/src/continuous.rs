@@ -521,8 +521,10 @@ impl Drop for ContinuousRecording {
     }
 }
 
-// 20 ms frames, 300 ms pre-roll, 180 ms confirmed voice, 700 ms end silence,
-// 20 seconds maximum utterance. All sample buffers have hard upper bounds.
+// Sample-clock deadlines cannot fire late after speech resumes.
+const PAUSE_MS: usize = 700;
+const COMMIT_GRACE_MS: usize = 600;
+const HARD_LIMIT_MS: usize = 20_000;
 #[derive(Default)]
 struct Segmenter {
     pending: VecDeque<i16>,
@@ -539,6 +541,8 @@ enum Seg {
     Start(Vec<i16>),
     /// More audio inside the current utterance (silence tail included).
     Audio(Vec<i16>),
+    Pause,
+    Resume,
     /// End of utterance after the trailing silence or the length cap.
     End,
 }
@@ -550,6 +554,7 @@ impl Segmenter {
         for event in self.push_stream(input) {
             match event {
                 Seg::Start(audio) | Seg::Audio(audio) => current.extend(audio),
+                Seg::Pause | Seg::Resume => (),
                 Seg::End => output.push(std::mem::take(&mut current)),
             }
         }
@@ -583,8 +588,14 @@ impl Segmenter {
                     Some(Seg::Audio(audio)) => audio.extend(frame),
                     _ => output.push(Seg::Audio(frame)),
                 }
+                if voice && self.quiet >= PAUSE_MS * 16 {
+                    output.push(Seg::Resume);
+                }
                 self.quiet = if voice { 0 } else { self.quiet + 320 };
-                if self.quiet >= 11200 || self.speech_len >= 320000 {
+                if self.quiet == PAUSE_MS * 16 {
+                    output.push(Seg::Pause);
+                }
+                if self.quiet >= (PAUSE_MS + COMMIT_GRACE_MS) * 16 || self.speech_len >= HARD_LIMIT_MS * 16 {
                     output.push(Seg::End);
                     self.speech_len = 0;
                     self.active = false;
@@ -993,6 +1004,7 @@ async fn run(
     gate: Option<jcode_base::jev::JevClient>,
 ) -> Result<(), VoiceError> {
     emit(&events, ContinuousEvent::State(VoiceState::Starting));
+    jcode_base::logging::info(&format!("JARVIS_CAPTURE settings pause_ms={PAUSE_MS} commit_grace_ms={COMMIT_GRACE_MS} hard_limit_ms={HARD_LIMIT_MS}"));
     let mut segmenter = Segmenter::default();
     let mut generation = epoch.load(Ordering::SeqCst);
     let mut resume_at = Instant::now();
@@ -1151,6 +1163,11 @@ async fn run(
                                 if let Some((_, tx)) = &live {
                                     budget.0.lock().unwrap_or_else(|e| e.into_inner()).extend(audio.len());
                                     if tx.send(audio).is_err() { live = None; }
+                                }
+                            }
+                            event @ (Seg::Pause | Seg::Resume) => {
+                                if let Some((id, _)) = &live {
+                                    trace_turn(*id, if event == Seg::Pause { "speech_pause" } else { "speech_resumed" });
                                 }
                             }
                             Seg::End => {
@@ -1549,10 +1566,22 @@ mod tests {
         let mut s = Segmenter::default();
         s.push(&[0; 4800]);
         assert!(s.push(&[3000; 16000]).is_empty());
-        let out = s.push(&[0; 11200]);
+        let out = s.push(&[0; (PAUSE_MS + COMMIT_GRACE_MS) * 16]);
         assert_eq!(out.len(), 1);
         assert!(out[0].len() <= 320000);
         assert!(!s.active);
+    }
+    #[test]
+    fn resumed_speech_cancels_commit_without_opening_another_stream() {
+        let mut s = Segmenter::default();
+        let mut transitions = Vec::new();
+        for (value, ms) in [(3000, 400), (0, 1280), (3000, 200), (0, 1280)] {
+            transitions.extend(s.push_stream(&vec![value; ms * 16]));
+        }
+        transitions.retain(|e| !matches!(e, Seg::Audio(_)));
+        assert!(matches!(transitions.as_slice(), [Seg::Start(_), Seg::Pause, Seg::Resume, Seg::Pause]));
+        assert!(matches!(s.push_stream(&[0; 320]).as_slice(), [Seg::Audio(_), Seg::End]));
+        assert!(s.push_stream(&[0; 16000]).is_empty());
     }
     #[test]
     fn brief_noise_is_not_speech() {
