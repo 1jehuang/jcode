@@ -148,6 +148,15 @@ else:
         self.assertNotIn("RUSTUP_TOOLCHAIN", build["env"])
         self.assertFalse(Path(self.env["RECORD"] + ".rustup").exists())
 
+    def test_selfdev_identity_forwarded_only_with_valid_run_number(self):
+        for suffix in ['0', '01', '18446744073709551616', '4-dev']:
+            self.assertNotEqual(self.run_script(JCODE_BUILD_SEMVER=f'v1.2.3-selfdev.{suffix}').returncode, 0)
+        self.assertEqual(self.records(), [])
+        version = 'v1.2.3-selfdev.444827'
+        result = self.run_script(JCODE_BUILD_SEMVER=version)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.records()[-1]['env']['JCODE_BUILD_SEMVER'], version)
+
     def test_arm_rebuilds_std_with_target_only_tls(self):
         result = self.run_script(ARM, RUSTFLAGS="", CARGO_ENCODED_RUSTFLAGS="",
                                  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-Cdebuginfo=1")
