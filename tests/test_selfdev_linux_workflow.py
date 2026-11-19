@@ -78,25 +78,47 @@ class LinuxSelfdevTests(unittest.TestCase):
                     self.assertEqual(output.read_text(), f'build={str(build).lower()}\n')
 
     def test_draft_retry_and_non_latest_publication(self):
-        (self.root / ARCHIVE).write_bytes(b'test')
-        (self.root / 'SHA256SUMS').write_bytes(subprocess.check_output(['sha256sum', ARCHIVE], cwd=self.root))
-        self.mock('gh', '''echo "$*" >> calls
-if [[ $2 == view ]]; then
-  if [[ $MODE == new && $# == 3 ]]; then exit 1; fi
-  cat status
-fi
+        dist = self.root / 'dist'
+        dist.mkdir()
+        (self.root / 'scripts').symlink_to(Path(__file__).resolve().parents[1] / 'scripts')
+        (dist / ARCHIVE).write_bytes(b'test')
+        (dist / 'SHA256SUMS').write_bytes(subprocess.check_output(['sha256sum', ARCHIVE], cwd=dist))
+        self.mock('gh', '''echo "$*" >> "$RUNNER_TEMP/calls"
+case "$1 $2" in
+  'release view')
+    if [[ $5 == body ]]; then
+      [[ $MODE != new ]] || exit 1
+      cat "$RUNNER_TEMP/body"
+    else cat "$RUNNER_TEMP/status"; fi ;;
+  'release create'|'release edit')
+    op=$2
+    while [[ $# -gt 0 ]]; do
+      if [[ $1 == --notes-file ]]; then cp "$2" "$RUNNER_TEMP/$op-notes"; exit; fi
+      shift
+    done
+    exit 1 ;;
+esac
 ''')
-        for mode in ['new', 'draft', 'published']:
+        for mode in ['new', 'draft', 'legacy-draft', 'published']:
+            saved = 'Original description\n\n## Highlights\n\n- Original highlight\n'
+            (self.root / 'body').write_text(saved if mode != 'legacy-draft' else 'Old description')
             calls = self.root / 'calls'
             calls.write_text('')
             (self.root / 'status').write_text(json.dumps(dict(isDraft=mode != 'published', isPrerelease=True, targetCommitish=self.sha)))
-            result = self.step(PUBLISH, MODE=mode)
+            result = self.step(PUBLISH, MODE=mode, GH_REPO='owner/repo', RELEASE_NOTES='Fresh highlights')
             log = calls.read_text().splitlines()
             self.assertEqual(result == 0, mode != 'published')
             if mode == 'published':
                 self.assertFalse(any('release upload' in line or 'release edit' in line for line in log))
                 continue
             self.assertEqual(any('release create' in line for line in log), mode == 'new')
+            published = (self.root / 'edit-notes').read_text()
+            if mode == 'draft':
+                self.assertEqual(published, saved)
+            else:
+                self.assertIn('## Highlights\n\n- Fresh highlights', published)
+            if mode == 'new':
+                self.assertEqual(published, (self.root / 'create-notes').read_text())
             self.assertIn('release upload', log[-2])
             self.assertIn('--draft=false --prerelease --latest=false', log[-1])
 
