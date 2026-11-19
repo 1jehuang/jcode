@@ -398,7 +398,11 @@ export -f cargo
                         request.last_progress = Some("published and smoke-tested".to_string());
                         request.save()?;
                         if prerelease && result.status == Some(BackgroundTaskStatus::Completed) {
-                            build::dispatch_linux_prerelease(&repo_dir, &source_after_build);
+                            build::dispatch_linux_prerelease(
+                                &repo_dir,
+                                &source_after_build,
+                                request.public_build_notes().as_deref(),
+                            );
                         }
                         result
                     }
@@ -454,6 +458,7 @@ export -f cargo
     pub(super) async fn do_build(
         &self,
         reason: Option<String>,
+        release_notes: Option<String>,
         target: Option<String>,
         notify: Option<bool>,
         wake: Option<bool>,
@@ -477,6 +482,9 @@ export -f cargo
         let command = SelfDevTool::build_command(&repo_dir, target);
         let dedupe_key = SelfDevTool::build_dedupe_key(&requested_source, &command);
         let blocker = SelfDevTool::newest_active_request(&requested_source.worktree_scope)?;
+        let release_notes = release_notes
+            .map(|notes| notes.trim().to_owned())
+            .filter(|notes| !notes.is_empty());
         let duplicate =
             BuildRequest::find_duplicate_pending(&requested_source.worktree_scope, &dedupe_key)?;
         let (session_short_name, session_title) = SelfDevTool::load_session_labels(&ctx.session_id);
@@ -495,6 +503,7 @@ export -f cargo
                 repo_dir: repo_dir.display().to_string(),
                 repo_scope: requested_source.repo_scope.clone(),
                 worktree_scope: requested_source.worktree_scope.clone(),
+                release_notes: release_notes.clone(),
                 command: command.display.clone(),
                 requested_at: Utc::now().to_rfc3339(),
                 started_at: None,
@@ -592,6 +601,7 @@ export -f cargo
             repo_dir: repo_dir.display().to_string(),
             repo_scope: requested_source.repo_scope.clone(),
             worktree_scope: requested_source.worktree_scope.clone(),
+            release_notes: release_notes.clone(),
             command: command.display.clone(),
             requested_at: Utc::now().to_rfc3339(),
             started_at: None,
@@ -706,6 +716,7 @@ export -f cargo
     pub(super) async fn do_build_reload(
         &self,
         reason: Option<String>,
+        release_notes: Option<String>,
         target: Option<String>,
         context: Option<String>,
         ctx: &ToolContext,
@@ -714,7 +725,7 @@ export -f cargo
         // waits inline for completion, so a separate completion notification
         // would be redundant noise.
         let build_output = self
-            .do_build(reason, target, Some(false), Some(false), ctx)
+            .do_build(reason, release_notes, target, Some(false), Some(false), ctx)
             .await?;
 
         let metadata = build_output.metadata.clone().unwrap_or_else(|| json!({}));
@@ -902,6 +913,7 @@ export -f cargo
             repo_dir: repo_dir.display().to_string(),
             repo_scope: requested_source.repo_scope.clone(),
             worktree_scope: requested_source.worktree_scope.clone(),
+            release_notes: None,
             command: shell_command.display.clone(),
             requested_at: Utc::now().to_rfc3339(),
             started_at: None,

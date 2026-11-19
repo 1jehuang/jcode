@@ -135,7 +135,7 @@ pub async fn run_self_dev(should_build: bool, resume_session: Option<String>) ->
 
         build::publish_local_current_build_for_source(&repo_dir, &source)?;
         if prerelease {
-            build::dispatch_linux_prerelease(&repo_dir, &source);
+            build::dispatch_linux_prerelease(&repo_dir, &source, None);
         }
 
         output::stderr_info("✓ Build complete; updated current launcher");

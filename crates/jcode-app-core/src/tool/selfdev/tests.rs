@@ -79,6 +79,7 @@ fn request_fixture(
         session_id: "session-history-test".to_string(),
         session_short_name: None,
         session_title: None,
+        release_notes: None,
         reason: request_id.to_string(),
         repo_dir: "/tmp/jcode".to_string(),
         repo_scope: source.repo_scope.clone(),
@@ -374,6 +375,7 @@ fn schema_only_advertises_core_selfdev_fields() {
     assert!(props.contains_key("prompt"));
     assert!(props.contains_key("context"));
     assert!(props.contains_key("reason"));
+    assert!(props.contains_key("release_notes"));
     assert!(props.contains_key("target"));
     assert!(props.contains_key("command"));
     assert!(props.contains_key("request_id"));
@@ -780,7 +782,7 @@ async fn build_queues_background_tasks_and_reports_queue_status() {
         .expect("first build should queue");
     let second = tool
         .execute(
-            json!({"action": "build", "reason": "second reason"}),
+            json!({"action": "build", "reason": "second reason", "release_notes": "From attached session"}),
             create_test_context(&session_two.id, Some(repo.path().to_path_buf())),
         )
         .await
@@ -795,6 +797,14 @@ async fn build_queues_background_tasks_and_reports_queue_status() {
     let first_task_id = first_meta["task_id"].as_str().expect("first task id");
     let second_task_id = second_meta["task_id"].as_str().expect("second task id");
 
+    let parent = BuildRequest::load(first_meta["request_id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(parent.release_notes.is_none());
+    assert_eq!(
+        parent.public_build_notes().as_deref(),
+        Some("From attached session")
+    );
     assert_eq!(first_meta["queue_position"].as_u64(), Some(1));
     assert_eq!(second_meta["deduped"].as_bool(), Some(true));
     assert!(
@@ -867,7 +877,7 @@ async fn build_reload_waits_for_build_then_reloads() {
     let tool = SelfDevTool::new();
     let output = tool
         .execute(
-            json!({"action": "build-reload", "reason": "combined build and reload"}),
+            json!({"action": "build-reload", "reason": "private coordination", "context": "private context", "release_notes": " Public highlight "}),
             create_test_context(&session.id, Some(repo.path().to_path_buf())),
         )
         .await
@@ -890,6 +900,15 @@ async fn build_reload_waits_for_build_then_reloads() {
         .expect("load request")
         .expect("request exists");
     assert_eq!(request.state, BuildRequestState::Completed);
+    assert_eq!(request.release_notes.as_deref(), Some("Public highlight"));
+    let mut legacy = serde_json::to_value(&request).unwrap();
+    legacy.as_object_mut().unwrap().remove("release_notes");
+    assert!(
+        serde_json::from_value::<BuildRequest>(legacy)
+            .unwrap()
+            .release_notes
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1033,6 +1052,7 @@ fn status_output_prunes_stale_pending_requests() {
         session_id: session.id.clone(),
         session_short_name: session.short_name.clone(),
         session_title: Some("Stale Build".to_string()),
+        release_notes: None,
         reason: "stale reason".to_string(),
         repo_dir: "/tmp/jcode".to_string(),
         repo_scope: source.repo_scope.clone(),
@@ -1101,6 +1121,7 @@ fn freshly_queued_request_survives_reconcile_before_task_metadata_exists() {
         session_id: session.id.clone(),
         session_short_name: session.short_name.clone(),
         session_title: Some("Fresh Build".to_string()),
+        release_notes: None,
         reason: "fresh reason".to_string(),
         repo_dir: "/tmp/jcode".to_string(),
         repo_scope: source.repo_scope.clone(),
@@ -1186,6 +1207,7 @@ async fn build_ignores_stale_pending_requests_when_computing_queue_position() {
         session_id: stale_session.id.clone(),
         session_short_name: stale_session.short_name.clone(),
         session_title: Some("Stale Build".to_string()),
+        release_notes: None,
         reason: "stale blocker".to_string(),
         repo_dir: repo.path().display().to_string(),
         repo_scope: source.repo_scope.clone(),
@@ -1287,6 +1309,7 @@ fn reconcile_pending_state_maps_superseded_background_status() {
         session_id: session.id.clone(),
         session_short_name: session.short_name.clone(),
         session_title: Some("Superseded Build".to_string()),
+        release_notes: None,
         reason: "superseded reason".to_string(),
         repo_dir: "/tmp/jcode".to_string(),
         repo_scope: source.repo_scope.clone(),
@@ -1377,6 +1400,7 @@ fn reconcile_keeps_running_request_not_yet_registered_in_live_task_map() {
         session_id: session.id.clone(),
         session_short_name: session.short_name.clone(),
         session_title: Some("Racing Build".to_string()),
+        release_notes: None,
         reason: "racing reason".to_string(),
         repo_dir: "/tmp/jcode".to_string(),
         repo_scope: source.repo_scope.clone(),

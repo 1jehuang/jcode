@@ -1,4 +1,4 @@
-# Embedded by the build hook. Send only an immutable SHA to the canonical repo.
+# Embedded by the build hook. Only send the SHA and explicitly supplied public highlights.
 set -eu
 sha=$1
 eligible() {
@@ -12,4 +12,7 @@ eligible || exit 0
 remote=$(gh api --hostname github.com repos/1jehuang/jcode/git/ref/heads/master --jq .object.sha)
 [ "$remote" = "$sha" ] || exit 0
 eligible || exit 0
-exec gh workflow run selfdev-linux.yml --repo 1jehuang/jcode --ref master -f "sha=$sha"
+notes=${2-}
+set -- -f "sha=$sha"
+if [ -n "$notes" ]; then set -- "$@" -f "release_notes=$notes"; fi
+exec gh workflow run selfdev-linux.yml --repo 1jehuang/jcode --ref master "$@"

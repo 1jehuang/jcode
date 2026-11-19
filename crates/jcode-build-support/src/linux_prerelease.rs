@@ -33,10 +33,11 @@ pub fn linux_prerelease_candidate(repo: &Path, source: &SourceState) -> bool {
 const DISPATCH_SCRIPT: &str = include_str!("linux_prerelease.sh");
 
 /// Network I/O happens in a child process so build/reload can finish independently.
-pub fn dispatch_linux_prerelease(repo: &Path, source: &SourceState) {
+pub fn dispatch_linux_prerelease(repo: &Path, source: &SourceState, release_notes: Option<&str>) {
     if let Ok(mut child) = Command::new("sh")
         .current_dir(repo)
         .args(["-c", DISPATCH_SCRIPT, "linux-prerelease", &source.full_hash])
+        .args(release_notes)
         .env("GH_HOST", "github.com")
         .env("GH_PROMPT_DISABLED", "1")
         .stdin(Stdio::null())
@@ -101,31 +102,42 @@ mod tests {
                 .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
         )
         .unwrap();
-        let dispatch = |tip: &str| {
+        let dispatch = |tip: &str, notes: Option<&str>| {
             let out = Command::new("sh")
                 .current_dir(&repo)
                 .env("PATH", &path)
                 .env("TIP", tip)
                 .args(["-c", DISPATCH_SCRIPT, "hook", &source.full_hash])
+                .args(notes)
                 .output()
                 .unwrap();
             assert!(out.status.success());
             String::from_utf8(out.stdout).unwrap()
         };
-        assert!(dispatch("not-pushed").is_empty());
+        assert!(dispatch("not-pushed", None).is_empty());
         assert_eq!(
-            dispatch(&source.full_hash),
+            dispatch(&source.full_hash, None),
             format!(
                 "workflow\nrun\nselfdev-linux.yml\n--repo\n1jehuang/jcode\n--ref\nmaster\n-f\nsha={}\n",
                 source.full_hash
             )
         );
+        let notes = "First line with spaces
+$(touch injected) * --ref other";
+        assert_eq!(
+            dispatch(&source.full_hash, Some(notes)),
+            format!(
+                "{}-f\nrelease_notes={notes}\n",
+                dispatch(&source.full_hash, None)
+            )
+        );
+        assert!(!repo.join("injected").exists());
         fs::write(repo.join("dirty"), "private").unwrap();
         assert!(!linux_prerelease_candidate(&repo, &source));
-        assert!(dispatch(&source.full_hash).is_empty());
+        assert!(dispatch(&source.full_hash, None).is_empty());
         fs::remove_file(repo.join("dirty")).unwrap();
         git(&["checkout", "-b", "other"]);
         assert!(!linux_prerelease_candidate(&repo, &source));
-        assert!(dispatch(&source.full_hash).is_empty());
+        assert!(dispatch(&source.full_hash, None).is_empty());
     }
 }

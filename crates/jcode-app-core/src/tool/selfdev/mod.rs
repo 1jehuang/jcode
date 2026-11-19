@@ -47,6 +47,8 @@ struct SelfDevInput {
     /// Why this build is needed; shown to other queued/blocked agents.
     #[serde(default)]
     reason: Option<String>,
+    #[serde(default)]
+    release_notes: Option<String>,
     /// Build target for selfdev build: auto, tui, or all.
     #[serde(default)]
     target: Option<String>,
@@ -120,6 +122,8 @@ struct BuildRequest {
     session_short_name: Option<String>,
     session_title: Option<String>,
     reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    release_notes: Option<String>,
     repo_dir: String,
     #[serde(default)]
     repo_scope: String,
@@ -304,6 +308,21 @@ impl BuildRequest {
                     && request.state == BuildRequestState::Attached
             })
             .collect())
+    }
+
+    fn public_build_notes(&self) -> Option<String> {
+        let mut highlights = Vec::new();
+        for notes in self.release_notes.iter().cloned().chain(
+            Self::attached_watchers(&self.request_id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|w| w.release_notes),
+        ) {
+            if !highlights.contains(&notes) {
+                highlights.push(notes);
+            }
+        }
+        (!highlights.is_empty()).then(|| highlights.join("\n"))
     }
 
     fn find_duplicate_pending(worktree_scope: &str, dedupe_key: &str) -> Result<Option<Self>> {
@@ -525,6 +544,7 @@ impl SelfDevTool {
                     "prompt": { "type": "string" },
                     "context": { "type": "string" },
                     "reason": { "type": "string" },
+                    "release_notes": { "type": "string", "description": "Optional public, user-facing highlights for build/build-reload. Never include private reason, context, or session information." },
                     "target": {
                         "type": "string",
                         "enum": ["auto", "tui", "all"],
@@ -618,6 +638,7 @@ impl Tool for SelfDevTool {
             "build" => {
                 self.do_build(
                     params.reason,
+                    params.release_notes,
                     params.target,
                     params.notify,
                     params.wake,
@@ -627,8 +648,14 @@ impl Tool for SelfDevTool {
             }
             "build-reload" | "build_reload" => {
                 if is_selfdev {
-                    self.do_build_reload(params.reason, params.target, params.context, &ctx)
-                        .await
+                    self.do_build_reload(
+                        params.reason,
+                        params.release_notes,
+                        params.target,
+                        params.context,
+                        &ctx,
+                    )
+                    .await
                 } else {
                     Ok(ToolOutput::new(SelfDevTool::selfdev_only_action_message(
                         "build-reload",
