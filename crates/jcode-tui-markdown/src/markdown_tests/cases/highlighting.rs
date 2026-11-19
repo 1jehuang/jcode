@@ -76,7 +76,9 @@ println(\"hello\")
 fn markdown_code_fence_expands_tabs_to_four_cell_stops() {
     // Ratatui draws `\t` as nothing, so tab-indented code must arrive as spaces.
     // Stops count from the start of the code line, after wide characters too.
-    let lines = render_markdown("```go\nfunc main() {\n\tif ok {\n\t\treturn\n\t}\n界\tx\nab\tc\n}\n```");
+    let lines = render_markdown(
+        "```go\nfunc main() {\n\tif ok {\n\t\treturn\n\t}\n界\tx\n⌨\u{fe0f}\tk\nab\tc\n}\n```",
+    );
     let body: Vec<String> = lines
         .iter()
         .map(line_to_string)
@@ -90,6 +92,7 @@ fn markdown_code_fence_expands_tabs_to_four_cell_stops() {
             "        return",
             "    }",
             "界  x",
+            "⌨\u{fe0f}  k",
             "ab  c",
             "}",
         ]
