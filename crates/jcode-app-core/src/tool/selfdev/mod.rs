@@ -22,6 +22,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 mod build_queue;
 mod launch;
+mod logs;
 mod reload;
 mod setup;
 mod status;
@@ -534,6 +535,7 @@ impl SelfDevTool {
                             "cancel-build",
                             "reload",
                             "reload-bridge",
+                            "logs",
                             "status",
                             "find-config",
                             "socket-info",
@@ -617,6 +619,12 @@ impl Tool for SelfDevTool {
             // Available in every session.
             "enter" => self.do_enter(params.prompt, &ctx).await,
             "setup" => self.do_setup(&ctx).await,
+            "logs" if is_selfdev => {
+                logs::output(SelfDevTool::resolve_repo_dir(ctx.working_dir.as_deref())).await
+            }
+            "logs" => Ok(ToolOutput::new(SelfDevTool::selfdev_only_action_message(
+                "logs",
+            ))),
             "status" => self.do_status().await,
             "find-config" => self.do_find_config(&ctx).await,
             "reload" => {
@@ -721,7 +729,7 @@ impl Tool for SelfDevTool {
             }
             _ => Ok(ToolOutput::new(format!(
                 "Unknown action: {}. In a self-dev session use 'enter', 'setup', 'build', \
-                 'build-reload', 'test', 'cancel-build', 'reload', 'reload-bridge', 'status', 'find-config', \
+                 'build-reload', 'test', 'cancel-build', 'reload', 'reload-bridge', 'logs', 'status', 'find-config', \
                  'socket-info', or 'socket-help'. Outside self-dev mode use 'enter', 'setup', \
                  'reload', 'status', or 'find-config'.",
                 action
