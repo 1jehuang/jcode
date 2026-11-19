@@ -24,6 +24,10 @@ local, unlocked Linux graphical session. It is not a background startup service.
    word. Ambient, quoted, hypothetical and uncertain speech should be rejected.
    Classifier failures fail closed, never forward directly to the agent.
 4. The listening window shows a running local transcript of finalized phrases.
+   A new `Heard` row starts gray. Once Jev scores the phrase, the row shows
+   its confidence that the phrase was addressed to Jarvis, not the accuracy of
+   the transcription. Green means the gate accepted it; an unscored phrase
+   does not display a made-up percentage.
    A caption is not a chat message. When Jev accepts a phrase, the ordinary
    agent receives a voice turn containing the recent `background_transcript`
    and the exact `trigger`. Only the trigger is a request. Earlier speech may
