@@ -106,6 +106,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn always_on_policy_distinguishes_background_from_the_trigger() {
+        for rule in [
+            "`background_transcript`",
+            "`trigger`",
+            "Answer or act on the trigger only",
+            "Ordinary typed messages remain ordinary requests",
+        ] {
+            assert!(ALWAYS_ON_INSTRUCTIONS.contains(rule));
+            assert!(!SYSTEM_PROMPT_APPEND.contains(rule));
+        }
+    }
+
+    #[test]
     fn speech_configuration_preserves_other_tools_and_restrictions() {
         let original = SessionToolConfig {
             enabled: Some(vec!["bash".into(), "speak".into()]),
