@@ -208,7 +208,8 @@ impl Agent {
             display_role,
             continues_turn,
         )?;
-        if continues_turn || display_role.is_some() {
+        // Jarvis input already has a user echo (or a turn-start pickup).
+        if continues_turn || display_role.is_some_and(|role| role != crate::session::StoredDisplayRole::JarvisUser) {
             self.emit_context_messages_since(input_start, &event_tx);
         }
         // The per-turn reminder (swarm DM wake, mission continuation, ...) goes
@@ -278,6 +279,7 @@ impl Agent {
                     content,
                     display_role: Some(
                         match message.display_role {
+                            Some(crate::session::StoredDisplayRole::JarvisUser) => "jarvis_user",
                             Some(crate::session::StoredDisplayRole::FileActivity) => {
                                 "file_activity"
                             }

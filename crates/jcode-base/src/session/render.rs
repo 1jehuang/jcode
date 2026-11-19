@@ -491,6 +491,7 @@ pub fn render_messages_and_images_with_compacted_history(
         }
 
         let role = match msg.display_role {
+            Some(StoredDisplayRole::JarvisUser) => "jarvis_user",
             Some(StoredDisplayRole::System) => "system",
             Some(StoredDisplayRole::BackgroundTask) => "background_task",
             Some(StoredDisplayRole::FileActivity) => "file_activity",
