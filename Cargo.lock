@@ -4930,6 +4930,7 @@ dependencies = [
  "jcode-base",
  "jcode-provider-env",
  "libc",
+ "rand 0.9.3",
  "regex",
  "reqwest 0.12.28",
  "rustls",

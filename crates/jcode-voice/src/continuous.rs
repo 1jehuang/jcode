@@ -17,8 +17,7 @@ use std::{
 /// A single monotonic clock lets diagnostics subtract endpoint from gate/final
 /// even when multiple utterances are being classified concurrently.
 fn trace_turn(id: u64, stage: &'static str) {
-    static CLOCK: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    let ms = CLOCK.get_or_init(Instant::now).elapsed().as_millis();
+    let ms = crate::timing::monotonic_ms();
     jcode_base::logging::info(&format!("JARVIS_CAPTURE utterance={id} stage={stage} monotonic_ms={ms}"));
 }
 
@@ -917,7 +916,8 @@ async fn run(
     let mut segmenter = Segmenter::default();
     let mut generation = epoch.load(Ordering::SeqCst);
     let mut resume_at = Instant::now();
-    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    // Randomize the process origin so IDs in persisted logs do not restart at 1.
+    static NEXT_ID: std::sync::OnceLock<AtomicU64> = std::sync::OnceLock::new();
     let mut jobs: VecDeque<(
         tokio::task::JoinHandle<Result<Option<ClassifiedCaption>, VoiceError>>,
         Arc<AtomicBool>,
@@ -999,7 +999,7 @@ async fn run(
                                     continue;
                                 }
                                 budget_limited = false;
-                                let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+                                let id = NEXT_ID.get_or_init(|| AtomicU64::new(rand::random())).fetch_add(1, Ordering::Relaxed);
                                 trace_turn(id, "speech_onset");
                                 let token = Arc::new(AtomicBool::new(false));
                                 let gate = gate.clone();
