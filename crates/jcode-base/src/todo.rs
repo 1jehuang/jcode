@@ -490,7 +490,13 @@ fn sync_lanes_after_save(session_id: &str, todos: &[TodoItem]) {
                         .map(|old| (old.waiting_on.clone(), old.waiting_reason.clone()))
                         .unwrap_or_default();
                 }
-                if lane.is_empty() || current == lane {
+                // A stale link must never clear a worker that has moved to another lane.
+                if current == lane
+                    || (lane.is_empty()
+                        && current
+                            .iter()
+                            .any(|item| stages::lane_id(item) != link.lane))
+                {
                     return Ok(());
                 }
                 write_todos(&link.worker, &lane)?;
@@ -680,6 +686,12 @@ mod lane_sync_tests {
             lane_change_summary(&mine, &worker_view),
             "changed: add lexer + parser tests"
         );
+
+        // Withdrawing the entire lane must clear the worker's active plan too.
+        let remaining: Vec<_> = edited.into_iter().filter(|todo| todo.id == "u1").collect();
+        save_todos(boss, &remaining).unwrap();
+        assert!(load_todos(fox).unwrap().is_empty());
+        assert_eq!(load_todos(boss).unwrap(), remaining);
 
         match previous_home {
             Some(value) => crate::env::set_var("JCODE_HOME", value),
