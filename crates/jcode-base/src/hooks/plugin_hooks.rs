@@ -376,9 +376,7 @@ async fn execute(
     if let Some(cwd) = &event.cwd {
         cmd.current_dir(cwd);
     }
-    let _ = super::CLIENT_TERMINAL_ENV.try_with(|env| {
-        crate::terminal_launch::apply_client_terminal_env(&mut cmd, env);
-    });
+    super::apply_current_client_terminal_env(&mut cmd);
     if let Some(data) = &data {
         // Override a daemon/terminal's stale value with this hook's identity.
         cmd.env("CLAUDE_PLUGIN_DATA", data);

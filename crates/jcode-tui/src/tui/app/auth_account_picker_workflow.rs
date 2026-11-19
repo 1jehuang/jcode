@@ -17,7 +17,10 @@ impl App {
             | AccountPickerCommand::Login { provider, label }
             | AccountPickerCommand::Replace { provider, label }
             | AccountPickerCommand::Rename { provider, label }
-            | AccountPickerCommand::Remove { provider, label } => (provider, label),
+            | AccountPickerCommand::Remove { provider, label }
+            | AccountPickerCommand::ClaudeCodeCli {
+                provider, label, ..
+            } => (provider, label),
             _ => return None,
         };
         let provider_id = match provider {

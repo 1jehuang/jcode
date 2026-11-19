@@ -244,7 +244,42 @@ pub fn instance_env(instance: &ClaudeCodeInstance) -> Vec<(String, String)> {
 /// like `jcode login` does.
 pub fn apply_instance_env(command: &mut tokio::process::Command, instance: &ClaudeCodeInstance) {
     command.env_remove("CLAUDE_CONFIG_DIR");
+    if instance.jcode_account.is_some() {
+        // An API key outranks CLAUDE_CODE_OAUTH_TOKEN in the CLI.
+        command.env_remove("ANTHROPIC_API_KEY");
+        command.env_remove("ANTHROPIC_AUTH_TOKEN");
+    }
     command.envs(instance_env(instance));
+}
+
+/// Env var through which a jcode account's OAuth token reaches the CLI.
+pub const OAUTH_TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
+
+/// `instance` with its jcode account's current token in `env` (a no-op for
+/// instances that own their login).
+pub async fn with_account_token(
+    mut instance: ClaudeCodeInstance,
+) -> anyhow::Result<ClaudeCodeInstance> {
+    if let Some(label) = instance.jcode_account.clone() {
+        let token = jcode_base::auth::claude_code::fresh_access_token_for_account(&label)
+            .await
+            .map_err(|err| anyhow::anyhow!("Claude account '{label}' for Claude Code: {err:#}"))?;
+        instance.env.insert(OAUTH_TOKEN_ENV.to_string(), token);
+    }
+    Ok(instance)
+}
+
+/// Same login and launch options, ignoring the (rotating) account token.
+pub fn same_account(a: &ClaudeCodeInstance, b: &ClaudeCodeInstance) -> bool {
+    let without_token = |i: &ClaudeCodeInstance| {
+        let mut env = i.env.clone();
+        env.remove(OAUTH_TOKEN_ENV);
+        env
+    };
+    a.resolved_home() == b.resolved_home()
+        && a.jcode_account == b.jcode_account
+        && without_token(a) == without_token(b)
+        && a.launch_args == b.launch_args
 }
 
 /// Extra env for the identity probe so it never connects to remote MCP or IDEs.
@@ -323,6 +358,9 @@ pub fn resolved_home(settings: &ClaudeCodeSettings, id: &str) -> Option<PathBuf>
 
 /// User-facing login command for an instance.
 pub fn login_command(binary: &str, instance: &ClaudeCodeInstance) -> String {
+    if let Some(label) = &instance.jcode_account {
+        return format!("/accounts claude login (re-login account `{label}`)");
+    }
     match instance.resolved_home() {
         Some(home) => format!("CLAUDE_CONFIG_DIR={} {binary} auth login", home.display()),
         None => format!("{binary} auth login"),
@@ -333,6 +371,27 @@ pub fn login_command(binary: &str, instance: &ClaudeCodeInstance) -> String {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn account_token_rotation_keeps_the_same_account() {
+        let base = ClaudeCodeInstance {
+            id: "claude-fox".into(),
+            jcode_account: Some("claude-fox".into()),
+            ..Default::default()
+        };
+        let mut a = base.clone();
+        a.env.insert(OAUTH_TOKEN_ENV.into(), "old".into());
+        let mut b = base.clone();
+        b.env.insert(OAUTH_TOKEN_ENV.into(), "new".into());
+        assert!(same_account(&a, &b));
+        assert_ne!(a.env, b.env);
+        let other = ClaudeCodeInstance {
+            jcode_account: Some("claude-otter".into()),
+            ..b.clone()
+        };
+        assert!(!same_account(&a, &other));
+        assert!(login_command("claude", &base).contains("/accounts claude login"));
+    }
 
     fn spec(session: SessionStart) -> SpawnSpec {
         SpawnSpec {
@@ -460,7 +519,7 @@ mod tests {
             display_name: None,
             home: Some("~/.claude_personal".into()),
             env: extra,
-            launch_args: None,
+            ..Default::default()
         };
         let env = instance_env(&personal);
         let dir = env

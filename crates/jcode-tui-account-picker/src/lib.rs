@@ -56,6 +56,13 @@ pub enum AccountPickerCommand {
         provider: AccountProviderKind,
         label: String,
     },
+    /// Run this saved Claude account through the Claude Code CLI (`enabled`)
+    /// or jcode's native API transport.
+    ClaudeCodeCli {
+        provider: AccountProviderKind,
+        label: String,
+        enabled: bool,
+    },
     PromptNew {
         provider: AccountProviderKind,
     },
@@ -127,7 +134,9 @@ pub fn action_kind_label(command: &AccountPickerCommand) -> &'static str {
         AccountPickerCommand::ToggleFailover => "setting",
         AccountPickerCommand::Login { .. } => "login",
         AccountPickerCommand::Replace { .. } => "login",
-        AccountPickerCommand::Rename { .. } => "setting",
+        AccountPickerCommand::Rename { .. } | AccountPickerCommand::ClaudeCodeCli { .. } => {
+            "setting"
+        }
         AccountPickerCommand::Remove { .. } => "danger",
         AccountPickerCommand::PromptNew { .. } => "account",
         AccountPickerCommand::SubmitInput(_) => "action",

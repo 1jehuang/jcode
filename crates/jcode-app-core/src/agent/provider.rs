@@ -320,7 +320,11 @@ impl Agent {
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
         self.refresh_compaction_budget();
-        self.persist_session_best_effort("route selection");
+        if source == crate::provider::ProviderModelSelectionSource::User {
+            self.persist_user_choice_best_effort("route selection");
+        } else {
+            self.persist_session_best_effort("route selection");
+        }
         self.log_env_snapshot("set_route_selection");
         Ok(())
     }
@@ -365,7 +369,11 @@ impl Agent {
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
         self.refresh_compaction_budget();
-        self.persist_session_best_effort("model selection");
+        if source == crate::provider::ProviderModelSelectionSource::User {
+            self.persist_user_choice_best_effort("model selection");
+        } else {
+            self.persist_session_best_effort("model selection");
+        }
         self.log_env_snapshot("set_model");
         Ok(())
     }
@@ -508,7 +516,7 @@ impl Agent {
         self.record_observed_account_pins();
         self.sync_bound_account_route();
         self.log_env_snapshot("set_account_pin");
-        self.session.save()?;
+        self.session.save_prepared()?;
         Ok(())
     }
 
@@ -633,7 +641,7 @@ impl Agent {
         // Keep the side-table in sync (see `restore_reasoning_effort_from_session`).
         crate::session_effort::record_session_effort(&self.session.id, current.as_deref());
         self.log_env_snapshot("set_reasoning_effort");
-        self.session.save()?;
+        self.session.save_prepared()?;
         Ok(current)
     }
 

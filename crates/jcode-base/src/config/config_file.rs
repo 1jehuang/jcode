@@ -352,6 +352,24 @@ impl Config {
         Ok(())
     }
 
+    /// Make saved Claude account `label` use jcode's native API (`native`)
+    /// or the Claude Code CLI (the default). `new_label` moves a native entry
+    /// on rename.
+    pub fn set_claude_account_native(
+        label: &str,
+        native: bool,
+        new_label: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let mut cfg = Self::load_for_update()?;
+        let accounts = &mut cfg.provider.claude_code.native_accounts;
+        let was = accounts.iter().any(|item| item.trim() == label.trim());
+        accounts.retain(|item| item.trim() != label.trim());
+        if native || (was && new_label.is_some()) {
+            accounts.push(new_label.unwrap_or(label).trim().to_string());
+        }
+        cfg.save()
+    }
+
     /// Update the persisted default alignment preference.
     pub fn set_display_centered(centered: bool) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;

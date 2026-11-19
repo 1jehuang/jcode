@@ -492,6 +492,14 @@ impl AccountPicker {
     }
 
     pub fn handle_overlay_mouse(&mut self, mouse: MouseEvent) {
+        // Any-motion tracking (?1003h) reports every pointer move; only a real
+        // click or scroll may dismiss the removal confirmation.
+        if matches!(
+            mouse.kind,
+            MouseEventKind::Moved | MouseEventKind::Up(_) | MouseEventKind::Drag(_)
+        ) {
+            return;
+        }
         self.removal_confirmation = None;
         if self.prompt.is_some() {
             return;
@@ -1091,7 +1099,8 @@ fn estimate_command_bytes(command: &AccountPickerCommand) -> usize {
         | AccountPickerCommand::Replace { label, .. }
         | AccountPickerCommand::Login { label, .. }
         | AccountPickerCommand::Rename { label, .. }
-        | AccountPickerCommand::Remove { label, .. } => label.capacity(),
+        | AccountPickerCommand::Remove { label, .. }
+        | AccountPickerCommand::ClaudeCodeCli { label, .. } => label.capacity(),
         AccountPickerCommand::PromptNew { .. }
         | AccountPickerCommand::Unpin { .. }
         | AccountPickerCommand::ToggleFailover

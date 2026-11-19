@@ -127,6 +127,9 @@ impl MultiProvider {
             {
                 anyhow::bail!("No Claude account with label '{}' found", label);
             }
+            if let Some(instance) = self.claude_cli_instance(Some(label)) {
+                return self.select_claude_via_cli(&instance, model.trim());
+            }
             ActiveProvider::Claude
         } else {
             if !crate::auth::codex::list_accounts()?
@@ -185,6 +188,64 @@ impl MultiProvider {
             }
             _ => Ok(true),
         }
+    }
+
+    /// Claude Code instance serving a native Claude selection: the given saved
+    /// account, else the native runtime's pinned or active account. `None`
+    /// when that account uses jcode's native API or the CLI is unavailable.
+    pub(super) fn claude_cli_instance(&self, label: Option<&str>) -> Option<String> {
+        self.claude_code_provider()?;
+        let label = match label {
+            Some(label) => label.to_string(),
+            None => self
+                .anthropic_provider()?
+                .account_pin(AccountProviderKind::Claude)
+                .and_then(|pin| crate::auth::claude::resolve_pin(&pin))
+                .or_else(crate::auth::claude::active_account_label)?,
+        };
+        crate::auth::claude_code::instance_for_account(&label)
+    }
+
+    /// A native Claude model selection whose account runs through the CLI
+    /// (the default for saved accounts); an API-key selection stays native.
+    pub(super) fn claude_selection_via_cli(
+        &self,
+        mode: Option<CredentialMode>,
+        model: &str,
+    ) -> Option<Result<()>> {
+        let mode = mode.or_else(|| self.anthropic_provider().map(|p| p.credential_mode()));
+        if mode == Some(CredentialMode::ApiKey) {
+            return None;
+        }
+        let instance = self.claude_cli_instance(None)?;
+        Some(self.select_claude_via_cli(&instance, model))
+    }
+
+    /// Pinning a CLI-mode Claude account in a native Claude session moves the
+    /// session to that account's Claude Code instance.
+    pub(super) fn claude_pin_via_cli(
+        &self,
+        kind: AccountProviderKind,
+        pin: &Option<AccountPin>,
+    ) -> Option<Result<()>> {
+        if kind != AccountProviderKind::Claude || self.active_provider() != ActiveProvider::Claude {
+            return None;
+        }
+        let label = crate::auth::claude::resolve_pin(pin.as_ref()?)?;
+        let instance = self.claude_cli_instance(Some(&label))?;
+        Some((|| {
+            if let Some(provider) = self.account_runtime(kind) {
+                provider.set_account_pin(kind, pin.clone())?;
+            }
+            self.select_claude_via_cli(&instance, &self.model())
+        })())
+    }
+
+    /// Serve a saved Claude account through the Claude Code CLI.
+    pub(super) fn select_claude_via_cli(&self, instance: &str, model: &str) -> Result<()> {
+        let pin = crate::auth::claude_code::pin_for_label(instance)?;
+        self.set_account_pin(AccountProviderKind::ClaudeCode, Some(pin))?;
+        self.set_model_on_provider(ActiveProvider::ClaudeCode, model)
     }
 
     pub(super) fn selected_account_for_provider(&self, target: ActiveProvider) -> Option<String> {

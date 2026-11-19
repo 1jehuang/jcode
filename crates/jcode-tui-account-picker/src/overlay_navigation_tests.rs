@@ -212,6 +212,14 @@ fn account_menu_removal_still_needs_confirmation_and_escape_never_deletes() {
     assert!(picker.removal_confirmation.is_none());
     assert!(matches!(picker.view, AccountPickerView::Account(_)));
     key(&mut picker, KeyCode::Enter);
+    // Pointer motion between Enter and y must not cancel the confirmation.
+    picker.handle_overlay_mouse(MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: 0,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    });
+    assert!(picker.removal_confirmation.is_some());
     assert!(matches!(key(&mut picker, KeyCode::Char('y')),
         OverlayAction::Execute(AccountPickerCommand::Remove { provider: AccountProviderKind::Anthropic, label }) if label == "work two"));
 }

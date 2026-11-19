@@ -178,7 +178,10 @@ fn account_target(command: &AccountPickerCommand) -> Option<(&AccountProviderKin
         | AccountPickerCommand::Replace { provider, label }
         | AccountPickerCommand::Login { provider, label }
         | AccountPickerCommand::Rename { provider, label }
-        | AccountPickerCommand::Remove { provider, label } => Some((provider, label)),
+        | AccountPickerCommand::Remove { provider, label }
+        | AccountPickerCommand::ClaudeCodeCli {
+            provider, label, ..
+        } => Some((provider, label)),
         _ => None,
     }
 }

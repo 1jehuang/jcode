@@ -453,6 +453,13 @@ pub fn remove_account(label: &str) -> Result<()> {
     if get_active_account_override().as_deref() == Some(label) {
         set_active_account_override(auth.active_anthropic_account.clone());
     }
+    if crate::config::config()
+        .provider
+        .claude_code
+        .uses_native(label)
+    {
+        crate::config::Config::set_claude_account_native(label, false, None)?;
+    }
 
     Ok(())
 }

@@ -54,7 +54,9 @@ pub(super) fn action_section(item: &AccountPickerItem) -> ActionSection {
         AccountPickerCommand::Login { .. } | AccountPickerCommand::Replace { .. } => {
             ActionSection::Login
         }
-        AccountPickerCommand::Rename { .. } => ActionSection::Setting,
+        AccountPickerCommand::Rename { .. } | AccountPickerCommand::ClaudeCodeCli { .. } => {
+            ActionSection::Setting
+        }
         AccountPickerCommand::Remove { .. } => ActionSection::Remove,
         AccountPickerCommand::PromptNew { .. } => ActionSection::Add,
         AccountPickerCommand::PromptValue { .. } => ActionSection::Setting,
@@ -241,6 +243,9 @@ pub(super) fn action_kind_help(command: &AccountPickerCommand) -> &'static str {
         AccountPickerCommand::PromptNew { .. } => {
             "Signs in to another account. Existing saved accounts are kept."
         }
+        AccountPickerCommand::ClaudeCodeCli { .. } => {
+            "Switches how this account calls Claude: jcode's native API, or the official Claude Code CLI (`claude`) using this account's login. CLI mode adds claude-code models for this account in /model."
+        }
         AccountPickerCommand::SubmitInput(_) => {
             "Runs the selected account-management command immediately."
         }
@@ -295,6 +300,11 @@ pub(super) fn command_preview(command: &AccountPickerCommand) -> String {
             AccountProviderKind::Anthropic => format!("/accounts claude remove {}", label),
             AccountProviderKind::OpenAi => format!("/accounts openai remove {}", label),
         },
+        AccountPickerCommand::ClaudeCodeCli { label, enabled, .. } => format!(
+            "/accounts claude cli {} {}",
+            label,
+            if *enabled { "on" } else { "off" }
+        ),
         AccountPickerCommand::PromptNew { provider } => match provider {
             AccountProviderKind::Anthropic => "/accounts claude add".to_string(),
             AccountProviderKind::OpenAi => "/accounts openai add".to_string(),

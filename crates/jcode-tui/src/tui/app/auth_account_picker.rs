@@ -957,7 +957,7 @@ impl App {
         });
         self.input.clear();
         self.cursor_pos = 0;
-        self.set_status_notice("Remote OAuth accounts: Enter requests switch, Esc closes. Management requires the remote host.");
+        self.set_status_notice("Remote OAuth accounts: Enter requests switch, Esc closes. /accounts claude cli <label> on|off sets the transport on the remote host.");
     }
 }
 

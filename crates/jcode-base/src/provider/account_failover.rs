@@ -461,11 +461,15 @@ pub(super) fn same_provider_account_candidates(provider: ActiveProvider) -> Vec<
     let Some(kind) = account_kind(provider) else {
         return Vec::new();
     };
+    // Native Claude failover skips accounts that run through the CLI.
+    let cli = (kind == AccountProviderKind::Claude).then(crate::auth::claude_code::settings);
     // Never clear a known cooldown just to try the same spent login again.
     same_provider_account_rotation(provider)
         .into_iter()
         .filter(|label| {
-            account_exhausted(kind, label).is_none()
+            cli.as_ref()
+                .is_none_or(|cli| !cli.routes_jcode_account(label))
+                && account_exhausted(kind, label).is_none()
                 && super::models::provider_unavailability_detail_for_account_label(
                     super::MultiProvider::provider_key(provider),
                     Some(label),
