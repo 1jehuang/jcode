@@ -768,7 +768,6 @@ fn render_system_message_renders_markdown_formatting() {
         .map(extract_line_text)
         .collect::<Vec<_>>()
         .join("\n");
-
     assert_eq!(
         lines.len(),
         1,
@@ -794,7 +793,6 @@ fn render_system_message_renders_markdown_formatting() {
         !plain.contains("[link](http://example.com)"),
         "strips raw link syntax: {plain:?}"
     );
-
     // Color is still forced to the system color over every span.
     for line in &lines {
         for span in &line.spans {
@@ -807,7 +805,6 @@ fn render_system_message_renders_markdown_formatting() {
 fn explicit_system_report_preserves_indentation_and_newlines() {
     let msg = DisplayMessage::system("Header line\n  indented detail\n\nNext block")
         .with_title("Context");
-
     let lines = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off);
     let rendered = lines.iter().map(extract_line_text).collect::<Vec<_>>();
 
@@ -829,7 +826,6 @@ fn explicit_system_report_preserves_indentation_and_newlines() {
         rendered[3].trim_end().ends_with("Next block"),
         "got: {rendered:?}"
     );
-
     // The detail line keeps exactly two more leading spaces than the header.
     assert_eq!(
         leading_spaces(&rendered[1]),
@@ -1640,7 +1636,6 @@ fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
     let msg = DisplayMessage::todos(
         serde_json::json!({ "todos": todos, "plan": plan, "goals": goals }).to_string(),
     );
-
     let narrow = render_todos_message(&msg, 60, crate::config::DiffDisplayMode::Off)
         .iter()
         .map(extract_line_text)
@@ -1668,7 +1663,6 @@ fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
         "{}",
         narrow.join("\n")
     );
-
     let wide = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off)
         .iter()
         .map(extract_line_text)

@@ -224,10 +224,8 @@ pub(crate) fn render_swarm_plan_dag(
         return Vec::new();
     }
 
-    // Build lookup maps.
     let item_map: HashMap<&str, &PlanItem> = items.iter().map(|i| (i.id.as_str(), i)).collect();
 
-    // Compute blocked status from dependency edges.
     let mut blocked_set: HashSet<&str> = HashSet::new();
     for item in items {
         if item
@@ -239,7 +237,6 @@ pub(crate) fn render_swarm_plan_dag(
         }
     }
 
-    // Classify item status.
     let classify = |item: &PlanItem| -> (&str, bool, bool, bool) {
         let id = item.id.as_str();
         if item.status == "completed" {
@@ -255,7 +252,6 @@ pub(crate) fn render_swarm_plan_dag(
         }
     };
 
-    // Build dependency graph: item_id -> children (items that depend on it).
     let mut children_map: HashMap<&str, Vec<&str>> = HashMap::new();
     for item in items {
         for dep in &item.blocked_by {
@@ -310,7 +306,6 @@ pub(crate) fn render_swarm_plan_dag(
     remaining.sort();
     topo_order.extend(remaining);
 
-    // Build tree from topological order.
     let mut node_map: HashMap<&str, DagNode> = HashMap::new();
 
     for id in &topo_order {
@@ -1248,7 +1243,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // Targeted tests for gallery and page rendering with selected indices.
     // -----------------------------------------------------------------------
-
     #[test]
     fn gallery_lines_selected_first_second_and_none() {
         let members = vec![

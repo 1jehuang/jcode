@@ -306,12 +306,10 @@ fn render_agentgrep_output_body(content: &str, row_width: usize) -> Vec<Line<'st
     let border = "    │ ";
     let border_width = UnicodeWidthStr::width(border);
     let avail = row_width.saturating_sub(border_width).max(1);
-
     let mut out: Vec<Line<'static>> = Vec::new();
     let source_lines: Vec<&str> = content.split('\n').collect();
     let total = source_lines.len();
     let mut truncated_extra = 0usize;
-
     for raw_line in source_lines {
         if out.len() >= MAX_BODY_LINES {
             truncated_extra = total.saturating_sub(out.len());
@@ -342,14 +340,12 @@ fn render_agentgrep_output_body(content: &str, row_width: usize) -> Vec<Line<'st
             }
         }
     }
-
     if truncated_extra > 0 {
         out.push(Line::from(Span::styled(
             format!("    │ … {} more lines …", truncated_extra),
             Style::default().fg(dim_color()),
         )));
     }
-
     out
 }
 
@@ -891,9 +887,6 @@ struct ParsedTodoToolOutput {
 }
 
 fn parse_todo_tool_output(content: &str) -> Option<ParsedTodoToolOutput> {
-    // Remote display and timestamp injection can decorate tool results before
-    // they reach this renderer. Keep that transport metadata outside the
-    // structured payload parser so a valid todo result still renders as a card.
     let content = strip_todo_tool_output_headers(content);
     let mut todo_stream =
         serde_json::Deserializer::from_str(content).into_iter::<Vec<crate::todo::TodoItem>>();

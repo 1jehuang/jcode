@@ -3031,19 +3031,15 @@ pub(crate) fn swarm_panel_action_for_key(
     if code == KeyCode::Char('/') && modifiers.is_empty() {
         return Some(SwarmPanelAction::EnterFilter);
     }
-    // Shift+Tab toggles batch mode.
     if code == KeyCode::BackTab {
         return Some(SwarmPanelAction::BatchMode);
     }
-    // Space toggles multi-select on the current agent.
     if code == KeyCode::Char(' ') && modifiers.is_empty() {
         return Some(SwarmPanelAction::ToggleSelect);
     }
-    // Ctrl+a selects all agents.
     if code == KeyCode::Char('a') && modifiers.contains(KeyModifiers::CONTROL) {
         return Some(SwarmPanelAction::SelectAll);
     }
-    // In batch mode, single letters apply to all selected agents.
     if batch_mode {
         return match code {
             KeyCode::Char('s') if modifiers.is_empty() => Some(SwarmPanelAction::BatchStop),
