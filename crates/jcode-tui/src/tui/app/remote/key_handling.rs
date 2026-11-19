@@ -150,42 +150,8 @@ mod key_events;
 pub(in crate::tui::app) use key_events::handle_remote_key_event;
 use key_events::handle_remote_key_internal;
 
-/// The text-only follow-up queue cannot carry attachments. Keep the complete
-/// draft editable rather than queueing text that refers to discarded images.
 fn queue_prepared_remote_input(app: &mut App, prepared: input::PreparedInput) {
-    if prepared.images.is_empty() {
-        app.queued_messages.push(prepared.expanded);
-        crate::logging::info(&format!(
-            "RECOVERY_QUEUE_STAGED session_id={:?} request_id={:?} queued={}",
-            app.remote_session_id,
-            app.current_message_id,
-            app.queued_messages.len()
-        ));
-        return;
-    }
-    crate::logging::info(&format!(
-        "RECOVERY_QUEUE_GUARD session_id={:?} request_id={:?} reason=images content_bytes={} images={} queued={} action=restore_draft",
-        app.remote_session_id,
-        app.current_message_id,
-        prepared.expanded.len(),
-        prepared.images.len(),
-        app.queued_messages.len()
-    ));
-    // Preparation consumed pasted text storage. Restore its expanded contents,
-    // not now-unresolvable [pasted ...] placeholders.
-    app.restore_failover_payload(app_mod::FallbackResendPayload {
-        content: prepared.expanded,
-        images: prepared.images,
-        is_system: false,
-        system_reminder: None,
-        auto_retry: false,
-        retry_attempts: 0,
-        raw_input: None,
-    });
-    app.push_display_message(DisplayMessage::system(
-        "Message not queued: queued messages cannot carry images. Your text and images are still in the input. Send now or wait until the current turn finishes.",
-    ));
-    app.set_status_notice("Images cannot be queued; draft preserved");
+    input::stage_queued_input(app, prepared);
 }
 
 #[cfg(test)]
@@ -193,7 +159,7 @@ mod recovery_queue_guard_tests {
     use super::*;
 
     #[test]
-    fn image_queue_guard_restores_expanded_draft_and_preserves_queue() {
+    fn image_queue_preserves_payload_and_order() {
         let mut app = app_mod::tests::create_test_app();
         app.queued_messages.push("already queued".to_string());
         let images = vec![("image/png".to_string(), "private image payload".to_string())];
@@ -205,9 +171,27 @@ mod recovery_queue_guard_tests {
                 images: images.clone(),
             },
         );
-        assert_eq!(app.input, "expanded private prompt [image 1]");
-        assert_eq!(app.pending_images, images);
-        assert_eq!(app.queued_messages, vec!["already queued"]);
+        assert!(app.input.is_empty());
+        assert_eq!(app.queued_images, images);
+        assert_eq!(
+            app.queued_messages,
+            vec!["already queued", "expanded private prompt"]
+        );
+    }
+
+    #[test]
+    fn image_queue_recall_preserves_distinct_markers_and_payloads() {
+        let mut app = app_mod::tests::create_test_app();
+        for data in ["first", "second"] {
+            app.input = "inspect [image 1]".into();
+            app.pending_images.push(("image/png".into(), data.into()));
+            input::queue_message(&mut app);
+        }
+        assert!(input::retrieve_pending_message_for_edit(&mut app));
+        assert_eq!(app.input, "inspect [image 1]\n\ninspect [image 2]");
+        assert_eq!(app.pending_images[0].1, "first");
+        assert_eq!(app.pending_images[1].1, "second");
+        assert!(app.queued_images.is_empty());
     }
 
     #[test]
@@ -1145,6 +1129,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             app.clear_provider_messages();
             app.clear_display_messages();
             app.queued_messages.clear();
+            app.queued_images.clear();
             app.queued_commands.clear();
             app.pasted_contents.clear();
             app.pending_images.clear();

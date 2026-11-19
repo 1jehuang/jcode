@@ -418,11 +418,12 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         if messages.is_empty() && reminder.is_none() {
             return true;
         }
+        let images = std::mem::take(&mut app.queued_images);
         if begin_remote_send(
             app,
             remote,
             combined.clone(),
-            vec![],
+            images.clone(),
             true,
             reminder.clone(),
             auto_retry,
@@ -443,6 +444,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             }
             if !combined.is_empty() {
                 app.queued_messages.insert(0, combined);
+                app.queued_images = images;
             }
         }
         needs_redraw = true;
@@ -1938,7 +1940,7 @@ fn queue_message_for_reconnect(app: &mut App) {
     }
 
     let prepared = input::take_prepared_input(app);
-    app.queued_messages.push(prepared.expanded);
+    input::stage_queued_input(app, prepared);
     if crate::tui::is_ssh_remote() {
         crate::tui::request_immediate_ssh_reconnect();
     }

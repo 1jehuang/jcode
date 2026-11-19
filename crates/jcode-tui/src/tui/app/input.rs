@@ -1153,7 +1153,22 @@ pub(super) fn expand_paste_placeholders(app: &App, input: &str) -> String {
 
 pub(super) fn queue_message(app: &mut App) {
     let prepared = take_prepared_input(app);
-    app.queued_messages.push(prepared.expanded);
+    stage_queued_input(app, prepared);
+}
+
+pub(super) fn stage_queued_input(app: &mut App, prepared: PreparedInput) {
+    let mut text = prepared.expanded;
+    offset_image_markers(&mut text, prepared.images.len(), app.queued_images.len());
+    app.queued_messages.push(text);
+    app.queued_images.extend(prepared.images);
+}
+
+pub(super) fn offset_image_markers(text: &mut String, count: usize, offset: usize) {
+    if offset > 0 {
+        for i in (1..=count).rev() {
+            *text = text.replace(&format!("[image {i}]"), &format!("[image {}]", offset + i));
+        }
+    }
 }
 
 /// True for composer text that runs as a client command rather than a prompt:
@@ -1274,7 +1289,11 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
         had_pending = true;
     }
     if !app.queued_messages.is_empty() {
-        parts.extend(std::mem::take(&mut app.queued_messages));
+        for mut text in std::mem::take(&mut app.queued_messages) {
+            offset_image_markers(&mut text, app.queued_images.len(), app.pending_images.len());
+            parts.push(text);
+        }
+        app.pending_images.append(&mut app.queued_images);
         if !app.has_queued_followups() {
             app.pending_queued_dispatch = false;
         }
@@ -4072,14 +4091,11 @@ impl App {
                     &combined,
                     self.provider.reasoning_effort().as_deref(),
                 );
-                self.add_provider_message(Message::user(&combined));
-                self.session.add_message(
-                    Role::User,
-                    vec![ContentBlock::Text {
-                        text: combined.clone(),
-                        cache_control: None,
-                    }],
-                );
+                let message =
+                    Message::user_with_images(&combined, std::mem::take(&mut self.queued_images));
+                self.session
+                    .add_message(Role::User, message.content.to_vec());
+                self.add_provider_message(message);
             }
             self.append_turn_system_reminder(turn_reminder);
             self.session_save_pending = true;
