@@ -352,7 +352,7 @@ fn test_remote_ctrl_enter_queues_while_processing() {
         .unwrap();
     // A person pressing the chord does not do it microseconds after the last
     // character, so close the pasted-newline window the way real typing would.
-    input::expire_char_press_for_test();
+    input::paste_guard::clear_char_press();
     rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::CONTROL, &mut remote))
         .unwrap();
 
@@ -395,7 +395,7 @@ fn test_remote_cmd_enter_queues_while_processing() {
         .unwrap();
     rt.block_on(app.handle_remote_key(KeyCode::Char('i'), KeyModifiers::empty(), &mut remote))
         .unwrap();
-    input::expire_char_press_for_test();
+    input::paste_guard::clear_char_press();
     rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::SUPER, &mut remote))
         .unwrap();
 

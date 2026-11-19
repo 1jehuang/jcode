@@ -303,7 +303,7 @@ where
 }
 
 pub(in crate::tui::app) mod newline;
-mod paste_guard;
+pub(crate) mod paste_guard;
 #[cfg(test)]
 pub(in crate::tui::app) use paste_guard::expire_for_test as paste_guard_expire_for_test;
 use paste_guard::load_dropped_image;
@@ -809,19 +809,6 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
     app.sync_model_picker_preview_from_input();
 }
 
-/// Whether a `Ctrl+Enter` right now is the line break of a paste.
-pub(super) fn pasted_newline_in_progress() -> bool {
-    paste_guard::ctrl_enter_is_pasted_newline()
-}
-
-/// Test hook: close the pasted-newline window, so the next `Ctrl+Enter` is read as
-/// the deliberate chord. Tests drive keys microseconds apart, which is indistinguishable
-/// from a paste burst without this.
-#[cfg(test)]
-pub(super) fn expire_char_press_for_test() {
-    paste_guard::clear_char_press();
-}
-
 pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
     if app.append_ssh_login_input(text) {
         return true;
@@ -829,14 +816,7 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
     if text.is_empty() {
         return false;
     }
-    // Remember character keystrokes so a following Ctrl+Enter can be recognised as
-    // the line break of a paste rather than a deliberate chord.
-    if text.chars().count() == 1 {
-        paste_guard::note_char_press();
-    } else {
-        paste_guard::clear_char_press();
-    }
-
+    paste_guard::note_text_input(text);
     let onboarding_suggestions = matches!(
         app.onboarding_phase(),
         Some(crate::tui::app::onboarding_flow::OnboardingPhase::Suggestions)

@@ -661,7 +661,7 @@ pub(super) async fn handle_remote_key_internal(
     // first line of the block on its own.
     if code == KeyCode::Enter
         && modifiers.contains(KeyModifiers::CONTROL)
-        && input::pasted_newline_in_progress()
+        && input::paste_guard::ctrl_enter_is_pasted_newline()
     {
         input::handle_text_input(app, "\n");
         return Ok(());

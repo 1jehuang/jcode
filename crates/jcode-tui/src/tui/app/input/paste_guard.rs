@@ -36,15 +36,25 @@ pub(super) fn note_char_press() {
 
 /// Whether a `Ctrl+Enter` right now is the line break of a paste, rather than a
 /// deliberate chord.
-pub(super) fn ctrl_enter_is_pasted_newline() -> bool {
+pub(crate) fn ctrl_enter_is_pasted_newline() -> bool {
     LAST_CHAR_PRESS.with(|cell| {
         cell.get()
             .is_some_and(|at| at.elapsed() <= PASTED_NEWLINE_MAX_GAP)
     })
 }
 
+/// Remember a typed chunk: one character arms the pasted-newline window, anything
+/// else ends it.
+pub(super) fn note_text_input(text: &str) {
+    if text.chars().count() == 1 {
+        note_char_press();
+    } else {
+        clear_char_press();
+    }
+}
+
 /// The paste is over once a key other than a character or its newline arrives.
-pub(super) fn clear_char_press() {
+pub(crate) fn clear_char_press() {
     LAST_CHAR_PRESS.with(|cell| cell.set(None));
 }
 
