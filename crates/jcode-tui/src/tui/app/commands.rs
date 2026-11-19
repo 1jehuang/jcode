@@ -2769,6 +2769,11 @@ pub(super) fn active_working_dir(app: &App) -> Option<std::path::PathBuf> {
 }
 
 pub(super) fn handle_dictation_command(app: &mut App, trimmed: &str) -> bool {
+    if let Some(rest) = slash_command_rest(trimmed, "/voice history") {
+        let notice = app.jarvis_listener.queue_history(rest);
+        app.set_status_notice(notice);
+        return true;
+    }
     if trimmed == "/voice" {
         app.toggle_voice_input();
         return true;

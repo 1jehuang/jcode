@@ -4,6 +4,9 @@
     clippy::too_many_arguments,
     clippy::type_complexity
 )]
+mod history;
+#[cfg(test)]
+mod gate_eval;
 use crate::{NariSession, PcmRecording, VoiceError};
 use std::{
     collections::VecDeque,
@@ -183,12 +186,14 @@ impl QuietWindow {
     }
 }
 struct Events {
+    history: history::History,
     context: GateContext,
     queue: VecDeque<ContinuousEvent>,
     quiet: QuietWindow,
     notify: Arc<tokio::sync::Notify>,
 }
 struct ClassifiedCaption {
+    audio: history::Candidate,
     id: u64,
     text: String,
     score: Option<(f64, bool)>,
@@ -244,6 +249,7 @@ impl Events {
         }
         if self.context.claimed == Some(caption.id) {
             self.context.claimed = None;
+            self.history.accept(caption.audio, caption.id, &caption.text);
             return;
         }
         if let Some((probability, accepted)) = caption.score {
@@ -253,6 +259,7 @@ impl Events {
                 accepted,
             });
             if accepted {
+                self.history.accept(caption.audio, caption.id, &caption.text);
                 let text = self.context.accepted(caption.text);
                 trace_turn(caption.id, "final_accepted");
                 self.push(ContinuousEvent::Transcript { id: caption.id, text });
@@ -358,7 +365,7 @@ impl ContinuousRecording {
         let epoch = Arc::new(AtomicU64::new(0));
         let level = Arc::new(AtomicU32::new(0));
         let events = Arc::new(Mutex::new(Events {
-            context: GateContext::default(),
+            history: history::History::default(), context: GateContext::default(),
             queue: VecDeque::new(),
             quiet: QuietWindow::default(),
             notify: Arc::new(tokio::sync::Notify::new()),
@@ -471,6 +478,9 @@ impl ContinuousRecording {
         }
         output.manual_trigger()
     }
+    pub fn reset_audio_history(&self, enabled: Option<bool>) { self.events.lock().unwrap_or_else(|e| e.into_inner()).history.reset(enabled); }
+    pub fn audio_history_status(&self) -> (bool, Vec<u64>) { self.events.lock().unwrap_or_else(|e| e.into_inner()).history.status() }
+    pub fn audio_history_clip(&self, id: u64) -> Option<(Vec<i16>, String)> { self.events.lock().unwrap_or_else(|e| e.into_inner()).history.clip(id) }
     /// Claim a quiet playback window without invalidating pending transcript events.
     pub fn suppress_if_quiet(&self) -> bool {
         let mut output = self.events.lock().unwrap_or_else(|e| e.into_inner());
@@ -1066,7 +1076,7 @@ async fn run(
         u64,
     )> = VecDeque::new();
     // Audio sink of the utterance currently streaming to Nari.
-    let mut live: Option<(u64, tokio::sync::mpsc::UnboundedSender<Vec<i16>>)> = None;
+    let mut live: Option<(u64, tokio::sync::mpsc::UnboundedSender<Vec<i16>>, Arc<Mutex<history::Candidate>>)> = None;
     let mut warm: Option<Warm> = None;
     let mut warm_retry_at = Instant::now();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -1146,8 +1156,11 @@ async fn run(
                                 let child = token.clone();
                                 let warm_session = warm.take().and_then(Warm::take);
                                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                                let mut candidate = events.lock().unwrap_or_else(|e| e.into_inner()).history.begin();
+                                candidate.append(&audio);
+                                let candidate = Arc::new(Mutex::new(candidate));
                                 let _ = tx.send(audio);
-                                live = Some((id, tx));
+                                live = Some((id, tx, candidate.clone()));
                                 let (events, epoch, paused, suppressed, stopped) = (events.clone(), epoch.clone(), paused.clone(), suppressed.clone(), cancel.clone());
                                 jobs.push_back((tokio::spawn(async move {
                                     let (partial_tx, partial_rx) = tokio::sync::watch::channel(String::new());
@@ -1185,12 +1198,14 @@ async fn run(
                                         pending_final.0 = None;
                                         // Always close a provisional request, even when
                                         // nothing was added, so Jarvis knows to answer.
+                                        let nonempty_final = !text.trim().is_empty();
                                         let full = if text.trim().is_empty() { trigger } else { text };
                                         let mut output = events.lock().unwrap_or_else(|e|e.into_inner());
                                         if stopped.load(Ordering::SeqCst) || generation != epoch.load(Ordering::SeqCst) || paused.load(Ordering::SeqCst) || suppressed.load(Ordering::SeqCst) {
                                             trace_discard(id, "continuation_discarded", "epoch_changed");
                                             return Ok(None);
                                         }
+                                        if nonempty_final {output.history.accept(std::mem::take(&mut *candidate.lock().unwrap_or_else(|e| e.into_inner())), id, &full);}
                                         trace_turn(id, "continuation_ready");
                                         output.push(ContinuousEvent::Continuation { id, text: full.trim().chars().take(4096).collect() });
                                         return Ok(None);
@@ -1206,22 +1221,23 @@ async fn run(
                                     let gate = gate.as_ref().ok_or(VoiceError::NotConfigured)?;
                                     let score = semantic_gate(gate,&text,threshold,state).await?;
                                     trace_turn(id, "final_gate_decided");
-                                    Ok(Some(ClassifiedCaption { id, text, score }))
+                                    Ok(Some(ClassifiedCaption { id, text, score, audio: std::mem::take(&mut *candidate.lock().unwrap_or_else(|e| e.into_inner())) }))
                                 }),token,generation));
                             }
                             Seg::Audio(audio) => {
-                                if let Some((_, tx)) = &live {
+                                if let Some((_, tx, candidate)) = &live {
+                                    candidate.lock().unwrap_or_else(|e| e.into_inner()).append(&audio);
                                     budget.0.lock().unwrap_or_else(|e| e.into_inner()).extend(audio.len());
                                     if tx.send(audio).is_err() { live = None; }
                                 }
                             }
                             event @ (Seg::Pause | Seg::Resume) => {
-                                if let Some((id, _)) = &live {
+                                if let Some((id, _, _)) = &live {
                                     trace_turn(*id, if event == Seg::Pause { "speech_pause" } else { "speech_resumed" });
                                 }
                             }
                             Seg::End => {
-                                if let Some((id, tx)) = live.take() {
+                                if let Some((id, tx, _)) = live.take() {
                                     trace_turn(id, "speech_endpoint");
                                     drop(tx);
                                 }
@@ -1767,11 +1783,12 @@ mod tests {
     #[test]
     fn scored_captions_precede_dispatch_and_unscored_speech_stays_background() {
         let mut events = Events {
-            context: GateContext::default(),
+            history: history::History::default(), context: GateContext::default(),
             queue: VecDeque::new(),
             quiet: QuietWindow::default(),
             notify: Arc::new(tokio::sync::Notify::new()),
         };
+        events.history.reset(Some(true));
         for (id, text, raw) in [
             (1, "ambient", Some(0.943)),
             (2, "unscored", None),
@@ -1788,7 +1805,10 @@ mod tests {
                 )
                 .unwrap()
             });
+            let mut audio = events.history.begin();
+            audio.append(&[id as i16, -9]);
             events.classified(ClassifiedCaption {
+                audio,
                 id,
                 text: text.into(),
                 score,
@@ -1812,6 +1832,8 @@ mod tests {
             }
             assert!(events.queue.is_empty());
         }
+        assert_eq!(events.history.status().1, [3]);
+        assert_eq!(events.history.clip(3).unwrap(), (vec![3,-9], "request".into()));
     }
     #[test]
     fn manual_trigger_sends_only_recent_speech() {
@@ -1841,7 +1863,7 @@ mod tests {
         assert_eq!(probe(&GateContext::default())["recent_acceptance"], false);
         // Speech still at the gate is claimed, and its later score dropped.
         let mut events = Events {
-            context: GateContext::default(),
+            history: history::History::default(), context: GateContext::default(),
             queue: VecDeque::new(),
             quiet: QuietWindow::default(),
             notify: Arc::new(tokio::sync::Notify::new()),
@@ -1857,6 +1879,7 @@ mod tests {
             serde_json::json!({"trigger":"just said","background_transcript":["before"]})
         );
         events.classified(ClassifiedCaption {
+                audio: Default::default(),
             id: 7,
             text: "just said".into(),
             score: Some((0.99, true)),
@@ -2014,7 +2037,7 @@ mod tests {
     }
     #[test]
     fn pending_requests_survive_telemetry_but_not_invalidation() {
-        let mut e = Events { context: GateContext::default(), queue: VecDeque::new(), quiet: QuietWindow::default(), notify: Arc::new(tokio::sync::Notify::new()) };
+        let mut e = Events { history: history::History::default(), context: GateContext::default(), queue: VecDeque::new(), quiet: QuietWindow::default(), notify: Arc::new(tokio::sync::Notify::new()) };
         let request = |id| ContinuousEvent::Transcript { id, text: "private".into() };
         let final_text = |id| ContinuousEvent::Continuation { id, text: "private".into() };
         assert_eq!(request(7).discard_marker(), Some((7, "accepted_discarded")));
@@ -2035,7 +2058,7 @@ mod tests {
     #[test]
     fn caption_revision_keeps_score_after_row_even_before_poll() {
         let mut e = Events {
-            context: GateContext::default(), queue: VecDeque::new(),
+            history: history::History::default(), context: GateContext::default(), queue: VecDeque::new(),
             quiet: QuietWindow::default(), notify: Arc::new(tokio::sync::Notify::new()),
         };
         let caption = |id, text: &str| ContinuousEvent::Caption { id, text: text.into() };
@@ -2051,7 +2074,7 @@ mod tests {
     #[test]
     fn bounded_events() {
         let mut e = Events {
-            context: GateContext::default(),
+            history: history::History::default(), context: GateContext::default(),
             queue: VecDeque::new(),
             quiet: QuietWindow::default(),
             notify: Arc::new(tokio::sync::Notify::new()),
