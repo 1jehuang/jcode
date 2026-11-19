@@ -57,6 +57,20 @@ fn context_test_provider(model: &str, limit: Option<u64>) -> AntigravityProvider
 }
 
 #[test]
+fn neon_requires_an_advertised_antigravity_route() {
+    let provider = context_test_provider("gemini-4-neon", None);
+    let ids = provider.available_models_for_switching();
+    assert_eq!(ids, ["gemini-3-flash"]);
+    assert!(
+        ensure_account_model("gemini-4-neon", &ids)
+            .unwrap_err()
+            .to_string()
+            .contains("gemini-4-neon")
+    );
+    assert!(ensure_account_model("gemini-4-neon", &["gemini-4-neon".into()]).is_ok());
+}
+
+#[test]
 fn context_window_uses_route_catalog_instead_of_family_maximum() {
     let provider = context_test_provider("gemini-3-flash", Some(128_000));
     assert_eq!(provider.context_window(), 128_000);

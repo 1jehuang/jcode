@@ -77,42 +77,10 @@ impl Provider for GeminiProvider {
             {
                 Ok(response) => response,
                 Err(err) if is_gemini_model_not_found_error(&err) => {
-                    let mut fallback_response = None;
-                    let mut last_err = err;
-                    for fallback_model in gemini_fallback_models(&model) {
-                        jcode_base::logging::warn(&format!(
-                            "Gemini model '{}' was not found; retrying with fallback '{}'",
-                            model, fallback_model
-                        ));
-                        match provider
-                            .generate_content(
-                                &state,
-                                fallback_model,
-                                &messages,
-                                &tools,
-                                &system,
-                                resume_session_id.as_deref(),
-                            )
-                            .await
-                        {
-                            Ok(response) => {
-                                let _ = provider.set_model(fallback_model);
-                                fallback_response = Some(response);
-                                break;
-                            }
-                            Err(err) => {
-                                last_err = err;
-                            }
-                        }
-                    }
-
-                    match fallback_response {
-                        Some(response) => response,
-                        None => {
-                            let _ = tx.send(Err(last_err)).await;
-                            return;
-                        }
-                    }
+                    let _ = tx.send(Err(err.context(format!(
+                        "Gemini could not serve selected model '{model}' for this account. Choose an available model with /model"
+                    )))).await;
+                    return;
                 }
                 Err(err) => {
                     // A tool schema `generateContent` rejects 400s every turn,
