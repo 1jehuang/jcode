@@ -129,6 +129,13 @@ async fn subagent_role_is_injected_into_assembled_prompt() {
             .static_part
             .contains(crate::prompt::SUBAGENT_PROMPT_BLOCK)
     );
+    assert_eq!(
+        split
+            .static_part
+            .matches(crate::prompt::SUBAGENT_PROMPT_BLOCK)
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -137,12 +144,35 @@ async fn coordinator_role_keeps_normal_assembled_prompt() {
     let provider: Arc<dyn Provider> = Arc::new(PromptRoleProvider);
     let registry = Registry::new(provider.clone()).await;
     let agent = Agent::new(provider, registry);
+    let coordinator_prompt = agent.build_system_prompt_split(None);
 
-    let split = agent.build_system_prompt_split(None);
     assert!(
-        !split
+        !coordinator_prompt
             .static_part
             .contains(crate::prompt::SUBAGENT_PROMPT_BLOCK)
+    );
+    agent.session.prompt_role = crate::prompt::PromptRole::Coordinator;
+    assert_eq!(
+        agent.build_system_prompt_split(None).static_part,
+        coordinator_prompt.static_part
+    );
+}
+
+#[tokio::test]
+async fn missing_role_defaults_to_subagent_guidance() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let provider: Arc<dyn Provider> = Arc::new(PromptRoleProvider);
+    let registry = Registry::new(provider.clone()).await;
+    // Missing or unknown role state defaults to subagent, so a spawned session
+    // without an explicit role still gets worker guidance.
+    let role = crate::prompt::PromptRole::default();
+    let prompt = crate::prompt::apply_prompt_role("assembled prompt".to_string(), role);
+    assert!(prompt.contains(crate::prompt::SUBAGENT_PROMPT_BLOCK));
+    assert_eq!(
+        prompt
+            .matches(crate::prompt::SUBAGENT_PROMPT_BLOCK)
+            .count(),
+        1
     );
 }
 

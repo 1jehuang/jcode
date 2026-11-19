@@ -41,32 +41,34 @@ pub const MERMAID_PROMPT: &str = "# Mermaid\n\nRender fenced `mermaid` blocks in
 /// transcript text. Coordinators keep the normal instruction set (including
 /// any operator-level delegation guidance); subagents receive an additional
 /// block that overrides delegation-style instructions with do-the-work rules.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptRole {
-    #[default]
     Coordinator,
+    #[serde(other)]
     Subagent,
 }
 
+/// Deserializing missing/unrecognized persisted role state chooses the safe
+/// worker role: spurious worker guidance is harmless, while treating a worker
+/// as a coordinator reintroduces the delegation-only failure mode.
+impl Default for PromptRole {
+    fn default() -> Self {
+        Self::Subagent
+    }
+}
+
 impl PromptRole {
-    /// Used with `skip_serializing_if` so legacy coordinator sessions keep
-    /// their existing on-disk representation.
+    /// Used with `skip_serializing_if` so coordinator sessions keep their
+    /// existing on-disk representation.
     pub fn is_coordinator(&self) -> bool {
         *self == Self::Coordinator
     }
 }
 
-/// Appended to every subagent system prompt, after all other instruction
-/// sources (including AGENTS.md and prompt overrides), so it wins conflicts.
-pub const SUBAGENT_PROMPT_BLOCK: &str = "\
-## Subagent Role
-You are a subagent executing one assigned unit of work, not a coordinator.
-- Complete the assigned task inline using your own tools. Do the work yourself.
-- Do not delegate, spawn, or ask other agents to do the task.
-- Use `BROKEN` only for a genuine tool, route, or machine failure that blocks all work.
-- Use `OPERATOR NEEDED` only for a decision or credential only the operator can provide.
-- Do not reply with status words such as BROKEN or OPERATOR NEEDED in place of doing the work.";
+#[path = "prompt/subagent_guidance.rs"]
+mod subagent_guidance;
+pub use subagent_guidance::SUBAGENT_PROMPT_BLOCK;
 
 /// Apply role-specific guidance to an assembled system prompt.
 ///

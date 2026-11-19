@@ -888,10 +888,23 @@ fn prompt_role_block_is_unconditional_for_subagents_only() {
     let coordinator = apply_prompt_role(base.clone(), PromptRole::Coordinator);
     assert_eq!(coordinator, base);
     assert!(!coordinator.contains(SUBAGENT_PROMPT_BLOCK));
+    assert_eq!(
+        serde_json::from_str::<PromptRole>("\"coordinator\"").expect("known role"),
+        PromptRole::Coordinator
+    );
 
-    let subagent = apply_prompt_role(base, PromptRole::Subagent);
+    let missing_role = serde_json::from_str::<PromptRole>("null").expect("missing role default");
+    assert_eq!(missing_role, PromptRole::Subagent);
+
+    let subagent = apply_prompt_role(base, missing_role);
     assert!(subagent.contains(SUBAGENT_PROMPT_BLOCK));
-    assert!(subagent.contains("Do not delegate, spawn, or ask other agents"));
-    assert!(subagent.contains("BROKEN` only for a genuine"));
-    assert!(subagent.contains("OPERATOR NEEDED` only for a decision"));
+    assert_eq!(
+        subagent
+            .matches(crate::prompt::SUBAGENT_PROMPT_BLOCK)
+            .count(),
+        1
+    );
+    assert!(subagent.contains("Do not delegate, do not spawn"));
+    assert!(subagent.contains("`BROKEN` is reserved for a genuine tool"));
+    assert!(subagent.contains("`OPERATOR NEEDED` is reserved for a decision"));
 }
