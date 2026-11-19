@@ -26,7 +26,7 @@ fn jarvis_detail_wraps_at_narrow_width_without_losing_sections() {
     assert_eq!(prepared.user_prompt_texts.as_slice(), &[detail.clone()]);
     assert_eq!(prepared.raw_plain_lines.join("\n"), detail);
     assert!(prepared.wrapped_lines.len() > prepared.raw_plain_lines.len());
-    assert_eq!(prepared.wrapped_user_indices.len(), 1);
+    assert_eq!(prepared.wrapped_user_prompt_starts.len(), 1);
 }
 
 fn transcript(turns: usize) -> Vec<DisplayMessage> {

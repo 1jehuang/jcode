@@ -33,6 +33,9 @@ fn display_message_from_stored_message(
         return Some(swarm);
     }
     match message.display_role {
+        Some(crate::session::StoredDisplayRole::JarvisUser) => {
+            Some(DisplayMessage::jarvis_user(text))
+        }
         Some(crate::session::StoredDisplayRole::FileActivity) => {
             super::remote_notifications::typed_file_activity_display_message(&text)
                 .or_else(|| Some(DisplayMessage::system(text)))

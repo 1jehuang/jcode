@@ -1545,16 +1545,18 @@ impl<'de> Visitor<'de> for SessionMessageSummaryVisitor {
                                 .starts_with("This session was forked (split) from session ")
                         })
                 });
+        let conversational_role =
+            matches!(display_role, None | Some(StoredDisplayRole::JarvisUser));
         let content_starts_with_system_reminder = matches!(role, Role::User)
             && display_role.is_none()
             && content.is_some_and(raw_content_starts_with_system_reminder);
-        let content_search = if display_role.is_none() && !content_starts_with_system_reminder {
+        let content_search = if conversational_role && !content_starts_with_system_reminder {
             content
                 .and_then(|raw| classified_search_excerpt(raw, &role, self.content_excerpt_budget))
         } else {
             None
         };
-        let content_text = if display_role.is_none() && !content_starts_with_system_reminder {
+        let content_text = if conversational_role && !content_starts_with_system_reminder {
             content.and_then(raw_value_display_text)
         } else {
             None
@@ -1573,7 +1575,10 @@ impl<'de> Visitor<'de> for SessionMessageSummaryVisitor {
 }
 
 fn summary_message_is_visible_conversation(message: &SessionMessageSummary) -> bool {
-    if message.display_role.is_some() {
+    if !matches!(
+        message.display_role,
+        None | Some(StoredDisplayRole::JarvisUser)
+    ) {
         return false;
     }
     if message.content_starts_with_system_reminder {
