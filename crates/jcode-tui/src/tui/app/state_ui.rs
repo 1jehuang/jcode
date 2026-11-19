@@ -349,7 +349,9 @@ impl App {
                 "split_view_enabled": false,
                 "todos_view_enabled": false,
             });
-            let _ = std::fs::write(&path, data.to_string());
+            if let Err(error) = std::fs::write(&path, data.to_string()) {
+                crate::logging::warn(&format!("Could not save reload input: {error}"));
+            }
         }
     }
 
@@ -368,7 +370,11 @@ impl App {
             return None;
         }
         let data = std::fs::read_to_string(&path).ok()?;
-        let _ = std::fs::remove_file(&path);
+        if let Err(error) = std::fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::logging::warn(&format!("Could not remove restored input file: {error}"));
+        }
 
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
             let input = value
@@ -553,11 +559,17 @@ impl App {
                 pending_images,
                 submit_on_restore,
                 queued_messages,
-                queued_images: value
-                    .get("queued_images")
-                    .cloned()
-                    .and_then(|v| serde_json::from_value(v).ok())
-                    .unwrap_or_default(),
+                queued_images: match value.get("queued_images") {
+                    None => Vec::new(),
+                    Some(images) => {
+                        serde_json::from_value(images.clone()).unwrap_or_else(|error| {
+                            crate::logging::warn(&format!(
+                                "Cannot restore queued image list: {error}"
+                            ));
+                            Vec::new()
+                        })
+                    }
+                },
                 queued_commands,
                 hidden_queued_system_messages,
                 startup_status_notice,
@@ -976,8 +988,16 @@ impl App {
                 let (_, writer) = stream.into_split();
                 let mut writer = writer;
 
-                let snapshot_json =
-                    serde_json::to_string(&initial_snapshot).unwrap_or_default() + "\n";
+                let mut snapshot_json = match serde_json::to_string(&initial_snapshot) {
+                    Ok(json) => json,
+                    Err(error) => {
+                        crate::logging::warn(&format!(
+                            "Cannot encode initial debug snapshot: {error}"
+                        ));
+                        continue;
+                    }
+                };
+                snapshot_json.push('\n');
                 if writer.write_all(snapshot_json.as_bytes()).await.is_ok() {
                     clients.lock().await.push(writer);
                 }

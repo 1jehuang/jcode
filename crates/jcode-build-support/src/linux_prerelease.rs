@@ -34,7 +34,7 @@ const DISPATCH_SCRIPT: &str = include_str!("linux_prerelease.sh");
 
 /// Network I/O happens in a child process so build/reload can finish independently.
 pub fn dispatch_linux_prerelease(repo: &Path, source: &SourceState, release_notes: Option<&str>) {
-    if let Ok(mut child) = Command::new("sh")
+    let child = Command::new("sh")
         .current_dir(repo)
         .args(["-c", DISPATCH_SCRIPT, "linux-prerelease", &source.full_hash])
         .args(release_notes)
@@ -43,11 +43,19 @@ pub fn dispatch_linux_prerelease(repo: &Path, source: &SourceState, release_note
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
+        .spawn();
+    let mut child = match child {
+        Ok(child) => child,
+        Err(error) => {
+            eprintln!("Could not launch Linux prerelease dispatch: {error}");
+            return;
+        }
+    };
+    if let Err(error) = std::thread::Builder::new()
+        .name("linux-prerelease".into())
+        .spawn(move || child.wait())
     {
-        let _ = std::thread::Builder::new()
-            .name("linux-prerelease".into())
-            .spawn(move || child.wait());
+        eprintln!("Could not start Linux prerelease process watcher: {error}");
     }
 }
 

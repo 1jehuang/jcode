@@ -237,11 +237,22 @@ impl CaptureStatus {
 
 impl Drop for CaptureStatus {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-        let _ = fs::remove_file(&self.temporary);
-        let _ = fs::remove_file(&self.pause);
-        let _ = fs::remove_file(&self.wake);
-        let _ = fs::remove_file(self.retry_path());
+        for path in [
+            &self.path,
+            &self.temporary,
+            &self.pause,
+            &self.wake,
+            &self.retry_path(),
+        ] {
+            if let Err(error) = fs::remove_file(path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                crate::logging::warn(&format!(
+                    "Could not clean up voice status {}: {error}",
+                    path.display()
+                ));
+            }
+        }
     }
 }
 

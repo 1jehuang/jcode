@@ -87,7 +87,9 @@ async fn bounded_tail(path: &std::path::Path) -> String {
         return String::new();
     }
     let mut bytes = Vec::new();
-    let _ = file.take(2000).read_to_end(&mut bytes).await;
+    if let Err(error) = file.take(2000).read_to_end(&mut bytes).await {
+        crate::logging::warn(&format!("Incomplete background output tail: {error}"));
+    }
     String::from_utf8_lossy(&bytes).into_owned()
 }
 

@@ -162,7 +162,6 @@ fn prompt_ngrams() -> &'static HashSet<Vec<String>> {
 }
 
 /// True when most of the transcript is copied from the recognition prompt.
-
 fn is_prompt_echo(text: &str) -> bool {
     let words = words(text);
     if words.len() < ECHO_NGRAM {

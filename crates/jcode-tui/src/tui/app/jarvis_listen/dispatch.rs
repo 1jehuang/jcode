@@ -58,9 +58,8 @@ impl Dispatch {
         if self.queue.len() + self.open.len() >= LIMIT {
             return "queue_full";
         }
-        let provisional = serde_json::from_str::<Value>(&text)
-            .ok()
-            .is_some_and(|v| v["still_speaking"] == true);
+        let provisional =
+            serde_json::from_str::<Value>(&text).is_ok_and(|v| v["still_speaking"] == true);
         self.seen.push_back(id);
         if self.seen.len() > 128 {
             self.seen.pop_front();
@@ -79,12 +78,12 @@ impl Dispatch {
             return "invalid_final";
         }
         if let Some(r) = self.queue.iter_mut().find(|r| r.id == id && r.provisional) {
-            let Ok(mut v) = serde_json::from_str::<Value>(&r.text) else {
+            let Ok(Value::Object(mut v)) = serde_json::from_str::<Value>(&r.text) else {
                 return "invalid_final";
             };
-            v["trigger"] = Value::String(text);
-            v.as_object_mut().unwrap().remove("still_speaking");
-            r.text = v.to_string();
+            v.insert("trigger".into(), Value::String(text));
+            v.remove("still_speaking");
+            r.text = Value::Object(v).to_string();
             r.provisional = false;
             return "merged_final";
         }

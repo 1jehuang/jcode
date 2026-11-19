@@ -366,7 +366,7 @@ fn prepare_todo_patch(
         let original = todos
             .iter()
             .find(|t| t["id"].as_str() == Some(&id))
-            .expect("resolved todo");
+            .ok_or_else(|| anyhow::anyhow!("resolved todo {name:?} no longer exists"))?;
         cancellations.push(crate::todo::store::TodoCancellation::new(
             serde_json::from_value(original.clone())?,
             reason.to_owned(),

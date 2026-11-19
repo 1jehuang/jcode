@@ -106,7 +106,7 @@ pub(super) async fn run(
                                 let child = token.clone();
                                 let warm_session = warm.take().and_then(Warm::take);
                                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                                let _ = tx.send(audio);
+                                tx.send(audio).map_err(|_| VoiceError::CaptureFailed)?;
                                 live = Some((id, tx));
                                 let (events, epoch, paused, suppressed, stopped) = (events.clone(), epoch.clone(), paused.clone(), suppressed.clone(), cancel.clone());
                                 jobs.push_back((tokio::spawn(async move {
@@ -225,8 +225,7 @@ pub(super) async fn run(
                         }
                     }
                     let mut failed = None;
-                    while failed.is_none() && jobs.front().is_some_and(|(h,_,_)|h.is_finished()) {
-                        let (handle,_,job_generation) = jobs.pop_front().unwrap();
+                    while failed.is_none() && let Some((handle,_,job_generation)) = jobs.pop_front_if(|(h,_,_)| h.is_finished()) {
                         let result = handle.await.map_err(|_|VoiceError::CaptureFailed)?;
                         if !cancel.load(Ordering::SeqCst) && job_generation == epoch.load(Ordering::SeqCst) && !suppressed.load(Ordering::SeqCst) && !paused.load(Ordering::SeqCst) {
                             if result.is_ok() { consecutive_failures = 0; }

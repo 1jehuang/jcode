@@ -64,10 +64,10 @@ pub struct PlaybackTrace {
     pub utterance: u64,
 }
 impl PlaybackTrace {
+    #[cfg(not(feature = "desktop-config"))]
+    pub fn mark(&self, _stage: &'static str, _held_ms: u128) {}
+    #[cfg(feature = "desktop-config")]
     pub fn mark(&self, stage: &'static str, held_ms: u128) {
-        #[cfg(not(feature = "desktop-config"))]
-        let _ = (stage, held_ms);
-        #[cfg(feature = "desktop-config")]
         jcode_base::logging::info(&format!(
             "JARVIS_PLAYBACK session={} utterance={} stage={stage} monotonic_ms={} held_ms={held_ms}",
             self.session,

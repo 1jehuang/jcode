@@ -26,10 +26,16 @@ pub(crate) fn jarvis_command(program: PathBuf, extra: &[String]) -> TerminalComm
 
 /// Open the Jarvis window. `Ok(false)` when no terminal emulator was found.
 pub(crate) fn launch(extra: &[String]) -> anyhow::Result<bool> {
-    let program = jcode_build_support::launcher_binary_path()
-        .ok()
-        .filter(|path| path.exists())
-        .unwrap_or_else(|| PathBuf::from("jcode"));
+    let program = match jcode_build_support::launcher_binary_path() {
+        Ok(path) if path.exists() => path,
+        Ok(_) => PathBuf::from("jcode"),
+        Err(error) => {
+            jcode_base::logging::warn(&format!(
+                "Cannot resolve launcher, falling back to PATH: {error}"
+            ));
+            PathBuf::from("jcode")
+        }
+    };
     let command = jarvis_command(program, extra);
     let cwd = std::env::var_os("HOME")
         .map(PathBuf::from)

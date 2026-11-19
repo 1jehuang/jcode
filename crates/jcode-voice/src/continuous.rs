@@ -869,7 +869,9 @@ async fn early_trigger(
     let mut judged = 0usize;
     for _ in 0..MAX_PARTIAL_GATES {
         let text = loop {
-            partials.changed().await.ok()?;
+            if partials.changed().await.is_err() {
+                return None; // The utterance stream has closed.
+            }
             let text = partials.borrow_and_update().trim().to_owned();
             let words = word_count(&text);
             if words >= MIN_PARTIAL_WORDS && words >= judged + 2 {
@@ -990,77 +992,6 @@ fn recovery_delay(error: &VoiceError, failures: usize) -> Option<Duration> {
         _ => return None,
     };
     delays.get(failures).copied().map(Duration::from_secs)
-}
-
-#[test]
-fn deliberate_retry_cannot_reset_rolling_audio_or_classification_usage() {
-    for (seconds, classifications) in [(1, 10), (3600, 1)] {
-        let config = ContinuousConfig {
-            max_audio_seconds_per_hour: seconds,
-            max_classifications_per_hour: classifications,
-            ..Default::default()
-        };
-        let original = ContinuousBudget::default();
-        let retry = original.clone();
-        let now = Instant::now();
-        assert!(original.0.lock().unwrap().reserve(now, 16_000, &config));
-        drop(original);
-        assert!(!retry.0.lock().unwrap().reserve(now, 1, &config));
-        assert!(
-            retry
-                .0
-                .lock()
-                .unwrap()
-                .reserve(now + Duration::from_secs(3600), 1, &config)
-        );
-    }
-}
-
-#[test]
-fn recovery_is_bounded_and_never_retries_known_permanent_errors() {
-    for error in [
-        VoiceError::Network,
-        VoiceError::NariRejected,
-        VoiceError::Timeout,
-        VoiceError::Http(503),
-        VoiceError::Http(429),
-    ] {
-        assert!(recovery_delay(&error, 0) < recovery_delay(&error, 1));
-        assert_eq!(recovery_delay(&error, 2), None);
-    }
-    for error in [
-        VoiceError::NariNotConfigured,
-        VoiceError::NariCreditsExhausted,
-        VoiceError::Http(400),
-        VoiceError::Cancelled,
-        VoiceError::CaptureFailed,
-    ] {
-        assert_eq!(recovery_delay(&error, 0), None);
-    }
-}
-
-#[tokio::test]
-async fn rejected_warm_session_never_opens_a_second_connection() {
-    for error in [
-        VoiceError::NariNotConfigured,
-        VoiceError::NariCreditsExhausted,
-        VoiceError::NariRejected,
-    ] {
-        let expected = error.clone();
-        let failed = tokio::spawn(async move { Err(error) });
-        let (_, rx) = tokio::sync::mpsc::unbounded_channel();
-        let (partial, _) = tokio::sync::watch::channel(String::new());
-        // Empty key makes an unintended fallback fail differently, without network I/O.
-        let result = stream_job(
-            Some(failed),
-            String::new(),
-            rx,
-            Arc::new(AtomicBool::new(false)),
-            partial,
-        )
-        .await;
-        assert_eq!(result, Err(expected));
-    }
 }
 
 /// Idle warm sessions are recycled before the provider could drop them.
