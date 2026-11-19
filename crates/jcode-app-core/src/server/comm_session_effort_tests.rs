@@ -1,28 +1,56 @@
 #[test]
-fn swarm_spawn_effort_prefers_explicit_then_config_pin_then_inherit() {
+fn swarm_spawn_effort_prefers_explicit_then_config_pin_then_root_inherit() {
     use super::super::resolve_swarm_spawn_effort;
 
     // Explicit spawn argument wins over the config pin (#1165).
     assert_eq!(
-        resolve_swarm_spawn_effort(Some("low"), Some("medium")),
+        resolve_swarm_spawn_effort(Some("low"), Some("medium"), None, Some("high")),
         Some("low".to_string())
     );
     // A missing or blank spawn argument falls back to `agents.swarm_effort`.
     assert_eq!(
-        resolve_swarm_spawn_effort(None, Some("medium")),
+        resolve_swarm_spawn_effort(None, Some("medium"), None, Some("high")),
         Some("medium".to_string())
     );
     assert_eq!(
-        resolve_swarm_spawn_effort(Some("  "), Some(" medium ")),
+        resolve_swarm_spawn_effort(Some("  "), Some(" medium "), None, None),
         Some("medium".to_string())
+    );
+    // Config pin wins over root sentinel inheritance.
+    assert_eq!(
+        resolve_swarm_spawn_effort(None, Some("high"), Some("swarm"), Some("none")),
+        Some("high".to_string())
+    );
+    // When the root carries the `swarm` sentinel and no config pin is set,
+    // workers inherit the configured `swarm_root_effort` value.
+    // Key path: a coordinator in swarm mode with `swarm_root_effort = "none"`
+    // spawns workers at effort "none".
+    assert_eq!(
+        resolve_swarm_spawn_effort(None, None, Some("swarm"), Some("none")),
+        Some("none".to_string())
+    );
+    // A non-default "medium" root_swarm_effort propagates correctly.
+    assert_eq!(
+        resolve_swarm_spawn_effort(None, None, Some("swarm"), Some("medium")),
+        Some("medium".to_string())
+    );
+    // Blank/whitespace root_swarm_effort falls through to the default.
+    assert_eq!(
+        resolve_swarm_spawn_effort(None, None, Some("swarm"), Some("  ")),
+        Some("low".to_string())
+    );
+    // Non-swarm root effort is ignored (only the sentinel triggers inherit).
+    assert_eq!(
+        resolve_swarm_spawn_effort(None, None, Some("medium"), Some("none")),
+        Some("low".to_string())
     );
     // With neither, workers default to low effort.
     assert_eq!(
-        resolve_swarm_spawn_effort(None, None),
+        resolve_swarm_spawn_effort(None, None, None, None),
         Some("low".to_string())
     );
     assert_eq!(
-        resolve_swarm_spawn_effort(Some(""), Some("")),
+        resolve_swarm_spawn_effort(Some(""), Some(""), None, None),
         Some("low".to_string())
     );
 }

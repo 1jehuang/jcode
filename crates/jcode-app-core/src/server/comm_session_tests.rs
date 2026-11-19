@@ -508,6 +508,7 @@ fn coordinator_identity(
         provider_key: provider_key.map(str::to_string),
         route_api_method: route_api_method.map(str::to_string),
         is_canary: false,
+        reasoning_effort: None,
     }
 }
 
