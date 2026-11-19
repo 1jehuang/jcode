@@ -264,8 +264,10 @@ impl Events {
                 // Live revisions replace only their own utterance's caption;
                 // scores for other utterances must survive.
                 let id = *id;
-                self.queue
-                    .retain(|e| !matches!(e, ContinuousEvent::Caption { id: old, .. } if *old == id))
+                if let Some(slot) = self.queue.iter_mut().find(|e| matches!(e, ContinuousEvent::Caption { id: old, .. } if *old == id)) {
+                    *slot = event;
+                    return;
+                }
             }
             ContinuousEvent::State(_) => self
                 .queue
@@ -806,7 +808,6 @@ async fn early_trigger(
         let mut output = events.lock().unwrap_or_else(|e| e.into_inner());
         if !live() { return None; }
         trace_turn(id, "partial_accepted");
-        output.push(ContinuousEvent::Caption { id, text: text.chars().take(256).collect() });
         output.push(ContinuousEvent::CaptionScore { id, probability, accepted: true });
         let payload = output.context.accepted(text.clone());
         // Mark the request provisional: Jarvis may prepare but must not speak
@@ -845,7 +846,7 @@ async fn stream_job(
     key: String,
     rx: tokio::sync::mpsc::UnboundedReceiver<Vec<i16>>,
     cancel: Arc<AtomicBool>,
-    partial: tokio::sync::watch::Sender<String>,
+    mut partial: impl FnMut(String),
 ) -> Result<String, VoiceError> {
     let job = async {
         let session = match warm {
@@ -871,7 +872,7 @@ async fn stream_job(
             forward,
             session.run(nari_rx, |event| {
                 if let crate::NariEvent::Transcript(text) = event {
-                    partial.send_replace(text);
+                    partial(text);
                 }
             })
         );
@@ -927,7 +928,7 @@ async fn rejected_warm_session_never_opens_a_second_connection() {
         let (_, rx) = tokio::sync::mpsc::unbounded_channel();
         let (partial, _) = tokio::sync::watch::channel(String::new());
         // Empty key makes an unintended fallback fail differently, without network I/O.
-        let result = stream_job(Some(failed), String::new(), rx, Arc::new(AtomicBool::new(false)), partial).await;
+        let result = stream_job(Some(failed), String::new(), rx, Arc::new(AtomicBool::new(false)), |text| { partial.send_replace(text); }).await;
         assert_eq!(result, Err(expected));
     }
 }
@@ -1088,22 +1089,18 @@ async fn run(
                                 let (events, epoch, paused, suppressed, stopped) = (events.clone(), epoch.clone(), paused.clone(), suppressed.clone(), cancel.clone());
                                 jobs.push_back((tokio::spawn(async move {
                                     let (partial_tx, partial_rx) = tokio::sync::watch::channel(String::new());
-                                    // Show Nari's revisions as they stream, word by word.
-                                    let mut live_rx = partial_tx.subscribe();
-                                    let live_events = events.clone();
-                                    let caption_feed = tokio::spawn(async move {
-                                        while live_rx.changed().await.is_ok() {
-                                            let text: String = live_rx.borrow_and_update().trim().chars().take(256).collect();
-                                            if text.is_empty() { continue; }
-                                            emit(&live_events, ContinuousEvent::Caption { id, text });
-                                        }
-                                    });
                                     let early = early_trigger(partial_rx, gate.clone(), threshold, require_jev, id, events.clone(), {
                                         let (epoch, paused, suppressed, stopped) = (epoch.clone(), paused.clone(), suppressed.clone(), stopped.clone());
                                         move || !(stopped.load(Ordering::SeqCst) || generation != epoch.load(Ordering::SeqCst) || paused.load(Ordering::SeqCst) || suppressed.load(Ordering::SeqCst))
                                     });
                                     tokio::pin!(early);
-                                    let stream = stream_job(warm_session, key, rx, child, partial_tx);
+                                    let stream = stream_job(warm_session, key, rx, child, |text| {
+                                        let mut output = events.lock().unwrap_or_else(|e| e.into_inner());
+                                        if generation == epoch.load(Ordering::SeqCst) && !stopped.load(Ordering::SeqCst) && !paused.load(Ordering::SeqCst) && !suppressed.load(Ordering::SeqCst) && !text.trim().is_empty() {
+                                            output.push(ContinuousEvent::Caption { id, text: text.trim().chars().take(256).collect() });
+                                        }
+                                        partial_tx.send_replace(text);
+                                    });
                                     tokio::pin!(stream);
                                     // Gate partials while audio streams. Once the final
                                     // transcript lands, any in-flight partial gate is stale.
@@ -1121,7 +1118,6 @@ async fn run(
                                             }
                                         }
                                     };
-                                    caption_feed.abort();
                                     trace_turn(id, "transcription_finished");
                                     if let Some(trigger) = fired {
                                         pending_final.0 = None;
@@ -1873,6 +1869,22 @@ mod tests {
         e.push(final_text(9));
         e.clear_pending_speech("stopped");
         assert!(matches!(e.queue.pop_front(), Some(ContinuousEvent::Stopped)));
+        assert!(e.queue.is_empty());
+    }
+    #[test]
+    fn caption_revision_keeps_score_after_row_even_before_poll() {
+        let mut e = Events {
+            context: GateContext::default(), queue: VecDeque::new(),
+            quiet: QuietWindow::default(), notify: Arc::new(tokio::sync::Notify::new()),
+        };
+        let caption = |id, text: &str| ContinuousEvent::Caption { id, text: text.into() };
+        e.push(caption(1, "start"));
+        e.push(ContinuousEvent::CaptionScore { id: 1, probability: 0.98, accepted: true });
+        e.push(caption(2, "another"));
+        e.push(caption(1, "revised"));
+        assert!(matches!(e.queue.pop_front(), Some(ContinuousEvent::Caption { id: 1, text }) if text == "revised"));
+        assert!(matches!(e.queue.pop_front(), Some(ContinuousEvent::CaptionScore { id: 1, accepted: true, .. })));
+        assert!(matches!(e.queue.pop_front(), Some(ContinuousEvent::Caption { id: 2, .. })));
         assert!(e.queue.is_empty());
     }
     #[test]

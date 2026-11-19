@@ -183,6 +183,22 @@ mod tests {
     }
 
     #[test]
+    fn final_caption_revises_only_matching_visible_row() {
+        let mut listener = AlwaysListening::default();
+        listener.update_caption(1, "turn");
+        listener.score_caption(1, 0.98, true);
+        listener.update_caption(2, "ambient");
+        listener.update_caption(1, "turn off");
+        listener.finalize_caption(9, "dropped");
+        listener.finalize_caption(1, "turn on");
+        listener.finalize_caption(1, "turn on");
+        assert_eq!(listener.captions.len(), 2);
+        assert_eq!(listener.captions[0].text, "turn on");
+        assert_eq!(listener.captions[0].score, Some((0.98, true)));
+        assert_eq!(listener.captions[1].text, "ambient");
+    }
+
+    #[test]
     fn caption_scores_follow_ids_not_repeated_text_or_position() {
         let mut listener = AlwaysListening::default();
         for id in 1..=5 {
@@ -383,6 +399,13 @@ impl AlwaysListening {
             text,
             score: None,
         });
+    }
+
+    fn finalize_caption(&mut self, id: u64, text: &str) {
+        // A late final must not resurrect an evicted or suppressed row.
+        if self.captions.iter().any(|r| r.id == id) {
+            self.update_caption(id, text);
+        }
     }
 
     fn score_caption(&mut self, id: u64, probability: f64, accepted: bool) -> bool {
@@ -697,6 +720,7 @@ impl App {
                     ContinuousEvent::Continuation { id, text }
                         if !paused && !listener.failed && !external_capture =>
                     {
+                        listener.finalize_caption(id, &text);
                         listener.playback.finalize(id, &text);
                         let outcome = listener.dispatch.finalize(id, text);
                         listener.trace(id, outcome);
