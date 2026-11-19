@@ -121,6 +121,155 @@ Fires after every tool call. Extra fields:
 tool was asked to read or write. It does not track files a `bash` command
 happened to modify.
 
+## Prompt hook: `user_prompt_submit`
+
+A synchronous hook that sees every new user message before it is added to the
+transcript.
+
+```toml
+[hooks]
+user_prompt_submit = "~/bin/prompt-hook"
+user_prompt_submit_timeout_ms = 5000   # default 5000, capped at 30000
+```
+
+The prompt arrives as a Claude-shaped JSON document on **stdin only** (never in
+env, so it cannot leak through `/proc/<pid>/environ`):
+
+```json
+{
+  "hook_event_name": "UserPromptSubmit",
+  "session_id": "session_...", "cwd": "/work",
+  "prompt": "text exactly as submitted",
+  "origin": { "kind": "person" },
+  "jcode": { "event": "user_prompt_submit", "origin_detail": "user",
+             "active_skill": "aidlc", "source": "chat" }
+}
+```
+
+`origin` uses the `TurnOrigin` shape workflow frameworks already read:
+`{"kind":"person"}` or `{"kind":"host","reason":"<origin_detail>","source":"record"}`.
+`jcode.origin_detail` says who wrote the message:
+
+| `origin_detail` | Meaning |
+| --- | --- |
+| `user` | typed in a client, or the `jcode run` message |
+| `auto` | client auto-poke, retry, client system sends |
+| `reminder` | reminder-only turn (`[auto]` continuation, reload recovery) |
+| `swarm_message` | DM, channel or assignment wake from another agent |
+| `swarm_spawn` | a worker's initial prompt |
+| `background_task` | background task or await completion wake |
+| `system` | server-generated system turn |
+| `sdk` | harness API client |
+
+Only `user` is a person. A worker's first prompt is `host`, so it never counts
+as human presence. `Request::Message` carries an optional `origin` (absent
+means `user`; unknown values are ignored). `JCODE_HOOK_PROMPT_ORIGIN` and
+`JCODE_HOOK_ACTIVE_SKILL` mirror the fields in env, and the hook payload never
+contains the prompt text.
+
+Response (Claude compatible), first matching rule wins:
+
+- exit 2 with stderr, `{"decision":"block","reason":...}` or
+  `{"continue":false}`: the message is not appended and the client gets an
+  error carrying the reason. The blocked text is never logged.
+- plain stdout, or `hookSpecificOutput.additionalContext`: added as a hidden
+  system reminder right after the message (never to the system prompt, so
+  prompt caching is unaffected). Capped at 10,000 chars.
+- anything else, a timeout, a crash or a spawn failure: the message proceeds.
+
+Commands run in declaration order and the first block wins. The hook does not
+fire on server failover retries or in-turn soft interrupts. Env overrides:
+`JCODE_HOOK_USER_PROMPT_SUBMIT`, `JCODE_HOOK_USER_PROMPT_SUBMIT_TIMEOUT_MS`.
+
+## Turn gate: `stop`
+
+A blocking hook that can keep a turn going when the model would otherwise
+finish.
+
+```toml
+[hooks]
+stop = "~/bin/stop-hook"
+stop_timeout_ms = 10000         # default 10000, capped at 600000
+stop_max_continuations = 8      # consecutive; reset when the model calls a tool
+```
+
+It fires when the model ends a turn with no tool calls, in interactive chat,
+`jcode run`, and swarm workers (where it plays the role of `SubagentStop`). It
+does not fire on user cancel, shutdown, provider errors or guardrail refusals.
+stdin is a Claude-shaped document:
+
+```json
+{
+  "hook_event_name": "Stop",
+  "session_id": "session_...", "cwd": "/work",
+  "stop_hook_active": false,
+  "last_assistant_message": "final text of the turn (capped 10,000 chars)",
+  "jcode": { "continuations": 0, "prompt_origin": "user", "swarm": null }
+}
+```
+
+Response, Claude compatible:
+
+- `{"decision":"block","reason":"..."}`, exit 2 with stderr, or
+  `hookSpecificOutput.additionalContext`: the text becomes a hidden
+  `[stop hook] ...` reminder and the model answers again **in the same turn**.
+  `turn_end` still fires once, at the real end, and `user_prompt_submit` does
+  not fire for the continuation. A continuation is never delivered as a user
+  message, so it cannot be mistaken for human input.
+- `{"continue":false}` from any command ends the turn and wins.
+- Commands run in declaration order. The first command that decides wins and
+  later commands are skipped for that round.
+- Anything else, a timeout or a crash allows the stop.
+
+`stop_hook_active` is true from the second call of a streak. After
+`stop_max_continuations` consecutive continuations the next request is
+overridden: the turn ends with one log line and a status notice. The streak
+resets whenever the model calls a tool and when a new user message arrives.
+Frameworks should keep their own no-progress guard on top. Auto-poke is
+independent and client-side: the stop hook runs first, on the server, then the
+client's poke policy sees the final transcript. Turn off `/poke` in projects
+whose stop hook drives continuation. Env overrides: `JCODE_HOOK_STOP`,
+`JCODE_HOOK_STOP_TIMEOUT_MS`, `JCODE_HOOK_STOP_MAX_CONTINUATIONS`.
+
+## Swarm identity and worker events
+
+Inside a swarm worker session every hook (observers, `pre_tool`,
+`post_tool_feedback`, and so on) receives extra fields, also present in
+`JCODE_HOOK_PAYLOAD`. They are absent in ordinary sessions.
+
+| Variable | Meaning |
+| --- | --- |
+| `JCODE_HOOK_SWARM_ID` | Swarm the worker belongs to |
+| `JCODE_HOOK_COORDINATOR_SESSION_ID` | Coordinator session that spawned it |
+| `JCODE_HOOK_PARENT_SESSION_ID` | Session that receives its report |
+| `JCODE_HOOK_SWARM_LABEL` | Spawn label, when given |
+| `JCODE_HOOK_AGENT_ID` | The worker's own session id |
+| `JCODE_HOOK_AGENT_TYPE` | Agent definition name, else the label |
+
+`JCODE_SPAWN_SWARM_LABEL` is also exported to the [spawn hook](SPAWN_HOOK.md).
+
+Two observers fire in the **coordinator's** context (`session_id` is the
+coordinator). Each receives a Claude-shaped JSON document on stdin.
+
+```toml
+[hooks]
+swarm_member_start = "~/bin/on-worker-start"   # hook_event_name "SubagentStart"
+swarm_member_end   = "~/bin/on-worker-end"     # hook_event_name "SubagentStop"
+```
+
+`swarm_member_end` fires once when a worker leaves the running state for
+`ready`, `completed`, `failed`, `stopped` or `crashed`. Its payload carries
+`agent_id`, `agent_type`, `last_assistant_message` (the completion report,
+truncated to 4000 chars with a marker) and `jcode.status`, `jcode.duration_ms`, `jcode.swarm`.
+Repeated updates of the same status do not refire.
+
+Known limits of worker identity: the swarm fields are registered when the
+worker is spawned, so a headless worker's own `session_start` hook (which runs
+while the agent is being constructed) carries no swarm fields, and identities
+are in memory only, so a worker revived after a daemon restart runs its hooks
+without them. Env overrides:
+`JCODE_HOOK_SWARM_MEMBER_START`, `JCODE_HOOK_SWARM_MEMBER_END`.
+
 ## Feedback hook: `post_tool_feedback`
 
 `post_tool_feedback` runs **synchronously after every successful tool call**

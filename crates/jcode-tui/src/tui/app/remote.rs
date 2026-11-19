@@ -61,10 +61,10 @@ use workspace::{handle_workspace_command, handle_workspace_navigation_key};
 #[allow(unused_imports)]
 pub(super) use input_dispatch::{
     apply_remote_transcript_event, apply_transcript_event, begin_remote_send,
-    begin_remote_split_launch, finish_remote_split_launch, history_matches_pending_startup_prompt,
-    route_prepared_input_to_new_remote_session, stage_turn_for_remote_tick_loop,
-    submit_prepared_remote_input, submit_remote_slash_input, submit_remote_voice_transcript,
-    submit_voice_transcript,
+    begin_remote_send_with_origin, begin_remote_split_launch, finish_remote_split_launch,
+    history_matches_pending_startup_prompt, route_prepared_input_to_new_remote_session,
+    stage_turn_for_remote_tick_loop, submit_prepared_remote_input, submit_remote_slash_input,
+    submit_remote_voice_transcript, submit_voice_transcript,
 };
 pub(super) use key_handling::{
     handle_remote_char_input, handle_remote_key, handle_remote_key_event, send_interleave_now,
@@ -396,6 +396,10 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
         let combined = messages.join("\n\n");
         let auto_retry = reminder.is_some() && messages.is_empty();
+        // Text a person queued keeps its human origin even though it is sent as `is_system`.
+        let queued_origin_is_auto = messages
+            .iter()
+            .all(|msg| super::commands::is_poke_message(msg));
         if !messages.is_empty() && !super::commands::queued_messages_are_only_pokes(&messages) {
             app.automatic_failover_targets.clear();
             app.automatic_failover_stopped = false;
@@ -418,12 +422,13 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         if messages.is_empty() && reminder.is_none() {
             return true;
         }
-        if begin_remote_send(
+        if begin_remote_send_with_origin(
             app,
             remote,
             combined.clone(),
             vec![],
             true,
+            queued_origin_is_auto,
             reminder.clone(),
             auto_retry,
             0,

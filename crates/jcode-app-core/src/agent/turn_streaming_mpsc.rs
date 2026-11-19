@@ -963,6 +963,8 @@ impl Agent {
                         tool_name,
                         input,
                     } => {
+                        // The model is calling a tool, so any stop-hook streak is over.
+                        crate::hooks::reset_stop_continuations(&self.session.id);
                         // Execute native tool and send result back to SDK bridge
                         let ctx = ToolContext {
                             session_id: self.session.id.clone(),
@@ -1354,6 +1356,17 @@ impl Agent {
                     &mut incomplete_continuations,
                 )? {
                     NoToolCallOutcome::Break => {
+                        if saw_message_end
+                            && self
+                                .stop_hook_continues_mpsc(
+                                    &text_content,
+                                    &stop_reason,
+                                    event_tx.raw(),
+                                )
+                                .await?
+                        {
+                            continue;
+                        }
                         if saw_message_end
                             && !self.is_graceful_shutdown()
                             && let Some(event) = incomplete_turn_stop(stop_reason.as_deref())

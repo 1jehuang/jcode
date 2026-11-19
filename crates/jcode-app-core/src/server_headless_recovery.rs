@@ -285,7 +285,7 @@ impl Server {
                     vec![],
                     Some(reminder),
                     events.sender(),
-                    true,
+                    (true, None),
                 )
                 .await;
 

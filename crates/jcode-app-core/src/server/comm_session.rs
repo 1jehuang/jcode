@@ -180,55 +180,6 @@ use spawn_model_selection::{
     resolve_coordinator_spawn_identity, resolve_swarm_spawn_selection, session_swarm_model,
 };
 
-fn persist_headed_startup_message(session_id: &str, message: &str) {
-    crate::logging::info(&format!(
-        "Headed spawn: persisting startup submission for {session_id} (chars={}) to client-input handoff file",
-        message.chars().count(),
-    ));
-    crate::client_input::save_startup_submission_for_session(
-        session_id,
-        message.to_string(),
-        Vec::new(),
-    );
-}
-
-fn clear_headed_startup_message(session_id: &str) {
-    if let Ok(jcode_dir) = crate::storage::jcode_dir() {
-        let path = jcode_dir.join(format!("client-input-{}", session_id));
-        if let Err(error) = std::fs::remove_file(&path)
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            crate::logging::warn(&format!(
-                "Unable to remove prepared spawn file {}: {error}",
-                path.display()
-            ));
-        }
-    }
-}
-
-fn cleanup_prepared_visible_spawn_session(session_id: &str) {
-    crate::session_env::remove_session_env(session_id);
-    clear_headed_startup_message(session_id);
-    if let Ok(path) = crate::session::session_path(session_id)
-        && let Err(error) = std::fs::remove_file(&path)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        crate::logging::warn(&format!(
-            "Failed to clean prepared session file {}: {error}",
-            path.display()
-        ));
-    }
-    if let Ok(path) = crate::session::session_journal_path(session_id)
-        && let Err(error) = std::fs::remove_file(&path)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        crate::logging::warn(&format!(
-            "Failed to clean prepared session file {}: {error}",
-            path.display()
-        ));
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn prepare_visible_spawn_session<F>(
     working_dir: Option<&str>,
@@ -255,6 +206,12 @@ where
 
     if let Some(message) = startup_message {
         persist_headed_startup_message(&new_session_id, message);
+        // The visible worker's TUI submits this saved text as its first turn
+        // without an origin; it is generated work, not a person's prompt.
+        crate::hooks::set_pending_prompt_origin(
+            &new_session_id,
+            crate::hooks::PromptOrigin::SwarmSpawn,
+        );
     }
 
     match launch_visible(
@@ -363,9 +320,12 @@ async fn register_visible_spawned_member(
 #[path = "spawn_policy.rs"]
 mod spawn_policy;
 use spawn_policy::inherit_coordinator_selection;
+#[path = "comm_session_startup.rs"]
+mod startup_handoff;
 pub(super) use spawn_policy::{
     is_inherit_sentinel, resolve_swarm_spawn_effort, resolve_swarm_spawn_mode,
 };
+use startup_handoff::{cleanup_prepared_visible_spawn_session, persist_headed_startup_message};
 #[expect(
     clippy::too_many_arguments,
     reason = "server-side swarm spawning needs session, swarm state, provider, and event sinks together"
@@ -478,17 +438,34 @@ pub(super) async fn spawn_swarm_agent(
                 }
                 // Tag the headed window as a swarm-agent spawn so spawn hooks
                 // and terminals can identify and reroute it (JCODE_SPAWN_*).
-                let context = crate::session_launch::SessionSpawnContext::kind("swarm-agent")
+                let mut context = crate::session_launch::SessionSpawnContext::kind("swarm-agent")
                     .env("JCODE_SPAWN_SWARM_ID", swarm_id)
-                    .env("JCODE_SPAWN_COORDINATOR_SESSION_ID", req_session_id)
-                    .with_client_terminal_env(client_terminal_env.clone());
-                spawn_visible_session_window_with_context(
+                    .env("JCODE_SPAWN_COORDINATOR_SESSION_ID", req_session_id);
+                if let Some(label) = label.as_deref() {
+                    context = context.env("JCODE_SPAWN_SWARM_LABEL", label);
+                }
+                let context = context.with_client_terminal_env(client_terminal_env.clone());
+                // Register the worker identity before the terminal starts, so
+                // its first prompt hook already carries agent_id/swarm. Undone
+                // below if the window does not launch.
+                super::swarm::swarm_hooks::register_worker_identity(
+                    session_id,
+                    swarm_id,
+                    req_session_id,
+                    label.as_deref(),
+                    None,
+                );
+                let launched = spawn_visible_session_window_with_context(
                     session_id,
                     cwd,
                     selfdev_requested,
                     provider_key,
                     &context,
-                )
+                );
+                if !matches!(launched, Ok(true)) {
+                    crate::hooks::forget_swarm_identity(session_id);
+                }
+                launched
             },
         ),
     };
@@ -583,6 +560,27 @@ pub(super) async fn spawn_swarm_agent(
     if let Some(label_text) = label.as_deref().or(initial_message.as_deref()) {
         set_member_task_label(&new_session_id, label_text, swarm_members).await;
     }
+    // Observers run in the coordinator's context, so use its directory rather
+    // than the worker's.
+    let coordinator_working_dir =
+        resolve_spawn_working_dir(None, req_session_id, sessions, swarm_members).await;
+    super::swarm::swarm_hooks::worker_spawned(&super::swarm::swarm_hooks::SpawnedWorker {
+        session_id: &new_session_id,
+        swarm_id,
+        coordinator_session_id: req_session_id,
+        label: label.as_deref(),
+        agent_type: None,
+        spawn_mode: if is_headless_fallback {
+            if resolved_spawn_mode == SwarmSpawnMode::Inline {
+                "inline"
+            } else {
+                "headless"
+            }
+        } else {
+            "visible"
+        },
+        working_dir: coordinator_working_dir.as_deref(),
+    });
     let swarm_state = SwarmState {
         members: Arc::clone(swarm_members),
         swarms_by_id: Arc::clone(swarms_by_id),
@@ -641,6 +639,10 @@ pub(super) async fn spawn_swarm_agent(
                     &lease,
                 );
                 let start_message_index = agent.message_count();
+                crate::hooks::set_pending_prompt_origin(
+                    &sid_clone,
+                    crate::hooks::PromptOrigin::SwarmSpawn,
+                );
                 let result = process_reserved_locked_message_with_server_failover(
                     &mut agent,
                     &lease,
@@ -997,6 +999,23 @@ pub(super) async fn handle_comm_stop(
         }
     }
 
+    // Publish the terminal status while the member and its hook identity still
+    // exist, so `swarm_member_end` fires for a worker stopped mid-turn.
+    update_member_status(
+        &target_session,
+        "stopped",
+        Some(format!("stopped by {req_session_id}")),
+        swarm_members,
+        swarms_by_id,
+        Some(event_history),
+        Some(event_counter),
+        Some(swarm_event_tx),
+    )
+    .await;
+
+    // `session_end` and `swarm_member_end` have been dispatched.
+    crate::hooks::forget_swarm_identity(&target_session);
+
     let (removed_swarm_id, removed_name) = {
         let mut members = swarm_members.write().await;
         if let Some(member) = members.remove(&target_session) {
@@ -1046,9 +1065,68 @@ pub(super) async fn handle_comm_stop(
     finish_request(swarm_mutation_runtime, &mutation_state, response).await;
 }
 
-#[path = "swarm_stop_target.rs"]
-mod swarm_stop_target;
-use swarm_stop_target::*;
+fn swarm_stop_allowed_by_owner(
+    req_session_id: &str,
+    target_member: &SwarmMember,
+    force: bool,
+) -> bool {
+    force || target_member.report_back_to_session_id.as_deref() == Some(req_session_id)
+}
+
+async fn resolve_stop_target_session(
+    swarm_id: &str,
+    target: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> std::result::Result<String, String> {
+    let target = target.trim();
+    if target.is_empty() {
+        return Err("target_session is required.".to_string());
+    }
+
+    let members = swarm_members.read().await;
+    if members
+        .get(target)
+        .is_some_and(|member| member.swarm_id.as_deref() == Some(swarm_id))
+    {
+        return Ok(target.to_string());
+    }
+
+    let mut matches = members
+        .iter()
+        .filter(|(_, member)| member.swarm_id.as_deref() == Some(swarm_id))
+        .filter(|(session_id, member)| {
+            member.friendly_name.as_deref() == Some(target)
+                || session_id.starts_with(target)
+                || session_id.ends_with(target)
+        })
+        .map(|(session_id, member)| {
+            (
+                session_id.clone(),
+                member
+                    .friendly_name
+                    .as_deref()
+                    .unwrap_or(session_id)
+                    .to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(|a, b| a.0.cmp(&b.0));
+
+    match matches.len() {
+        0 => Err(format!(
+            "Unknown swarm session '{target}'. Use an exact session ID, unique friendly name, or unique session ID prefix/suffix."
+        )),
+        1 => Ok(matches.remove(0).0),
+        _ => Err(format!(
+            "Ambiguous swarm session '{target}' matched: {}. Use an exact session ID.",
+            matches
+                .iter()
+                .map(|(session_id, friendly)| format!("{friendly} [{session_id}]"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
 
 fn swarm_member_status_is_stale_for_coordination(status: &str) -> bool {
     matches!(

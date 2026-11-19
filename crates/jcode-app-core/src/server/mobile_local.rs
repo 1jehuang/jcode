@@ -89,6 +89,7 @@ impl DaemonSessions {
                         images: images.clone(),
                         system_reminder: None,
                         display_role: None,
+                        origin: crate::hooks::PromptOrigin::User,
                         status_detail: None,
                     },
                     self.swarm.clone(),
