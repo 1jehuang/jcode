@@ -1985,8 +1985,7 @@ impl Server {
                 // Compact todo names and progress are surfaced on the inline
                 // swarm strip so a coordinator can see each managed agent's work.
                 BusEvent::TodoUpdated(event) => {
-                    // The session tracker no longer mirrors todo plans, so the swarm
-                    // strip below is the only consumer of this event.
+                    // The swarm strip below is now the only consumer of this event.
                     dispatch_swarm_todo_progress(&event, &swarm_members, &swarms_by_id).await;
                     // Worker-owned lanes whose dependencies are met get a
                     // worker automatically; no launch call is involved.
