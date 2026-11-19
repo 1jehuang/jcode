@@ -303,3 +303,76 @@ fn claude_code_session_route_restore_round_trips() {
         );
     });
 }
+
+#[test]
+fn saved_claude_accounts_default_to_the_cli_unless_toggled_native() {
+    with_clean_provider_test_env(|| {
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                crate::auth::claude_code::TEST_CLI_DEFAULT
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                match self.0.take() {
+                    Some(value) => crate::env::set_var("JCODE_CLAUDE_CODE_BIN", value),
+                    None => crate::env::remove_var("JCODE_CLAUDE_CODE_BIN"),
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("JCODE_CLAUDE_CODE_BIN"));
+        // Any existing file stands in for the `claude` binary; nothing spawns.
+        crate::env::set_var("JCODE_CLAUDE_CODE_BIN", std::env::current_exe().unwrap());
+        crate::auth::claude_code::TEST_CLI_DEFAULT.store(true, std::sync::atomic::Ordering::SeqCst);
+        for label in ["claude-otter", "claude-fox"] {
+            crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+                label: label.into(),
+                access: format!("access-{label}"),
+                refresh: format!("refresh-{label}"),
+                expires: i64::MAX,
+                email: Some(format!("{label}@example.com")),
+                subscription_type: Some("max".into()),
+                scopes: Vec::new(),
+            })
+            .unwrap();
+        }
+        crate::auth::claude::set_active_account("claude-otter").unwrap();
+        crate::config::Config::set_claude_account_native("claude-fox", true, None).unwrap();
+        let runtime = enter_test_runtime();
+        let _enter = runtime.enter();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let provider = multi_provider_with_claude_code(tx);
+        let pinned = |p: &MultiProvider| {
+            p.account_pin(AccountProviderKind::ClaudeCode).map(|pin| pin.label)
+        };
+
+        // An explicit saved-account route for a CLI account runs the CLI.
+        provider
+            .set_model("claude-oauth@claude-otter:claude-sonnet-4-6")
+            .unwrap();
+        assert_eq!(provider.active_provider(), ActiveProvider::ClaudeCode);
+        assert_eq!(provider.model(), "claude-sonnet-4-6");
+        assert_eq!(pinned(&provider).as_deref(), Some("claude-otter"));
+
+        // A bare native selection follows the active (CLI) account too.
+        provider.set_active_provider(ActiveProvider::Claude);
+        provider.set_model("claude:claude-opus-4-8").unwrap();
+        assert_eq!(provider.active_provider(), ActiveProvider::ClaudeCode);
+
+        // Accounts toggled native, and API-key routes, stay native.
+        provider
+            .set_model("claude-oauth@claude-fox:claude-sonnet-4-6")
+            .unwrap();
+        assert_eq!(provider.active_provider(), ActiveProvider::Claude);
+        provider.set_model("claude-api:claude-sonnet-4-6").unwrap();
+        assert_eq!(provider.active_provider(), ActiveProvider::Claude);
+
+        // The catalog lists CLI accounts as Claude Code routes only.
+        let settings = crate::auth::claude_code::settings();
+        assert!(settings.routes_jcode_account("claude-otter"));
+        assert!(!settings.routes_jcode_account("claude-fox"));
+        let routes = super::catalog_routes::claude_code_routes_for(&settings, |_| {
+            vec!["claude-sonnet-4-6".to_string()]
+        });
+        assert!(routes.iter().any(|r| r.api_method == "claude-code:claude-otter"));
+        assert!(!routes.iter().any(|r| r.api_method == "claude-code:claude-fox"));
+    });
+}

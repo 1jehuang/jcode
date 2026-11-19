@@ -248,7 +248,7 @@ impl ClaudeCodeProvider {
     pub fn new() -> Self {
         Self {
             live: true,
-            ..Self::with_settings(jcode_base::config::config().provider.claude_code.clone())
+            ..Self::with_settings(jcode_base::auth::claude_code::settings())
         }
     }
 
@@ -283,7 +283,7 @@ impl ClaudeCodeProvider {
 
     fn settings(&self) -> ClaudeCodeSettings {
         if self.live {
-            return jcode_base::config::config().provider.claude_code.clone();
+            return jcode_base::auth::claude_code::settings();
         }
         read(&self.settings)
     }

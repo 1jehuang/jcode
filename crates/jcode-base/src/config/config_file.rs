@@ -352,18 +352,19 @@ impl Config {
         Ok(())
     }
 
-    /// Run saved Claude account `label` through the Claude Code CLI, or stop.
-    /// `new_label` moves an enabled entry on rename.
-    pub fn set_claude_code_jcode_account(
+    /// Make saved Claude account `label` use jcode's native API (`native`)
+    /// or the Claude Code CLI (the default). `new_label` moves a native entry
+    /// on rename.
+    pub fn set_claude_account_native(
         label: &str,
-        enabled: bool,
+        native: bool,
         new_label: Option<&str>,
     ) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;
-        let accounts = &mut cfg.provider.claude_code.jcode_accounts;
+        let accounts = &mut cfg.provider.claude_code.native_accounts;
         let was = accounts.iter().any(|item| item.trim() == label.trim());
         accounts.retain(|item| item.trim() != label.trim());
-        if enabled || (was && new_label.is_some()) {
+        if native || (was && new_label.is_some()) {
             accounts.push(new_label.unwrap_or(label).trim().to_string());
         }
         cfg.save()

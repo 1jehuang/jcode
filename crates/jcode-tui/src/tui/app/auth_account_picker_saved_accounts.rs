@@ -352,7 +352,7 @@ impl App {
         lines.extend(format_account_table(&headers, &rows));
         lines.push(String::new());
         lines.push(
-            "Commands: /accounts switch <label> (this window), /accounts default <label> (new windows), /accounts claude add, /accounts claude remove <label>"
+            "Commands: /accounts switch <label> (this window), /accounts default <label> (new windows), /accounts claude add, /accounts claude remove <label>, /accounts claude cli <label> on|off (Claude Code CLI, the default, or native API)"
                 .to_string(),
         );
 

@@ -510,6 +510,17 @@ pub(super) async fn execute(
             "Saved OpenAI preference on runtime host.".into()
         }
         ("compat", [setting, value]) => save_compat(setting, value)?,
+        ("claude", [setting, label, value]) if setting == "cli" => {
+            let cli = match value.as_str() {
+                "on" => true,
+                "off" => false,
+                _ => bail!("Claude Code CLI must be on or off"),
+            };
+            format!(
+                "{} Saved on runtime host.",
+                crate::auth::claude_code::set_account_transport(label, cli)?
+            )
+        }
         ("copilot", [setting, value]) if setting == "premium" => {
             let value = match value.as_str() {
                 "normal" | "clear" => None,

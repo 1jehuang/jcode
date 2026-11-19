@@ -264,9 +264,9 @@ pub fn rename_account(old_label: &str, new_label: &str) -> Result<()> {
     if crate::config::config()
         .provider
         .claude_code
-        .routes_jcode_account(old_label)
+        .uses_native(old_label)
     {
-        crate::config::Config::set_claude_code_jcode_account(old_label, false, Some(new_label))?;
+        crate::config::Config::set_claude_account_native(old_label, false, Some(new_label))?;
     }
 
     Ok(())

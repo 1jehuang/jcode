@@ -915,6 +915,12 @@ fn ssh_account_runtime_args(command: &AccountCommand) -> Option<Vec<String>> {
             "fast".into(),
             if *v { "on" } else { "off" }.into(),
         ],
+        AccountCommand::SetClaudeCodeCli { label, enabled } => vec![
+            "claude".into(),
+            "cli".into(),
+            label.clone(),
+            if *enabled { "on" } else { "off" }.into(),
+        ],
         AccountCommand::SetCopilotPremium(v) => vec![
             "copilot".into(),
             "premium".into(),
@@ -1360,6 +1366,14 @@ mod tests {
         assert_eq!(
             ssh_account_runtime_args(&AccountCommand::SetOpenAiFast(true)).unwrap(),
             vec!["openai", "fast", "on"]
+        );
+        assert_eq!(
+            ssh_account_runtime_args(&AccountCommand::SetClaudeCodeCli {
+                label: "Work Max".into(),
+                enabled: false,
+            })
+            .unwrap(),
+            vec!["claude", "cli", "Work Max", "off"]
         );
         assert_eq!(
             ssh_account_runtime_args(&AccountCommand::Doctor { provider_id: None }).unwrap(),

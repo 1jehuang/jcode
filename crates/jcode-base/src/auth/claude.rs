@@ -456,9 +456,9 @@ pub fn remove_account(label: &str) -> Result<()> {
     if crate::config::config()
         .provider
         .claude_code
-        .routes_jcode_account(label)
+        .uses_native(label)
     {
-        crate::config::Config::set_claude_code_jcode_account(label, false, None)?;
+        crate::config::Config::set_claude_account_native(label, false, None)?;
     }
 
     Ok(())

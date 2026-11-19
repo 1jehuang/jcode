@@ -227,7 +227,12 @@ fn expand_saved_account_routes(mut routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
         // Auth and disk-catalog reads are account facts, not model facts.
         let active_label = crate::auth::claude::active_account_label();
         let now = chrono::Utc::now().timestamp_millis();
+        // CLI-mode accounts are listed as Claude Code routes instead.
+        let cli = crate::auth::claude_code::settings();
         for account in claude {
+            if cli.routes_jcode_account(&account.label) {
+                continue;
+            }
             let scope = format!("oauth::{}", account.label);
             let cached_models = super::cached_anthropic_model_ids_for_scope(&scope);
             let cached = cached_models.is_some();
@@ -920,9 +925,12 @@ pub fn claude_code_routes_for(
             (!settings.is_default_instance(&instance.id)).then_some(instance.id.as_str()),
         );
         let provider_label = claude_code_route_provider_label(settings, &instance);
-        let detail = match instance.resolved_home() {
-            Some(home) => format!("Claude Code CLI, CLAUDE_CONFIG_DIR={}", home.display()),
-            None => "Claude Code CLI, default login".to_string(),
+        let detail = match (&instance.jcode_account, instance.resolved_home()) {
+            (Some(label), _) => format!("Claude Code CLI, jcode account {label}"),
+            (None, Some(home)) => {
+                format!("Claude Code CLI, CLAUDE_CONFIG_DIR={}", home.display())
+            }
+            (None, None) => "Claude Code CLI, default login".to_string(),
         };
         for model in models_for(&instance) {
             routes.push(ModelRoute {

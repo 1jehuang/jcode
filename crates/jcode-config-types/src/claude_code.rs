@@ -35,8 +35,13 @@ pub struct ClaudeCodeConfig {
     pub default_instance: String,
     /// Claude Code logins. Empty means one implicit `default` instance.
     pub instances: Vec<ClaudeCodeInstanceConfig>,
-    /// Saved jcode Anthropic account labels that also run through the CLI,
-    /// each as an extra instance using that account's jcode-managed token.
+    /// Saved jcode Claude accounts that use jcode's native API instead of the
+    /// CLI. Every other saved account runs through the CLI by default.
+    pub native_accounts: Vec<String>,
+    /// Saved jcode Claude accounts that run through the CLI, each as an extra
+    /// instance using that account's jcode-managed token. Derived at runtime
+    /// from the saved accounts minus `native_accounts`; never persisted.
+    #[serde(skip)]
     pub jcode_accounts: Vec<String>,
 }
 
@@ -50,6 +55,7 @@ impl Default for ClaudeCodeConfig {
             expose_jcode_tools: true,
             default_instance: CLAUDE_CODE_DEFAULT_INSTANCE_ID.to_string(),
             instances: Vec::new(),
+            native_accounts: Vec::new(),
             jcode_accounts: Vec::new(),
         }
     }
@@ -188,6 +194,13 @@ impl ClaudeCodeConfig {
             .any(|item| item.trim() == label.trim())
     }
 
+    /// True when the saved jcode account `label` was toggled to native API.
+    pub fn uses_native(&self, label: &str) -> bool {
+        self.native_accounts
+            .iter()
+            .any(|item| item.trim() == label.trim())
+    }
+
     /// Default instance id, guaranteed to name an effective instance.
     pub fn resolved_default_instance(&self) -> String {
         let instances = self.effective_instances();
@@ -299,6 +312,14 @@ mod tests {
         assert!(config.routes_jcode_account("My Work"));
         assert!(!config.routes_jcode_account("claude-otter"));
         assert_eq!(jcode_account_instance_id("1st"), "a-1st");
+        let parsed: Wrapper = toml_like(
+            r#"{"claude_code":{"native_accounts":["claude-otter"],"jcode_accounts":["x"]}}"#,
+        );
+        assert!(parsed.claude_code.uses_native("claude-otter"));
+        assert!(
+            parsed.claude_code.jcode_accounts.is_empty(),
+            "derived, never read"
+        );
     }
 
     #[test]

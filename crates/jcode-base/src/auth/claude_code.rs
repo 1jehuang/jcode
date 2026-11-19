@@ -3,20 +3,58 @@
 //! In this mode the official `claude` binary owns login, token storage and
 //! refresh. jcode never reads or imports those credentials. An "account" is a
 //! configured instance (`[provider.claude_code].instances`), isolated by its
-//! own `CLAUDE_CONFIG_DIR`. Session pins use the instance id as the label.
+//! own `CLAUDE_CONFIG_DIR`, or a saved jcode Claude account (the default for
+//! every saved account) whose jcode-managed token is handed to the CLI.
+//! Session pins use the instance id as the label.
 
 use crate::config::{ClaudeCodeConfig, ClaudeCodeInstanceConfig};
 use anyhow::{Result, bail};
 use jcode_provider_core::AccountPin;
 
-/// Current `[provider.claude_code]` config.
+/// Current `[provider.claude_code]` config, with every saved Claude account
+/// not toggled to native API added as a CLI instance (when the CLI exists).
 pub fn settings() -> ClaudeCodeConfig {
-    crate::config::config().provider.claude_code.clone()
+    let mut settings = crate::config::config().provider.claude_code.clone();
+    if cli_default() && command_available(&settings.resolved_binary()) {
+        settings.jcode_accounts = crate::auth::claude::list_accounts()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|account| account.label)
+            .filter(|label| !settings.uses_native(label))
+            .collect();
+    }
+    settings
+}
+
+/// jcode-base's own unit tests cover native Claude routing and must not depend
+/// on whether `claude` is on the test host's PATH; they opt in explicitly.
+#[cfg(test)]
+pub(crate) static TEST_CLI_DEFAULT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn cli_default() -> bool {
+    #[cfg(test)]
+    return TEST_CLI_DEFAULT.load(std::sync::atomic::Ordering::SeqCst);
+    #[cfg(not(test))]
+    true
 }
 
 /// Binary that will be spawned (`JCODE_CLAUDE_CODE_BIN` wins).
 pub fn binary() -> String {
-    settings().resolved_binary()
+    crate::config::config()
+        .provider
+        .claude_code
+        .resolved_binary()
+}
+
+/// CLI instance id serving saved Claude account `label`, `None` when the
+/// account uses jcode's native API (or the CLI is not installed).
+pub fn instance_for_account(label: &str) -> Option<String> {
+    settings()
+        .effective_instances()
+        .into_iter()
+        .find(|instance| instance.jcode_account.as_deref() == Some(label.trim()))
+        .map(|instance| instance.id)
 }
 
 /// True when the configured Claude Code binary exists (on PATH or as a path).
@@ -68,6 +106,32 @@ pub fn pin_for_label(label: &str) -> Result<AccountPin> {
 /// Current id of the instance a pin names, `None` when it was removed.
 pub fn resolve_pin(pin: &AccountPin) -> Option<String> {
     instance(&pin.label).map(|instance| instance.id)
+}
+
+/// Run saved Claude account `label` through the Claude Code CLI (`cli`) or
+/// jcode's native API. Returns a confirmation for the user.
+pub fn set_account_transport(label: &str, cli: bool) -> Result<String> {
+    let label = label.trim();
+    if !crate::auth::claude::list_accounts()?
+        .iter()
+        .any(|account| account.label == label)
+    {
+        bail!("No saved Claude account `{label}`.");
+    }
+    if cli && !binary_available() {
+        bail!(
+            "Claude Code CLI `{}` not found. Install it, or set [provider.claude_code].binary.",
+            binary()
+        );
+    }
+    crate::config::Config::set_claude_account_native(label, !cli, None)?;
+    Ok(if cli {
+        format!(
+            "Claude account `{label}` now runs through the Claude Code CLI. Its Claude models are listed as Claude Code routes in /model."
+        )
+    } else {
+        format!("Claude account `{label}` now uses jcode's native API.")
+    })
 }
 
 /// Non-secret identity Claude Code caches for an instance's login.
