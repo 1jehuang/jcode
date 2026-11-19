@@ -8,9 +8,13 @@ impl ProviderAuth {
         req: reqwest::RequestBuilder,
         api_base: &str,
     ) -> Result<reqwest::RequestBuilder> {
+        let req = match self {
+            Self::WithHeaders { headers, .. } => req.headers(headers.clone()),
+            _ => req,
+        };
         // Reuse key-probe rules without changing other providers' auth modes.
         if jcode_base::provider_catalog::api_base_is_anthropic(api_base) {
-            match self {
+            match self.credentials() {
                 Self::AuthorizationBearer { token, .. } => {
                     return Ok(
                         jcode_base::provider_catalog::apply_openai_compatible_catalog_auth(
