@@ -35,6 +35,9 @@ fn envelope_trigger(text: &str) -> Option<String> {
     struct Envelope {
         background_transcript: Vec<String>,
         trigger: String,
+        #[serde(default)]
+        #[allow(dead_code)]
+        still_speaking: bool,
     }
     if text.len() > 128 * 1024 {
         return None;
@@ -550,18 +553,21 @@ impl App {
             listener.turns.pop_front();
         }
         if let Some(full) = listener.continuation.take() {
-            let content = format!("(The user kept talking. Full request: \"{full}\". Adjust or cancel what you are doing if needed.)");
+            let content = format!("(The user finished speaking. Full request: \"{full}\". Now acknowledge and complete any necessary actions.)");
             if let Some((text, _)) = listener.pending.as_mut() {
-                // Not dispatched yet: send the full utterance instead.
+                // Not dispatched yet: send the final utterance as a normal request.
                 if let Ok(mut env) = serde_json::from_str::<serde_json::Value>(text) {
                     env["trigger"] = serde_json::Value::String(full);
+                    if let Some(map) = env.as_object_mut() {
+                        map.remove("still_speaking");
+                    }
                     *text = env.to_string();
                 }
             } else if self.is_processing {
-                self.push_display_message(DisplayMessage::user(content.clone()));
+                // The injected soft interrupt renders itself in chat.
                 self.send_interleave_now(content, vec![], remote).await;
             } else {
-                listener.pending = Some((serde_json::json!({"background_transcript": [], "trigger": full}).to_string(), Instant::now()));
+                listener.pending = Some((content, Instant::now()));
             }
             changed = true;
         }

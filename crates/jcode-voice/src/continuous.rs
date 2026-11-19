@@ -70,7 +70,7 @@ pub enum ContinuousEvent {
     },
     /// Accepted JSON payload with prior background_transcript strings and the exact trigger.
     Transcript(String),
-    /// The user kept talking after an early (partial transcript) trigger.
+    /// The user finished speaking after an early (partial transcript) trigger.
     /// Carries the full final utterance. Never dispatch without a prior Transcript.
     Continuation(String),
     Rejected(String),
@@ -726,6 +726,15 @@ async fn early_trigger(
         output.push(ContinuousEvent::Caption { id, text: text.chars().take(256).collect() });
         output.push(ContinuousEvent::CaptionScore { id, probability, accepted: true });
         let payload = output.context.accepted(text.clone());
+        // Mark the request provisional: Jarvis may prepare but must not speak
+        // until the Continuation with the finished utterance arrives.
+        let payload = match serde_json::from_str::<serde_json::Value>(&payload) {
+            Ok(mut env) => {
+                env["still_speaking"] = serde_json::Value::Bool(true);
+                env.to_string()
+            }
+            Err(_) => payload,
+        };
         output.push(ContinuousEvent::Transcript(payload));
         return Some(text);
     }
@@ -955,18 +964,21 @@ async fn run(
                                     let text = loop {
                                         tokio::select! {
                                             biased;
-                                            text = &mut stream => break text?,
+                                            // A failed stream after an early trigger still closes it.
+                                            text = &mut stream => break match (text, &fired) { (Err(_), Some(t)) => t.clone(), (r, _) => r? },
                                             trigger = &mut early, if fired.is_none() => {
                                                 match trigger { Some(t) => fired = Some(t), None => break (&mut stream).await? }
+                                                // Loop again to await the final transcript.
                                             }
                                         }
                                     };
                                     super::timing::mark("final transcript");
                                     if let Some(trigger) = fired {
-                                        if word_count(&text) > word_count(&trigger) {
-                                            let mut output = events.lock().unwrap_or_else(|e|e.into_inner());
-                                            output.push(ContinuousEvent::Continuation(text.trim().chars().take(4096).collect()));
-                                        }
+                                        // Always close a provisional request, even when
+                                        // nothing was added, so Jarvis knows to answer.
+                                        let full = if text.trim().is_empty() { trigger } else { text };
+                                        let mut output = events.lock().unwrap_or_else(|e|e.into_inner());
+                                        output.push(ContinuousEvent::Continuation(full.trim().chars().take(4096).collect()));
                                         return Ok(None);
                                     }
                                     if text.trim().is_empty() { return Ok(None); }
