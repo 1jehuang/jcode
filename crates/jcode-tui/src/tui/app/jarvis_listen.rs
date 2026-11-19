@@ -17,7 +17,10 @@ fn envelope_trigger(text: &str) -> Option<String> {
     if text.len() > 128 * 1024 {
         return None;
     }
-    let e: Envelope = serde_json::from_str(text).ok()?;
+    // Ordinary chat text is not an envelope and is displayed unchanged.
+    let Ok(e) = serde_json::from_str::<Envelope>(text) else {
+        return None;
+    };
     (e.background_transcript.len() <= 16
         && e.background_transcript
             .iter()
