@@ -23,8 +23,9 @@ local, unlocked Linux graphical session. It is not a background startup service.
    actually a request for the assistant. Natural requests need not say a wake
    word. Ambient, quoted, hypothetical and uncertain speech should be rejected.
    Classifier failures fail closed, never forward directly to the agent.
-4. Only accepted requests reach the ordinary agent conversation. Ambient
-   transcripts are not appended to agent history or printed in the TUI.
+4. The listening window shows a temporary caption for each transcribed phrase,
+   even if Jev does not accept it. A caption is not a chat message. Only
+   accepted requests reach the ordinary agent conversation.
 5. At most one accepted request waits while the agent is busy. It expires after
    30 seconds. Duplicate requests within ten seconds are suppressed. Delivery
    attempts are not automatically retried.
@@ -119,6 +120,14 @@ text-module example above. The native helper is backward-compatible with older
 retain at most 64 amplitudes, and publish only a 1 Hz heartbeat while paused.
 No transcripts are included. A capture/state transition is published immediately.
 The renderer stops animation when capture is off or its feed expires.
+
+When Jev accepts a request, the module briefly enters the `triggered` state.
+This confirms acceptance, not that an agent reply has finished. The words stay
+out of Waybar. To make acceptance stand out even when the microphone is quiet:
+
+```css
+#waveform-jarvis.triggered { color: #1e1e2e; background-color: #a6e3a1; border-radius: 8px; }
+```
 
 ## Screen context
 
