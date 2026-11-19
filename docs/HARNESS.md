@@ -202,6 +202,10 @@ It does not count as successful completion. If another lane explicitly depends
 on that item, redirect its prerequisite to a replacement or explicitly clear
 that dependency before cancelling (or in the same edit).
 
+The cancellation history for a session lives at `todos/cancellations/<session-id>.json` under `JCODE_HOME`. It contains the item as it was before cancellation, the reason, and the timestamp.
+
+When space is tight, the collapsed pinned todo view prioritizes rows with live workers before showing `+N more`. This is a display choice only. Expanding the list restores plan order, and scheduling and dependencies are unchanged.
+
 ## Pausing a todo
 
 A todo has no "blocked" state. An unfinished todo keeps receiving automatic continuation unless one of these applies:
