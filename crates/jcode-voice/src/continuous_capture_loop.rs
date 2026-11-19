@@ -15,7 +15,9 @@ pub(super) async fn run(
     gate: Option<jcode_base::jev::JevClient>,
 ) -> Result<(), VoiceError> {
     emit(&events, ContinuousEvent::State(VoiceState::Starting));
-    jcode_base::logging::info(&format!("JARVIS_CAPTURE settings pause_ms={PAUSE_MS} commit_grace_ms={COMMIT_GRACE_MS} hard_limit_ms={HARD_LIMIT_MS}"));
+    jcode_base::logging::info(&format!(
+        "JARVIS_CAPTURE settings pause_ms={PAUSE_MS} commit_grace_ms={COMMIT_GRACE_MS} hard_limit_ms={HARD_LIMIT_MS}"
+    ));
     let mut segmenter = Segmenter::default();
     let mut generation = epoch.load(Ordering::SeqCst);
     let mut resume_at = Instant::now();

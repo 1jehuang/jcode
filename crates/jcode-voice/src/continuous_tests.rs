@@ -368,8 +368,90 @@ fn resumed_speech_cancels_commit_without_opening_another_stream() {
         transitions.as_slice(),
         [Seg::Start(_), Seg::Pause, Seg::Resume, Seg::Pause]
     ));
-    assert!(matches!(s.push_stream(&[0; 320]).as_slice(), [Seg::Audio(_), Seg::End]));
+    assert!(matches!(
+        s.push_stream(&[0; 320]).as_slice(),
+        [Seg::Audio(_), Seg::End]
+    ));
     assert!(s.push_stream(&[0; 16000]).is_empty());
+}
+#[tokio::test]
+async fn pause_resume_commits_one_nari_stream_after_all_audio() {
+    use futures::{SinkExt, StreamExt};
+    use serde_json::{Value, json};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/voice/realtime", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut ws = tokio_tungstenite::accept_async(listener.accept().await.unwrap().0)
+            .await
+            .unwrap();
+        let mut samples = 0;
+        while let Some(msg) = ws.next().await {
+            let v: Value = serde_json::from_str(msg.unwrap().to_text().unwrap()).unwrap();
+            let response = match v["type"].as_str().unwrap() {
+                "session.configure" => json!({"type":"session.configured"}),
+                "input_audio_buffer.append" => {
+                    use base64::Engine;
+                    samples += base64::engine::general_purpose::STANDARD
+                        .decode(v["audio"].as_str().unwrap())
+                        .unwrap()
+                        .len()
+                        / 2;
+                    continue;
+                }
+                "input_audio_buffer.commit" => {
+                    assert_eq!(samples, (400 + 1000 + 200 + 1300) * 16);
+                    ws.send(Message::Text(json!({"type":"input_audio_buffer.committed","item_id":"a","client_event_id":v["event_id"]}).to_string())).await.unwrap();
+                    json!({"type":"transcript.completed","item_id":"a","transcript":"both halves"})
+                }
+                other => panic!("unexpected message {other}"),
+            };
+            ws.send(Message::Text(response.to_string())).await.unwrap();
+            if v["type"] == "input_audio_buffer.commit" {
+                return;
+            }
+        }
+        panic!("stream closed before final commit");
+    });
+    let cancel = Arc::new(AtomicBool::new(false));
+    let connect_cancel = cancel.clone();
+    let mut warm = Some(tokio::spawn(async move {
+        NariSession::connect_relay(&url, "test", connect_cancel).await
+    }));
+    let mut segmenter = Segmenter::default();
+    let mut live = None;
+    let mut job = None;
+    for (value, ms) in [(3000, 400), (0, 1000), (3000, 200), (0, 1300)] {
+        for event in segmenter.push_stream(&vec![value; ms * 16]) {
+            match event {
+                Seg::Start(audio) => {
+                    assert!(job.is_none());
+                    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                    tx.send(audio).unwrap();
+                    live = Some(tx);
+                    let warm = warm.take().unwrap();
+                    let cancel = cancel.clone();
+                    job = Some(tokio::spawn(async move {
+                        stream_job(Some(warm), String::new(), rx, cancel, |_| {}).await
+                    }));
+                }
+                Seg::Audio(audio) => live.as_ref().unwrap().send(audio).unwrap(),
+                Seg::Pause | Seg::Resume => assert!(live.is_some()),
+                Seg::End => drop(live.take().unwrap()),
+            }
+        }
+    }
+    assert!(live.is_none());
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), job.unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        "both halves"
+    );
+    server.await.unwrap();
 }
 #[test]
 fn brief_noise_is_not_speech() {

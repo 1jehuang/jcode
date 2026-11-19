@@ -680,7 +680,9 @@ impl Segmenter {
                 if self.quiet == PAUSE_MS * 16 {
                     output.push(Seg::Pause);
                 }
-                if self.quiet >= (PAUSE_MS + COMMIT_GRACE_MS) * 16 || self.speech_len >= HARD_LIMIT_MS * 16 {
+                if self.quiet >= (PAUSE_MS + COMMIT_GRACE_MS) * 16
+                    || self.speech_len >= HARD_LIMIT_MS * 16
+                {
                     output.push(Seg::End);
                     self.speech_len = 0;
                     self.active = false;
