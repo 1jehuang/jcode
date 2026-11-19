@@ -73,7 +73,6 @@ fn is_osc133_leak(c: char) -> bool {
     OSC133_FILTER.with(|f| f.filter(c))
 }
 
-
 pub(in crate::tui::app) async fn send_interleave_now(
     app: &mut App,
     content: String,

@@ -75,10 +75,7 @@ fn kcode_layout_selects_kcode_package_names() {
     for package in ["kcode-desktop", "kcode-desktop-ui"] {
         std::fs::create_dir_all(root.path().join("crates").join(package)).unwrap();
         std::fs::write(
-            root.path()
-                .join("crates")
-                .join(package)
-                .join("Cargo.toml"),
+            root.path().join("crates").join(package).join("Cargo.toml"),
             format!("[package]\nname='{package}'\nversion='0.1.0'\n"),
         )
         .unwrap();

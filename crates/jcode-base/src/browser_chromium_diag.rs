@@ -205,7 +205,10 @@ mod tests {
         let user_data = temp.path();
         // Native absolute paths: a POSIX literal is not absolute on Windows, and
         // the "another folder" classification compares real paths.
-        let expected = user_data.join("browser").join("extensions").join("chromium");
+        let expected = user_data
+            .join("browser")
+            .join("extensions")
+            .join("chromium");
         let expected = expected.as_path();
         let other_folder = user_data.join("Downloads").join("bridge");
         let other_folder_json = serde_json::Value::String(other_folder.to_string_lossy().into());

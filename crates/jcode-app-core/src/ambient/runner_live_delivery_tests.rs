@@ -56,7 +56,8 @@ fn scheduled_live_delivery_reaches_subscribed_client() {
                 .await
                 .expect("observer subscription ready");
             let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
-            let item = ScheduledItem { recurrence: Default::default(),
+            let item = ScheduledItem {
+                recurrence: Default::default(),
                 id: "scheduled-live-regression".to_string(),
                 scheduled_for: chrono::Utc::now(),
                 context: "Report scheduled live output".to_string(),

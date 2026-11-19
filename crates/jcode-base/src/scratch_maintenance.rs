@@ -260,11 +260,7 @@ fn busy_process_dirs() -> Option<Vec<PathBuf>> {
 
     // If not a single process was inspectable the API is not behaving as expected;
     // report that as "unknown" so the caller declines to prune.
-    if readable == 0 {
-        None
-    } else {
-        Some(dirs)
-    }
+    if readable == 0 { None } else { Some(dirs) }
 }
 
 /// Any platform without a working cwd probe reports "unknown", which makes
@@ -538,7 +534,10 @@ mod tests {
             temp.path(),
             "JCODE_HOME did not redirect storage::jcode_dir"
         );
-        assert!(scratch.is_dir(), "scratch root must exist under the redirected home");
+        assert!(
+            scratch.is_dir(),
+            "scratch root must exist under the redirected home"
+        );
         assert!(
             retention_from_env().is_some(),
             "retention must be enabled for the pass to run"
@@ -570,6 +569,9 @@ mod tests {
             busy_kept,
             "the scheduled pass deleted a directory holding a live process cwd"
         );
-        assert!(stamped, "the pass must record its stamp so it runs once a day");
+        assert!(
+            stamped,
+            "the pass must record its stamp so it runs once a day"
+        );
     }
 }

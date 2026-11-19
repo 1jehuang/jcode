@@ -180,13 +180,19 @@ mod destination_tests {
     #[test]
     fn unc_destinations_are_rewritten() {
         let text = "![shot](\\\\server\\share\\a.png)";
-        assert_eq!(normalize_image_destinations(text), "![shot](//server/share/a.png)");
+        assert_eq!(
+            normalize_image_destinations(text),
+            "![shot](//server/share/a.png)"
+        );
     }
 
     #[test]
     fn angle_bracket_destinations_are_rewritten() {
         let text = "![shot](<C:\\a b\\c.png>)";
-        assert_eq!(normalize_image_destinations(text), "![shot](<C:/a b/c.png>)");
+        assert_eq!(
+            normalize_image_destinations(text),
+            "![shot](<C:/a b/c.png>)"
+        );
     }
 
     #[test]

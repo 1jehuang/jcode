@@ -546,7 +546,12 @@ fn test_discover_projects_uses_sandboxed_external_home() {
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
-    let project_dir = temp.path().join("external").join(".claude").join("projects").join("demo");
+    let project_dir = temp
+        .path()
+        .join("external")
+        .join(".claude")
+        .join("projects")
+        .join("demo");
     std::fs::create_dir_all(&project_dir).unwrap();
     std::fs::write(
         project_dir.join("sessions-index.json"),
@@ -564,7 +569,12 @@ fn test_list_claude_code_sessions_uses_live_transcripts_when_index_is_stale() {
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
-    let project_dir = temp.path().join("external").join(".claude").join("projects").join("demo-project");
+    let project_dir = temp
+        .path()
+        .join("external")
+        .join(".claude")
+        .join("projects")
+        .join("demo-project");
     std::fs::create_dir_all(&project_dir).unwrap();
 
     let indexed_session_path = project_dir.join("live-session-1.jsonl");
@@ -640,7 +650,12 @@ fn test_list_claude_code_sessions_uses_index_metadata_without_parsing_transcript
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
-    let project_dir = temp.path().join("external").join(".claude").join("projects").join("demo-project");
+    let project_dir = temp
+        .path()
+        .join("external")
+        .join(".claude")
+        .join("projects")
+        .join("demo-project");
     std::fs::create_dir_all(&project_dir).unwrap();
 
     let transcript_path = project_dir.join("indexed-session.jsonl");
@@ -690,7 +705,12 @@ fn test_list_claude_code_sessions_skips_empty_index_entries_without_messages() {
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
-    let project_dir = temp.path().join("external").join(".claude").join("projects").join("demo-project");
+    let project_dir = temp
+        .path()
+        .join("external")
+        .join(".claude")
+        .join("projects")
+        .join("demo-project");
     std::fs::create_dir_all(&project_dir).unwrap();
 
     let transcript_path = project_dir.join("empty-session.jsonl");
@@ -730,7 +750,12 @@ fn test_import_claude_session_uses_recovered_live_transcript() {
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
-    let project_dir = temp.path().join("external").join(".claude").join("projects").join("demo-project");
+    let project_dir = temp
+        .path()
+        .join("external")
+        .join(".claude")
+        .join("projects")
+        .join("demo-project");
     std::fs::create_dir_all(&project_dir).unwrap();
 
     let transcript_path = project_dir.join("live-session-1.jsonl");
@@ -971,7 +996,12 @@ fn test_resolve_resume_target_to_jcode_imports_claude_code_session() {
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
-    let project_dir = temp.path().join("external").join(".claude").join("projects").join("demo-project");
+    let project_dir = temp
+        .path()
+        .join("external")
+        .join(".claude")
+        .join("projects")
+        .join("demo-project");
     std::fs::create_dir_all(&project_dir).unwrap();
     let transcript_path = project_dir.join("claude-resolve-test.jsonl");
     std::fs::write(
@@ -1029,7 +1059,12 @@ fn test_reimporting_claude_session_preserves_jcode_continuation() {
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
-    let project_dir = temp.path().join("external").join(".claude").join("projects").join("demo-project");
+    let project_dir = temp
+        .path()
+        .join("external")
+        .join(".claude")
+        .join("projects")
+        .join("demo-project");
     std::fs::create_dir_all(&project_dir).unwrap();
     let transcript_path = project_dir.join("claude-continued.jsonl");
     std::fs::write(

@@ -1171,7 +1171,13 @@ fn render_todos_message_with_cap(
             .map(|line| super::truncate_line_with_ellipsis_to_width(line, width as usize))
             .collect();
     }
-    todo_intent::push_todo_plan_details(&mut lines, &plan, base_indent, inner_width, compact_details);
+    todo_intent::push_todo_plan_details(
+        &mut lines,
+        &plan,
+        base_indent,
+        inner_width,
+        compact_details,
+    );
     if todos.is_empty() {
         lines.push(todo_card_line(
             vec![Span::styled(

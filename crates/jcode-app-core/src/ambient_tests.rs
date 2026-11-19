@@ -24,7 +24,8 @@ fn test_scheduled_queue_push_and_pop() {
     let past = Utc::now() - Duration::minutes(5);
     let future = Utc::now() + Duration::hours(1);
 
-    queue.push(ScheduledItem { recurrence: Default::default(),
+    queue.push(ScheduledItem {
+        recurrence: Default::default(),
         id: "s1".into(),
         scheduled_for: past,
         context: "past item".into(),
@@ -39,7 +40,8 @@ fn test_scheduled_queue_push_and_pop() {
         additional_context: None,
     });
 
-    queue.push(ScheduledItem { recurrence: Default::default(),
+    queue.push(ScheduledItem {
+        recurrence: Default::default(),
         id: "s2".into(),
         scheduled_for: future,
         context: "future item".into(),
@@ -73,7 +75,8 @@ fn test_scheduled_queue_remove_by_id_persists_remaining_items() {
     let mut queue = ScheduledQueue::load(path.clone());
     let future = Utc::now() + Duration::hours(1);
 
-    queue.push(ScheduledItem { recurrence: Default::default(),
+    queue.push(ScheduledItem {
+        recurrence: Default::default(),
         id: "keep".into(),
         scheduled_for: future,
         context: "keep item".into(),
@@ -87,7 +90,8 @@ fn test_scheduled_queue_remove_by_id_persists_remaining_items() {
         git_branch: None,
         additional_context: None,
     });
-    queue.push(ScheduledItem { recurrence: Default::default(),
+    queue.push(ScheduledItem {
+        recurrence: Default::default(),
         id: "cancel".into(),
         scheduled_for: future,
         context: "cancel item".into(),
@@ -120,7 +124,8 @@ fn test_pop_ready_sorts_by_priority_then_time() {
     let past1 = Utc::now() - Duration::minutes(10);
     let past2 = Utc::now() - Duration::minutes(5);
 
-    queue.push(ScheduledItem { recurrence: Default::default(),
+    queue.push(ScheduledItem {
+        recurrence: Default::default(),
         id: "low_early".into(),
         scheduled_for: past1,
         context: "low early".into(),
@@ -135,7 +140,8 @@ fn test_pop_ready_sorts_by_priority_then_time() {
         additional_context: None,
     });
 
-    queue.push(ScheduledItem { recurrence: Default::default(),
+    queue.push(ScheduledItem {
+        recurrence: Default::default(),
         id: "high_late".into(),
         scheduled_for: past2,
         context: "high late".into(),
@@ -165,7 +171,8 @@ fn test_take_ready_direct_items_only_removes_direct_targets() {
     let mut queue = ScheduledQueue::load(path);
     let past = Utc::now() - Duration::minutes(5);
 
-    queue.push(ScheduledItem { recurrence: Default::default(),
+    queue.push(ScheduledItem {
+        recurrence: Default::default(),
         id: "session_due".into(),
         scheduled_for: past,
         context: "scheduled session task".into(),
@@ -182,7 +189,8 @@ fn test_take_ready_direct_items_only_removes_direct_targets() {
         additional_context: None,
     });
 
-    queue.push(ScheduledItem { recurrence: Default::default(),
+    queue.push(ScheduledItem {
+        recurrence: Default::default(),
         id: "spawn_due".into(),
         scheduled_for: past,
         context: "spawned session task".into(),
@@ -199,7 +207,8 @@ fn test_take_ready_direct_items_only_removes_direct_targets() {
         additional_context: None,
     });
 
-    queue.push(ScheduledItem { recurrence: Default::default(),
+    queue.push(ScheduledItem {
+        recurrence: Default::default(),
         id: "ambient_due".into(),
         scheduled_for: past,
         context: "scheduled ambient task".into(),
@@ -256,7 +265,8 @@ fn test_ambient_state_record_cycle_with_schedule() {
         memories_modified: 0,
         compactions: 0,
         proactive_work: None,
-        next_schedule: Some(ScheduleRequest { recurrence: Default::default(),
+        next_schedule: Some(ScheduleRequest {
+            recurrence: Default::default(),
             wake_in_minutes: Some(15),
             wake_at: None,
             context: "check CI".into(),
@@ -358,7 +368,8 @@ fn test_build_ambient_system_prompt_with_data() {
         ..Default::default()
     };
 
-    let queue = vec![ScheduledItem { recurrence: Default::default(),
+    let queue = vec![ScheduledItem {
+        recurrence: Default::default(),
         id: "sched_001".into(),
         scheduled_for: Utc::now(),
         context: "Check CI status".into(),
@@ -436,7 +447,8 @@ fn test_scheduled_queue_items_accessor() {
     let path = tmp.path().join("queue.json");
     let mut queue = ScheduledQueue::load(path);
 
-    queue.push(ScheduledItem { recurrence: Default::default(),
+    queue.push(ScheduledItem {
+        recurrence: Default::default(),
         id: "s1".into(),
         scheduled_for: Utc::now(),
         context: "test item".into(),

@@ -6,8 +6,8 @@
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-use super::color_support::rgb;
 use super::TuiState;
+use super::color_support::rgb;
 
 /// Minimum terminal width to show the status bar.
 const MIN_WIDTH: u16 = 80;
@@ -79,11 +79,11 @@ fn build_status_line(data: &StatusBarData, width: usize) -> Line<'static> {
                 Style::default().fg(rgb(100, 160, 220)),
             ));
         } else {
-            spans.push(Span::styled(" \u{2502} ", Style::default().fg(separator_color)));
             spans.push(Span::styled(
-                format!("{} ", repo),
-                Style::default().fg(dim),
+                " \u{2502} ",
+                Style::default().fg(separator_color),
             ));
+            spans.push(Span::styled(format!("{} ", repo), Style::default().fg(dim)));
         }
     }
 

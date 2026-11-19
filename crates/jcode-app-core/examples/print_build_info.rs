@@ -35,10 +35,28 @@ fn main() {
     println!("  source_fingerprint: {:?}", info.source_fingerprint);
 
     println!();
-    println!("current_git_hash:        {}", current_git_hash(repo).expect("current_git_hash"));
-    println!("current_git_hash_full:   {}", current_git_hash_full(repo).expect("current_git_hash_full"));
-    println!("current_git_diff:        {}", current_git_diff(repo).expect("current_git_diff"));
-    println!("current_source_state:    {:?}", current_source_state(repo).expect("current_source_state"));
-    println!("is_working_tree_dirty:   {}", is_working_tree_dirty(repo).expect("is_working_tree_dirty"));
-    println!("current_version_file:    {:?}", current_version_file().expect("current_version_file"));
+    println!(
+        "current_git_hash:        {}",
+        current_git_hash(repo).expect("current_git_hash")
+    );
+    println!(
+        "current_git_hash_full:   {}",
+        current_git_hash_full(repo).expect("current_git_hash_full")
+    );
+    println!(
+        "current_git_diff:        {}",
+        current_git_diff(repo).expect("current_git_diff")
+    );
+    println!(
+        "current_source_state:    {:?}",
+        current_source_state(repo).expect("current_source_state")
+    );
+    println!(
+        "is_working_tree_dirty:   {}",
+        is_working_tree_dirty(repo).expect("is_working_tree_dirty")
+    );
+    println!(
+        "current_version_file:    {:?}",
+        current_version_file().expect("current_version_file")
+    );
 }

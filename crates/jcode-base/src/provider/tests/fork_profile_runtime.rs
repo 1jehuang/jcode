@@ -23,16 +23,12 @@ fn forked_provider_reuses_the_active_compatible_profile_runtime() {
                 OpenRouterRuntimeSpec::OpenRouterApiKey => {
                     Arc::new(OpenRouterProvider::new_openrouter_api_key_runtime()?)
                 }
-                OpenRouterRuntimeSpec::CompatibleProfile(profile) => {
-                    Arc::new(OpenRouterProvider::new_openai_compatible_profile_runtime(
-                        profile,
-                    )?)
-                }
-                OpenRouterRuntimeSpec::NamedProfile { name, config } => {
-                    Arc::new(OpenRouterProvider::new_named_openai_compatible(
-                        &name, &config,
-                    )?)
-                }
+                OpenRouterRuntimeSpec::CompatibleProfile(profile) => Arc::new(
+                    OpenRouterProvider::new_openai_compatible_profile_runtime(profile)?,
+                ),
+                OpenRouterRuntimeSpec::NamedProfile { name, config } => Arc::new(
+                    OpenRouterProvider::new_named_openai_compatible(&name, &config)?,
+                ),
             };
             Ok(provider)
         });

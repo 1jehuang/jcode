@@ -45,8 +45,8 @@ pub fn role_color(role: Option<&str>) -> Option<Color> {
     match role {
         Some("coordinator") => Some(rgb(255, 200, 100)), // gold/amber
         Some("worker") | Some("implementer") => Some(rgb(100, 160, 255)), // blue
-        Some("reviewer") => Some(rgb(130, 210, 130)), // green
-        Some("researcher") => Some(rgb(180, 140, 255)), // purple
+        Some("reviewer") => Some(rgb(130, 210, 130)),    // green
+        Some("researcher") => Some(rgb(180, 140, 255)),  // purple
         _ => None,
     }
 }
@@ -315,10 +315,7 @@ pub fn summary_line(
     if body_w < width {
         spans.push(Span::raw(" ".repeat(width - body_w)));
     }
-    spans.push(Span::styled(
-        body,
-        Style::default().fg(rgb(105, 105, 120)),
-    ));
+    spans.push(Span::styled(body, Style::default().fg(rgb(105, 105, 120))));
     Line::from(spans)
 }
 
@@ -496,11 +493,9 @@ pub fn members_to_tiles(members: &[GalleryMember]) -> Vec<SwarmTile> {
     sort_members_for_display(members)
         .into_iter()
         .map(|m| {
-            let accent = role_color(m.role.as_deref())
-                .unwrap_or_else(|| status_accent(&m.status));
+            let accent = role_color(m.role.as_deref()).unwrap_or_else(|| status_accent(&m.status));
             let mut tile =
-                SwarmTile::new(m.label.clone(), m.status.clone(), accent)
-                    .with_body(m.body.clone());
+                SwarmTile::new(m.label.clone(), m.status.clone(), accent).with_body(m.body.clone());
             if let Some(glyph) = role_glyph(m.role.as_deref()) {
                 tile = tile.with_role_glyph(glyph);
             }
@@ -561,8 +556,8 @@ pub fn render_swarm_chat_cards(members: &[GalleryMember], width: usize) -> Vec<L
 
     let mut out = Vec::new();
     for member in sort_members_for_display(members) {
-        let accent = role_color(member.role.as_deref())
-            .unwrap_or_else(|| status_accent(&member.status));
+        let accent =
+            role_color(member.role.as_deref()).unwrap_or_else(|| status_accent(&member.status));
         let lead = format!(
             "    {} {} ",
             member.icon.as_deref().unwrap_or("🐝"),
@@ -624,8 +619,8 @@ pub fn render_swarm_live_card(
         return Vec::new();
     }
 
-    let accent = role_color(member.role.as_deref())
-        .unwrap_or_else(|| status_accent(&member.status));
+    let accent =
+        role_color(member.role.as_deref()).unwrap_or_else(|| status_accent(&member.status));
     let mut metadata = Vec::new();
     if let Some(elapsed) = member.elapsed_secs {
         metadata.push(format_elapsed(elapsed));
@@ -772,10 +767,7 @@ pub fn render_swarm_panel(
         let cursor = "▌";
         let label = format!("Rename: {buffer}{cursor}");
         let label_w = unicode_width::UnicodeWidthStr::width(label.as_str());
-        let mut spans = vec![Span::styled(
-            label,
-            Style::default().fg(rgb(200, 200, 210)),
-        )];
+        let mut spans = vec![Span::styled(label, Style::default().fg(rgb(200, 200, 210)))];
         // Pad to the panel width so the row reads as an input field.
         if label_w < width {
             spans.push(Span::styled(
@@ -901,7 +893,11 @@ pub fn render_swarm_strip(
     let chip_w = |c: &Chip| -> usize {
         let prefix = if c.is_sel && focused { 2 } else { 0 }; // '▸ ' width
         let batch_pfx = if c.is_batch { 2 } else { 0 }; // '✓ ' width
-        prefix + batch_pfx + disp_w(&c.glyph) + 1 + disp_w(&c.name)
+        prefix
+            + batch_pfx
+            + disp_w(&c.glyph)
+            + 1
+            + disp_w(&c.name)
             + c.todo.as_ref().map(|t| disp_w(t) + 1).unwrap_or(0)
     };
 
@@ -1023,8 +1019,7 @@ pub fn render_swarm_strip(
                 Style::default().fg(rgb(110, 110, 125))
             };
             if chip.is_sel && focused {
-                style = style
-                    .add_modifier(Modifier::REVERSED | Modifier::UNDERLINED);
+                style = style.add_modifier(Modifier::REVERSED | Modifier::UNDERLINED);
             } else if chip.is_sel {
                 style = style.add_modifier(Modifier::UNDERLINED);
             }
@@ -1118,7 +1113,11 @@ pub fn render_swarm_strip(
                 let prefix_w = prefix.chars().count();
                 let body = truncate_label(&detail, width.saturating_sub(prefix_w));
                 out.push(Line::from(vec![
-                    Span::styled(prefix, Style::default().fg(role_color(m.role.as_deref()).unwrap_or_else(|| status_accent(&m.status)))),
+                    Span::styled(
+                        prefix,
+                        Style::default().fg(role_color(m.role.as_deref())
+                            .unwrap_or_else(|| status_accent(&m.status))),
+                    ),
                     Span::styled(body, Style::default().fg(rgb(180, 180, 190))),
                 ]));
             }
@@ -1795,8 +1794,8 @@ fn dock_row(
     spinner_frame: usize,
     width: usize,
 ) -> Line<'static> {
-    let accent = role_color(member.role.as_deref())
-        .unwrap_or_else(|| status_accent(&member.status));
+    let accent =
+        role_color(member.role.as_deref()).unwrap_or_else(|| status_accent(&member.status));
     let active = is_active_status(&member.status);
     let marker = if selected { "▸ " } else { "  " };
     let glyph = role_glyph(member.role.as_deref())
@@ -1842,10 +1841,7 @@ fn dock_row(
     } else {
         Style::default().fg(rgb(110, 110, 125))
     };
-    spans.push(Span::styled(
-        status.to_string(),
-        status_style,
-    ));
+    spans.push(Span::styled(status.to_string(), status_style));
     if let Some(todo) = todo {
         spans.push(Span::styled(todo, Style::default().fg(rgb(130, 130, 140))));
     }
@@ -1930,8 +1926,7 @@ fn render_hovered_detail(
     width: usize,
     budget: usize,
 ) -> Vec<Line<'static>> {
-    let accent = role_color(m.role.as_deref())
-        .unwrap_or_else(|| status_accent(&m.status));
+    let accent = role_color(m.role.as_deref()).unwrap_or_else(|| status_accent(&m.status));
     let dim = rgb(120, 120, 130);
     const GUTTER: &str = "   ";
 
@@ -2194,11 +2189,7 @@ fn push_metric_lines(
     if let Some(depth) = m.queue_depth
         && depth > 0
     {
-        push(
-            "⚠️ ",
-            format!("{depth} tasks queued"),
-            rgb(255, 180, 50),
-        );
+        push("⚠️ ", format!("{depth} tasks queued"), rgb(255, 180, 50));
     }
     if let Some(cents) = m.cost_cents {
         push("💰", format_cost(cents), detail_fg);
@@ -2288,8 +2279,8 @@ fn display_index_to_tile_index(
 /// One row in the agent list: a selection marker, optional role glyph, the
 /// label, a status badge, and an age hint, all bounded to `width`.
 fn list_row(member: &GalleryMember, selected: bool, focused: bool, width: usize) -> Line<'static> {
-    let accent = role_color(member.role.as_deref())
-        .unwrap_or_else(|| status_accent(&member.status));
+    let accent =
+        role_color(member.role.as_deref()).unwrap_or_else(|| status_accent(&member.status));
     let marker = if selected { "▸ " } else { "  " };
     let glyph = role_glyph(member.role.as_deref())
         .map(|g| format!("{g} "))
@@ -2316,9 +2307,7 @@ fn list_row(member: &GalleryMember, selected: bool, focused: bool, width: usize)
     let label_w = disp_w(&label);
 
     let label_style = if selected && focused {
-        Style::default()
-            .fg(accent)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(accent).add_modifier(Modifier::BOLD)
     } else if selected {
         Style::default().fg(rgb(235, 235, 245))
     } else {

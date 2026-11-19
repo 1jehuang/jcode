@@ -1529,7 +1529,8 @@ pub(super) async fn handle_resume_session(
             history_base,
         )
         .await?;
-        crate::tool::sdk::release_connection(client_connection_id); let _ = client_event_tx.send(ServerEvent::Done { id });
+        crate::tool::sdk::release_connection(client_connection_id);
+        let _ = client_event_tx.send(ServerEvent::Done { id });
         // Resolve project-local MCP config against the resumed session's
         // working dir, not the server process cwd (issue #420).
         // Do not block on the agent lock here: the target agent may be busy
@@ -2003,7 +2004,8 @@ pub(super) async fn handle_resume_session(
             });
             history_result?;
             let history_sent_ms = resume_start.elapsed().as_millis();
-            crate::tool::sdk::release_connection(client_connection_id); let _ = client_event_tx.send(ServerEvent::Done { id });
+            crate::tool::sdk::release_connection(client_connection_id);
+            let _ = client_event_tx.send(ServerEvent::Done { id });
             // Re-send the swarm plan AFTER the History payload: the client
             // clears its plan snapshot on session change, so without this the
             // plan graph would stay blank until the next plan mutation.

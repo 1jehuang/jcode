@@ -315,7 +315,11 @@ async fn unregister_restores_prior_configuration() {
 
     // Verify the prior server is preserved and the removed one is gone.
     let restored = McpConfig::load_from_file(&config_path).expect("load restored config");
-    assert_eq!(restored.servers.len(), 1, "must have exactly 1 server after unregister");
+    assert_eq!(
+        restored.servers.len(),
+        1,
+        "must have exactly 1 server after unregister"
+    );
     assert!(
         restored.servers.contains_key("keep-me"),
         "keep-me must survive unregister"
@@ -342,7 +346,10 @@ async fn unregister_restores_prior_configuration() {
         .await
         .expect("keep-me must connect");
     assert!(
-        manager.connected_servers().await.contains(&"keep-me".to_string()),
+        manager
+            .connected_servers()
+            .await
+            .contains(&"keep-me".to_string()),
         "keep-me must be in connected set"
     );
 

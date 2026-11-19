@@ -1680,7 +1680,10 @@ fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
     );
     // Wide widths wrap so the whole objective stays readable; compact ellipsizes.
     let keeps_tail = |lines: &[String]| lines.iter().any(|l| l.contains("narrow terminal window"));
-    assert!(keeps_tail(&wide), "wide intent should stay complete: {wide:?}");
+    assert!(
+        keeps_tail(&wide),
+        "wide intent should stay complete: {wide:?}"
+    );
     assert!(!wide.iter().any(|l| l.contains('…')), "wide wrap: {wide:?}");
     assert!(
         !narrow

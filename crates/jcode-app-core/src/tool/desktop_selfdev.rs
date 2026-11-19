@@ -129,10 +129,7 @@ fn desktop_package_names(root: &Path) -> (String, String) {
         candidates
             .iter()
             .find(|name| root.join("crates").join(name).join("Cargo.toml").is_file())
-            .map_or_else(
-                || fallback.to_string(),
-                |name| (*name).to_string(),
-            )
+            .map_or_else(|| fallback.to_string(), |name| (*name).to_string())
     };
     (
         resolve(&["kcode-desktop", "jcode-desktop"], "jcode-desktop"),

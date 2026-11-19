@@ -36,13 +36,7 @@ const RETRY_BASE_DELAY_MS: u64 = 1000;
 const TRANSPORT_ERROR_DELAY_MS: u64 = 2000;
 
 /// Native tools that jcode handles locally (not ForgeCode built-ins).
-const NATIVE_TOOL_NAMES: &[&str] = &[
-    "selfdev",
-    "communicate",
-    "memory",
-    "session_search",
-    "bg",
-];
+const NATIVE_TOOL_NAMES: &[&str] = &["selfdev", "communicate", "memory", "session_search", "bg"];
 
 #[derive(Clone)]
 pub struct ForgeCodeProvider {
@@ -342,8 +336,7 @@ impl ForgeCodeEventTranslator {
             SseEvent::MessageStart { message } => {
                 if let Some(usage) = message.get("usage") {
                     let input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64());
-                    let output_tokens =
-                        usage.get("output_tokens").and_then(|v| v.as_u64());
+                    let output_tokens = usage.get("output_tokens").and_then(|v| v.as_u64());
                     let cache_creation_input_tokens = usage
                         .get("cache_creation_input_tokens")
                         .and_then(|v| v.as_u64());
@@ -365,9 +358,7 @@ impl ForgeCodeEventTranslator {
                 }
                 Vec::new()
             }
-            SseEvent::ContentBlockStart {
-                content_block, ..
-            } => match content_block {
+            SseEvent::ContentBlockStart { content_block, .. } => match content_block {
                 ContentBlockInfo::Text { .. } => Vec::new(),
                 ContentBlockInfo::ToolUse { id, name } => {
                     self.in_tool_use_block = true;
@@ -409,17 +400,14 @@ impl ForgeCodeEventTranslator {
                 if let Some(usage) = usage
                     && (usage.input_tokens.is_some()
                         || usage.output_tokens.is_some()
-                        || usage
-                            .cache_creation_input_tokens
-                            .is_some()
+                        || usage.cache_creation_input_tokens.is_some()
                         || usage.cache_read_input_tokens.is_some())
                 {
                     return vec![StreamEvent::TokenUsage {
                         input_tokens: usage.input_tokens,
                         output_tokens: usage.output_tokens,
                         cache_read_input_tokens: usage.cache_read_input_tokens,
-                        cache_creation_input_tokens: usage
-                            .cache_creation_input_tokens,
+                        cache_creation_input_tokens: usage.cache_creation_input_tokens,
                     }];
                 }
                 Vec::new()
@@ -463,19 +451,17 @@ impl CliOutputParser {
                     Ok(parsed) => parsed,
                     Err(err) => {
                         return vec![StreamEvent::Error {
-                            message: format!(
-                                "Failed to parse ForgeCode CLI stream event: {}",
-                                err
-                            ),
+                            message: format!("Failed to parse ForgeCode CLI stream event: {}", err),
                             retry_after_secs: None,
                         }];
                     }
                 };
 
                 let events = self.translator.handle_event(parsed);
-                if events.iter().any(|event| {
-                    matches!(event, StreamEvent::MessageEnd { .. })
-                }) {
+                if events
+                    .iter()
+                    .any(|event| matches!(event, StreamEvent::MessageEnd { .. }))
+                {
                     self.saw_message_end = true;
                 }
                 events
@@ -490,17 +476,14 @@ impl CliOutputParser {
                                 events.push(StreamEvent::TextDelta(text));
                             }
                         }
-                        SdkContentBlock::ToolUse {
-                            id, name, input,
-                        } => {
+                        SdkContentBlock::ToolUse { id, name, input } => {
                             if !self.saw_stream_events {
                                 events.push(StreamEvent::ToolUseStart {
                                     id,
                                     name: to_internal_tool_name(&name),
                                 });
                                 events.push(StreamEvent::ToolInputDelta(
-                                    serde_json::to_string(&input)
-                                        .unwrap_or_default(),
+                                    serde_json::to_string(&input).unwrap_or_default(),
                                 ));
                                 events.push(StreamEvent::ToolUseEnd);
                             }
@@ -515,8 +498,7 @@ impl CliOutputParser {
                                     if let Some(s) = v.as_str() {
                                         s.to_string()
                                     } else {
-                                        serde_json::to_string(&v)
-                                            .unwrap_or_default()
+                                        serde_json::to_string(&v).unwrap_or_default()
                                     }
                                 })
                                 .unwrap_or_default();
@@ -532,9 +514,7 @@ impl CliOutputParser {
 
                 if !self.saw_message_end {
                     self.saw_message_end = true;
-                    events.push(StreamEvent::MessageEnd {
-                        stop_reason: None,
-                    });
+                    events.push(StreamEvent::MessageEnd { stop_reason: None });
                 }
 
                 events
@@ -554,8 +534,7 @@ impl CliOutputParser {
                                 if let Some(s) = v.as_str() {
                                     s.to_string()
                                 } else {
-                                    serde_json::to_string(&v)
-                                        .unwrap_or_default()
+                                    serde_json::to_string(&v).unwrap_or_default()
                                 }
                             })
                             .unwrap_or_default();
@@ -577,17 +556,14 @@ impl CliOutputParser {
                 if let Some(usage) = usage
                     && (usage.input_tokens.is_some()
                         || usage.output_tokens.is_some()
-                        || usage
-                            .cache_creation_input_tokens
-                            .is_some()
+                        || usage.cache_creation_input_tokens.is_some()
                         || usage.cache_read_input_tokens.is_some())
                 {
                     events.push(StreamEvent::TokenUsage {
                         input_tokens: usage.input_tokens,
                         output_tokens: usage.output_tokens,
                         cache_read_input_tokens: usage.cache_read_input_tokens,
-                        cache_creation_input_tokens: usage
-                            .cache_creation_input_tokens,
+                        cache_creation_input_tokens: usage.cache_creation_input_tokens,
                     });
                 }
                 if let Some(sid) = session_id {
@@ -601,9 +577,7 @@ impl CliOutputParser {
                 }
                 if !self.saw_message_end {
                     self.saw_message_end = true;
-                    events.push(StreamEvent::MessageEnd {
-                        stop_reason: None,
-                    });
+                    events.push(StreamEvent::MessageEnd { stop_reason: None });
                 }
                 events
             }
@@ -615,10 +589,7 @@ impl CliOutputParser {
                 retry_after_secs,
             }],
             CliOutput::System { session_id } => {
-                session_id
-                    .map(StreamEvent::SessionId)
-                    .into_iter()
-                    .collect()
+                session_id.map(StreamEvent::SessionId).into_iter().collect()
             }
             CliOutput::Other => Vec::new(),
         }
@@ -628,9 +599,7 @@ impl CliOutputParser {
 fn parse_content_blocks(content: &Value) -> Vec<SdkContentBlock> {
     match content {
         Value::String(text) => {
-            vec![SdkContentBlock::Text {
-                text: text.clone(),
-            }]
+            vec![SdkContentBlock::Text { text: text.clone() }]
         }
         Value::Array(items) => items
             .iter()
@@ -687,14 +656,8 @@ impl Provider for ForgeCodeProvider {
             )),
             Some(tool_names.len()),
             &[
-                (
-                    "resume_present",
-                    resume.is_some().to_string(),
-                ),
-                (
-                    "logical_message_count",
-                    messages.len().to_string(),
-                ),
+                ("resume_present", resume.is_some().to_string()),
+                ("logical_message_count", messages.len().to_string()),
             ],
         );
 
@@ -714,25 +677,21 @@ impl Provider for ForgeCodeProvider {
 
             for attempt in 0..MAX_RETRIES {
                 if attempt > 0 {
-                    let base_delay =
-                        jcode_provider_core::attempt_tracker::retry_backoff_delay(
-                            attempt,
-                            RETRY_BASE_DELAY_MS,
-                        );
-                    let extra_delay =
-                        if let Some(ref e) = last_error {
-                            let err_str =
-                                e.to_string().to_lowercase();
-                            if err_str.contains("not ready") {
-                                TRANSPORT_ERROR_DELAY_MS
-                            } else {
-                                0
-                            }
+                    let base_delay = jcode_provider_core::attempt_tracker::retry_backoff_delay(
+                        attempt,
+                        RETRY_BASE_DELAY_MS,
+                    );
+                    let extra_delay = if let Some(ref e) = last_error {
+                        let err_str = e.to_string().to_lowercase();
+                        if err_str.contains("not ready") {
+                            TRANSPORT_ERROR_DELAY_MS
                         } else {
                             0
-                        };
-                    let delay = base_delay
-                        + std::time::Duration::from_millis(extra_delay);
+                        }
+                    } else {
+                        0
+                    };
+                    let delay = base_delay + std::time::Duration::from_millis(extra_delay);
                     tokio::time::sleep(delay).await;
                     jcode_base::logging::info(&format!(
                         "Retrying ForgeCode CLI request (attempt \
@@ -759,11 +718,8 @@ impl Provider for ForgeCodeProvider {
                 {
                     Ok(()) => return,
                     Err(e) => {
-                        let error_str =
-                            format!("{e:#}").to_lowercase();
-                        if is_retryable_error(&error_str)
-                            && attempt + 1 < MAX_RETRIES
-                        {
+                        let error_str = format!("{e:#}").to_lowercase();
+                        if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
                             jcode_base::logging::info(&format!(
                                 "Transient error, will retry: {}",
                                 e
@@ -884,21 +840,12 @@ async fn run_forgecode_cli(
 
     let mut child = cmd
         .spawn()
-        .with_context(|| {
-            format!(
-                "Failed to spawn ForgeCode CLI using {}",
-                config.cli_path
-            )
-        })?;
+        .with_context(|| format!("Failed to spawn ForgeCode CLI using {}", config.cli_path))?;
 
     let mut stdin = child
         .stdin
         .take()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Failed to capture ForgeCode CLI stdin"
-            )
-        })?;
+        .ok_or_else(|| anyhow::anyhow!("Failed to capture ForgeCode CLI stdin"))?;
 
     let payload = serde_json::json!({
         "type": "user",
@@ -908,21 +855,13 @@ async fn run_forgecode_cli(
         }
     });
 
-    async fn terminate_child(
-        child: &mut tokio::process::Child,
-    ) {
+    async fn terminate_child(child: &mut tokio::process::Child) {
         let _ = child.kill().await;
-        let _ = tokio::time::timeout(
-            Duration::from_secs(2),
-            child.wait(),
-        )
-        .await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
     }
 
     if let Err(err) = async {
-        stdin
-            .write_all(payload.to_string().as_bytes())
-            .await?;
+        stdin.write_all(payload.to_string().as_bytes()).await?;
         stdin.write_all(b"\n").await?;
         stdin.flush().await?;
         Ok::<(), std::io::Error>(())
@@ -934,21 +873,20 @@ async fn run_forgecode_cli(
     }
     drop(stdin);
 
-    let stdout = child.stdout.take().ok_or_else(|| {
-        anyhow::anyhow!("Failed to capture ForgeCode CLI stdout")
-    })?;
-    let stderr = child.stderr.take().ok_or_else(|| {
-        anyhow::anyhow!("Failed to capture ForgeCode CLI stderr")
-    })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Failed to capture ForgeCode CLI stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Failed to capture ForgeCode CLI stderr"))?;
 
     let tx_stderr = tx.clone();
     tokio::spawn(async move {
         let mut reader = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = reader.next_line().await {
-            jcode_base::logging::debug(&format!(
-                "[forgecode-cli] {}",
-                line
-            ));
+            jcode_base::logging::debug(&format!("[forgecode-cli] {}", line));
         }
         drop(tx_stderr);
     });
@@ -1050,10 +988,7 @@ async fn run_forgecode_cli(
     let status = child.wait().await?;
     if !status.success() {
         let event = StreamEvent::Error {
-            message: format!(
-                "ForgeCode CLI exited with status {}",
-                status
-            ),
+            message: format!("ForgeCode CLI exited with status {}", status),
             retry_after_secs: None,
         };
         let _ = tx.send(Ok(event)).await;

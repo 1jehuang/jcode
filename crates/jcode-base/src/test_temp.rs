@@ -37,7 +37,9 @@ pub fn root() -> PathBuf {
 
 /// Create a temp dir under [`root`], ignoring `TMPDIR`.
 pub fn tempdir() -> std::io::Result<tempfile::TempDir> {
-    tempfile::Builder::new().prefix("jcode-test-").tempdir_in(root())
+    tempfile::Builder::new()
+        .prefix("jcode-test-")
+        .tempdir_in(root())
 }
 
 /// Create a prefixed temp dir under [`root`], ignoring `TMPDIR`.

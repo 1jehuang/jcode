@@ -4,7 +4,6 @@
 //! swarm state, sessions, queues, event history). It lives here so `server.rs`
 //! keeps only the wiring that spawns it.
 
-use super::*;
 use super::background_tasks::{
     dispatch_background_task_completion, dispatch_background_task_progress,
     dispatch_background_task_stalled, dispatch_swarm_await_completion,
@@ -13,6 +12,7 @@ use super::background_tasks::{
 };
 use super::file_activity::file_activity_scope_label;
 use super::state::latest_peer_touches;
+use super::*;
 use crate::bus::BusEvent;
 use crate::protocol::NotificationType;
 use jcode_agent_runtime::SoftInterruptSource;

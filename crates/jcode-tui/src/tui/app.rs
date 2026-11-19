@@ -141,10 +141,10 @@ pub(crate) use todos_view::pinned_todos_payload_for_session;
 mod tui_lifecycle;
 mod tui_lifecycle_runtime;
 mod tui_state;
-mod ui_elicit;
 mod turn;
 mod turn_memory;
 mod turn_notify;
+mod ui_elicit;
 mod ui_prefs;
 
 pub(crate) use self::state_ui_storage::compact_display_messages_for_storage;

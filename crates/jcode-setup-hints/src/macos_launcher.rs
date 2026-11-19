@@ -38,8 +38,7 @@ const LEGACY_BROKER_BUNDLE_IDS: &[&str] = &["com.jcode.notifications"];
 const LEGACY_LAUNCHER_BUNDLE_IDS: &[&str] = &["com.jcode.app", "com.jcode.launcher"];
 
 pub(super) fn should_refresh_macos_app_launcher(state: &SetupHintsState) -> bool {
-    let (Ok(home), Ok(applications)) = (jcode_storage::jcode_dir(), user_applications_dir())
-    else {
+    let (Ok(home), Ok(applications)) = (jcode_storage::jcode_dir(), user_applications_dir()) else {
         return !state.desktop_shortcut_created;
     };
     let broker_dir = macos_notification_broker_dir_in(&home);

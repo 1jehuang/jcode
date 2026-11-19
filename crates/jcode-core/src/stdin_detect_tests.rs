@@ -234,10 +234,7 @@ fn test_is_stdin_pipe_is_negation_of_interactive() {
 fn test_is_stdin_interactive_consistency_with_is_terminal_trait() {
     // Our helper should agree with the raw IsTerminal trait call.
     use std::io::IsTerminal;
-    assert_eq!(
-        is_stdin_interactive(),
-        std::io::stdin().is_terminal()
-    );
+    assert_eq!(is_stdin_interactive(), std::io::stdin().is_terminal());
 }
 
 #[cfg(target_os = "linux")]

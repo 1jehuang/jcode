@@ -178,10 +178,7 @@ fn test_kcode_opt_out_env_var() {
     jcode_core::env::set_var("KCODE_NO_TELEMETRY", "1");
     assert!(opt_out_forced_by_env());
     assert!(!is_enabled());
-    assert_eq!(
-        opt_out_source(),
-        Some(TelemetryOptOutSource::Environment)
-    );
+    assert_eq!(opt_out_source(), Some(TelemetryOptOutSource::Environment));
     jcode_core::env::remove_var("KCODE_NO_TELEMETRY");
 }
 

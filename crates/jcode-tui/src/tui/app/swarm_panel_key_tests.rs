@@ -328,11 +328,23 @@ fn alt_chords_drive_the_panel() {
         Some(SwarmPanelAction::PopOut)
     );
     assert_eq!(
-        swarm_panel_action_for_key(KeyCode::Char('P'), KeyModifiers::ALT | KeyModifiers::SHIFT, false, false, false),
+        swarm_panel_action_for_key(
+            KeyCode::Char('P'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+            false,
+            false,
+            false
+        ),
         Some(SwarmPanelAction::OpenPrompt)
     );
     assert_eq!(
-        swarm_panel_action_for_key(KeyCode::Char('p'), KeyModifiers::ALT | KeyModifiers::SHIFT, false, false, false),
+        swarm_panel_action_for_key(
+            KeyCode::Char('p'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+            false,
+            false,
+            false
+        ),
         Some(SwarmPanelAction::OpenPrompt)
     );
     assert_eq!(
@@ -363,7 +375,13 @@ fn space_toggles_select() {
 #[test]
 fn ctrl_a_selects_all() {
     assert_eq!(
-        swarm_panel_action_for_key(KeyCode::Char('a'), KeyModifiers::CONTROL, false, false, false),
+        swarm_panel_action_for_key(
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL,
+            false,
+            false,
+            false
+        ),
         Some(SwarmPanelAction::SelectAll)
     );
 }

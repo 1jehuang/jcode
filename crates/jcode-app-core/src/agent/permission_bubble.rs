@@ -4,9 +4,7 @@
 //! constraints: byte-identical prefix construction, fork depth guards, and
 //! the 10-rule child message template.
 
-use jcode_permission_bubble::{
-    ForkDepthGuard, ForkDepthResult, build_child_message,
-};
+use jcode_permission_bubble::{ForkDepthGuard, ForkDepthResult, build_child_message};
 use jcode_session_types::StoredMessage;
 
 use crate::logging;

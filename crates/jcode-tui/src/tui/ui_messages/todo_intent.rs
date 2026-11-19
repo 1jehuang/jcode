@@ -32,7 +32,12 @@ pub(super) fn push_todo_plan_details(
             && !compact_details
         {
             push_wrapped_intent(
-                lines, state.as_str(), state_color, intention, base_indent, inner_width,
+                lines,
+                state.as_str(),
+                state_color,
+                intention,
+                base_indent,
+                inner_width,
             );
             return;
         }
@@ -80,7 +85,10 @@ fn push_wrapped_intent(
         .saturating_sub(prefix_width)
         .saturating_sub(base_indent.width())
         .max(1);
-    for (index, chunk) in wrap_todo_detail(intention, available).into_iter().enumerate() {
+    for (index, chunk) in wrap_todo_detail(intention, available)
+        .into_iter()
+        .enumerate()
+    {
         let mut spans: Vec<Span<'static>> = vec![Span::raw(base_indent.to_string())];
         if index == 0 {
             spans.push(Span::styled(

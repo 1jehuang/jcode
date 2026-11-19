@@ -13,9 +13,7 @@
 //!
 //! Run with: `cargo run -p jcode-tool-core --example build_schema`
 
-use jcode_tool_core::{
-    ACCEPT_LARGE_OUTPUT_KEY, ensure_intent_in_schema, intent_schema_property,
-};
+use jcode_tool_core::{ACCEPT_LARGE_OUTPUT_KEY, ensure_intent_in_schema, intent_schema_property};
 use serde_json::json;
 
 fn main() {

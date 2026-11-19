@@ -321,7 +321,8 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
     parent.working_dir = Some(temp.path().display().to_string());
     parent.save().expect("save parent session");
 
-    let item = ScheduledItem { recurrence: Default::default(),
+    let item = ScheduledItem {
+        recurrence: Default::default(),
         id: "sched_spawn_test".to_string(),
         scheduled_for: chrono::Utc::now(),
         context: "Follow up later".to_string(),

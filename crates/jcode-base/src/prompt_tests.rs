@@ -857,8 +857,11 @@ fn prompt_guidance_distinct_files_with_identical_contents_are_both_loaded() {
             // convention is still `.jcode`, so these are two distinct files with
             // identical contents and both must load.
             std::fs::write(home.join(".kcode").join(name), "identical guidance").unwrap();
-            std::fs::write(project.path().join(".jcode").join(name), "identical guidance")
-                .unwrap();
+            std::fs::write(
+                project.path().join(".jcode").join(name),
+                "identical guidance",
+            )
+            .unwrap();
         }
         for (content, size) in [
             load_prompt_overlay_files_from_dir(Some(project.path())),

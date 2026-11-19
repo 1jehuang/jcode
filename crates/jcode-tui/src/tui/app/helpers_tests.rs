@@ -299,7 +299,10 @@ fn build_resume_command_uses_imported_jcode_session_for_claude_code() {
         None,
     );
 
-    assert_eq!(program.file_name().and_then(|name| name.to_str()), Some(crate::build::binary_name()));
+    assert_eq!(
+        program.file_name().and_then(|name| name.to_str()),
+        Some(crate::build::binary_name())
+    );
     assert_eq!(
         args,
         vec![
@@ -323,7 +326,10 @@ fn build_resume_command_uses_imported_jcode_session_for_codex() {
         None,
     );
 
-    assert_eq!(program.file_name().and_then(|name| name.to_str()), Some(crate::build::binary_name()));
+    assert_eq!(
+        program.file_name().and_then(|name| name.to_str()),
+        Some(crate::build::binary_name())
+    );
     assert_eq!(
         args,
         vec![

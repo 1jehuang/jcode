@@ -16,8 +16,8 @@
 
 use super::{App, DisplayMessage};
 use crate::goal::{
-    create_goal, list_relevant_goals, open_goal_for_session, open_goals_overview_for_session,
-    resume_goal_for_session, update_goal, GoalCreateInput, GoalScope, GoalStatus, GoalUpdateInput,
+    GoalCreateInput, GoalScope, GoalStatus, GoalUpdateInput, create_goal, list_relevant_goals,
+    open_goal_for_session, open_goals_overview_for_session, resume_goal_for_session, update_goal,
 };
 
 /// Dispatch `/goal ...`. Returns `false` when `trimmed` is not a `/goal`

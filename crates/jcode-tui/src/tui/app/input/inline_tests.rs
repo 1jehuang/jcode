@@ -27,9 +27,9 @@ fn ssh_clipboard_image_bytes_work_without_local_file_or_url_fetch() {
 
 use super::dropped::dropped_image_files;
 use super::{
-    ClipboardPasteContent, ClipboardPasteKind, is_clipboard_paste_shortcut,
-    parse_dropped_paths, preferred_wayland_text_type, read_clipboard_for_paste_with,
-    shifted_printable_fallback, text_input_for_key,
+    ClipboardPasteContent, ClipboardPasteKind, is_clipboard_paste_shortcut, parse_dropped_paths,
+    preferred_wayland_text_type, read_clipboard_for_paste_with, shifted_printable_fallback,
+    text_input_for_key,
 };
 use crossterm::event::{KeyCode, KeyModifiers};
 

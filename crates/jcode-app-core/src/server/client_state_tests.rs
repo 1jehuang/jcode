@@ -19,10 +19,11 @@ async fn read_frames<R: tokio::io::AsyncRead + Unpin>(reader: R, count: usize) -
     let mut reader = tokio::io::BufReader::new(reader);
     let mut bytes = Vec::new();
     for _ in 0..count {
-        let read = tokio::time::timeout(Duration::from_secs(2), reader.read_until(b'\n', &mut bytes))
-            .await
-            .unwrap_or_else(|_| panic!("frame {count} did not arrive"))
-            .unwrap();
+        let read =
+            tokio::time::timeout(Duration::from_secs(2), reader.read_until(b'\n', &mut bytes))
+                .await
+                .unwrap_or_else(|_| panic!("frame {count} did not arrive"))
+                .unwrap();
         assert!(read > 0, "stream closed before {count} frames");
     }
     bytes

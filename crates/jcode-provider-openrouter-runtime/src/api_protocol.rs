@@ -57,7 +57,11 @@ impl ApiProtocol {
 /// existing behavior; `/chat/completions` stays the fallback for every model
 /// that is not explicitly listed, which is what keeps ordinary OpenRouter and
 /// user-declared OpenAI-compatible profiles unchanged.
-pub(crate) fn select_protocol(api_base: &str, profile_id: Option<&str>, model: &str) -> ApiProtocol {
+pub(crate) fn select_protocol(
+    api_base: &str,
+    profile_id: Option<&str>,
+    model: &str,
+) -> ApiProtocol {
     if model_uses_responses_api(api_base, profile_id, model) {
         return ApiProtocol::Responses;
     }

@@ -105,11 +105,7 @@ impl App {
         // simply omitted, and with no counts at all the message count is used.
         match (event.pre_tokens, event.post_tokens) {
             (Some(pre), Some(post)) => {
-                format!(
-                    "◧ Compacted ({strategy}): {} → {}",
-                    usage(pre),
-                    usage(post)
-                )
+                format!("◧ Compacted ({strategy}): {} → {}", usage(pre), usage(post))
             }
             (Some(pre), None) => format!("◧ Compacted ({strategy}): from {}", usage(pre)),
             (None, Some(post)) => format!("◧ Compacted ({strategy}): now {}", usage(post)),
@@ -876,9 +872,7 @@ mod tests {
             event.trigger = method.to_string();
             assert_eq!(
                 App::format_compaction_complete_message(&event, 200_000),
-                format!(
-                    "◧ Compacted ({method}): ~180,000 tokens (90.0%) → ~40,000 tokens (20.0%)"
-                )
+                format!("◧ Compacted ({method}): ~180,000 tokens (90.0%) → ~40,000 tokens (20.0%)")
             );
         }
         event.trigger = "hard_compact".to_string();

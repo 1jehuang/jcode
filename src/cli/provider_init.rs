@@ -1726,19 +1726,13 @@ async fn init_provider_with_model_policy(
         }
         ProviderChoice::ForgeCode => {
             disable_subscription_runtime_mode();
-            init_notice(
-                "Using ForgeCode as the initial provider (use /model to switch)",
-            );
+            init_notice("Using ForgeCode as the initial provider (use /model to switch)");
             clear_initial_model_provider();
             crate::env::set_var("JCODE_ACTIVE_PROVIDER", "forgecode");
             crate::provider::external::instantiate_external_provider(
                 crate::provider::external::FORGECODE_RUNTIME,
             )
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "ForgeCode runtime is not registered"
-                )
-            })?
+            .ok_or_else(|| anyhow::anyhow!("ForgeCode runtime is not registered"))?
         }
         ProviderChoice::Auto => {
             disable_subscription_runtime_mode_preserving_active_provider_profile();

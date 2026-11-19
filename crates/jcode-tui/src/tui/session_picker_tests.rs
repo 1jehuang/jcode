@@ -2782,8 +2782,8 @@ fn preview_without_search_has_no_highlight_and_scrolls_to_bottom() {
 #[path = "session_picker_scope_tests.rs"]
 mod project_scope;
 
-#[path = "session_picker_tests/onboarding.rs"]
-mod onboarding;
 #[cfg(test)]
 #[path = "session_picker/compact_render_tests.rs"]
 mod compact_render_tests;
+#[path = "session_picker_tests/onboarding.rs"]
+mod onboarding;

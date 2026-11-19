@@ -88,7 +88,9 @@ pub(crate) fn is_agent_edited(
         .unwrap_or(repo_path)
         .trim_matches('"');
     let candidate = root.join(rel.trim_end_matches('/'));
-    edited.iter().any(|edited_path| same_path(edited_path, &candidate))
+    edited
+        .iter()
+        .any(|edited_path| same_path(edited_path, &candidate))
 }
 
 /// Whether two paths name the same location.

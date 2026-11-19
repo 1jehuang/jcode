@@ -231,7 +231,11 @@ pub fn install_panic_hook() {
         //    shell or by the backgrounded jcode server.
         if let Some(session_id) = get_current_session() {
             let panic_path = std::path::PathBuf::from(format!("{session_id}.panic.log"));
-            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(&panic_path) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&panic_path)
+            {
                 use std::io::Write as _;
                 let timestamp = chrono::Utc::now().to_rfc3339();
                 let payload = info.payload_as_str().unwrap_or("<no message>");

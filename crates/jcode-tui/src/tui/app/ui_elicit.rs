@@ -174,9 +174,7 @@ impl App {
                         });
                         return;
                     }
-                    FieldSpec::Choice {
-                        options, ..
-                    } => {
+                    FieldSpec::Choice { options, .. } => {
                         let selected = self
                             .elicit_overlay
                             .as_ref()
@@ -256,7 +254,10 @@ impl App {
 
             // ---- Boolean quick keys ----
             KeyCode::Char('y') | KeyCode::Char('Y') => {
-                if matches!(&self.elicit_overlay.as_ref().map(|s| &s.request.field), Some(FieldSpec::Boolean { .. })) {
+                if matches!(
+                    &self.elicit_overlay.as_ref().map(|s| &s.request.field),
+                    Some(FieldSpec::Boolean { .. })
+                ) {
                     self.send_elicit_response(ElicitResponse {
                         action: ElicitAction::Confirm,
                         value: Some("true".to_string()),
@@ -266,7 +267,10 @@ impl App {
                 }
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
-                if matches!(&self.elicit_overlay.as_ref().map(|s| &s.request.field), Some(FieldSpec::Boolean { .. })) {
+                if matches!(
+                    &self.elicit_overlay.as_ref().map(|s| &s.request.field),
+                    Some(FieldSpec::Boolean { .. })
+                ) {
                     self.send_elicit_response(ElicitResponse {
                         action: ElicitAction::Confirm,
                         value: Some("false".to_string()),
@@ -281,7 +285,11 @@ impl App {
                 // Only accept character input for text-like fields.
                 let is_text_field = matches!(
                     &self.elicit_overlay.as_ref().map(|s| &s.request.field),
-                    Some(FieldSpec::Text { .. } | FieldSpec::LongText { .. } | FieldSpec::DateTime { .. })
+                    Some(
+                        FieldSpec::Text { .. }
+                            | FieldSpec::LongText { .. }
+                            | FieldSpec::DateTime { .. }
+                    )
                 );
                 let is_int_field = matches!(
                     &self.elicit_overlay.as_ref().map(|s| &s.request.field),
@@ -291,9 +299,9 @@ impl App {
                     if let Some(ref mut state) = self.elicit_overlay {
                         // Check max_length constraint.
                         let max_ok = match &state.request.field {
-                            FieldSpec::Text { max_length, .. } | FieldSpec::LongText { max_length, .. } => {
-                                max_length.map_or(true, |max| state.text_buffer.len() < max as usize)
-                            }
+                            FieldSpec::Text { max_length, .. }
+                            | FieldSpec::LongText { max_length, .. } => max_length
+                                .map_or(true, |max| state.text_buffer.len() < max as usize),
                             _ => true,
                         };
                         if max_ok {
@@ -308,7 +316,12 @@ impl App {
             KeyCode::Backspace => {
                 let is_text_field = matches!(
                     &self.elicit_overlay.as_ref().map(|s| &s.request.field),
-                    Some(FieldSpec::Text { .. } | FieldSpec::LongText { .. } | FieldSpec::DateTime { .. } | FieldSpec::Integer { .. })
+                    Some(
+                        FieldSpec::Text { .. }
+                            | FieldSpec::LongText { .. }
+                            | FieldSpec::DateTime { .. }
+                            | FieldSpec::Integer { .. }
+                    )
                 );
                 if is_text_field {
                     if let Some(ref mut state) = self.elicit_overlay {
@@ -359,14 +372,23 @@ fn parse_field_spec(v: &serde_json::Value) -> FieldSpec {
         "text" => FieldSpec::Text {
             label,
             default: v.get("default").and_then(|d| d.as_str()).map(String::from),
-            placeholder: v.get("placeholder").and_then(|p| p.as_str()).map(String::from),
-            max_length: v.get("max_length").and_then(|m| m.as_u64()).map(|n| n as u32),
+            placeholder: v
+                .get("placeholder")
+                .and_then(|p| p.as_str())
+                .map(String::from),
+            max_length: v
+                .get("max_length")
+                .and_then(|m| m.as_u64())
+                .map(|n| n as u32),
             secret: v.get("secret").and_then(|s| s.as_bool()).unwrap_or(false),
         },
         "long_text" => FieldSpec::LongText {
             label,
             default: v.get("default").and_then(|d| d.as_str()).map(String::from),
-            max_length: v.get("max_length").and_then(|m| m.as_u64()).map(|n| n as u32),
+            max_length: v
+                .get("max_length")
+                .and_then(|m| m.as_u64())
+                .map(|n| n as u32),
         },
         "integer" => FieldSpec::Integer {
             label,
@@ -402,7 +424,10 @@ fn parse_field_spec(v: &serde_json::Value) -> FieldSpec {
             FieldSpec::Choice {
                 label,
                 options,
-                default_index: v.get("default_index").and_then(|i| i.as_u64()).map(|n| n as usize),
+                default_index: v
+                    .get("default_index")
+                    .and_then(|i| i.as_u64())
+                    .map(|n| n as usize),
             }
         }
         "boolean" => FieldSpec::Boolean {
@@ -441,7 +466,10 @@ fn parse_notes_spec(v: &serde_json::Value) -> Option<NotesSpec> {
             .unwrap_or("Notes")
             .to_string(),
         default: v.get("default").and_then(|d| d.as_str()).map(String::from),
-        max_length: v.get("max_length").and_then(|m| m.as_u64()).map(|n| n as u32),
+        max_length: v
+            .get("max_length")
+            .and_then(|m| m.as_u64())
+            .map(|n| n as u32),
         required: v.get("required").and_then(|r| r.as_bool()).unwrap_or(false),
     })
 }

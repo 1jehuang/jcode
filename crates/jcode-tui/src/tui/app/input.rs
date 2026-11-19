@@ -414,7 +414,6 @@ mod dropped;
 use dropped::{attach_dropped_images, format_dropped_path};
 pub(super) use dropped::{parse_dropped_paths, promote_dropped_images};
 
-
 pub(super) fn handle_text_paste(app: &mut App, text: String) {
     crate::logging::info(&format!(
         "Text paste: {} chars, {} lines",

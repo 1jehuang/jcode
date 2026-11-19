@@ -62,7 +62,9 @@ fn desktop_binary_candidates(
     if cfg!(target_os = "macos") {
         let app_dirs = ["KCode.app", "Jcode.app"];
         for app in app_dirs {
-            let macos = PathBuf::from("/Applications").join(app).join("Contents/MacOS");
+            let macos = PathBuf::from("/Applications")
+                .join(app)
+                .join("Contents/MacOS");
             out.extend(desktop_binary_names().iter().map(|name| macos.join(name)));
         }
         if let Some(home) = &home {
@@ -215,12 +217,8 @@ mod tests {
         let names = desktop_binary_names();
         assert!(names[0].starts_with("kcode-desktop"));
         assert!(names[1].starts_with("jcode-desktop"));
-        let candidates = desktop_binary_candidates(
-            None,
-            Some(PathBuf::from("/bundle/kcode")),
-            None,
-            None,
-        );
+        let candidates =
+            desktop_binary_candidates(None, Some(PathBuf::from("/bundle/kcode")), None, None);
         assert_eq!(candidates[0], Path::new("/bundle").join(names[0]));
         assert_eq!(candidates[1], Path::new("/bundle").join(names[1]));
     }

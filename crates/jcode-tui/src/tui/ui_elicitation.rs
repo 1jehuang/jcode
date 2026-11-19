@@ -162,11 +162,7 @@ pub(super) fn draw_elicit_overlay(frame: &mut Frame, area: Rect, state: &ElicitO
                 input_style,
             )));
         }
-        FieldSpec::LongText {
-            label,
-            default,
-            ..
-        } => {
+        FieldSpec::LongText { label, default, .. } => {
             if !label.is_empty() {
                 lines.push(Line::from(Span::styled(
                     label.clone(),
@@ -234,11 +230,7 @@ pub(super) fn draw_elicit_overlay(frame: &mut Frame, area: Rect, state: &ElicitO
                 )));
             }
         }
-        FieldSpec::DateTime {
-            label,
-            default,
-            ..
-        } => {
+        FieldSpec::DateTime { label, default, .. } => {
             if !label.is_empty() {
                 lines.push(Line::from(Span::styled(
                     label.clone(),
@@ -356,9 +348,7 @@ fn text_wrap(text: &str, max_width: usize) -> Vec<String> {
             let mut remaining = paragraph;
             while remaining.len() > max_width {
                 // Find last space within max_width.
-                let break_at = remaining[..max_width]
-                    .rfind(' ')
-                    .unwrap_or(max_width);
+                let break_at = remaining[..max_width].rfind(' ').unwrap_or(max_width);
                 result.push(remaining[..break_at].to_string());
                 remaining = &remaining[break_at..].trim_start_matches(' ');
             }

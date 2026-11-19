@@ -26,7 +26,11 @@ fn main() {
 
     let long = "a".repeat(120);
     let truncated = util::truncate_str(&long, 20);
-    println!("util::truncate_str(120 chars, 20) -> len {} ({:?})", truncated.len(), truncated);
+    println!(
+        "util::truncate_str(120 chars, 20) -> len {} ({:?})",
+        truncated.len(),
+        truncated
+    );
 
     let sample = "the quick brown fox jumps over the lazy dog";
     let est = util::estimate_tokens(sample);
