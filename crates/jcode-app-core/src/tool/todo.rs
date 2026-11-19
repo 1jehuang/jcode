@@ -499,15 +499,20 @@ fn prepare_todo_patch(
     if !cancelled_ids.is_empty() {
         todos.retain(|todo| !id_of(todo).is_some_and(|id| cancelled_ids.contains(&id)));
         for todo in &todos {
-            if todo["lane_after"].as_array().is_some_and(|deps| {
-                deps.iter()
-                    .filter_map(Value::as_str)
-                    .any(|id| cancelled_ids.contains(id))
-            }) {
-                bail!(
-                    "cannot cancel a prerequisite of {}; redirect or clear its lane_dependencies in the same edit",
-                    todo["content"]
-                );
+            for (field, public_field) in [
+                ("lane_after", "lane_dependencies"),
+                ("blocked_by", "blocked_by"),
+            ] {
+                if todo[field].as_array().is_some_and(|deps| {
+                    deps.iter()
+                        .filter_map(Value::as_str)
+                        .any(|id| cancelled_ids.contains(id))
+                }) {
+                    bail!(
+                        "cannot cancel a prerequisite of {}; redirect or clear its {public_field} in the same edit",
+                        todo["content"]
+                    );
+                }
             }
         }
     }
@@ -1316,7 +1321,7 @@ impl Tool for TodoTool {
                     }
                 },
                 "cancel": {
-                    "type": "array", "description": "Withdraw by name and archive why. Redirect or clear explicit dependents first.",
+                    "type": "array", "description": "Withdraw and archive why.",
                     "items": {"type": "object", "additionalProperties": false, "required": ["name", "reason"], "properties": {"name": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}}}
                 },
                 "todos": {
@@ -1505,7 +1510,7 @@ impl Tool for TodoTool {
         }
         schema["properties"]["phases"] = json!({
             "type": "array",
-            "description": "Creates or replaces the whole plan; [] clears. Use once, then change items with update/add/cancel. Phases are sequential, lanes parallel, items ordered.",
+            "description": "Replace plan ([] clears). Then use update/add/cancel. Phases are sequential, lanes parallel, items ordered.",
             "items": {"type": "object", "required": ["phase", "lanes"], "additionalProperties": false,
                 "properties": {"phase": {"type": "integer", "minimum": 1}, "lanes": {
                     "type": "array", "minItems": 1, "items": {"type": "object", "required": ["lane", "items"], "additionalProperties": false,
