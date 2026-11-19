@@ -122,7 +122,6 @@ pub(crate) fn reload_exec_target(is_selfdev_session: bool) -> Option<(PathBuf, &
     // exits without a replacement and strands every connected client. Strip the
     // marker so we compare against (and can re-exec) the real on-disk path.
     let current_exe = running_server_binary();
-
     // Identity/mtime comparisons must look through release wrapper scripts to
     // the payload that actually runs (see `build::resolve_binary_payload`):
     // the running exe is the `.bin` payload while channel candidates are tiny
@@ -137,7 +136,6 @@ pub(crate) fn reload_exec_target(is_selfdev_session: bool) -> Option<(PathBuf, &
 
     let current_mtime = current_canonical.as_deref().and_then(binary_mtime);
     let candidate_mtime = binary_mtime(candidate_canonical.as_path());
-
     match guarded_reload_target(
         candidate.clone(),
         candidate_canonical.as_path(),
@@ -293,7 +291,6 @@ fn guarded_reload_target(
     if current_canonical == Some(candidate_canonical) {
         return ReloadTargetDecision::UseCandidate(candidate);
     }
-
     let candidate_is_strictly_older = match (current_mtime, candidate_mtime) {
         (Some(current), Some(cand)) => cand < current,
         // Unknown mtimes: be conservative and treat as a potential downgrade so
@@ -304,7 +301,6 @@ fn guarded_reload_target(
     if !candidate_is_strictly_older {
         return ReloadTargetDecision::UseCandidate(candidate);
     }
-
     match current_exe {
         Some(current_exe) => ReloadTargetDecision::DowngradeBlockedUseCurrent((
             current_exe.to_path_buf(),
@@ -312,10 +308,6 @@ fn guarded_reload_target(
         )),
         None => ReloadTargetDecision::DowngradeUnverifiable(candidate),
     }
-}
-
-fn canonicalize_or(path: PathBuf) -> PathBuf {
-    std::fs::canonicalize(&path).unwrap_or(path)
 }
 
 /// Strip the Linux `/proc/self/exe` " (deleted)" marker that appears when the
@@ -443,7 +435,7 @@ pub(crate) fn git_common_dir_for(path: &Path) -> Option<PathBuf> {
     while let Some(dir) = current {
         let dotgit = dir.join(".git");
         if dotgit.is_dir() {
-            return Some(canonicalize_or(dotgit));
+            return Some(std::fs::canonicalize(&dotgit).unwrap_or(dotgit));
         }
         if dotgit.is_file() {
             let content = std::fs::read_to_string(&dotgit).ok()?;
@@ -462,13 +454,15 @@ pub(crate) fn git_common_dir_for(path: &Path) -> Option<PathBuf> {
             } else {
                 dir.join(raw)
             };
-            let gitdir = canonicalize_or(gitdir);
+            let gitdir = std::fs::canonicalize(&gitdir).unwrap_or(gitdir);
             // Worktree gitdir looks like: <repo>/.git/worktrees/<name>
             if let Some(parent) = gitdir.parent()
                 && parent.file_name().and_then(|s| s.to_str()) == Some("worktrees")
                 && let Some(common) = parent.parent()
             {
-                return Some(canonicalize_or(common.to_path_buf()));
+                return Some(
+                    std::fs::canonicalize(common).unwrap_or_else(|_| common.to_path_buf()),
+                );
             }
             return Some(gitdir);
         }
@@ -478,11 +472,8 @@ pub(crate) fn git_common_dir_for(path: &Path) -> Option<PathBuf> {
 }
 
 pub(crate) fn swarm_id_for_dir(dir: Option<PathBuf>) -> Option<String> {
-    if let Ok(sw_id) = std::env::var("JCODE_SWARM_ID") {
-        let trimmed = sw_id.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
+    if let Some(swarm) = env_swarm_id() {
+        return Some(swarm);
     }
     let dir = dir?;
     if let Some(git_common) = git_common_dir_for(&dir) {
@@ -498,13 +489,16 @@ pub(crate) fn swarm_id_for_dir(dir: Option<PathBuf>) -> Option<String> {
 /// when those sessions were unrelated. Root sessions therefore own a swarm by
 /// default. `JCODE_SWARM_ID` remains an explicit opt-in to a shared swarm.
 pub(crate) fn swarm_id_for_session(session_id: &str) -> Option<String> {
-    if let Ok(sw_id) = std::env::var("JCODE_SWARM_ID") {
-        let trimmed = sw_id.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
+    if let Some(swarm) = env_swarm_id() {
+        return Some(swarm);
     }
     default_swarm_id_for_session(session_id)
+}
+
+fn env_swarm_id() -> Option<String> {
+    let sw_id = std::env::var("JCODE_SWARM_ID").ok()?;
+    let trimmed = sw_id.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 pub(super) fn default_swarm_id_for_session(session_id: &str) -> Option<String> {

@@ -99,6 +99,16 @@ async fn register_empty_mcp_tools(registry: &Registry, working_dir: &std::path::
         .await;
 }
 
+fn test_registry(compaction: Arc<RwLock<CompactionManager>>) -> Registry {
+    Registry {
+        mcp_policy: Arc::default(),
+        tools: Arc::new(RwLock::new(HashMap::new())),
+        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
+        compaction,
+        search_index: tool_search::ToolSearchIndex::new(),
+    }
+}
+
 #[tokio::test]
 async fn mcp_list_remains_available_while_background_connect_is_handshaking() {
     let _env_lock = crate::storage::lock_test_env();
@@ -966,13 +976,7 @@ fn test_schema_validator_rejects_any_of_branches_without_type() {
 #[tokio::test]
 async fn test_context_guard_small_output_passes_through() {
     let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(200_000)));
-    let registry = Registry {
-        mcp_policy: Arc::default(),
-        tools: Arc::new(RwLock::new(HashMap::new())),
-        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
-        compaction,
-        search_index: tool_search::ToolSearchIndex::new(),
-    };
+    let registry = test_registry(compaction);
 
     let output = ToolOutput::new("small output");
     let result = registry.guard_context_overflow("test", output, false).await;
@@ -982,13 +986,7 @@ async fn test_context_guard_small_output_passes_through() {
 #[tokio::test]
 async fn test_context_guard_withholds_huge_single_output_by_default() {
     let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(1000)));
-    let registry = Registry {
-        mcp_policy: Arc::default(),
-        tools: Arc::new(RwLock::new(HashMap::new())),
-        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
-        compaction,
-        search_index: tool_search::ToolSearchIndex::new(),
-    };
+    let registry = test_registry(compaction);
 
     // 30% of 1000 = 300 tokens = 1200 chars max for a single output
     // Create output that's way larger
@@ -1021,13 +1019,7 @@ async fn test_context_guard_withholds_huge_single_output_by_default() {
 #[tokio::test]
 async fn test_context_guard_returns_truncated_output_when_caller_accepts() {
     let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(1000)));
-    let registry = Registry {
-        mcp_policy: Arc::default(),
-        tools: Arc::new(RwLock::new(HashMap::new())),
-        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
-        compaction,
-        search_index: tool_search::ToolSearchIndex::new(),
-    };
+    let registry = test_registry(compaction);
 
     let big_output = "x".repeat(8000);
     let output = ToolOutput::new(big_output.clone());
@@ -1058,13 +1050,7 @@ async fn test_context_guard_reports_the_real_cost_and_affordable_size() {
         let mut mgr = compaction.write().await;
         mgr.update_observed_input_tokens(40_000);
     }
-    let registry = Registry {
-        mcp_policy: Arc::default(),
-        tools: Arc::new(RwLock::new(HashMap::new())),
-        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
-        compaction,
-        search_index: tool_search::ToolSearchIndex::new(),
-    };
+    let registry = test_registry(compaction);
 
     let output = ToolOutput::new("x".repeat(360_000)); // ~90k tokens
     let result = registry.guard_context_overflow("test", output, false).await;
@@ -1105,13 +1091,7 @@ async fn test_context_guard_truncates_when_context_nearly_full() {
         let mut mgr = compaction.write().await;
         mgr.update_observed_input_tokens(9500); // 95% full
     }
-    let registry = Registry {
-        mcp_policy: Arc::default(),
-        tools: Arc::new(RwLock::new(HashMap::new())),
-        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
-        compaction,
-        search_index: tool_search::ToolSearchIndex::new(),
-    };
+    let registry = test_registry(compaction);
 
     // Even a modest output should get truncated when context is 95% full
     let output = ToolOutput::new("x".repeat(4000)); // 1000 tokens
@@ -1132,13 +1112,7 @@ async fn test_context_guard_still_refuses_when_context_is_exhausted() {
         let mut mgr = compaction.write().await;
         mgr.update_observed_input_tokens(9_990);
     }
-    let registry = Registry {
-        mcp_policy: Arc::default(),
-        tools: Arc::new(RwLock::new(HashMap::new())),
-        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
-        compaction,
-        search_index: tool_search::ToolSearchIndex::new(),
-    };
+    let registry = test_registry(compaction);
 
     let payload = "x".repeat(400_000);
     let result = registry
@@ -1159,13 +1133,7 @@ async fn test_context_guard_still_refuses_when_context_is_exhausted() {
 #[tokio::test]
 async fn test_context_guard_zero_budget_passes_through() {
     let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(0)));
-    let registry = Registry {
-        mcp_policy: Arc::default(),
-        tools: Arc::new(RwLock::new(HashMap::new())),
-        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
-        compaction,
-        search_index: tool_search::ToolSearchIndex::new(),
-    };
+    let registry = test_registry(compaction);
 
     let output = ToolOutput::new("x".repeat(100_000));
     let result = registry.guard_context_overflow("test", output, false).await;
@@ -1379,13 +1347,7 @@ async fn test_context_guard_never_spends_more_than_it_reports() {
                         let mut mgr = compaction.write().await;
                         mgr.update_observed_input_tokens(used as u64);
                     }
-                    let registry = Registry {
-                        mcp_policy: Arc::default(),
-                        tools: Arc::new(RwLock::new(HashMap::new())),
-                        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
-                        compaction,
-                        search_index: tool_search::ToolSearchIndex::new(),
-                    };
+                    let registry = test_registry(compaction);
 
                     let payload = "x".repeat(payload_tokens * 4);
                     let result = registry
@@ -1429,13 +1391,7 @@ async fn test_context_guard_refusal_reads_clearly_for_todays_regression() {
         let mut mgr = compaction.write().await;
         mgr.update_observed_input_tokens(18_000);
     }
-    let registry = Registry {
-        mcp_policy: Arc::default(),
-        tools: Arc::new(RwLock::new(HashMap::new())),
-        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
-        compaction,
-        search_index: tool_search::ToolSearchIndex::new(),
-    };
+    let registry = test_registry(compaction);
 
     let result = registry
         .guard_context_overflow("agentgrep", ToolOutput::new("x".repeat(932_000)), false)
@@ -1733,13 +1689,7 @@ async fn test_guard_withholds_large_output_on_a_million_token_window() {
         let mut mgr = compaction.write().await;
         mgr.update_observed_input_tokens(21_000);
     }
-    let registry = Registry {
-        mcp_policy: Arc::default(),
-        tools: Arc::new(RwLock::new(HashMap::new())),
-        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
-        compaction,
-        search_index: tool_search::ToolSearchIndex::new(),
-    };
+    let registry = test_registry(compaction);
 
     // ~233k tokens: the real size of the agentgrep result that started this.
     let output = ToolOutput::new("x".repeat(932_000));
@@ -1766,13 +1716,7 @@ async fn test_single_output_ceiling_is_absolute_not_only_proportional() {
     // advertised context window silently raises the per-call blast radius.
     for budget in [200_000usize, 1_000_000, 2_000_000, 10_000_000] {
         let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(budget)));
-        let registry = Registry {
-            mcp_policy: Arc::default(),
-            tools: Arc::new(RwLock::new(HashMap::new())),
-            skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
-            compaction,
-            search_index: tool_search::ToolSearchIndex::new(),
-        };
+        let registry = test_registry(compaction);
 
         // Just over the absolute ceiling, but a trivial fraction of a huge window.
         let over_ceiling_tokens = Registry::SINGLE_OUTPUT_MAX_TOKENS + 10_000;
