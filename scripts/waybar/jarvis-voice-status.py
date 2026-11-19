@@ -6,7 +6,10 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import stat
+import subprocess
+import sys
 import time
 
 BARS = "▁▂▃▄▅▆▇█"
@@ -48,11 +51,36 @@ def latest_status(directory, now=None):
     return max(candidates, default=None, key=lambda item: item[0])
 
 
+def retry_token(value):
+    token = value.get("retry_token")
+    if value.get("retry_supported") is True and isinstance(token, str) and re.fullmatch(r"[0-9a-f]{16}", token):
+        return token
+    return None
+
+
+LEGACY_ERROR = "Open the Jarvis client for the error and recovery instructions. This client does not support Waybar retry."
+
+
+def safe_line(value, default):
+    if not isinstance(value, str):
+        return default
+    return " ".join("".join(ch if ch.isprintable() else " " for ch in value[:180]).split()) or default
+
+
 def render(value):
     if value is None:
         return {"text": "", "tooltip": "Jarvis microphone is off", "class": "off"}
     state = value.get("state", "unknown")
     capturing = value.get("capturing") is True
+    if state == "error":
+        lines = ["Jarvis microphone error", f"Microphone capture: {'on' if capturing else 'off'}"]
+        if retry_token(value):
+            lines.extend([safe_line(value.get("error_reason"), "Capture stopped."),
+                          safe_line(value.get("error_hint"), "Check the Jarvis client for details."),
+                          "After resolving the issue, click to request a retry or use /voice in Jarvis."])
+        else:
+            lines.append(LEGACY_ERROR)
+        return {"text": "🎙 !", "tooltip": html.escape("\n".join(lines)), "class": "error"}
     levels = value.get("levels", [])
     levels = levels[-12:] if isinstance(levels, list) else []
     levels = [float(v) if isinstance(v, (int, float)) and math.isfinite(v) else 0.0 for v in levels]
@@ -97,6 +125,19 @@ def toggle(directory):
     status = latest_status(directory)
     if not status:
         return
+    if status[2].get("state") == "error":
+        token = retry_token(status[2])
+        if not token:
+            return LEGACY_ERROR
+        path = status[1].with_suffix(f".retry-{token}")
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+            os.close(fd)
+        except FileExistsError:
+            pass  # Repeated clicks coalesce; never toggle a pending retry off.
+        except OSError:
+            return "Could not request a retry. Use /voice in the Jarvis client."
+        return None
     path = status[1].with_suffix(".paused")
     try:
         if path.exists():
@@ -116,7 +157,13 @@ def main():
     args = parser.parse_args()
     directory = runtime_dir()
     if args.toggle:
-        toggle(directory)
+        message = toggle(directory)
+        if message:
+            print(message, file=sys.stderr)
+            try:
+                subprocess.run(["notify-send", "Jarvis microphone", message], timeout=2, check=False)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
         return
     previous = None
     while True:

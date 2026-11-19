@@ -69,6 +69,38 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(result["class"], "paused")
         self.assertFalse(result["capturing"])
 
+    def test_error_click_is_a_private_single_request_never_a_pause_toggle(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            path = root / f"{os.getpid()}.json"
+            value = {"pid": os.getpid(), "capturing": False, "state": "error",
+                     "error_reason": "Nari credits are exhausted", "error_hint": "Add credits.",
+                     "retry_supported": True, "retry_token": "0123456789abcdef", "transcript": "private"}
+            path.write_text(json.dumps(value))
+            for renderer in (module.render, module.native_render):
+                result = renderer(value)
+                self.assertEqual(result["class"], "error")
+                self.assertIn("Nari credits", result["tooltip"])
+                self.assertIn("Add credits", result["tooltip"])
+                self.assertIn("click to request", result["tooltip"])
+                self.assertNotIn("private", json.dumps(result))
+            self.assertEqual(module.native_render(value)["state"], "error")
+            self.assertIsNone(module.toggle(root))
+            self.assertIsNone(module.toggle(root))
+            self.assertEqual(path.with_suffix(".retry-0123456789abcdef").stat().st_mode & 0o777, 0o600)
+            self.assertFalse(path.with_suffix(".paused").exists())
+
+    def test_legacy_or_malformed_error_does_not_imply_retry_or_create_any_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            path = root / f"{os.getpid()}.json"
+            for capability in [{}, {"retry_supported": "true"}, {"retry_supported": True, "retry_token": "../oops"}]:
+                value = {"pid": os.getpid(), "capturing": False, "state": "error", **capability}
+                path.write_text(json.dumps(value))
+                self.assertIn("Open the Jarvis client", module.toggle(root))
+                self.assertIn("does not support Waybar retry", module.native_render(value)["tooltip"])
+                self.assertEqual(list(root.iterdir()), [path])
+
     def test_native_metadata_is_clamped(self):
         result = module.native_render({"capturing": True, "state": "x" * 1000,
                                       "sequence": -4, "sample_interval_ms": 9000,

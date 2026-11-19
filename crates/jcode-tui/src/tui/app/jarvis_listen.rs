@@ -382,6 +382,9 @@ impl AlwaysListening {
             return None;
         }
         self.failed = true;
+        if let Some(status) = &mut self.status {
+            status.set_failure(error);
+        }
         self.clear_dispatch("capture_failed");
         if self.playback.latest.is_some() {
             self.clear_playback();
@@ -415,6 +418,14 @@ impl AlwaysListening {
 
     fn initialize(&mut self) -> anyhow::Result<()> {
         self.initialized = true;
+        self.status = Some(CaptureStatus::new()?);
+        self.wake = Some(tokio::spawn(async {
+            let mut tick = tokio::time::interval(Duration::from_millis(50));
+            loop {
+                tick.tick().await;
+                Bus::global().publish(BusEvent::VoiceInputWake);
+            }
+        }));
         let cfg = &crate::config::config().jarvis.listening;
         anyhow::ensure!(
             (1..=3600).contains(&cfg.max_audio_seconds_per_hour)
@@ -424,9 +435,7 @@ impl AlwaysListening {
                 && (0.5..=1.0).contains(&cfg.action_probability),
             "Invalid Jarvis listening limits: audio 1..3600 sec/hour, classifications 1..600/hour, agent turns 1..120/hour, probability 0.5..1"
         );
-        let status = CaptureStatus::new()?;
-        let key = jcode_voice::nari_api_key()
-            .ok_or_else(|| anyhow::anyhow!("Always-on Jarvis requires a Nari API key"))?;
+        let key = jcode_voice::nari_api_key().ok_or(jcode_voice::VoiceError::NariNotConfigured)?;
         // Resolve before opening the microphone. A missing gate must not turn
         // continuous speech into unchecked agent requests.
         crate::jev::JevClient::for_voice()?;
@@ -443,15 +452,7 @@ impl AlwaysListening {
             },
             self.capture_budget.clone(),
         )?;
-        self.status = Some(status);
         self.recording = Some(recording);
-        self.wake = Some(tokio::spawn(async {
-            let mut tick = tokio::time::interval(Duration::from_millis(50));
-            loop {
-                tick.tick().await;
-                Bus::global().publish(BusEvent::VoiceInputWake);
-            }
-        }));
         Ok(())
     }
 
@@ -510,12 +511,22 @@ impl App {
         }
         let mut listener = std::mem::take(&mut self.jarvis_listener);
         let mut changed = false;
+        if listener.failed
+            && listener
+                .status
+                .as_ref()
+                .is_some_and(CaptureStatus::take_retry)
+        {
+            self.set_status_notice(listener.request_retry());
+            changed = true;
+        }
         if !listener.initialized {
             match listener.initialize() {
                 Ok(()) => self.push_display_message(DisplayMessage::system(
                     "Always-on Jarvis: local speech detection, Nari transcription, and Jev request gating. Recent speech and visible chat are sent to Jev. Only accepted requests and their preceding speech are sent to the agent. Use /voice or click the Waybar microphone to pause. Speech audio is sent to Nari; request candidates are sent to Jev.")),
                 Err(error) => {
                     listener.failed = true;
+                    if let Some(status) = &mut listener.status { status.set_failure(error.downcast_ref::<jcode_voice::VoiceError>()); }
                     self.push_display_message(DisplayMessage::error(format!("Always-on Jarvis did not start: {error}. After resolving the issue, use /voice to retry.")));
                 }
             }
@@ -551,6 +562,16 @@ impl App {
         });
         let mut indicator_failed = false;
         let recording = listener.recording.take();
+        if listener.failed
+            && recording.is_none()
+            && let Some(status) = &mut listener.status
+        {
+            // Setup can fail before a worker exists. Still heartbeat the error indicator
+            // so its owner can explicitly retry without opening a microphone on its own.
+            if status.publish(false, "error", 0.0, json!({})).is_err() {
+                indicator_failed = true;
+            }
+        }
         if let Some(recording) = &recording {
             recording.set_paused(paused || listener.failed);
             // Fn tap (companion): act on what was just heard.
@@ -671,7 +692,7 @@ impl App {
                     _ => None,
                 })
                 .flatten();
-            let state = if push_to_talk_level.is_some() {
+            let state = if push_to_talk_level.is_some() && !listener.failed {
                 "push to talk"
             } else {
                 state
