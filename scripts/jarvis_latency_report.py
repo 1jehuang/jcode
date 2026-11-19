@@ -17,7 +17,7 @@ CLOCK_NOTE = ('Intervals use the shared process monotonic clock when both marker
 ACCEPT = {'partial_accepted', 'final_accepted', 'manual_accepted'}
 SEND = {'sent', 'interleave_sent'}
 DROP = {'queue_full', 'invalid', 'suppressed', 'hourly_limit', 'expired', 'detached',
-        'capture_error', 'capture_stopped', 'paused_or_failed', 'send_failed'}
+        'capture_error', 'capture_failed', 'capture_stopped', 'paused_or_failed', 'send_failed'}
 
 
 def records(lines):
