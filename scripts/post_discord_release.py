@@ -74,7 +74,17 @@ def preview_commit_lines(notes: str) -> list[str]:
 
 def format_message(*, tag: str, name: str, body: str, url: str) -> str:
     if match := re.fullmatch(r"selfdev-linux-([0-9a-f]{40})", tag):
-        return f"**Linux x86_64 self-dev prerelease** · `{match[1][:9]}`\nDownload: {url}"
+        lines = ["## jcode · Linux prerelease", f"Linux x86_64 · Build `{match[1][:9]}`"]
+        section = re.search(r"^## Highlights[ \t]*\n(.*?)(?=^#|^<!--|\Z)", body, re.M | re.S)
+        if section:
+            bullets = re.findall(r"^[-*] (\S[^\n]*)", section[1], re.M)
+            if bullets:
+                lines += ["", "**What changed**"]
+                for item in bullets[:4]:
+                    text = item.strip()
+                    lines.append("- " + (text if len(text) <= 160 else text[:159].rstrip() + "…"))
+        lines += ["", f"[Download & release notes](<{url}>)"]
+        return "\n".join(lines)
     if re.fullmatch(r"v1\.0\.0-preview\.[1-9][0-9]*", tag):
         # An arbitrary URL cannot both fit Discord and remain intact. Fall back
         # to the project's downloads page instead of emitting a broken link.

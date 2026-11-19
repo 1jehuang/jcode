@@ -48,8 +48,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
 class DiscordReleaseTests(unittest.TestCase):
     def test_linux_selfdev_announcement(self):
-        msg = MODULE.format_message(tag='selfdev-linux-' + 'ab' * 20, name='', body='', url='https://example.org/download')
-        self.assertEqual(msg, '**Linux x86_64 self-dev prerelease** · `ababababa`\nDownload: https://example.org/download')
+        tag = 'selfdev-linux-' + 'ab' * 20
+        format_notes = lambda body: MODULE.format_message(tag=tag, name='', body=body, url='https://example.org/download')
+        msg = format_notes('## Highlights\n- Captions update as you speak.\n- Configure the push-to-talk key.\n\n<!-- marker -->')
+        self.assertIn('**What changed**\n- Captions update as you speak.\n- Configure the push-to-talk key.', msg)
+        self.assertTrue(msg.endswith('[Download & release notes](<https://example.org/download>)'))
+        self.assertNotIn('marker', msg)
+        self.assertNotIn('What changed', format_notes('Older build without highlights.'))
+        self.assertLessEqual(len(format_notes('## Highlights\n' + ('- ' + '🙂' * 300 + '\n') * 8).encode('utf-16-le')) // 2, 2000)
 
     def setUp(self) -> None:
         WebhookHandler.response_status = 200

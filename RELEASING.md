@@ -19,6 +19,12 @@ launcher. This is a manual testing channel, separate from stable updates and
 the cross-platform v1 preview below. Rebuilding a commit does not create a
 second public release.
 
+For agent-driven builds, write public `release_notes` while the changes are
+fresh: one short bullet per change, describing what a tester will notice or
+can try. Keep internal build reasons, chat context, and local paths out of the
+notes. The release and Discord announcement share these highlights. Builds
+without authored notes use public commit titles instead.
+
 ## Opt-in v1 preview channel
 
 The separate `.github/workflows/preview.yml` pipeline is **enabled by default** on
