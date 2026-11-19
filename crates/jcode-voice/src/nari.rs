@@ -43,21 +43,10 @@ pub enum NariEvent {
     Finished(Result<String, VoiceError>),
 }
 
-/// Describes the assistant name in context. Qwen3-ASR uses the prompt as
-/// biasing context, and a descriptive sentence with example addresses beats a
-/// bare term list: on noisy synthetic speech it doubled exact "Jev" (12/18 vs
-/// 6/18, repeatable), recovering "Jen", "Gem", "Kim" and dropped names.
-const NAME_CONTEXT: &str = "The user often addresses Jev, a voice assistant. \
-Jev is spelled J-E-V and sounds like Jeff. Write it as Jev. \
-Examples: \"Hey Jev, open settings.\" \"Okay Jev.\" \"Thanks Jev.\" \"Ask Jev.\" \
-The user also talks about Jcode, a coding app pronounced jay-code, and Jcode Desktop. \
-Jcode and Jev are different names: write \"Jcode Desktop\", never \"Jev Desktop\". \
-Other names: ";
+const NAME_CONTEXT: &str = "Vocabulary: ";
 
 /// Names Qwen3-ASR otherwise mishears. Keep proper casing: it is copied as-is.
-/// "Jev" is covered by `NAME_CONTEXT`, so it is deduplicated from this list.
 const BUILTIN_VOCABULARY: &[&str] = &[
-    "Jev",
     "Jcode",
     "Jcode Desktop",
     "Handterm",
@@ -104,17 +93,11 @@ const BUILTIN_VOCABULARY: &[&str] = &[
     "tmux",
     "Neovim",
 ];
-/// Mishearings the recognition prompt cannot fix, because the audio is
-/// genuinely ambiguous ("Jev" is pronounced like "Jeff"). Applied to every
-/// transcript revision as whole-word, case-insensitive replacements.
-/// Order matters: "Jeff Desktop" becomes "Jev Desktop", then "Jcode Desktop".
+/// Whole-word product-name corrections applied to each transcript revision.
 const BUILTIN_CORRECTIONS: &[(&str, &str)] = &[
-    (r"jeff", "Jev"),
     (r"j[\s.-]?code", "Jcode"),
     (r"jay[\s-]?code", "Jcode"),
     (r"(?:jade|jake)[\s-]?code", "Jcode"),
-    // No product is called "Jev Desktop". The speaker meant Jcode Desktop.
-    (r"jev[\s-]?desktop", "Jcode Desktop"),
     (r"jcode[\s-]?desktop", "Jcode Desktop"),
 ];
 
@@ -138,55 +121,18 @@ fn corrections() -> &'static [(regex::Regex, &'static str)] {
     })
 }
 
-/// Apply product-name corrections to a transcript. A transcript that only
-/// repeats the recognition prompt's example addresses is a prompt leak, which
-/// Qwen3-ASR produces on silence, so it becomes empty.
+/// Correct product names and discard recognition prompt echoes on silence.
 pub fn correct_transcript(text: &str) -> String {
     let text = corrections()
         .iter()
         .fold(text.to_owned(), |text, (pattern, fixed)| {
             pattern.replace_all(&text, *fixed).into_owned()
         });
-    if is_prompt_leak(&text) || is_prompt_echo(&text) {
+    if is_prompt_echo(&text) {
         String::new()
     } else {
         text
     }
-}
-
-/// Example addresses from `NAME_CONTEXT`, as lowercase words.
-const PROMPT_EXAMPLES: &[&[&str]] = &[
-    &["hey", "jev", "open", "settings"],
-    &["okay", "jev"],
-    &["ok", "jev"],
-    &["thanks", "jev"],
-    &["thank", "you", "jev"],
-    &["ask", "jev"],
-];
-
-/// True when the transcript is two or more prompt examples and nothing else.
-/// One genuine "Okay Jev" is kept. A garbled tail word is tolerated after
-/// three examples ("Thanks Jev, asked up").
-fn is_prompt_leak(text: &str) -> bool {
-    let words: Vec<String> = text
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .map(str::to_lowercase)
-        .collect();
-    let (mut at, mut matched) = (0, 0);
-    'outer: while at < words.len() {
-        for example in PROMPT_EXAMPLES {
-            let end = at + example.len();
-            if end <= words.len() && words[at..end].iter().zip(*example).all(|(w, e)| w == e) {
-                at = end;
-                matched += 1;
-                continue 'outer;
-            }
-        }
-        break;
-    }
-    let rest = words.len() - at;
-    matched >= 2 && (rest == 0 || (matched >= 3 && rest <= 2))
 }
 
 fn words(text: &str) -> Vec<String> {
@@ -196,8 +142,7 @@ fn words(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Run length that counts as copied prompt text. Five words avoids flagging a
-/// genuine "Hey Jev, open settings" while catching any real echo.
+/// Minimum consecutive prompt words used to detect an echo.
 const ECHO_NGRAM: usize = 5;
 
 fn prompt_ngrams() -> &'static HashSet<Vec<String>> {
@@ -217,8 +162,7 @@ fn prompt_ngrams() -> &'static HashSet<Vec<String>> {
 }
 
 /// True when most of the transcript is copied from the recognition prompt.
-/// Qwen3-ASR recites its whole context on silent audio ("The user often
-/// addresses Jev, a voice assistant..."), which the example check misses.
+
 fn is_prompt_echo(text: &str) -> bool {
     let words = words(text);
     if words.len() < ECHO_NGRAM {
@@ -252,7 +196,7 @@ pub fn recognition_prompt() -> String {
 }
 
 fn build_prompt(extra: &[String]) -> String {
-    let mut seen = HashSet::from(["jev".to_string()]);
+    let mut seen = HashSet::new();
     let mut prompt = String::new();
     let terms = BUILTIN_VOCABULARY
         .iter()
@@ -878,27 +822,13 @@ mod tests {
     #[test]
     fn silent_prompt_leaks_are_dropped_but_real_speech_is_kept() {
         for leak in [
-            "Hey Jev, open settings. Okay Jev. Thanks Jev. Ask Jev.",
-            "Hey, Jeff, open settings. Okay, Jeff, thanks, Jeff, asked up.",
-            "Okay Jev. Thanks Jev.",
-            // Full prompt recital on silence, as observed.
-            "The user often addresses Jev, a voice assistant. Jev is spelled J- E- V and \
-             sounds like Jev. Write it as Jev. Examples: \"Hey Jev, open settings.\" \
-             \"Okay Jev.\" \"Thanks Jev.\" \"Ask Jev.\" The user also talks about Jcode, a \
-             coding app pronounced jay- code, and Jcode Desktop. Jcode and Jev are \
-             different names: write \"Jcode Desktop\", never \"Jcode Desktop\". Other \
-             names: Jcode, Jcode Desktop, Handterm, Nari, TypeSafe, GPUI, Wayland, niri, \
-             Copilot, swarm, hot reload, Claude, Codex, OpenAI, Anthropic.",
-            "Other names: Jcode, Jcode Desktop, Handterm, Nari, TypeSafe, GPUI, Wayland.",
-            "The user also talks about Jcode, a coding app.",
+            build_prompt(&[]).as_str(),
+            "Jcode Desktop, Handterm, Nari, TypeSafe, GPUI",
         ] {
             assert_eq!(correct_transcript(leak), "", "{leak}");
         }
         for real in [
-            "Okay Jev.",
-            "Hey Jev, open settings.",
-            "Okay Jev, thanks Jev, now fix the build.",
-            "Hey Jev, open settings and switch the theme.",
+            "Okay Jeff. Thanks Jeff.",
             "Tell the user about Jcode Desktop and Handterm today.",
             "Can you ask Codex, Claude and OpenAI models to review the swarm hot reload code?",
         ] {
@@ -909,7 +839,7 @@ mod tests {
     fn product_name_mishearings_are_corrected() {
         assert_eq!(
             correct_transcript("Hey, Jeff. Open the JCode desktop and ask jeff's route."),
-            "Hey, Jev. Open the Jcode Desktop and ask Jev's route."
+            "Hey, Jeff. Open the Jcode Desktop and ask jeff's route."
         );
         assert_eq!(
             correct_transcript("J code, j-code, Jay code"),
@@ -917,22 +847,10 @@ mod tests {
         );
         // Whole words only.
         assert_eq!(correct_transcript("Jefferson jcoder"), "Jefferson jcoder");
-        assert_eq!(correct_transcript("Jev and Jcode"), "Jev and Jcode");
-        // Jev Desktop is always a mishearing of Jcode Desktop.
-        assert_eq!(
-            correct_transcript(
-                "Can you fix the resume menu of Jev Desktop? jeff desktop, jcode desktop"
-            ),
-            "Can you fix the resume menu of Jcode Desktop? Jcode Desktop, Jcode Desktop"
-        );
+
         assert_eq!(
             correct_transcript("Jade code and jake-code"),
             "Jcode and Jcode"
-        );
-        // Jev alone stays Jev.
-        assert_eq!(
-            correct_transcript("Hey Jev, open desktops"),
-            "Hey Jev, open desktops"
         );
     }
 
@@ -959,11 +877,11 @@ mod tests {
             ",Kubernetes,".into(),
         ]);
         assert!(prompt.starts_with(NAME_CONTEXT));
-        assert!(prompt.contains("sounds like Jeff. Write it as Jev."));
+        assert!(!prompt.to_lowercase().contains("jev"));
         let terms = prompt.strip_prefix(NAME_CONTEXT).unwrap();
         assert!(terms.starts_with("Jcode, Jcode Desktop, Handterm"));
         assert!(terms.ends_with(", Alice Zhang, Kubernetes."));
-        assert!(!terms.contains("Jev"), "Jev lives in the context: {terms}");
+
         assert_eq!(terms.matches("code").count(), 2, "jcode deduped: {prompt}");
         assert!(!prompt.contains("bad"));
         let long = build_prompt(&(0..500).map(|i| format!("term{i}")).collect::<Vec<_>>());
