@@ -98,9 +98,27 @@ fn recent_chat(messages: &[DisplayMessage]) -> Vec<(String, String)> {
     chat
 }
 
+fn turn_retry_after(turns: &VecDeque<Instant>, limit: u32, continuation: bool) -> Option<Duration> {
+    if continuation || limit == 0 {
+        return None;
+    }
+    let oldest_blocking = turns.get(turns.len().checked_sub(limit as usize)?)?;
+    Some(Duration::from_secs(3600).saturating_sub(oldest_blocking.elapsed()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_turn_limit_applies_only_to_new_requests() {
+        let turns = VecDeque::from([Instant::now() - Duration::from_secs(3500)]);
+        assert_eq!(turn_retry_after(&turns, 0, false), None);
+        assert_eq!(turn_retry_after(&turns, 2, false), None);
+        assert_eq!(turn_retry_after(&turns, 1, true), None);
+        let delay = turn_retry_after(&turns, 1, false).unwrap();
+        assert!((99..=100).contains(&delay.as_secs()));
+    }
 
     #[test]
     fn spoken_cue_waits_for_final_and_yields_to_ready_reply() {
@@ -459,10 +477,10 @@ impl AlwaysListening {
         anyhow::ensure!(
             (1..=3600).contains(&cfg.max_audio_seconds_per_hour)
                 && (1..=600).contains(&cfg.max_classifications_per_hour)
-                && (1..=120).contains(&cfg.max_agent_turns_per_hour)
+                && cfg.max_agent_turns_per_hour <= 120
                 && cfg.action_probability.is_finite()
                 && (0.5..=1.0).contains(&cfg.action_probability),
-            "Invalid Jarvis listening limits: audio 1..3600 sec/hour, classifications 1..600/hour, agent turns 1..120/hour, probability 0.5..1"
+            "Invalid Jarvis listening limits: audio 1..3600 sec/hour, classifications 1..600/hour, agent turns 0 (unlimited) or 1..120/hour, probability 0.5..1"
         );
         let key = jcode_voice::nari_api_key().ok_or(jcode_voice::VoiceError::NariNotConfigured)?;
         // Resolve before opening the microphone. A missing gate must not turn
@@ -774,21 +792,17 @@ impl App {
             && !listener.failed
             && let Some(req) = listener.dispatch.pop()
         {
-            if !req.continuation
-                && listener.turns.len()
-                    >= crate::config::config()
-                        .jarvis
-                        .listening
-                        .max_agent_turns_per_hour as usize
-            {
+            let limit = crate::config::config()
+                .jarvis
+                .listening
+                .max_agent_turns_per_hour;
+            if let Some(delay) = turn_retry_after(&listener.turns, limit, req.continuation) {
                 listener.trace(req.id, "hourly_limit");
-                self.set_status_notice(
-                    "Jarvis agent-turn hourly limit reached; voice request ignored",
-                );
+                self.set_status_notice(format!(
+                    "Jarvis voice request not sent: {limit}-turn hourly cap reached. Try again in {}s.",
+                    delay.as_secs_f64().ceil() as u64
+                ));
             } else {
-                if !req.continuation {
-                    listener.turns.push_back(Instant::now());
-                }
                 let interleave = self.is_processing;
                 let result = dispatch::submit(self, remote, &req.text, interleave).await;
                 // The finished utterance must not wait for the turn's next safe
@@ -812,6 +826,9 @@ impl App {
                     )));
                     "send_failed"
                 } else {
+                    if !req.continuation {
+                        listener.turns.push_back(Instant::now());
+                    }
                     listener.dispatch.sent(&req);
                     if interleave {
                         "interleave_sent"
