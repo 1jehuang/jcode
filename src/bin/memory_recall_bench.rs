@@ -1089,7 +1089,6 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
         let key = opts
             .get("openai_key")
             .cloned()
-            .or_else(|| std::env::var("OPENAI_API_KEY").ok())
             .or_else(|| {
                 jcode::provider_catalog::load_api_key_from_env_or_config(
                     "OPENAI_API_KEY",

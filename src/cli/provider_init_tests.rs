@@ -960,6 +960,103 @@ id = "llama3.1:8b"
     crate::config::invalidate_config_cache();
 }
 
+/// Issue #1382 / epic #1389 phase 3: `--provider auto` must notice direct
+/// OpenAI-compatible credentials from the catalog, not a hardcoded allowlist.
+/// Here the *only* credential configured is DEEPSEEK_API_KEY (never on the old
+/// 7-name list), and auto must bootstrap the DeepSeek profile instead of an
+/// empty deferred MultiProvider.
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "test env locks intentionally stay held across provider init to isolate process-global auth env"
+)]
+async fn auto_provider_detects_non_allowlisted_compat_catalog_credentials() {
+    let _guard = lock_env();
+    let _env_guard = crate::storage::lock_test_env();
+    let dir = TempDir::new().expect("temp dir");
+    let saved: Vec<(String, Option<String>)> = [
+        "JCODE_HOME",
+        "JCODE_NON_INTERACTIVE",
+        "DEEPSEEK_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GITHUB_TOKEN",
+        "GEMINI_API_KEY",
+        "CURSOR_API_KEY",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_DEFAULT_MODEL",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+    ]
+    .iter()
+    .map(|k| (k.to_string(), std::env::var(k).ok()))
+    .collect();
+
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
+    for key in [
+        "DEEPSEEK_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GITHUB_TOKEN",
+        "GEMINI_API_KEY",
+        "CURSOR_API_KEY",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_DEFAULT_MODEL",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+    ] {
+        crate::env::remove_var(key);
+    }
+    // The catalog scan reads the credential env-then-file; an exported env var
+    // is the user's shell, i.e. a read-only override that must win (epic #1389).
+    crate::env::set_var("DEEPSEEK_API_KEY", "sk-deepseek-for-auto-test");
+    crate::config::invalidate_config_cache();
+
+    let provider = init_provider_for_validation(&ProviderChoice::Auto, None)
+        .await
+        .expect("auto should bootstrap the configured catalog compat profile");
+
+    assert!(
+        provider.model_routes().iter().any(|route| {
+            route.provider == "DeepSeek" && route.model == "deepseek-v4-flash" && route.available
+        }),
+        "auto must surface the DeepSeek catalog profile routes, got: {:?}",
+        provider
+            .model_routes()
+            .iter()
+            .map(|r| (&r.provider, &r.model, r.available))
+            .collect::<Vec<_>>()
+    );
+
+    for (key, value) in saved {
+        if let Some(value) = value {
+            crate::env::set_var(&key, value);
+        } else {
+            crate::env::remove_var(&key);
+        }
+    }
+    crate::config::invalidate_config_cache();
+}
+
 #[tokio::test]
 #[expect(
     clippy::await_holding_lock,

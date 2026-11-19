@@ -86,6 +86,7 @@ run_ratchet "oversized-file ratchet" check_code_size_budget.py
 run_ratchet "oversized-test ratchet" check_test_size_budget.py
 run_ratchet "panic-prone usage ratchet" check_panic_budget.py
 run_ratchet "swallowed-error usage ratchet" check_swallowed_error_budget.py
+run_ratchet "secret env read ratchet" check_secret_env_reads.py
 run_gate "crate dependency boundaries" python3 scripts/check_dependency_boundaries.py
 run_gate "wildcard re-export ratchet" python3 scripts/check_wildcard_reexport_budget.py
 
