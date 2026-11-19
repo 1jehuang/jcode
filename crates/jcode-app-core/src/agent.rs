@@ -21,6 +21,7 @@ mod streaming;
 mod swarm_reminder_tests;
 mod tools;
 mod turn_execution;
+pub(crate) use turn_execution::hook_notice_event;
 mod turn_loops;
 mod turn_ownership;
 pub(crate) use turn_ownership::{

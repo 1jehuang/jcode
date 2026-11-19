@@ -1193,6 +1193,7 @@ impl AcpRuntime {
                 images,
                 system_reminder: None,
                 active_skill,
+                origin: None,
                 no_reply: false,
             })
             .await;
