@@ -42,6 +42,17 @@ class JarvisReportTests(unittest.TestCase):
                            marker(30, 'DISPATCH', 'final_suppressed')])
         self.assertEqual((row['delivery'], row['final_delivery']), ('sent', 'final_suppressed'))
 
+    def test_capture_without_session_joins_only_unambiguous_owner(self):
+        capture = marker(10, 'CAPTURE', 'final_accepted').replace('session=local-a ', '')
+        a = marker(15, 'DISPATCH', 'queued', 'a')
+        b = marker(20, 'DISPATCH', 'sent', 'b')
+        [alone] = summarize([capture])
+        self.assertIsNone(alone['session'])
+        self.assertEqual(alone['delivery'], 'accepted_delivery_unavailable')
+        [joined] = summarize([capture, b])
+        self.assertEqual((joined['session'], joined['acceptance_to_send_ms']), ('b', 10))
+        self.assertIsNone(summarize([capture, a, b], 'b')[0]['acceptance_to_send_ms'])
+
     def test_cli_never_echoes_content_or_embedded_markers(self):
         lines = marker(25, 'CAPTURE', 'partial_accepted', extra='transcript=secret')
         lines += '[2026-11-19 01:02:03.000] [INFO] tool input: ' + marker(26, 'DISPATCH', 'sent')

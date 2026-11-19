@@ -28,8 +28,10 @@ def records(lines):
         if not uid or not re.fullmatch(r'[a-z_]+', kv.get('stage', '')):
             continue
         session = kv.get('session')
-        if not session or session == 'none' or not re.fullmatch(r'[\w.:-]{1,160}', session) or (uid[1] or uid[2]) == '0':
+        if (session and not re.fullmatch(r'[\w.:-]{1,160}', session)) or (uid[1] or uid[2]) == '0':
             continue
+        if session == 'none':
+            session = None
         try:
             at = datetime.fromisoformat(stamp)
         except ValueError:
@@ -41,6 +43,15 @@ def summarize(lines, session=None):
     groups = defaultdict(list)
     for key, rec in records(lines):
         groups[key].append(rec)
+    # Capture runs before the UI knows the session. Its process-randomized u64
+    # is carried unchanged into dispatch. Never guess between conflicting owners.
+    owners = defaultdict(set)
+    for sid, uid in groups:
+        if sid is not None:
+            owners[uid].add(sid)
+    for sid, uid in list(groups):
+        if sid is None and len(owners[uid]) == 1:
+            groups[next(iter(owners[uid])), uid].extend(groups.pop((None, uid)))
     result = []
     for (sid, uid), events in groups.items():
         if session is not None and sid != session:
