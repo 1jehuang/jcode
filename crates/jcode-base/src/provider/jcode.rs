@@ -195,6 +195,10 @@ impl Provider for JcodeProvider {
         self.inner.reasoning_effort()
     }
 
+    fn default_reasoning_effort(&self) -> Option<String> {
+        self.inner.default_reasoning_effort()
+    }
+
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
         self.inner.set_reasoning_effort(effort)
     }

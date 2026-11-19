@@ -63,6 +63,37 @@ pub(super) fn available_efforts(state: &SessionUiState) -> Vec<&'static str> {
     .collect()
 }
 
+/// Effort to report for the current session, filtered through the model's
+/// ladder.
+///
+/// A daemon-reported value is authoritative even when the client's inferred
+/// ladder does not list it: named compatible profiles can enable efforts for
+/// model ids the client cannot recognize. The ladder only constrains the
+/// inferred default used when no daemon value exists.
+pub(super) fn displayed_effort<'a>(state: &'a SessionUiState) -> &'a str {
+    if let Some(effort) = state
+        .reasoning_effort
+        .as_deref()
+        .filter(|effort| !effort.starts_with("swarm"))
+    {
+        return effort;
+    }
+    let efforts = available_efforts(state);
+    if let Some(effort) = crate::provider::default_reasoning_effort(
+        state.provider_name.as_deref(),
+        state.model.as_deref(),
+    )
+    .filter(|effort| efforts.contains(effort))
+    {
+        return effort;
+    }
+    if efforts.contains(&"medium") {
+        "medium"
+    } else {
+        efforts.first().copied().unwrap_or("provider default")
+    }
+}
+
 /// Build the ACP `configOptions` array (model selector plus reasoning effort)
 /// from the current session provider state. Empty when the daemon reported no
 /// usable model state.
@@ -90,21 +121,17 @@ pub(super) fn session_config_options(state: &SessionUiState) -> Vec<Value> {
 
     let efforts = available_efforts(state);
     if !efforts.is_empty() {
-        let current = state
-            .reasoning_effort
-            .as_deref()
-            .filter(|effort| efforts.contains(effort))
-            .unwrap_or_else(|| {
-                if efforts.contains(&"medium") {
-                    "medium"
-                } else {
-                    efforts[0]
-                }
-            });
-        let select_options: Vec<Value> = efforts
+        // An unset effort still needs a concrete `currentValue`; the helper
+        // keeps the inferred default inside the model's ladder and preserves
+        // a daemon-reported value the client's ladder does not know.
+        let current = displayed_effort(state);
+        let mut select_options: Vec<Value> = efforts
             .iter()
             .map(|name| json!({ "value": name, "name": name }))
             .collect();
+        if !efforts.iter().any(|effort| *effort == current) {
+            select_options.insert(0, json!({ "value": current, "name": current }));
+        }
         options.push(json!({
             "type": "select",
             "id": CONFIG_ID_EFFORT,
