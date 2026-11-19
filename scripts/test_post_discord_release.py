@@ -47,6 +47,10 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
 
 class DiscordReleaseTests(unittest.TestCase):
+    def test_linux_selfdev_announcement(self):
+        msg = MODULE.format_message(tag='selfdev-linux-' + 'ab' * 20, name='', body='', url='https://example.org/download')
+        self.assertEqual(msg, '**Linux x86_64 self-dev prerelease** · `ababababa`\nDownload: https://example.org/download')
+
     def setUp(self) -> None:
         WebhookHandler.response_status = 200
 

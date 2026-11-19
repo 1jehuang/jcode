@@ -134,3 +134,15 @@ jobs:
             jq -e --arg sha "$SHA" '.isDraft and .isPrerelease and .targetCommitish == $sha'
           gh release upload "$tag" "$ARCHIVE" SHA256SUMS --clobber
           gh release edit "$tag" --draft=false --prerelease --latest=false
+
+  announce:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Announce Linux self-dev prerelease on Discord
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run discord-release.yml --repo "$GITHUB_REPOSITORY" --ref master -f "tag=selfdev-linux-$SHA"
