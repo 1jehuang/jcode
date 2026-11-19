@@ -8,8 +8,11 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::sync::RwLock;
 
+mod arguments;
 mod invocation;
+mod list_value;
 pub use invocation::SkillInvocation;
+use list_value::ListValue;
 
 /// A skill definition from SKILL.md
 #[derive(Debug, Clone)]
@@ -17,6 +20,7 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub allowed_tools: Option<Vec<String>>,
+    pub arguments: Vec<String>,
     pub content: String,
     pub path: PathBuf,
     /// Normalized search text, built on first use. Normalizing every skill
@@ -30,14 +34,8 @@ struct SkillFrontmatter {
     name: String,
     description: String,
     #[serde(rename = "allowed-tools")]
-    allowed_tools: Option<AllowedTools>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum AllowedTools {
-    CommaDelimited(String),
-    Sequence(Vec<String>),
+    allowed_tools: Option<ListValue>,
+    arguments: Option<ListValue>,
 }
 
 /// Registry of available skills
@@ -559,19 +557,15 @@ impl SkillRegistry {
             name,
             description,
             allowed_tools,
+            arguments,
         } = frontmatter;
 
-        let allowed_tools = allowed_tools.map(|tools| match tools {
-            AllowedTools::CommaDelimited(tools) => tools
-                .split(',')
-                .map(|tool| tool.trim().to_string())
-                .collect(),
-            AllowedTools::Sequence(tools) => tools,
-        });
+        let allowed_tools = allowed_tools.map(ListValue::into_comma_list);
         Ok(Skill {
             name,
             description,
             allowed_tools,
+            arguments: arguments.map_or_else(Vec::new, ListValue::into_names),
             content: body,
             path: path.to_path_buf(),
             search_text: std::sync::OnceLock::new(),
@@ -670,29 +664,30 @@ impl SkillRegistry {
 
         let name = scalar("name")?;
         let description = scalar("description")?;
-        let allowed_tools = entries
-            .iter()
-            .find(|(entry, _)| *entry == "allowed-tools")
-            .and_then(|(_, lines)| {
-                let inline = lines[0]
-                    .trim()
-                    .trim_start_matches('[')
-                    .trim_end_matches(']');
-                if !inline.is_empty() {
-                    return Some(AllowedTools::CommaDelimited(inline.to_string()));
-                }
-                let items: Vec<String> = lines[1..]
-                    .iter()
-                    .filter_map(|line| line.trim().strip_prefix('-'))
-                    .map(unquote)
-                    .filter(|item| !item.is_empty())
-                    .collect();
-                (!items.is_empty()).then_some(AllowedTools::Sequence(items))
-            });
+        let list = |key: &str| -> Option<ListValue> {
+            let (_, lines) = entries.iter().find(|(entry, _)| *entry == key)?;
+            let inline = lines[0]
+                .trim()
+                .trim_start_matches('[')
+                .trim_end_matches(']');
+            if !inline.is_empty() {
+                return Some(ListValue::Delimited(inline.to_string()));
+            }
+            let items: Vec<String> = lines[1..]
+                .iter()
+                .filter_map(|line| line.trim().strip_prefix('-'))
+                .map(unquote)
+                .filter(|item| !item.is_empty())
+                .collect();
+            (!items.is_empty()).then_some(ListValue::Sequence(items))
+        };
+        let allowed_tools = list("allowed-tools");
+        let arguments = list("arguments");
         Some(SkillFrontmatter {
             name,
             description,
             allowed_tools,
+            arguments,
         })
     }
 

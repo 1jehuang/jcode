@@ -1,9 +1,9 @@
 {
-  "total": 3854,
+  "total": 3855,
   "totals_by_pattern": {
     "dot_ok": 1526,
     "let_underscore": 1403,
-    "unwrap_or_default": 925
+    "unwrap_or_default": 926
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {
@@ -2374,7 +2374,7 @@
     "crates/jcode-tui/src/tui/app/input.rs": {
       "dot_ok": 12,
       "let_underscore": 3,
-      "unwrap_or_default": 3
+      "unwrap_or_default": 4
     },
     "crates/jcode-tui/src/tui/app/jarvis_status.rs": {
       "dot_ok": 0,

@@ -200,6 +200,7 @@ pub(super) async fn start_processing_message(
         images,
         mut system_reminder,
         active_skill,
+        skill_arguments,
         server_failover,
     } = message;
     if server_reload_starting() {
@@ -274,7 +275,7 @@ pub(super) async fn start_processing_message(
         ));
         system_reminder = None;
     }
-    if !agent_guard.set_remote_active_skill(active_skill.clone()) {
+    if !agent_guard.set_remote_active_skill(active_skill.clone(), skill_arguments) {
         let skill_name = active_skill.as_deref().unwrap_or_default();
         let _ = client_event_tx.send(ServerEvent::Error {
             id,
