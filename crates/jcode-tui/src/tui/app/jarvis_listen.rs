@@ -432,12 +432,30 @@ impl App {
                 }
             }
             let state = listener.indicator_state(paused, speech_busy, Instant::now());
+            // Companion push-to-talk (Fn or Copilot) owns the microphone for
+            // this session while Jarvis's own capture is suppressed. Show its
+            // live level so the Waybar waveform keeps tracking the voice.
+            let push_to_talk_level = external_capture
+                .then(|| match self.external_voice.as_ref() {
+                    Some((crate::protocol::VoiceActivity::Recording { levels, .. }, _)) => {
+                        Some(levels.last().copied().unwrap_or(0.0))
+                    }
+                    _ => None,
+                })
+                .flatten();
+            let state = if push_to_talk_level.is_some() {
+                "push to talk"
+            } else {
+                state
+            };
             if let Some(status) = &mut listener.status {
-                let capturing = recording.is_capturing();
+                let capturing = recording.is_capturing() || push_to_talk_level.is_some();
                 if let Err(error) = status.publish(
                     capturing,
                     state,
-                    recording.audio_level(),
+                    recording
+                        .audio_level()
+                        .max(push_to_talk_level.unwrap_or(0.0)),
                     json!({"agent_turns_last_hour":listener.turns.len()}),
                 ) {
                     recording.stop();

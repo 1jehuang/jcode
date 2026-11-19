@@ -28,6 +28,8 @@ pub struct CompanionOptions {
     pub voice_waveform: bool,
     /// Desktop notifications for push-to-talk state.
     pub voice_notifications: bool,
+    /// Bare Fn hold talks to the always-on Jarvis session.
+    pub jarvis_fn_key: bool,
     /// Handle `open` / `reveal` requests.
     pub open: bool,
     /// Handle `spawn_terminal` requests.
@@ -46,6 +48,7 @@ impl CompanionOptions {
             browser_updates: config.browser_updates,
             voice_waveform: config.voice_waveform,
             voice_notifications: config.voice_notifications,
+            jarvis_fn_key: config.jarvis_fn_key,
             open: config.open,
             spawn_terminal: config.spawn_terminal,
             lid: config.lid,
@@ -80,6 +83,7 @@ impl Default for CompanionOptions {
             browser_updates: true,
             voice_waveform: true,
             voice_notifications: true,
+            jarvis_fn_key: false,
             open: true,
             spawn_terminal: true,
             lid: true,
@@ -342,6 +346,7 @@ pub async fn run(options: CompanionOptions) -> Result<()> {
         crate::voice::spawn(crate::voice::VoiceIndicators {
             notifications: options.voice_notifications,
             waveform: options.voice_waveform,
+            jarvis_fn_key: options.jarvis_fn_key,
         });
     }
     if options.browser_updates {

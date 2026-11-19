@@ -901,6 +901,11 @@ voice_waveform = true
 # Desktop notifications for voice state. When off, recording still needs the
 # waveform to be shown in a Jcode CLI as its visible indicator.
 voice_notifications = true
+# Hold the laptop Fn key to talk to the running always-on Jarvis session
+# (`jcode --jarvis-always-on`) from any window, without changing focus. Needs
+# Fn to reach Linux as KEY_FN on a [dictation] global_devices keyboard (on some
+# laptops via a udev hwdb remap). Fn shortcuts never record.
+jarvis_fn_key = false
 # Open URLs and files for the server. Off: clients use their own opener.
 open = true
 # Open new terminal windows for the server. Off: clients launch locally.

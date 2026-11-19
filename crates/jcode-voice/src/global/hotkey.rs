@@ -6,6 +6,12 @@
 //! Linux always delivers EV_SYN framing despite masks. SYN_REPORT is ignored,
 //! SYN_DROPPED fails closed. No ordinary EV_KEY events are read.
 //! `new(&[PathBuf])` accepts an explicit event-device allowlist and registers only. The first `poll` discovers/opens eligible devices.
+//!
+//! Optional Fn trigger (`set_fn_trigger`): a bare hold of `KEY_FN` emits
+//! `FnPress`/`FnRelease`, independent of focus routing. To tell a deliberate
+//! hold from Fn+key shortcuts, non-text function, media, and navigation keys
+//! are also selected, only as a "chord happened" signal. Their identities are
+//! never stored, logged, or reported. Text keys are still never read.
 #![cfg(target_os = "linux")]
 
 use std::{
@@ -24,6 +30,24 @@ use std::{
 const F23: usize = 193;
 const ASSISTANT: usize = 0x247;
 const KEYS: [usize; 10] = [F23, ASSISTANT, 42, 54, 125, 126, 29, 97, 56, 100];
+const KEY_FN: usize = 464;
+/// Modifiers (Shift, Meta, Ctrl, Alt) that make an Fn press a chord.
+const MODIFIERS: [usize; 8] = [42, 54, 125, 126, 29, 97, 56, 100];
+/// Non-text keys that Fn combines with on laptops (F-row, media, navigation).
+/// Read only to cancel an Fn hold, never identified or recorded.
+const CHORD_KEYS: [usize; 46] = [
+    1, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 87, 88, 98, 99, 102, 103, 104, 105, 106, 107, 108,
+    109, 110, 111, 113, 114, 115, 119, 140, 148, 152, 163, 164, 165, 166, 210, 224, 225, 227, 228,
+    229, 230, 236, 248, 431,
+];
+/// A bare Fn hold becomes a recording only after this long without a chord.
+/// Firmware fake-shift codes and Fn shortcuts arrive well within it.
+const FN_ARM: Duration = Duration::from_millis(180);
+/// Typematic repeat is ~30 ms apart. A repeat after this much silence is a
+/// new physical press of a key the kernel never saw released.
+const FN_STUCK_GAP: Duration = Duration::from_millis(1000);
+/// Once an Fn hold autorepeats, this much silence means it was released.
+const FN_REPEAT_LOST: Duration = Duration::from_millis(400);
 const TTL: u64 = 3_000_000_000;
 const RETRY: Duration = Duration::from_secs(2);
 const DEADLINE: Duration = Duration::from_secs(120);
@@ -42,6 +66,30 @@ pub enum Edge {
     /// A spawned window opened after its Shift+Copilot hold already ended.
     /// Start a click-style recording instead of losing the request.
     Tap,
+    /// Bare Fn held past the arming delay (only with `set_fn_trigger`).
+    FnPress,
+    /// Physical key-up of an Fn hold that produced `FnPress`.
+    FnRelease,
+    /// Abort an Fn hold: a chord key, modifier, or safety failure.
+    FnCancel,
+}
+
+/// Bare-Fn hold state machine. Lives beside the routed Copilot capture.
+#[derive(Debug)]
+enum FnHold {
+    /// Down, waiting out `FN_ARM` for a chord.
+    Armed(PathBuf, Instant),
+    /// `FnPress` emitted.
+    Held(PathBuf, Instant),
+    /// A chord or modifier spoiled this press. Wait for key-up.
+    Spoiled(PathBuf),
+}
+impl FnHold {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Armed(path, _) | Self::Held(path, _) | Self::Spoiled(path) => path,
+        }
+    }
 }
 
 /// How long a freshly spawned window waits to adopt the hold that opened it.
@@ -406,7 +454,7 @@ struct Device {
     decoder: Decoder,
 }
 impl Device {
-    fn open(path: &Path) -> io::Result<Option<Self>> {
+    fn open(path: &Path, fn_trigger: bool) -> io::Result<Option<Self>> {
         let file = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOFOLLOW)
@@ -419,12 +467,17 @@ impl Device {
         }
         let mut keys = [0u8; KEY_BYTES];
         ioctl(&file, request(false, 0x21, KEY_BYTES), &mut keys)?; // EVIOCGBIT(EV_KEY)
-        if !bit(&keys, F23) && !bit(&keys, ASSISTANT) {
+        if !bit(&keys, F23) && !bit(&keys, ASSISTANT) && !(fn_trigger && bit(&keys, KEY_FN)) {
             return Ok(None);
         }
         let mut selected = [0u8; KEY_BYTES];
         for key in KEYS {
             selected[key / 8] |= 1 << (key % 8);
+        }
+        if fn_trigger {
+            for key in CHORD_KEYS.into_iter().chain([KEY_FN]) {
+                selected[key / 8] |= 1 << (key % 8);
+            }
         }
         // Set all per-type masks, including the event-type mask (type zero).
         // EV_SYN is special in evdev. Only SYN_DROPPED is acted upon.
@@ -455,8 +508,8 @@ impl Device {
         }))
     }
     /// After SYN_DROPPED, discard the stale queue and re-read which keys are
-    /// down (EVIOCGKEY). Returns whether the trigger key is still held.
-    fn resync(&mut self) -> io::Result<bool> {
+    /// down (EVIOCGKEY). Returns whether the trigger key and Fn are still held.
+    fn resync(&mut self) -> io::Result<(bool, bool)> {
         while let Some(event) = self.read_raw()? {
             if event.kind == 0 && event.code == 0 {
                 break;
@@ -464,7 +517,7 @@ impl Device {
         }
         let mut held = [0u8; KEY_BYTES];
         ioctl(&self.file, request(false, 0x18, KEY_BYTES), &mut held)?;
-        Ok(self.decoder.resync(&held))
+        Ok((self.decoder.resync(&held), bit(&held, KEY_FN)))
     }
     fn read(&mut self) -> io::Result<Option<InputEvent>> {
         self.read_raw()
@@ -535,6 +588,15 @@ pub struct Listener {
     capture: Option<(PathBuf, Instant, Option<Lock>)>,
     pending: Option<(PathBuf, u64, Edge)>,
     adopt_until: Option<Instant>,
+    /// Opt-in bare-Fn hold trigger, independent of focus routing.
+    fn_trigger: bool,
+    fn_hold: Option<FnHold>,
+    /// Last KEY_FN event of any value, to spot a fresh press of a key the
+    /// kernel still believes is down (it then arrives as a repeat).
+    fn_last: Option<Instant>,
+    /// The current Fn hold has autorepeated, so silence means key-up even if
+    /// the firmware's break code is lost.
+    fn_repeating: bool,
     next_scan: Instant,
     healthy: bool,
     registration_ok: bool,
@@ -577,6 +639,10 @@ impl Listener {
             capture: None,
             pending: None,
             adopt_until: None,
+            fn_trigger: false,
+            fn_hold: None,
+            fn_last: None,
+            fn_repeating: false,
             next_scan: Instant::now(),
             healthy: false,
             registration_ok: false,
@@ -602,6 +668,126 @@ impl Listener {
                 self.eligible && self.healthy && !self.devices.is_empty(),
             )
             .is_ok();
+    }
+    /// Also report bare Fn holds as `FnPress`/`FnRelease`. Off by default.
+    /// Fn edges do not use the focus registry or eligibility: the caller
+    /// decides where they go. Devices reopen on the next poll.
+    pub fn set_fn_trigger(&mut self, enabled: bool) {
+        if self.fn_trigger != enabled {
+            self.fn_trigger = enabled;
+            self.fn_hold = None;
+            self.devices.clear();
+            self.next_scan = Instant::now();
+        }
+    }
+    /// Track Fn and chord keys. Returns true if the event was Fn-only input
+    /// that the Copilot decoder must not see.
+    fn fn_event(
+        &mut self,
+        path: &Path,
+        kind: u16,
+        code: u16,
+        value: i32,
+        edges: &mut Vec<Edge>,
+    ) -> bool {
+        if !self.fn_trigger || kind != 1 {
+            return false;
+        }
+        let key = usize::from(code);
+        let on_path = self
+            .fn_hold
+            .as_ref()
+            .is_some_and(|hold| hold.path() == path);
+        if key == KEY_FN {
+            let silent = self.fn_last.is_none_or(|at| at.elapsed() >= FN_STUCK_GAP);
+            self.fn_last = Some(Instant::now());
+            let idle = match &self.fn_hold {
+                None => true,
+                Some(FnHold::Spoiled(spoiled)) => spoiled == path,
+                Some(_) => false,
+            };
+            // A press, or a repeat after silence: the kernel can believe Fn
+            // is still down (firmware fake-shift codes that never released),
+            // so the next physical press only arrives as autorepeat.
+            if (value == 1 && self.fn_hold.is_none()) || (value == 2 && idle && silent) {
+                let chorded = self.devices.get(path).is_some_and(|device| {
+                    MODIFIERS
+                        .iter()
+                        .any(|key| device.decoder.down.contains(key))
+                });
+                self.fn_repeating = false;
+                self.fn_hold = Some(if chorded {
+                    FnHold::Spoiled(path.to_path_buf())
+                } else {
+                    FnHold::Armed(path.to_path_buf(), Instant::now())
+                });
+            } else if value == 0
+                && on_path
+                && let Some(FnHold::Held(..)) = self.fn_hold.take()
+            {
+                edges.push(Edge::FnRelease);
+            } else if value == 2 && on_path {
+                self.fn_repeating = true;
+            }
+            return true;
+        }
+        // Any other selected key pressed during the hold makes it a chord.
+        // Only that fact is kept, never which key.
+        if value == 1 && on_path {
+            self.spoil_fn(edges);
+        }
+        CHORD_KEYS.contains(&key)
+    }
+    fn spoil_fn(&mut self, edges: &mut Vec<Edge>) {
+        if let Some(hold) = self.fn_hold.take() {
+            if matches!(hold, FnHold::Held(..)) {
+                edges.push(Edge::FnCancel);
+            }
+            self.fn_hold = Some(FnHold::Spoiled(hold.path().to_path_buf()));
+        }
+    }
+    fn fn_tick(&mut self, edges: &mut Vec<Edge>) {
+        match &self.fn_hold {
+            // Repeats stopped before arming with no key-up seen: a short tap.
+            Some(FnHold::Armed(..))
+                if self.fn_repeating
+                    && self
+                        .fn_last
+                        .is_some_and(|at| at.elapsed() >= FN_REPEAT_LOST) =>
+            {
+                self.fn_hold = None;
+            }
+            Some(FnHold::Armed(path, start)) if start.elapsed() >= FN_ARM => {
+                self.fn_hold = Some(FnHold::Held(path.clone(), Instant::now()));
+                edges.push(Edge::FnPress);
+            }
+            Some(FnHold::Held(path, start)) => {
+                if !self.devices.contains_key(path) {
+                    self.fn_cancel("Fn keyboard disappeared", edges);
+                } else if start.elapsed() >= DEADLINE {
+                    self.fn_cancel("Fn hold exceeded the 120s deadline", edges);
+                } else if self.fn_repeating
+                    && self
+                        .fn_last
+                        .is_some_and(|at| at.elapsed() >= FN_REPEAT_LOST)
+                {
+                    // Repeats stopped without a key-up event: released.
+                    self.fn_hold = None;
+                    edges.push(Edge::FnRelease);
+                }
+            }
+            Some(hold) if !self.devices.contains_key(hold.path()) => self.fn_hold = None,
+            _ => {}
+        }
+    }
+    fn fn_cancel(&mut self, reason: &str, edges: &mut Vec<Edge>) {
+        if let Some(FnHold::Held(_, start)) = self.fn_hold.take() {
+            eprintln!(
+                "global voice: Fn hold cancel after {:.1}s: {reason}",
+                start.elapsed().as_secs_f32()
+            );
+            edges.push(Edge::FnCancel);
+        }
     }
     /// Treat a Copilot key that is already down as this window's own hold.
     /// Used once by a window that Shift+Copilot just opened.
@@ -677,14 +863,17 @@ impl Listener {
                     .join(name)
                     .join("device/capabilities/key"),
             )?;
-            if advertised(&caps, F23)? || advertised(&caps, ASSISTANT)? {
+            if advertised(&caps, F23)?
+                || advertised(&caps, ASSISTANT)?
+                || (self.fn_trigger && advertised(&caps, KEY_FN)?)
+            {
                 paths.insert(path);
             }
         }
         self.devices.retain(|path, _| paths.contains(path));
         for path in paths {
             if let std::collections::btree_map::Entry::Vacant(entry) = self.devices.entry(path)
-                && let Some(device) = Device::open(entry.key())?
+                && let Some(device) = Device::open(entry.key(), self.fn_trigger)?
             {
                 entry.insert(device);
             }
@@ -747,7 +936,21 @@ impl Listener {
                     Ok(Some(event)) if event.kind == 0 && event.code == 3 => {
                         let capturing = self.capture.as_ref().is_some_and(|(p, _, _)| p == &path);
                         match device.resync() {
-                            Ok(held) => {
+                            Ok((held, fn_held)) => {
+                                if self
+                                    .fn_hold
+                                    .as_ref()
+                                    .is_some_and(|hold| hold.path() == path)
+                                {
+                                    if !fn_held {
+                                        if let Some(FnHold::Held(..)) = self.fn_hold.take() {
+                                            edges.push(Edge::FnRelease);
+                                        }
+                                    } else if matches!(self.fn_hold, Some(FnHold::Armed(..))) {
+                                        // A chord key may be among the dropped events.
+                                        self.fn_hold = Some(FnHold::Spoiled(path.clone()));
+                                    }
+                                }
                                 eprintln!(
                                     "global voice: keyboard events dropped (UI stalled); resynced, {}",
                                     match (capturing, held) {
@@ -764,6 +967,7 @@ impl Listener {
                             Err(error) => {
                                 self.devices.remove(&path);
                                 self.healthy = false;
+                                self.fn_cancel("keyboard resync failed", &mut edges);
                                 self.cancel(
                                     &format!(
                                         "keyboard resync after dropped events failed: {error}"
@@ -779,9 +983,16 @@ impl Listener {
                     Err(error) => {
                         self.devices.remove(&path);
                         self.healthy = false;
+                        self.fn_cancel("keyboard read failed", &mut edges);
                         self.cancel(&format!("keyboard read failed: {error}"), &mut edges);
                         break;
                     }
+                };
+                if self.fn_event(&path, event.kind, event.code, event.value, &mut edges) {
+                    continue;
+                }
+                let Some(device) = self.devices.get_mut(&path) else {
+                    break;
                 };
                 match device.decoder.event(event.kind, event.code, event.value) {
                     Some(edge @ (Edge::Press | Edge::Spawn))
@@ -842,6 +1053,7 @@ impl Listener {
         }
         // After draining, so a key-up during startup is already applied.
         self.adopt(&mut edges);
+        self.fn_tick(&mut edges);
         edges
     }
 }

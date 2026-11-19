@@ -1006,6 +1006,10 @@ pub struct CompanionConfig {
     pub voice_waveform: bool,
     /// Show desktop notifications for companion voice state.
     pub voice_notifications: bool,
+    /// Hold the laptop Fn key (Linux, `KEY_FN` on a `global_devices` keyboard)
+    /// to talk to the running always-on Jarvis session from any window.
+    /// Fn shortcuts (Fn+F-keys, Fn+arrows) never record. Off by default.
+    pub jarvis_fn_key: bool,
     /// Open URLs and files for the server.
     pub open: bool,
     /// Open new terminal windows for the server.
@@ -1023,6 +1027,7 @@ impl Default for CompanionConfig {
             voice: true,
             voice_waveform: true,
             voice_notifications: true,
+            jarvis_fn_key: false,
             open: true,
             spawn_terminal: true,
             lid: true,

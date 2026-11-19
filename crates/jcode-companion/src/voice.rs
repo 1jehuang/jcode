@@ -13,6 +13,11 @@
 //!
 //! Never records without a visible indicator: a desktop notification is shown
 //! first, and recording is refused if it cannot be shown.
+//!
+//! With `[companion] jarvis_fn_key`, a bare hold of the laptop Fn key records
+//! for the running always-on Jarvis session instead, from any window and
+//! without changing focus. Its waveform appears in that Jarvis client, which
+//! also feeds the levels to the Waybar Jarvis indicator.
 
 use jcode_base::protocol::VoiceActivity;
 use jcode_voice::global::hotkey::{Edge, Listener};
@@ -41,6 +46,8 @@ pub struct VoiceIndicators {
     pub notifications: bool,
     /// Live waveform in the focused Jcode CLI's status line.
     pub waveform: bool,
+    /// Bare Fn hold talks to the always-on Jarvis session.
+    pub jarvis_fn_key: bool,
 }
 
 pub fn spawn(indicators: VoiceIndicators) {
@@ -58,7 +65,7 @@ pub fn spawn(indicators: VoiceIndicators) {
         );
         return;
     }
-    let listener = match Listener::new(&devices) {
+    let mut listener = match Listener::new(&devices) {
         Ok(listener) => listener,
         Err(error) => {
             jcode_base::logging::warn(&format!("companion voice unavailable: {error}"));
@@ -66,9 +73,15 @@ pub fn spawn(indicators: VoiceIndicators) {
             return;
         }
     };
+    listener.set_fn_trigger(indicators.jarvis_fn_key);
     eprintln!(
-        "jcode companion: global voice on {} device(s)",
-        devices.len()
+        "jcode companion: global voice on {} device(s){}",
+        devices.len(),
+        if indicators.jarvis_fn_key {
+            ", Fn talks to Jarvis"
+        } else {
+            ""
+        }
     );
     if let Err(error) = std::thread::Builder::new()
         .name("jcode-companion-voice".into())
@@ -78,7 +91,17 @@ pub fn spawn(indicators: VoiceIndicators) {
     }
 }
 
+/// Which key started a capture. Each key's edges only end its own capture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Source {
+    /// Copilot key, to the focused Jcode CLI.
+    Copilot,
+    /// Fn key, to the always-on Jarvis session.
+    JarvisFn,
+}
+
 struct Capture {
+    source: Source,
     session: String,
     cancel: Arc<AtomicBool>,
     recording: NariRecording,
@@ -118,16 +141,37 @@ fn run(mut listener: Listener, indicators: VoiceIndicators) {
                     if capture.is_none()
                         && let Some(session) = focused.clone()
                     {
-                        capture = start(session, indicators);
+                        capture = start(Source::Copilot, session, indicators);
                     }
                 }
-                Edge::Release => {
-                    if let Some(active) = capture.take() {
+                Edge::FnPress => {
+                    if capture.is_none() {
+                        match crate::jarvis_target::live_jarvis() {
+                            Some(target) => {
+                                capture = start(Source::JarvisFn, target.session, indicators);
+                            }
+                            None => {
+                                Indicator::new(indicators.notifications)
+                                    .show("No always-on Jarvis is running");
+                            }
+                        }
+                    }
+                }
+                Edge::Release | Edge::FnRelease => {
+                    if capture
+                        .as_ref()
+                        .is_some_and(|active| active.source == edge_source(edge))
+                        && let Some(active) = capture.take()
+                    {
                         finish(active);
                     }
                 }
-                Edge::Cancel => {
-                    if let Some(active) = capture.take() {
+                Edge::Cancel | Edge::FnCancel => {
+                    if capture
+                        .as_ref()
+                        .is_some_and(|active| active.source == edge_source(edge))
+                        && let Some(active) = capture.take()
+                    {
                         active.cancel.store(true, Ordering::SeqCst);
                         active.indicator.show("Voice cancelled");
                         if let Some(reporter) = &active.activity {
@@ -151,7 +195,14 @@ fn run(mut listener: Listener, indicators: VoiceIndicators) {
     }
 }
 
-fn start(session: String, indicators: VoiceIndicators) -> Option<Capture> {
+fn edge_source(edge: Edge) -> Source {
+    match edge {
+        Edge::FnPress | Edge::FnRelease | Edge::FnCancel => Source::JarvisFn,
+        _ => Source::Copilot,
+    }
+}
+
+fn start(source: Source, session: String, indicators: VoiceIndicators) -> Option<Capture> {
     if !block_on(jcode_voice::global::session::permitted()) {
         eprintln!("jcode companion: voice denied by session check");
         return None;
@@ -173,7 +224,11 @@ fn start(session: String, indicators: VoiceIndicators) -> Option<Capture> {
         })
     });
     let indicator = Indicator::new(indicators.notifications);
-    let notified = indicators.notifications && indicator.show("Listening for Jcode…");
+    let notified = indicators.notifications
+        && indicator.show(match source {
+            Source::Copilot => "Listening for Jcode…",
+            Source::JarvisFn => "Listening for Jarvis…",
+        });
     if !waveform_shown && !notified {
         eprintln!("jcode companion: no visible voice indicator, not recording");
         return None;
@@ -182,6 +237,7 @@ fn start(session: String, indicators: VoiceIndicators) -> Option<Capture> {
     let recorder = jcode_base::config::config().dictation.recorder.clone();
     match NariRecording::start_auto(cancel.clone(), &key, &recorder) {
         Ok(recording) => Some(Capture {
+            source,
             session,
             cancel,
             recording,
@@ -228,7 +284,10 @@ fn finish(mut capture: Capture) {
                             Some(capture.session.clone()),
                             SEND_TIMEOUT,
                         ) {
-                            Ok(()) => "Sent to Jcode".to_string(),
+                            Ok(()) => match capture.source {
+                                Source::Copilot => "Sent to Jcode".to_string(),
+                                Source::JarvisFn => "Sent to Jarvis".to_string(),
+                            },
                             Err(error) => {
                                 eprintln!("jcode companion: voice delivery failed: {error:#}");
                                 "Couldn't reach Jcode".to_string()
