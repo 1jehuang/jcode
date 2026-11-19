@@ -305,10 +305,14 @@ impl App {
     /// Status-line text while voice input is active: `(recording, text)`.
     /// Empty when the composer shows it instead.
     pub(crate) fn voice_input_status_line(&self) -> Option<(bool, String)> {
-        if crate::config::config().dictation.composer_preview {
-            return None;
+        if !crate::config::config().dictation.composer_preview
+            && let Some(status) = self.voice_status_line_text()
+        {
+            return Some(status);
         }
-        self.voice_status_line_text()
+        self.jarvis_listener
+            .caption()
+            .map(|text| (false, format!("Heard: {text}")))
     }
 
     /// Live voice state for the composer, built-in recording first, then

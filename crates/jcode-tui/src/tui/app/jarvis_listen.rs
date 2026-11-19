@@ -11,6 +11,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn caption_is_bounded_terminal_safe_and_never_queued() {
+        let mut listener = AlwaysListening::default();
+        listener.update_caption("\x1b[31mhello\x1b[0m\nworld\0\u{202e}");
+        assert_eq!(listener.caption(), Some("hello world"));
+        listener.update_caption(&"界".repeat(500));
+        assert_eq!(listener.caption().unwrap().chars().count(), 160);
+        assert!(listener.pending.is_none() && listener.last_request.is_none());
+        listener.detach();
+        assert!(listener.caption().is_none());
+    }
+
+    #[test]
+    fn trigger_expires_without_overriding_pause_or_failure() {
+        let now = Instant::now();
+        let mut listener = AlwaysListening::default();
+        listener.triggered_at = Some(now);
+        listener.state = Some(VoiceState::Listening);
+        assert_eq!(listener.indicator_state(false, true, now), "triggered");
+        assert_eq!(listener.indicator_state(true, false, now), "paused");
+        assert_eq!(
+            listener.indicator_state(false, false, now + Duration::from_secs(3)),
+            "listening"
+        );
+        listener.failed = true;
+        assert_eq!(listener.indicator_state(true, false, now), "error");
+    }
+
+    #[test]
     fn jarvis_listening_keeps_one_bounded_request_and_deduplicates() {
         let mut listener = AlwaysListening::default();
         for invalid in [String::new(), "a".repeat(4097), "nul\0text".into()] {
@@ -42,6 +70,8 @@ pub(super) struct AlwaysListening {
     last_request: Option<(String, Instant)>,
     state: Option<VoiceState>,
     failed: bool,
+    caption: Option<(String, Instant)>,
+    triggered_at: Option<Instant>,
 }
 impl Drop for AlwaysListening {
     fn drop(&mut self) {
@@ -51,6 +81,41 @@ impl Drop for AlwaysListening {
     }
 }
 impl AlwaysListening {
+    pub(super) fn caption(&self) -> Option<&str> {
+        self.caption.as_ref().map(|(text, _)| text.as_str())
+    }
+
+    fn update_caption(&mut self, text: &str) {
+        let plain = crate::message::strip_ansi_escape_sequences(text);
+        let text: String = plain.chars().filter_map(|c| {
+            if c.is_whitespace() { Some(' ') } else if c.is_control() || matches!(c, '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') { None } else { Some(c) }
+        }).take(160).collect();
+        self.caption = (!text.trim().is_empty()).then(|| (text.trim().to_owned(), Instant::now()));
+    }
+
+    fn indicator_state(&self, paused: bool, speech_busy: bool, now: Instant) -> &'static str {
+        if self.failed {
+            "error"
+        } else if paused {
+            "paused"
+        } else if self
+            .triggered_at
+            .is_some_and(|at| now.duration_since(at) < Duration::from_secs(3))
+        {
+            "triggered"
+        } else if speech_busy {
+            "speech suppressed"
+        } else {
+            match self.state {
+                Some(VoiceState::Transcribing) => "transcribing",
+                Some(VoiceState::Speaking) => "hearing speech",
+                Some(VoiceState::Listening) => "listening",
+                Some(VoiceState::BudgetLimited) => "hourly speech-processing limit reached",
+                _ => "starting",
+            }
+        }
+    }
+
     fn queue_request(&mut self, text: String) {
         if text.trim().is_empty()
             || text.len() > 4096
@@ -117,6 +182,8 @@ impl AlwaysListening {
     }
 
     pub(super) fn detach(&mut self) {
+        self.caption = None;
+        self.triggered_at = None;
         self.pending = None;
         self.session = None;
         if let Some(recording) = &self.recording {
@@ -171,6 +238,8 @@ impl App {
         }
         let session = self.remote_session_id.clone();
         if listener.session != session {
+            listener.caption = None;
+            listener.triggered_at = None;
             listener.pending = None;
             listener.session = session;
             if let Some(recording) = &listener.recording {
@@ -200,10 +269,17 @@ impl App {
                         listener.state = Some(state);
                     }
                     ContinuousEvent::Level(_) => {}
+                    ContinuousEvent::Caption(text) => {
+                        if !paused && !listener.failed && !speech_busy && !external_capture {
+                            listener.update_caption(&text);
+                            changed = true;
+                        }
+                    }
                     ContinuousEvent::Rejected(_) => {} // Never save ambient speech in chat or logs.
                     ContinuousEvent::Transcript(text)
                         if !paused && !listener.failed && !speech_busy && !external_capture =>
                     {
+                        listener.triggered_at = Some(Instant::now());
                         listener.queue_request(text);
                     }
                     ContinuousEvent::Transcript(_) => {}
@@ -219,23 +295,9 @@ impl App {
                     }
                 }
             }
+            let state = listener.indicator_state(paused, speech_busy, Instant::now());
             if let Some(status) = &mut listener.status {
                 let capturing = recording.is_capturing();
-                let state = if listener.failed {
-                    "error"
-                } else if paused {
-                    "paused"
-                } else if speech_busy {
-                    "speech suppressed"
-                } else {
-                    match listener.state {
-                        Some(VoiceState::Transcribing) => "transcribing",
-                        Some(VoiceState::Speaking) => "hearing speech",
-                        Some(VoiceState::Listening) => "listening",
-                        Some(VoiceState::BudgetLimited) => "hourly speech-processing limit reached",
-                        _ => "starting",
-                    }
-                };
                 if let Err(error) = status.publish(
                     capturing,
                     state,
@@ -251,6 +313,17 @@ impl App {
                     changed = true;
                 }
             }
+        }
+        if paused
+            || listener.failed
+            || speech_busy
+            || external_capture
+            || listener
+                .caption
+                .as_ref()
+                .is_some_and(|(_, at)| at.elapsed() >= Duration::from_secs(5))
+        {
+            changed |= listener.caption.take().is_some();
         }
         listener.recording = recording;
         if indicator_failed {
