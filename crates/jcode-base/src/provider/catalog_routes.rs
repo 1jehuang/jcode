@@ -906,6 +906,9 @@ pub(crate) fn claude_code_route_provider_label(
     settings: &crate::config::ClaudeCodeConfig,
     instance: &crate::config::ClaudeCodeInstanceConfig,
 ) -> String {
+    if let Some(label) = &instance.jcode_account {
+        return format!("Claude Code ({label})");
+    }
     match instance.display_name.as_deref().map(str::trim) {
         Some(name) if !name.is_empty() => name.to_string(),
         _ if settings.is_default_instance(&instance.id) => "Claude Code".to_string(),
@@ -920,19 +923,49 @@ pub fn claude_code_routes_for(
     models_for: impl Fn(&crate::config::ClaudeCodeInstanceConfig) -> Vec<String>,
 ) -> Vec<ModelRoute> {
     let mut routes = Vec::new();
+    let accounts = if settings.jcode_accounts.is_empty() {
+        Vec::new()
+    } else {
+        crate::auth::claude::list_accounts().unwrap_or_default()
+    };
     for instance in settings.effective_instances() {
         let api_method = jcode_provider_core::claude_code_api_method(
             (!settings.is_default_instance(&instance.id)).then_some(instance.id.as_str()),
         );
         let provider_label = claude_code_route_provider_label(settings, &instance);
+        let mut models = models_for(&instance);
         let detail = match (&instance.jcode_account, instance.resolved_home()) {
-            (Some(label), _) => format!("Claude Code CLI, jcode account {label}"),
+            (Some(label), _) => {
+                // The CLI only reports its few aliases; the account's own
+                // Anthropic catalog is what it can run. shortcut: 1M-context
+                // variants are left out because their extra-usage gate is
+                // not known per account; list them once that is tracked.
+                let mut catalog: Vec<String> =
+                    super::known_anthropic_model_ids_for_scope(&format!("oauth::{label}"))
+                        .into_iter()
+                        .filter(|model| !model.ends_with("[1m]"))
+                        .collect();
+                for model in models {
+                    if !catalog.contains(&model) {
+                        catalog.push(model);
+                    }
+                }
+                models = catalog;
+                match accounts
+                    .iter()
+                    .find(|account| &account.label == label)
+                    .and_then(|account| account.email.as_deref())
+                {
+                    Some(email) => format!("account {label} · {email} · via Claude Code CLI"),
+                    None => format!("account {label} · via Claude Code CLI"),
+                }
+            }
             (None, Some(home)) => {
                 format!("Claude Code CLI, CLAUDE_CONFIG_DIR={}", home.display())
             }
             (None, None) => "Claude Code CLI, default login".to_string(),
         };
-        for model in models_for(&instance) {
+        for model in models {
             routes.push(ModelRoute {
                 catalog_metadata: None,
                 model,
