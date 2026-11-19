@@ -6,6 +6,65 @@ use jcode_voice::continuous::{ContinuousConfig, ContinuousEvent, ContinuousRecor
 use serde_json::json;
 use std::collections::VecDeque;
 
+fn envelope_trigger(text: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Envelope {
+        background_transcript: Vec<String>,
+        trigger: String,
+    }
+    if text.len() > 128 * 1024 {
+        return None;
+    }
+    let e: Envelope = serde_json::from_str(text).ok()?;
+    (e.background_transcript.len() <= 16
+        && e.background_transcript
+            .iter()
+            .all(|s| s.chars().count() <= 1024)
+        && !e.trigger.trim().is_empty()
+        && !e.trigger.contains('\0')
+        && e.trigger.len() <= 4096)
+        .then_some(e.trigger)
+}
+
+fn recent_chat(messages: &[DisplayMessage]) -> Vec<(String, String)> {
+    let mut chat: Vec<_> = messages
+        .iter()
+        .rev()
+        .filter(|m| matches!(m.role.as_str(), "user" | "assistant") && !m.content.trim().is_empty())
+        .filter_map(|m| {
+            let visible;
+            let text = if m.role == "assistant" {
+                visible = super::input::strip_reasoning_lines(&m.content);
+                visible.as_str()
+            } else {
+                m.content.as_str()
+            };
+            if text.trim().is_empty() {
+                return None;
+            }
+            let (text, _) = jcode_session_types::strip_transcription(text);
+            let trigger = if m.role == "user" {
+                envelope_trigger(&text)
+            } else {
+                None
+            };
+            Some((
+                m.role.clone(),
+                trigger
+                    .as_deref()
+                    .unwrap_or(&text)
+                    .chars()
+                    .take(1024)
+                    .collect(),
+            ))
+        })
+        .take(8)
+        .collect();
+    chat.reverse();
+    chat
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -14,12 +73,34 @@ mod tests {
     fn caption_is_bounded_terminal_safe_and_never_queued() {
         let mut listener = AlwaysListening::default();
         listener.update_caption("\x1b[31mhello\x1b[0m\nworld\0\u{202e}");
-        assert_eq!(listener.caption(), Some("hello world"));
+        assert_eq!(
+            listener.captions.front().map(String::as_str),
+            Some("Heard: hello world")
+        );
         listener.update_caption(&"界".repeat(500));
-        assert_eq!(listener.caption().unwrap().chars().count(), 160);
+        assert_eq!(listener.captions.back().unwrap().chars().count(), 167);
         assert!(listener.pending.is_none() && listener.last_request.is_none());
         listener.detach();
-        assert!(listener.caption().is_none());
+        assert!(listener.captions.is_empty());
+    }
+
+    #[test]
+    fn context_only_includes_visible_dialogue_and_unwraps_voice() {
+        let rows = [
+            DisplayMessage::system("secret"),
+            DisplayMessage::user(r#"{"background_transcript":["private"],"trigger":"question"}"#),
+            DisplayMessage::assistant(format!(
+                "{}\nreply",
+                jcode_tui_markdown::reasoning_line_markup("secret")
+            )),
+        ];
+        assert_eq!(
+            recent_chat(&rows),
+            vec![
+                ("user".into(), "question".into()),
+                ("assistant".into(), "reply".into())
+            ]
+        );
     }
 
     #[test]
@@ -45,13 +126,16 @@ mod tests {
             listener.queue_request(invalid);
             assert!(listener.pending.is_none());
         }
-        listener.queue_request("show my screen".into());
-        listener.queue_request("replace with different work".into());
-        assert_eq!(listener.pending.as_ref().unwrap().0, "show my screen");
+        let envelope =
+            |trigger, bg| json!({"trigger":trigger,"background_transcript":[bg]}).to_string();
+        let original = envelope("show my screen", "a");
+        listener.queue_request(original.clone());
+        listener.queue_request(envelope("replace with different work", "a"));
+        assert_eq!(listener.pending.as_ref().unwrap().0, original);
         listener.pending = None;
-        listener.queue_request("show my screen".into());
+        listener.queue_request(envelope("show my screen", "b"));
         assert!(listener.pending.is_none());
-        listener.queue_request("explain this window".into());
+        listener.queue_request(envelope("explain this window", "b"));
         assert!(listener.pending.is_some());
         listener.detach();
         assert!(listener.pending.is_none() && listener.session.is_none());
@@ -70,7 +154,8 @@ pub(super) struct AlwaysListening {
     last_request: Option<(String, Instant)>,
     state: Option<VoiceState>,
     failed: bool,
-    caption: Option<(String, Instant)>,
+    captions: VecDeque<String>,
+    chat_version: Option<u64>,
     triggered_at: Option<Instant>,
 }
 impl Drop for AlwaysListening {
@@ -81,16 +166,27 @@ impl Drop for AlwaysListening {
     }
 }
 impl AlwaysListening {
-    pub(super) fn caption(&self) -> Option<&str> {
-        self.caption.as_ref().map(|(text, _)| text.as_str())
+    pub(super) fn captions(&self) -> &VecDeque<String> {
+        &self.captions
     }
 
-    fn update_caption(&mut self, text: &str) {
+    fn caption_text(text: &str) -> String {
         let plain = crate::message::strip_ansi_escape_sequences(text);
         let text: String = plain.chars().filter_map(|c| {
             if c.is_whitespace() { Some(' ') } else if c.is_control() || matches!(c, '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') { None } else { Some(c) }
         }).take(160).collect();
-        self.caption = (!text.trim().is_empty()).then(|| (text.trim().to_owned(), Instant::now()));
+        text.trim().to_owned()
+    }
+
+    fn update_caption(&mut self, text: &str) {
+        let text = Self::caption_text(text);
+        if text.is_empty() {
+            return;
+        }
+        if self.captions.len() == 4 {
+            self.captions.pop_front();
+        }
+        self.captions.push_back(format!("Heard: {text}"));
     }
 
     fn indicator_state(&self, paused: bool, speech_busy: bool, now: Instant) -> &'static str {
@@ -117,21 +213,32 @@ impl AlwaysListening {
     }
 
     fn queue_request(&mut self, text: String) {
-        if text.trim().is_empty()
-            || text.len() > 4096
-            || text.contains('\0')
-            || self.pending.is_some()
+        let Some(trigger) = envelope_trigger(&text) else {
+            return;
+        };
+        let label = Self::caption_text(&trigger);
+        if self
+            .captions
+            .back()
+            .is_some_and(|line| line.strip_prefix("Heard: ") == Some(label.as_str()))
         {
+            self.captions.pop_back();
+        }
+        if self.captions.len() == 4 {
+            self.captions.pop_front();
+        }
+        self.captions.push_back(format!("Trigger: {label}"));
+        if self.pending.is_some() {
             return;
         }
         if self
             .last_request
             .as_ref()
-            .is_some_and(|(old, at)| old == &text && at.elapsed() < Duration::from_secs(10))
+            .is_some_and(|(old, at)| old == &trigger && at.elapsed() < Duration::from_secs(10))
         {
             return;
         }
-        self.last_request = Some((text.clone(), Instant::now()));
+        self.last_request = Some((trigger, Instant::now()));
         self.pending = Some((text, Instant::now()));
     }
 
@@ -182,7 +289,9 @@ impl AlwaysListening {
     }
 
     pub(super) fn detach(&mut self) {
-        self.caption = None;
+        self.captions.clear();
+        self.last_request = None;
+        self.chat_version = None;
         self.triggered_at = None;
         self.pending = None;
         self.session = None;
@@ -228,7 +337,7 @@ impl App {
         if !listener.initialized {
             match listener.initialize() {
                 Ok(()) => self.push_display_message(DisplayMessage::system(
-                    "Always-on Jarvis: local speech detection, Nari transcription, and Jev request gating. Ambient transcripts stay out of agent history. Use /voice or click the Waybar microphone to pause. Speech audio is sent to Nari; request candidates are sent to Jev.")),
+                    "Always-on Jarvis: local speech detection, Nari transcription, and Jev request gating. Recent speech and visible chat are sent to Jev. Only accepted requests and their preceding speech are sent to the agent. Use /voice or click the Waybar microphone to pause. Speech audio is sent to Nari; request candidates are sent to Jev.")),
                 Err(error) => {
                     listener.failed = true;
                     self.push_display_message(DisplayMessage::error(format!("Always-on Jarvis did not start: {error}")));
@@ -238,13 +347,8 @@ impl App {
         }
         let session = self.remote_session_id.clone();
         if listener.session != session {
-            listener.caption = None;
-            listener.triggered_at = None;
-            listener.pending = None;
+            listener.detach();
             listener.session = session;
-            if let Some(recording) = &listener.recording {
-                recording.set_suppressed(true);
-            }
         }
         let paused = listener.status.as_ref().is_some_and(CaptureStatus::paused);
         let speech_busy = self
@@ -259,6 +363,13 @@ impl App {
         let recording = listener.recording.take();
         if let Some(recording) = &recording {
             recording.set_paused(paused || listener.failed);
+            if !paused
+                && !listener.failed
+                && listener.chat_version != Some(self.display_messages_version)
+            {
+                recording.set_chat_context(recent_chat(&self.display_messages));
+                listener.chat_version = Some(self.display_messages_version);
+            }
             recording.set_suppressed(speech_busy || external_capture || paused || listener.failed);
             for _ in 0..32 {
                 let Some(event) = recording.try_event() else {
@@ -281,6 +392,7 @@ impl App {
                     {
                         listener.triggered_at = Some(Instant::now());
                         listener.queue_request(text);
+                        changed = true;
                     }
                     ContinuousEvent::Transcript(_) => {}
                     ContinuousEvent::Error(error) => {
@@ -314,16 +426,11 @@ impl App {
                 }
             }
         }
-        if paused
-            || listener.failed
-            || speech_busy
-            || external_capture
-            || listener
-                .caption
-                .as_ref()
-                .is_some_and(|(_, at)| at.elapsed() >= Duration::from_secs(5))
-        {
-            changed |= listener.caption.take().is_some();
+        if paused || listener.failed {
+            changed |= !listener.captions.is_empty();
+            listener.captions.clear();
+            listener.last_request = None;
+            listener.chat_version = None;
         }
         listener.recording = recording;
         if indicator_failed {
@@ -368,9 +475,8 @@ impl App {
                 // Count attempts, even if delivery fails, so errors cannot create
                 // an automatic retry loop or an unbounded billing path.
                 listener.turns.push_back(Instant::now());
-                if let Err(error) =
-                    super::remote::submit_remote_voice_transcript(self, remote, &text).await
-                {
+                self.push_display_message(DisplayMessage::user(text.clone()));
+                if let Err(error) = self.begin_remote_send(remote, text, vec![], false).await {
                     self.push_display_message(DisplayMessage::error(format!(
                         "Voice request was not sent: {error}"
                     )));

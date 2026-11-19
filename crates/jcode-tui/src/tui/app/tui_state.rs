@@ -999,6 +999,10 @@ impl crate::tui::TuiState for App {
         self.remote_client_count
     }
 
+    fn jarvis_transcript(&self) -> Option<&std::collections::VecDeque<String>> {
+        Some(self.jarvis_listener.captions())
+    }
+
     fn voice_input_status(&self) -> Option<(bool, String)> {
         self.voice_input_status_line()
     }

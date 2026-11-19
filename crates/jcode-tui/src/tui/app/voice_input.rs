@@ -310,9 +310,7 @@ impl App {
         {
             return Some(status);
         }
-        self.jarvis_listener
-            .caption()
-            .map(|text| (false, format!("Heard: {text}")))
+        None
     }
 
     /// Live voice state for the composer, built-in recording first, then

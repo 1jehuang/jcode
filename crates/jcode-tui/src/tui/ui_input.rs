@@ -976,12 +976,16 @@ pub(crate) fn openai_reset_status_hint(
 
 fn notification_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     let spans = build_notification_spans(app);
-    if spans.is_empty() || width == 0 {
+    if width == 0 {
         return Vec::new();
     }
-    let line = Line::from(spans);
-    // Notifications must never occupy a second row on narrow terminals.
-    let lines = vec![line];
+    let mut lines = Vec::new();
+    for row in app.jarvis_transcript().into_iter().flatten() {
+        lines.push(Line::from(truncate_cells(row, width as usize)));
+    }
+    if !spans.is_empty() {
+        lines.push(Line::from(spans));
+    }
     lines
         .into_iter()
         .map(|line| {
@@ -1002,6 +1006,7 @@ pub(super) fn notification_height(app: &dyn TuiState, width: u16) -> u16 {
             .unwrap_or(u16::MAX)
     } else {
         u16::from(app.has_notification())
+            + app.jarvis_transcript().map_or(0, |rows| rows.len() as u16)
     }
 }
 

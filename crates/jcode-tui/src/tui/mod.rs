@@ -944,6 +944,9 @@ pub trait TuiState {
     fn voice_input_status(&self) -> Option<(bool, String)> {
         None
     }
+    fn jarvis_transcript(&self) -> Option<&std::collections::VecDeque<String>> {
+        None
+    }
     /// Voice input rendered in the composer instead of the status line.
     fn voice_composer_preview(&self) -> Option<VoiceComposerPreview> {
         None
