@@ -188,6 +188,20 @@ progress and does not dim a prerequisite-ready lane merely because its phase is
 later. This note describes the prerequisite gate, not the lane's lifecycle or
 other blockers.
 
+## Cancelling a todo
+
+The active plan uses three statuses: `pending`, `in_progress`, and `completed`.
+Cancel work you no longer intend to do with an action rather than another status:
+
+```json
+{"cancel":[{"name":"compiler-promotion","reason":"Superseded by publish-built-014"}]}
+```
+
+Cancellation removes the item from the plan and records why it was withdrawn.
+It does not count as successful completion. If another lane explicitly depends
+on that item, redirect its prerequisite to a replacement or explicitly clear
+that dependency before cancelling (or in the same edit).
+
 ## Pausing a todo
 
 A todo has no "blocked" state. An unfinished todo keeps receiving automatic continuation unless one of these applies:
