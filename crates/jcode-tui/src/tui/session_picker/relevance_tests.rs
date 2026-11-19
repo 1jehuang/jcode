@@ -350,7 +350,8 @@ fn opening_prompt_evidence_requires_a_local_multiword_match() {
         ),
         0
     );
-    assert_eq!(opening_prompt_rank("logs about wake", "logs wake"), 0);
+    assert_eq!(opening_prompt_rank("logs about wake", "wake logs"), 2);
+    assert_eq!(opening_prompt_rank("logs about wake", "logs logs"), 0);
     assert_eq!(
         opening_prompt_rank(
             "unrelated discussion about caches",
@@ -537,7 +538,12 @@ fn retyped_later_user_prompt_beats_scattered_literal_hits() {
         user("okay great") + &user("oaky is a typo") + &user("ltes test") + &user("do that later"),
     )
     .unwrap();
-    for query in ["oaky ltes do that", "okay ltes do that"] {
+    for query in [
+        "oaky ltes do that",
+        "okay ltes do that",
+        "that okay",
+        "that okay ltes",
+    ] {
         let target = session("target", "resume search", 500, &target_path);
         let noise = session("noise", "unrelated", 0, &noise_path);
         let mut picker = SessionPicker::new(vec![noise, target]);
