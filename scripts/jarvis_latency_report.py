@@ -11,6 +11,9 @@ import sys
 
 # Only trust actual INFO records, not marker-looking strings embedded in other logs.
 LINE = re.compile(r'^\[([\d-]+ [\d:.]+)\] \[INFO\] JARVIS_(CAPTURE|DISPATCH|PLAYBACK) (.*)$')
+CLOCK_NOTE = ('Intervals use the shared process monotonic clock when both markers carry it, otherwise local log timestamps. '
+              'endpoint_to_first_send_ms is signed: negative means local submission preceded the VAD endpoint. '
+              'The first speak callback is the local deferred marker, not audible output.')
 ACCEPT = {'partial_accepted', 'final_accepted', 'manual_accepted'}
 SEND = {'sent', 'interleave_sent'}
 DROP = {'queue_full', 'invalid', 'suppressed', 'hourly_limit', 'expired', 'detached',
@@ -59,14 +62,14 @@ def summarize(lines, session=None):
         events.sort(key=lambda e: e[0])
         def first(stages, kind):
             return next((e for e in events if e[1] == kind and e[2] in stages), None)
-        def delta(a, b):
+        def delta(a, b, *, signed=False):
             if not a or not b:
                 return None
             if all(e[3].get('monotonic_ms', '').isdigit() for e in (a, b)):
                 ms = int(b[3]['monotonic_ms']) - int(a[3]['monotonic_ms'])
             else:
                 ms = round((b[0] - a[0]).total_seconds() * 1000)
-            return ms if ms >= 0 else None
+            return ms if signed or ms >= 0 else None
         def capture(*stages):
             return first(stages, 'CAPTURE')
         accept = first(ACCEPT, 'CAPTURE')
@@ -81,6 +84,8 @@ def summarize(lines, session=None):
         synth = first({'synthesis_started'}, 'PLAYBACK')
         continuation = capture('continuation_ready')
         final_sent = next((e for e in events if e[2] in SEND and e[3].get('final_update') == 'true'), None)
+        final_request = next((e for e in events if e[1] == 'DISPATCH' and e[2] in SEND
+                              and (e[3].get('provisional') == 'false' or e[3].get('final_update') == 'true')), None)
         merged = first({'merged_final'}, 'DISPATCH')
         final_drop = first({'final_suppressed', 'invalid_final', 'unmatched_final'}, 'DISPATCH')
         final_delivery = ('sent' if final_sent or (merged and sent) else
@@ -95,6 +100,10 @@ def summarize(lines, session=None):
                            partial_gate_to_acceptance_ms=delta(capture('partial_gate_sent'), capture('partial_accepted')),
                            endpoint_to_final_ms=delta(endpoint, final),
                            final_to_gate_ms=delta(final, capture('final_gate_decided')),
+                           onset_to_first_send_ms=delta(capture('speech_onset'), sent),
+                           endpoint_to_first_send_ms=delta(endpoint, sent, signed=True),
+                           endpoint_to_final_send_ms=delta(endpoint, final_request),
+                           endpoint_to_first_speak_callback_ms=delta(endpoint, deferred),
                            acceptance_to_send_ms=delta(accept, sent),
                            queue_to_send_ms=(int(sent[3]['queue_ms']) if sent and sent[3].get('queue_ms', '').isdigit() else delta(queued, sent)),
                            endpoint_to_speech_enqueue_ms=delta(endpoint, playback),
@@ -109,7 +118,7 @@ def summarize(lines, session=None):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, epilog='A send is local submission, not proof the model received the turn. Speech enqueue and player process start do not measure audible playback. Missing markers are unavailable, not evidence of a drop.')
+    ap = argparse.ArgumentParser(description=__doc__, epilog='A send is local submission, not proof the model received the turn. Speech enqueue and player process start do not measure audible playback. Missing markers are unavailable, not evidence of a drop. ' + CLOCK_NOTE)
     ap.add_argument('logs', nargs='*', help='Chronological daily log files, or - for stdin (default: today’s Jcode log)')
     ap.add_argument('--session', help='Only show the exact local session ID')
     ap.add_argument('--json', action='store_true', help='Emit a JSON array, using null for unavailable measurements')
@@ -130,6 +139,7 @@ def main():
         print(json.dumps(rows, indent=2))
     else:
         print('Send = local submission. Speech enqueue and player process start do not measure audible playback. Unavailable does not mean dropped.')
+        print(CLOCK_NOTE)
         missing = sum(row['delivery'] == 'accepted_delivery_unavailable' for row in rows)
         dropped = sum(row['delivery'] == 'dropped' for row in rows)
         print(f'Utterances: {len(rows)}. Explicit delivery failures: {dropped}. Accepted without observed send or loss: {missing}.')

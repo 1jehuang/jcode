@@ -27,6 +27,21 @@ class JarvisReportTests(unittest.TestCase):
         self.assertEqual(turn['endpoint_to_player_ms'], 100)
         self.assertEqual(turn['playback_boundary'], 'player_process_started')
 
+    def test_signed_early_send_and_final_callback_boundaries(self):
+        early = [marker(10, 'CAPTURE', 'speech_onset'),
+                 marker(40, 'DISPATCH', 'sent', extra='provisional=true final_update=false'),
+                 marker(75, 'CAPTURE', 'speech_endpoint')]
+        [turn] = summarize(early)
+        self.assertEqual(turn['endpoint_to_first_send_ms'], -35)
+        self.assertEqual(turn['onset_to_first_send_ms'], 30)
+        self.assertIsNone(turn['endpoint_to_final_send_ms'])
+        self.assertIsNone(turn['endpoint_to_first_speak_callback_ms'])
+        [turn] = summarize(early + [marker(90, 'DISPATCH', 'interleave_sent', extra='provisional=false final_update=true'),
+                                    marker(100, 'PLAYBACK', 'deferred')])
+        self.assertEqual(turn['endpoint_to_first_send_ms'], -35)
+        self.assertEqual(turn['endpoint_to_final_send_ms'], 15)
+        self.assertEqual(turn['endpoint_to_first_speak_callback_ms'], 25)
+
     def test_explicit_loss_vs_missing_across_sessions(self):
         rows = [marker(20, 'CAPTURE', 'manual_accepted', sid) for sid in ['a', 'b']]
         rows.append(marker(22, 'DISPATCH', 'queue_full', 'b'))
