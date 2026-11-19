@@ -16,6 +16,32 @@ pub(in crate::tui::app) async fn begin_remote_send(
     auto_retry: bool,
     retry_attempts: u8,
 ) -> Result<u64> {
+    begin_remote_send_with_origin(
+        app,
+        remote,
+        content,
+        images,
+        is_system,
+        system_reminder,
+        auto_retry,
+        retry_attempts,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::tui::app) async fn begin_remote_send_with_origin(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    content: String,
+    images: Vec<(String, String)>,
+    is_system: bool,
+    system_reminder: Option<String>,
+    auto_retry: bool,
+    retry_attempts: u8,
+    jarvis_voice: bool,
+) -> Result<u64> {
     if let Err(error) = app.prepare_local_tools(remote).await {
         crate::logging::info(&format!(
             "RECOVERY_SEND_FAILED session_id={:?} previous_request_id={:?} request_id=unassigned phase=prepare content_bytes={} images={} retry_attempts={}",
@@ -56,11 +82,12 @@ pub(in crate::tui::app) async fn begin_remote_send(
         }
     });
     let msg_id = remote
-        .send_message_with_images_reminder_and_skill(
+        .send_message_with_origin(
             content.clone(),
             images.clone(),
             system_reminder.clone(),
             app.active_skill.clone(),
+            jarvis_voice,
         )
         .await;
     let msg_id = match msg_id {
@@ -118,6 +145,7 @@ pub(in crate::tui::app) async fn begin_remote_send(
     app.thinking_prefix_emitted = false;
     app.thinking_buffer.clear();
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice,
         content,
         images,
         is_system,

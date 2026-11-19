@@ -81,6 +81,7 @@ impl App {
                             "content": pending.content,
                             "images": pending.images,
                             "is_system": pending.is_system,
+                            "jarvis_voice": pending.jarvis_voice,
                             "system_reminder": pending.system_reminder,
                             "auto_retry": pending.auto_retry,
                             "retry_attempts": pending.retry_attempts,

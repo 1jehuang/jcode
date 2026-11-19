@@ -134,6 +134,7 @@ impl App {
     }
 
     pub fn push_display_message(&mut self, mut message: DisplayMessage) {
+        message.normalize_jarvis_role();
         if is_background_task_lifecycle_message(&message.content) {
             if matches!(message.role.as_str(), "user" | "system") {
                 message.role = "background_task".to_string();
@@ -177,6 +178,7 @@ impl App {
 
     pub(super) fn replace_display_messages(&mut self, mut messages: Vec<DisplayMessage>) {
         messages.retain_mut(|message| {
+            message.normalize_jarvis_role();
             if !is_background_task_lifecycle_message(&message.content) {
                 return true;
             }

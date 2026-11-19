@@ -1189,6 +1189,7 @@ impl AcpRuntime {
         let send_result = session
             .send(&Request::Message {
                 id: prompt_id,
+                jarvis_voice: false,
                 content: text,
                 images,
                 system_reminder: None,

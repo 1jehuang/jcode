@@ -173,6 +173,7 @@ fn assert_manual_failover_restores_remote_payload(mode: &str) {
         estimated_input_tokens: 0,
     };
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "expanded failed request".into(),
         images: Vec::new(),
         is_system: false,

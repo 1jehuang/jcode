@@ -228,14 +228,16 @@ impl DisplayMessage {
                     .or_else(|| Self::tool_duration_from_output(&item.content))
             })
             .flatten();
-        Self {
+        let mut row = Self {
             role: item.role,
             content: item.content,
             tool_calls: item.tool_calls,
             duration_secs,
             title: None,
             tool_data: item.tool_data,
-        }
+        };
+        row.normalize_jarvis_role();
+        row
     }
 
     /// Create a tool message with title.

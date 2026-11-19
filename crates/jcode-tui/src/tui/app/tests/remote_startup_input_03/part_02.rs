@@ -200,6 +200,7 @@ fn test_initial_history_bootstrap_skips_resubmit_when_prompt_already_in_history(
 
         let mut app = create_test_app();
         app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            jarvis_voice: false,
             content: "continue implementing the fix".to_string(),
             images: vec![],
             is_system: false,

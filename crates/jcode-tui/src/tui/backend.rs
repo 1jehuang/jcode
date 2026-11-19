@@ -792,6 +792,18 @@ impl RemoteConnection {
         system_reminder: Option<String>,
         active_skill: Option<String>,
     ) -> Result<u64> {
+        self.send_message_with_origin(content, images, system_reminder, active_skill, false)
+            .await
+    }
+
+    pub(crate) async fn send_message_with_origin(
+        &mut self,
+        content: String,
+        images: Vec<(String, String)>,
+        system_reminder: Option<String>,
+        active_skill: Option<String>,
+        jarvis_voice: bool,
+    ) -> Result<u64> {
         // Output token usage snapshots are cumulative within a single API call.
         // Reset per-call watermark before sending the next user request.
         self.reset_call_output_tokens_seen();
@@ -799,6 +811,7 @@ impl RemoteConnection {
         let id = self.next_request_id;
         let request = Request::Message {
             id,
+            jarvis_voice,
             content,
             images,
             system_reminder,
@@ -1301,8 +1314,20 @@ impl RemoteConnection {
         images: Vec<(String, String)>,
         urgent: bool,
     ) -> Result<u64> {
+        self.soft_interrupt_with_origin(content, images, urgent, false)
+            .await
+    }
+
+    pub(crate) async fn soft_interrupt_with_origin(
+        &mut self,
+        content: String,
+        images: Vec<(String, String)>,
+        urgent: bool,
+        jarvis_voice: bool,
+    ) -> Result<u64> {
         let id = self.next_request_id;
         let request = Request::SoftInterrupt {
+            jarvis_voice,
             id,
             content,
             images,
