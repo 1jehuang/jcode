@@ -319,9 +319,14 @@ impl Events {
                 // Live revisions replace only their own utterance's caption;
                 // scores for other utterances must survive.
                 let id = *id;
-                self.queue.retain(
-                    |e| !matches!(e, ContinuousEvent::Caption { id: old, .. } if *old == id),
-                )
+                if let Some(slot) = self
+                    .queue
+                    .iter_mut()
+                    .find(|e| matches!(e, ContinuousEvent::Caption { id: old, .. } if *old == id))
+                {
+                    *slot = event;
+                    return;
+                }
             }
             ContinuousEvent::State(_) => self
                 .queue
@@ -897,10 +902,6 @@ async fn early_trigger(
             return None;
         }
         trace_turn(id, "partial_accepted");
-        output.push(ContinuousEvent::Caption {
-            id,
-            text: text.chars().take(256).collect(),
-        });
         output.push(ContinuousEvent::CaptionScore {
             id,
             probability,
@@ -943,7 +944,7 @@ async fn stream_job(
     key: String,
     rx: tokio::sync::mpsc::UnboundedReceiver<Vec<i16>>,
     cancel: Arc<AtomicBool>,
-    partial: tokio::sync::watch::Sender<String>,
+    mut partial: impl FnMut(String),
 ) -> Result<String, VoiceError> {
     let job = async {
         let session = match warm {
@@ -969,7 +970,7 @@ async fn stream_job(
             forward,
             session.run(nari_rx, |event| {
                 if let crate::NariEvent::Transcript(text) = event {
-                    partial.send_replace(text);
+                    partial(text);
                 }
             })
         );

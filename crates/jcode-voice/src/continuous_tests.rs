@@ -62,7 +62,9 @@ async fn rejected_warm_session_never_opens_a_second_connection() {
             String::new(),
             rx,
             Arc::new(AtomicBool::new(false)),
-            partial,
+            |text| {
+                partial.send_replace(text);
+            },
         )
         .await;
         assert_eq!(result, Err(expected));
@@ -729,6 +731,45 @@ fn pending_requests_survive_telemetry_but_not_invalidation() {
     ));
     assert!(e.queue.is_empty());
 }
+#[test]
+fn caption_revision_keeps_score_after_row_even_before_poll() {
+    use super::*;
+    let mut e = Events {
+        context: GateContext::default(),
+        queue: VecDeque::new(),
+        quiet: QuietWindow::default(),
+        notify: Arc::new(tokio::sync::Notify::new()),
+    };
+    let caption = |id, text: &str| ContinuousEvent::Caption {
+        id,
+        text: text.into(),
+    };
+    e.push(caption(1, "start"));
+    e.push(ContinuousEvent::CaptionScore {
+        id: 1,
+        probability: 0.98,
+        accepted: true,
+    });
+    e.push(caption(2, "another"));
+    e.push(caption(1, "revised"));
+    assert!(
+        matches!(e.queue.pop_front(), Some(ContinuousEvent::Caption { id: 1, text }) if text == "revised")
+    );
+    assert!(matches!(
+        e.queue.pop_front(),
+        Some(ContinuousEvent::CaptionScore {
+            id: 1,
+            accepted: true,
+            ..
+        })
+    ));
+    assert!(matches!(
+        e.queue.pop_front(),
+        Some(ContinuousEvent::Caption { id: 2, .. })
+    ));
+    assert!(e.queue.is_empty());
+}
+
 #[test]
 fn bounded_events() {
     let mut e = Events {

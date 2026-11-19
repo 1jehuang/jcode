@@ -111,22 +111,18 @@ pub(super) async fn run(
                                 let (events, epoch, paused, suppressed, stopped) = (events.clone(), epoch.clone(), paused.clone(), suppressed.clone(), cancel.clone());
                                 jobs.push_back((tokio::spawn(async move {
                                     let (partial_tx, partial_rx) = tokio::sync::watch::channel(String::new());
-                                    // Show Nari's revisions as they stream, word by word.
-                                    let mut live_rx = partial_tx.subscribe();
-                                    let live_events = events.clone();
-                                    let caption_feed = tokio::spawn(async move {
-                                        while live_rx.changed().await.is_ok() {
-                                            let text: String = live_rx.borrow_and_update().trim().chars().take(256).collect();
-                                            if text.is_empty() { continue; }
-                                            emit(&live_events, ContinuousEvent::Caption { id, text });
-                                        }
-                                    });
                                     let early = early_trigger(partial_rx, gate.clone(), threshold, require_jev, id, events.clone(), {
                                         let (epoch, paused, suppressed, stopped) = (epoch.clone(), paused.clone(), suppressed.clone(), stopped.clone());
                                         move || !(stopped.load(Ordering::SeqCst) || generation != epoch.load(Ordering::SeqCst) || paused.load(Ordering::SeqCst) || suppressed.load(Ordering::SeqCst))
                                     });
                                     tokio::pin!(early);
-                                    let stream = stream_job(warm_session, key, rx, child, partial_tx);
+                                    let stream = stream_job(warm_session, key, rx, child, |text| {
+                                        let mut output = events.lock().unwrap_or_else(|e| e.into_inner());
+                                        if generation == epoch.load(Ordering::SeqCst) && !stopped.load(Ordering::SeqCst) && !paused.load(Ordering::SeqCst) && !suppressed.load(Ordering::SeqCst) && !text.trim().is_empty() {
+                                            output.push(ContinuousEvent::Caption { id, text: text.trim().chars().take(256).collect() });
+                                        }
+                                        partial_tx.send_replace(text);
+                                    });
                                     tokio::pin!(stream);
                                     // Gate partials while audio streams. Once the final
                                     // transcript lands, any in-flight partial gate is stale.
@@ -144,7 +140,6 @@ pub(super) async fn run(
                                             }
                                         }
                                     };
-                                    caption_feed.abort();
                                     trace_turn(id, "transcription_finished");
                                     if let Some(trigger) = fired {
                                         pending_final.0 = None;
