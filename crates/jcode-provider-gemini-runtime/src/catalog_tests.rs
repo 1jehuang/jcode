@@ -27,21 +27,6 @@ fn detects_model_not_found_errors() {
 }
 
 #[test]
-fn fallback_models_skip_current_model() {
-    assert_eq!(
-        gemini_fallback_models("gemini-2.5-flash"),
-        vec![
-            "gemini-pro-latest",
-            "gemini-3.1-pro-preview",
-            "gemini-3-pro-preview",
-            "gemini-2.5-pro",
-            "gemini-3-flash-preview",
-            "gemini-2.0-flash",
-        ]
-    );
-}
-
-#[test]
 fn extract_gemini_model_ids_discovers_nested_models() {
     let response = json!({
         "routing": {
@@ -121,6 +106,65 @@ fn available_models_display_seeds_from_persisted_catalog() {
             .available_models_display()
             .contains(&"gemini-3-pro-preview".to_string())
     );
+}
+
+#[test]
+fn direct_neon_404_preserves_selected_model_and_original_error() {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio_stream::StreamExt;
+    let _lock = jcode_base::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", home.path());
+    let _key = EnvVarGuard::set_value("GEMINI_API_KEY", "loopback-key");
+    let _force = EnvVarGuard::set_value("JCODE_GEMINI_FORCE_OAUTH", "false");
+    let _version = EnvVarGuard::set_value("GEMINI_API_VERSION", "v1beta");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let _endpoint = EnvVarGuard::set_value("GEMINI_API_ENDPOINT", &endpoint);
+            let server = tokio::spawn(async move {
+                let mut reader = BufReader::new(listener.accept().await.unwrap().0);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                assert!(line.starts_with("POST /v1beta/models/gemini-4-neon:generateContent "));
+                let mut length = 0;
+                loop {
+                    line.clear();
+                    assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(n) = line.to_lowercase().strip_prefix("content-length:") {
+                        length = n.trim().parse().unwrap();
+                    }
+                }
+                reader.read_exact(&mut vec![0; length]).await.unwrap();
+                reader
+                    .get_mut()
+                    .write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+            });
+            let mut provider = GeminiProvider::new();
+            provider.client = reqwest::Client::builder().no_proxy().build().unwrap();
+            provider.set_model("gemini:gemini-4-neon").unwrap();
+            let mut events = provider.complete(&[], &[], "test", None).await.unwrap();
+            let err = loop {
+                if let Err(err) = events.next().await.expect("terminal model error") {
+                    break err;
+                }
+            };
+            assert!(err.to_string().contains("gemini-4-neon"));
+            assert!(format!("{err:#}").contains("HTTP 404"));
+            assert_eq!(provider.model(), "gemini-4-neon");
+            server.await.unwrap();
+        });
 }
 
 #[test]

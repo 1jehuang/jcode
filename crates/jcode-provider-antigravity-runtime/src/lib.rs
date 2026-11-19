@@ -564,6 +564,14 @@ impl Default for AntigravityProvider {
     }
 }
 
+fn ensure_account_model(model: &str, ids: &[String]) -> Result<()> {
+    anyhow::ensure!(
+        ids.iter().any(|id| id == model),
+        "Antigravity does not offer '{model}' for this account. Use /model to choose an available route. No generation request was sent."
+    );
+    Ok(())
+}
+
 #[async_trait]
 impl Provider for AntigravityProvider {
     async fn complete(
@@ -579,6 +587,21 @@ impl Provider for AntigravityProvider {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         let messages = messages.to_vec();
+        // A saved session or manual route can name a model from another
+        // provider. Confirm cache misses against this account before sending
+        // user content. A stale cache alone must not reject a new launch.
+        if model != DEFAULT_MODEL
+            && !model.trim().is_empty()
+            && !self
+                .fetched_catalog()
+                .iter()
+                .any(|entry| entry.id == model && entry.available)
+        {
+            let ids = self.fetch_live_model_ids_for_doctor().await.context(
+                "Could not verify the selected Antigravity model against this account's catalog",
+            )?;
+            ensure_account_model(&model, &ids)?;
+        }
         let tools = _tools.to_vec();
         let system = system.to_string();
         let resume_session_id = _resume_session_id.map(str::to_string);
@@ -934,7 +957,16 @@ impl Provider for AntigravityProvider {
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {
-        self.available_models_display()
+        let catalog = self.fetched_catalog();
+        if catalog.is_empty() {
+            return self.available_models_display();
+        }
+        merge_antigravity_model_ids(
+            catalog
+                .into_iter()
+                .filter(|model| model.available)
+                .map(|model| model.id),
+        )
     }
 
     fn model_routes(&self) -> Vec<jcode_provider_core::ModelRoute> {
