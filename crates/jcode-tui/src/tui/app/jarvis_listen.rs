@@ -103,6 +103,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn spoken_cue_waits_for_final_and_yields_to_ready_reply() {
+        let mut playback = DeferredPlayback::default();
+        playback.trigger(1, r#"{"still_speaking":true,"trigger":"open"}"#);
+        playback.prepare_spoken_cue();
+        assert!(playback.speech.is_none());
+        playback.finalize(1, "open it");
+        playback.prepare_spoken_cue();
+        assert_eq!(playback.speech.take().unwrap().0, "On it");
+        playback.prepare_spoken_cue();
+        assert!(playback.speech.is_none());
+        playback.trigger(2, "finished request");
+        playback.speech = Some(("Already done".into(), Instant::now()));
+        playback.prepare_spoken_cue();
+        assert_eq!(playback.speech.take().unwrap().0, "Already done");
+        assert!(!playback.ding);
+    }
+
+    #[test]
     fn deferred_playback_typed_reply_survives_capture_failure() {
         let mut listener = AlwaysListening::default();
         listener.defer_speech("typed reply".into());
@@ -248,6 +266,12 @@ struct DeferredPlayback {
 }
 
 impl DeferredPlayback {
+    fn prepare_spoken_cue(&mut self) {
+        if std::mem::take(&mut self.ding) && self.speech.is_none() {
+            self.speech = Some(("On it".into(), Instant::now()));
+        }
+    }
+
     fn trigger(&mut self, id: u64, text: &str) {
         self.latest = Some(id);
         self.speech = None;
@@ -824,6 +848,9 @@ impl App {
             }
             listener.clear_playback();
         } else if !speech_busy && listener.playback.partial.is_none() {
+            if listener.playback.ding && crate::tui::jarvis::handterm_spoken_cue() {
+                listener.playback.prepare_spoken_cue();
+            }
             let claim = || {
                 if disabled {
                     return !listener

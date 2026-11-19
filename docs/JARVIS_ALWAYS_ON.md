@@ -68,7 +68,10 @@ boundary, not evidence of the first audible sample at the speaker. Older logs
 cannot reconstruct timings or drops they never recorded.
 
 Local playback waits for a quiet microphone. New input can supersede a held
-reply; the ding is skipped if speech is already ready. Temporary provider
+reply. In Handterm the default trigger cue says “On it” in the configured
+Jarvis voice instead of playing a ding. A ready spoken reply takes precedence.
+A custom `trigger_sound` still plays its file, and `trigger_sound = ""` disables
+the cue. Temporary provider
 failures release the microphone for a bounded cooldown. Repeat the utterance
 after listening resumes: failed audio is not replayed. A known credential or
 credit failure stops capture. Correct the issue, then use `/voice` to retry
