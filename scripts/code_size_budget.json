@@ -1,7 +1,7 @@
 {
   "threshold_loc": 1200,
   "tracked_files": {
-    "crates/jcode-app-core/src/agent.rs": 1374,
+    "crates/jcode-app-core/src/agent.rs": 1391,
     "crates/jcode-app-core/src/agent/turn_execution.rs": 1553,
     "crates/jcode-app-core/src/agent/turn_loops.rs": 1349,
     "crates/jcode-app-core/src/agent/turn_streaming_mpsc.rs": 1849,
@@ -12,7 +12,7 @@
     "crates/jcode-app-core/src/server/client_session.rs": 2059,
     "crates/jcode-app-core/src/server/client_state.rs": 1369,
     "crates/jcode-app-core/src/server/comm_control.rs": 2581,
-    "crates/jcode-app-core/src/server/comm_session.rs": 1259,
+    "crates/jcode-app-core/src/server/comm_session.rs": 1261,
     "crates/jcode-app-core/src/server/debug_server_state.rs": 1258,
     "crates/jcode-app-core/src/server/jade_relay.rs": 1338,
     "crates/jcode-app-core/src/server/provider_control.rs": 1403,
@@ -38,7 +38,7 @@
     "crates/jcode-base/src/memory.rs": 1572,
     "crates/jcode-base/src/provider/mod.rs": 3128,
     "crates/jcode-base/src/provider_catalog.rs": 1236,
-    "crates/jcode-base/src/session.rs": 1778,
+    "crates/jcode-base/src/session.rs": 1792,
     "crates/jcode-base/src/sidecar.rs": 1709,
     "crates/jcode-config-types/src/lib.rs": 1521,
     "crates/jcode-harness-api-server/src/translate.rs": 3469,
