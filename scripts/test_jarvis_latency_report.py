@@ -57,6 +57,18 @@ class JarvisReportTests(unittest.TestCase):
                            marker(30, 'DISPATCH', 'final_suppressed')])
         self.assertEqual((row['delivery'], row['final_delivery']), ('sent', 'final_suppressed'))
 
+    def test_capture_discard_reasons_are_allowlisted_and_final_is_separate(self):
+        for raw, expected in [('queue_overflow', 'queue_overflow'), ('private-conversation', None)]:
+            with self.subTest(raw=raw):
+                [turn] = summarize([marker(2, 'CAPTURE', 'final_accepted'),
+                                    marker(3, 'CAPTURE', 'accepted_discarded', extra=f'reason={raw}')])
+                self.assertEqual((turn['delivery'], turn['reason']), ('dropped', expected))
+                [turn] = summarize([marker(2, 'DISPATCH', 'sent', extra='provisional=true'),
+                                    marker(3, 'CAPTURE', 'continuation_discarded', extra=f'reason={raw}')])
+                self.assertEqual((turn['delivery'], turn['final_delivery'], turn['final_reason']),
+                                 ('sent', 'continuation_discarded', expected))
+                self.assertNotIn('private-conversation', json.dumps(turn))
+
     def test_capture_without_session_joins_only_unambiguous_owner(self):
         capture = marker(10, 'CAPTURE', 'final_accepted').replace('session=local-a ', '')
         a = marker(15, 'DISPATCH', 'queued', 'a')

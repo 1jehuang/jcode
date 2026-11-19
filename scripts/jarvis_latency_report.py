@@ -20,6 +20,17 @@ DROP = {'queue_full', 'invalid', 'suppressed', 'hourly_limit', 'expired', 'detac
         'capture_error', 'capture_failed', 'capture_stopped', 'paused_or_failed', 'send_failed'}
 
 
+CAPTURE_DISCARD_REASONS = {'stream_aborted', 'queue_overflow', 'epoch_changed', 'stopped',
+                           'capture_failed', 'paused', 'suppressed', 'permission_lost'}
+
+
+def discard_reason(event):
+    if event[1] == 'DISPATCH':
+        return event[2]  # The caller already checked a fixed stage allowlist.
+    reason = event[3].get('reason')
+    return reason if reason in CAPTURE_DISCARD_REASONS else None
+
+
 def records(lines):
     for line in lines:
         m = LINE.match(line.rstrip('\n'))
@@ -75,7 +86,7 @@ def summarize(lines, session=None):
         accept = first(ACCEPT, 'CAPTURE')
         queued = first({'queued'}, 'DISPATCH')
         sent = first(SEND, 'DISPATCH')
-        dropped = first(DROP, 'DISPATCH')
+        dropped = capture('accepted_discarded') or first(DROP, 'DISPATCH')
         endpoint = capture('speech_endpoint')
         final = capture('transcription_finished')
         deferred = first({'deferred'}, 'PLAYBACK')
@@ -87,15 +98,16 @@ def summarize(lines, session=None):
         final_request = next((e for e in events if e[1] == 'DISPATCH' and e[2] in SEND
                               and (e[3].get('provisional') == 'false' or e[3].get('final_update') == 'true')), None)
         merged = first({'merged_final'}, 'DISPATCH')
-        final_drop = first({'final_suppressed', 'invalid_final', 'unmatched_final'}, 'DISPATCH')
+        final_drop = capture('continuation_discarded') or first({'final_suppressed', 'invalid_final', 'unmatched_final'}, 'DISPATCH')
         final_delivery = ('sent' if final_sent or (merged and sent) else
                           final_drop[2] if final_drop else 'unavailable' if continuation else None)
         disposition = ('sent' if sent else 'dropped' if dropped else
                        'accepted_delivery_unavailable' if accept or queued else 'unavailable')
         result.append(dict(session=sid, utterance=uid, delivery=disposition,
-                           reason=dropped[2] if dropped and not sent else None,
+                           reason=discard_reason(dropped) if dropped and not sent else None,
                            acceptance=accept[2] if accept else None,
                            final_delivery=final_delivery,
+                           final_reason=discard_reason(final_drop) if final_drop and final_delivery != 'sent' else None,
                            onset_to_acceptance_ms=delta(capture('speech_onset'), accept),
                            partial_gate_to_acceptance_ms=delta(capture('partial_gate_sent'), capture('partial_accepted')),
                            endpoint_to_final_ms=delta(endpoint, final),
