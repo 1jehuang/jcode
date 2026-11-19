@@ -160,10 +160,25 @@ impl GateContext {
         serde_json::json!({"recent_chat":chat,"continuous_transcript":continuous_transcript,"background_transcript":self.background,"candidate":candidate,"require_explicit_name":require_name})
     }
 }
+#[derive(Default)]
+struct QuietWindow {
+    since: Option<Instant>,
+    last: Option<Instant>,
+}
+impl QuietWindow {
+    fn observe(&mut self, now:Instant, voiced:bool) {
+        if voiced || self.last.is_some_and(|last| now.duration_since(last) > Duration::from_millis(200)) {self.since=None;}
+        self.last=Some(now);
+        if !voiced {self.since.get_or_insert(now);}
+    }
+    fn ready(&self, now:Instant)->bool {
+        self.last.is_some_and(|last|now.duration_since(last)<=Duration::from_millis(200)) && self.since.is_some_and(|at|now.duration_since(at)>=Duration::from_millis(250))
+    }
+}
 struct Events {
     context: GateContext,
     queue: VecDeque<ContinuousEvent>,
-    quiet_since: Option<Instant>,
+    quiet: QuietWindow,
     notify: Arc<tokio::sync::Notify>,
 }
 struct ClassifiedCaption {
@@ -253,6 +268,14 @@ impl ContinuousRecording {
         recorder: &str,
         config: ContinuousConfig,
     ) -> Result<Self, VoiceError> {
+        Self::start_auto_with_budget(cancel, key, recorder, config, ContinuousBudget::default())
+    }
+
+    /// Keep the same ledger when a user explicitly retries a stopped listener.
+    pub fn start_auto_with_budget(
+        cancel: Arc<AtomicBool>, key: &str, recorder: &str, config: ContinuousConfig,
+        budget: ContinuousBudget,
+    ) -> Result<Self, VoiceError> {
         if cancel.load(Ordering::SeqCst) {
             return Err(VoiceError::Cancelled);
         }
@@ -267,14 +290,6 @@ impl ContinuousRecording {
             || !(0.5..=1.0).contains(&config.action_probability)
         {
             return Err(VoiceError::InvalidResponse);
-    ) -> Result<Self, VoiceError> {
-        Self::start_auto_with_budget(cancel, key, recorder, config, ContinuousBudget::default())
-    }
-
-    /// Keep the same ledger when a user explicitly retries a stopped listener.
-    pub fn start_auto_with_budget(
-        cancel: Arc<AtomicBool>, key: &str, recorder: &str, config: ContinuousConfig,
-        budget: ContinuousBudget,
         }
         #[cfg(not(test))]
         let gate =
@@ -294,7 +309,7 @@ impl ContinuousRecording {
         let events = Arc::new(Mutex::new(Events {
             context: GateContext::default(),
             queue: VecDeque::new(),
-            quiet_since: None,
+            quiet: QuietWindow::default(),
             notify: Arc::new(tokio::sync::Notify::new()),
         }));
         let (c, s, g, l, e) = (
@@ -323,6 +338,7 @@ impl ContinuousRecording {
                             key,
                             recorder,
                             config,
+                            budget,
                             p,
                             a.clone(),
                             gate,
@@ -338,7 +354,6 @@ impl ContinuousRecording {
                     if error != VoiceError::Cancelled {
                         emit(&e, ContinuousEvent::Error(error));
                     }
-                            budget,
                 }
                 emit(&e, ContinuousEvent::Stopped);
             })
@@ -380,6 +395,7 @@ impl ContinuousRecording {
     }
     fn clear_speech_events(&self, clear_chat: bool) {
         let mut output = self.events.lock().unwrap_or_else(|e| e.into_inner());
+        output.quiet = QuietWindow::default();
         // Aborted gate jobs never report back: forget their pending caption.
         output.context.inflight = None;
         output.context.claimed = None;
@@ -410,8 +426,9 @@ impl ContinuousRecording {
     }
     /// Claim a quiet playback window without invalidating pending transcript events.
     pub fn suppress_if_quiet(&self) -> bool {
-        let output = self.events.lock().unwrap_or_else(|e| e.into_inner());
-        if !self.is_capturing() || !output.quiet_since.is_some_and(|at| at.elapsed() >= Duration::from_millis(250)) || output.queue.iter().any(|e| matches!(e, ContinuousEvent::Transcript {..} | ContinuousEvent::Continuation {..} | ContinuousEvent::State(VoiceState::Speaking | VoiceState::Transcribing))) { return false; }
+        let mut output = self.events.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.is_capturing() || !output.quiet.ready(Instant::now()) || output.queue.iter().any(|e| matches!(e, ContinuousEvent::Transcript {..} | ContinuousEvent::Continuation {..} | ContinuousEvent::State(VoiceState::Speaking | VoiceState::Transcribing))) { return false; }
+        output.quiet = QuietWindow::default();
         if !self.suppressed.swap(true, Ordering::SeqCst) { self.epoch.fetch_add(1, Ordering::SeqCst); }
         true
     }
@@ -643,6 +660,9 @@ async fn session_permitted(_config: &ContinuousConfig) -> bool {
     crate::global::session::permitted().await
 }
 
+#[derive(Default, Clone)]
+pub struct ContinuousBudget(Arc<Mutex<Budget>>);
+
 #[derive(Default)]
 struct Budget(VecDeque<(Instant, usize)>);
 impl Budget {
@@ -660,9 +680,6 @@ impl Budget {
         {
             return false;
         }
-#[derive(Default, Clone)]
-pub struct ContinuousBudget(Arc<Mutex<Budget>>);
-
         self.0.push_back((now, samples));
         true
     }
@@ -845,6 +862,20 @@ fn recovery_delay(error: &VoiceError, failures: usize) -> Option<Duration> {
 }
 
 #[test]
+fn deliberate_retry_cannot_reset_rolling_audio_or_classification_usage() {
+    for (seconds, classifications) in [(1, 10), (3600, 1)] {
+        let config = ContinuousConfig { max_audio_seconds_per_hour: seconds, max_classifications_per_hour: classifications, ..Default::default() };
+        let original = ContinuousBudget::default();
+        let retry = original.clone();
+        let now = Instant::now();
+        assert!(original.0.lock().unwrap().reserve(now, 16_000, &config));
+        drop(original);
+        assert!(!retry.0.lock().unwrap().reserve(now, 1, &config));
+        assert!(retry.0.lock().unwrap().reserve(now + Duration::from_secs(3600), 1, &config));
+    }
+}
+
+#[test]
 fn recovery_is_bounded_and_never_retries_known_permanent_errors() {
     for error in [VoiceError::Network, VoiceError::NariRejected, VoiceError::Timeout, VoiceError::Http(503), VoiceError::Http(429)] {
         assert!(recovery_delay(&error, 0) < recovery_delay(&error, 1));
@@ -861,20 +892,6 @@ async fn rejected_warm_session_never_opens_a_second_connection() {
         let expected = error.clone();
         let failed = tokio::spawn(async move { Err(error) });
         let (_, rx) = tokio::sync::mpsc::unbounded_channel();
-#[test]
-fn deliberate_retry_cannot_reset_rolling_audio_or_classification_usage() {
-    for (seconds, classifications) in [(1, 10), (3600, 1)] {
-        let config = ContinuousConfig { max_audio_seconds_per_hour: seconds, max_classifications_per_hour: classifications, ..Default::default() };
-        let original = ContinuousBudget::default();
-        let retry = original.clone();
-        let now = Instant::now();
-        assert!(original.0.lock().unwrap().reserve(now, 16_000, &config));
-        drop(original);
-        assert!(!retry.0.lock().unwrap().reserve(now, 1, &config));
-        assert!(retry.0.lock().unwrap().reserve(now + Duration::from_secs(3600), 1, &config));
-    }
-}
-
         let (partial, _) = tokio::sync::watch::channel(String::new());
         // Empty key makes an unintended fallback fail differently, without network I/O.
         let result = stream_job(Some(failed), String::new(), rx, Arc::new(AtomicBool::new(false)), partial).await;
@@ -936,6 +953,7 @@ async fn run(
     key: String,
     recorder: String,
     config: ContinuousConfig,
+    budget: ContinuousBudget,
     paused: Arc<AtomicBool>,
     capturing: Arc<AtomicBool>,
     gate: Option<jcode_base::jev::JevClient>,
@@ -953,7 +971,6 @@ async fn run(
     )> = VecDeque::new();
     // Audio sink of the utterance currently streaming to Nari.
     let mut live: Option<(u64, tokio::sync::mpsc::UnboundedSender<Vec<i16>>)> = None;
-    budget: ContinuousBudget,
     let mut warm: Option<Warm> = None;
     let mut warm_retry_at = Instant::now();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -1009,11 +1026,7 @@ async fn run(
                     level.store(amplitude.to_bits(),Ordering::Relaxed);
                     {
                         let mut output = events.lock().unwrap_or_else(|e| e.into_inner());
-                        if amplitude >= 0.018 || segmenter.active {
-                            output.quiet_since = None;
-                        } else {
-                            output.quiet_since.get_or_insert_with(Instant::now);
-                        }
+                        output.quiet.observe(Instant::now(), amplitude >= 0.018 || segmenter.active);
                     }
                     for seg in segmenter.push_stream(&chunk) {
                         match seg {
@@ -1065,8 +1078,9 @@ async fn run(
                                     let text = loop {
                                         tokio::select! {
                                             biased;
-                                            // A failed stream after an early trigger still closes it.
-                                            text = &mut stream => break match (text, &fired) { (Err(_), Some(t)) => t.clone(), (r, _) => r? },
+                                            // A provisional request is not a successful transcription.
+                                            // On failure the recovery event clears deferred replies.
+                                            text = &mut stream => break text?,
                                             trigger = &mut early, if fired.is_none() => {
                                                 match trigger { Some(t) => fired = Some(t), None => break (&mut stream).await? }
                                                 // Loop again to await the final transcript.
@@ -1176,6 +1190,21 @@ async fn run(
                 },
             }
         };
+        if result.is_err() {
+            // Invalidate queued speech before waiting for the capture backend to stop.
+            // Keep only non-speech telemetry and visible chat, never an unfinished trigger.
+            epoch.fetch_add(1, Ordering::SeqCst);
+            drop(warm.take());
+            drop(live.take());
+            for (handle, token, _) in jobs.drain(..) {
+                token.store(true, Ordering::SeqCst);
+                handle.abort();
+            }
+            let mut out = events.lock().unwrap_or_else(|e| e.into_inner());
+            let chat = std::mem::take(&mut out.context.chat);
+            out.context = GateContext { chat, ..Default::default() };
+            out.queue.retain(|event| matches!(event, ContinuousEvent::State(_) | ContinuousEvent::Level(_)));
+        }
         mic.stop();
         let capture = tokio::task::spawn_blocking(move || mic.finish())
             .await
@@ -1212,6 +1241,18 @@ async fn run(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn quiet_window_requires_recent_contiguous_silence() {
+        use super::*;
+        let start = Instant::now(); let t = |ms| start + Duration::from_millis(ms);
+        let mut quiet=QuietWindow::default();
+        for ms in [0,100,200] {quiet.observe(t(ms),false);}
+        assert!(!quiet.ready(t(200)));
+        quiet.observe(t(250),false);assert!(quiet.ready(t(250)));
+        assert!(!quiet.ready(t(501)));
+        quiet.observe(t(501),false);assert!(!quiet.ready(t(501)));
+        quiet.observe(t(550),true);quiet.observe(t(650),false);assert!(!quiet.ready(t(650)));
+    }
     use super::*;
 
     #[cfg(unix)]
@@ -1542,7 +1583,7 @@ mod tests {
         let mut events = Events {
             context: GateContext::default(),
             queue: VecDeque::new(),
-            quiet_since: None,
+            quiet: QuietWindow::default(),
             notify: Arc::new(tokio::sync::Notify::new()),
         };
         for (id, text, raw) in [
@@ -1606,7 +1647,7 @@ mod tests {
         let mut events = Events {
             context: GateContext::default(),
             queue: VecDeque::new(),
-            quiet_since: None,
+            quiet: QuietWindow::default(),
             notify: Arc::new(tokio::sync::Notify::new()),
         };
         events.context.remember_at(6, "before", now);
@@ -1780,7 +1821,7 @@ mod tests {
         let mut e = Events {
             context: GateContext::default(),
             queue: VecDeque::new(),
-            quiet_since: None,
+            quiet: QuietWindow::default(),
             notify: Arc::new(tokio::sync::Notify::new()),
         };
         for _ in 0..1000 {
