@@ -124,9 +124,11 @@ async fn subagent_role_is_injected_into_assembled_prompt() {
     agent.session.prompt_role = crate::prompt::PromptRole::Subagent;
 
     let split = agent.build_system_prompt_split(None);
-    assert!(split
-        .static_part
-        .contains(crate::prompt::SUBAGENT_PROMPT_BLOCK));
+    assert!(
+        split
+            .static_part
+            .contains(crate::prompt::SUBAGENT_PROMPT_BLOCK)
+    );
     assert_eq!(
         split
             .static_part
@@ -144,9 +146,11 @@ async fn coordinator_role_keeps_normal_assembled_prompt() {
     let mut agent = Agent::new(provider, registry);
     let coordinator_prompt = agent.build_system_prompt_split(None);
 
-    assert!(!coordinator_prompt
-        .static_part
-        .contains(crate::prompt::SUBAGENT_PROMPT_BLOCK));
+    assert!(
+        !coordinator_prompt
+            .static_part
+            .contains(crate::prompt::SUBAGENT_PROMPT_BLOCK)
+    );
     agent.session.prompt_role = crate::prompt::PromptRole::Coordinator;
     assert_eq!(
         agent.build_system_prompt_split(None).static_part,
