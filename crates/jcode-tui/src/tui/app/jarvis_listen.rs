@@ -521,6 +521,7 @@ impl AlwaysListening {
                 warm_nari: cfg.warm_nari,
             },
             self.capture_budget.clone(),
+            || Box::pin(crate::network_retry::wait_for_connectivity_restoration()),
         )?;
         self.recording = Some(recording);
         Ok(())

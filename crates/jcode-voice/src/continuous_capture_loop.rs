@@ -10,6 +10,7 @@ pub(super) async fn run(
     recorder: String,
     config: ContinuousConfig,
     budget: ContinuousBudget,
+    restoration: RestorationWait,
     paused: Arc<AtomicBool>,
     capturing: Arc<AtomicBool>,
     gate: Option<jcode_base::jev::JevClient>,
@@ -298,15 +299,15 @@ pub(super) async fn run(
                 };
                 capture?;
                 consecutive_failures = consecutive_failures.saturating_add(1);
+                let watch_network = matches!(error, VoiceError::Network | VoiceError::Timeout);
                 emit(&events, ContinuousEvent::Recovering { error, delay });
                 emit(&events, ContinuousEvent::State(VoiceState::Suppressed));
                 level.store(0, Ordering::Relaxed);
                 segmenter = Segmenter::default();
                 permitted = false;
-                tokio::select! {
-                    _ = crate::nari::cancelled(&cancel) => return Err(VoiceError::Cancelled),
-                    _ = tokio::time::sleep(delay) => continue,
-                }
+                wait_for_recovery(&cancel, delay, watch_network, async { restoration().await })
+                    .await?;
+                continue;
             }
             capture?;
         }
