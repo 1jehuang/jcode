@@ -31,7 +31,7 @@ Three situations still break, and jcode handles each explicitly:
 | Situation | Fix | Where |
 | --- | --- | --- |
 | Terminal ignores the request (Terminal.app) | Switch terminals, or map Shift+Return to `\033[13;2u` by hand | `/terminal-setup` explains |
-| tmux does not forward extended keys | Write `extended-keys` settings to `~/.tmux.conf` | `/terminal-setup` applies |
+| tmux does not forward extended keys | Write `extended-keys` settings to the config tmux loads | `/terminal-setup` applies |
 | WezTerm needs an opt-in flag | Set `enable_kitty_keyboard = true` | `/terminal-setup` applies |
 
 ## `/terminal-setup`
@@ -45,6 +45,22 @@ The query matters: writing the activation escape sequence almost always
 "succeeds" even on terminals that ignore it, so
 `supports_modified_enter_reporting` asks the terminal directly (`CSI ? u`
 followed by `CSI c`).
+
+### Which config file gets edited
+
+tmux may load `~/.tmux.conf` or `$XDG_CONFIG_HOME/tmux/tmux.conf`, and WezTerm
+may load `$XDG_CONFIG_HOME/wezterm/wezterm.lua` or `~/.wezterm.lua`. Creating the
+other one leaves the user with two configs, one of them unread, and a chord that
+still does not work, so `/terminal-setup` decides in this order:
+
+1. the file the running tmux server reports for `#{config_files}`;
+2. the only existing candidate;
+3. the default path, when none exists yet.
+
+If several candidates exist and the server cannot be asked, the command edits
+nothing and names every file, because picking one can change which settings tmux
+loads. The report always says which file was created or appended to, and which
+other candidates it left alone.
 
 ## Fallbacks
 
@@ -65,6 +81,10 @@ achievable. A fallback is a safety net, not a substitute for the chord working.
 
 - `tui::terminal_mode_tests::*` cover tmux opt-in, reapplication without another
   Kitty stack push, cleanup, and unchanged keyboard requests outside tmux.
+- `tui::terminal_setup::tests::tmux_setup_*` and
+  `wezterm_setup_edits_the_xdg_config_instead_of_creating_a_dotfile` cover the
+  file-selection order, the ambiguity refusal, and the created-versus-appended
+  report.
 - `tui::app::tests::shift_enter_csi_u_sequence_decodes_to_enter_plus_shift`
   feeds the exact bytes through a real PTY and asserts crossterm decodes
   Enter+SHIFT. This pins the sequence written into terminal configs to the
