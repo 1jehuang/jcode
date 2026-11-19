@@ -72,7 +72,7 @@ pub const INLINE_DIAGRAM_MAX_ROWS: u16 = 200;
 /// half-block fallback. Keep this centralized so raster images, Mermaid, and
 /// LaTeX use the same wording.
 pub const TERMINAL_IMAGE_FALLBACK_NOTE: &str =
-    "Your terminal cannot render inline images; showing a text fallback.";
+    "Your terminal does not expose a supported inline-image protocol; showing a text fallback.";
 
 pub fn text_image_fallback_note_line() -> Line<'static> {
     let style = Style::default()
@@ -603,7 +603,7 @@ mod fallback_note_tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>();
-        assert!(text.contains("terminal cannot render inline images"));
+        assert!(text.contains("terminal does not expose a supported inline-image protocol"));
         assert!(text.contains("text fallback"));
     }
 
