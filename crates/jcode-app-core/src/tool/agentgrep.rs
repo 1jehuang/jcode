@@ -494,6 +494,22 @@ fn resolve_path_arg(ctx: &ToolContext, path: &str) -> PathBuf {
     ctx.resolve_path(Path::new(path))
 }
 
+fn exact_file_paths_equal(reported: &str, expected: &str) -> bool {
+    fn normalize(path: &str) -> &str {
+        path.strip_prefix("./")
+            .or_else(|| path.strip_prefix(".\\"))
+            .unwrap_or(path)
+    }
+    let equal = |left: &str, right: &str| {
+        left.chars()
+            .map(|c| if c == '\\' { '/' } else { c })
+            .eq(right.chars().map(|c| if c == '\\' { '/' } else { c }))
+    };
+    let (reported, expected) = (normalize(reported), normalize(expected));
+    equal(reported, expected)
+        || (cfg!(windows) && equal(&reported.to_lowercase(), &expected.to_lowercase()))
+}
+
 fn exact_search_file_path(ctx: &ToolContext, path: Option<&str>) -> Option<String> {
     let path = path?;
     let resolved = resolve_path_arg(ctx, path);
@@ -513,7 +529,9 @@ fn filter_grep_result_to_exact_file(
         return result;
     };
 
-    result.files.retain(|file| file.path == exact_file);
+    result
+        .files
+        .retain(|file| exact_file_paths_equal(&file.path, exact_file));
     result.total_files = result.files.len();
     result.total_matches = result.files.iter().map(|file| file.matches.len()).sum();
     result
@@ -527,7 +545,9 @@ fn filter_find_result_to_exact_file(
         return result;
     };
 
-    result.files.retain(|file| file.path == exact_file);
+    result
+        .files
+        .retain(|file| exact_file_paths_equal(&file.path, exact_file));
     result
 }
 
@@ -539,7 +559,9 @@ fn filter_smart_result_to_exact_file(
         return result;
     };
 
-    result.files.retain(|file| file.path == exact_file);
+    result
+        .files
+        .retain(|file| exact_file_paths_equal(&file.path, exact_file));
     result.summary.total_files = result.files.len();
     result.summary.total_regions = result.files.iter().map(|file| file.regions.len()).sum();
     result.summary.best_file = result.files.first().map(|file| file.path.clone());

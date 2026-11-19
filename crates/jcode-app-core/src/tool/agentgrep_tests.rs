@@ -881,6 +881,14 @@ async fn execute_runs_linked_grep_when_path_points_to_file() {
     assert!(!output.output.contains("other.rs"));
 }
 
+#[test]
+fn exact_file_paths_equal_accepts_windows_relative_prefix() {
+    assert!(exact_file_paths_equal(".\\app.rs", "app.rs"));
+    assert!(exact_file_paths_equal("./src/app.rs", "src/app.rs"));
+    assert!(exact_file_paths_equal("src\\app.rs", "src/app.rs"));
+    assert!(!exact_file_paths_equal(".\\other.rs", "app.rs"));
+}
+
 #[tokio::test]
 async fn execute_smart_accepts_query_fallback() {
     let temp = tempfile::tempdir().expect("tempdir");
