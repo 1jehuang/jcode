@@ -440,6 +440,10 @@ pub(crate) enum Command {
         #[arg(long)]
         no_jarvis_fn_key: bool,
 
+        /// Do not open an always-on Jarvis when Fn is held and none is running
+        #[arg(long)]
+        no_jarvis_fn_launch: bool,
+
         /// Do not handle open/reveal requests (clients open locally)
         #[arg(long)]
         no_open: bool,

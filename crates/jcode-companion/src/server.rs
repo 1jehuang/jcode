@@ -30,6 +30,8 @@ pub struct CompanionOptions {
     pub voice_notifications: bool,
     /// Bare Fn hold talks to the always-on Jarvis session.
     pub jarvis_fn_key: bool,
+    /// Fn opens an always-on Jarvis when none is running.
+    pub jarvis_fn_launch: bool,
     /// Handle `open` / `reveal` requests.
     pub open: bool,
     /// Handle `spawn_terminal` requests.
@@ -49,6 +51,7 @@ impl CompanionOptions {
             voice_waveform: config.voice_waveform,
             voice_notifications: config.voice_notifications,
             jarvis_fn_key: config.jarvis_fn_key,
+            jarvis_fn_launch: config.jarvis_fn_launch,
             open: config.open,
             spawn_terminal: config.spawn_terminal,
             lid: config.lid,
@@ -84,6 +87,7 @@ impl Default for CompanionOptions {
             voice_waveform: true,
             voice_notifications: true,
             jarvis_fn_key: false,
+            jarvis_fn_launch: true,
             open: true,
             spawn_terminal: true,
             lid: true,
@@ -347,6 +351,7 @@ pub async fn run(options: CompanionOptions) -> Result<()> {
             notifications: options.voice_notifications,
             waveform: options.voice_waveform,
             jarvis_fn_key: options.jarvis_fn_key,
+            jarvis_fn_launch: options.jarvis_fn_launch,
         });
     }
     if options.browser_updates {

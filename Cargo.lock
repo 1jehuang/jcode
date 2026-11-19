@@ -3896,6 +3896,7 @@ dependencies = [
  "anyhow",
  "async-io",
  "jcode-base",
+ "jcode-build-support",
  "jcode-desktop-open",
  "jcode-transport",
  "jcode-voice",

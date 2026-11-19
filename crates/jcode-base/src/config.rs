@@ -1010,6 +1010,13 @@ pub struct CompanionConfig {
     /// to talk to the running always-on Jarvis session from any window.
     /// Fn shortcuts (Fn+F-keys, Fn+arrows) never record. Off by default.
     pub jarvis_fn_key: bool,
+    /// With `jarvis_fn_key`, an Fn hold while no always-on Jarvis runs opens
+    /// one in a new terminal, records meanwhile, and sends the words once it
+    /// is ready.
+    pub jarvis_fn_launch: bool,
+    /// Extra flags for a Jarvis opened by `jarvis_fn_launch`, after
+    /// `--jarvis-always-on`, e.g. `["--jarvis-screen"]`.
+    pub jarvis_fn_launch_args: Vec<String>,
     /// Open URLs and files for the server.
     pub open: bool,
     /// Open new terminal windows for the server.
@@ -1028,6 +1035,8 @@ impl Default for CompanionConfig {
             voice_waveform: true,
             voice_notifications: true,
             jarvis_fn_key: false,
+            jarvis_fn_launch: true,
+            jarvis_fn_launch_args: Vec::new(),
             open: true,
             spawn_terminal: true,
             lid: true,

@@ -740,7 +740,12 @@ impl Listener {
     }
     fn spoil_fn(&mut self, edges: &mut Vec<Edge>) {
         if let Some(hold) = self.fn_hold.take() {
-            if matches!(hold, FnHold::Held(..)) {
+            if let FnHold::Held(_, start) = &hold {
+                // Never log which key: only that the hold became a chord.
+                eprintln!(
+                    "global voice: Fn hold cancel after {:.1}s: another key was pressed",
+                    start.elapsed().as_secs_f32()
+                );
                 edges.push(Edge::FnCancel);
             }
             self.fn_hold = Some(FnHold::Spoiled(hold.path().to_path_buf()));

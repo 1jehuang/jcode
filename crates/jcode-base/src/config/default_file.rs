@@ -906,6 +906,11 @@ voice_notifications = true
 # Fn to reach Linux as KEY_FN on a [dictation] global_devices keyboard (on some
 # laptops via a udev hwdb remap). Fn shortcuts never record.
 jarvis_fn_key = false
+# With jarvis_fn_key: when no always-on Jarvis is running, an Fn hold opens one
+# in a new terminal and sends what you said once it is ready.
+jarvis_fn_launch = true
+# Extra flags for that Jarvis, after --jarvis-always-on, e.g. ["--jarvis-screen"].
+jarvis_fn_launch_args = []
 # Open URLs and files for the server. Off: clients use their own opener.
 open = true
 # Open new terminal windows for the server. Off: clients launch locally.

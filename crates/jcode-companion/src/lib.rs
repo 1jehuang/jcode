@@ -15,6 +15,8 @@
 //! Test with `justrust test -p jcode-companion`.
 
 #[cfg(target_os = "linux")]
+mod jarvis_launch;
+#[cfg(target_os = "linux")]
 mod jarvis_target;
 pub mod lid_override;
 pub mod screen;

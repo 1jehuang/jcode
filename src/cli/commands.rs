@@ -1440,6 +1440,7 @@ pub struct CompanionFlags {
     pub no_voice_waveform: bool,
     pub no_voice_notifications: bool,
     pub no_jarvis_fn_key: bool,
+    pub no_jarvis_fn_launch: bool,
     pub no_open: bool,
     pub no_spawn_terminal: bool,
     pub no_lid: bool,
@@ -1452,6 +1453,7 @@ impl CompanionFlags {
         options.voice_waveform &= !self.no_voice_waveform;
         options.voice_notifications &= !self.no_voice_notifications;
         options.jarvis_fn_key &= !self.no_jarvis_fn_key;
+        options.jarvis_fn_launch &= !self.no_jarvis_fn_launch;
         options.open &= !self.no_open;
         options.spawn_terminal &= !self.no_spawn_terminal;
         options.lid &= !self.no_lid;
