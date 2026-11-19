@@ -238,6 +238,30 @@ where
     CLIENT_TERMINAL_ENV.scope(env, future).await
 }
 
+/// Carry the current client's terminal identity into `future`, which is about
+/// to be spawned: task-locals do not cross `tokio::spawn`, and tools run in
+/// spawned tasks, so they would otherwise see the server's inherited one.
+pub fn inherit_client_terminal_env<F>(future: F) -> impl std::future::Future<Output = F::Output>
+where
+    F: std::future::Future,
+{
+    let env = CLIENT_TERMINAL_ENV.try_with(Clone::clone);
+    async move {
+        match env {
+            Ok(env) => CLIENT_TERMINAL_ENV.scope(env, future).await,
+            Err(_) => future.await,
+        }
+    }
+}
+
+/// Give `cmd` the terminal identity of the client whose request runs it, so a
+/// shared server's children never speak as the pane that started the server.
+pub fn apply_current_client_terminal_env(cmd: &mut std::process::Command) {
+    let _ = CLIENT_TERMINAL_ENV.try_with(|env| {
+        crate::terminal_launch::apply_client_terminal_env(cmd, env);
+    });
+}
+
 /// The configured commands for `event`, in declaration order.
 pub fn hook_commands(event: &str) -> Vec<String> {
     if hooks_suppressed() {
@@ -520,9 +544,7 @@ fn build_hook_process(
         cmd.current_dir(cwd);
     }
     apply_event_env(&mut cmd, event);
-    let _ = CLIENT_TERMINAL_ENV.try_with(|env| {
-        crate::terminal_launch::apply_client_terminal_env(&mut cmd, env);
-    });
+    apply_current_client_terminal_env(&mut cmd);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
