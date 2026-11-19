@@ -70,6 +70,9 @@ pub enum ContinuousEvent {
     },
     /// Accepted JSON payload with prior background_transcript strings and the exact trigger.
     Transcript(String),
+    /// The user kept talking after an early (partial transcript) trigger.
+    /// Carries the full final utterance. Never dispatch without a prior Transcript.
+    Continuation(String),
     Rejected(String),
     Error(VoiceError),
     Stopped,
@@ -673,6 +676,62 @@ async fn semantic_gate(
     gate_answer(&response, threshold).map(Some)
 }
 
+/// Partial gate calls allowed per utterance, on top of the final-transcript
+/// call. They ride on the utterance's single classification reservation, so
+/// worst case Jev cost per utterance is (1 + this) calls.
+const MAX_PARTIAL_GATES: usize = 3;
+/// Too-short partials are rarely judgeable and would waste the allowance.
+const MIN_PARTIAL_WORDS: usize = 3;
+fn word_count(text: &str) -> usize {
+    text.split_whitespace().count()
+}
+/// Gate Nari partial revisions while the user is still talking. One call at a
+/// time: each call judges the newest revision, and revisions that arrive during
+/// a call collapse into the latest. Returns the accepted partial after emitting
+/// the request, or None when the stream ends or the allowance is spent.
+async fn early_trigger(
+    mut partials: tokio::sync::watch::Receiver<String>,
+    gate: Option<jcode_base::jev::JevClient>,
+    threshold: f64,
+    require_jev: bool,
+    id: u64,
+    events: Arc<Mutex<Events>>,
+    live: impl Fn() -> bool,
+) -> Option<String> {
+    let gate = gate?;
+    let mut judged = 0usize;
+    for _ in 0..MAX_PARTIAL_GATES {
+        let text = loop {
+            partials.changed().await.ok()?;
+            let text = partials.borrow_and_update().trim().to_owned();
+            let words = word_count(&text);
+            if words >= MIN_PARTIAL_WORDS && words >= judged + 2 {
+                break text;
+            }
+        };
+        judged = word_count(&text);
+        if !live() {
+            return None;
+        }
+        let state = events.lock().unwrap_or_else(|e| e.into_inner()).context.state(&text, require_jev);
+        super::timing::mark("partial gate sent");
+        let Ok(Some((probability, true))) = semantic_gate(&gate, &text, threshold, state).await else {
+            continue;
+        };
+        if !live() {
+            return None;
+        }
+        super::timing::mark("partial gate accepted");
+        let mut output = events.lock().unwrap_or_else(|e| e.into_inner());
+        output.push(ContinuousEvent::Caption { id, text: text.chars().take(256).collect() });
+        output.push(ContinuousEvent::CaptionScore { id, probability, accepted: true });
+        let payload = output.context.accepted(text.clone());
+        output.push(ContinuousEvent::Transcript(payload));
+        return Some(text);
+    }
+    None
+}
+
 async fn open_capture(
     cancel: Arc<AtomicBool>,
     recorder: String,
@@ -694,6 +753,7 @@ async fn stream_job(
     key: String,
     rx: tokio::sync::mpsc::UnboundedReceiver<Vec<i16>>,
     cancel: Arc<AtomicBool>,
+    partial: tokio::sync::watch::Sender<String>,
 ) -> Result<String, VoiceError> {
     let job = async {
         let session = match warm {
@@ -715,7 +775,14 @@ async fn stream_job(
                 }
             }
         };
-        let (_, result) = tokio::join!(forward, session.run(nari_rx, |_| {}));
+        let (_, result) = tokio::join!(
+            forward,
+            session.run(nari_rx, |event| {
+                if let crate::NariEvent::Transcript(text) = event {
+                    partial.send_replace(text);
+                }
+            })
+        );
         result
     };
     tokio::select! {
@@ -874,8 +941,34 @@ async fn run(
                                 live = Some(tx);
                                 let (events, epoch, paused, suppressed, stopped) = (events.clone(), epoch.clone(), paused.clone(), suppressed.clone(), cancel.clone());
                                 jobs.push_back((tokio::spawn(async move {
-                                    let text = stream_job(warm_session, key, rx, child).await?;
+                                    let (partial_tx, partial_rx) = tokio::sync::watch::channel(String::new());
+                                    let early = early_trigger(partial_rx, gate.clone(), threshold, require_jev, id, events.clone(), {
+                                        let (epoch, paused, suppressed, stopped) = (epoch.clone(), paused.clone(), suppressed.clone(), stopped.clone());
+                                        move || !(stopped.load(Ordering::SeqCst) || generation != epoch.load(Ordering::SeqCst) || paused.load(Ordering::SeqCst) || suppressed.load(Ordering::SeqCst))
+                                    });
+                                    tokio::pin!(early);
+                                    let stream = stream_job(warm_session, key, rx, child, partial_tx);
+                                    tokio::pin!(stream);
+                                    // Gate partials while audio streams. Once the final
+                                    // transcript lands, any in-flight partial gate is stale.
+                                    let mut fired: Option<String> = None;
+                                    let text = loop {
+                                        tokio::select! {
+                                            biased;
+                                            text = &mut stream => break text?,
+                                            trigger = &mut early, if fired.is_none() => {
+                                                match trigger { Some(t) => fired = Some(t), None => break (&mut stream).await? }
+                                            }
+                                        }
+                                    };
                                     super::timing::mark("final transcript");
+                                    if let Some(trigger) = fired {
+                                        if word_count(&text) > word_count(&trigger) {
+                                            let mut output = events.lock().unwrap_or_else(|e|e.into_inner());
+                                            output.push(ContinuousEvent::Continuation(text.trim().chars().take(4096).collect()));
+                                        }
+                                        return Ok(None);
+                                    }
                                     if text.trim().is_empty() { return Ok(None); }
                                     let state = {
                                         let mut output = events.lock().unwrap_or_else(|e|e.into_inner());
@@ -1512,20 +1605,23 @@ mod tests {
         .unwrap();
         let deadline = Instant::now() + Duration::from_secs(20 * rounds as u64 + 20);
         let mut seen = Vec::new();
+        let mut fired: Option<i128> = None;
+        let now_ns = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as i128;
         while Instant::now() < deadline && seen.len() < rounds {
+            let ends = std::fs::read_to_string(&marker).unwrap_or_default();
+            let ends: Vec<i128> = ends.lines().filter_map(|l| l.trim().parse().ok()).collect();
+            // Pair the trigger with this round's speech end; negative means it
+            // fired on a partial before the user stopped talking.
+            if let (Some(at), Some(end)) = (fired, ends.get(seen.len())) {
+                let ms = (at - end) / 1_000_000;
+                eprintln!("warm={warm} round {}: speech end -> accepted request {ms} ms", seen.len());
+                seen.push(ms);
+                fired = None;
+            }
             while let Some(event) = recording.try_event() {
                 match event {
-                    ContinuousEvent::Transcript(_) => {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_nanos() as i128;
-                        let ends = std::fs::read_to_string(&marker).unwrap_or_default();
-                        let end: i128 = ends.lines().last().unwrap().trim().parse().unwrap();
-                        let ms = (now - end) / 1_000_000;
-                        eprintln!("warm={warm} round {}: speech end -> accepted request {ms} ms", seen.len());
-                        seen.push(ms);
-                    }
+                    ContinuousEvent::Transcript(_) if fired.is_none() => fired = Some(now_ns()),
+                    ContinuousEvent::Continuation(text) => eprintln!("continuation: {} words", text.split_whitespace().count()),
                     ContinuousEvent::Error(error) => panic!("pipeline failed: {error}"),
                     _ => {}
                 }

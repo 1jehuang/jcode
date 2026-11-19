@@ -199,6 +199,8 @@ pub(super) struct AlwaysListening {
     captions: VecDeque<JarvisCaption>,
     chat_version: Option<u64>,
     triggered_at: Option<Instant>,
+    /// Full utterance heard after an early trigger fired on a partial.
+    continuation: Option<String>,
 }
 impl Drop for AlwaysListening {
     fn drop(&mut self) {
@@ -463,6 +465,13 @@ impl App {
                         changed = true;
                     }
                     ContinuousEvent::Transcript(_) => {}
+                    ContinuousEvent::Continuation(text)
+                        if !paused && !listener.failed && !external_capture =>
+                    {
+                        listener.continuation = Some(text);
+                        changed = true;
+                    }
+                    ContinuousEvent::Continuation(_) => {}
                     ContinuousEvent::Error(error) => {
                         listener.failed = true;
                         listener.pending = None;
@@ -539,6 +548,22 @@ impl App {
             .is_some_and(|at| at.elapsed() >= Duration::from_secs(3600))
         {
             listener.turns.pop_front();
+        }
+        if let Some(full) = listener.continuation.take() {
+            let content = format!("(The user kept talking. Full request: \"{full}\". Adjust or cancel what you are doing if needed.)");
+            if let Some((text, _)) = listener.pending.as_mut() {
+                // Not dispatched yet: send the full utterance instead.
+                if let Ok(mut env) = serde_json::from_str::<serde_json::Value>(text) {
+                    env["trigger"] = serde_json::Value::String(full);
+                    *text = env.to_string();
+                }
+            } else if self.is_processing {
+                self.push_display_message(DisplayMessage::user(content.clone()));
+                self.send_interleave_now(content, vec![], remote).await;
+            } else {
+                listener.pending = Some((serde_json::json!({"background_transcript": [], "trigger": full}).to_string(), Instant::now()));
+            }
+            changed = true;
         }
         if !self.is_processing
             && self.pending_login.is_none()
