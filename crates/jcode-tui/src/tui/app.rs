@@ -145,6 +145,7 @@ mod tui_lifecycle;
 mod tui_lifecycle_runtime;
 mod tui_state;
 mod turn;
+mod turn_bounds;
 mod turn_memory;
 mod turn_notify;
 mod ui_prefs;

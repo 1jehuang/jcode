@@ -54,18 +54,7 @@ impl App {
         let mut redraw_interval = super::run_shell::redraw_timer(redraw_period);
         let mut status_spinner_interval = super::run_shell::status_spinner_interval();
         let mut status_spinner_renderer = super::run_shell::StatusSpinnerRenderer::default();
-
-        // Fixed total-turn deadline, created once here and never reset by
-        // heartbeats, comment frames, or network retries. The idle timeout
-        // remains complementary: it catches a silent dead stream sooner.
-        let turn_deadline = crate::provider::TurnDeadline::start();
-        let mut retry_budget = {
-            let config = crate::config::config();
-            crate::network_retry::RetryBudget::new(
-                config.provider.max_retries,
-                config.provider.retry_backoff_cap_secs,
-            )
-        };
+        let (turn_deadline, mut retry_budget) = super::turn_bounds::start_bounds();
         'turn_loop: loop {
             self.streaming.response_output.reset();
             // Mark the turn as in-flight work: from here until the turn ends,
@@ -170,15 +159,7 @@ impl App {
 
             let mut stream = loop {
                 tokio::select! {
-                    biased;
-                    // Hard total-turn deadline: heartbeats cannot extend this.
-                    _ = turn_deadline.sleep() => {
-                        self.push_display_message(DisplayMessage::error(format!(
-                            "Turn timed out after {} seconds. No further provider activity will be accepted; try again with a shorter request.",
-                            crate::provider::turn_deadline().as_secs()
-                        )));
-                        return Err(anyhow::anyhow!("Turn deadline exceeded"));
-                    }
+                    biased; _ = turn_deadline.sleep() => { return super::turn_bounds::fail_turn_deadline(self); }
                     // Handle keyboard input while waiting for API
                     event = event_stream.next() => {
                         match event {
@@ -295,13 +276,7 @@ impl App {
                                     self.push_display_message(DisplayMessage::system(
                                         "Network connectivity looks restored; retrying request.".to_string(),
                                     ));
-                                    if !retry_budget.record_attempt() {
-                                    self.push_display_message(DisplayMessage::error(
-                                        "Network retry limit reached; ending turn. Check connectivity and try again."
-                                    ));
-                                    return Err(anyhow::anyhow!("Network retry limit exceeded"));
-                                }
-                                continue 'turn_loop;
+                                    if !retry_budget.record_attempt() { return super::turn_bounds::fail_retry_limit(self); } continue 'turn_loop;
                                 }
                                 return Err(err);
                             }
@@ -342,29 +317,13 @@ impl App {
             let mut openai_native_compaction: Option<(String, usize)> = None;
 
             // Stream with input handling
-            loop {
-                if turn_deadline.expired() {
-                    self.push_display_message(DisplayMessage::error(format!(
-                        "Turn timed out after {} seconds. No further provider activity will be accepted; try again with a shorter request.",
-                        crate::provider::turn_deadline().as_secs()
-                    )));
-                    return Err(anyhow::anyhow!("Turn deadline exceeded"));
-                }
+            loop { if turn_deadline.expired() { return super::turn_bounds::fail_turn_deadline(self); }
                 let desired_redraw = crate::tui::redraw_interval(self);
                 if desired_redraw != redraw_period {
                     redraw_period = desired_redraw;
                     redraw_interval = super::run_shell::redraw_timer(redraw_period);
                 }
-                tokio::select! {
-                    // Total-turn deadline fires even while heartbeats keep the
-                    // per-stream idle timer alive.
-                    _ = turn_deadline.sleep() => {
-                        self.push_display_message(DisplayMessage::error(format!(
-                            "Turn timed out after {} seconds. No further provider activity will be accepted; try again with a shorter request.",
-                            crate::provider::turn_deadline().as_secs()
-                        )));
-                        return Err(anyhow::anyhow!("Turn deadline exceeded"));
-                    }
+                tokio::select! { _ = turn_deadline.sleep() => { return super::turn_bounds::fail_turn_deadline(self); }
                     // Cheap single-cell spinner refresh between full redraws. This
                     // keeps the thinking/connecting spinner feeling responsive
                     // (especially in low-resource tiers where full redraws run at
@@ -930,13 +889,7 @@ impl App {
                                             self.push_display_message(DisplayMessage::system(
                                                 "Network connectivity looks restored; retrying request.".to_string(),
                                             ));
-                                            if !retry_budget.record_attempt() {
-                                    self.push_display_message(DisplayMessage::error(
-                                        "Network retry limit reached; ending turn. Check connectivity and try again."
-                                    ));
-                                    return Err(anyhow::anyhow!("Network retry limit exceeded"));
-                                }
-                                continue 'turn_loop;
+                                            if !retry_budget.record_attempt() { return super::turn_bounds::fail_retry_limit(self); } continue 'turn_loop;
                                         }
                                         return Err(anyhow::anyhow!("Stream error: {}", message));
                                     }
@@ -1238,13 +1191,7 @@ impl App {
                                     self.push_display_message(DisplayMessage::system(
                                         "Network connectivity looks restored; retrying request.".to_string(),
                                     ));
-                                    if !retry_budget.record_attempt() {
-                                    self.push_display_message(DisplayMessage::error(
-                                        "Network retry limit reached; ending turn. Check connectivity and try again."
-                                    ));
-                                    return Err(anyhow::anyhow!("Network retry limit exceeded"));
-                                }
-                                continue 'turn_loop;
+                                    if !retry_budget.record_attempt() { return super::turn_bounds::fail_retry_limit(self); } continue 'turn_loop;
                                 }
                                 return Err(e);
                             }
@@ -1268,13 +1215,7 @@ impl App {
                                     self.push_display_message(DisplayMessage::system(
                                         "Network connectivity looks restored; retrying request.".to_string(),
                                     ));
-                                    if !retry_budget.record_attempt() {
-                                    self.push_display_message(DisplayMessage::error(
-                                        "Network retry limit reached; ending turn. Check connectivity and try again."
-                                    ));
-                                    return Err(anyhow::anyhow!("Network retry limit exceeded"));
-                                }
-                                continue 'turn_loop;
+                                    if !retry_budget.record_attempt() { return super::turn_bounds::fail_retry_limit(self); } continue 'turn_loop;
                                 }
                                 break;
                             }
