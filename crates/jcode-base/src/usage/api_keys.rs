@@ -67,6 +67,35 @@ async fn probe_openai_compatible_key(api_base: &str, api_key: &str) -> String {
     }
 }
 
+/// LLMTR's `GET /v1/models` returns 200 for any bearer, so it cannot tell a
+/// valid key from a bad one. One chat completion with `max_tokens` 1 can:
+/// 401/403 is invalid. The default model is the free chat id.
+async fn probe_llmtr_key(api_base: &str, api_key: &str, model: &str) -> String {
+    let base = api_base.trim_end_matches('/');
+    if base.is_empty() || model.trim().is_empty() {
+        return "configured (no endpoint to probe)".to_string();
+    }
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+        "stream": false
+    });
+    let client = crate::provider::shared_http_client();
+    let request = client.post(format!("{base}/chat/completions")).json(&body);
+    let request =
+        crate::provider_catalog::apply_openai_compatible_catalog_auth(request, base, api_key);
+    let response = request
+        .header("Accept", "application/json")
+        .timeout(HTTP_TIMEOUT)
+        .send()
+        .await;
+    match response {
+        Ok(response) => key_status_from_response(response.status()),
+        Err(e) => format!("check failed ({})", e),
+    }
+}
+
 fn month_start_utc() -> chrono::DateTime<chrono::Utc> {
     use chrono::Datelike;
     let now = chrono::Utc::now();
@@ -296,6 +325,14 @@ async fn fetch_compatible_profile_report(
                     "Quota".to_string(),
                     "unavailable (no stored account snapshot)".to_string(),
                 )),
+            }
+        }
+        "llmtr" => {
+            if let Some(api_key) = configured_key(profile.api_key_env, profile.env_file) {
+                let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
+                let model = profile.default_model.unwrap_or("qwen/qwen3.8-27b-free");
+                let status = probe_llmtr_key(&resolved.api_base, &api_key, model).await;
+                extra_info.push(("Key status".to_string(), status));
             }
         }
         _ => {

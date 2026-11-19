@@ -1,3 +1,4 @@
+use super::llmtr::{LLMTR_LOGIN_PROVIDER, LLMTR_PROFILE};
 use super::muse::{
     META_MUSE_LOGIN_PROVIDER, META_MUSE_PROFILE, MUSE_SUBSCRIPTION_LOGIN_PROVIDER,
     MUSE_SUBSCRIPTION_PROFILE,
@@ -483,10 +484,7 @@ pub const VENICE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     requires_api_key: true,
 };
 
-// Yolo-Auto is an OpenAI-compatible gateway. Its `/v1/models` listing is
-// authenticated, so the full catalog is discovered with the account key after
-// login; `default_model` keeps the documented `yolo` alias selected until that
-// refresh lands, and `yolo-small` is the other documented alias.
+// Yolo-Auto gateway. `/v1/models` needs the key; `yolo` is the default until refresh.
 pub const YOLO_AUTO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "yolo-auto",
     display_name: "Yolo-Auto",
@@ -509,7 +507,7 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     requires_api_key: true,
 };
 
-pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 45] = [
+pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 46] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
@@ -551,6 +549,7 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 45] = [
     MUSE_SUBSCRIPTION_PROFILE,
     CELERIS_PROFILE,
     VENICE_PROFILE,
+    LLMTR_PROFILE,
     YOLO_AUTO_PROFILE,
     LMSTUDIO_PROFILE,
     OLLAMA_PROFILE,
@@ -1290,7 +1289,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 57] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 58] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     ANTHROPIC_API_LOGIN_PROVIDER,
@@ -1338,6 +1337,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 57] = [
     MUSE_SUBSCRIPTION_LOGIN_PROVIDER,
     CELERIS_LOGIN_PROVIDER,
     VENICE_LOGIN_PROVIDER,
+    LLMTR_LOGIN_PROVIDER,
     YOLO_AUTO_LOGIN_PROVIDER,
     LMSTUDIO_LOGIN_PROVIDER,
     OLLAMA_LOGIN_PROVIDER,
