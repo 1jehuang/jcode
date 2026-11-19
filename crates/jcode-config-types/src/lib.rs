@@ -1185,6 +1185,17 @@ pub struct ProviderConfig {
     /// automatically (see `jcode_base::provider::stream_idle_timeout_for_effort`).
     /// Default: 180. Overridable via `JCODE_STREAM_IDLE_TIMEOUT_SECS`.
     pub stream_idle_timeout_secs: u64,
+    /// Hard cap on the total duration of one assistant turn, from the first
+    /// provider request to the final response, across all streams and retries.
+    /// Unlike `stream_idle_timeout_secs`, heartbeats and comment frames do NOT
+    /// reset this clock: a connection that only emits keepalives must still end.
+    /// Default: 1800 seconds (30 minutes), which covers long agentic turns while
+    /// bounding an indefinite 'thinking' state. Overridable in `[provider]`.
+    pub turn_deadline_secs: u64,
+    /// Max seconds to wait for a provider stream to produce its first
+    /// acceptance event (headers or `WaitingForResponse`). Default: 30.
+    /// A stalled request that never starts must not hang the turn.
+    pub stream_start_timeout_secs: u64,
     /// Maximum request attempts for transient provider errors, including the
     /// initial attempt. Default: 8. Overridable via `JCODE_MAX_RETRIES`.
     pub max_retries: u32,
@@ -1224,6 +1235,8 @@ impl Default for ProviderConfig {
             gemini_project: None,
             model_picker_providers: None,
             stream_idle_timeout_secs: 180,
+            turn_deadline_secs: 1800,
+            stream_start_timeout_secs: 30,
             max_retries: 8,
             retry_backoff_cap_secs: 30,
             request_compression: "auto".to_string(),

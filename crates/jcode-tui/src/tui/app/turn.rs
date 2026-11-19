@@ -55,6 +55,17 @@ impl App {
         let mut status_spinner_interval = super::run_shell::status_spinner_interval();
         let mut status_spinner_renderer = super::run_shell::StatusSpinnerRenderer::default();
 
+        // Fixed total-turn deadline, created once here and never reset by
+        // heartbeats, comment frames, or network retries. The idle timeout
+        // remains complementary: it catches a silent dead stream sooner.
+        let turn_deadline = crate::provider::TurnDeadline::start();
+        let mut retry_budget = {
+            let config = crate::config::config();
+            crate::network_retry::RetryBudget::new(
+                config.provider.max_retries,
+                config.provider.retry_backoff_cap_secs,
+            )
+        };
         'turn_loop: loop {
             self.streaming.response_output.reset();
             // Mark the turn as in-flight work: from here until the turn ends,
@@ -160,6 +171,14 @@ impl App {
             let mut stream = loop {
                 tokio::select! {
                     biased;
+                    // Hard total-turn deadline: heartbeats cannot extend this.
+                    _ = turn_deadline.sleep() => {
+                        self.push_display_message(DisplayMessage::error(format!(
+                            "Turn timed out after {} seconds. No further provider activity will be accepted; try again with a shorter request.",
+                            crate::provider::turn_deadline().as_secs()
+                        )));
+                        return Err(anyhow::anyhow!("Turn deadline exceeded"));
+                    }
                     // Handle keyboard input while waiting for API
                     event = event_stream.next() => {
                         match event {
@@ -272,11 +291,17 @@ impl App {
                                     };
                                     status_spinner_renderer.draw_full(self, terminal)?;
                                     super::run_shell::reset_status_spinner_interval(&mut status_spinner_interval, self);
-                                    crate::network_retry::wait_until_probably_online().await;
+                                    let _ = crate::network_retry::wait_until_probably_online_bounded(retry_budget).await;
                                     self.push_display_message(DisplayMessage::system(
                                         "Network connectivity looks restored; retrying request.".to_string(),
                                     ));
-                                    continue 'turn_loop;
+                                    if !retry_budget.record_attempt() {
+                                    self.push_display_message(DisplayMessage::error(
+                                        "Network retry limit reached; ending turn. Check connectivity and try again."
+                                    ));
+                                    return Err(anyhow::anyhow!("Network retry limit exceeded"));
+                                }
+                                continue 'turn_loop;
                                 }
                                 return Err(err);
                             }
@@ -318,12 +343,28 @@ impl App {
 
             // Stream with input handling
             loop {
+                if turn_deadline.expired() {
+                    self.push_display_message(DisplayMessage::error(format!(
+                        "Turn timed out after {} seconds. No further provider activity will be accepted; try again with a shorter request.",
+                        crate::provider::turn_deadline().as_secs()
+                    )));
+                    return Err(anyhow::anyhow!("Turn deadline exceeded"));
+                }
                 let desired_redraw = crate::tui::redraw_interval(self);
                 if desired_redraw != redraw_period {
                     redraw_period = desired_redraw;
                     redraw_interval = super::run_shell::redraw_timer(redraw_period);
                 }
                 tokio::select! {
+                    // Total-turn deadline fires even while heartbeats keep the
+                    // per-stream idle timer alive.
+                    _ = turn_deadline.sleep() => {
+                        self.push_display_message(DisplayMessage::error(format!(
+                            "Turn timed out after {} seconds. No further provider activity will be accepted; try again with a shorter request.",
+                            crate::provider::turn_deadline().as_secs()
+                        )));
+                        return Err(anyhow::anyhow!("Turn deadline exceeded"));
+                    }
                     // Cheap single-cell spinner refresh between full redraws. This
                     // keeps the thinking/connecting spinner feeling responsive
                     // (especially in low-resource tiers where full redraws run at
@@ -885,11 +926,17 @@ impl App {
                                                 listener: plan.listener_summary.clone(),
                                             };
                                             status_spinner_renderer.draw_full(self, terminal)?;
-                                            crate::network_retry::wait_until_probably_online().await;
+                                            let _ = crate::network_retry::wait_until_probably_online_bounded(retry_budget).await;
                                             self.push_display_message(DisplayMessage::system(
                                                 "Network connectivity looks restored; retrying request.".to_string(),
                                             ));
-                                            continue 'turn_loop;
+                                            if !retry_budget.record_attempt() {
+                                    self.push_display_message(DisplayMessage::error(
+                                        "Network retry limit reached; ending turn. Check connectivity and try again."
+                                    ));
+                                    return Err(anyhow::anyhow!("Network retry limit exceeded"));
+                                }
+                                continue 'turn_loop;
                                         }
                                         return Err(anyhow::anyhow!("Stream error: {}", message));
                                     }
@@ -1187,11 +1234,17 @@ impl App {
                                         listener: plan.listener_summary.clone(),
                                     };
                                     status_spinner_renderer.draw_full(self, terminal)?;
-                                    crate::network_retry::wait_until_probably_online().await;
+                                    let _ = crate::network_retry::wait_until_probably_online_bounded(retry_budget).await;
                                     self.push_display_message(DisplayMessage::system(
                                         "Network connectivity looks restored; retrying request.".to_string(),
                                     ));
-                                    continue 'turn_loop;
+                                    if !retry_budget.record_attempt() {
+                                    self.push_display_message(DisplayMessage::error(
+                                        "Network retry limit reached; ending turn. Check connectivity and try again."
+                                    ));
+                                    return Err(anyhow::anyhow!("Network retry limit exceeded"));
+                                }
+                                continue 'turn_loop;
                                 }
                                 return Err(e);
                             }
@@ -1211,11 +1264,17 @@ impl App {
                                         listener: plan.listener_summary.clone(),
                                     };
                                     status_spinner_renderer.draw_full(self, terminal)?;
-                                    crate::network_retry::wait_until_probably_online().await;
+                                    let _ = crate::network_retry::wait_until_probably_online_bounded(retry_budget).await;
                                     self.push_display_message(DisplayMessage::system(
                                         "Network connectivity looks restored; retrying request.".to_string(),
                                     ));
-                                    continue 'turn_loop;
+                                    if !retry_budget.record_attempt() {
+                                    self.push_display_message(DisplayMessage::error(
+                                        "Network retry limit reached; ending turn. Check connectivity and try again."
+                                    ));
+                                    return Err(anyhow::anyhow!("Network retry limit exceeded"));
+                                }
+                                continue 'turn_loop;
                                 }
                                 break;
                             }
