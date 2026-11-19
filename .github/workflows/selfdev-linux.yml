@@ -142,8 +142,9 @@ jobs:
           existing=false
           if gh release view "$tag" --json body --jq .body > "$notes"; then existing=true; fi
           if [[ $existing == false ]] || ! grep -Fxq '## Highlights' "$notes"; then
-            gh api --paginate --slurp "repos/$GH_REPO/releases?per_page=100" \
-              --jq 'add | sort_by(.published_at) | reverse | .[] | select(.draft == false and .prerelease) | .tag_name' > "$tags"
+            gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
+              --jq '.[] | select(.draft == false and .prerelease) | [.published_at, .tag_name] | @tsv' \
+              | LC_ALL=C sort -r | cut -f2 > "$tags"
             python3 ../scripts/selfdev_release_highlights.py "$tags" > "$notes"
           fi
           if [[ $existing == false ]]; then
