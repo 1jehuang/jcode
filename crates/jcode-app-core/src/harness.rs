@@ -6,10 +6,12 @@
 //! and `Registry::execute` (which also serves `codemode` and `batch`
 //! subcalls) see the same picture for native and MCP tools alike.
 
+use crate::resilience::{Admission, CircuitBreaker, RecoveryReason, classify_interruption};
 use crate::skill::{Skill, SkillRegistry};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{LazyLock, Mutex};
+use std::time::Instant;
 
 pub const MAX_INTERVENTIONS: u32 = 2;
 const MAX_AUTO_ROUTED: usize = 3;
@@ -24,11 +26,54 @@ const SYSTEM_PREFIXES: &[&str] = &[
 ];
 /// Generic words never route on their own (as a tag or a skill name).
 const STOP_WORDS: &[&str] = &[
-    "build", "do", "background", "server", "file", "files", "code", "run", "check",
-    "test", "tests", "update", "fix", "make", "plan", "release", "deploy", "install",
-    "setup", "init", "talk", "hero", "design", "data", "search", "review", "debug",
-    "web", "page", "image", "video", "text", "api", "tool", "tools", "skill", "skills",
-    "log", "logs", "git", "app", "ui", "doc", "docs", "report", "audit", "memory", "understand",
+    "build",
+    "do",
+    "background",
+    "server",
+    "file",
+    "files",
+    "code",
+    "run",
+    "check",
+    "test",
+    "tests",
+    "update",
+    "fix",
+    "make",
+    "plan",
+    "release",
+    "deploy",
+    "install",
+    "setup",
+    "init",
+    "talk",
+    "hero",
+    "design",
+    "data",
+    "search",
+    "review",
+    "debug",
+    "web",
+    "page",
+    "image",
+    "video",
+    "text",
+    "api",
+    "tool",
+    "tools",
+    "skill",
+    "skills",
+    "log",
+    "logs",
+    "git",
+    "app",
+    "ui",
+    "doc",
+    "docs",
+    "report",
+    "audit",
+    "memory",
+    "understand",
 ];
 const MAX_CONSTRAINT_LINES: usize = 8;
 
@@ -53,6 +98,8 @@ struct SessionState {
     constraints: HashMap<String, Vec<String>>,
     inspected_targets: HashSet<String>,
     turn: TurnTelemetry,
+    /// Per-tool run brake: repeated failures stop retry storms.
+    breakers: HashMap<String, CircuitBreaker>,
 }
 
 static STATE: LazyLock<Mutex<HashMap<String, SessionState>>> =
@@ -122,9 +169,21 @@ fn route_score(text: &str, name: &str, triggers: &[String]) -> usize {
     let tags: usize = triggers
         .iter()
         .filter(|t| contains_phrase(text, t))
-        .map(|t| if t.trim().contains(' ') { 2 } else if generic(t) { 0 } else { 1 })
+        .map(|t| {
+            if t.trim().contains(' ') {
+                2
+            } else if generic(t) {
+                0
+            } else {
+                1
+            }
+        })
         .sum();
-    tags + if !generic(name) && contains_phrase(text, name) { 2 } else { 0 }
+    tags + if !generic(name) && contains_phrase(text, name) {
+        2
+    } else {
+        0
+    }
 }
 
 fn is_system_message(prompt: &str) -> bool {
@@ -241,6 +300,46 @@ pub fn turn(session: &str) -> TurnTelemetry {
 
 pub fn record_tool_call(session: &str, name: &str) {
     with(session, |s| s.turn.tools_called.push(name.to_string()));
+}
+
+/// Ask the tool's breaker before executing. `Err` means the brake is open
+/// (or a probe is already in flight) and the call is coalesced, not run.
+pub fn admit_tool(session: &str, name: &str, now: Instant) -> Result<Admission, String> {
+    with(session, |s| {
+        match s.breakers.entry(name.to_string()).or_default().admit(now) {
+            Admission::Coalesced => {
+                s.turn.gate_blocks += 1;
+                Err(format!(
+                    "Tool '{name}' circuit open after repeated failures; retry coalesced. \
+                     Wait for the cooldown or fix the cause before calling it again."
+                ))
+            }
+            admitted => Ok(admitted),
+        }
+    })
+}
+
+/// Report an execution outcome. Failures feed the breaker and return their
+/// named recovery reason so callers can auto-resume or escalate once.
+pub fn record_tool_outcome(
+    session: &str,
+    name: &str,
+    outcome: Result<(), &str>,
+    now: Instant,
+) -> Option<RecoveryReason> {
+    with(session, |s| {
+        let breaker = s.breakers.entry(name.to_string()).or_default();
+        match outcome {
+            Ok(()) => {
+                breaker.record_success(now);
+                None
+            }
+            Err(message) => {
+                breaker.record_failure(now);
+                Some(classify_interruption(message))
+            }
+        }
+    })
 }
 
 /// Current policy snapshot; the agent appends it to history only when it changes.
@@ -471,6 +570,34 @@ pub fn check_tool_call(session: &str, name: &str, input: &Value) -> Result<(), S
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::time::Duration;
+
+    #[test]
+    fn tool_breaker_opens_coalesces_probes_and_classifies() {
+        let s = "harness-breaker";
+        reset(s);
+        let t0 = Instant::now();
+        for i in 0..11 {
+            assert_eq!(admit_tool(s, "bash", t0), Ok(Admission::Allow), "call {i}");
+            assert_eq!(
+                record_tool_outcome(s, "bash", Err("connection reset"), t0),
+                Some(RecoveryReason::Interrupted)
+            );
+        }
+        record_tool_outcome(s, "bash", Err("connection reset"), t0);
+        // 12th failure opened it: retries coalesce, other tools unaffected.
+        assert!(admit_tool(s, "bash", t0).unwrap_err().contains("coalesced"));
+        assert_eq!(admit_tool(s, "read", t0), Ok(Admission::Allow));
+        let later = t0 + Duration::from_secs(61);
+        assert_eq!(admit_tool(s, "bash", later), Ok(Admission::Probe));
+        assert!(admit_tool(s, "bash", later).is_err(), "one probe at a time");
+        assert_eq!(record_tool_outcome(s, "bash", Ok(()), later), None);
+        assert_eq!(
+            record_tool_outcome(s, "web", Err("401 Unauthorized: login required"), t0),
+            Some(RecoveryReason::UserActionRequired)
+        );
+        reset(s);
+    }
 
     #[test]
     fn inline_evidence_rules_are_global_and_survive_compaction() {
@@ -565,12 +692,29 @@ mod tests {
 
     #[test]
     fn understand_requires_architectural_intent() {
-        let triggers = ["understand codebase", "knowledge graph", "map codebase", "architecture graph", "analyze repository structure"].map(str::to_string);
-        for prompt in ["help me understand this", "explain this diff", "fix css button"] {
-            assert!(route_score(prompt, "understand", &triggers) < MIN_ROUTE_SCORE, "{prompt}");
+        let triggers = [
+            "understand codebase",
+            "knowledge graph",
+            "map codebase",
+            "architecture graph",
+            "analyze repository structure",
+        ]
+        .map(str::to_string);
+        for prompt in [
+            "help me understand this",
+            "explain this diff",
+            "fix css button",
+        ] {
+            assert!(
+                route_score(prompt, "understand", &triggers) < MIN_ROUTE_SCORE,
+                "{prompt}"
+            );
         }
         for prompt in &triggers {
-            assert!(route_score(prompt, "understand", &triggers) >= MIN_ROUTE_SCORE, "{prompt}");
+            assert!(
+                route_score(prompt, "understand", &triggers) >= MIN_ROUTE_SCORE,
+                "{prompt}"
+            );
         }
     }
 

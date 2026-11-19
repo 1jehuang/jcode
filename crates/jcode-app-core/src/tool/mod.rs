@@ -1192,8 +1192,37 @@ impl Registry {
             Self::tool_lifecycle_fields("start", name, resolved_name, &input, &ctx),
         );
 
+        let harness_on = crate::harness::enabled();
+        if harness_on
+            && let Err(reason) = crate::harness::admit_tool(
+                &ctx.session_id,
+                resolved_name,
+                std::time::Instant::now(),
+            )
+        {
+            let mut fields =
+                Self::tool_lifecycle_fields("blocked", name, resolved_name, &input, &ctx);
+            fields.push(("block_reason".to_string(), reason.clone()));
+            crate::logging::event_warn("TOOL_LIFECYCLE", fields);
+            return Err(anyhow::anyhow!(reason));
+        }
+
         let started_at = std::time::Instant::now();
-        let result = tool.execute(input.clone(), ctx.clone()).await;
+        let mut result = tool.execute(input.clone(), ctx.clone()).await;
+        if harness_on {
+            let message = result.as_ref().err().map(crate::util::format_error_chain);
+            let reason = crate::harness::record_tool_outcome(
+                &ctx.session_id,
+                resolved_name,
+                message.as_deref().map_or(Ok(()), Err),
+                std::time::Instant::now(),
+            );
+            if reason == Some(crate::resilience::RecoveryReason::UserActionRequired) {
+                result = result.map_err(|e| {
+                    e.context("USER_ACTION_REQUIRED: escalate to the user, do not retry")
+                });
+            }
+        }
         let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
         crate::telemetry::record_tool_execution_in(
