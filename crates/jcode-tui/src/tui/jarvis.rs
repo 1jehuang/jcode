@@ -25,6 +25,24 @@ pub(crate) fn screen_enabled() -> bool {
     SCREEN.load(Ordering::Relaxed)
 }
 
+/// CLI flags that restore this process's Jarvis mode in a re-exec (reload,
+/// restart, update). The modes are process-local, so a client that drops
+/// them would silently stop always-on capture.
+pub fn reexec_args() -> Vec<&'static str> {
+    reexec_args_for(enabled(), always_on(), screen_enabled())
+}
+
+fn reexec_args_for(enabled: bool, always_on: bool, screen: bool) -> Vec<&'static str> {
+    [
+        (enabled, "--jarvis"),
+        (always_on, "--jarvis-always-on"),
+        (screen, "--jarvis-screen"),
+    ]
+    .into_iter()
+    .filter_map(|(on, flag)| on.then_some(flag))
+    .collect()
+}
+
 /// Enable before constructing the interactive client.
 pub fn enable() {
     ENABLED.store(true, Ordering::Relaxed);
@@ -104,6 +122,16 @@ const ALWAYS_ON_INSTRUCTIONS: &str = "## Always-listening variant\nThe local cli
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reexec_args_restore_every_enabled_jarvis_mode() {
+        assert_eq!(
+            reexec_args_for(true, true, true),
+            ["--jarvis", "--jarvis-always-on", "--jarvis-screen"]
+        );
+        assert_eq!(reexec_args_for(true, false, false), ["--jarvis"]);
+        assert!(reexec_args_for(false, false, false).is_empty());
+    }
 
     #[test]
     fn always_on_policy_distinguishes_background_from_the_trigger() {

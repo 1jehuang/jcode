@@ -23,6 +23,7 @@ pub fn waiter_command(session_id: &str) -> std::io::Result<std::process::Command
     }
     cmd.arg("--resume")
         .arg(session_id)
+        .args(crate::tui::jarvis::reexec_args())
         .env(WAIT_ENV, "1")
         .env("JCODE_RESUMING", "1")
         .current_dir(std::env::current_dir()?);
