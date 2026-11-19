@@ -218,6 +218,7 @@ async fn mpsc_preserves_signatures_and_never_rebinds_to_provider_session_id() {
 struct ExplicitPinProvider {
     model: Arc<std::sync::Mutex<String>>,
     pin: Arc<std::sync::Mutex<Option<String>>>,
+    effort: Arc<std::sync::Mutex<Option<String>>>,
     set_model_requests: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
@@ -226,6 +227,7 @@ impl ExplicitPinProvider {
         Self {
             model: Arc::new(std::sync::Mutex::new(model.to_string())),
             pin: Arc::new(std::sync::Mutex::new(None)),
+            effort: Arc::new(std::sync::Mutex::new(None)),
             set_model_requests: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
@@ -268,6 +270,15 @@ impl Provider for ExplicitPinProvider {
 
     fn explicit_provider_pin_for_current_model(&self) -> Option<String> {
         self.pin.lock().unwrap().clone()
+    }
+
+    fn reasoning_effort(&self) -> Option<String> {
+        self.effort.lock().unwrap().clone()
+    }
+
+    fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
+        *self.effort.lock().unwrap() = Some(effort.to_string());
+        Ok(())
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
@@ -1676,6 +1687,43 @@ async fn explicit_provider_pin_is_persisted_and_reapplied_on_restore() {
         ["openrouter:z-ai/glm-5.2@Novita"]
     );
     assert_eq!(restored_agent.provider_model(), "z-ai/glm-5.2@Novita");
+}
+
+#[tokio::test]
+async fn explicit_model_and_effort_on_empty_session_survive_reload_resume() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    let provider: Arc<dyn Provider> = Arc::new(ExplicitPinProvider::new("default/model"));
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    assert_eq!(agent.session.visible_conversation_message_count(), 0);
+
+    // `/model` before the first message, then `/server-reload`: the new
+    // server process can only resume what is on disk.
+    agent.set_model("z-ai/glm-5.2").expect("set model");
+    agent.set_reasoning_effort("high").expect("set effort");
+
+    let resumed_provider = Arc::new(ExplicitPinProvider::new("default/model"));
+    let resumed_provider_dyn: Arc<dyn Provider> = resumed_provider.clone();
+    let resumed_registry = Registry::new(resumed_provider_dyn.clone()).await;
+    let mut resumed = Agent::new(resumed_provider_dyn, resumed_registry);
+    resumed
+        .restore_session(agent.session_id())
+        .expect("empty session with an explicit model choice is on disk");
+
+    assert_eq!(resumed.provider_model(), "z-ai/glm-5.2");
+    assert_eq!(resumed_provider.reasoning_effort().as_deref(), Some("high"));
 }
 
 #[tokio::test]

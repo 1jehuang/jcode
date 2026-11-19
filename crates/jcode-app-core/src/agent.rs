@@ -834,6 +834,17 @@ impl Agent {
         }
     }
 
+    /// Persist a user's explicit choice even before the first message, so a
+    /// `/server-reload` resumes this session on it instead of a fresh one.
+    fn persist_user_choice_best_effort(&mut self, context: &str) {
+        if let Err(err) = self.session.save_prepared() {
+            logging::warn(&format!(
+                "Failed to persist {} for session {}: {}",
+                context, self.session.id, err
+            ));
+        }
+    }
+
     /// Synchronize the remote client's selected skill, accepting only names
     /// present in the daemon's own registry snapshot.
     pub(super) fn set_remote_active_skill(&mut self, active_skill: Option<String>) -> bool {
