@@ -278,6 +278,13 @@ impl App {
             .as_deref()
             .unwrap_or(&self.session.id);
         crate::todo::todo_requires_user_auth(todo)
+            || todo.assigned_to.as_deref().is_some_and(|assigned| {
+                assigned != session_id
+                    && self.remote_swarm_members.iter().any(|member| {
+                        member.session_id == assigned
+                            && jcode_tui_render::swarm_gallery::is_active_status(&member.status)
+                    })
+            })
             || crate::todo::todo_goal_cannot_complete(
                 todo,
                 &crate::todo::load_goals(session_id).unwrap_or_default(),
