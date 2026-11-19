@@ -6,6 +6,33 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub(super) fn trace(session: Option<&str>, id: u64, stage: &str) {
+    crate::logging::info(&format!(
+        "JARVIS_DISPATCH session={} utterance={id} stage={stage} monotonic_ms={}",
+        session.unwrap_or("none"),
+        jcode_voice::timing::monotonic_ms()
+    ));
+}
+
+pub(super) async fn submit(
+    app: &mut super::App,
+    remote: &mut super::RemoteConnection,
+    text: &str,
+    interleave: bool,
+) -> anyhow::Result<u64> {
+    if interleave {
+        let id = remote
+            .soft_interrupt(text.to_owned(), vec![], false)
+            .await?;
+        app.track_pending_soft_interrupt(id, text.to_owned());
+        Ok(id)
+    } else {
+        app.push_display_message(super::DisplayMessage::user(text.to_owned()));
+        app.begin_remote_send(remote, text.to_owned(), vec![], false)
+            .await
+    }
+}
+
 pub(super) struct Request {
     pub id: u64,
     pub text: String,
@@ -28,7 +55,7 @@ impl Dispatch {
         if envelope_trigger(&text).is_none() {
             return "invalid";
         }
-        if self.queue.len() >= LIMIT {
+        if self.queue.len() + self.open.len() >= LIMIT {
             return "queue_full";
         }
         let provisional = serde_json::from_str::<Value>(&text)
@@ -64,8 +91,8 @@ impl Dispatch {
         let Some(pos) = self.open.iter().position(|(i, _)| *i == id) else {
             return "unmatched_final";
         };
-        let (_, at) = self.open.remove(pos).unwrap();
-        self.queue.push_front(Request {id, at, text: format!("(The user finished speaking. Full request: {text:?}. Now acknowledge and complete any necessary actions.)"), provisional:false, continuation:true});
+        self.open.remove(pos);
+        self.queue.push_back(Request {id, at: Instant::now(), text: format!("(The user finished speaking. Full request: {text:?}. Now acknowledge and complete any necessary actions.)"), provisional:false, continuation:true});
         "queued_final"
     }
     pub fn sent(&mut self, r: &Request) {
@@ -75,7 +102,7 @@ impl Dispatch {
     }
     pub fn expire(&mut self, mut log: impl FnMut(u64)) {
         self.queue.retain(|r| {
-            let keep = r.continuation || r.at.elapsed() < Duration::from_secs(30);
+            let keep = r.at.elapsed() < Duration::from_secs(30);
             if !keep {
                 log(r.id)
             }
@@ -118,12 +145,64 @@ mod tests {
         let a = d.pop().unwrap();
         d.sent(&a);
         assert_eq!(d.finalize(1, "one complete".into()), "queued_final");
-        assert!(d.pop().unwrap().continuation);
         assert_eq!(
             envelope_trigger(&d.pop().unwrap().text).unwrap(),
             "two complete"
         );
+        assert!(d.pop().unwrap().continuation);
         assert_eq!(d.finalize(1, "again".into()), "unmatched_final");
+    }
+    #[test]
+    fn expired_requests_and_orphaned_partials_are_reported_once() {
+        let mut d = Dispatch::default();
+        d.enqueue(5, env("one"));
+        d.enqueue(6, env("two"));
+        let mut first = d.pop().unwrap();
+        first.at -= Duration::from_secs(181);
+        d.sent(&first);
+        d.queue.front_mut().unwrap().at -= Duration::from_secs(31);
+        let mut expired = Vec::new();
+        d.expire(|id| expired.push(id));
+        expired.sort();
+        assert_eq!(expired, [5, 6]);
+        d.expire(|_| panic!("duplicate expiry"));
+        assert_eq!(d.finalize(5, "late".into()), "unmatched_final");
+    }
+    #[test]
+    fn busy_agent_receives_both_identical_phrases_as_separate_wire_requests() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut app = crate::tui::app::tests::create_test_app();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let mut remote = super::super::RemoteConnection::dummy();
+            let peer = remote.take_dummy_peer().unwrap();
+            let mut lines = BufReader::new(peer).lines();
+            let mut queue = Dispatch::default();
+            let text = env("check that");
+            for id in [71, 72] {
+                assert_eq!(queue.enqueue(id, text.clone()), "queued");
+            }
+            let mut ids = vec![];
+            while let Some(r) = queue.pop() {
+                let id = submit(&mut app, &mut remote, &r.text, true).await.unwrap();
+                ids.push(id);
+                let record = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                let v: Value = serde_json::from_str(&record).unwrap();
+                assert_eq!(v["content"], text);
+                assert_eq!(v["id"], id);
+            }
+            assert_eq!(ids.len(), 2);
+            assert_ne!(ids[0], ids[1]);
+            let tracked: Vec<_> = app
+                .pending_soft_interrupt_requests
+                .iter()
+                .map(|(id, _)| *id)
+                .collect();
+            assert_eq!(tracked, ids);
+        });
     }
     #[test]
     fn bounded_and_deduplicated_by_id() {

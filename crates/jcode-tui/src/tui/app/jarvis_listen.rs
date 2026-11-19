@@ -1,4 +1,5 @@
 //! Continuous voice remains client-side. Only gated requests become user turns.
+mod dispatch;
 use super::jarvis_status::CaptureStatus;
 use super::*;
 use crate::tui::JarvisCaption;
@@ -8,25 +9,28 @@ use serde_json::json;
 use std::collections::VecDeque;
 
 /// Audible cue that speech reached Jarvis (gate or Fn tap). Fire and forget.
-fn play_trigger_sound() {
-    let sound = crate::config::config().jarvis.listening.trigger_sound.clone();
+fn play_trigger_sound() -> Option<std::process::Child> {
+    let sound = crate::config::config()
+        .jarvis
+        .listening
+        .trigger_sound
+        .clone();
     if sound.is_empty() || !std::path::Path::new(&sound).is_file() {
-        return;
+        return None;
     }
-    std::thread::spawn(move || {
-        for player in ["pw-play", "paplay"] {
-            if std::process::Command::new(player)
-                .arg(&sound)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok()
-            {
-                return;
-            }
+    for player in ["pw-play", "paplay"] {
+        if let Ok(child) = std::process::Command::new(player)
+            .arg(&sound)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            jcode_voice::timing::mark("trigger sound started");
+            return Some(child);
         }
-    });
+    }
+    None
 }
 
 fn envelope_trigger(text: &str) -> Option<String> {
@@ -99,6 +103,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn deferred_playback_only_matching_final_releases_or_revises() {
+        let mut listener = AlwaysListening::default();
+        let partial = r#"{"trigger":"open it","still_speaking":true}"#;
+        listener.playback.trigger(5, partial);
+        listener.defer_speech("opening".into());
+        listener.playback.finalize(4, "different turn");
+        assert!(listener.playback.partial.is_some() && listener.playback.speech.is_some());
+        listener.playback.finalize(5, "open it tomorrow");
+        assert!(listener.playback.partial.is_none() && listener.playback.speech.is_none());
+        listener.playback.trigger(6, partial);
+        listener.defer_speech("opening now".into());
+        listener.playback.finalize(6, "open it");
+        assert!(listener.playback.partial.is_none() && listener.playback.speech.is_some());
+        listener.detach();
+        assert!(!listener.playback.ding && listener.playback.speech.is_none());
+    }
+
+    #[test]
     fn caption_is_bounded_terminal_safe_and_never_queued() {
         let mut listener = AlwaysListening::default();
         listener.update_caption(1, "\x1b[31mhello\x1b[0m\nworld\0\u{202e}");
@@ -108,7 +130,7 @@ mod tests {
         );
         listener.update_caption(2, &"界".repeat(500));
         assert_eq!(listener.captions.back().unwrap().text.chars().count(), 160);
-        assert!(listener.pending.is_none() && listener.last_request.is_none());
+        assert!(listener.dispatch.pop().is_none());
         listener.detach();
         assert!(listener.captions.is_empty());
     }
@@ -149,6 +171,29 @@ mod tests {
     }
 
     #[test]
+    fn hard_error_explains_deliberate_voice_retry_without_replaying_or_resetting_turns() {
+        let mut app = super::super::tests::create_test_app();
+        let listener = &mut app.jarvis_listener;
+        listener.initialized = true;
+        listener.turns.push_back(Instant::now());
+        listener.update_caption(7, "private caption");
+        listener.playback.trigger(7, "private caption");
+        let notice = listener
+            .capture_failure(Some(&jcode_voice::VoiceError::NariCreditsExhausted))
+            .unwrap();
+        assert!(notice.contains("Add credits") && notice.contains("/voice"));
+        assert!(!notice.contains("private"));
+        assert!(listener.failed && listener.initialized);
+        assert!(listener.capture_failure(None).is_none()); // subsequent Stopped must not mask the cause
+        app.toggle_always_listening();
+        assert!(app.status_notice.as_ref().unwrap().0.contains("Retrying"));
+        let listener = &app.jarvis_listener;
+        assert!(!listener.initialized && !listener.failed);
+        assert_eq!(listener.turns.len(), 1);
+        assert!(listener.captions.is_empty() && !listener.playback.ding);
+    }
+
+    #[test]
     fn trigger_expires_without_overriding_pause_or_failure() {
         let now = Instant::now();
         let mut listener = AlwaysListening::default();
@@ -163,47 +208,72 @@ mod tests {
         listener.failed = true;
         assert_eq!(listener.indicator_state(true, false, now), "error");
     }
-
-    #[test]
-    fn jarvis_listening_keeps_one_bounded_request_and_deduplicates() {
-        let mut listener = AlwaysListening::default();
-        for invalid in [String::new(), "a".repeat(4097), "nul\0text".into()] {
-            listener.queue_request(invalid);
-            assert!(listener.pending.is_none());
-        }
-        let envelope =
-            |trigger, bg| json!({"trigger":trigger,"background_transcript":[bg]}).to_string();
-        let original = envelope("show my screen", "a");
-        listener.queue_request(original.clone());
-        listener.queue_request(envelope("replace with different work", "a"));
-        assert_eq!(listener.pending.as_ref().unwrap().0, original);
-        listener.pending = None;
-        listener.queue_request(envelope("show my screen", "b"));
-        assert!(listener.pending.is_none());
-        listener.queue_request(envelope("explain this window", "b"));
-        assert!(listener.pending.is_some());
-        listener.detach();
-        assert!(listener.pending.is_none() && listener.session.is_none());
-    }
 }
 
 #[derive(Default)]
 pub(super) struct AlwaysListening {
+    playback: DeferredPlayback,
     initialized: bool,
     recording: Option<ContinuousRecording>,
     status: Option<CaptureStatus>,
     wake: Option<tokio::task::JoinHandle<()>>,
     session: Option<String>,
-    pending: Option<(String, Instant)>,
+    dispatch: dispatch::Dispatch,
     turns: VecDeque<Instant>,
-    last_request: Option<(String, Instant)>,
+    capture_budget: jcode_voice::continuous::ContinuousBudget,
     state: Option<VoiceState>,
     failed: bool,
     captions: VecDeque<JarvisCaption>,
     chat_version: Option<u64>,
     triggered_at: Option<Instant>,
-    /// Full utterance heard after an early trigger fired on a partial.
-    continuation: Option<String>,
+}
+#[derive(Default)]
+struct DeferredPlayback {
+    partial: Option<(u64, String, Instant)>,
+    cue_player: Option<(std::process::Child, Instant)>,
+    latest: Option<u64>,
+    speech: Option<(String, Instant)>,
+    ding: bool,
+}
+
+impl DeferredPlayback {
+    fn trigger(&mut self, id: u64, text: &str) {
+        self.latest = Some(id);
+        self.speech = None;
+        self.ding = true;
+        self.partial = serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .and_then(|env| {
+                (env["still_speaking"].as_bool() == Some(true)).then(|| {
+                    (
+                        id,
+                        env["trigger"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .trim()
+                            .to_owned(),
+                        Instant::now(),
+                    )
+                })
+            });
+    }
+
+    fn finalize(&mut self, id: u64, text: &str) {
+        if !self.partial.as_ref().is_some_and(|(old, _, _)| *old == id) {
+            return;
+        }
+        if self.partial.take().unwrap().1 != text.trim() {
+            self.speech = None;
+        }
+    }
+}
+impl Drop for DeferredPlayback {
+    fn drop(&mut self) {
+        if let Some((mut child, _)) = self.cue_player.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 impl Drop for AlwaysListening {
     fn drop(&mut self) {
@@ -213,6 +283,21 @@ impl Drop for AlwaysListening {
     }
 }
 impl AlwaysListening {
+    fn playback_trace(&self) -> jcode_voice::speech::PlaybackTrace {
+        jcode_voice::speech::PlaybackTrace {
+            session: self.session.clone().unwrap_or_else(|| "none".into()),
+            utterance: self.playback.latest.unwrap_or_default(),
+        }
+    }
+    pub(super) fn defer_speech(&mut self, text: String) {
+        self.playback_trace().mark("deferred", 0);
+        self.playback.speech = Some((text, Instant::now()));
+        jcode_voice::timing::mark("speech callback deferred");
+    }
+
+    pub(super) fn clear_playback(&mut self) {
+        self.playback = DeferredPlayback::default();
+    }
     pub(super) fn captions(&self) -> &VecDeque<JarvisCaption> {
         &self.captions
     }
@@ -276,22 +361,46 @@ impl AlwaysListening {
         }
     }
 
-    fn queue_request(&mut self, text: String) {
-        let Some(trigger) = envelope_trigger(&text) else {
-            return;
-        };
-        if self.pending.is_some() {
-            return;
+    fn trace(&self, id: u64, stage: &str) {
+        dispatch::trace(self.session.as_deref(), id, stage);
+    }
+    fn clear_dispatch(&mut self, reason: &str) {
+        let session = self.session.as_deref();
+        self.dispatch
+            .clear(|id| dispatch::trace(session, id, reason));
+    }
+    fn capture_failure(&mut self, error: Option<&jcode_voice::VoiceError>) -> Option<String> {
+        if self.failed {
+            return None;
         }
-        if self
-            .last_request
-            .as_ref()
-            .is_some_and(|(old, at)| old == &trigger && at.elapsed() < Duration::from_secs(10))
-        {
-            return;
+        self.failed = true;
+        self.clear_dispatch("capture_failed");
+        self.clear_playback();
+        self.captions.clear();
+        self.triggered_at = None;
+        let reason = error
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "Capture stopped".into());
+        Some(format!(
+            "Always-on Jarvis stopped: {reason}. After resolving the issue, use /voice to retry."
+        ))
+    }
+
+    fn request_retry(&mut self) -> &'static str {
+        if self.recording.as_ref().is_some_and(|r| !r.is_finished()) {
+            return "Microphone is still stopping. Use /voice again once stopped.";
         }
-        self.last_request = Some((trigger, Instant::now()));
-        self.pending = Some((text, Instant::now()));
+        self.detach();
+        self.recording = None;
+        self.status = None;
+        if let Some(task) = self.wake.take() {
+            task.abort();
+        }
+        self.state = None;
+        self.failed = false;
+        self.initialized = false;
+        Bus::global().publish(BusEvent::VoiceInputWake);
+        "Retrying always-on Jarvis. Previous speech will not be replayed."
     }
 
     fn initialize(&mut self) -> anyhow::Result<()> {
@@ -311,7 +420,7 @@ impl AlwaysListening {
         // Resolve before opening the microphone. A missing gate must not turn
         // continuous speech into unchecked agent requests.
         crate::jev::JevClient::for_voice()?;
-        let recording = ContinuousRecording::start_auto(
+        let recording = ContinuousRecording::start_auto_with_budget(
             Arc::new(AtomicBool::new(false)),
             &key,
             &crate::config::config().dictation.recorder,
@@ -322,6 +431,7 @@ impl AlwaysListening {
                 action_probability: cfg.action_probability,
                 warm_nari: cfg.warm_nari,
             },
+            self.capture_budget.clone(),
         )?;
         self.status = Some(status);
         self.recording = Some(recording);
@@ -342,11 +452,11 @@ impl AlwaysListening {
     }
 
     pub(super) fn detach(&mut self) {
+        self.clear_playback();
         self.captions.clear();
-        self.last_request = None;
+        self.clear_dispatch("detached");
         self.chat_version = None;
         self.triggered_at = None;
-        self.pending = None;
         self.session = None;
         if let Some(recording) = &self.recording {
             recording.set_suppressed(true);
@@ -357,7 +467,10 @@ impl AlwaysListening {
 
 impl App {
     pub(super) fn toggle_always_listening(&mut self) {
-        if let Some(status) = &self.jarvis_listener.status {
+        if self.jarvis_listener.failed {
+            let notice = self.jarvis_listener.request_retry();
+            self.set_status_notice(notice);
+        } else if let Some(status) = &self.jarvis_listener.status {
             let paused = !status.paused();
             match status.set_paused(paused) {
                 Ok(()) => self.set_status_notice(if paused {
@@ -393,7 +506,7 @@ impl App {
                     "Always-on Jarvis: local speech detection, Nari transcription, and Jev request gating. Recent speech and visible chat are sent to Jev. Only accepted requests and their preceding speech are sent to the agent. Use /voice or click the Waybar microphone to pause. Speech audio is sent to Nari; request candidates are sent to Jev.")),
                 Err(error) => {
                     listener.failed = true;
-                    self.push_display_message(DisplayMessage::error(format!("Always-on Jarvis did not start: {error}")));
+                    self.push_display_message(DisplayMessage::error(format!("Always-on Jarvis did not start: {error}. After resolving the issue, use /voice to retry.")));
                 }
             }
             changed = true;
@@ -404,10 +517,24 @@ impl App {
             listener.session = session;
         }
         let paused = listener.status.as_ref().is_some_and(CaptureStatus::paused);
-        let speech_busy = self
-            .jarvis_speech
-            .as_ref()
-            .is_some_and(|player| !player.is_idle());
+        let cue_busy = listener
+            .playback
+            .cue_player
+            .as_mut()
+            .is_some_and(|(child, at)| {
+                if at.elapsed() > Duration::from_secs(3) {
+                    let _ = child.kill();
+                }
+                matches!(child.try_wait(), Ok(None))
+            });
+        if !cue_busy {
+            listener.playback.cue_player = None;
+        }
+        let speech_busy = cue_busy
+            || self
+                .jarvis_speech
+                .as_ref()
+                .is_some_and(|player| !player.is_idle());
         let external_capture = self.external_voice.as_ref().is_some_and(|(activity, at)| {
             matches!(activity, crate::protocol::VoiceActivity::Recording { .. })
                 && at.elapsed() <= Duration::from_secs(3)
@@ -426,7 +553,6 @@ impl App {
                     // Say why the tap did nothing instead of dropping it.
                     self.set_status_notice("Jarvis is paused; Fn tap ignored");
                 } else if recording.manual_trigger() {
-                    play_trigger_sound();
                     self.set_status_notice("Jarvis: sending what it just heard");
                 } else {
                     self.set_status_notice("Jarvis hasn't heard anything recently");
@@ -463,32 +589,53 @@ impl App {
                     } => {
                         changed |= listener.score_caption(id, probability, accepted);
                     }
+                    ContinuousEvent::Recovering { error, delay } => {
+                        listener.clear_dispatch("capture_recovering");
+                        listener.clear_playback();
+                        self.set_status_notice(format!("{error}. Microphone released for {}s. Repeat the request when listening resumes.", delay.as_secs()));
+                        changed = true;
+                    }
                     ContinuousEvent::Rejected(_) => {} // Never save ambient speech in chat or logs.
-                    ContinuousEvent::Transcript(text)
+                    ContinuousEvent::Transcript { id, text }
                         if !paused && !listener.failed && !speech_busy && !external_capture =>
                     {
                         listener.triggered_at = Some(Instant::now());
-                        play_trigger_sound();
-                        listener.queue_request(text);
+                        let outcome = listener.dispatch.enqueue(id, text.clone());
+                        if outcome == "queued" {
+                            listener.playback.trigger(id, &text);
+                        }
+                        listener.trace(id, outcome);
                         changed = true;
                     }
-                    ContinuousEvent::Transcript(_) => {}
-                    ContinuousEvent::Continuation(text)
+                    ContinuousEvent::Transcript { id, .. } => listener.trace(id, "suppressed"),
+                    ContinuousEvent::Continuation { id, text }
                         if !paused && !listener.failed && !external_capture =>
                     {
-                        listener.continuation = Some(text);
+                        listener.playback.finalize(id, &text);
+                        let outcome = listener.dispatch.finalize(id, text);
+                        listener.trace(id, outcome);
                         changed = true;
                     }
-                    ContinuousEvent::Continuation(_) => {}
+                    ContinuousEvent::Continuation { id, .. } => {
+                        listener.trace(id, "final_suppressed")
+                    }
                     ContinuousEvent::Error(error) => {
-                        listener.failed = true;
-                        listener.pending = None;
-                        self.push_display_message(DisplayMessage::error(format!("Always-on Jarvis paused: {error}. Restart this mode after resolving the error.")));
+                        if let Some(notice) = listener.capture_failure(Some(&error)) {
+                            if let Some(player) = &self.jarvis_speech {
+                                player.cancel();
+                            }
+                            self.push_display_message(DisplayMessage::error(notice));
+                        }
                         changed = true;
                     }
                     ContinuousEvent::Stopped => {
-                        listener.failed = true;
-                        listener.pending = None;
+                        if let Some(notice) = listener.capture_failure(None) {
+                            if let Some(player) = &self.jarvis_speech {
+                                player.cancel();
+                            }
+                            self.push_display_message(DisplayMessage::error(notice));
+                            changed = true;
+                        }
                     }
                 }
             }
@@ -523,7 +670,7 @@ impl App {
                     listener.failed = true;
                     indicator_failed = true;
                     self.push_display_message(DisplayMessage::error(format!(
-                        "Capture indicator failed; microphone paused: {error}"
+                        "Capture indicator failed; microphone paused: {error}. Use /voice to retry."
                     )));
                     changed = true;
                 }
@@ -532,24 +679,17 @@ impl App {
         if paused || listener.failed {
             changed |= !listener.captions.is_empty();
             listener.captions.clear();
-            listener.last_request = None;
+            listener.clear_dispatch("paused_or_failed");
             listener.chat_version = None;
         }
         listener.recording = recording;
         if indicator_failed {
             listener.status = None;
         }
-        if paused {
-            listener.pending = None;
-        }
-        if listener
-            .pending
-            .as_ref()
-            .is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(30))
-        {
-            listener.pending = None;
-            self.set_status_notice("An old voice request expired while Jarvis was busy");
-        }
+        let sid = listener.session.as_deref();
+        listener
+            .dispatch
+            .expire(|id| dispatch::trace(sid, id, "expired"));
         while listener
             .turns
             .front()
@@ -557,54 +697,99 @@ impl App {
         {
             listener.turns.pop_front();
         }
-        if let Some(full) = listener.continuation.take() {
-            let content = format!("(The user finished speaking. Full request: \"{full}\". Now acknowledge and complete any necessary actions.)");
-            if let Some((text, _)) = listener.pending.as_mut() {
-                // Not dispatched yet: send the final utterance as a normal request.
-                if let Ok(mut env) = serde_json::from_str::<serde_json::Value>(text) {
-                    env["trigger"] = serde_json::Value::String(full);
-                    if let Some(map) = env.as_object_mut() {
-                        map.remove("still_speaking");
-                    }
-                    *text = env.to_string();
-                }
-            } else if self.is_processing {
-                // The injected soft interrupt renders itself in chat.
-                self.send_interleave_now(content, vec![], remote).await;
-            } else {
-                listener.pending = Some((content, Instant::now()));
-            }
-            changed = true;
-        }
-        if !self.is_processing
-            && self.pending_login.is_none()
+        if self.pending_login.is_none()
             && !self.cloud_handoff_blocks_work()
             && !speech_busy
             && !paused
             && !listener.failed
-            && let Some((text, _)) = listener.pending.take()
+            && let Some(req) = listener.dispatch.pop()
         {
-            if listener.turns.len()
-                >= crate::config::config()
-                    .jarvis
-                    .listening
-                    .max_agent_turns_per_hour as usize
+            if !req.continuation
+                && listener.turns.len()
+                    >= crate::config::config()
+                        .jarvis
+                        .listening
+                        .max_agent_turns_per_hour as usize
             {
+                listener.trace(req.id, "hourly_limit");
                 self.set_status_notice(
                     "Jarvis agent-turn hourly limit reached; voice request ignored",
                 );
             } else {
-                // Count attempts, even if delivery fails, so errors cannot create
-                // an automatic retry loop or an unbounded billing path.
-                listener.turns.push_back(Instant::now());
-                self.push_display_message(DisplayMessage::user(text.clone()));
-                if let Err(error) = self.begin_remote_send(remote, text, vec![], false).await {
+                if !req.continuation {
+                    listener.turns.push_back(Instant::now());
+                }
+                let interleave = self.is_processing;
+                let result = dispatch::submit(self, remote, &req.text, interleave).await;
+                let request_id = result.as_ref().ok().copied();
+                let stage = if let Err(error) = result {
                     self.push_display_message(DisplayMessage::error(format!(
                         "Voice request was not sent: {error}"
                     )));
-                }
+                    "send_failed"
+                } else {
+                    listener.dispatch.sent(&req);
+                    if interleave {
+                        "interleave_sent"
+                    } else {
+                        "sent"
+                    }
+                };
+                crate::logging::info(&format!(
+                    "JARVIS_DISPATCH session={} utterance={} stage={} monotonic_ms={} request_id={request_id:?} queue_ms={} provisional={} final_update={}",
+                    listener.session.as_deref().unwrap_or("none"),
+                    req.id,
+                    stage,
+                    jcode_voice::timing::monotonic_ms(),
+                    req.at.elapsed().as_millis(),
+                    req.provisional,
+                    req.continuation
+                ));
             }
             changed = true;
+        }
+        let orphaned_partial = listener
+            .playback
+            .partial
+            .as_ref()
+            .is_some_and(|(_, _, at)| at.elapsed() >= Duration::from_secs(180));
+        if paused
+            || listener.failed
+            || external_capture
+            || self.voice_input.is_some()
+            || orphaned_partial
+        {
+            listener.clear_playback();
+        } else if !speech_busy
+            && listener.playback.partial.is_none()
+            && (listener.playback.ding || listener.playback.speech.is_some())
+            && listener.state == Some(VoiceState::Listening)
+            && listener
+                .recording
+                .as_ref()
+                .is_some_and(ContinuousRecording::suppress_if_quiet)
+        {
+            let ding = std::mem::take(&mut listener.playback.ding);
+            if let Some((text, at)) = listener
+                .playback
+                .speech
+                .take()
+                .filter(|(_, at)| at.elapsed() < Duration::from_secs(30))
+            {
+                if let Some(player) = &self.jarvis_speech {
+                    let trace = listener.playback_trace();
+                    trace.mark("enqueue", at.elapsed().as_millis());
+                    if let Err(error) = player.enqueue_traced(&text, Some(trace)) {
+                        self.push_display_message(DisplayMessage::error(error.to_string()));
+                        changed = true;
+                    }
+                }
+            } else if ding {
+                listener.playback.cue_player = play_trigger_sound().map(|c| {
+                    listener.playback_trace().mark("ding_started", 0);
+                    (c, Instant::now())
+                });
+            }
         }
         self.jarvis_listener = listener;
         changed
