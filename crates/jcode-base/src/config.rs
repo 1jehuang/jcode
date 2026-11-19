@@ -1055,6 +1055,10 @@ impl Default for CompanionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct JarvisConfig {
+    /// Expand Jarvis requests into readable transcript, status, context and instruction sections.
+    pub show_raw_requests: bool,
+    /// Show the original user payload instead of the clean or expanded presentation.
+    pub show_exact_request_payload: bool,
     pub speech: JarvisSpeechConfig,
     pub listening: JarvisListeningConfig,
 }

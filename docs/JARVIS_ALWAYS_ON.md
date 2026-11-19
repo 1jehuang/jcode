@@ -57,6 +57,21 @@ are invalidated, and a short cooldown avoids loudspeaker feedback. This is not
 full acoustic echo cancellation or simultaneous barge-in. Use the normal stop
 controls or pause the microphone before media playback or private conversations.
 
+## What appears in the chat
+
+By default, the TUI shows the spoken trigger or final request for each Jarvis user turn. A partial already sent and its later final remain two turns. Typed messages and old sessions without voice provenance are displayed as originally recorded, even if they resemble a voice envelope.
+
+To expand each voice row into transcript, status, nonempty background (one utterance per line) and any injected instructions, set the following and restart the TUI:
+
+```toml
+[jarvis]
+show_raw_requests = true
+```
+
+This multiline view is formatted for reading. For the original user payload instead, set `show_exact_request_payload = true` in the same section. It takes precedence over the other setting.
+
+This is a display preference, not a privacy setting. The agent still receives the original JSON with its trigger, bounded background speech and optional `still_speaking` flag, or the final-transcript control message. That message is only one part of a provider call: system instructions, earlier conversation and tool results can also be in context. The toggle neither reveals that full context nor removes anything from saved history.
+
 ## Voice latency and recovery
 
 Run `python3 scripts/jarvis_latency_report.py --session SESSION_ID` from the checkout.

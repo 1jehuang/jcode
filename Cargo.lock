@@ -4814,6 +4814,7 @@ dependencies = [
  "jcode-session-types",
  "jcode-tui-markdown",
  "ratatui",
+ "serde",
  "serde_json",
 ]
 

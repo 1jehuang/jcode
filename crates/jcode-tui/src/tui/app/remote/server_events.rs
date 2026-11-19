@@ -1585,7 +1585,11 @@ fn handle_server_event_inner(
                         .into_iter()
                         .map(|msg| crate::protocol::HistoryMessage {
                             response_stats: None,
-                            role: msg.role,
+                            role: if msg.is_jarvis_user() {
+                                jcode_tui_messages::jarvis::JARVIS_USER_ROLE.into()
+                            } else {
+                                msg.role
+                            },
                             content: msg.content,
                             tool_calls: (!msg.tool_calls.is_empty()).then_some(msg.tool_calls),
                             tool_data: msg.tool_data,
@@ -2283,6 +2287,9 @@ fn handle_server_event_inner(
                     tool_data: msg.tool_data,
                 })
                 .collect();
+            for message in &mut restored_messages {
+                message.normalize_jarvis_role();
+            }
             if !app.recent_history_page_contains_visible_tail(
                 &mut restored_messages,
                 compacted_visible,

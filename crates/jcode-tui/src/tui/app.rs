@@ -170,6 +170,7 @@ fn active_runtime_provider_key() -> Option<String> {
 
 #[derive(Debug, Clone)]
 struct PendingRemoteMessage {
+    jarvis_voice: bool,
     content: String,
     images: Vec<(String, String)>,
     is_system: bool,

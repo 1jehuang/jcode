@@ -22,14 +22,24 @@ pub(super) async fn submit(
 ) -> anyhow::Result<u64> {
     if interleave {
         let id = remote
-            .soft_interrupt(text.to_owned(), vec![], false)
+            .soft_interrupt_with_origin(text.to_owned(), vec![], false, true)
             .await?;
         app.track_pending_soft_interrupt(id, text.to_owned());
         Ok(id)
     } else {
-        app.push_display_message(super::DisplayMessage::user(text.to_owned()));
-        app.begin_remote_send(remote, text.to_owned(), vec![], false)
-            .await
+        app.push_display_message(super::DisplayMessage::jarvis_user(text.to_owned()));
+        super::super::remote::begin_remote_send_with_origin(
+            app,
+            remote,
+            text.to_owned(),
+            vec![],
+            false,
+            None,
+            false,
+            0,
+            true,
+        )
+        .await
     }
 }
 
@@ -92,7 +102,13 @@ impl Dispatch {
             return "unmatched_final";
         };
         self.open.remove(pos);
-        self.queue.push_back(Request {id, at: Instant::now(), text: format!("(The user finished speaking. Full request: {text:?}. Now complete any necessary actions. Your held acknowledgement plays only if the request is unchanged, so speak again only if it no longer fits or you gave none.)"), provisional:false, continuation:true});
+        self.queue.push_back(Request {
+            id,
+            at: Instant::now(),
+            text: jcode_tui_messages::jarvis::jarvis_final_payload(&text),
+            provisional: false,
+            continuation: true,
+        });
         "queued_final"
     }
     pub fn sent(&mut self, r: &Request) {
@@ -192,6 +208,7 @@ mod tests {
                     .unwrap();
                 let v: Value = serde_json::from_str(&record).unwrap();
                 assert_eq!(v["content"], text);
+                assert_eq!(v["jarvis_voice"], true);
                 assert_eq!(v["id"], id);
             }
             assert_eq!(ids.len(), 2);

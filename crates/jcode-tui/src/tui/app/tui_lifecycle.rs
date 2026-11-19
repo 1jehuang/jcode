@@ -60,6 +60,7 @@ mod terminal_retry_tests {
             let image = ("image/png".to_string(), "original-image".to_string());
             app.last_submitted_input = Some("Inspect this screenshot".to_string());
             app.rate_limit_pending_message = Some(PendingRemoteMessage {
+                jarvis_voice: false,
                 content: "Expanded screenshot instructions".to_string(),
                 images: vec![image.clone()],
                 is_system: false,
@@ -92,6 +93,7 @@ mod terminal_retry_tests {
         app.last_submitted_input = Some("Failed prompt".to_string());
         app.pending_images.push(image.clone());
         app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            jarvis_voice: false,
             content: "Expanded failed prompt".to_string(),
             images: vec![image.clone()],
             is_system: false,

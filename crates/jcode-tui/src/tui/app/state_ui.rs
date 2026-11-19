@@ -473,6 +473,10 @@ impl App {
                 .get("rate_limit_pending_message")
                 .and_then(|pending| pending.as_object())
                 .map(|pending| super::PendingRemoteMessage {
+                    jarvis_voice: pending
+                        .get("jarvis_voice")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
                     content: pending
                         .get("content")
                         .and_then(|v| v.as_str())

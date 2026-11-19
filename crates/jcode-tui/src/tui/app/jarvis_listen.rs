@@ -77,11 +77,7 @@ fn recent_chat(messages: &[DisplayMessage]) -> Vec<(String, String)> {
                 return None;
             }
             let (text, _) = jcode_session_types::strip_transcription(text);
-            let trigger = if m.role == "user" {
-                envelope_trigger(&text)
-            } else {
-                None
-            };
+            let trigger = m.is_jarvis_user().then(|| m.user_row_text(false));
             Some((
                 m.role.clone(),
                 trigger
@@ -218,7 +214,9 @@ mod tests {
     fn context_only_includes_visible_dialogue_and_unwraps_voice() {
         let rows = [
             DisplayMessage::system("secret"),
-            DisplayMessage::user(r#"{"background_transcript":["private"],"trigger":"question"}"#),
+            DisplayMessage::jarvis_user(
+                r#"{"background_transcript":["private"],"trigger":"question"}"#,
+            ),
             DisplayMessage::assistant(format!(
                 "{}\nreply",
                 jcode_tui_markdown::reasoning_line_markup("secret")

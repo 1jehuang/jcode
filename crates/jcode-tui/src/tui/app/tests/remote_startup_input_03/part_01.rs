@@ -1119,6 +1119,7 @@ fn test_save_and_restore_reload_state_preserves_interleave_and_pending_retry() {
     ];
     app.pending_soft_interrupt_requests = vec![(17, "already sent two".to_string())];
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "retry me".to_string(),
         images: vec![("image/png".to_string(), "abc123".to_string())],
         is_system: true,
@@ -1166,6 +1167,7 @@ fn test_save_and_restore_reload_state_promotes_inflight_prompt_to_startup_submis
     let session_id = format!("test-reload-inflight-prompt-{}", std::process::id());
 
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "finish the refactor".to_string(),
         images: vec![("image/png".to_string(), "abc123".to_string())],
         is_system: false,

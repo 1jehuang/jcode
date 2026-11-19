@@ -33,6 +33,7 @@ fn remote_exact_failover_fixture() -> (App, crate::tui::backend::RemoteConnectio
     target.api_method = "openai-oauth@openai-fox".into();
     app.remote_model_options = vec![target];
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "hi".into(),
         images: vec![],
         is_system: false,
@@ -328,6 +329,7 @@ fn test_remote_failover_stops_when_cross_route_retry_budget_is_spent() {
         let payload = app.pending_fallback_resend.take().unwrap();
         app.pending_automatic_failover_route = None;
         app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            jarvis_voice: false,
             content: payload.content,
             images: payload.images,
             is_system: payload.is_system,
@@ -877,6 +879,7 @@ fn test_remote_auth_error_arms_fallback_offer_with_resend_payload() {
         claude_oauth_route("claude-sonnet-4"),
     ];
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "hi".to_string(),
         images: vec![],
         is_system: false,
@@ -937,6 +940,7 @@ fn test_remote_usage_limit_shows_error_and_single_switch_line() {
         claude_oauth_route("claude-sonnet-4"),
     ];
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "hi".to_string(),
         images: vec![],
         is_system: false,
@@ -1039,6 +1043,7 @@ fn test_remote_fallback_offer_accept_stages_switch_and_resends() {
         claude_oauth_route("claude-sonnet-4"),
     ];
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "hi".to_string(),
         images: vec![],
         is_system: false,
