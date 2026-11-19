@@ -79,6 +79,26 @@ fn is_lane_task(task_id: &str) -> bool {
     task_id.starts_with(LANE_ID_PREFIX)
 }
 
+/// A linked worker's persisted todos mirror its coordinator lane.
+pub(super) fn first_open_assignment_todo(worker: &str, task_id: &str) -> Option<String> {
+    if !is_lane_task(task_id) {
+        return None;
+    }
+    let todos = match crate::todo::load_todos(worker) {
+        Ok(todos) => todos,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Could not load assigned todos for {worker}: {error}"
+            ));
+            return None;
+        }
+    };
+    todos
+        .into_iter()
+        .find(|todo| is_open(todo) && lane_id(todo) == task_id)
+        .map(|todo| todo.content)
+}
+
 /// Convert open todos into swarm plan items: one item per lane.
 ///
 /// Layout comes from [`crate::todo::stages::stage_layout`]: stages run in
