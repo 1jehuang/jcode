@@ -24,13 +24,6 @@ static STATE: LazyLock<StdRwLock<State>> = LazyLock::new(|| StdRwLock::new(State
 static NEXT_CALL: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) struct ConnectionGuard(pub String);
-
-/// Releases a connection's SDK overlays at a session boundary. The regular
-/// connection guard remains alive for the socket, but a new session must not
-/// inherit callbacks owned by the previous one.
-pub(crate) fn release_connection(owner: &str) {
-    drop(ConnectionGuard(owner.to_string()));
-}
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         let mut state = STATE.write().unwrap_or_else(|e| e.into_inner());
