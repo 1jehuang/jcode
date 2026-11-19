@@ -853,18 +853,7 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
 
     insert_input_text_with_undo(app, text, true);
     #[cfg(windows)]
-    if let Some(fragment) =
-        crate::tui::keyboard_protocol::scrub_leaked_report(&mut app.input, &mut app.cursor_pos)
-    {
-        crate::logging::info(&format!(
-            "Stripped a keyboard-protocol report that arrived as text: {fragment:?}"
-        ));
-        // The picker filter was built from the text before the strip, so a report
-        // arriving after `/model ` can leave the picker matching nothing while the
-        // visible command is clean. Rebuild it from what is actually there.
-        app.sync_model_picker_preview_from_input();
-        app.reset_tab_completion();
-    }
+    app.scrub_leaked_report_after_input();
     // A key stream may still be receiving the rest of a multi-file drop. Do not
     // strip quoting from a verified non-image prefix until submission, otherwise
     // later paths make its now-unquoted spaces ambiguous.
@@ -3164,24 +3153,6 @@ impl App {
     /// scrolling), so image placeholder cells do not flash blank (issue #404).
     pub(super) fn request_full_repaint(&mut self) {
         self.force_full_repaint = true;
-    }
-
-    /// Repaint every cell after an event that can move the physical viewport
-    /// without a geometry change (issue #1812).
-    ///
-    /// Windows ConPTY hosts such as herdr can repaint, zoom or scroll their own
-    /// pane while the console window rect crossterm reports stays the same.
-    /// ratatui only emits diffs against its virtual buffer, so the frame then
-    /// stays anchored to rows the pane no longer shows: typed keys render on
-    /// the host's status row and Enter anchors against the wrong line. Re-emit
-    /// every cell so the layout is painted at the rows jcode laid it out for.
-    ///
-    /// No-op off Windows: native terminals report geometry faithfully and a
-    /// full clear on every focus change would only add flicker.
-    pub(super) fn force_viewport_repaint_after_shift(&mut self) {
-        if cfg!(windows) {
-            self.force_full_redraw = true;
-        }
     }
 
     const RESIZE_REDRAW_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);

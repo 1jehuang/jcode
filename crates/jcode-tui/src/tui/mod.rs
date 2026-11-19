@@ -3,6 +3,7 @@ pub(crate) mod app;
 pub mod jarvis;
 pub mod justrust_status;
 pub(crate) mod screen_context;
+mod ui_diagnostics;
 
 #[derive(Clone)]
 pub struct ContextSnapshot {
