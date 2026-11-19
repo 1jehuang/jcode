@@ -2,9 +2,7 @@ name: FreeBSD Smoke
 
 env:
   JCODE_CI: "1"
-  # CI builds without the local parallel-frontend rustc wrapper from
-  # .cargo/config.toml (a POSIX shell script; see scripts/rustc-parallel-frontend).
-  CARGO_BUILD_RUSTC_WRAPPER: ""
+  RUSTC_WRAPPER: ${{ github.workspace }}/scripts/rustc-parallel-frontend
 
 # Builds and smoke-tests jcode inside a real FreeBSD VM.
 #

@@ -135,7 +135,7 @@ else:
                                        "linux-compat-vendored-openssl"])
         expected = {"JUSTRUST_REMOTE_REQUIRED": "1", "JUSTRUST_TOOLCHAIN_REQUIRED": "1",
                     "JUSTRUST_TOOLCHAIN": "1.99.0", "CARGO_PROFILE_RELEASE_OPT_LEVEL": "3",
-                    "CARGO_INCREMENTAL": "0", "CARGO_BUILD_RUSTC_WRAPPER": "",
+                    "CARGO_INCREMENTAL": "0",
                     "JCODE_RELEASE_BUILD": "1", "JCODE_BUILD_SEMVER": "v1.0.0-preview.42",
                     "JCODE_BUILD_GIT_DIRTY": "false"}
         for key, value in expected.items():
