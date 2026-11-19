@@ -91,6 +91,18 @@ pub fn instance_profile_path(instance: &ClaudeCodeInstanceConfig) -> Option<std:
 /// Read the cached account profile (`oauthAccount`) of an instance. Only
 /// display fields are read; tokens live elsewhere and are never touched.
 pub fn instance_identity(instance: &ClaudeCodeInstanceConfig) -> Option<InstanceIdentity> {
+    if let Some(label) = instance.jcode_account.as_deref() {
+        // Uses a saved jcode account, not a Claude Code login.
+        let account = crate::auth::claude::list_accounts()
+            .ok()?
+            .into_iter()
+            .find(|account| account.label == label)?;
+        return Some(InstanceIdentity {
+            email: account.email,
+            plan: account.subscription_type,
+            organization: None,
+        });
+    }
     let raw = std::fs::read_to_string(instance_profile_path(instance)?).ok()?;
     parse_instance_identity(&raw)
 }
@@ -116,11 +128,29 @@ fn parse_instance_identity(raw: &str) -> Option<InstanceIdentity> {
 
 /// Command that logs an instance in, for user-facing hints.
 pub fn login_hint(instance: &ClaudeCodeInstanceConfig) -> String {
+    if let Some(label) = &instance.jcode_account {
+        return format!("/accounts claude login (re-login account `{label}`)");
+    }
     let binary = binary();
     match instance.resolved_home() {
         Some(home) => format!("CLAUDE_CONFIG_DIR={} {binary} auth login", home.display()),
         None => format!("{binary} auth login"),
     }
+}
+
+/// Access token of saved account `label`, refreshed (and saved) when it
+/// expires within 5 minutes. Used to hand the token to the Claude Code CLI.
+pub async fn fresh_access_token_for_account(label: &str) -> Result<String> {
+    let creds = crate::auth::claude::load_credentials_for_account(label)?;
+    let now = chrono::Utc::now().timestamp_millis();
+    if creds.expires_at > now + 300_000 || creds.refresh_token.is_empty() {
+        return Ok(creds.access_token);
+    }
+    Ok(
+        crate::auth::oauth::refresh_claude_tokens_for_account(&creds.refresh_token, label)
+            .await?
+            .access_token,
+    )
 }
 
 #[cfg(test)]

@@ -35,6 +35,9 @@ pub struct ClaudeCodeConfig {
     pub default_instance: String,
     /// Claude Code logins. Empty means one implicit `default` instance.
     pub instances: Vec<ClaudeCodeInstanceConfig>,
+    /// Saved jcode Anthropic account labels that also run through the CLI,
+    /// each as an extra instance using that account's jcode-managed token.
+    pub jcode_accounts: Vec<String>,
 }
 
 impl Default for ClaudeCodeConfig {
@@ -47,6 +50,7 @@ impl Default for ClaudeCodeConfig {
             expose_jcode_tools: true,
             default_instance: CLAUDE_CODE_DEFAULT_INSTANCE_ID.to_string(),
             instances: Vec::new(),
+            jcode_accounts: Vec::new(),
         }
     }
 }
@@ -65,6 +69,9 @@ pub struct ClaudeCodeInstanceConfig {
     pub env: BTreeMap<String, String>,
     /// Extra CLI arguments, whitespace separated.
     pub launch_args: Option<String>,
+    /// Saved jcode Anthropic account whose OAuth token the CLI uses
+    /// (`CLAUDE_CODE_OAUTH_TOKEN`). jcode keeps refreshing it.
+    pub jcode_account: Option<String>,
 }
 
 impl ClaudeCodeInstanceConfig {
@@ -106,6 +113,27 @@ pub fn is_valid_claude_code_instance_id(id: &str) -> bool {
     id.len() <= 64 && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+/// Instance id for a saved jcode account label (labels may hold spaces).
+fn jcode_account_instance_id(label: &str) -> String {
+    let slug: String = label
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(64)
+        .collect();
+    if is_valid_claude_code_instance_id(&slug) {
+        slug
+    } else {
+        format!("a-{}", slug.chars().take(62).collect::<String>())
+    }
+}
+
 fn expand_tilde(raw: &str) -> PathBuf {
     let home = || std::env::var_os("HOME").map(PathBuf::from);
     if raw == "~" {
@@ -137,7 +165,27 @@ impl ClaudeCodeConfig {
         if out.is_empty() {
             out.push(ClaudeCodeInstanceConfig::implicit_default());
         }
+        for label in &self.jcode_accounts {
+            let label = label.trim();
+            let id = jcode_account_instance_id(label);
+            if label.is_empty() || out.iter().any(|seen| seen.id == id) {
+                continue;
+            }
+            out.push(ClaudeCodeInstanceConfig {
+                id,
+                display_name: Some(label.to_string()),
+                jcode_account: Some(label.to_string()),
+                ..ClaudeCodeInstanceConfig::default()
+            });
+        }
         out
+    }
+
+    /// True when the saved jcode account `label` runs through the CLI.
+    pub fn routes_jcode_account(&self, label: &str) -> bool {
+        self.jcode_accounts
+            .iter()
+            .any(|item| item.trim() == label.trim())
     }
 
     /// Default instance id, guaranteed to name an effective instance.
@@ -232,6 +280,25 @@ mod tests {
         let home = instances[1].resolved_home().expect("home");
         assert!(home.ends_with(".claude_personal"));
         assert!(!home.to_string_lossy().starts_with('~') || std::env::var_os("HOME").is_none());
+    }
+
+    #[test]
+    fn jcode_accounts_add_instances_and_keep_the_default() {
+        let config = ClaudeCodeConfig {
+            jcode_accounts: vec!["claude-fox".into(), "My Work".into(), "claude-fox".into()],
+            ..ClaudeCodeConfig::default()
+        };
+        let instances = config.effective_instances();
+        assert_eq!(
+            instances.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+            ["default", "claude-fox", "My-Work"]
+        );
+        assert_eq!(config.resolved_default_instance(), "default");
+        assert_eq!(instances[2].jcode_account.as_deref(), Some("My Work"));
+        assert_eq!(instances[2].display_label(), "My Work");
+        assert!(config.routes_jcode_account("My Work"));
+        assert!(!config.routes_jcode_account("claude-otter"));
+        assert_eq!(jcode_account_instance_id("1st"), "a-1st");
     }
 
     #[test]

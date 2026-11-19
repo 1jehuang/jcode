@@ -261,6 +261,13 @@ pub fn rename_account(old_label: &str, new_label: &str) -> Result<()> {
     if super::get_active_account_override().as_deref() == Some(old_label) {
         super::set_active_account_override(Some(new_label.to_string()));
     }
+    if crate::config::config()
+        .provider
+        .claude_code
+        .routes_jcode_account(old_label)
+    {
+        crate::config::Config::set_claude_code_jcode_account(old_label, false, Some(new_label))?;
+    }
 
     Ok(())
 }

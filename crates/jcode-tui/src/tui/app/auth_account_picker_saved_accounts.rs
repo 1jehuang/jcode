@@ -366,6 +366,7 @@ impl App {
     ) {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let accounts = crate::auth::claude::list_accounts().unwrap_or_default();
+        let claude_code = crate::auth::claude_code::settings();
         for account in &accounts {
             let status = if account.expires > now_ms {
                 "valid"
@@ -421,6 +422,29 @@ impl App {
                 crate::tui::account_picker::AccountPickerCommand::Remove {
                     provider: crate::tui::account_picker::AccountProviderKind::Anthropic,
                     label: label.clone(),
+                },
+            ));
+            let via_cli = claude_code.routes_jcode_account(&label);
+            items.push(crate::tui::account_picker::AccountPickerItem::action(
+                provider.id,
+                provider.display_name,
+                format!(
+                    "Transport: {}",
+                    if via_cli {
+                        "Claude Code CLI"
+                    } else {
+                        "native API"
+                    }
+                ),
+                if via_cli {
+                    "Enter: back to jcode's native API only"
+                } else {
+                    "Enter: also run this account through the official `claude` CLI"
+                },
+                crate::tui::account_picker::AccountPickerCommand::ClaudeCodeCli {
+                    provider: crate::tui::account_picker::AccountProviderKind::Anthropic,
+                    label: label.clone(),
+                    enabled: !via_cli,
                 },
             ));
         }

@@ -1099,7 +1099,8 @@ fn estimate_command_bytes(command: &AccountPickerCommand) -> usize {
         | AccountPickerCommand::Replace { label, .. }
         | AccountPickerCommand::Login { label, .. }
         | AccountPickerCommand::Rename { label, .. }
-        | AccountPickerCommand::Remove { label, .. } => label.capacity(),
+        | AccountPickerCommand::Remove { label, .. }
+        | AccountPickerCommand::ClaudeCodeCli { label, .. } => label.capacity(),
         AccountPickerCommand::PromptNew { .. }
         | AccountPickerCommand::Unpin { .. }
         | AccountPickerCommand::ToggleFailover

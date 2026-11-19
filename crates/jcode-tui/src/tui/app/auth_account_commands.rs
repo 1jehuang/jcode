@@ -1,4 +1,9 @@
+#[path = "auth_provider_settings.rs"]
+mod auth_provider_settings;
 use super::*;
+use auth_provider_settings::{
+    parse_claude_code_cli, save_claude_code_cli_setting, save_copilot_premium_setting,
+};
 
 pub(crate) fn handle_auth_command(app: &mut App, trimmed: &str) -> bool {
     if trimmed == "/auth" {
@@ -412,6 +417,9 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
                 }
                 AccountCommand::SetOpenAiEffort(normalize_clearish_value(value))
             }
+            "cli" | "claude-code" if provider.id == "claude" => {
+                return Some(parse_claude_code_cli(value));
+            }
             "fast" if provider.id == "openai" => match value.to_ascii_lowercase().as_str() {
                 "on" => AccountCommand::SetOpenAiFast(true),
                 "off" => AccountCommand::SetOpenAiFast(false),
@@ -671,6 +679,12 @@ pub(crate) fn account_command_from_picker(
             provider_id: provider_id(provider),
             label: label.clone(),
         }),
+        AccountPickerCommand::ClaudeCodeCli { label, enabled, .. } => {
+            Some(AccountCommand::SetClaudeCodeCli {
+                label: label.clone(),
+                enabled: *enabled,
+            })
+        }
         AccountPickerCommand::SubmitInput(_)
         | AccountPickerCommand::OpenProviderSettings
         | AccountPickerCommand::OpenAccountCenter { .. }
@@ -761,6 +775,9 @@ pub(crate) fn execute_account_command_local(app: &mut App, command: AccountComma
             save_openai_effort_setting_local(app, value.as_deref())
         }
         AccountCommand::SetOpenAiFast(enabled) => save_openai_fast_setting_local(app, enabled),
+        AccountCommand::SetClaudeCodeCli { label, enabled } => {
+            save_claude_code_cli_setting(app, &label, enabled)
+        }
         AccountCommand::SetCopilotPremium(mode) => {
             save_copilot_premium_setting(app, mode.as_deref())
         }
@@ -1155,46 +1172,6 @@ pub(crate) fn save_openai_fast_setting_local(app: &mut App, enabled: bool) {
         }
         Err(err) => app.push_display_message(DisplayMessage::error(format!(
             "Failed to save OpenAI fast mode: {}",
-            err
-        ))),
-    }
-}
-
-fn save_copilot_premium_setting(app: &mut App, mode: Option<&str>) {
-    use crate::provider::copilot::PremiumMode;
-
-    let premium_mode = match mode.unwrap_or("normal") {
-        "normal" => PremiumMode::Normal,
-        "one" => PremiumMode::OnePerSession,
-        "zero" => PremiumMode::Zero,
-        other => {
-            app.push_display_message(DisplayMessage::error(format!(
-                "Copilot premium mode must be normal, one, or zero (got {}).",
-                other
-            )));
-            return;
-        }
-    };
-    app.provider.set_premium_mode(premium_mode);
-    let result = match mode {
-        None | Some("normal") => crate::config::Config::set_copilot_premium(None),
-        Some(value) => crate::config::Config::set_copilot_premium(Some(value)),
-    };
-    match result {
-        Ok(()) => {
-            let label = match premium_mode {
-                PremiumMode::Normal => "normal",
-                PremiumMode::OnePerSession => "one premium per session",
-                PremiumMode::Zero => "zero premium requests",
-            };
-            app.set_status_notice(format!("Premium: {}", label));
-            app.push_display_message(DisplayMessage::system(format!(
-                "Saved Copilot premium mode: {}.",
-                label
-            )));
-        }
-        Err(err) => app.push_display_message(DisplayMessage::error(format!(
-            "Failed to save Copilot premium mode: {}",
             err
         ))),
     }

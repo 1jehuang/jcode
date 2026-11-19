@@ -60,7 +60,9 @@ fn assert_accounts_overlay_actions(app: &mut App, providers: &[&str]) {
                     ));
                     let profile = picker.debug_memory_profile();
                     assert_eq!(profile["view"], "account");
-                    assert_eq!(profile["filtered_count"], 6);
+                    // Claude accounts also carry the Claude Code CLI transport toggle.
+                    let actions = if *provider_id == "claude" { 7 } else { 6 };
+                    assert_eq!(profile["filtered_count"], actions);
                     if title == "Use" {
                         picker.select_account(provider_id, Some(label));
                     } else {

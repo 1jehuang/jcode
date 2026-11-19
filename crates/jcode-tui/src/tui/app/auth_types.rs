@@ -241,6 +241,11 @@ pub(crate) enum AccountCommand {
     SetOpenAiTransport(Option<String>),
     SetOpenAiEffort(Option<String>),
     SetOpenAiFast(bool),
+    /// Run a saved Claude account through the Claude Code CLI, or not.
+    SetClaudeCodeCli {
+        label: String,
+        enabled: bool,
+    },
     SetCopilotPremium(Option<String>),
     SetOpenAiCompatApiBase(Option<String>),
     SetOpenAiCompatApiKeyName(Option<String>),

@@ -271,3 +271,44 @@ fn account_manager_remote_form_keyboard_never_leaks_into_model_or_chat() {
         );
     });
 }
+
+#[test]
+fn claude_account_transport_toggle_adds_cli_instance_and_follows_rename_and_remove() {
+    with_temp_jcode_home(|| {
+        let (first, _second) = store_two_claude_accounts();
+        let mut app = create_test_app();
+        app.open_account_center(Some("claude"));
+        let toggle = |enabled| AccountPickerCommand::ClaudeCodeCli {
+            provider: AccountProviderKind::Anthropic,
+            label: first.clone(),
+            enabled,
+        };
+        app.handle_account_picker_command(toggle(true));
+        root(&app);
+        let routed = |label: &str| {
+            crate::auth::claude_code::instances()
+                .iter()
+                .any(|i| i.jcode_account.as_deref() == Some(label))
+        };
+        // Skipped when the `claude` binary is absent on the test host.
+        if !crate::auth::claude_code::binary_available() {
+            assert!(!routed(&first));
+            return;
+        }
+        assert!(routed(&first));
+        assert!(
+            crate::auth::claude_code::instances()
+                .iter()
+                .any(|i| i.id == "default"),
+            "the CLI's own login stays available"
+        );
+        app.rename_saved_account("claude", &first, "Work Max");
+        assert!(routed("Work Max") && !routed(&first));
+        app.handle_account_picker_command(AccountPickerCommand::Remove {
+            provider: AccountProviderKind::Anthropic,
+            label: "Work Max".into(),
+        });
+        assert!(!routed("Work Max"));
+        assert!(crate::config::config().provider.claude_code.jcode_accounts.is_empty());
+    });
+}

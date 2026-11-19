@@ -352,6 +352,23 @@ impl Config {
         Ok(())
     }
 
+    /// Run saved Claude account `label` through the Claude Code CLI, or stop.
+    /// `new_label` moves an enabled entry on rename.
+    pub fn set_claude_code_jcode_account(
+        label: &str,
+        enabled: bool,
+        new_label: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let mut cfg = Self::load_for_update()?;
+        let accounts = &mut cfg.provider.claude_code.jcode_accounts;
+        let was = accounts.iter().any(|item| item.trim() == label.trim());
+        accounts.retain(|item| item.trim() != label.trim());
+        if enabled || (was && new_label.is_some()) {
+            accounts.push(new_label.unwrap_or(label).trim().to_string());
+        }
+        cfg.save()
+    }
+
     /// Update the persisted default alignment preference.
     pub fn set_display_centered(centered: bool) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;

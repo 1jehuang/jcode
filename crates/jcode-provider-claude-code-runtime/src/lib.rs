@@ -86,6 +86,7 @@ pub async fn probe_instance(
     settings: &ClaudeCodeSettings,
     instance: &ClaudeCodeInstance,
 ) -> Result<ClaudeCodeIdentity> {
+    let instance = &settings::with_account_token(instance.clone()).await?;
     let mut command = tokio::process::Command::new(settings.resolved_binary());
     command
         .args(settings::build_probe_argv(&settings.setting_sources))
@@ -208,6 +209,9 @@ type ModelCatalogCache = Vec<(ClaudeCodeInstance, Instant, Vec<String>)>;
 /// Claude via the local Claude Code CLI.
 pub struct ClaudeCodeProvider {
     settings: Arc<RwLock<ClaudeCodeSettings>>,
+    /// Follow `[provider.claude_code]` in config.toml (accounts toggled in
+    /// `/accounts` take effect without a restart). Off for explicit settings.
+    live: bool,
     model: Arc<RwLock<String>>,
     effort: Arc<RwLock<Option<String>>>,
     pin: AccountPinSlot,
@@ -242,7 +246,10 @@ fn write<T>(lock: &RwLock<T>, value: T) {
 impl ClaudeCodeProvider {
     /// Provider configured from `[provider.claude_code]`.
     pub fn new() -> Self {
-        Self::with_settings(jcode_base::config::config().provider.claude_code.clone())
+        Self {
+            live: true,
+            ..Self::with_settings(jcode_base::config::config().provider.claude_code.clone())
+        }
     }
 
     /// Provider with explicit settings (tests, embedding).
@@ -257,6 +264,7 @@ impl ClaudeCodeProvider {
         let (result_tx, result_rx) = mpsc::channel(64);
         Self {
             settings: Arc::new(RwLock::new(settings)),
+            live: false,
             model: Arc::new(RwLock::new(default_model)),
             effort: Arc::new(RwLock::new(None)),
             pin: AccountPinSlot::default(),
@@ -274,6 +282,9 @@ impl ClaudeCodeProvider {
     }
 
     fn settings(&self) -> ClaudeCodeSettings {
+        if self.live {
+            return jcode_base::config::config().provider.claude_code.clone();
+        }
         read(&self.settings)
     }
 
@@ -440,7 +451,8 @@ impl ClaudeCodeProvider {
         resume_hint: Option<&str>,
         append_system_prompt: &str,
     ) -> Result<Arc<ChildHandle>> {
-        let instance = self.active_instance();
+        let plain_instance = self.active_instance();
+        let instance = settings::with_account_token(plain_instance.clone()).await?;
         let model = settings::normalize_model_id(&read(&self.model));
         let effort = read(&self.effort);
         let expose_mcp = self.expose_mcp(tools);
@@ -459,16 +471,16 @@ impl ClaudeCodeProvider {
 
         if let Some(child) = state.child.take() {
             let launch = &child.launch;
-            let same_home = launch.instance.resolved_home() == instance.resolved_home()
-                && launch.instance.env == instance.env
-                && launch.instance.launch_args == instance.launch_args;
+            let same_home = settings::same_account(&launch.instance, &instance);
+            // A refreshed account token needs a new child, resuming the session.
+            let same_token = launch.instance.env == instance.env;
             let same_shape = launch.spec.expose_mcp == expose_mcp
                 && launch.spec.permission_mode == permission_mode
                 && launch.spec.host_file_tools == host_file_tools
                 && launch.spec.effort == effort
                 && launch.cwd == cwd
                 && launch.append_system_prompt == append_system_prompt;
-            let mut reusable = child.is_alive() && same_home && same_shape;
+            let mut reusable = child.is_alive() && same_home && same_token && same_shape;
             if reusable && child.model() != model {
                 let request = serde_json::json!({"subtype": "set_model", "model": model});
                 match child.control(request, Duration::from_secs(15)).await {
@@ -555,7 +567,7 @@ impl ClaudeCodeProvider {
             }
         };
         let info = child.init.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        self.cache_models(&instance, info.model_ids());
+        self.cache_models(&plain_instance, info.model_ids());
         self.pin.set_resolved_label(Some(instance.id.clone()));
         state.resume_id = Some(child.session_id().to_string());
         state.child = Some(child.clone());
@@ -568,6 +580,7 @@ impl ClaudeCodeProvider {
         let (result_tx, result_rx) = mpsc::channel(64);
         Self {
             settings: Arc::new(RwLock::new(self.settings())),
+            live: self.live,
             model: Arc::new(RwLock::new(read(&self.model))),
             effort: Arc::new(RwLock::new(read(&self.effort))),
             pin: self.pin.fork(),
@@ -843,6 +856,7 @@ impl ClaudeCodeProvider {
     fn fork_shared(&self) -> Self {
         Self {
             settings: self.settings.clone(),
+            live: self.live,
             model: self.model.clone(),
             effort: self.effort.clone(),
             pin: self.pin.clone(),
