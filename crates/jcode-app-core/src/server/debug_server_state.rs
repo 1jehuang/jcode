@@ -21,64 +21,9 @@ const MEMORY_CRITICAL_GROWTH_BYTES: u64 = 1024 * 1024 * 1024;
 const MEMORY_WARNING_LIVE_SESSIONS: usize = 128;
 const MEMORY_CRITICAL_LIVE_SESSIONS: usize = 512;
 
-#[derive(Default)]
-struct CompactionMemoryTotals {
-    summary_text_bytes: u64,
-    encrypted_content_bytes: u64,
-    retained_payload_capacity_bytes: u64,
-    persisted_metadata_payload_capacity_bytes: u64,
-    sessions: Vec<serde_json::Value>,
-}
-
-impl CompactionMemoryTotals {
-    fn observe(&mut self, session_id: &str, profile: &serde_json::Value) {
-        let compaction = &profile["compaction"];
-        let bytes = |field: &str| compaction[field].as_u64().unwrap_or(0);
-        let summary = bytes("summary_text_bytes");
-        let encrypted = bytes("encrypted_content_bytes");
-        let retained = bytes("retained_payload_capacity_bytes");
-        let metadata = bytes("persisted_metadata_payload_capacity_bytes");
-        self.summary_text_bytes = self.summary_text_bytes.saturating_add(summary);
-        self.encrypted_content_bytes = self.encrypted_content_bytes.saturating_add(encrypted);
-        self.retained_payload_capacity_bytes = self
-            .retained_payload_capacity_bytes
-            .saturating_add(retained);
-        self.persisted_metadata_payload_capacity_bytes = self
-            .persisted_metadata_payload_capacity_bytes
-            .saturating_add(metadata);
-        self.sessions.push(serde_json::json!({
-            "session_id": session_id,
-            "summary_text_bytes": summary,
-            "encrypted_content_bytes": encrypted,
-            "retained_payload_capacity_bytes": retained,
-            "persisted_metadata_payload_capacity_bytes": metadata,
-            "total_retained_payload_capacity_bytes": retained.saturating_add(metadata),
-        }));
-    }
-
-    fn into_json(mut self) -> serde_json::Value {
-        self.sessions.sort_by(|left, right| {
-            right["total_retained_payload_capacity_bytes"]
-                .as_u64()
-                .cmp(&left["total_retained_payload_capacity_bytes"].as_u64())
-                .then_with(|| {
-                    left["session_id"]
-                        .as_str()
-                        .cmp(&right["session_id"].as_str())
-                })
-        });
-        self.sessions.truncate(12);
-        serde_json::json!({
-            "summary_text_bytes": self.summary_text_bytes,
-            "encrypted_content_bytes": self.encrypted_content_bytes,
-            "retained_payload_capacity_bytes": self.retained_payload_capacity_bytes,
-            "persisted_metadata_payload_capacity_bytes": self.persisted_metadata_payload_capacity_bytes,
-            "total_retained_payload_capacity_bytes": self.retained_payload_capacity_bytes
-                .saturating_add(self.persisted_metadata_payload_capacity_bytes),
-            "top_by_retained_payload_capacity_bytes": self.sessions,
-        })
-    }
-}
+#[path = "debug_server_compaction.rs"]
+mod compaction;
+use compaction::CompactionMemoryTotals;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MemoryIncidentDecision {
@@ -1256,9 +1201,11 @@ fn estimate_swarm_event_bytes(event: &SwarmEvent) -> usize {
     }
 
     let mut count = ByteCount(0);
-    std::fmt::write(&mut count, format_args!("{event:?}"))
-        .expect("formatting a SwarmEvent into a byte counter cannot fail");
-    count.0
+    // A partial rendering is not comparable to a full event. Fall back to its inline size.
+    match std::fmt::write(&mut count, format_args!("{event:?}")) {
+        Ok(()) => count.0,
+        Err(_) => std::mem::size_of_val(event),
+    }
 }
 
 fn path_len(path: &std::path::Path) -> usize {

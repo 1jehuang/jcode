@@ -40,22 +40,34 @@ fn find(
     session_of: impl Fn(u32) -> Option<String>,
 ) -> Option<JarvisTarget> {
     let mut best: Option<(SystemTime, JarvisTarget)> = None;
-    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                jcode_base::logging::debug(&format!(
+                    "cannot scan Jarvis status {}: {error}",
+                    dir.display()
+                ));
+            }
+            return None;
+        }
+    };
+    for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
             continue;
         }
-        let Some(pid) = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .and_then(|stem| stem.parse::<u32>().ok())
-        else {
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let Ok(pid) = stem.parse::<u32>() else {
             continue;
         };
         let Ok(modified) = entry.metadata().and_then(|meta| meta.modified()) else {
             continue;
         };
-        if now.duration_since(modified).unwrap_or_default() > FRESH {
+        // Future timestamps are treated as fresh after a clock adjustment.
+        if now.duration_since(modified).is_ok_and(|age| age > FRESH) {
             continue;
         }
         if best.as_ref().is_some_and(|(at, _)| *at >= modified) || !alive(pid) {
