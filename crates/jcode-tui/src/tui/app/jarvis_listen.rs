@@ -7,6 +7,28 @@ use jcode_voice::continuous::{ContinuousConfig, ContinuousEvent, ContinuousRecor
 use serde_json::json;
 use std::collections::VecDeque;
 
+/// Audible cue that speech reached Jarvis (gate or Fn tap). Fire and forget.
+fn play_trigger_sound() {
+    let sound = crate::config::config().jarvis.listening.trigger_sound.clone();
+    if sound.is_empty() || !std::path::Path::new(&sound).is_file() {
+        return;
+    }
+    std::thread::spawn(move || {
+        for player in ["pw-play", "paplay"] {
+            if std::process::Command::new(player)
+                .arg(&sound)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok()
+            {
+                return;
+            }
+        }
+    });
+}
+
 fn envelope_trigger(text: &str) -> Option<String> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -433,6 +455,7 @@ impl App {
                         if !paused && !listener.failed && !speech_busy && !external_capture =>
                     {
                         listener.triggered_at = Some(Instant::now());
+                        play_trigger_sound();
                         listener.queue_request(text);
                         changed = true;
                     }

@@ -1063,6 +1063,8 @@ pub struct JarvisListeningConfig {
     pub max_classifications_per_hour: u32,
     pub max_agent_turns_per_hour: u32,
     pub action_probability: f64,
+    /// Sound played when speech triggers Jarvis. Empty string disables it.
+    pub trigger_sound: String,
 }
 
 impl Default for JarvisListeningConfig {
@@ -1072,6 +1074,7 @@ impl Default for JarvisListeningConfig {
             max_classifications_per_hour: 120,
             max_agent_turns_per_hour: 20,
             action_probability: 0.97,
+            trigger_sound: "/usr/share/sounds/freedesktop/stereo/message-new-instant.oga".into(),
         }
     }
 }
