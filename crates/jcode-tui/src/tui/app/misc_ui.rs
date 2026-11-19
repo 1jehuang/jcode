@@ -458,6 +458,9 @@ impl App {
     }
 
     pub(super) fn compute_streaming_tps(&self) -> Option<f32> {
+        if !crate::config::config().display.show_tps {
+            return None;
+        }
         let elapsed_secs = self.streaming.streaming_tps_observed_elapsed.as_secs_f32();
         let total_tokens = self.streaming.streaming_tps_observed_output_tokens;
         if elapsed_secs > 0.1 && total_tokens > 0 {

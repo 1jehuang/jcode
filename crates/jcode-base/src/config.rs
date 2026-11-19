@@ -21,7 +21,17 @@ use std::path::PathBuf;
 use std::sync::{LazyLock, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
-const CONFIG_CACHE_CHECK_INTERVAL: Duration = if cfg!(test) {
+/// How often `config()` re-fingerprints the config file and env overrides.
+///
+/// In any test build (this crate's own tests, or a downstream crate's test
+/// binary compiling us with `test-support`), every call re-checks. Parallel
+/// tests share one config cache: a test that scopes `JCODE_HOME` under
+/// `lock_test_env` invalidates the cache, and a 500ms throttle would let a
+/// lock-free sibling's `config()` call fast-path the victim into a config
+/// loaded from a different home (observed as a stolen `show_tps` footer).
+/// Re-checking every call keeps the cache honest as soon as the env lock
+/// serializes the next mutation.
+const CONFIG_CACHE_CHECK_INTERVAL: Duration = if cfg!(any(test, feature = "test-support")) {
     Duration::ZERO
 } else {
     Duration::from_millis(500)
