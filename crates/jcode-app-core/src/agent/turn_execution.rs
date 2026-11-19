@@ -737,6 +737,18 @@ impl Agent {
             .map(|names| names.iter().cloned().collect());
         let allowed = enabled.as_ref().or(self.allowed_tools.as_ref());
         let mut tools = self.registry.definitions(allowed).await;
+        if sdk
+            .as_ref()
+            .is_some_and(|config| self.is_jarvis_root(config))
+            && let Some(swarm) = tools.iter_mut().find(|tool| tool.name == "swarm")
+        {
+            // Replace only the stock policy. Preserve a user's swarm-prompt.md
+            // and let the SDK overlay below retain any custom tool definition.
+            swarm.description = swarm.description.replace(
+                crate::prompt::DEFAULT_SWARM_PROMPT.trim(),
+                "Follow Jarvis root coordination. Delegate substantive execution, including single-lane work. Worker-owned todo lanes launch automatically, so do not spawn another worker for the same lane.",
+            );
+        }
         if enabled.is_none() && !self.disabled_tools.is_empty() {
             tools.retain(|tool| {
                 !self
