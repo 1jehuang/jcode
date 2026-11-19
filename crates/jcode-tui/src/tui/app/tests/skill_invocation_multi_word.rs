@@ -16,11 +16,19 @@ fn skill_invocation_matches_a_multi_word_skill_name() {
     app.submit_input();
 
     assert_eq!(app.active_skill.as_deref(), Some("My Custom Skill"));
-    let last = app.display_messages().last().expect("activation message");
+    // A bare /skill now submits a turn (placeholder prompt) so the skill body
+    // is injected on the next run_turn_interactive; the activation message is
+    // therefore no longer the *last* display message (a user message is
+    // appended after it). Assert the activation message exists and never shows
+    // an error, rather than that it is the last message.
+    let activation = app
+        .display_messages()
+        .iter()
+        .find(|m| m.content.contains("Activated skill: My Custom Skill"))
+        .expect("activation message");
+    assert!(activation.content.contains("Activated skill: My Custom Skill"));
     assert!(
-        last.content.contains("Activated skill: My Custom Skill"),
-        "{}",
-        last.content
+        !app.display_messages().iter().any(|m| m.content.contains("Unknown skill")),
+        "no display message should report an unknown skill"
     );
-    assert!(!last.content.contains("Unknown skill"), "{}", last.content);
 }
