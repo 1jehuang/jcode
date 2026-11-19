@@ -1065,6 +1065,9 @@ pub struct JarvisListeningConfig {
     pub action_probability: f64,
     /// Sound played when speech triggers Jarvis. Empty string disables it.
     pub trigger_sound: String,
+    /// Keep one idle Nari connection ready so speech onset skips the handshake.
+    /// It carries no audio while idle.
+    pub warm_nari: bool,
 }
 
 impl Default for JarvisListeningConfig {
@@ -1075,6 +1078,7 @@ impl Default for JarvisListeningConfig {
             max_agent_turns_per_hour: 20,
             action_probability: 0.97,
             trigger_sound: "/usr/share/sounds/freedesktop/stereo/message-new-instant.oga".into(),
+            warm_nari: false,
         }
     }
 }

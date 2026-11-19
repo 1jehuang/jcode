@@ -141,6 +141,7 @@ session_picker_enter = "current-terminal"
 # max_agent_turns_per_hour = 20
 # action_probability = 0.97  # 0.5..1; Fn tap sends recent speech without the gate
 # trigger_sound = "/usr/share/sounds/freedesktop/stereo/message-new-instant.oga"  # "" = silent
+# warm_nari = false  # keep one idle Nari connection ready (no audio sent while idle)
 
 [dictation]
 # External speech-to-text command.

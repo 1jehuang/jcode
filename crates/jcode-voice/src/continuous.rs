@@ -25,6 +25,9 @@ pub struct ContinuousConfig {
     pub max_classifications_per_hour: u32,
     /// Minimum typed Jev probability for accepting a directed request (0.5..=1).
     pub action_probability: f64,
+    /// Keep one idle Nari session connected so speech onset skips the handshake.
+    /// Idle sessions carry no audio. Audio is still sent only for detected speech.
+    pub warm_nari: bool,
     #[cfg(test)]
     bypass_external_guards: bool,
 }
@@ -35,6 +38,7 @@ impl Default for ContinuousConfig {
             max_audio_seconds_per_hour: 600,
             max_classifications_per_hour: 120,
             action_probability: 0.95,
+            warm_nari: false,
             #[cfg(test)]
             bypass_external_guards: false,
         }
@@ -436,13 +440,35 @@ impl Drop for ContinuousRecording {
 struct Segmenter {
     pending: VecDeque<i16>,
     pre: VecDeque<i16>,
-    speech: Vec<i16>,
+    speech_len: usize,
     voiced: usize,
     quiet: usize,
     active: bool,
 }
+/// Streaming segmentation events, so transcription can start while the user speaks.
+#[derive(Debug, PartialEq)]
+enum Seg {
+    /// Speech onset, carrying the pre-roll and the voiced onset audio.
+    Start(Vec<i16>),
+    /// More audio inside the current utterance (silence tail included).
+    Audio(Vec<i16>),
+    /// End of utterance after the trailing silence or the length cap.
+    End,
+}
 impl Segmenter {
+    #[cfg(test)]
     fn push(&mut self, input: &[i16]) -> Vec<Vec<i16>> {
+        let mut output = Vec::new();
+        let mut current = Vec::new();
+        for event in self.push_stream(input) {
+            match event {
+                Seg::Start(audio) | Seg::Audio(audio) => current.extend(audio),
+                Seg::End => output.push(std::mem::take(&mut current)),
+            }
+        }
+        output
+    }
+    fn push_stream(&mut self, input: &[i16]) -> Vec<Seg> {
         let mut output = Vec::new();
         for &sample in input {
             self.pending.push_back(sample);
@@ -459,14 +485,21 @@ impl Segmenter {
                 self.voiced = if voice { self.voiced + 320 } else { 0 };
                 if self.voiced >= 2880 {
                     self.active = true;
-                    self.speech.extend(self.pre.drain(..));
+                    let onset: Vec<i16> = self.pre.drain(..).collect();
+                    self.speech_len = onset.len();
+                    output.push(Seg::Start(onset));
                     self.quiet = 0;
                 }
             } else {
-                self.speech.extend(frame);
+                self.speech_len += frame.len();
+                match output.last_mut() {
+                    Some(Seg::Audio(audio)) => audio.extend(frame),
+                    _ => output.push(Seg::Audio(frame)),
+                }
                 self.quiet = if voice { 0 } else { self.quiet + 320 };
-                if self.quiet >= 11200 || self.speech.len() >= 320000 {
-                    output.push(std::mem::take(&mut self.speech));
+                if self.quiet >= 11200 || self.speech_len >= 320000 {
+                    output.push(Seg::End);
+                    self.speech_len = 0;
                     self.active = false;
                     self.voiced = 0;
                     self.quiet = 0;
@@ -597,6 +630,12 @@ impl Budget {
         self.0.push_back((now, samples));
         true
     }
+    /// Charges audio streamed after the onset reservation.
+    fn extend(&mut self, samples: usize) {
+        if let Some((_, n)) = self.0.back_mut() {
+            *n += samples;
+        }
+    }
 }
 
 fn gate_answer(response: &serde_json::Value, threshold: f64) -> Result<(f64, bool), VoiceError> {
@@ -648,6 +687,71 @@ async fn open_capture(
     .await
     .map_err(|_| VoiceError::CaptureFailed)?
 }
+/// Nari is opened at speech onset (never for silence) and audio streams while
+/// the user speaks, so the transcript is nearly final when the endpoint fires.
+async fn stream_job(
+    warm: Option<tokio::task::JoinHandle<Result<NariSession, VoiceError>>>,
+    key: String,
+    rx: tokio::sync::mpsc::UnboundedReceiver<Vec<i16>>,
+    cancel: Arc<AtomicBool>,
+) -> Result<String, VoiceError> {
+    let job = async {
+        let session = match warm {
+            Some(handle) => match handle.await {
+                Ok(Ok(session)) => session,
+                _ => NariSession::connect(&key, cancel.clone()).await?,
+            },
+            None => NariSession::connect(&key, cancel.clone()).await?,
+        };
+        super::timing::mark("nari session ready for utterance");
+        let (tx, nari_rx) = crate::nari_pcm_channel();
+        let mut rx = rx;
+        let forward = async move {
+            while let Some(chunk) = rx.recv().await {
+                for part in chunk.chunks(crate::NARI_PCM_CHUNK_SAMPLES) {
+                    if tx.send(part.to_vec()).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        };
+        let (_, result) = tokio::join!(forward, session.run(nari_rx, |_| {}));
+        result
+    };
+    tokio::select! {
+        biased;
+        _ = crate::nari::cancelled(&cancel) => Err(VoiceError::Cancelled),
+        result = job => result,
+    }
+}
+/// Idle warm sessions are recycled before the provider could drop them.
+const WARM_MAX_IDLE: Duration = Duration::from_secs(50);
+struct Warm {
+    handle: Option<tokio::task::JoinHandle<Result<NariSession, VoiceError>>>,
+    since: Instant,
+}
+impl Warm {
+    fn spawn(key: &str) -> Self {
+        let key = key.to_string();
+        Self {
+            handle: Some(tokio::spawn(async move {
+                NariSession::connect(&key, Arc::new(AtomicBool::new(false))).await
+            })),
+            since: Instant::now(),
+        }
+    }
+    fn take(mut self) -> Option<tokio::task::JoinHandle<Result<NariSession, VoiceError>>> {
+        self.handle.take()
+    }
+}
+impl Drop for Warm {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+#[cfg(test)]
 async fn transcribe(
     key: String,
     samples: Vec<i16>,
@@ -682,13 +786,16 @@ async fn run(
     let mut segmenter = Segmenter::default();
     let mut generation = epoch.load(Ordering::SeqCst);
     let mut resume_at = Instant::now();
-    let mut pending = VecDeque::new();
     let mut next_id = 0u64;
-    let mut job: Option<(
+    let mut jobs: VecDeque<(
         tokio::task::JoinHandle<Result<Option<ClassifiedCaption>, VoiceError>>,
         Arc<AtomicBool>,
         u64,
-    )> = None;
+    )> = VecDeque::new();
+    // Audio sink of the utterance currently streaming to Nari.
+    let mut live: Option<tokio::sync::mpsc::UnboundedSender<Vec<i16>>> = None;
+    let mut warm: Option<Warm> = None;
+    let mut warm_retry_at = Instant::now();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     // Each device lease rotates before the push-to-talk five-minute safety cap.
     let mut budget = Budget::default();
@@ -730,8 +837,8 @@ async fn run(
                     last_audio = Instant::now();
                     let next = epoch.load(Ordering::SeqCst);
                     if next != generation {
-                        generation = next; segmenter = Segmenter::default(); pending.clear();
-                        if let Some((handle,token,_)) = job.take() { token.store(true,Ordering::SeqCst); handle.abort(); }
+                        generation = next; segmenter = Segmenter::default(); live = None;
+                        for (handle,token,_) in jobs.drain(..) { token.store(true,Ordering::SeqCst); handle.abort(); }
                         // Drain stale capture buffers and allow loudspeaker decay after TTS.
                         resume_at = Instant::now() + Duration::from_millis(500);
                     }
@@ -739,9 +846,60 @@ async fn run(
                         level.store(0,Ordering::Relaxed); continue;
                     }
                     level.store(rms(&chunk).to_bits(),Ordering::Relaxed);
-                    for utterance in segmenter.push(&chunk) {
-                        if pending.len() < 2 { pending.push_back(utterance); }
-                        // Drop excess utterances, never build an unbounded upload backlog.
+                    for seg in segmenter.push_stream(&chunk) {
+                        match seg {
+                            Seg::Start(audio) => {
+                                live = None;
+                                // Bounded: drop speech rather than build an upload backlog.
+                                if jobs.len() >= 2 { continue; }
+                                if !budget.reserve(Instant::now(), audio.len(), &config) {
+                                    budget_limited = true;
+                                    emit(&events, ContinuousEvent::State(VoiceState::BudgetLimited));
+                                    continue;
+                                }
+                                budget_limited = false;
+                                super::timing::begin();
+                                super::timing::mark("speech onset");
+                                next_id += 1;
+                                let id = next_id;
+                                let token = Arc::new(AtomicBool::new(false));
+                                let gate = gate.clone();
+                                let threshold = config.action_probability;
+                                let require_jev = config.require_jev;
+                                let key = key.clone();
+                                let child = token.clone();
+                                let warm_session = warm.take().and_then(Warm::take);
+                                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                                let _ = tx.send(audio);
+                                live = Some(tx);
+                                let (events, epoch, paused, suppressed, stopped) = (events.clone(), epoch.clone(), paused.clone(), suppressed.clone(), cancel.clone());
+                                jobs.push_back((tokio::spawn(async move {
+                                    let text = stream_job(warm_session, key, rx, child).await?;
+                                    super::timing::mark("final transcript");
+                                    if text.trim().is_empty() { return Ok(None); }
+                                    let state = {
+                                        let mut output = events.lock().unwrap_or_else(|e|e.into_inner());
+                                        if stopped.load(Ordering::SeqCst) || generation != epoch.load(Ordering::SeqCst) || paused.load(Ordering::SeqCst) || suppressed.load(Ordering::SeqCst) { return Ok(None); }
+                                        output.push(ContinuousEvent::Caption { id, text: text.trim().chars().take(256).collect() });
+                                        output.context.inflight = Some((id, text.chars().take(1024).collect()));
+                                        output.context.state(&text,require_jev)
+                                    };
+                                    let gate = gate.as_ref().ok_or(VoiceError::NotConfigured)?;
+                                    let score = semantic_gate(gate,&text,threshold,state).await?;
+                                    super::timing::mark("gate decided");
+                                    Ok(Some(ClassifiedCaption { id, text, score }))
+                                }),token,generation));
+                            }
+                            Seg::Audio(audio) => {
+                                if let Some(tx) = &live {
+                                    budget.extend(audio.len());
+                                    if tx.send(audio).is_err() { live = None; }
+                                }
+                            }
+                            Seg::End => {
+                                if live.take().is_some() { super::timing::release(); }
+                            }
+                        }
                     }
                 },
                 _ = tick.tick() => {
@@ -755,13 +913,26 @@ async fn run(
                         out.context = GateContext::default();
                         out.queue.retain(|event| !matches!(event, ContinuousEvent::Caption { .. } | ContinuousEvent::CaptionScore { .. } | ContinuousEvent::Transcript(_) | ContinuousEvent::Rejected(_)));
                         drop(out);
-                        pending.clear();
-                        if let Some((handle,token,_)) = job.take() { token.store(true,Ordering::SeqCst); handle.abort(); }
+                        live = None; warm = None;
+                        for (handle,token,_) in jobs.drain(..) { token.store(true,Ordering::SeqCst); handle.abort(); }
                         break Ok(());
                     }
                     if Instant::now().duration_since(last_audio) > Duration::from_secs(5) { break Err(VoiceError::CaptureFailed); }
-                    if job.as_ref().is_some_and(|(h,_,_)|h.is_finished()) {
-                        let (handle,_,job_generation) = job.take().unwrap();
+                    // Warm spare: connected but idle, it carries no audio until speech onset.
+                    if config.warm_nari && live.is_none() && jobs.is_empty() {
+                        // Recycle before idle timeouts. A failed or dropped spare falls
+                        // back to a cold connect at onset, so staleness costs speed only.
+                        if warm.as_ref().is_some_and(|w| w.since.elapsed() >= WARM_MAX_IDLE) {
+                            warm = None;
+                        }
+                        if warm.is_none() && Instant::now() >= warm_retry_at {
+                            warm = Some(Warm::spawn(&key));
+                            warm_retry_at = Instant::now() + Duration::from_secs(5);
+                        }
+                    }
+                    let mut failed = None;
+                    while failed.is_none() && jobs.front().is_some_and(|(h,_,_)|h.is_finished()) {
+                        let (handle,_,job_generation) = jobs.pop_front().unwrap();
                         let result = handle.await.map_err(|_|VoiceError::CaptureFailed)?;
                         if !cancel.load(Ordering::SeqCst) && job_generation == epoch.load(Ordering::SeqCst) && !suppressed.load(Ordering::SeqCst) && !paused.load(Ordering::SeqCst) {
                             match result {
@@ -772,47 +943,15 @@ async fn run(
                                     }
                                 },
                                 Ok(None) => {},
-                                Err(error) => break Err(error), // No automatic network/auth retry loop.
+                                Err(error) => failed = Some(error), // No automatic network/auth retry loop.
                             }
                         }
                     }
-                    if job.is_none() && !suppressed.load(Ordering::SeqCst) && generation == epoch.load(Ordering::SeqCst) {
-                        if let Some(samples) = pending.pop_front() {
-                            if !budget.reserve(Instant::now(), samples.len(), &config) {
-                                budget_limited = true;
-                                emit(&events, ContinuousEvent::State(VoiceState::BudgetLimited));
-                                continue;
-                            }
-                            budget_limited = false;
-                            next_id += 1;
-                            let id = next_id;
-                            let token = Arc::new(AtomicBool::new(false));
-                            let gate = gate.clone();
-                            let threshold = config.action_probability;
-                            let require_jev = config.require_jev;
-                            let key = key.clone();
-                            let child = token.clone();
-                            let (events, epoch, paused, suppressed, stopped) = (events.clone(), epoch.clone(), paused.clone(), suppressed.clone(), cancel.clone());
-                            job = Some((tokio::spawn(async move {
-                                let text = transcribe(key,samples,child).await?;
-                                if text.trim().is_empty() { return Ok(None); }
-                                let state = {
-                                    let mut output = events.lock().unwrap_or_else(|e|e.into_inner());
-                                    if stopped.load(Ordering::SeqCst) || generation != epoch.load(Ordering::SeqCst) || paused.load(Ordering::SeqCst) || suppressed.load(Ordering::SeqCst) { return Ok(None); }
-                                    output.push(ContinuousEvent::Caption { id, text: text.trim().chars().take(256).collect() });
-                                    output.context.inflight = Some((id, text.chars().take(1024).collect()));
-                                    output.context.state(&text,require_jev)
-                                };
-                                let gate = gate.as_ref().ok_or(VoiceError::NotConfigured)?;
-                                let score = semantic_gate(gate,&text,threshold,state).await?;
-                                Ok(Some(ClassifiedCaption { id, text, score }))
-                            }),token,generation));
-                        }
-                    }
+                    if let Some(error) = failed { break Err(error); }
                     let state = if suppressed.load(Ordering::SeqCst) { VoiceState::Suppressed }
                         else if budget_limited { VoiceState::BudgetLimited }
                         else if segmenter.active { VoiceState::Speaking }
-                        else if job.is_some() { VoiceState::Transcribing } else { VoiceState::Listening };
+                        else if !jobs.is_empty() { VoiceState::Transcribing } else { VoiceState::Listening };
                     emit(&events,ContinuousEvent::State(state));
                     emit(&events,ContinuousEvent::Level(if state == VoiceState::Suppressed { 0.0 } else { f32::from_bits(level.load(Ordering::Relaxed)) }));
                 },
@@ -823,8 +962,11 @@ async fn run(
             .await
             .map_err(|_| VoiceError::CaptureFailed)?;
         capturing.store(false, Ordering::SeqCst);
+        // Closing the sink commits whatever was said before the device restart.
+        live = None;
         if result.is_err() || capture.is_err() {
-            if let Some((handle, token, _)) = job.take() {
+            warm = None;
+            for (handle, token, _) in jobs.drain(..) {
                 token.store(true, Ordering::SeqCst);
                 handle.abort();
             }
@@ -1253,6 +1395,146 @@ mod tests {
             ctx.remember_at(&i.to_string(), now);
         }
         assert_eq!((ctx.background.len(), ctx.heard.len()), (16, 16));
+    }
+    #[test]
+    #[ignore = "Live latency probe: JCODE_TEST_CONTINUOUS_PCM raw 16 kHz s16le, uses Nari and Jev accounts"]
+    fn live_latency_profile() {
+        let pcm = std::fs::read(std::env::var("JCODE_TEST_CONTINUOUS_PCM").unwrap()).unwrap();
+        let samples: Vec<i16> = pcm
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        let key = crate::nari_api_key().unwrap();
+        let gate = jcode_base::jev::JevClient::for_voice().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            for round in 0..3 {
+                let cancel = Arc::new(AtomicBool::new(false));
+                let t0 = Instant::now();
+                let session = NariSession::connect(&key, cancel).await.unwrap();
+                let connected = t0.elapsed();
+                let (tx, rx) = crate::nari_pcm_channel();
+                let chunks: Vec<Vec<i16>> = samples
+                    .chunks(crate::NARI_PCM_CHUNK_SAMPLES)
+                    .map(<[i16]>::to_vec)
+                    .collect();
+                let send = async move {
+                    for chunk in chunks {
+                        let _ = tx.send(chunk).await;
+                    }
+                };
+                let t1 = Instant::now();
+                let (_, text) = tokio::join!(send, session.run(rx, |_| {}));
+                let text = text.unwrap();
+                let transcribed = t1.elapsed();
+                let mut ctx = GateContext::default();
+                ctx.chat.push(("assistant".into(), "Hi.".into()));
+                let state = ctx.state(&text, false);
+                let t2 = Instant::now();
+                let score = semantic_gate(&gate, &text, 0.5, state).await.unwrap();
+                let gated = t2.elapsed();
+                eprintln!(
+                    "round {round}: nari connect {:>4} ms, transcribe {:>4} ms, gate {:>4} ms, score {score:?}",
+                    connected.as_millis(),
+                    transcribed.as_millis(),
+                    gated.as_millis()
+                );
+            }
+        });
+    }
+    #[test]
+    #[ignore = "Live probe: does an idle Nari session survive and stay fast? Uses Nari account"]
+    fn live_nari_idle_probe() {
+        let pcm = std::fs::read(std::env::var("JCODE_TEST_CONTINUOUS_PCM").unwrap()).unwrap();
+        let samples: Vec<i16> = pcm
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        let key = crate::nari_api_key().unwrap();
+        let idle: Vec<u64> = std::env::var("JCODE_TEST_NARI_IDLE")
+            .unwrap_or_else(|_| "0,30,120".into())
+            .split(',')
+            .map(|s| s.parse().unwrap())
+            .collect();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            for secs in &idle {
+                let session = NariSession::connect(&key, Arc::new(AtomicBool::new(false)))
+                    .await
+                    .unwrap();
+                tokio::time::sleep(Duration::from_secs(*secs)).await;
+                let (tx, rx) = crate::nari_pcm_channel();
+                let chunks: Vec<Vec<i16>> = samples
+                    .chunks(crate::NARI_PCM_CHUNK_SAMPLES)
+                    .map(<[i16]>::to_vec)
+                    .collect();
+                let send = async move {
+                    for chunk in chunks {
+                        let _ = tx.send(chunk).await;
+                    }
+                };
+                let t = Instant::now();
+                let (_, text) = tokio::join!(send, session.run(rx, |_| {}));
+                eprintln!(
+                    "idle {secs:>4} s: {:>4} ms {:?}",
+                    t.elapsed().as_millis(),
+                    text.map(|t| t.chars().take(40).collect::<String>())
+                );
+            }
+        });
+    }
+    /// Real-time paced end-to-end latency: speech end to accepted request.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "Live latency e2e: JCODE_TEST_CONTINUOUS_PCM, Nari/Jev accounts, no real microphone"]
+    fn live_e2e_latency() {
+        let fixture = std::env::var("JCODE_TEST_CONTINUOUS_PCM").unwrap();
+        let rounds: usize = std::env::var("JCODE_TEST_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+        let warm = std::env::var("JCODE_TEST_WARM").map_or(true, |v| v != "0");
+        let marker = std::env::temp_dir().join(format!("jcode-e2e-{}", std::process::id()));
+        let key = crate::nari_api_key().unwrap();
+        // Pace 100 ms chunks in real time, stamp the speech end, then feed silence.
+        // Each round waits idle first so the warm spare (if enabled) is connected.
+        let script = format!(
+            "rounds={rounds}; f=\"{fixture}\"; n=$(( $(stat -c%s \"$f\") / 3200 )); \
+             idle() {{ i=0; while [ $i -lt $1 ]; do dd if=/dev/zero bs=3200 count=1 2>/dev/null; sleep 0.1; i=$((i+1)); done; }}; \
+             r=0; while [ $r -lt $rounds ]; do idle 40; i=0; while [ $i -lt $n ]; do dd if=\"$f\" bs=3200 skip=$i count=1 2>/dev/null; sleep 0.1; i=$((i+1)); done; \
+             date +%s%N >> {m}; idle 60; r=$((r+1)); done; while :; do idle 10; done",
+            m = marker.display()
+        );
+        let _ = std::fs::remove_file(&marker);
+        let recording = ContinuousRecording::start_auto(
+            Arc::new(AtomicBool::new(false)),
+            &key,
+            &script,
+            ContinuousConfig { action_probability: 0.5, warm_nari: warm, ..Default::default() },
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20 * rounds as u64 + 20);
+        let mut seen = Vec::new();
+        while Instant::now() < deadline && seen.len() < rounds {
+            while let Some(event) = recording.try_event() {
+                match event {
+                    ContinuousEvent::Transcript(_) => {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_nanos() as i128;
+                        let ends = std::fs::read_to_string(&marker).unwrap_or_default();
+                        let end: i128 = ends.lines().last().unwrap().trim().parse().unwrap();
+                        let ms = (now - end) / 1_000_000;
+                        eprintln!("warm={warm} round {}: speech end -> accepted request {ms} ms", seen.len());
+                        seen.push(ms);
+                    }
+                    ContinuousEvent::Error(error) => panic!("pipeline failed: {error}"),
+                    _ => {}
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        recording.stop();
+        let _ = std::fs::remove_file(&marker);
+        assert_eq!(seen.len(), rounds);
     }
     #[test]
     fn bounded_events() {
