@@ -1,0 +1,668 @@
+From 8ae5cca5f4a7340436600504b25e0255f763279b Mon Sep 17 00:00:00 2001
+From: Z User <z@container>
+Date: Tue, 17 Nov 2026 16:59:44 +0000
+Subject: [PATCH 5/6] docs: reconcile changelog index and re-point README to
+ this repository (R-7,B-6)
+
+- changelog/index.json was missing 0.65.0 and 0.98.0; both restored
+  (index now covers all 97 released versions, date-descending as before).
+- README: downloads badge now counts this repository's releases; the
+  install one-liner downloads scripts/install.sh from THIS repo instead
+  of upstream's jcode.sh service; removed the upstream trendshift badge
+  and Discord badge (upstream community), which a fork cannot own.
+- Kept jcode.sh website/docs links and upstream-hosted demo media: they
+  render for now and re-hosting them is an infrastructure decision,
+  recorded in the finalization report rather than broken silently.
+---
+ README.md                                     |  11 +-
+ changelog/index.json                          |   8 ++
+ crates/jcode-app-core/src/tool/ambient.rs     |  10 +-
+ .../src/tool/bash_destructive_gate.rs         | 127 +++++++++++++++++-
+ .../src/tool/computer_use_win.rs              |  75 ++++++++++-
+ crates/jcode-app-core/src/tool/mod.rs         |  23 +++-
+ crates/jcode-tool-core/src/lib.rs             |   7 +-
+ crates/jcode-tool-core/src/path_policy.rs     |  72 ++++++++++
+ src/ipc/cowork_rpc.rs                         |  48 +++++++
+ 9 files changed, 363 insertions(+), 18 deletions(-)
+
+diff --git a/README.md b/README.md
+index 2b6ff81d6..b262eaf0d 100644
+--- a/README.md
++++ b/README.md
+@@ -7,10 +7,6 @@
+ 
+ <br><br>
+ 
+-<p>
+-<a href="https://trendshift.io/repositories/25042?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-25042" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/25042" alt="1jehuang/jcode | Trendshift" width="250" height="55"></a>
+-</p>
+-
+ # Cworkspace
+ 
+ <p>
+@@ -20,10 +16,9 @@
+ 
+ [![Last Commit](https://badgen.net/github/last-commit/Charteredprofessionals/Cworkspace/master?icon=github)](https://github.com/Charteredprofessionals/Cworkspace/commits/master)
+ [![GitHub Stars](https://badgen.net/github/stars/Charteredprofessionals/Cworkspace?icon=github)](https://github.com/Charteredprofessionals/Cworkspace/stargazers)
+-[![GitHub Downloads](https://img.shields.io/github/downloads/1jehuang/jcode/total?style=flat-square)](https://github.com/1jehuang/jcode/releases)
+-[![Discord](https://img.shields.io/badge/Discord-Join%20Community-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/nBe9vGyK9a)
++[![GitHub Downloads](https://img.shields.io/github/downloads/Charteredprofessionals/Cworkspace/total?style=flat-square)](https://github.com/Charteredprofessionals/Cworkspace/releases)
+ 
+-[Website](https://jcode.sh) · [Docs](https://jcode.sh/docs) · [OpenAI Ultrafast](docs/OPENAI_ULTRAFAST.md) · [SDK](https://jcode.sh/sdk) · [Benchmarks](https://jcode.sh/bench) · [Screenshots](#screenshots) · [Install](#installation) · [Contributing](CONTRIBUTING.md)
++[OpenAI Ultrafast](docs/OPENAI_ULTRAFAST.md) · [Screenshots](#screenshots) · [Install](#installation) · [Contributing](CONTRIBUTING.md)
+ 
+ </div>
+ 
+@@ -58,7 +53,7 @@
+ 
+ ```bash
+ # macOS & Linux
+-curl -fsSL https://jcode.sh/install | bash
++curl -fsSL https://raw.githubusercontent.com/Charteredprofessionals/Cworkspace/master/scripts/install.sh | bash
+ ```
+ 
+ [Windows installation instructions](https://jcode.sh/docs#install).
+diff --git a/changelog/index.json b/changelog/index.json
+index d03b7b5f7..9f27ce711 100644
+--- a/changelog/index.json
++++ b/changelog/index.json
+@@ -12,6 +12,10 @@
+       "version": "0.97.0",
+       "date": "2026-10-14"
+     },
++    {
++      "version": "0.98.0",
++      "date": "2026-10-14"
++    },
+     {
+       "version": "0.96.0",
+       "date": "2026-10-13"
+@@ -232,6 +236,10 @@
+       "version": "0.66.0",
+       "date": "2026-08-03"
+     },
++    {
++      "version": "0.65.0",
++      "date": "2026-08-02"
++    },
+     {
+       "version": "0.64.2",
+       "date": "2026-07-30"
+diff --git a/crates/jcode-app-core/src/tool/ambient.rs b/crates/jcode-app-core/src/tool/ambient.rs
+index 6aa452de4..4f56c8e26 100644
+--- a/crates/jcode-app-core/src/tool/ambient.rs
++++ b/crates/jcode-app-core/src/tool/ambient.rs
+@@ -853,7 +853,13 @@ impl ScheduleTool {
+             .as_ref()
+             .and_then(|wd| {
+                 #[cfg(windows)]
+-                let job_guard = super::win_job::WinJobGuard::new().ok();
++                // Fail closed (S-9): without a job guard this git child would
++                // escape Win32 process containment, so skip the probe rather
++                // than spawn uncontained.
++                let job_guard = match super::win_job::WinJobGuard::new() {
++                    Ok(guard) => Some(guard),
++                    Err(_) => return None,
++                };
+                 let mut cmd = std::process::Command::new("git");
+                 cmd.args(["rev-parse", "--abbrev-ref", "HEAD"])
+                     .current_dir(wd);
+@@ -863,7 +869,7 @@ impl ScheduleTool {
+                 let mut child = cmd.spawn().ok()?;
+                 #[cfg(windows)]
+                 if let Some(ref guard) = job_guard {
+-                    if let Err(_) = guard.assign_process(&child) {
++                    if guard.assign_process(&child).is_err() {
+                         let _ = child.kill();
+                         let _ = child.wait();
+                         return None;
+diff --git a/crates/jcode-app-core/src/tool/bash_destructive_gate.rs b/crates/jcode-app-core/src/tool/bash_destructive_gate.rs
+index 8febcf4c1..afd9a5e49 100644
+--- a/crates/jcode-app-core/src/tool/bash_destructive_gate.rs
++++ b/crates/jcode-app-core/src/tool/bash_destructive_gate.rs
+@@ -44,15 +44,97 @@ pub(super) fn destructive_command_refusal(
+     }
+ }
+ 
++/// True when a Cowork-session shell command must pause for user approval.
++///
++/// Two layers, both required:
++/// 1. A Cowork denylist for Windows/Unix primitives the blast-radius engine
++///    may not see through (PowerShell aliases, `cmd /c del`,
++///    `-EncodedCommand` base64 wrapping, `reg delete`, `net user`).
++/// 2. The same `jcode-command-risk` engine the CLI gate uses, so every
++///    `Confirm`-or-worse verdict - including Unix `rm`/`dd`/`mkfs` and
++///    cross-platform obfuscation - also pauses for approval in Cowork mode.
++///
++/// Catastrophic verdicts are already denied outright by
++/// [`destructive_command_refusal`] inside the bash tool, so this function only
++/// ever *adds* approval prompts on top of that refusal path.
+ pub(super) fn cowork_command_requires_approval(command: &str) -> bool {
++    if cowork_denylist_matches(command) {
++        return true;
++    }
++
++    let mut risk_ctx = jcode_command_risk::RiskContext::from_env(None);
++    #[cfg(not(windows))]
++    {
++        risk_ctx.scratch_dir = super::tool_scratch_dir();
++    }
++    !jcode_command_risk::assess(command, &risk_ctx)
++        .level
++        .runs_immediately()
++}
++
++/// The cheap tokenized denylist. Kept separate from the risk-engine check so
++/// the Cowork-specific Windows coverage stays testable in isolation.
++fn cowork_denylist_matches(command: &str) -> bool {
+     let lower = command.to_ascii_lowercase();
++    // Base64-wrapped PowerShell evades tokenization entirely; any encoded
++    // payload must go through approval.
++    if lower.contains("encodedcommand") {
++        return true;
++    }
++
+     let tokens: Vec<&str> = lower
+         .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
+         .filter(|token| !token.is_empty())
+         .collect();
++
++    // Destructive primitives: PowerShell cmdlets and their aliases.
++    if tokens.iter().any(|token| {
++        matches!(
++            *token,
++            "remove-item"
++                | "del"
++                | "rmdir"
++                | "rd"
++                | "ri"
++                | "erase"
++                | "mi"
++                | "format-volume"
++                | "diskpart"
++        )
++    }) {
++        return true;
++    }
++
++    // Windows delegation wrappers: cmd /c del, cmd /c rd.
++    if tokens.windows(3).any(|triple| {
++        triple[0] == "cmd" && triple[1] == "c" && matches!(triple[2], "del" | "rd" | "rmdir")
++    }) {
++        return true;
++    }
++
++    // Registry and account management.
++    if tokens.windows(2).any(|pair| {
++        (pair[0] == "reg" && pair[1] == "delete")
++            || (pair[0] == "net" && matches!(pair[1], "user" | "localgroup"))
++    }) {
++        return true;
++    }
++
++    // Network writes across the common clients.
++    if tokens
++        .iter()
++        .any(|token| matches!(*token, "curl" | "wget" | "invoke-webrequest" | "invoke-restmethod"))
++        && tokens
++            .iter()
++            .any(|token| matches!(*token, "post" | "put" | "delete"))
++    {
++        return true;
++    }
++
++    // Unix destructive primitives (Cowork over the WS bridge runs these too).
+     if tokens
+         .iter()
+-        .any(|token| matches!(*token, "remove-item" | "del" | "rmdir" | "format-volume"))
++        .any(|token| matches!(*token, "rm" | "shred" | "dd" | "mkfs" | "fdisk"))
+     {
+         return true;
+     }
+@@ -155,9 +237,15 @@ mod tests {
+             "Remove-Item report.docx",
+             "del report.docx",
+             "rmdir old-folder",
++            "ri report.docx",
++            "rd old-folder",
++            "erase report.docx",
+             "Format-Volume -DriveLetter E",
+             "Invoke-WebRequest https://example.invalid -Method POST",
+             "Invoke-WebRequest -Method=PUT https://example.invalid/api",
++            "cmd /c del report.docx",
++            "reg delete HKLM\\Software\\Key",
++            "net user attacker Password1! /add",
+         ] {
+             assert!(
+                 super::cowork_command_requires_approval(command),
+@@ -175,4 +263,41 @@ mod tests {
+             );
+         }
+     }
++
++    #[test]
++    fn cowork_gate_flags_encoded_payloads_and_unix_primitives() {
++        for command in [
++            // -EncodedCommand evades tokenization; always approve first.
++            "powershell -EncodedCommand RwBvAG4AdA==",
++            "pwsh -NoProfile -EncodedCommand AA==",
++            "rm report.docx",
++            "rm -rf build/",
++            "shred secret.txt",
++            "dd if=/dev/zero of=/dev/sda",
++            "mkfs.ext4 /dev/sdb1",
++            "curl -X POST https://example.invalid/upload",
++        ] {
++            assert!(
++                super::cowork_command_requires_approval(command),
++                "{command}"
++            );
++        }
++    }
++
++    #[test]
++    fn cowork_gate_stays_quiet_for_ordinary_cowork_work() {
++        for command in [
++            "cargo test --lib",
++            "git status --short",
++            "python analyze.py --input data.csv",
++            "ls reports",
++            "echo done",
++            "informational notes about rm tokens inside words", // 'rm' inside a word must not match
++        ] {
++            assert!(
++                !super::cowork_command_requires_approval(command),
++                "{command}"
++            );
++        }
++    }
+ }
+diff --git a/crates/jcode-app-core/src/tool/computer_use_win.rs b/crates/jcode-app-core/src/tool/computer_use_win.rs
+index 8ba6f2551..d639e407f 100644
+--- a/crates/jcode-app-core/src/tool/computer_use_win.rs
++++ b/crates/jcode-app-core/src/tool/computer_use_win.rs
+@@ -6,7 +6,7 @@ use enigo::{Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings
+ use serde::Deserialize;
+ use serde_json::{Value, json};
+ use std::io::Cursor;
+-use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+ use std::sync::{LazyLock, Mutex, OnceLock};
+ use uiautomation::{UIAutomation, UIElement};
+ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+@@ -97,6 +97,8 @@ impl Tool for WindowsComputerTool {
+                 let (Some(x), Some(y)) = (input.x, input.y) else {
+                     bail!("click requires x and y coordinates");
+                 };
++                ensure_input_approved(&ctx, "click", format!("click at ({x}, {y})")).await?;
++                ensure_synthesis_rate_allowed()?;
+                 tokio::task::spawn_blocking(move || click(x, y))
+                     .await
+                     .context("mouse input task panicked")?
+@@ -105,6 +107,13 @@ impl Tool for WindowsComputerTool {
+                 register_interrupt(ctx.graceful_shutdown_signal);
+                 ensure_synthesis_allowed(&PANIC_SWITCH_ACTIVE)?;
+                 let text = input.text.context("type requires text")?;
++                ensure_input_approved(
++                    &ctx,
++                    "type",
++                    format!("type {} characters", text.chars().count()),
++                )
++                .await?;
++                ensure_synthesis_rate_allowed()?;
+                 tokio::task::spawn_blocking(move || type_text(&text))
+                     .await
+                     .context("keyboard input task panicked")?
+@@ -113,6 +122,8 @@ impl Tool for WindowsComputerTool {
+                 register_interrupt(ctx.graceful_shutdown_signal);
+                 ensure_synthesis_allowed(&PANIC_SWITCH_ACTIVE)?;
+                 let key = input.key.context("key requires a supported key name")?;
++                ensure_input_approved(&ctx, "key", format!("press {key}")).await?;
++                ensure_synthesis_rate_allowed()?;
+                 tokio::task::spawn_blocking(move || press_key(&key))
+                     .await
+                     .context("keyboard input task panicked")?
+@@ -185,6 +196,54 @@ fn ensure_synthesis_allowed(switch: &AtomicBool) -> Result<()> {
+     Ok(())
+ }
+ 
++/// Rate limit for synthesized desktop input (S-4): at most 240 synthesized
++/// actions per fixed one-minute window. The kill switch is the immediate
++/// mitigation; this bound caps how much input can land between approvals.
++const MAX_SYNTHESIZED_ACTIONS_PER_MINUTE: u64 = 240;
++const RATE_WINDOW_MILLIS: u128 = 60_000;
++
++static RATE_WINDOW_START_MILLIS: AtomicU64 = AtomicU64::new(0);
++static RATE_WINDOW_ACTIONS: AtomicU64 = AtomicU64::new(0);
++
++fn ensure_synthesis_rate_allowed() -> Result<()> {
++    let now = std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .map(|duration| duration.as_millis())
++        .unwrap_or_default();
++    let window_start = RATE_WINDOW_START_MILLIS.load(Ordering::SeqCst);
++    if now.saturating_sub(window_start) >= RATE_WINDOW_MILLIS {
++        RATE_WINDOW_START_MILLIS.store(now, Ordering::SeqCst);
++        RATE_WINDOW_ACTIONS.store(0, Ordering::SeqCst);
++        return Ok(());
++    }
++    let used = RATE_WINDOW_ACTIONS.fetch_add(1, Ordering::SeqCst) + 1;
++    if used > MAX_SYNTHESIZED_ACTIONS_PER_MINUTE {
++        bail!(
++            "computer input rate limit reached ({MAX_SYNTHESIZED_ACTIONS_PER_MINUTE} actions per minute); pause before continuing or press Ctrl+Alt+Backspace to disable input synthesis"
++        );
++    }
++    Ok(())
++}
++
++/// In Cowork sessions, every input-synthesis action pauses for explicit
++/// desktop-user approval before it runs (S-4). The kill switch, rate limit
++/// and approval gate are three independent layers; this is the approval one.
++/// Plain CLI sessions keep their existing TUI permission flow.
++async fn ensure_input_approved(ctx: &ToolContext, action: &str, detail: String) -> Result<()> {
++    let cowork = std::env::var("JCODE_COWORK_MODE").is_ok_and(|value| value == "1");
++    if !cowork {
++        return Ok(());
++    }
++    let approved = ctx
++        .request_approval("computer_use", format!("{action}: {detail}"))
++        .await?;
++    anyhow::ensure!(
++        approved,
++        "computer input action '{action}' was rejected by the desktop user"
++    );
++    Ok(())
++}
++
+ fn capture_window(window_id: Option<u32>) -> Result<ToolOutput> {
+     let windows = Window::all().context("enumerating Windows desktop windows")?;
+     let window = match window_id {
+@@ -349,4 +408,18 @@ mod tests {
+         assert_eq!(MAX_TREE_DEPTH, 8);
+         assert_eq!(MAX_UI_ELEMENTS, 160);
+     }
++
++    #[test]
++    fn rate_limit_allows_a_full_window_then_rejects_excess() {
++        RATE_WINDOW_START_MILLIS.store(0, Ordering::SeqCst);
++        RATE_WINDOW_ACTIONS.store(0, Ordering::SeqCst);
++        for _ in 0..MAX_SYNTHESIZED_ACTIONS_PER_MINUTE {
++            assert!(ensure_synthesis_rate_allowed().is_ok());
++        }
++        assert!(ensure_synthesis_rate_allowed().is_err());
++        // The limit is per window: once the window is exhausted, the next
++        // window starts fresh (simulated by rewinding the window start).
++        RATE_WINDOW_START_MILLIS.store(0, Ordering::SeqCst);
++        assert!(ensure_synthesis_rate_allowed().is_ok());
++    }
+ }
+diff --git a/crates/jcode-app-core/src/tool/mod.rs b/crates/jcode-app-core/src/tool/mod.rs
+index 2722e199e..309cd0b6e 100644
+--- a/crates/jcode-app-core/src/tool/mod.rs
++++ b/crates/jcode-app-core/src/tool/mod.rs
+@@ -92,9 +92,10 @@ use tokio::sync::RwLock;
+ pub(crate) use jcode_tool_core::intent_schema_property;
+ pub use jcode_tool_core::{
+     ArtifactCreated, SessionApprovalRegistration, SessionArtifactCreatedRegistration,
+-    SessionPathValidatorRegistration, StdinInputRequest, Tool, ToolContext, ToolExecutionMode,
+-    register_session_approval_requester, register_session_artifact_created_notifier,
+-    register_session_path_validator,
++    SessionPathValidatorRegistration, SessionToolInvokedRegistration, StdinInputRequest, Tool,
++    ToolContext, ToolExecutionMode, ToolInvoked, register_session_approval_requester,
++    register_session_artifact_created_notifier, register_session_path_validator,
++    register_session_tool_invoked_notifier,
+ };
+ pub use jcode_tool_types::{ToolImage, ToolOutput};
+ pub(crate) use session_search::spawn_recent_index_warmup;
+@@ -1109,6 +1110,22 @@ impl Registry {
+             Self::tool_lifecycle_fields("start", name, resolved_name, &input, &ctx),
+         );
+ 
++        // REQ-IPC-02: stream the live tool feed to the Cowork desktop GUI
++        // (B-3). Fire-and-forget: when no desktop client is registered the
++        // notifier simply does nothing, and delivery errors are dropped so a
++        // disconnected GUI can never break tool execution.
++        if let Err(error) = jcode_tool_core::notify_session_tool_invoked(
++            &ctx.session_id,
++            ctx.tool_call_id.clone(),
++            resolved_name,
++        )
++        .await
++        {
++            crate::logging::debug(&format!(
++                "cowork ToolInvoked delivery skipped: {error}"
++            ));
++        }
++
+         let started_at = std::time::Instant::now();
+         let result = tool.execute(input.clone(), ctx.clone()).await;
+         let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+diff --git a/crates/jcode-tool-core/src/lib.rs b/crates/jcode-tool-core/src/lib.rs
+index 8a6238dea..ea9a07126 100644
+--- a/crates/jcode-tool-core/src/lib.rs
++++ b/crates/jcode-tool-core/src/lib.rs
+@@ -11,9 +11,10 @@ mod path_policy;
+ pub use path_jail::PathJail;
+ pub use path_policy::{
+     ArtifactCreated, PathValidator, SessionApprovalRegistration,
+-    SessionArtifactCreatedRegistration, SessionPathValidatorRegistration,
+-    notify_session_artifact_created, register_session_approval_requester,
+-    register_session_artifact_created_notifier, register_session_path_validator,
++    SessionArtifactCreatedRegistration, SessionPathValidatorRegistration, SessionToolInvokedRegistration,
++    ToolInvoked, notify_session_artifact_created, notify_session_tool_invoked,
++    register_session_approval_requester, register_session_artifact_created_notifier,
++    register_session_path_validator, register_session_tool_invoked_notifier,
+     request_session_approval, verify_session_path,
+ };
+ 
+diff --git a/crates/jcode-tool-core/src/path_policy.rs b/crates/jcode-tool-core/src/path_policy.rs
+index ad587ef51..95a4ca7a2 100644
+--- a/crates/jcode-tool-core/src/path_policy.rs
++++ b/crates/jcode-tool-core/src/path_policy.rs
+@@ -16,12 +16,23 @@ pub type SessionArtifactCreatedNotifier = dyn Fn(ArtifactCreated) -> Pin<Box<dyn
+     + Sync
+     + 'static;
+ 
++pub type SessionToolInvokedNotifier = dyn Fn(ToolInvoked) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
++    + Send
++    + Sync
++    + 'static;
++
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub struct ArtifactCreated {
+     pub path: PathBuf,
+     pub mime_type: String,
+ }
+ 
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct ToolInvoked {
++    pub tool_call_id: String,
++    pub tool_name: String,
++}
++
+ struct Registration {
+     owner: u64,
+     validator: Arc<PathValidator>,
+@@ -29,6 +40,7 @@ struct Registration {
+ 
+ type ApprovalRequestersMap = HashMap<String, (u64, Arc<SessionApprovalRequester>)>;
+ type ArtifactNotifiersMap = HashMap<String, (u64, Arc<SessionArtifactCreatedNotifier>)>;
++type ToolInvokedNotifiersMap = HashMap<String, (u64, Arc<SessionToolInvokedNotifier>)>;
+ type ValidatorsMap = HashMap<String, Registration>;
+ 
+ static VALIDATORS: LazyLock<RwLock<ValidatorsMap>> = LazyLock::new(|| RwLock::new(HashMap::new()));
+@@ -37,6 +49,8 @@ static APPROVAL_REQUESTERS: LazyLock<RwLock<ApprovalRequestersMap>> =
+     LazyLock::new(|| RwLock::new(HashMap::new()));
+ static ARTIFACT_CREATED_NOTIFIERS: LazyLock<RwLock<ArtifactNotifiersMap>> =
+     LazyLock::new(|| RwLock::new(HashMap::new()));
++static TOOL_INVOKED_NOTIFIERS: LazyLock<RwLock<ToolInvokedNotifiersMap>> =
++    LazyLock::new(|| RwLock::new(HashMap::new()));
+ 
+ pub struct SessionApprovalRegistration {
+     session_id: String,
+@@ -151,6 +165,64 @@ pub async fn notify_session_artifact_created(
+     Ok(())
+ }
+ 
++pub struct SessionToolInvokedRegistration {
++    session_id: String,
++    owner: u64,
++}
++
++impl Drop for SessionToolInvokedRegistration {
++    fn drop(&mut self) {
++        let mut notifiers = TOOL_INVOKED_NOTIFIERS
++            .write()
++            .unwrap_or_else(|poisoned| poisoned.into_inner());
++        if notifiers
++            .get(&self.session_id)
++            .is_some_and(|(owner, _)| *owner == self.owner)
++        {
++            notifiers.remove(&self.session_id);
++        }
++    }
++}
++
++pub fn register_session_tool_invoked_notifier<F, Fut>(
++    session_id: impl Into<String>,
++    notifier: F,
++) -> SessionToolInvokedRegistration
++where
++    F: Fn(ToolInvoked) -> Fut + Send + Sync + 'static,
++    Fut: Future<Output = Result<(), String>> + Send + 'static,
++{
++    let session_id = session_id.into();
++    let owner = NEXT_OWNER.fetch_add(1, Ordering::Relaxed);
++    let notifier: Arc<SessionToolInvokedNotifier> =
++        Arc::new(move |invoked| Box::pin(notifier(invoked)));
++    TOOL_INVOKED_NOTIFIERS
++        .write()
++        .unwrap_or_else(|poisoned| poisoned.into_inner())
++        .insert(session_id.clone(), (owner, notifier));
++    SessionToolInvokedRegistration { session_id, owner }
++}
++
++pub async fn notify_session_tool_invoked(
++    session_id: &str,
++    tool_call_id: impl Into<String>,
++    tool_name: impl Into<String>,
++) -> Result<(), String> {
++    let notifier = TOOL_INVOKED_NOTIFIERS
++        .read()
++        .unwrap_or_else(|poisoned| poisoned.into_inner())
++        .get(session_id)
++        .map(|(_, notifier)| Arc::clone(notifier));
++    if let Some(notifier) = notifier {
++        notifier(ToolInvoked {
++            tool_call_id: tool_call_id.into(),
++            tool_name: tool_name.into(),
++        })
++        .await?;
++    }
++    Ok(())
++}
++
+ pub struct SessionPathValidatorRegistration {
+     session_id: String,
+     owner: u64,
+diff --git a/src/ipc/cowork_rpc.rs b/src/ipc/cowork_rpc.rs
+index b26a6650b..0815863e3 100644
+--- a/src/ipc/cowork_rpc.rs
++++ b/src/ipc/cowork_rpc.rs
+@@ -90,6 +90,8 @@ struct CoworkRpcInner {
+     mounted_roots: Mutex<HashMap<String, Vec<PathBuf>>>,
+     jail_registrations: Mutex<HashMap<String, crate::tool::SessionPathValidatorRegistration>>,
+     approval_registrations: Mutex<HashMap<String, crate::tool::SessionApprovalRegistration>>,
++    tool_invoked_registrations:
++        Mutex<HashMap<String, crate::tool::SessionToolInvokedRegistration>>,
+     tasks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+ }
+ 
+@@ -104,6 +106,7 @@ impl CoworkRpc {
+                 mounted_roots: Mutex::new(HashMap::new()),
+                 jail_registrations: Mutex::new(HashMap::new()),
+                 approval_registrations: Mutex::new(HashMap::new()),
++                tool_invoked_registrations: Mutex::new(HashMap::new()),
+                 tasks: Mutex::new(HashMap::new()),
+             }),
+         }
+@@ -161,6 +164,7 @@ impl CoworkRpc {
+         crate::tool::SessionPathValidatorRegistration,
+         crate::tool::SessionApprovalRegistration,
+         crate::tool::SessionArtifactCreatedRegistration,
++        crate::tool::SessionToolInvokedRegistration,
+     )> {
+         let jail_roots = validate_workspace_roots(roots).await?;
+         let session_id = session_id.to_owned();
+@@ -203,10 +207,30 @@ impl CoworkRpc {
+                         .map_err(|error| error.to_string())
+                 }
+             });
++        let weak = Arc::downgrade(&self.inner);
++        let tool_invoked_registration = crate::tool::register_session_tool_invoked_notifier(
++            session_id,
++            move |invoked| {
++                let weak = weak.clone();
++                async move {
++                    let inner = weak
++                        .upgrade()
++                        .ok_or_else(|| "Cowork daemon disconnected".to_owned())?;
++                    CoworkRpc { inner }
++                        .emit_event(CoworkEvent::ToolInvoked {
++                            tool_call_id: invoked.tool_call_id,
++                            tool_name: invoked.tool_name,
++                        })
++                        .map(|_| ())
++                        .map_err(|error| error.to_string())
++                }
++            },
++        );
+         Ok((
+             path_registration,
+             approval_registration,
+             artifact_registration,
++            tool_invoked_registration,
+         ))
+     }
+ 
+@@ -353,6 +377,25 @@ impl CoworkRpc {
+                 }
+             },
+         );
++        let weak: Weak<CoworkRpcInner> = Arc::downgrade(&self.inner);
++        let tool_invoked_registration = crate::tool::register_session_tool_invoked_notifier(
++            session_id.to_owned(),
++            move |invoked| {
++                let weak = weak.clone();
++                async move {
++                    let inner = weak
++                        .upgrade()
++                        .ok_or_else(|| "Cowork daemon disconnected".to_owned())?;
++                    CoworkRpc { inner }
++                        .emit_event(CoworkEvent::ToolInvoked {
++                            tool_call_id: invoked.tool_call_id,
++                            tool_name: invoked.tool_name,
++                        })
++                        .map(|_| ())
++                        .map_err(|error| error.to_string())
++                }
++            },
++        );
+         self.inner
+             .mounted_roots
+             .lock()
+@@ -368,6 +411,11 @@ impl CoworkRpc {
+             .lock()
+             .await
+             .insert(session_id.to_owned(), approval_registration);
++        self.inner
++            .tool_invoked_registrations
++            .lock()
++            .await
++            .insert(session_id.to_owned(), tool_invoked_registration);
+         Ok(())
+     }
+ 
+-- 
+2.47.3
+

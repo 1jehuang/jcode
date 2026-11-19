@@ -1,0 +1,667 @@
+From 30bb753e6149e812f1c4c6da6b936471cc3428de Mon Sep 17 00:00:00 2001
+From: Z User <z@container>
+Date: Tue, 17 Nov 2026 16:47:50 +0000
+Subject: [PATCH 4/6] security(ipc): authenticate Cowork daemon clients with a
+ capability token (S-1,S-2,S-7,S-10)
+
+The named-pipe / WebSocket daemon served every method - including
+approve_tool_call - to any same-user local process, and broadcast pending
+approval IDs to every connected client, letting a rogue process drive the
+agent and self-approve destructive actions.
+
+- Daemon now generates a 256-bit capability token at startup and writes it
+  to a 0600 owner-only file in the user temp dir BEFORE the pipe accepts
+  its first client. The desktop GUI reads the token and sends
+  auth: { token } with every request; RpcConnection::open fails fast when
+  the token is missing.
+- Every JSON-RPC method (including ping and notifications) requires the
+  token, verified with a constant-time comparison; failures return
+  -32001 before any handler runs.
+- CoworkEvent stream is only forwarded to connections that have
+  authenticated at least once, so approval IDs are never disclosed to
+  unauthenticated listeners.
+- S-7: named-pipe lines are read with a bounded reader (1 MiB cap,
+  incremental fill - oversized lines fail fast instead of buffering) and
+  the WebSocket fallback caps message/frame sizes at the same limit.
+- S-10: pipe instances now set reject_remote_clients(true).
+- New tests: unauthorized rejection (missing + wrong token, no task
+  started), bounded reader oversized/partial-EOF behavior, token
+  uniqueness/shape; existing RPC tests updated for the auth field.
+
+Residual risks documented in the finalization report: a process running
+as the same user that can read the token file is trusted (Windows pipe
+ACLs would tighten this further); the GUI crate cannot be compiled in the
+audit sandbox (webkit2gtk/Windows-only) and is review-verified.
+---
+ Cargo.lock               |   1 +
+ Cargo.toml               |   2 +
+ gui/src-tauri/src/lib.rs |  28 ++++
+ src/cli/selfdev_tests.rs |   1 +
+ src/ipc/cowork_rpc.rs    | 335 +++++++++++++++++++++++++++++++++++----
+ 5 files changed, 333 insertions(+), 34 deletions(-)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index ba47955ee..095f41194 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -3739,6 +3739,7 @@ dependencies = [
+  "objc2-foundation",
+  "objc2-user-notifications",
+  "open",
++ "rand 0.9.3",
+  "ratatui",
+  "reqwest 0.12.28",
+  "rustls",
+diff --git a/Cargo.toml b/Cargo.toml
+index 3173d3570..95500fbbb 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -169,6 +169,8 @@ chrono = { version = "0.4", features = ["serde"] }
+ # OAuth
+ sha2 = "0.10"
+ hex = "0.4"
++# Cryptographically secure capability token for the Cowork IPC daemon (S-1).
++rand = "0.9"
+ open = "5"               # Open URLs in browser
+ jcode-tui-style = { path = "crates/jcode-tui-style" }
+ jcode-tui-session-picker = { path = "crates/jcode-tui-session-picker", features = ["serde"] }
+diff --git a/gui/src-tauri/src/lib.rs b/gui/src-tauri/src/lib.rs
+index 54dba1f00..49ee7d6d4 100644
+--- a/gui/src-tauri/src/lib.rs
++++ b/gui/src-tauri/src/lib.rs
+@@ -15,6 +15,11 @@ use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
+ use uuid::Uuid;
+ 
+ const PIPE_NAME: &str = r"\\.\pipe\jcode-cowork";
++/// Must stay in sync with `src/ipc/cowork_rpc.rs` (`token_file_path`): the
++/// daemon publishes a 256-bit capability token here before accepting pipe
++/// clients, and every RPC request must carry it or the daemon rejects the
++/// call as unauthorized.
++const TOKEN_FILE_NAME: &str = "jcode-cowork-ipc.token";
+ const KNOWN_EVENTS: [&str; 5] = [
+     "AgentSpawned",
+     "ToolInvoked",
+@@ -23,6 +28,25 @@ const KNOWN_EVENTS: [&str; 5] = [
+     "TaskCompleted",
+ ];
+ 
++fn read_capability_token() -> Result<String, String> {
++    let path = std::env::temp_dir().join(TOKEN_FILE_NAME);
++    fs::read_to_string(&path)
++        .map(|token| token.trim().to_owned())
++        .map_err(|error| {
++            format!(
++                "Cowork capability token not found at {}: {error}. Is the daemon running?",
++                path.display()
++            )
++        })
++        .and_then(|token| {
++            if token.is_empty() {
++                Err("Cowork capability token file is empty".to_owned())
++            } else {
++                Ok(token)
++            }
++        })
++}
++
+ struct Bridge {
+     connection: Mutex<Option<Arc<RpcConnection>>>,
+     child: Mutex<Option<Child>>,
+@@ -65,6 +89,7 @@ impl Default for Bridge {
+ 
+ struct RpcConnection {
+     writer: Mutex<Option<File>>,
++    auth_token: String,
+     pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>>,
+     next_id: AtomicU64,
+     alive: AtomicBool,
+@@ -84,10 +109,12 @@ impl RpcConnection {
+     }
+ 
+     fn open(app: AppHandle) -> Result<Arc<Self>, String> {
++        let auth_token = read_capability_token()?;
+         let pipe = open_named_pipe()?;
+         let reader = pipe.try_clone().map_err(|error| error.to_string())?;
+         let connection = Arc::new(Self {
+             writer: Mutex::new(Some(pipe)),
++            auth_token,
+             pending: Arc::new(Mutex::new(HashMap::new())),
+             next_id: AtomicU64::new(1),
+             alive: AtomicBool::new(true),
+@@ -150,6 +177,7 @@ impl RpcConnection {
+             "id": id,
+             "method": method,
+             "params": params,
++            "auth": { "token": self.auth_token },
+         });
+         let write_result = (|| {
+             let mut writer = self
+diff --git a/src/cli/selfdev_tests.rs b/src/cli/selfdev_tests.rs
+index 6b588ba38..e17b207bb 100644
+--- a/src/cli/selfdev_tests.rs
++++ b/src/cli/selfdev_tests.rs
+@@ -191,6 +191,7 @@ async fn test_selfdev_session_and_registry() {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: tool::ToolExecutionMode::Direct,
++        require_validator: false,
+     };
+     let result = registry
+         .execute("selfdev", serde_json::json!({"action": "status"}), ctx)
+diff --git a/src/ipc/cowork_rpc.rs b/src/ipc/cowork_rpc.rs
+index d7211ade5..b26a6650b 100644
+--- a/src/ipc/cowork_rpc.rs
++++ b/src/ipc/cowork_rpc.rs
+@@ -11,6 +11,40 @@ use tokio::sync::{Mutex, broadcast, oneshot};
+ 
+ pub const PIPE_NAME: &str = r"\\.\pipe\jcode-cowork";
+ 
++/// Maximum accepted JSON-RPC message size (S-7): a connected client must not
++/// be able to exhaust daemon memory with a single oversized line or frame.
++pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
++
++/// Local file holding the daemon's capability token. The desktop GUI reads it
++/// and authenticates every request. Without a valid token the daemon serves no
++/// method and delivers no event, so a same-user local process cannot drive the
++/// agent or self-approve its own actions (S-1).
++pub const TOKEN_FILE_NAME: &str = "jcode-cowork-ipc.token";
++
++pub fn token_file_path() -> PathBuf {
++    std::env::temp_dir().join(TOKEN_FILE_NAME)
++}
++
++/// 256-bit capability token (four independent CSPRNG words, hex-encoded).
++fn generate_capability_token() -> String {
++    let a = rand::random::<u64>();
++    let b = rand::random::<u64>();
++    let c = rand::random::<u64>();
++    let d = rand::random::<u64>();
++    format!("{a:016x}{b:016x}{c:016x}{d:016x}")
++}
++
++fn constant_time_eq(a: &str, b: &str) -> bool {
++    let (a, b) = (a.as_bytes(), b.as_bytes());
++    if a.len() != b.len() {
++        return false;
++    }
++    a.iter()
++        .zip(b.iter())
++        .fold(0u8, |diff, (x, y)| diff | (x ^ y))
++        == 0
++}
++
+ static GLOBAL_RPC: OnceLock<CoworkRpc> = OnceLock::new();
+ 
+ pub fn global() -> &'static CoworkRpc {
+@@ -50,6 +84,7 @@ pub struct CoworkRpc {
+ }
+ 
+ struct CoworkRpcInner {
++    auth_token: String,
+     events: broadcast::Sender<CoworkEvent>,
+     approvals: Mutex<HashMap<String, oneshot::Sender<bool>>>,
+     mounted_roots: Mutex<HashMap<String, Vec<PathBuf>>>,
+@@ -63,6 +98,7 @@ impl CoworkRpc {
+         let (events, _) = broadcast::channel(128);
+         Self {
+             inner: Arc::new(CoworkRpcInner {
++                auth_token: generate_capability_token(),
+                 events,
+                 approvals: Mutex::new(HashMap::new()),
+                 mounted_roots: Mutex::new(HashMap::new()),
+@@ -73,6 +109,50 @@ impl CoworkRpc {
+         }
+     }
+ 
++    /// True when the request carries this daemon's capability token. Every
++    /// method requires it (S-1): only token holders may invoke commands or
++    /// resolve approvals, so broadcast approval IDs are harmless - an
++    /// unauthenticated listener can see nothing and do nothing.
++    pub fn authorize(&self, request: &RpcRequest) -> bool {
++        request
++            .auth
++            .as_ref()
++            .is_some_and(|auth| constant_time_eq(&auth.token, &self.inner.auth_token))
++    }
++
++    /// Write the capability token to the local token file so the desktop GUI
++    /// can authenticate. The file is created owner-only (0600 on Unix; the
++    /// Windows per-user temp directory is ACL-protected) and the daemon
++    /// publishes it before the pipe accepts its first client, so a client can
++    /// never see the pipe without the token already being in place.
++    pub async fn publish_capability_token(&self) -> Result<PathBuf> {
++        let path = token_file_path();
++        if let Some(parent) = path.parent() {
++            tokio::fs::create_dir_all(parent).await.with_context(|| {
++                format!("failed to create directory for {}", path.display())
++            })?;
++        }
++        #[cfg(unix)]
++        {
++            let mut file = tokio::fs::OpenOptions::new()
++                .write(true)
++                .create(true)
++                .truncate(true)
++                .mode(0o600)
++                .open(&path)
++                .await
++                .with_context(|| format!("failed to create {}", path.display()))?;
++            tokio::io::AsyncWriteExt::write_all(&mut file, self.inner.auth_token.as_bytes())
++                .await?;
++            tokio::io::AsyncWriteExt::flush(&mut file).await?;
++        }
++        #[cfg(not(unix))]
++        tokio::fs::write(&path, self.inner.auth_token.as_bytes())
++            .await
++            .with_context(|| format!("failed to write {}", path.display()))?;
++        Ok(path)
++    }
++
+     pub async fn register_agent_session(
+         &self,
+         session_id: &str,
+@@ -382,6 +462,11 @@ impl Default for CoworkRpc {
+     }
+ }
+ 
++#[derive(Debug, Deserialize)]
++struct RpcAuth {
++    token: String,
++}
++
+ #[derive(Debug, Deserialize)]
+ struct RpcRequest {
+     jsonrpc: String,
+@@ -390,6 +475,8 @@ struct RpcRequest {
+     method: String,
+     #[serde(default)]
+     params: Value,
++    #[serde(default)]
++    auth: Option<RpcAuth>,
+ }
+ 
+ fn rpc_error(id: Option<Value>, code: i64, message: impl Into<String>) -> Value {
+@@ -405,6 +492,15 @@ async fn dispatch_request(request: RpcRequest, rpc: &CoworkRpc) -> Option<Value>
+     if request.jsonrpc != "2.0" {
+         return id.map(|id| rpc_error(Some(id), -32600, "Invalid Request: jsonrpc must be 2.0"));
+     }
++    // Capability gate (S-1): reject everything - including notifications -
++    // before any method handler runs.
++    if !rpc.authorize(&request) {
++        return Some(rpc_error(
++            id,
++            -32001,
++            "Unauthorized: missing or invalid Cowork capability token",
++        ));
++    }
+     let Some(id) = id else {
+         return None;
+     };
+@@ -494,16 +590,66 @@ async fn dispatch_request(request: RpcRequest, rpc: &CoworkRpc) -> Option<Value>
+     })
+ }
+ 
++/// Read one newline-terminated line, rejecting input beyond
++/// [`MAX_REQUEST_BYTES`] (S-7). Unlike `AsyncBufReadExt::next_line`, the
++/// buffer is filled incrementally so an oversized line fails fast instead of
++/// being fully buffered first.
++async fn read_bounded_line<R>(reader: &mut R) -> std::io::Result<Option<String>>
++where
++    R: tokio::io::AsyncBufRead + Unpin,
++{
++    use tokio::io::AsyncBufReadExt;
++    let mut buf: Vec<u8> = Vec::new();
++    loop {
++        let available = reader.fill_buf().await?;
++        if available.is_empty() {
++            return Ok(if buf.is_empty() {
++                None
++            } else {
++                Some(String::from_utf8_lossy(&buf).into_owned())
++            });
++        }
++        let newline = available.iter().position(|byte| *byte == b'\n');
++        let take = newline.map(|pos| pos + 1).unwrap_or(available.len());
++        if buf.len() + take > MAX_REQUEST_BYTES {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::InvalidData,
++                "request exceeds the Cowork IPC size limit",
++            ));
++        }
++        buf.extend_from_slice(&available[..take]);
++        reader.consume(take);
++        if newline.is_some() {
++            // Match AsyncBufReadExt::next_line semantics: strip the trailing
++            // newline (and a preceding carriage return) from the returned line.
++            if buf.last() == Some(&b'\n') {
++                buf.pop();
++                if buf.last() == Some(&b'\r') {
++                    buf.pop();
++                }
++            }
++            return Ok(Some(String::from_utf8_lossy(&buf).into_owned()));
++        }
++    }
++}
++
+ #[cfg(windows)]
+ pub async fn run_server() -> Result<()> {
+-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
++    use tokio::io::AsyncWriteExt;
+     use tokio::net::windows::named_pipe::ServerOptions;
+ 
+     let rpc = global().clone();
++    let token_path = rpc.publish_capability_token().await?;
++    tracing::info!(
++        "Cowork IPC capability token published at {}",
++        token_path.display()
++    );
+     let mut first_instance = true;
+     loop {
+         let server = ServerOptions::new()
+             .first_pipe_instance(first_instance)
++            // S-10 hardening: refuse pipe connections over the network.
++            .reject_remote_clients(true)
+             .create(PIPE_NAME)
+             .with_context(|| format!("failed to create named pipe {PIPE_NAME}"))?;
+         first_instance = false;
+@@ -515,14 +661,23 @@ pub async fn run_server() -> Result<()> {
+         let client_rpc = rpc.clone();
+         tokio::spawn(async move {
+             let (reader, mut writer) = tokio::io::split(server);
+-            let mut lines = BufReader::new(reader).lines();
++            let mut lines = BufReader::new(reader);
+             let mut events = client_rpc.subscribe();
++            // Events flow only after the connection proves it holds the
++            // capability token, so approval IDs are never broadcast to
++            // unauthenticated listeners (S-1).
++            let mut authorized = false;
+             loop {
+                 tokio::select! {
+-                    line = lines.next_line() => {
++                    line = read_bounded_line(&mut lines) => {
+                         let Ok(Some(line)) = line else { break };
+                         let response = match serde_json::from_str::<RpcRequest>(&line) {
+-                            Ok(request) => dispatch_request(request, &client_rpc).await,
++                            Ok(request) => {
++                                if client_rpc.authorize(&request) {
++                                    authorized = true;
++                                }
++                                dispatch_request(request, &client_rpc).await
++                            }
+                             Err(error) => Some(rpc_error(None, -32700, format!("Parse error: {error}"))),
+                         };
+                         if let Some(response) = response {
+@@ -535,6 +690,9 @@ pub async fn run_server() -> Result<()> {
+                     }
+                     event = events.recv() => {
+                         let Ok(event) = event else { continue };
++                        if !authorized {
++                            continue;
++                        }
+                         let notification = json!({
+                             "jsonrpc": "2.0",
+                             "method": "cowork/event",
+@@ -555,8 +713,9 @@ pub async fn run_server() -> Result<()> {
+ #[cfg(not(windows))]
+ pub async fn run_server() -> Result<()> {
+     use tokio::net::TcpListener;
+-    use tokio_tungstenite::accept_async;
++    use tokio_tungstenite::accept_async_with_config;
+     use tokio_tungstenite::tungstenite::Message;
++    use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+ 
+     const WS_PORT: u16 = 29384;
+     let addr = format!("127.0.0.1:{}", WS_PORT);
+@@ -565,7 +724,21 @@ pub async fn run_server() -> Result<()> {
+         .with_context(|| format!("failed to bind WebSocket server to {}", addr))?;
+ 
+     let rpc = global().clone();
+-    tracing::info!("Cowork WebSocket IPC server listening on ws://{}", addr);
++    let token_path = rpc.publish_capability_token().await?;
++    tracing::info!(
++        "Cowork WebSocket IPC server listening on ws://{}; capability token published at {}",
++        addr,
++        token_path.display()
++    );
++
++    // S-7: cap message and frame sizes so a client cannot exhaust daemon
++    // memory with one oversized frame. The bind is loopback-only; the
++    // capability token below is what actually authorizes each request (S-2).
++    let ws_config = WebSocketConfig {
++        max_message_size: Some(MAX_REQUEST_BYTES),
++        max_frame_size: Some(MAX_REQUEST_BYTES),
++        ..Default::default()
++    };
+ 
+     loop {
+         let (stream, _) = listener
+@@ -575,7 +748,7 @@ pub async fn run_server() -> Result<()> {
+         let client_rpc = rpc.clone();
+ 
+         tokio::spawn(async move {
+-            let ws_stream = match accept_async(stream).await {
++            let ws_stream = match accept_async_with_config(stream, Some(ws_config)).await {
+                 Ok(ws) => ws,
+                 Err(e) => {
+                     tracing::warn!("WebSocket handshake failed: {}", e);
+@@ -585,6 +758,9 @@ pub async fn run_server() -> Result<()> {
+ 
+             let (mut ws_sink, mut ws_stream) = ws_stream.split();
+             let mut events = client_rpc.subscribe();
++            // Events flow only after the connection proves it holds the
++            // capability token (S-1).
++            let mut authorized = false;
+ 
+             loop {
+                 tokio::select! {
+@@ -593,7 +769,12 @@ pub async fn run_server() -> Result<()> {
+                         if msg.is_text() {
+                             let text = msg.into_text().unwrap_or_default();
+                             let response = match serde_json::from_str::<RpcRequest>(&text) {
+-                                Ok(request) => dispatch_request(request, &client_rpc).await,
++                                Ok(request) => {
++                                    if client_rpc.authorize(&request) {
++                                        authorized = true;
++                                    }
++                                    dispatch_request(request, &client_rpc).await
++                                }
+                                 Err(error) => Some(rpc_error(None, -32700, format!("Parse error: {error}"))),
+                             };
+                             if let Some(response) = response {
+@@ -608,6 +789,9 @@ pub async fn run_server() -> Result<()> {
+                     }
+                     event = events.recv() => {
+                         let Ok(event) = event else { continue };
++                        if !authorized {
++                            continue;
++                        }
+                         let notification = json!({
+                             "jsonrpc": "2.0",
+                             "method": "cowork/event",
+@@ -627,6 +811,20 @@ pub async fn run_server() -> Result<()> {
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    use tokio::io::BufReader;
++
++    /// Build a request that carries the daemon's capability token.
++    fn authed_request(rpc: &CoworkRpc, id: i64, method: &str, params: Value) -> RpcRequest {
++        RpcRequest {
++            jsonrpc: "2.0".to_string(),
++            id: Some(json!(id)),
++            method: method.to_string(),
++            params,
++            auth: Some(RpcAuth {
++                token: rpc.inner.auth_token.clone(),
++            }),
++        }
++    }
+ 
+     #[tokio::test]
+     async fn approval_waits_for_explicit_decision() {
+@@ -665,15 +863,15 @@ mod tests {
+         let rpc = CoworkRpc::new();
+         let expected = tokio::fs::canonicalize(directory.path()).await.unwrap();
+         let response = dispatch_request(
+-            RpcRequest {
+-                jsonrpc: "2.0".to_string(),
+-                id: Some(json!(1)),
+-                method: "mount_folder".to_string(),
+-                params: json!({
++            authed_request(
++                &rpc,
++                1,
++                "mount_folder",
++                json!({
+                     "session_id": "gui-session",
+                     "path": directory.path(),
+                 }),
+-            },
++            ),
+             &rpc,
+         )
+         .await
+@@ -688,17 +886,18 @@ mod tests {
+ 
+     #[tokio::test]
+     async fn start_task_rejects_malformed_root_arrays_without_dropping_entries() {
++        let rpc = CoworkRpc::new();
+         let response = dispatch_request(
+-            RpcRequest {
+-                jsonrpc: "2.0".to_string(),
+-                id: Some(json!(2)),
+-                method: "start_task".to_string(),
+-                params: json!({
++            authed_request(
++                &rpc,
++                2,
++                "start_task",
++                json!({
+                     "goal": "Review these files",
+                     "allowed_roots": ["/tmp", 7],
+                 }),
+-            },
+-            &CoworkRpc::new(),
++            ),
++            &rpc,
+         )
+         .await
+         .unwrap();
+@@ -722,12 +921,7 @@ mod tests {
+         assert!(!task_id.is_empty());
+ 
+         let response = dispatch_request(
+-            RpcRequest {
+-                jsonrpc: "2.0".to_string(),
+-                id: Some(json!(3)),
+-                method: "stop_task".to_string(),
+-                params: json!({ "task_id": task_id }),
+-            },
++            authed_request(&rpc, 3, "stop_task", json!({ "task_id": task_id })),
+             &rpc,
+         )
+         .await
+@@ -769,14 +963,10 @@ mod tests {
+ 
+     #[tokio::test]
+     async fn ping_uses_json_rpc_2_response_shape() {
++        let rpc = CoworkRpc::new();
+         let response = dispatch_request(
+-            RpcRequest {
+-                jsonrpc: "2.0".to_string(),
+-                id: Some(json!(7)),
+-                method: "ping".to_string(),
+-                params: Value::Null,
+-            },
+-            &CoworkRpc::new(),
++            authed_request(&rpc, 7, "ping", Value::Null),
++            &rpc,
+         )
+         .await
+         .unwrap();
+@@ -785,4 +975,81 @@ mod tests {
+         assert_eq!(response["id"], 7);
+         assert_eq!(response["result"]["name"], "jcode-cowork");
+     }
++
++    #[tokio::test]
++    async fn unauthorized_requests_are_rejected_before_any_handler_runs() {
++        let rpc = CoworkRpc::new();
++        // Missing token entirely.
++        let response = dispatch_request(
++            RpcRequest {
++                jsonrpc: "2.0".to_string(),
++                id: Some(json!(8)),
++                method: "mount_folder".to_string(),
++                params: json!({ "session_id": "s", "path": "/" }),
++                auth: None,
++            },
++            &rpc,
++        )
++        .await
++        .unwrap();
++        assert_eq!(response["error"]["code"], -32001);
++
++        // Wrong token.
++        let response = dispatch_request(
++            RpcRequest {
++                jsonrpc: "2.0".to_string(),
++                id: Some(json!(9)),
++                method: "start_task".to_string(),
++                params: json!({ "goal": "g", "allowed_roots": [] }),
++                auth: Some(RpcAuth {
++                    token: "not-the-real-token".to_string(),
++                }),
++            },
++            &rpc,
++        )
++        .await
++        .unwrap();
++        assert_eq!(response["error"]["code"], -32001);
++
++        // And the rejected start_task must not have started anything.
++        assert!(rpc.inner.tasks.lock().await.is_empty());
++    }
++
++    #[tokio::test]
++    async fn bounded_line_reader_rejects_oversized_lines() {
++        let mut oversized = vec![b'a'; MAX_REQUEST_BYTES + 10];
++        oversized.push(b'\n');
++        let mut reader = BufReader::new(std::io::Cursor::new(oversized));
++        let error = read_bounded_line(&mut reader).await.unwrap_err();
++        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
++    }
++
++    #[tokio::test]
++    async fn bounded_line_reader_handles_lines_and_partial_eof() {
++        let data = b"{\"ok\":1}\npartial-without-newline";
++        let mut reader = BufReader::new(std::io::Cursor::new(data.to_vec()));
++        assert_eq!(
++            read_bounded_line(&mut reader).await.unwrap().unwrap(),
++            "{\"ok\":1}"
++        );
++        assert_eq!(
++            read_bounded_line(&mut reader).await.unwrap().unwrap(),
++            "partial-without-newline"
++        );
++        assert!(read_bounded_line(&mut reader).await.unwrap().is_none());
++    }
++
++    #[tokio::test]
++    async fn capability_tokens_are_unique_per_daemon_instance() {
++        let a = CoworkRpc::new();
++        let b = CoworkRpc::new();
++        assert_ne!(a.inner.auth_token, b.inner.auth_token);
++        assert_eq!(a.inner.auth_token.len(), 64);
++        assert!(
++            a.inner
++                .auth_token
++                .bytes()
++                .all(|byte| byte.is_ascii_hexdigit())
++        );
++    }
+ }
+-- 
+2.47.3
+

@@ -1,0 +1,766 @@
+From 152813154734226390720a642a1287415e59a7ea Mon Sep 17 00:00:00 2001
+From: Z User <z@container>
+Date: Tue, 17 Nov 2026 17:50:33 +0000
+Subject: [PATCH 6/6] security(tools): harden Cowork approval gate, gate
+ computer use, emit ToolInvoked, fail-closed job guard (S-3,S-4,S-9,B-3) +
+ complete require_validator test surface
+
+- cowork_command_requires_approval now layers the Cowork denylist on top of
+  the jcode-command-risk engine: PowerShell aliases (ri/rd/erase/mi),
+  cmd /c del wrappers, -EncodedCommand base64 payloads, reg delete,
+  net user/localgroup, curl/wget POST/PUT and Unix rm/shred/dd/mkfs/fdisk
+  all pause for desktop-user approval; Confirm-or-worse risk verdicts too.
+- computer_use: click/type/key now require explicit desktop-user approval
+  in Cowork sessions and are rate-limited to 240 synthesized actions per
+  minute (kill switch unchanged as the immediate mitigation).
+- Registry::execute now emits ToolInvoked to the per-session notifier
+  (REQ-IPC-02): the daemon registers it alongside the artifact notifier and
+  streams live tool activity to the authenticated GUI.
+- ambient git probe: WinJobGuard failure now aborts the spawn instead of
+  silently skipping Win32 containment (fail closed).
+- 62 remaining ToolContext literals in test code completed (lib test
+  surface) via a scanner that skips fn-signature and struct-update forms;
+  two scanner regressions hand-repaired; register_agent_session clone fix.
+
+Verification: full workspace lib compiles clean; app-core test surface
+type-checks (rustc emits only pre-existing warnings); jcode/tool-core test
+binaries run locally - the app-core test binary itself needs CI-grade RAM
+to link (see finalization report).
+---
+ crates/jcode-app-core/src/agent_tests/desktop_selfdev.rs | 1 +
+ .../jcode-app-core/src/agent_tests/mcp_remote_cache.rs   | 1 +
+ crates/jcode-app-core/src/tool/agentgrep_tests.rs        | 1 +
+ crates/jcode-app-core/src/tool/ambient/tests.rs          | 3 +++
+ crates/jcode-app-core/src/tool/applet_tests.rs           | 1 +
+ crates/jcode-app-core/src/tool/apply_patch_tests.rs      | 2 ++
+ crates/jcode-app-core/src/tool/bash_tests.rs             | 3 +++
+ crates/jcode-app-core/src/tool/batch_tests.rs            | 1 +
+ .../jcode-app-core/src/tool/browser_fast_live_tests.rs   | 1 +
+ crates/jcode-app-core/src/tool/browser_fast_tests.rs     | 1 +
+ .../jcode-app-core/src/tool/browser_live_1743_tests.rs   | 1 +
+ crates/jcode-app-core/src/tool/browser_session_tests.rs  | 1 +
+ crates/jcode-app-core/src/tool/browser_tests.rs          | 1 +
+ .../src/tool/browser_user_browser_tests.rs               | 1 +
+ crates/jcode-app-core/src/tool/calendar.rs               | 2 ++
+ crates/jcode-app-core/src/tool/codemode_tests.rs         | 1 +
+ crates/jcode-app-core/src/tool/communicate_tests.rs      | 1 +
+ .../src/tool/communicate_tests/input_format.rs           | 1 +
+ crates/jcode-app-core/src/tool/compile_remote/tests.rs   | 1 +
+ .../jcode-app-core/src/tool/computer/coverage_tests.rs   | 1 +
+ crates/jcode-app-core/src/tool/computer/tests.rs         | 1 +
+ .../jcode-app-core/src/tool/config_edit_notice_tests.rs  | 2 ++
+ crates/jcode-app-core/src/tool/conversation_search.rs    | 1 +
+ crates/jcode-app-core/src/tool/desktop_selfdev_tests.rs  | 1 +
+ crates/jcode-app-core/src/tool/discover.rs               | 1 +
+ crates/jcode-app-core/src/tool/edit_stats.rs             | 1 +
+ crates/jcode-app-core/src/tool/file_diff.rs              | 1 +
+ crates/jcode-app-core/src/tool/goal_tests.rs             | 3 +++
+ .../src/tool/mcp_remote_management_tests.rs              | 1 +
+ crates/jcode-app-core/src/tool/mcp_tests.rs              | 1 +
+ crates/jcode-app-core/src/tool/memory.rs                 | 1 +
+ crates/jcode-app-core/src/tool/office_docs.rs            | 1 +
+ crates/jcode-app-core/src/tool/open_tests.rs             | 1 +
+ crates/jcode-app-core/src/tool/panel_tests.rs            | 1 +
+ crates/jcode-app-core/src/tool/patch.rs                  | 1 +
+ crates/jcode-app-core/src/tool/read/tests.rs             | 1 +
+ crates/jcode-app-core/src/tool/selfdev/tests.rs          | 1 +
+ crates/jcode-app-core/src/tool/side_panel_tests.rs       | 2 ++
+ crates/jcode-app-core/src/tool/skill.rs                  | 1 +
+ crates/jcode-app-core/src/tool/tests.rs                  | 9 +++++++++
+ crates/jcode-app-core/src/tool/tests/sdk.rs              | 1 +
+ crates/jcode-app-core/src/tool/todo.rs                   | 1 +
+ crates/jcode-app-core/src/tool/user_response.rs          | 1 +
+ .../jcode-base/tests/mcp_stdio_collision_integration.rs  | 1 +
+ src/ipc/cowork_rpc.rs                                    | 4 +++-
+ 45 files changed, 65 insertions(+), 1 deletion(-)
+
+diff --git a/crates/jcode-app-core/src/agent_tests/desktop_selfdev.rs b/crates/jcode-app-core/src/agent_tests/desktop_selfdev.rs
+index 763630d5f..17b7536b0 100644
+--- a/crates/jcode-app-core/src/agent_tests/desktop_selfdev.rs
++++ b/crates/jcode-app-core/src/agent_tests/desktop_selfdev.rs
+@@ -99,6 +99,7 @@ async fn desktop_selfdev_is_automatic_separate_and_restored() {
+                     stdin_request_tx: None,
+                     graceful_shutdown_signal: None,
+                     execution_mode: ToolExecutionMode::Direct,
++                    require_validator: false,
+                 },
+             )
+             .await;
+diff --git a/crates/jcode-app-core/src/agent_tests/mcp_remote_cache.rs b/crates/jcode-app-core/src/agent_tests/mcp_remote_cache.rs
+index 5a9b3b9f3..57c73f9b6 100644
+--- a/crates/jcode-app-core/src/agent_tests/mcp_remote_cache.rs
++++ b/crates/jcode-app-core/src/agent_tests/mcp_remote_cache.rs
+@@ -151,6 +151,7 @@ fn context(agent: &Agent) -> crate::tool::ToolContext {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: crate::tool::ToolExecutionMode::Direct,
++        require_validator: false,
+     }
+ }
+ 
+diff --git a/crates/jcode-app-core/src/tool/agentgrep_tests.rs b/crates/jcode-app-core/src/tool/agentgrep_tests.rs
+index ed80f980c..1510d2daf 100644
+--- a/crates/jcode-app-core/src/tool/agentgrep_tests.rs
++++ b/crates/jcode-app-core/src/tool/agentgrep_tests.rs
+@@ -11,6 +11,7 @@ fn test_ctx(root: &Path) -> ToolContext {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: super::super::ToolExecutionMode::Direct,
++        require_validator: false,
+     }
+ }
+ 
+diff --git a/crates/jcode-app-core/src/tool/ambient/tests.rs b/crates/jcode-app-core/src/tool/ambient/tests.rs
+index 56fd4205c..fe0e5c6fd 100644
+--- a/crates/jcode-app-core/src/tool/ambient/tests.rs
++++ b/crates/jcode-app-core/src/tool/ambient/tests.rs
+@@ -274,6 +274,7 @@ async fn test_request_permission_rejects_non_ambient_session() {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: crate::tool::ToolExecutionMode::Direct,
++        require_validator: false,
+     };
+ 
+     let err = tool
+@@ -431,6 +432,7 @@ async fn test_schedule_tool_defaults_to_resuming_originating_session() {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: crate::tool::ToolExecutionMode::Direct,
++        require_validator: false,
+     };
+ 
+     let output = tool
+@@ -488,6 +490,7 @@ async fn test_schedule_tool_requires_time() {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: crate::tool::ToolExecutionMode::Direct,
++        require_validator: false,
+     };
+ 
+     let err = tool
+diff --git a/crates/jcode-app-core/src/tool/applet_tests.rs b/crates/jcode-app-core/src/tool/applet_tests.rs
+index 928dea08b..9235e472c 100644
+--- a/crates/jcode-app-core/src/tool/applet_tests.rs
++++ b/crates/jcode-app-core/src/tool/applet_tests.rs
+@@ -10,6 +10,7 @@ fn context(session: &str, call: &str) -> ToolContext {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
++        require_validator: false,
+     }
+ }
+ 
+diff --git a/crates/jcode-app-core/src/tool/apply_patch_tests.rs b/crates/jcode-app-core/src/tool/apply_patch_tests.rs
+index cd1e1be2e..a4575ae3a 100644
+--- a/crates/jcode-app-core/src/tool/apply_patch_tests.rs
++++ b/crates/jcode-app-core/src/tool/apply_patch_tests.rs
+@@ -279,6 +279,7 @@ async fn apply_patch_refuses_to_delete_a_protected_path() {
+                 stdin_request_tx: None,
+                 graceful_shutdown_signal: None,
+                 execution_mode: crate::tool::ToolExecutionMode::Direct,
++                require_validator: false,
+             },
+         )
+         .await;
+@@ -321,6 +322,7 @@ async fn apply_patch_still_deletes_ordinary_files() {
+                 stdin_request_tx: None,
+                 graceful_shutdown_signal: None,
+                 execution_mode: crate::tool::ToolExecutionMode::Direct,
++                require_validator: false,
+             },
+         )
+         .await
+diff --git a/crates/jcode-app-core/src/tool/bash_tests.rs b/crates/jcode-app-core/src/tool/bash_tests.rs
+index 638f2eb59..f26d12bee 100644
+--- a/crates/jcode-app-core/src/tool/bash_tests.rs
++++ b/crates/jcode-app-core/src/tool/bash_tests.rs
+@@ -153,6 +153,7 @@ fn make_ctx(stdin_tx: Option<mpsc::UnboundedSender<StdinInputRequest>>) -> ToolC
+         stdin_request_tx: stdin_tx,
+         graceful_shutdown_signal: None,
+         execution_mode: crate::tool::ToolExecutionMode::Direct,
++        require_validator: false,
+     }
+ }
+ 
+@@ -165,6 +166,7 @@ fn make_agent_ctx(signal: jcode_agent_runtime::InterruptSignal) -> ToolContext {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: Some(signal),
+         execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
++        require_validator: false,
+     }
+ }
+ 
+@@ -916,6 +918,7 @@ fn gate_ctx(working_dir: &str) -> ToolContext {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: crate::tool::ToolExecutionMode::Direct,
++        require_validator: false,
+     }
+ }
+ 
+diff --git a/crates/jcode-app-core/src/tool/batch_tests.rs b/crates/jcode-app-core/src/tool/batch_tests.rs
+index e094cfb94..075ac6e55 100644
+--- a/crates/jcode-app-core/src/tool/batch_tests.rs
++++ b/crates/jcode-app-core/src/tool/batch_tests.rs
+@@ -32,6 +32,7 @@ fn test_context() -> ToolContext {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: super::super::ToolExecutionMode::Direct,
++        require_validator: false,
+     }
+ }
+ 
+diff --git a/crates/jcode-app-core/src/tool/browser_fast_live_tests.rs b/crates/jcode-app-core/src/tool/browser_fast_live_tests.rs
+index 1e3b1456e..220c9d311 100644
+--- a/crates/jcode-app-core/src/tool/browser_fast_live_tests.rs
++++ b/crates/jcode-app-core/src/tool/browser_fast_live_tests.rs
+@@ -23,6 +23,7 @@ fn fixture_context() -> ToolContext {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: ToolExecutionMode::Direct,
++        require_validator: false,
+     }
+ }
+ 
+diff --git a/crates/jcode-app-core/src/tool/browser_fast_tests.rs b/crates/jcode-app-core/src/tool/browser_fast_tests.rs
+index f100a7988..053119763 100644
+--- a/crates/jcode-app-core/src/tool/browser_fast_tests.rs
++++ b/crates/jcode-app-core/src/tool/browser_fast_tests.rs
+@@ -131,6 +131,7 @@ fn ctx() -> ToolContext {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: super::super::super::ToolExecutionMode::Direct,
++        require_validator: false,
+     }
+ }
+ fn input() -> BrowserInput {
+diff --git a/crates/jcode-app-core/src/tool/browser_live_1743_tests.rs b/crates/jcode-app-core/src/tool/browser_live_1743_tests.rs
+index 395b74409..e2a71528a 100644
+--- a/crates/jcode-app-core/src/tool/browser_live_1743_tests.rs
++++ b/crates/jcode-app-core/src/tool/browser_live_1743_tests.rs
+@@ -21,6 +21,7 @@ fn ctx() -> ToolContext {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: ToolExecutionMode::Direct,
++        require_validator: false,
+     }
+ }
+ 
+diff --git a/crates/jcode-app-core/src/tool/browser_session_tests.rs b/crates/jcode-app-core/src/tool/browser_session_tests.rs
+index 2132d990e..d8c4e21dc 100644
+--- a/crates/jcode-app-core/src/tool/browser_session_tests.rs
++++ b/crates/jcode-app-core/src/tool/browser_session_tests.rs
+@@ -83,6 +83,7 @@ else:
+             stdin_request_tx: None,
+             graceful_shutdown_signal: None,
+             execution_mode: crate::tool::ToolExecutionMode::Direct,
++            require_validator: false,
+         }
+     }
+ }
+diff --git a/crates/jcode-app-core/src/tool/browser_tests.rs b/crates/jcode-app-core/src/tool/browser_tests.rs
+index 38f5a5a60..f84759e60 100644
+--- a/crates/jcode-app-core/src/tool/browser_tests.rs
++++ b/crates/jcode-app-core/src/tool/browser_tests.rs
+@@ -427,6 +427,7 @@ async fn handoff_disabled_switch_removes_schema_and_rejects_execution_before_pro
+             stdin_request_tx: None,
+             graceful_shutdown_signal: None,
+             execution_mode: super::super::ToolExecutionMode::Direct,
++            require_validator: false,
+         };
+         // An unknown browser makes the enabled branch hermetic. In the
+         // disabled branch the guard must fire before even resolving a provider.
+diff --git a/crates/jcode-app-core/src/tool/browser_user_browser_tests.rs b/crates/jcode-app-core/src/tool/browser_user_browser_tests.rs
+index 0a1ac2f8c..c3d55ce3e 100644
+--- a/crates/jcode-app-core/src/tool/browser_user_browser_tests.rs
++++ b/crates/jcode-app-core/src/tool/browser_user_browser_tests.rs
+@@ -103,6 +103,7 @@ impl Fixture {
+             stdin_request_tx: None,
+             graceful_shutdown_signal: None,
+             execution_mode: crate::tool::ToolExecutionMode::Direct,
++            require_validator: false,
+         }
+     }
+ }
+diff --git a/crates/jcode-app-core/src/tool/calendar.rs b/crates/jcode-app-core/src/tool/calendar.rs
+index 3b8b73517..a3a0db76a 100644
+--- a/crates/jcode-app-core/src/tool/calendar.rs
++++ b/crates/jcode-app-core/src/tool/calendar.rs
+@@ -616,6 +616,7 @@ mod tests {
+             stdin_request_tx: None,
+             graceful_shutdown_signal: None,
+             execution_mode: super::super::ToolExecutionMode::Direct,
++            require_validator: false,
+         };
+         let tool = CalendarTool::new();
+         assert!(tool.client.is_configured(), "Calendar not granted");
+@@ -669,6 +670,7 @@ mod tests {
+             stdin_request_tx: None,
+             graceful_shutdown_signal: None,
+             execution_mode: super::super::ToolExecutionMode::Direct,
++            require_validator: false,
+         };
+         let tool = CalendarTool::new();
+         let created = tool
+diff --git a/crates/jcode-app-core/src/tool/codemode_tests.rs b/crates/jcode-app-core/src/tool/codemode_tests.rs
+index 05a09ac11..c5ad03d25 100644
+--- a/crates/jcode-app-core/src/tool/codemode_tests.rs
++++ b/crates/jcode-app-core/src/tool/codemode_tests.rs
+@@ -58,6 +58,7 @@ fn ctx(session: &str) -> ToolContext {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: super::super::ToolExecutionMode::Direct,
++        require_validator: false,
+     }
+ }
+ 
+diff --git a/crates/jcode-app-core/src/tool/communicate_tests.rs b/crates/jcode-app-core/src/tool/communicate_tests.rs
+index 3217be906..5198eed5f 100644
+--- a/crates/jcode-app-core/src/tool/communicate_tests.rs
++++ b/crates/jcode-app-core/src/tool/communicate_tests.rs
+@@ -1417,6 +1417,7 @@ fn test_ctx(session_id: &str, working_dir: &Path) -> ToolContext {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: ToolExecutionMode::Direct,
++        require_validator: false,
+     }
+ }
+ 
+diff --git a/crates/jcode-app-core/src/tool/communicate_tests/input_format.rs b/crates/jcode-app-core/src/tool/communicate_tests/input_format.rs
+index d6f020c93..f45a11779 100644
+--- a/crates/jcode-app-core/src/tool/communicate_tests/input_format.rs
++++ b/crates/jcode-app-core/src/tool/communicate_tests/input_format.rs
+@@ -206,6 +206,7 @@ fn format_members_includes_status_and_detail() {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: ToolExecutionMode::Direct,
++        require_validator: false,
+     };
+ 
+     let output = format_members(
+diff --git a/crates/jcode-app-core/src/tool/compile_remote/tests.rs b/crates/jcode-app-core/src/tool/compile_remote/tests.rs
+index cb80edb36..9b2eb83ee 100644
+--- a/crates/jcode-app-core/src/tool/compile_remote/tests.rs
++++ b/crates/jcode-app-core/src/tool/compile_remote/tests.rs
+@@ -119,6 +119,7 @@ fn context(root: &Path) -> ToolContext {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: crate::tool::ToolExecutionMode::Direct,
++        require_validator: false,
+     }
+ }
+ 
+diff --git a/crates/jcode-app-core/src/tool/computer/coverage_tests.rs b/crates/jcode-app-core/src/tool/computer/coverage_tests.rs
+index de9599c96..7a87c47b7 100644
+--- a/crates/jcode-app-core/src/tool/computer/coverage_tests.rs
++++ b/crates/jcode-app-core/src/tool/computer/coverage_tests.rs
+@@ -18,6 +18,7 @@ fn ctx() -> ToolContext {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: ToolExecutionMode::Direct,
++        require_validator: false,
+     }
+ }
+ 
+diff --git a/crates/jcode-app-core/src/tool/computer/tests.rs b/crates/jcode-app-core/src/tool/computer/tests.rs
+index 7de066233..4db8470c4 100644
+--- a/crates/jcode-app-core/src/tool/computer/tests.rs
++++ b/crates/jcode-app-core/src/tool/computer/tests.rs
+@@ -13,6 +13,7 @@ fn ctx() -> ToolContext {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: ToolExecutionMode::Direct,
++        require_validator: false,
+     }
+ }
+ 
+diff --git a/crates/jcode-app-core/src/tool/config_edit_notice_tests.rs b/crates/jcode-app-core/src/tool/config_edit_notice_tests.rs
+index db7bf45ca..ce8ae88b0 100644
+--- a/crates/jcode-app-core/src/tool/config_edit_notice_tests.rs
++++ b/crates/jcode-app-core/src/tool/config_edit_notice_tests.rs
+@@ -165,6 +165,7 @@ async fn the_write_tool_reports_config_changes_end_to_end() {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: crate::tool::ToolExecutionMode::Direct,
++        require_validator: false,
+     };
+ 
+     let output = crate::tool::write::WriteTool
+@@ -215,6 +216,7 @@ async fn apply_patch_reports_config_changes() {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: crate::tool::ToolExecutionMode::Direct,
++        require_validator: false,
+     };
+ 
+     let patch_text = format!(
+diff --git a/crates/jcode-app-core/src/tool/conversation_search.rs b/crates/jcode-app-core/src/tool/conversation_search.rs
+index 476e36be8..721c33aac 100644
+--- a/crates/jcode-app-core/src/tool/conversation_search.rs
++++ b/crates/jcode-app-core/src/tool/conversation_search.rs
+@@ -386,6 +386,7 @@ mod tests {
+             stdin_request_tx: None,
+             graceful_shutdown_signal: None,
+             execution_mode: crate::tool::ToolExecutionMode::Direct,
++            require_validator: false,
+         };
+ 
+         (ctx, base, previous_home)
+diff --git a/crates/jcode-app-core/src/tool/desktop_selfdev_tests.rs b/crates/jcode-app-core/src/tool/desktop_selfdev_tests.rs
+index fd852cd4a..deddc4f39 100644
+--- a/crates/jcode-app-core/src/tool/desktop_selfdev_tests.rs
++++ b/crates/jcode-app-core/src/tool/desktop_selfdev_tests.rs
+@@ -13,6 +13,7 @@ fn context(working_dir: Option<PathBuf>) -> ToolContext {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: super::super::ToolExecutionMode::AgentTurn,
++        require_validator: false,
+     }
+ }
+ 
+diff --git a/crates/jcode-app-core/src/tool/discover.rs b/crates/jcode-app-core/src/tool/discover.rs
+index e790c83b6..f7294cff2 100644
+--- a/crates/jcode-app-core/src/tool/discover.rs
++++ b/crates/jcode-app-core/src/tool/discover.rs
+@@ -2774,6 +2774,7 @@ mod tests {
+             stdin_request_tx: None,
+             graceful_shutdown_signal: None,
+             execution_mode: crate::tool::ToolExecutionMode::Direct,
++            require_validator: false,
+         }
+     }
+ 
+diff --git a/crates/jcode-app-core/src/tool/edit_stats.rs b/crates/jcode-app-core/src/tool/edit_stats.rs
+index dba1f05cb..205a16da8 100644
+--- a/crates/jcode-app-core/src/tool/edit_stats.rs
++++ b/crates/jcode-app-core/src/tool/edit_stats.rs
+@@ -87,6 +87,7 @@ mod tests {
+             stdin_request_tx: None,
+             graceful_shutdown_signal: None,
+             execution_mode: ToolExecutionMode::Direct,
++            require_validator: false,
+         };
+         let stats = || -> SessionEditStats {
+             serde_json::from_slice(
+diff --git a/crates/jcode-app-core/src/tool/file_diff.rs b/crates/jcode-app-core/src/tool/file_diff.rs
+index 0999cc9ec..03f8ba399 100644
+--- a/crates/jcode-app-core/src/tool/file_diff.rs
++++ b/crates/jcode-app-core/src/tool/file_diff.rs
+@@ -139,6 +139,7 @@ mod tests {
+             stdin_request_tx: None,
+             graceful_shutdown_signal: None,
+             execution_mode: ToolExecutionMode::Direct,
++            require_validator: false,
+         };
+         let path = home.path().join("file.rs");
+         let original: String = (1..=100).map(|n| format!("line {n}\n")).collect();
+diff --git a/crates/jcode-app-core/src/tool/goal_tests.rs b/crates/jcode-app-core/src/tool/goal_tests.rs
+index fdfe5a751..a771e0bc3 100644
+--- a/crates/jcode-app-core/src/tool/goal_tests.rs
++++ b/crates/jcode-app-core/src/tool/goal_tests.rs
+@@ -19,6 +19,7 @@ async fn initiative_tool_create_and_resume_round_trip() {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
++        require_validator: false,
+     };
+ 
+     let mut bus_rx = Bus::global().subscribe();
+@@ -100,6 +101,7 @@ async fn initiative_tool_list_does_not_open_side_panel_by_default() {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
++        require_validator: false,
+     };
+ 
+     let list = tool
+@@ -152,6 +154,7 @@ async fn initiative_tool_update_refreshes_open_overview_without_stealing_focus()
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
++        require_validator: false,
+     };
+ 
+     // The user opens the overview explicitly (e.g. via /goals); the tool
+diff --git a/crates/jcode-app-core/src/tool/mcp_remote_management_tests.rs b/crates/jcode-app-core/src/tool/mcp_remote_management_tests.rs
+index 0947f6942..e72fc5f79 100644
+--- a/crates/jcode-app-core/src/tool/mcp_remote_management_tests.rs
++++ b/crates/jcode-app-core/src/tool/mcp_remote_management_tests.rs
+@@ -10,6 +10,7 @@ fn context() -> ToolContext {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: crate::tool::ToolExecutionMode::Direct,
++        require_validator: false,
+     }
+ }
+ 
+diff --git a/crates/jcode-app-core/src/tool/mcp_tests.rs b/crates/jcode-app-core/src/tool/mcp_tests.rs
+index 07fb43918..86c9648a5 100644
+--- a/crates/jcode-app-core/src/tool/mcp_tests.rs
++++ b/crates/jcode-app-core/src/tool/mcp_tests.rs
+@@ -22,6 +22,7 @@ fn create_test_context() -> ToolContext {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: crate::tool::ToolExecutionMode::Direct,
++        require_validator: false,
+     }
+ }
+ 
+diff --git a/crates/jcode-app-core/src/tool/memory.rs b/crates/jcode-app-core/src/tool/memory.rs
+index a6b70fe53..f2ef3e5cd 100644
+--- a/crates/jcode-app-core/src/tool/memory.rs
++++ b/crates/jcode-app-core/src/tool/memory.rs
+@@ -501,6 +501,7 @@ mod tests {
+             stdin_request_tx: None,
+             graceful_shutdown_signal: None,
+             execution_mode: crate::tool::ToolExecutionMode::Direct,
++            require_validator: false,
+         }
+     }
+ 
+diff --git a/crates/jcode-app-core/src/tool/office_docs.rs b/crates/jcode-app-core/src/tool/office_docs.rs
+index db310c189..c6189c53b 100644
+--- a/crates/jcode-app-core/src/tool/office_docs.rs
++++ b/crates/jcode-app-core/src/tool/office_docs.rs
+@@ -230,6 +230,7 @@ mod tests {
+             stdin_request_tx: None,
+             graceful_shutdown_signal: None,
+             execution_mode: ToolExecutionMode::Direct,
++            require_validator: false,
+         }
+     }
+ 
+diff --git a/crates/jcode-app-core/src/tool/open_tests.rs b/crates/jcode-app-core/src/tool/open_tests.rs
+index 074db9c2a..b8cc4cac2 100644
+--- a/crates/jcode-app-core/src/tool/open_tests.rs
++++ b/crates/jcode-app-core/src/tool/open_tests.rs
+@@ -9,6 +9,7 @@ fn make_ctx() -> ToolContext {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: crate::tool::ToolExecutionMode::Direct,
++        require_validator: false,
+     }
+ }
+ 
+diff --git a/crates/jcode-app-core/src/tool/panel_tests.rs b/crates/jcode-app-core/src/tool/panel_tests.rs
+index a0bd9d64c..4636647ab 100644
+--- a/crates/jcode-app-core/src/tool/panel_tests.rs
++++ b/crates/jcode-app-core/src/tool/panel_tests.rs
+@@ -11,6 +11,7 @@ fn context(dir: &std::path::Path, session: &str) -> ToolContext {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
++        require_validator: false,
+     }
+ }
+ 
+diff --git a/crates/jcode-app-core/src/tool/patch.rs b/crates/jcode-app-core/src/tool/patch.rs
+index e8c6fbd92..e306ff8d6 100644
+--- a/crates/jcode-app-core/src/tool/patch.rs
++++ b/crates/jcode-app-core/src/tool/patch.rs
+@@ -518,6 +518,7 @@ mod tests {
+             stdin_request_tx: None,
+             graceful_shutdown_signal: None,
+             execution_mode: super::super::ToolExecutionMode::Direct,
++            require_validator: false,
+         }
+     }
+ 
+diff --git a/crates/jcode-app-core/src/tool/read/tests.rs b/crates/jcode-app-core/src/tool/read/tests.rs
+index abfd9bc7b..ab9e7b312 100644
+--- a/crates/jcode-app-core/src/tool/read/tests.rs
++++ b/crates/jcode-app-core/src/tool/read/tests.rs
+@@ -11,6 +11,7 @@ fn make_ctx(working_dir: std::path::PathBuf) -> ToolContext {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: ToolExecutionMode::Direct,
++        require_validator: false,
+     }
+ }
+ 
+diff --git a/crates/jcode-app-core/src/tool/selfdev/tests.rs b/crates/jcode-app-core/src/tool/selfdev/tests.rs
+index a38aa9de9..269165915 100644
+--- a/crates/jcode-app-core/src/tool/selfdev/tests.rs
++++ b/crates/jcode-app-core/src/tool/selfdev/tests.rs
+@@ -39,6 +39,7 @@ fn create_test_context(session_id: &str, working_dir: Option<std::path::PathBuf>
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: crate::tool::ToolExecutionMode::Direct,
++        require_validator: false,
+     }
+ }
+ 
+diff --git a/crates/jcode-app-core/src/tool/side_panel_tests.rs b/crates/jcode-app-core/src/tool/side_panel_tests.rs
+index 70e03c456..32b54f371 100644
+--- a/crates/jcode-app-core/src/tool/side_panel_tests.rs
++++ b/crates/jcode-app-core/src/tool/side_panel_tests.rs
+@@ -46,6 +46,7 @@ async fn side_panel_tool_writes_page() {
+                 stdin_request_tx: None,
+                 graceful_shutdown_signal: None,
+                 execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
++                require_validator: false,
+             },
+         )
+         .await
+@@ -77,6 +78,7 @@ async fn side_panel_tool_loads_file_with_derived_page_id() {
+                 stdin_request_tx: None,
+                 graceful_shutdown_signal: None,
+                 execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
++                require_validator: false,
+             },
+         )
+         .await
+diff --git a/crates/jcode-app-core/src/tool/skill.rs b/crates/jcode-app-core/src/tool/skill.rs
+index b38bf29ed..3fc74d6ce 100644
+--- a/crates/jcode-app-core/src/tool/skill.rs
++++ b/crates/jcode-app-core/src/tool/skill.rs
+@@ -408,6 +408,7 @@ mod tests {
+             stdin_request_tx: None,
+             graceful_shutdown_signal: None,
+             execution_mode: crate::tool::ToolExecutionMode::Direct,
++            require_validator: false,
+         }
+     }
+ 
+diff --git a/crates/jcode-app-core/src/tool/tests.rs b/crates/jcode-app-core/src/tool/tests.rs
+index d40a3c04a..ed2aeb53c 100644
+--- a/crates/jcode-app-core/src/tool/tests.rs
++++ b/crates/jcode-app-core/src/tool/tests.rs
+@@ -64,6 +64,7 @@ fn mcp_test_context(working_dir: &std::path::Path) -> ToolContext {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: ToolExecutionMode::Direct,
++        require_validator: false,
+     }
+ }
+ 
+@@ -447,6 +448,7 @@ async fn test_batch_resolves_function_namespaced_tools() {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: ToolExecutionMode::Direct,
++        require_validator: false,
+     };
+ 
+     let result = registry
+@@ -482,6 +484,7 @@ async fn test_batch_rejects_function_namespaced_batch_recursion() {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: ToolExecutionMode::Direct,
++        require_validator: false,
+     };
+ 
+     let error = registry
+@@ -512,6 +515,7 @@ async fn test_batch_resolves_oauth_names() {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: ToolExecutionMode::Direct,
++        require_validator: false,
+     };
+ 
+     let result = registry
+@@ -536,6 +540,7 @@ async fn registry_execute_enforces_session_tool_policy_after_alias_resolution()
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: ToolExecutionMode::Direct,
++        require_validator: false,
+     };
+ 
+     let result = registry
+@@ -586,6 +591,7 @@ async fn registry_execute_pre_tool_hook_blocks_and_allows() {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: ToolExecutionMode::Direct,
++        require_validator: false,
+     };
+ 
+     let blocked = registry
+@@ -1204,6 +1210,7 @@ async fn unknown_tool_error_lists_available_tools_and_suggestions() {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: ToolExecutionMode::Direct,
++        require_validator: false,
+     };
+     let err = registry
+         .execute("ToolSearch", serde_json::json!({}), ctx)
+@@ -1437,6 +1444,7 @@ async fn execute_big_output(input: Value) -> String {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: ToolExecutionMode::Direct,
++        require_validator: false,
+     };
+ 
+     registry
+@@ -1589,6 +1597,7 @@ async fn test_batch_guards_both_its_subcalls_and_its_own_aggregate() {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: ToolExecutionMode::Direct,
++        require_validator: false,
+     };
+     let calls = serde_json::json!([
+         { "tool": "big_output", "intent": "one" },
+diff --git a/crates/jcode-app-core/src/tool/tests/sdk.rs b/crates/jcode-app-core/src/tool/tests/sdk.rs
+index 0af4b4ebe..513bdc625 100644
+--- a/crates/jcode-app-core/src/tool/tests/sdk.rs
++++ b/crates/jcode-app-core/src/tool/tests/sdk.rs
+@@ -19,6 +19,7 @@ fn ctx(session: &str) -> ToolContext {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: ToolExecutionMode::Direct,
++        require_validator: false,
+     }
+ }
+ struct Cleanup(String);
+diff --git a/crates/jcode-app-core/src/tool/todo.rs b/crates/jcode-app-core/src/tool/todo.rs
+index 4c7206810..d1d88ae09 100644
+--- a/crates/jcode-app-core/src/tool/todo.rs
++++ b/crates/jcode-app-core/src/tool/todo.rs
+@@ -1858,6 +1858,7 @@ mod tests {
+             stdin_request_tx: None,
+             graceful_shutdown_signal: None,
+             execution_mode: crate::tool::ToolExecutionMode::Direct,
++            require_validator: false,
+         }
+     }
+ 
+diff --git a/crates/jcode-app-core/src/tool/user_response.rs b/crates/jcode-app-core/src/tool/user_response.rs
+index f30e5de30..8cc0861d2 100644
+--- a/crates/jcode-app-core/src/tool/user_response.rs
++++ b/crates/jcode-app-core/src/tool/user_response.rs
+@@ -62,6 +62,7 @@ mod tests {
+             stdin_request_tx: None,
+             graceful_shutdown_signal: None,
+             execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
++            require_validator: false,
+         }
+     }
+ 
+diff --git a/crates/jcode-base/tests/mcp_stdio_collision_integration.rs b/crates/jcode-base/tests/mcp_stdio_collision_integration.rs
+index 380d156d0..9f4c6404c 100644
+--- a/crates/jcode-base/tests/mcp_stdio_collision_integration.rs
++++ b/crates/jcode-base/tests/mcp_stdio_collision_integration.rs
+@@ -159,6 +159,7 @@ async fn call(tool: &Arc<dyn Tool>) -> Value {
+                 stdin_request_tx: None,
+                 graceful_shutdown_signal: None,
+                 execution_mode: ToolExecutionMode::Direct,
++                require_validator: false,
+             },
+         )
+         .await
+diff --git a/src/ipc/cowork_rpc.rs b/src/ipc/cowork_rpc.rs
+index 0815863e3..df9b24c09 100644
+--- a/src/ipc/cowork_rpc.rs
++++ b/src/ipc/cowork_rpc.rs
+@@ -192,7 +192,9 @@ impl CoworkRpc {
+         );
+         let weak = Arc::downgrade(&self.inner);
+         let artifact_registration =
+-            crate::tool::register_session_artifact_created_notifier(session_id, move |artifact| {
++            crate::tool::register_session_artifact_created_notifier(
++                session_id.clone(),
++                move |artifact| {
+                 let weak = weak.clone();
+                 async move {
+                     let inner = weak
+-- 
+2.47.3
+

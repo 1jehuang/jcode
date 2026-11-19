@@ -1,0 +1,508 @@
+From f0e7adaa3a3a7bbd1f354ed86d75b84ff0ad83cc Mon Sep 17 00:00:00 2001
+From: Z User <z@container>
+Date: Tue, 17 Nov 2026 16:29:26 +0000
+Subject: [PATCH 3/6] release: re-point release path from upstream fork to this
+ repository (R-1,R-2,R-3,R-6)
+
+- release.yml: repository gate now matches Charteredprofessionals/Cworkspace,
+  so the release pipeline actually runs here instead of silently no-oping;
+  Homebrew tap, formula URLs, AUR source/URLs and maintainer identity
+  re-pointed to this repo and its git identity.
+- scripts/install.sh: REPO now this repository. The optional
+  JCODE_RELEASE_METADATA_BASE mirror stays configurable; version lookup,
+  download bases and SHA256SUMS verification all already fall back to the
+  GitHub release itself, so installation works without jcode.sh.
+- jcode update (update.rs GITHUB_REPO) and selfdev repo URL now point at
+  Charteredprofessionals/Cworkspace, so published binaries self-update to
+  THIS project's releases.
+- publish-typescript-sdk.yml: publish under the
+  @charteredprofessionals npm scope and wire NODE_AUTH_TOKEN (was absent,
+  so both npm publish steps could never authenticate). SDK package names,
+  optionalDependencies and READMEs renamed accordingly.
+- windows-installer.yml: fix invalid PowerShell -Filter syntax (was
+  -Filter "*.msi","*.exe"), remove the v* tag push trigger that raced
+  release.yml on the same tags.
+
+label-pr.yml keeps the upstream jev-pr-labeler action (public, works from
+any repository). Requires repo setup: NPM_TOKEN secret, npm org, Homebrew
+tap fork, AUR account.
+---
+ .github/workflows/discord-release.yml         |  2 +-
+ .github/workflows/publish-typescript-sdk.yml  |  6 ++++-
+ .github/workflows/release.yml                 | 26 +++++++++----------
+ .github/workflows/update-star-history.yml     |  2 +-
+ .github/workflows/windows-installer.yml       |  9 ++++---
+ crates/jcode-app-core/src/tool/selfdev/mod.rs |  2 +-
+ crates/jcode-app-core/src/update.rs           |  2 +-
+ scripts/install.sh                            |  2 +-
+ sdk/npm/darwin-arm64/README.md                |  4 +--
+ sdk/npm/darwin-arm64/package.json             |  4 +--
+ sdk/npm/darwin-x64/README.md                  |  4 +--
+ sdk/npm/darwin-x64/package.json               |  4 +--
+ sdk/npm/linux-arm64/README.md                 |  4 +--
+ sdk/npm/linux-arm64/package.json              |  4 +--
+ sdk/npm/linux-x64/README.md                   |  4 +--
+ sdk/npm/linux-x64/package.json                |  4 +--
+ sdk/npm/win32-arm64/README.md                 |  4 +--
+ sdk/npm/win32-arm64/package.json              |  4 +--
+ sdk/npm/win32-x64/README.md                   |  4 +--
+ sdk/npm/win32-x64/package.json                |  4 +--
+ sdk/typescript/package.json                   | 20 +++++++-------
+ 21 files changed, 62 insertions(+), 57 deletions(-)
+
+diff --git a/.github/workflows/discord-release.yml b/.github/workflows/discord-release.yml
+index 25cb0bdce..b3d382dd0 100644
+--- a/.github/workflows/discord-release.yml
++++ b/.github/workflows/discord-release.yml
+@@ -29,7 +29,7 @@ jobs:
+     # belongs to the canonical repository. On a fork the webhook secret is
+     # absent and the step would fail rather than post, but the guard makes that
+     # independent of whether the fork happens to hold the secret.
+-    if: github.repository == '1jehuang/jcode'
++    if: github.repository == 'Charteredprofessionals/Cworkspace'
+     runs-on: ubuntu-latest
+     steps:
+       - uses: actions/checkout@v4
+diff --git a/.github/workflows/publish-typescript-sdk.yml b/.github/workflows/publish-typescript-sdk.yml
+index b7c58e974..744e911cd 100644
+--- a/.github/workflows/publish-typescript-sdk.yml
++++ b/.github/workflows/publish-typescript-sdk.yml
+@@ -18,7 +18,7 @@ permissions:
+ 
+ jobs:
+   publish:
+-    name: Publish @1jehuang/jcode-sdk
++    name: Publish @charteredprofessionals/jcode-sdk
+     runs-on: ubuntu-latest
+     permissions:
+       contents: read
+@@ -73,6 +73,8 @@ jobs:
+       # the package matching the consumer's os/cpu from optionalDependencies.
+       - name: Publish platform runtime packages
+         working-directory: ${{ github.workspace }}
++        env:
++          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+         run: |
+           for package in sdk/npm/*; do
+             name=$(node -p "require('./$package/package.json').name")
+@@ -85,4 +87,6 @@ jobs:
+           done
+ 
+       - name: Publish with npm provenance
++        env:
++          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+         run: npm publish --access public --provenance
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index e07d61839..0f7edb888 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -53,7 +53,7 @@ jobs:
+     # Every other job in this workflow needs `create-release`, directly or
+     # transitively, so gating this one job skips the whole workflow: a skipped
+     # dependency skips its dependents.
+-    if: github.repository == '1jehuang/jcode'
++    if: github.repository == 'Charteredprofessionals/Cworkspace'
+     runs-on: ubuntu-latest
+     # Exact-commit CI includes a native Windows test job with a 150-minute cap.
+     timeout-minutes: 190
+@@ -1048,18 +1048,18 @@ jobs:
+           chmod 600 ~/.ssh/deploy_key
+           export GIT_SSH_COMMAND="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no"
+ 
+-          git clone git@github.com:1jehuang/homebrew-jcode.git /tmp/homebrew-jcode
++          git clone git@github.com:Charteredprofessionals/homebrew-jcode.git /tmp/homebrew-jcode
+ 
+           cat > /tmp/homebrew-jcode/Formula/jcode.rb << FORMULA
+           class Jcode < Formula
+             desc "AI coding agent powered by Claude and ChatGPT"
+-            homepage "https://github.com/1jehuang/jcode"
++            homepage "https://github.com/Charteredprofessionals/Cworkspace"
+             version "${VERSION_NUM}"
+             license "MIT"
+ 
+             on_macos do
+               on_arm do
+-                url "https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-macos-aarch64.tar.gz"
++                url "https://github.com/Charteredprofessionals/Cworkspace/releases/download/${VERSION}/jcode-macos-aarch64.tar.gz"
+                 sha256 "${MACOS_ARM_SHA}"
+ 
+                 def install
+@@ -1068,7 +1068,7 @@ jobs:
+               end
+ 
+               on_intel do
+-                url "https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-macos-x86_64.tar.gz"
++                url "https://github.com/Charteredprofessionals/Cworkspace/releases/download/${VERSION}/jcode-macos-x86_64.tar.gz"
+                 sha256 "${MACOS_INTEL_SHA}"
+ 
+                 def install
+@@ -1079,7 +1079,7 @@ jobs:
+ 
+             on_linux do
+               on_intel do
+-                url "https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-linux-x86_64.tar.gz"
++                url "https://github.com/Charteredprofessionals/Cworkspace/releases/download/${VERSION}/jcode-linux-x86_64.tar.gz"
+                 sha256 "${LINUX_SHA}"
+ 
+                 def install
+@@ -1093,7 +1093,7 @@ jobs:
+               end
+ 
+               on_arm do
+-                url "https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-linux-aarch64.tar.gz"
++                url "https://github.com/Charteredprofessionals/Cworkspace/releases/download/${VERSION}/jcode-linux-aarch64.tar.gz"
+                 sha256 "${LINUX_ARM_SHA}"
+ 
+                 def install
+@@ -1145,7 +1145,7 @@ jobs:
+           VERSION_NUM="${VERSION#v}"
+ 
+           LINUX_SHA=$(sha256sum artifacts/jcode-linux-x86_64/jcode-linux-x86_64.tar.gz | cut -d' ' -f1)
+-          LINUX_URL="https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-linux-x86_64.tar.gz"
++          LINUX_URL="https://github.com/Charteredprofessionals/Cworkspace/releases/download/${VERSION}/jcode-linux-x86_64.tar.gz"
+ 
+           mkdir -p ~/.ssh
+           chmod 700 ~/.ssh
+@@ -1162,13 +1162,13 @@ jobs:
+           git remote set-url origin ssh://aur@aur.archlinux.org/jcode-bin.git
+ 
+           cat > PKGBUILD << 'PKGBUILD_END'
+-          # Maintainer: Jeremy Huang <jeremyhuang55555@gmail.com>
++          # Maintainer: Charteredprofessionals <94949997+Charteredprofessionals@users.noreply.github.com>
+           pkgname=jcode-bin
+           pkgver=VERSION_PLACEHOLDER
+           pkgrel=1
+           pkgdesc="AI coding agent powered by Claude and ChatGPT"
+           arch=('x86_64')
+-          url="https://github.com/1jehuang/jcode"
++          url="https://github.com/Charteredprofessionals/Cworkspace"
+           license=('MIT')
+           provides=('jcode')
+           conflicts=('jcode')
+@@ -1199,7 +1199,7 @@ jobs:
+           printf '\tpkgdesc = AI coding agent powered by Claude and ChatGPT\n' >> .SRCINFO
+           printf '\tpkgver = %s\n' "${VERSION_NUM}" >> .SRCINFO
+           printf '\tpkgrel = 1\n' >> .SRCINFO
+-          printf '\turl = https://github.com/1jehuang/jcode\n' >> .SRCINFO
++          printf '\turl = https://github.com/Charteredprofessionals/Cworkspace\n' >> .SRCINFO
+           printf '\tarch = x86_64\n' >> .SRCINFO
+           printf '\tlicense = MIT\n' >> .SRCINFO
+           printf '\tprovides = jcode\n' >> .SRCINFO
+@@ -1208,8 +1208,8 @@ jobs:
+           printf '\tsha256sums = %s\n' "${LINUX_SHA}" >> .SRCINFO
+           printf '\npkgname = jcode-bin\n' >> .SRCINFO
+ 
+-          git config user.name "Jeremy Huang"
+-          git config user.email "jeremyhuang55555@gmail.com"
++          git config user.name "Charteredprofessionals"
++          git config user.email "94949997+Charteredprofessionals@users.noreply.github.com"
+           git add PKGBUILD .SRCINFO
+           git commit -m "Update to ${VERSION}" || echo "No changes"
+           retry 3 5 git push origin master
+diff --git a/.github/workflows/update-star-history.yml b/.github/workflows/update-star-history.yml
+index 7f77e73e9..08ed0b82b 100644
+--- a/.github/workflows/update-star-history.yml
++++ b/.github/workflows/update-star-history.yml
+@@ -17,7 +17,7 @@ concurrency:
+ 
+ jobs:
+   update:
+-    if: github.repository == '1jehuang/jcode'
++    if: github.repository == 'Charteredprofessionals/Cworkspace'
+     runs-on: ubuntu-latest
+     steps:
+       - uses: actions/checkout@v4
+diff --git a/.github/workflows/windows-installer.yml b/.github/workflows/windows-installer.yml
+index c34727be8..13300f261 100644
+--- a/.github/workflows/windows-installer.yml
++++ b/.github/workflows/windows-installer.yml
+@@ -2,9 +2,10 @@ name: Windows Installer
+ 
+ on:
+   workflow_dispatch:
+-  push:
+-    tags:
+-      - 'v*'
++  # Dispatch manually after a release tag is published. The former
++  # `push: tags: v*` trigger was removed (R-6): it raced the release
++  # pipeline and could publish a partial installer for the same tag.
++  # (Do not re-add a `v*` tag push trigger; release.yml owns tag events.)
+ 
+ permissions:
+   contents: read
+@@ -76,7 +77,7 @@ jobs:
+       - name: Find installer artifacts
+         id: artifacts
+         run: |
+-          $installers = Get-ChildItem gui/src-tauri/target/x86_64-pc-windows-msvc/release/bundle -Filter "*.msi","*.exe" -Recurse -ErrorAction SilentlyContinue
++          $installers = Get-ChildItem gui/src-tauri/target/x86_64-pc-windows-msvc/release/bundle -Recurse -Include *.msi,*.exe -ErrorAction SilentlyContinue
+           if (-not $installers) {
+             Write-Error "No installer artifacts found"
+             exit 1
+diff --git a/crates/jcode-app-core/src/tool/selfdev/mod.rs b/crates/jcode-app-core/src/tool/selfdev/mod.rs
+index 0243b2c45..59fe2b89c 100644
+--- a/crates/jcode-app-core/src/tool/selfdev/mod.rs
++++ b/crates/jcode-app-core/src/tool/selfdev/mod.rs
+@@ -33,7 +33,7 @@ pub use reload::{ReloadRecoveryDirective, persisted_background_tasks_note};
+ pub use status::selfdev_status_output;
+ 
+ /// Public GitHub source used when cloning the jcode repository for self-dev.
+-pub const JCODE_REPO_URL: &str = "https://github.com/1jehuang/jcode.git";
++pub const JCODE_REPO_URL: &str = "https://github.com/Charteredprofessionals/Cworkspace.git";
+ 
+ #[derive(Debug, Deserialize)]
+ struct SelfDevInput {
+diff --git a/crates/jcode-app-core/src/update.rs b/crates/jcode-app-core/src/update.rs
+index 62db80d59..7d17cff7a 100644
+--- a/crates/jcode-app-core/src/update.rs
++++ b/crates/jcode-app-core/src/update.rs
+@@ -28,7 +28,7 @@ use update_metadata::{record_release_update_duration, record_source_update_durat
+ pub use update_rate_limit::{RATE_LIMIT_ERROR_PREFIX, is_rate_limit_error};
+ use update_rate_limit::{clear_rate_limit_backoff, rate_limit_error};
+ 
+-const GITHUB_REPO: &str = "1jehuang/jcode";
++const GITHUB_REPO: &str = "Charteredprofessionals/Cworkspace";
+ /// Minimum gap between *automatic* update checks.
+ ///
+ /// Every automatic check costs one or two unauthenticated `api.github.com`
+diff --git a/scripts/install.sh b/scripts/install.sh
+index 885b39398..035661200 100755
+--- a/scripts/install.sh
++++ b/scripts/install.sh
+@@ -1,7 +1,7 @@
+ #!/usr/bin/env bash
+ set -euo pipefail
+ 
+-REPO="1jehuang/jcode"
++REPO="Charteredprofessionals/Cworkspace"
+ RELEASE_METADATA_BASE="${JCODE_RELEASE_METADATA_BASE:-https://jcode.sh/releases}"
+ IS_WINDOWS=false
+ IS_TERMUX=false
+diff --git a/sdk/npm/darwin-arm64/README.md b/sdk/npm/darwin-arm64/README.md
+index 1d4108dac..943a3b0fc 100644
+--- a/sdk/npm/darwin-arm64/README.md
++++ b/sdk/npm/darwin-arm64/README.md
+@@ -1,3 +1,3 @@
+-# @1jehuang/jcode-darwin-arm64
++# @charteredprofessionals/jcode-darwin-arm64
+ 
+-Platform runtime used by `@1jehuang/jcode-sdk`. Install the SDK rather than this package directly.
++Platform runtime used by `@charteredprofessionals/jcode-sdk`. Install the SDK rather than this package directly.
+diff --git a/sdk/npm/darwin-arm64/package.json b/sdk/npm/darwin-arm64/package.json
+index 65f103e68..254bd0e62 100644
+--- a/sdk/npm/darwin-arm64/package.json
++++ b/sdk/npm/darwin-arm64/package.json
+@@ -1,5 +1,5 @@
+ {
+-  "name": "@1jehuang/jcode-darwin-arm64",
++  "name": "@charteredprofessionals/jcode-darwin-arm64",
+   "version": "1.2.0",
+   "description": "Jcode runtime binary for darwin arm64",
+   "license": "MIT",
+@@ -18,7 +18,7 @@
+   },
+   "repository": {
+     "type": "git",
+-    "url": "git+https://github.com/1jehuang/jcode.git",
++    "url": "git+https://github.com/Charteredprofessionals/Cworkspace.git",
+     "directory": "sdk/npm/darwin-arm64"
+   },
+   "publishConfig": {
+diff --git a/sdk/npm/darwin-x64/README.md b/sdk/npm/darwin-x64/README.md
+index 7c8983abe..f442da2ac 100644
+--- a/sdk/npm/darwin-x64/README.md
++++ b/sdk/npm/darwin-x64/README.md
+@@ -1,3 +1,3 @@
+-# @1jehuang/jcode-darwin-x64
++# @charteredprofessionals/jcode-darwin-x64
+ 
+-Platform runtime used by `@1jehuang/jcode-sdk`. Install the SDK rather than this package directly.
++Platform runtime used by `@charteredprofessionals/jcode-sdk`. Install the SDK rather than this package directly.
+diff --git a/sdk/npm/darwin-x64/package.json b/sdk/npm/darwin-x64/package.json
+index 5e9fa05e5..cd4967a72 100644
+--- a/sdk/npm/darwin-x64/package.json
++++ b/sdk/npm/darwin-x64/package.json
+@@ -1,5 +1,5 @@
+ {
+-  "name": "@1jehuang/jcode-darwin-x64",
++  "name": "@charteredprofessionals/jcode-darwin-x64",
+   "version": "1.2.0",
+   "description": "Jcode runtime binary for darwin x64",
+   "license": "MIT",
+@@ -18,7 +18,7 @@
+   },
+   "repository": {
+     "type": "git",
+-    "url": "git+https://github.com/1jehuang/jcode.git",
++    "url": "git+https://github.com/Charteredprofessionals/Cworkspace.git",
+     "directory": "sdk/npm/darwin-x64"
+   },
+   "publishConfig": {
+diff --git a/sdk/npm/linux-arm64/README.md b/sdk/npm/linux-arm64/README.md
+index 00852cfcb..dce61e66e 100644
+--- a/sdk/npm/linux-arm64/README.md
++++ b/sdk/npm/linux-arm64/README.md
+@@ -1,3 +1,3 @@
+-# @1jehuang/jcode-linux-arm64
++# @charteredprofessionals/jcode-linux-arm64
+ 
+-Platform runtime used by `@1jehuang/jcode-sdk`. Install the SDK rather than this package directly.
++Platform runtime used by `@charteredprofessionals/jcode-sdk`. Install the SDK rather than this package directly.
+diff --git a/sdk/npm/linux-arm64/package.json b/sdk/npm/linux-arm64/package.json
+index eae7fa261..b3e610a88 100644
+--- a/sdk/npm/linux-arm64/package.json
++++ b/sdk/npm/linux-arm64/package.json
+@@ -1,5 +1,5 @@
+ {
+-  "name": "@1jehuang/jcode-linux-arm64",
++  "name": "@charteredprofessionals/jcode-linux-arm64",
+   "version": "1.2.0",
+   "description": "Jcode runtime binary for linux arm64",
+   "license": "MIT",
+@@ -18,7 +18,7 @@
+   },
+   "repository": {
+     "type": "git",
+-    "url": "git+https://github.com/1jehuang/jcode.git",
++    "url": "git+https://github.com/Charteredprofessionals/Cworkspace.git",
+     "directory": "sdk/npm/linux-arm64"
+   },
+   "publishConfig": {
+diff --git a/sdk/npm/linux-x64/README.md b/sdk/npm/linux-x64/README.md
+index 5108e3ca7..6fdbb3c2e 100644
+--- a/sdk/npm/linux-x64/README.md
++++ b/sdk/npm/linux-x64/README.md
+@@ -1,3 +1,3 @@
+-# @1jehuang/jcode-linux-x64
++# @charteredprofessionals/jcode-linux-x64
+ 
+-Platform runtime used by `@1jehuang/jcode-sdk`. Install the SDK rather than this package directly.
++Platform runtime used by `@charteredprofessionals/jcode-sdk`. Install the SDK rather than this package directly.
+diff --git a/sdk/npm/linux-x64/package.json b/sdk/npm/linux-x64/package.json
+index 59b64ded9..140d9de23 100644
+--- a/sdk/npm/linux-x64/package.json
++++ b/sdk/npm/linux-x64/package.json
+@@ -1,5 +1,5 @@
+ {
+-  "name": "@1jehuang/jcode-linux-x64",
++  "name": "@charteredprofessionals/jcode-linux-x64",
+   "version": "1.2.0",
+   "description": "Jcode runtime binary for linux x64",
+   "license": "MIT",
+@@ -18,7 +18,7 @@
+   },
+   "repository": {
+     "type": "git",
+-    "url": "git+https://github.com/1jehuang/jcode.git",
++    "url": "git+https://github.com/Charteredprofessionals/Cworkspace.git",
+     "directory": "sdk/npm/linux-x64"
+   },
+   "publishConfig": {
+diff --git a/sdk/npm/win32-arm64/README.md b/sdk/npm/win32-arm64/README.md
+index 9b5633eec..05c865313 100644
+--- a/sdk/npm/win32-arm64/README.md
++++ b/sdk/npm/win32-arm64/README.md
+@@ -1,3 +1,3 @@
+-# @1jehuang/jcode-win32-arm64
++# @charteredprofessionals/jcode-win32-arm64
+ 
+-Platform runtime used by `@1jehuang/jcode-sdk`. Install the SDK rather than this package directly.
++Platform runtime used by `@charteredprofessionals/jcode-sdk`. Install the SDK rather than this package directly.
+diff --git a/sdk/npm/win32-arm64/package.json b/sdk/npm/win32-arm64/package.json
+index a395d926b..419a36f12 100644
+--- a/sdk/npm/win32-arm64/package.json
++++ b/sdk/npm/win32-arm64/package.json
+@@ -1,5 +1,5 @@
+ {
+-  "name": "@1jehuang/jcode-win32-arm64",
++  "name": "@charteredprofessionals/jcode-win32-arm64",
+   "version": "1.2.0",
+   "description": "Jcode runtime binary for win32 arm64",
+   "license": "MIT",
+@@ -18,7 +18,7 @@
+   },
+   "repository": {
+     "type": "git",
+-    "url": "git+https://github.com/1jehuang/jcode.git",
++    "url": "git+https://github.com/Charteredprofessionals/Cworkspace.git",
+     "directory": "sdk/npm/win32-arm64"
+   },
+   "publishConfig": {
+diff --git a/sdk/npm/win32-x64/README.md b/sdk/npm/win32-x64/README.md
+index eb7d13de7..bdf59b96c 100644
+--- a/sdk/npm/win32-x64/README.md
++++ b/sdk/npm/win32-x64/README.md
+@@ -1,3 +1,3 @@
+-# @1jehuang/jcode-win32-x64
++# @charteredprofessionals/jcode-win32-x64
+ 
+-Platform runtime used by `@1jehuang/jcode-sdk`. Install the SDK rather than this package directly.
++Platform runtime used by `@charteredprofessionals/jcode-sdk`. Install the SDK rather than this package directly.
+diff --git a/sdk/npm/win32-x64/package.json b/sdk/npm/win32-x64/package.json
+index 922c0590a..cc65e9369 100644
+--- a/sdk/npm/win32-x64/package.json
++++ b/sdk/npm/win32-x64/package.json
+@@ -1,5 +1,5 @@
+ {
+-  "name": "@1jehuang/jcode-win32-x64",
++  "name": "@charteredprofessionals/jcode-win32-x64",
+   "version": "1.2.0",
+   "description": "Jcode runtime binary for win32 x64",
+   "license": "MIT",
+@@ -18,7 +18,7 @@
+   },
+   "repository": {
+     "type": "git",
+-    "url": "git+https://github.com/1jehuang/jcode.git",
++    "url": "git+https://github.com/Charteredprofessionals/Cworkspace.git",
+     "directory": "sdk/npm/win32-x64"
+   },
+   "publishConfig": {
+diff --git a/sdk/typescript/package.json b/sdk/typescript/package.json
+index a4aaeaced..0ff08e617 100644
+--- a/sdk/typescript/package.json
++++ b/sdk/typescript/package.json
+@@ -1,5 +1,5 @@
+ {
+-  "name": "@1jehuang/jcode-sdk",
++  "name": "@charteredprofessionals/jcode-sdk",
+   "version": "1.2.0",
+   "description": "TypeScript SDK for the jcode harness API (protocol v1)",
+   "license": "MIT",
+@@ -42,12 +42,12 @@
+   ],
+   "repository": {
+     "type": "git",
+-    "url": "git+https://github.com/1jehuang/jcode.git",
++    "url": "git+https://github.com/Charteredprofessionals/Cworkspace.git",
+     "directory": "sdk/typescript"
+   },
+-  "homepage": "https://github.com/1jehuang/jcode/tree/main/sdk/typescript#readme",
++  "homepage": "https://github.com/Charteredprofessionals/Cworkspace/tree/main/sdk/typescript#readme",
+   "bugs": {
+-    "url": "https://github.com/1jehuang/jcode/issues"
++    "url": "https://github.com/Charteredprofessionals/Cworkspace/issues"
+   },
+   "author": "Jeremy Huang",
+   "sideEffects": false,
+@@ -58,11 +58,11 @@
+     "ajv": "^8.20.0"
+   },
+   "optionalDependencies": {
+-    "@1jehuang/jcode-darwin-arm64": "1.2.0",
+-    "@1jehuang/jcode-darwin-x64": "1.2.0",
+-    "@1jehuang/jcode-linux-arm64": "1.2.0",
+-    "@1jehuang/jcode-linux-x64": "1.2.0",
+-    "@1jehuang/jcode-win32-arm64": "1.2.0",
+-    "@1jehuang/jcode-win32-x64": "1.2.0"
++    "@charteredprofessionals/jcode-darwin-arm64": "1.2.0",
++    "@charteredprofessionals/jcode-darwin-x64": "1.2.0",
++    "@charteredprofessionals/jcode-linux-arm64": "1.2.0",
++    "@charteredprofessionals/jcode-linux-x64": "1.2.0",
++    "@charteredprofessionals/jcode-win32-arm64": "1.2.0",
++    "@charteredprofessionals/jcode-win32-x64": "1.2.0"
+   }
+ }
+-- 
+2.47.3
+

@@ -1,0 +1,252 @@
+From c5c422674d539daf6f4749d621b2745220f9a66e Mon Sep 17 00:00:00 2001
+From: Z User <z@container>
+Date: Tue, 17 Nov 2026 16:25:41 +0000
+Subject: [PATCH 1/6] fix(build): restore compiling master (B-10)
+
+- Complete the require_validator refactor: add the missing field to the
+  10 ToolContext literals commit f80dccb20 missed (7 in jcode-app-core,
+  3 in jcode-tui, 1 in src/bin/harness.rs). Value is false, matching the
+  documented backward-compatible default; daemon sessions still fail
+  closed via the JCODE_COWORK_MODE checks in verify_path/resolve_path.
+- Fix broken duplicated stdout/stderr/wait tail in run_bridge_cli
+  (browser.rs): hoist WinJobGuard to function scope, let each platform
+  block assign shared stdout/stderr/status, delete the dead duplicate
+  that referenced a moved-out-of-scope `child`.
+
+cargo check --locked -p jcode -p jcode-tool-core now passes.
+---
+ .../src/agent/turn_execution.rs               |  1 +
+ crates/jcode-app-core/src/agent/turn_loops.rs |  2 +
+ .../src/agent/turn_streaming_mpsc.rs          |  2 +
+ .../src/server/client_actions.rs              |  1 +
+ .../src/server/runtime_commands.rs            |  1 +
+ crates/jcode-app-core/src/tool/browser.rs     | 53 +++++++------------
+ crates/jcode-tui/src/tui/app/commands.rs      |  1 +
+ crates/jcode-tui/src/tui/app/turn.rs          |  2 +
+ src/bin/harness.rs                            |  1 +
+ 9 files changed, 29 insertions(+), 35 deletions(-)
+
+diff --git a/crates/jcode-app-core/src/agent/turn_execution.rs b/crates/jcode-app-core/src/agent/turn_execution.rs
+index d0600ef46..a72bcbec6 100644
+--- a/crates/jcode-app-core/src/agent/turn_execution.rs
++++ b/crates/jcode-app-core/src/agent/turn_execution.rs
+@@ -1035,6 +1035,7 @@ impl Agent {
+             stdin_request_tx: self.stdin_request_tx.clone(),
+             graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
+             execution_mode: ToolExecutionMode::Direct,
++            require_validator: false,
+         };
+         self.registry.execute(name, input, ctx).await
+     }
+diff --git a/crates/jcode-app-core/src/agent/turn_loops.rs b/crates/jcode-app-core/src/agent/turn_loops.rs
+index 4434d7330..c95f23172 100644
+--- a/crates/jcode-app-core/src/agent/turn_loops.rs
++++ b/crates/jcode-app-core/src/agent/turn_loops.rs
+@@ -753,6 +753,7 @@ impl Agent {
+                             stdin_request_tx: self.stdin_request_tx.clone(),
+                             graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
+                             execution_mode: ToolExecutionMode::AgentTurn,
++                            require_validator: false,
+                         };
+                         crate::telemetry::record_tool_call();
+                         let tool_result = self
+@@ -1201,6 +1202,7 @@ impl Agent {
+                     stdin_request_tx: self.stdin_request_tx.clone(),
+                     graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
+                     execution_mode: ToolExecutionMode::AgentTurn,
++                    require_validator: false,
+                 };
+ 
+                 if trace {
+diff --git a/crates/jcode-app-core/src/agent/turn_streaming_mpsc.rs b/crates/jcode-app-core/src/agent/turn_streaming_mpsc.rs
+index 9b7a6985b..14350f664 100644
+--- a/crates/jcode-app-core/src/agent/turn_streaming_mpsc.rs
++++ b/crates/jcode-app-core/src/agent/turn_streaming_mpsc.rs
+@@ -1021,6 +1021,7 @@ impl Agent {
+                             stdin_request_tx: self.stdin_request_tx.clone(),
+                             graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
+                             execution_mode: ToolExecutionMode::AgentTurn,
++                            require_validator: false,
+                         };
+                         crate::telemetry::record_tool_call();
+                         let tool_result = self
+@@ -1632,6 +1633,7 @@ impl Agent {
+                     stdin_request_tx: self.stdin_request_tx.clone(),
+                     graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
+                     execution_mode: ToolExecutionMode::AgentTurn,
++                    require_validator: false,
+                 };
+ 
+                 if trace {
+diff --git a/crates/jcode-app-core/src/server/client_actions.rs b/crates/jcode-app-core/src/server/client_actions.rs
+index 03d531e2d..dd03f4891 100644
+--- a/crates/jcode-app-core/src/server/client_actions.rs
++++ b/crates/jcode-app-core/src/server/client_actions.rs
+@@ -417,6 +417,7 @@ pub(super) fn handle_run_subagent(
+             stdin_request_tx: None,
+             graceful_shutdown_signal: None,
+             execution_mode: crate::tool::ToolExecutionMode::Direct,
++            require_validator: false,
+         };
+ 
+         let started = Instant::now();
+diff --git a/crates/jcode-app-core/src/server/runtime_commands.rs b/crates/jcode-app-core/src/server/runtime_commands.rs
+index 1ee96b114..4bc9788b4 100644
+--- a/crates/jcode-app-core/src/server/runtime_commands.rs
++++ b/crates/jcode-app-core/src/server/runtime_commands.rs
+@@ -80,6 +80,7 @@ pub(super) async fn execute(
+                         stdin_request_tx: None,
+                         graceful_shutdown_signal: None,
+                         execution_mode: crate::tool::ToolExecutionMode::Direct,
++                        require_validator: false,
+                     },
+                 )
+                 .await?;
+diff --git a/crates/jcode-app-core/src/tool/browser.rs b/crates/jcode-app-core/src/tool/browser.rs
+index 9fed2b009..24f41a031 100644
+--- a/crates/jcode-app-core/src/tool/browser.rs
++++ b/crates/jcode-app-core/src/tool/browser.rs
+@@ -968,6 +968,12 @@ async fn run_bridge_cli(
+     use_session: bool,
+     ctx: &ToolContext,
+ ) -> Result<std::result::Result<String, String>> {
++    // Exactly one platform block below runs; it assigns all three before use.
++    let stdout: String;
++    let stderr: String;
++    let status: Option<std::process::ExitStatus>;
++    #[cfg(windows)]
++    let job_guard = super::win_job::WinJobGuard::new()?;
+     #[cfg(not(windows))]
+     {
+         let mut command = tokio::process::Command::new(bin);
+@@ -1009,11 +1015,13 @@ async fn run_bridge_cli(
+             stderr
+         };
+ 
+-        let (stdout, stderr, status) = tokio::join!(stdout_fut, stderr_fut, child.wait());
++        let (out_bytes, err_bytes, waited) = tokio::join!(stdout_fut, stderr_fut, child.wait());
+ 
+-        let status = status
++        let exit = waited
+             .with_context(|| format!("Failed to wait for browser bridge action '{}'.", action))?;
+-        let stdout = String::from_utf8_lossy(&stdout).trim().to_string();
++        stdout = String::from_utf8_lossy(&out_bytes).trim().to_string();
++        stderr = String::from_utf8_lossy(&err_bytes).trim().to_string();
++        status = Some(exit);
+     }
+     #[cfg(windows)]
+     {
+@@ -1026,7 +1034,6 @@ async fn run_bridge_cli(
+         command.stderr(std::process::Stdio::piped());
+         crate::browser::apply_bridge_browser_env(&mut command, browser);
+ 
+-        let job_guard = super::win_job::WinJobGuard::new()?;
+         let child = command
+             .spawn()
+             .with_context(|| format!("Failed to run browser bridge action '{}'.", action))?;
+@@ -1036,7 +1043,7 @@ async fn run_bridge_cli(
+         }
+ 
+         // Convert std::process::Child to tokio::process::Child for async I/O
+-        let child = tokio::process::Child::from_std(child)?;
++        let mut child = tokio::process::Child::from_std(child)?;
+ 
+         let stdout_handle = child.stdout.take();
+         let stderr_handle = child.stderr.take();
+@@ -1058,43 +1065,19 @@ async fn run_bridge_cli(
+             stderr
+         };
+ 
+-        let (stdout, stderr, status) = tokio::join!(stdout_fut, stderr_fut, child.wait());
++        let (out_bytes, err_bytes, waited) = tokio::join!(stdout_fut, stderr_fut, child.wait());
+ 
+-        let status = status
++        let exit = waited
+             .with_context(|| format!("Failed to wait for browser bridge action '{}'.", action))?;
+-        let stdout = String::from_utf8_lossy(&stdout).trim().to_string();
++        stdout = String::from_utf8_lossy(&out_bytes).trim().to_string();
++        stderr = String::from_utf8_lossy(&err_bytes).trim().to_string();
++        status = Some(exit);
+     }
+ 
+-    let stdout_handle = child.stdout.take();
+-    let stderr_handle = child.stderr.take();
+-
+-    let stdout_fut = async {
+-        let mut stdout = Vec::new();
+-        if let Some(mut handle) = stdout_handle {
+-            use tokio::io::AsyncReadExt;
+-            handle.read_to_end(&mut stdout).await.unwrap_or_default();
+-        }
+-        stdout
+-    };
+-    let stderr_fut = async {
+-        let mut stderr = Vec::new();
+-        if let Some(mut handle) = stderr_handle {
+-            use tokio::io::AsyncReadExt;
+-            handle.read_to_end(&mut stderr).await.unwrap_or_default();
+-        }
+-        stderr
+-    };
+-
+-    let (stdout, stderr, status) = tokio::join!(stdout_fut, stderr_fut, child.wait());
+-
+-    let status = status
+-        .with_context(|| format!("Failed to wait for browser bridge action '{}'.", action))?;
+-    let stdout = String::from_utf8_lossy(&stdout).trim().to_string();
+-    let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
+-
+     #[cfg(windows)]
+     let _job_guard = job_guard;
+ 
++    let status = status.expect("browser bridge status must be set by the platform block");
+     if !status.success() {
+         let details = if stderr.is_empty() {
+             stdout
+diff --git a/crates/jcode-tui/src/tui/app/commands.rs b/crates/jcode-tui/src/tui/app/commands.rs
+index d2777ad66..9796934b1 100644
+--- a/crates/jcode-tui/src/tui/app/commands.rs
++++ b/crates/jcode-tui/src/tui/app/commands.rs
+@@ -712,6 +712,7 @@ fn launch_manual_subagent(app: &mut App, spec: ManualSubagentSpec) {
+             stdin_request_tx: None,
+             graceful_shutdown_signal: None,
+             execution_mode: crate::tool::ToolExecutionMode::Direct,
++            require_validator: false,
+         };
+ 
+         let start = Instant::now();
+diff --git a/crates/jcode-tui/src/tui/app/turn.rs b/crates/jcode-tui/src/tui/app/turn.rs
+index 948015f3c..dba579ecf 100644
+--- a/crates/jcode-tui/src/tui/app/turn.rs
++++ b/crates/jcode-tui/src/tui/app/turn.rs
+@@ -1170,6 +1170,7 @@ impl App {
+                                             stdin_request_tx: None,
+                                             graceful_shutdown_signal: None,
+                                             execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
++                                            require_validator: false,
+                                         };
+                                         let tool_result = self
+                                             .registry
+@@ -1462,6 +1463,7 @@ impl App {
+                     stdin_request_tx: None,
+                     graceful_shutdown_signal: None,
+                     execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
++                    require_validator: false,
+                 };
+ 
+                 Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+diff --git a/src/bin/harness.rs b/src/bin/harness.rs
+index e8639f4cd..9e6d2cba5 100644
+--- a/src/bin/harness.rs
++++ b/src/bin/harness.rs
+@@ -84,6 +84,7 @@ async fn main() -> Result<()> {
+         stdin_request_tx: None,
+         graceful_shutdown_signal: None,
+         execution_mode: ToolExecutionMode::Direct,
++        require_validator: false,
+     };
+ 
+     let mut cases = Vec::new();
+-- 
+2.47.3
+
