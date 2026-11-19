@@ -34,12 +34,18 @@ class HighlightsTests(unittest.TestCase):
                 tags.write_text(releases)
                 output = subprocess.check_output([sys.executable, SCRIPT, tags], cwd=repo,
                     env=dict(os.environ, SHA=hashes[-1], RELEASE_NOTES=notes), text=True)
-                return output.split('## Highlights\n\n')[1].splitlines()
+                return output.split('## Highlights\n\n')[1].split('\n\n## Bundled changes')[0].splitlines()
 
             self.assertEqual(render(), ['- newest'])
             self.assertEqual(render('selfdev-linux-' + hashes[0]), ['- newest', '- new'])
             self.assertEqual(render(notes='  - Better picker\nFaster startup'),
                              ['- Better picker', '- Faster startup'])
+            tags.write_text('selfdev-linux-' + hashes[0])
+            output = subprocess.check_output([sys.executable, SCRIPT, tags], cwd=repo,
+                env=dict(os.environ, SHA=hashes[-1], RELEASE_NOTES='Better picker'), text=True)
+            self.assertIn(f'[View all 2 commits](https://github.com/1jehuang/jcode/compare/{hashes[0]}...{hashes[-1]})', output)
+            self.assertIn('- newest\n- new\n', output)
+            self.assertNotIn('private commit body', output)
 
 
 if __name__ == '__main__':

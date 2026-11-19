@@ -38,20 +38,29 @@ def body(sha, notes, tags):
     if not re.fullmatch('[0-9a-f]{40}', sha):
         raise ValueError('invalid commit SHA')
     items = bullets(notes)
+    authored = bool(items)
+    previous = None
+    for tag in tags:  # API release order, newest first; ignore unrelated histories.
+        match = TAG.fullmatch(tag.strip())
+        if match and (base := match[1]) != sha:
+            status = subprocess.run(['git', 'merge-base', '--is-ancestor', base, sha]).returncode
+            if status == 0:
+                previous = base
+                break
+            if status != 1:
+                raise ValueError('unable to inspect release ancestry')
     if not items:
-        previous = None
-        for tag in tags:  # API release order, newest first; ignore unrelated histories.
-            match = TAG.fullmatch(tag.strip())
-            if match and (base := match[1]) != sha:
-                status = subprocess.run(['git', 'merge-base', '--is-ancestor', base, sha]).returncode
-                if status == 0:
-                    previous = base
-                    break
-                if status != 1:
-                    raise ValueError('unable to inspect release ancestry')
         revision = f'{previous}..{sha}' if previous else sha
         items = bullets(git('log', '--format=%s', '-n', str(MAX_ITEMS if previous else 1), revision))
-    return f'Portable Linux x86_64 self-dev build of {sha}.\n\n## Highlights\n\n' + '\n'.join(items or ['- Build ' + sha[:12]]) + '\n'
+    result = f'Portable Linux x86_64 self-dev build of {sha}.\n\n## Highlights\n\n' + '\n'.join(items or ['- Build ' + sha[:12]]) + '\n'
+    if previous:
+        revision = f'{previous}..{sha}'
+        count = int(git('rev-list', '--count', revision))
+        compare = f'https://github.com/1jehuang/jcode/compare/{previous}...{sha}'
+        result += f'\n## Bundled changes\n\n[View all {count} commits]({compare})\n'
+        if authored:
+            result += '\n'.join(bullets(git('log', '--format=%s', '-n', str(MAX_ITEMS), revision))) + '\n'
+    return result
 
 
 if __name__ == '__main__':

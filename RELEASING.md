@@ -19,11 +19,14 @@ launcher. This is a manual testing channel, separate from stable updates and
 the cross-platform v1 preview below. Rebuilding a commit does not create a
 second public release.
 
-For agent-driven builds, write public `release_notes` while the changes are
-fresh: one short bullet per change, describing what a tester will notice or
-can try. Keep internal build reasons, chat context, and local paths out of the
-notes. The release and Discord announcement share these highlights. Builds
-without authored notes use public commit titles instead.
+Before requesting `selfdev build` or `build-reload`, run `selfdev logs` and
+review the changes since the last **published Linux prerelease**, not just
+the last local build. Both tool actions require public `release_notes`: write
+short bullets about what testers will notice, including changes made by other
+agents. Keep internal build reasons, chat context, and local paths out of the
+notes. Discord uses these highlights. The GitHub release also links the full
+commit range so changes omitted from the summary remain discoverable. CLI and
+manual workflow builds without authored notes still use public commit titles.
 
 ## Opt-in v1 preview channel
 
