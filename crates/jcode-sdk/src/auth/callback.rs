@@ -105,12 +105,7 @@ impl CallbackListener {
         flow: &FlowInner,
         deadline: Instant,
     ) -> Option<String> {
-        stream
-            .set_read_timeout(Some(Duration::from_millis(100)))
-            .ok()?;
-        stream
-            .set_write_timeout(Some(Duration::from_millis(100)))
-            .ok()?;
+        configure_accepted(stream).ok()?;
         let deadline = deadline.min(Instant::now() + Duration::from_secs(2));
         let mut request = Vec::new();
         let input = loop {
@@ -191,5 +186,55 @@ impl CallbackListener {
             return None;
         }
         Some(url.to_string())
+    }
+}
+
+/// Make an accepted callback connection block on reads for at most 100 ms.
+///
+/// On BSD/macOS an accepted socket inherits `O_NONBLOCK` from the listener
+/// (Linux does not). Left non-blocking, the read timeout never applies: every
+/// read returns `WouldBlock` at once and `receive` spins at full CPU until its
+/// deadline for any connection that has not sent its request yet.
+fn configure_accepted(stream: &TcpStream) -> std::io::Result<()> {
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(100)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepted_stream_waits_for_the_read_timeout() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+        listener
+            .set_nonblocking(true)
+            .expect("non-blocking listener");
+        let _client = TcpStream::connect(listener.local_addr().expect("addr")).expect("connect");
+        let stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("accept failed: {error}"),
+            }
+        };
+        configure_accepted(&stream).expect("configure");
+
+        let started = Instant::now();
+        let error = (&stream)
+            .read(&mut [0u8; 8])
+            .expect_err("the client sent nothing");
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+        assert!(
+            started.elapsed() >= Duration::from_millis(50),
+            "read returned after {:?}: the accepted socket is still non-blocking",
+            started.elapsed()
+        );
     }
 }
