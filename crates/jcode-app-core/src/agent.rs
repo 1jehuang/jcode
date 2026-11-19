@@ -2,6 +2,7 @@
 
 #[cfg(test)]
 mod cache_monitor_tests;
+mod cli_reasoning;
 mod compaction;
 mod conversation_reset;
 mod environment;
