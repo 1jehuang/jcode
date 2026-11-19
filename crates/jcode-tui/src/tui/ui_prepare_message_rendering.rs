@@ -16,9 +16,10 @@ pub(super) fn render_message_into(
     let centered = ctx.centered;
     let diff_mode = ctx.diff_mode;
     let role = msg.effective_role();
-    // Keep redundant await-start notices and pinned todo tool messages in
+    // Keep routine await notices and pinned todo tool messages in
     // display_messages for history fidelity, but omit their transcript cards.
     if super::super::messages::is_swarm_await_started(msg)
+        || super::super::messages::is_routine_swarm_await_result(msg)
         || (role == "tool"
             && crate::config::config().display.pin_todos
             && msg

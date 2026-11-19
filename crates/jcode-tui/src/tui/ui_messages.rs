@@ -376,6 +376,33 @@ pub(super) fn needs_message_separator(msg: &DisplayMessage) -> bool {
         && !is_kv_cache_footer(msg)
 }
 
+pub(crate) fn is_routine_swarm_await_result(msg: &DisplayMessage) -> bool {
+    if !matches!(msg.effective_role(), "system" | "background_task" | "swarm") {
+        return false;
+    }
+    let summary = if msg
+        .content
+        .trim_start()
+        .starts_with("🐝 **Swarm await finished**")
+    {
+        compact_swarm_await_summary(&msg.content)
+    } else if msg.title.as_deref() == Some("🐝 Swarm await") {
+        msg.content.to_string()
+    } else {
+        return false;
+    };
+    let Some((_, statuses)) = summary.split_once(" matched · ") else {
+        return false;
+    };
+    !summary.starts_with("recovered")
+        && !summary.starts_with("timed out")
+        && statuses.split(", ").all(|status| {
+            status.split_once(' ').is_some_and(|(count, state)| {
+                count.parse::<usize>().is_ok() && matches!(state, "ready" | "completed" | "running")
+            })
+        })
+}
+
 pub(crate) fn is_swarm_await_started(msg: &DisplayMessage) -> bool {
     matches!(msg.effective_role(), "system" | "background_task" | "swarm")
         && msg
