@@ -411,10 +411,12 @@ impl App {
                 .status
                 .as_ref()
                 .is_some_and(CaptureStatus::take_wake)
-                && !paused
-                && !listener.failed
             {
-                if recording.manual_trigger() {
+                if paused || listener.failed {
+                    // Say why the tap did nothing instead of dropping it.
+                    self.set_status_notice("Jarvis is paused; Fn tap ignored");
+                } else if recording.manual_trigger() {
+                    play_trigger_sound();
                     self.set_status_notice("Jarvis: sending what it just heard");
                 } else {
                     self.set_status_notice("Jarvis hasn't heard anything recently");
