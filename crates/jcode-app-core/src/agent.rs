@@ -573,6 +573,23 @@ impl Agent {
         Self::new_with_initial_ownership(provider, registry, working_dir, parent_id, true)
     }
 
+    /// Construct a headless swarm worker with the explicit subagent prompt role.
+    pub(crate) fn new_headless_worker(
+        provider: Arc<dyn Provider>,
+        registry: Registry,
+        working_dir: Option<&str>,
+        parent_id: Option<String>,
+    ) -> Self {
+        let mut agent = Self::new_with_parent_and_initial_working_dir(
+            provider,
+            registry,
+            working_dir,
+            parent_id,
+        );
+        agent.session.prompt_role = crate::prompt::PromptRole::Subagent;
+        agent
+    }
+
     fn new_with_initial_ownership(
         provider: Arc<dyn Provider>,
         registry: Registry,

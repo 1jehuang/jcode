@@ -2,8 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    EnvSnapshot, SessionImproveMode, SessionStatus, StoredCompactionState, StoredMemoryInjection,
-    StoredMessage, StoredReplayEvent,
+    EnvSnapshot, PromptRole, SessionImproveMode, SessionStatus, StoredCompactionState,
+    StoredMemoryInjection, StoredMessage, StoredReplayEvent,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -14,6 +14,8 @@ pub(super) struct SessionJournalMeta {
     pub(super) custom_title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) system_prompt: Option<String>,
+    #[serde(default)]
+    pub(super) prompt_role: PromptRole,
     pub(super) updated_at: DateTime<Utc>,
     pub(super) compaction: Option<std::sync::Arc<StoredCompactionState>>,
     /// Compaction state can be several MB (OpenAI encrypted context). When it
@@ -105,6 +107,7 @@ pub(super) fn metadata_requires_snapshot(
         || prev.title != current.title
         || prev.custom_title != current.custom_title
         || prev.system_prompt != current.system_prompt
+        || prev.prompt_role != current.prompt_role
         || prev.provider_key != current.provider_key
         || prev.route_api_method != current.route_api_method
         || prev.reasoning_effort != current.reasoning_effort

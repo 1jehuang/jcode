@@ -90,6 +90,62 @@ async fn swarm_effort_does_not_touch_system_prompt() {
     assert!(!full.contains("Deep Task Graph"));
 }
 
+#[derive(Clone)]
+struct PromptRoleProvider;
+
+#[async_trait]
+impl Provider for PromptRoleProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        anyhow::bail!("not used")
+    }
+    fn name(&self) -> &str {
+        "test"
+    }
+    fn model(&self) -> String {
+        "test-model".into()
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[tokio::test]
+async fn subagent_role_is_injected_into_assembled_prompt() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let provider: Arc<dyn Provider> = Arc::new(PromptRoleProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.session.prompt_role = crate::prompt::PromptRole::Subagent;
+
+    let split = agent.build_system_prompt_split(None);
+    assert!(
+        split
+            .static_part
+            .contains(crate::prompt::SUBAGENT_PROMPT_BLOCK)
+    );
+}
+
+#[tokio::test]
+async fn coordinator_role_keeps_normal_assembled_prompt() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let provider: Arc<dyn Provider> = Arc::new(PromptRoleProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let agent = Agent::new(provider, registry);
+
+    let split = agent.build_system_prompt_split(None);
+    assert!(
+        !split
+            .static_part
+            .contains(crate::prompt::SUBAGENT_PROMPT_BLOCK)
+    );
+}
+
 #[tokio::test]
 async fn run_once_path_also_appends_reminder() {
     let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();

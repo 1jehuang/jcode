@@ -880,3 +880,18 @@ fn prompt_guidance_missing_or_unreadable_project_keeps_global_content() {
         }
     });
 }
+
+#[test]
+fn prompt_role_block_is_unconditional_for_subagents_only() {
+    let base = "existing instructions".to_string();
+
+    let coordinator = apply_prompt_role(base.clone(), PromptRole::Coordinator);
+    assert_eq!(coordinator, base);
+    assert!(!coordinator.contains(SUBAGENT_PROMPT_BLOCK));
+
+    let subagent = apply_prompt_role(base, PromptRole::Subagent);
+    assert!(subagent.contains(SUBAGENT_PROMPT_BLOCK));
+    assert!(subagent.contains("Do not delegate, spawn, or ask other agents"));
+    assert!(subagent.contains("BROKEN` only for a genuine"));
+    assert!(subagent.contains("OPERATOR NEEDED` only for a decision"));
+}
