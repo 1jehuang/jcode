@@ -283,7 +283,7 @@ fn replacement_escape_navigation_search_modified_y_and_mouse_disarm() {
     select_replace(&mut picker);
     key(&mut picker, KeyCode::Enter);
     picker.handle_overlay_mouse(MouseEvent {
-        kind: MouseEventKind::Moved,
+        kind: MouseEventKind::Down(MouseButton::Left),
         column: 0,
         row: 0,
         modifiers: KeyModifiers::empty(),
