@@ -209,7 +209,7 @@ pub(super) async fn dispatch_background_task_stalled(
     if task.wake
         && !emit_external_wake(
             &task.session_id,
-            "background_task_stalled",
+            if task.elapsed_review { "background_task_elapsed_review" } else { "background_task_stalled" },
             &notification,
             swarm_members,
         )
@@ -217,10 +217,12 @@ pub(super) async fn dispatch_background_task_stalled(
         && !run_live_turn_if_idle(
             &task.session_id,
             &notification,
-            Some(
+            Some(if task.elapsed_review {
+                "Review elapsed runtime and diagnose any avoidable delay. Leave healthy work running without restarting it.".to_string()
+            } else {
                 "A background task for this session has produced no output or progress for its stall window. Inspect it and decide whether to keep waiting, fix it, or cancel it."
-                    .to_string(),
-            ),
+                    .to_string()
+            }),
             sessions,
             LiveTurnSwarmContext::new(
                 swarm_members,
