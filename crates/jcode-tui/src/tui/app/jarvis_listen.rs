@@ -115,10 +115,13 @@ mod tests {
         let mut listener = AlwaysListening::default();
         let partial = r#"{"trigger":"open it","still_speaking":true}"#;
         listener.playback.trigger(5, partial);
+        assert!(!listener.playback.ding, "no cue while still speaking");
         listener.defer_speech("opening".into());
         listener.playback.finalize(4, "different turn");
+        assert!(!listener.playback.ding);
         assert!(listener.playback.partial.is_some() && listener.playback.speech.is_some());
         listener.playback.finalize(5, "open it tomorrow");
+        assert!(listener.playback.ding, "cue plays once speech ends");
         assert!(listener.playback.partial.is_none() && listener.playback.speech.is_none());
         listener.playback.trigger(6, partial);
         listener.defer_speech("opening now".into());
@@ -248,7 +251,6 @@ impl DeferredPlayback {
     fn trigger(&mut self, id: u64, text: &str) {
         self.latest = Some(id);
         self.speech = None;
-        self.ding = true;
         self.partial = serde_json::from_str::<serde_json::Value>(text)
             .ok()
             .and_then(|env| {
@@ -264,12 +266,15 @@ impl DeferredPlayback {
                     )
                 })
             });
+        // No cue while the user is still talking: it plays on finalize.
+        self.ding = self.partial.is_none();
     }
 
     fn finalize(&mut self, id: u64, text: &str) {
         if !self.partial.as_ref().is_some_and(|(old, _, _)| *old == id) {
             return;
         }
+        self.ding = true;
         if self.partial.take().unwrap().1 != text.trim() {
             self.speech = None;
         }
@@ -762,6 +767,20 @@ impl App {
                 }
                 let interleave = self.is_processing;
                 let result = dispatch::submit(self, remote, &req.text, interleave).await;
+                // The finished utterance must not wait for the turn's next safe
+                // point: cancel the provisional turn. The server keeps the queued
+                // interrupt and runs it as the next turn (Esc-redirect path).
+                let result = match result {
+                    Ok(id) if interleave && req.continuation => remote
+                        .cancel_with_reason("jarvis_final_transcript")
+                        .await
+                        .map(|_| {
+                            self.remote_interrupt_ack_deadline =
+                                Some(Instant::now() + Duration::from_secs(3));
+                            id
+                        }),
+                    other => other,
+                };
                 let request_id = result.as_ref().ok().copied();
                 let stage = if let Err(error) = result {
                     self.push_display_message(DisplayMessage::error(format!(
