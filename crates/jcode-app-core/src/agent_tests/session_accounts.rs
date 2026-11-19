@@ -801,3 +801,44 @@ async fn dropped_pin_notice_names_the_replacement_pin() {
         "notice contradicts the replacement pin: {reason}"
     );
 }
+
+/// A saved Claude account runs through its Claude Code instance by default, so
+/// resuming a session pinned to it must also pin that instance; otherwise the
+/// CLI silently falls back to its own default login.
+#[tokio::test]
+async fn resumed_claude_account_pin_selects_its_cli_instance() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+    struct RestoreBin(Option<std::ffi::OsString>);
+    impl Drop for RestoreBin {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => crate::env::set_var("JCODE_CLAUDE_CODE_BIN", value),
+                None => crate::env::remove_var("JCODE_CLAUDE_CODE_BIN"),
+            }
+        }
+    }
+    let _bin = RestoreBin(std::env::var_os("JCODE_CLAUDE_CODE_BIN"));
+    // Any existing file stands in for the `claude` binary; nothing spawns.
+    crate::env::set_var("JCODE_CLAUDE_CODE_BIN", std::env::current_exe().unwrap());
+    store_claude_accounts();
+    let mut saved = Session::create(None, None);
+    saved.account_pins.insert("claude".to_string(), fox_pin());
+    saved.save_prepared().expect("persist session");
+
+    let resume = |id: &str| {
+        let provider = PinProvider::new(None);
+        let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+        let mut agent = Agent::new(provider_dyn, Registry::empty());
+        agent.restore_session(id).expect("resume");
+        let pin = provider
+            .pins
+            .lock()
+            .unwrap()
+            .get(&AccountProviderKind::ClaudeCode)
+            .cloned();
+        pin.map(|pin| pin.label)
+    };
+    assert_eq!(resume(&saved.id).as_deref(), Some("claude-fox"));
+    crate::config::Config::set_claude_account_native("claude-fox", true, None).unwrap();
+    assert_eq!(resume(&saved.id), None, "a native-mode account keeps no CLI pin");
+}

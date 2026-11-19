@@ -411,12 +411,38 @@ impl Agent {
     /// exists are dropped (the session falls back to the default account).
     /// Kinds without a pin are unpinned, since a restored session may reuse a
     /// provider instance that carried another session's pin.
+    /// A saved Claude account runs through its Claude Code instance unless
+    /// toggled native, so the session's Claude account selects that instance.
+    fn claude_cli_pin_for_session(&self) -> Option<crate::provider::AccountPin> {
+        use crate::provider::AccountProviderKind;
+        let label = self
+            .session
+            .account_pins
+            .get(AccountProviderKind::Claude.key())
+            .and_then(|pin| crate::session_accounts::resolve_pin(AccountProviderKind::Claude, pin))
+            .or_else(|| {
+                let route = self.session.route_api_method.as_deref()?;
+                route
+                    .starts_with("claude-oauth@")
+                    .then(|| jcode_provider_core::oauth_account_label(route))
+                    .flatten()
+                    .map(str::to_string)
+            })?;
+        let instance = crate::auth::claude_code::instance_for_account(&label)?;
+        Some(crate::provider::AccountPin::new(instance, None))
+    }
+
     pub fn restore_account_pins_from_session(&mut self) {
         use crate::provider::AccountProviderKind;
         let mut dropped = Vec::new();
         for kind in AccountProviderKind::ALL {
             let key = kind.key();
-            match self.session.account_pins.get(key).cloned() {
+            let session_pin = self.session.account_pins.get(key).cloned().or_else(|| {
+                (kind == AccountProviderKind::ClaudeCode)
+                    .then(|| self.claude_cli_pin_for_session())
+                    .flatten()
+            });
+            match session_pin {
                 Some(pin) => match crate::session_accounts::resolve_pin(kind, &pin) {
                     Some(label) => {
                         let pin = crate::provider::AccountPin::new(label, pin.identity.clone());
