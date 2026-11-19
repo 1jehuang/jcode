@@ -373,6 +373,7 @@ export -f cargo
         let result = if Self::is_test_session() {
             Self::run_test_build(output_path.clone(), &reason).await?
         } else {
+            let prerelease = build::linux_prerelease_candidate(&repo_dir, &actual_source);
             let result =
                 Self::stream_build_command(repo_dir.clone(), command.clone(), output_path.clone())
                     .await?;
@@ -396,6 +397,9 @@ export -f cargo
                         request.validated = true;
                         request.last_progress = Some("published and smoke-tested".to_string());
                         request.save()?;
+                        if prerelease && result.status == Some(BackgroundTaskStatus::Completed) {
+                            build::dispatch_linux_prerelease(&repo_dir, &source_after_build);
+                        }
                         result
                     }
                     Err(err) => {
