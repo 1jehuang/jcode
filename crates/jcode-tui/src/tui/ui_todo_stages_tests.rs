@@ -707,8 +707,9 @@ fn worker_dots_prefer_complete_status_snapshot() {
     let mut member: crate::protocol::SwarmMemberStatus =
         serde_json::from_value(serde_json::json!({
             "session_id": "worker", "status": "running",
-            "todo_items": [{"content": "visible detail", "status": "in_progress"}],
-            "runtime": {"todo_statuses": ["completed", "completed", "in_progress", "pending"]}
+            "todo_items": [{"content": "visible detail", "status": "in_progress"},
+                           {"content": "retired", "status": "cancelled"}],
+            "runtime": {"todo_statuses": ["completed", "cancelled", "completed", "in_progress", "pending"]}
         }))
         .unwrap();
     let snapshot = TodoCardAgent::from_member(&member);

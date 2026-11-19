@@ -69,7 +69,7 @@ fn include_old_saved_sessions_on_initial_load() -> bool {
 }
 
 const SESSION_LIST_CACHE_TTL: Duration = Duration::from_secs(5);
-const SESSION_LIST_DISK_CACHE_VERSION: u32 = 4;
+const SESSION_LIST_DISK_CACHE_VERSION: u32 = 5;
 const SESSION_LIST_DISK_CACHE_MAX_AGE_SECONDS: i64 = 7 * 24 * 60 * 60;
 const SAVED_METADATA_TAIL_SCAN_BYTES: u64 = 64 * 1024;
 const INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES: usize = 64 * 1024;
@@ -1913,6 +1913,7 @@ fn parse_jcode_session_info(
         todo_statuses: crate::todo::load_todos(stem)
             .unwrap_or_default()
             .into_iter()
+            .filter(|todo| !crate::todo::todo_status_is_cancelled(&todo.status))
             .map(|todo| todo.status)
             .collect(),
     })

@@ -108,10 +108,17 @@ impl TodoCardAgent {
                 member
                     .todo_items
                     .iter()
+                    .filter(|item| !crate::todo::todo_status_is_cancelled(&item.status))
                     .map(|item| item.status.clone())
                     .collect()
             } else {
-                member.runtime.todo_statuses.clone()
+                member
+                    .runtime
+                    .todo_statuses
+                    .iter()
+                    .filter(|status| !crate::todo::todo_status_is_cancelled(status))
+                    .cloned()
+                    .collect()
             },
         }
     }
