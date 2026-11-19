@@ -53,6 +53,9 @@ pub enum VoiceState {
 pub enum ContinuousEvent {
     State(VoiceState),
     Level(f32),
+    /// Transient display text only. Never dispatch as a request.
+    Caption(String),
+    /// A request accepted by the semantic gate.
     Transcript(String),
     Rejected(String),
     Error(VoiceError),
@@ -69,6 +72,9 @@ impl Events {
             ContinuousEvent::Level(_) => self
                 .queue
                 .retain(|e| !matches!(e, ContinuousEvent::Level(_))),
+            ContinuousEvent::Caption(_) => self
+                .queue
+                .retain(|e| !matches!(e, ContinuousEvent::Caption(_))),
             ContinuousEvent::State(_) => self
                 .queue
                 .retain(|e| !matches!(e, ContinuousEvent::State(_))),
@@ -199,23 +205,29 @@ impl ContinuousRecording {
         if self.paused.swap(value, Ordering::SeqCst) != value {
             self.epoch.fetch_add(1, Ordering::SeqCst);
             self.level.store(0, Ordering::Relaxed);
-            self.events
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .queue
-                .retain(|event| {
-                    !matches!(
-                        event,
-                        ContinuousEvent::Transcript(_) | ContinuousEvent::Rejected(_)
-                    )
-                });
+            self.clear_speech_events();
         }
+    }
+    fn clear_speech_events(&self) {
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .queue
+            .retain(|event| {
+                !matches!(
+                    event,
+                    ContinuousEvent::Caption(_)
+                        | ContinuousEvent::Transcript(_)
+                        | ContinuousEvent::Rejected(_)
+                )
+            });
     }
     pub fn is_capturing(&self) -> bool {
         self.capturing.load(Ordering::SeqCst) && !self.is_finished()
     }
     pub fn stop(&self) {
         self.cancel.store(true, Ordering::SeqCst);
+        self.clear_speech_events();
     }
     /// Invalidates captured and pending speech on both edges. TTS cannot turn into a request.
     pub fn set_suppressed(&self, value: bool) {
@@ -224,16 +236,7 @@ impl ContinuousRecording {
         }
         if value {
             self.level.store(0, Ordering::Relaxed);
-            self.events
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .queue
-                .retain(|event| {
-                    !matches!(
-                        event,
-                        ContinuousEvent::Transcript(_) | ContinuousEvent::Rejected(_)
-                    )
-                });
+            self.clear_speech_events();
         }
     }
     pub fn audio_level(&self) -> f32 {
@@ -596,12 +599,12 @@ async fn run(
                     if job.as_ref().is_some_and(|(h,_,_)|h.is_finished()) {
                         let (handle,_,job_generation) = job.take().unwrap();
                         let result = handle.await.map_err(|_|VoiceError::CaptureFailed)?;
-                        if job_generation == epoch.load(Ordering::SeqCst) && !suppressed.load(Ordering::SeqCst) && !paused.load(Ordering::SeqCst) {
+                        if !cancel.load(Ordering::SeqCst) && job_generation == epoch.load(Ordering::SeqCst) && !suppressed.load(Ordering::SeqCst) && !paused.load(Ordering::SeqCst) {
                             match result {
                                 Ok(text) => {
                                     if !text.trim().is_empty() {
                                         let mut output = events.lock().unwrap_or_else(|e|e.into_inner());
-                                        if job_generation == epoch.load(Ordering::SeqCst) && !suppressed.load(Ordering::SeqCst) && !paused.load(Ordering::SeqCst) {
+                                        if !cancel.load(Ordering::SeqCst) && job_generation == epoch.load(Ordering::SeqCst) && !suppressed.load(Ordering::SeqCst) && !paused.load(Ordering::SeqCst) {
                                             output.push(ContinuousEvent::Transcript(text));
                                         }
                                     }
@@ -624,9 +627,15 @@ async fn run(
                             let require_jev = config.require_jev;
                             let key = key.clone();
                             let child = token.clone();
+                            let (events, epoch, paused, suppressed, stopped) = (events.clone(), epoch.clone(), paused.clone(), suppressed.clone(), cancel.clone());
                             job = Some((tokio::spawn(async move {
                                 let text = transcribe(key,samples,child).await?;
                                 if text.trim().is_empty() { return Ok(String::new()); }
+                                {
+                                    let mut output = events.lock().unwrap_or_else(|e|e.into_inner());
+                                    if stopped.load(Ordering::SeqCst) || generation != epoch.load(Ordering::SeqCst) || paused.load(Ordering::SeqCst) || suppressed.load(Ordering::SeqCst) { return Ok(String::new()); }
+                                    output.push(ContinuousEvent::Caption(text.trim().chars().take(256).collect()));
+                                }
                                 let gate = gate.as_ref().ok_or(VoiceError::NotConfigured)?;
                                 let accepted = semantic_gate(gate,&text,threshold,require_jev).await?;
                                 Ok(if accepted {text} else {String::new()})
@@ -937,8 +946,16 @@ mod tests {
         for _ in 0..1000 {
             e.push(ContinuousEvent::Rejected("no".into()));
             e.push(ContinuousEvent::Level(0.1));
+            e.push(ContinuousEvent::Caption("ambient".into()));
         }
         assert!(e.queue.len() <= 32);
+        assert_eq!(
+            e.queue
+                .iter()
+                .filter(|e| matches!(e, ContinuousEvent::Caption(_)))
+                .count(),
+            1
+        );
         assert_eq!(
             e.queue
                 .iter()
