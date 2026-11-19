@@ -196,7 +196,10 @@ impl SkillTool {
             description: What this skill does\n\
             allowed-tools: bash, read, write\n\
             ---\n\n\
-            # Skill content here\n"
+            # Skill content here\n\n\
+            Optional `command: <shell command>` frontmatter makes a user `/my-skill args`\n\
+            run that command plus the shell-quoted args locally (like a `!` line),\n\
+            with no model turn. The skill body is still loaded by this tool.\n"
                 .to_string()
         } else {
             let mut output = format!("Loaded skills: {}\n\n", skills.len());
@@ -206,6 +209,9 @@ impl SkillTool {
                 output.push_str(&format!("  Path: {}\n", skill.path.display()));
                 if let Some(ref tools) = skill.allowed_tools {
                     output.push_str(&format!("  Tools: {}\n", tools.join(", ")));
+                }
+                if let Some(ref command) = skill.command {
+                    output.push_str(&format!("  Command: {}\n", command));
                 }
                 output.push('\n');
             }

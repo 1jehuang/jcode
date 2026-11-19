@@ -17,6 +17,10 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub allowed_tools: Option<Vec<String>>,
+    /// Optional shell command from the `command:` frontmatter key. When set, a
+    /// user `/skill args` invocation runs `command` plus the shell-quoted args
+    /// locally (like a `!` input line) instead of starting a model turn.
+    pub command: Option<String>,
     pub content: String,
     pub path: PathBuf,
     /// Normalized search text, built on first use. Normalizing every skill
@@ -31,6 +35,8 @@ struct SkillFrontmatter {
     description: String,
     #[serde(rename = "allowed-tools")]
     allowed_tools: Option<AllowedTools>,
+    #[serde(default)]
+    command: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -559,7 +565,11 @@ impl SkillRegistry {
             name,
             description,
             allowed_tools,
+            command,
         } = frontmatter;
+        let command = command
+            .map(|command| command.trim().to_string())
+            .filter(|command| !command.is_empty());
 
         let allowed_tools = allowed_tools.map(|tools| match tools {
             AllowedTools::CommaDelimited(tools) => tools
@@ -572,6 +582,7 @@ impl SkillRegistry {
             name,
             description,
             allowed_tools,
+            command,
             content: body,
             path: path.to_path_buf(),
             search_text: std::sync::OnceLock::new(),
@@ -618,7 +629,7 @@ impl SkillRegistry {
     }
 
     /// Fallback for frontmatter that is not valid YAML: read the top-level
-    /// `name`, `description` and `allowed-tools` keys as plain text and ignore
+    /// `name`, `description`, `allowed-tools` and `command` keys as plain text and ignore
     /// everything else. Returns `None` unless both required keys are present.
     fn parse_frontmatter_lenient(yaml: &str) -> Option<SkillFrontmatter> {
         fn top_level_key(line: &str) -> Option<(&str, &str)> {
@@ -689,10 +700,12 @@ impl SkillRegistry {
                     .collect();
                 (!items.is_empty()).then_some(AllowedTools::Sequence(items))
             });
+        let command = scalar("command");
         Some(SkillFrontmatter {
             name,
             description,
             allowed_tools,
+            command,
         })
     }
 
@@ -1073,6 +1086,29 @@ impl Skill {
             "# Skill: {}\n\n{}\n\n{}",
             self.name, self.description, self.content
         )
+    }
+
+    /// Build the shell line for a user `/skill args` invocation of a skill
+    /// with a `command:` frontmatter key. `raw_args` is the text after the
+    /// skill name; it is split with POSIX shell rules (so user quoting is
+    /// respected) and each argument is re-quoted before being appended, so
+    /// the args can never inject extra shell syntax. Returns `None` for
+    /// skills without a command.
+    pub fn command_line(&self, raw_args: &str) -> Option<String> {
+        let command = self.command.as_deref()?;
+        let raw_args = raw_args.trim();
+        let args = shlex::split(raw_args)
+            .unwrap_or_else(|| raw_args.split_whitespace().map(str::to_string).collect());
+        let mut line = command.to_string();
+        for arg in &args {
+            line.push(' ');
+            match shlex::try_quote(arg) {
+                Ok(quoted) => line.push_str(&quoted),
+                // Only NUL bytes are unquotable; drop them rather than the arg.
+                Err(_) => line.push_str(&shlex::try_quote(&arg.replace('\0', "")).ok()?),
+            }
+        }
+        Some(line)
     }
 
     /// Load additional files from the skill directory

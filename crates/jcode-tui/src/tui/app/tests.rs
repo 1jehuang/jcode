@@ -1184,6 +1184,41 @@ fn skill_invocation_with_prompt_attaches_pending_image_to_user_message() {
 }
 
 #[test]
+fn command_skill_invocation_runs_local_shell_without_model_turn() {
+    let mut app = create_test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let skill_dir = temp.path().join(".jcode/skills/cmd-skill");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: cmd-skill\ndescription: Command skill\ncommand: echo\n---\nBody.\n",
+    )
+    .expect("write skill");
+    app.session.working_dir = Some(temp.path().to_string_lossy().to_string());
+    app.is_processing = true;
+    app.input = "/cmd-skill status 'two words'".to_string();
+    app.cursor_pos = app.input.len();
+    // Like `!` lines, command skills submit immediately even mid-turn.
+    assert_eq!(app.send_action(false), SendAction::Submit);
+    app.is_processing = false;
+    let session_messages_before = app.session.messages.len();
+
+    app.submit_input();
+
+    assert!(!app.is_processing, "command skill must not start a turn");
+    assert_eq!(app.session.messages.len(), session_messages_before);
+    assert!(app.active_skill.is_none());
+    assert!(app.input.is_empty());
+    let last = app.display_messages().last().expect("user echo");
+    assert_eq!(last.role, "user");
+    assert_eq!(last.content, "/cmd-skill status 'two words'");
+    assert_eq!(
+        app.status_notice(),
+        Some("Running local shell: echo status 'two words'".to_string())
+    );
+}
+
+#[test]
 fn unknown_skill_invocation_surfaces_error_and_sends_nothing() {
     let mut app = create_test_app();
     let temp = tempfile::tempdir().expect("tempdir");
