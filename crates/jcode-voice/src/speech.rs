@@ -49,12 +49,30 @@ impl std::error::Error for SpeechError {}
 type Backend = Arc<dyn Fn(&str) -> std::io::Result<Child> + Send + Sync>;
 #[derive(Default)]
 struct State {
-    queue: VecDeque<String>,
+    queue: VecDeque<(String, Option<PlaybackTrace>)>,
     active: Option<(Child, Instant)>,
     generation: u64,
     synthesizing: bool,
     last_error: Option<&'static str>,
     stopped: bool,
+}
+
+pub struct PlaybackTrace {
+    pub session: String,
+    pub utterance: u64,
+}
+impl PlaybackTrace {
+    pub fn mark(&self, stage: &'static str, held_ms: u128) {
+        #[cfg(not(feature = "desktop-config"))]
+        let _ = (stage, held_ms);
+        #[cfg(feature = "desktop-config")]
+        jcode_base::logging::info(&format!(
+            "JARVIS_PLAYBACK session={} utterance={} stage={stage} monotonic_ms={} held_ms={held_ms}",
+            self.session,
+            self.utterance,
+            crate::timing::monotonic_ms()
+        ));
+    }
 }
 impl State {
     fn stop_child(&mut self) {
@@ -133,6 +151,14 @@ impl SpeechPlayer {
     /// Queue one utterance without waiting for playback or queue capacity.
     /// Caps are in UTF-8 bytes and exclude the single active utterance.
     pub fn enqueue(&self, text: &str) -> Result<(), SpeechError> {
+        self.enqueue_traced(text, None)
+    }
+
+    pub fn enqueue_traced(
+        &self,
+        text: &str,
+        trace: Option<PlaybackTrace>,
+    ) -> Result<(), SpeechError> {
         if text.len() > MAX_TEXT_BYTES || text.trim().is_empty() || text.contains('\0') {
             return Err(SpeechError::InvalidText);
         }
@@ -144,7 +170,7 @@ impl SpeechPlayer {
         if state.queue.len() >= MAX_QUEUED_UTTERANCES {
             return Err(SpeechError::QueueFull);
         }
-        state.queue.push_back(text.to_owned());
+        state.queue.push_back((text.to_owned(), trace));
         wake.notify_one();
         Ok(())
     }
@@ -205,10 +231,14 @@ fn run(shared: Arc<(Mutex<State>, Condvar)>, backend: Backend) {
             }
         }
         if state.active.is_none() {
-            if let Some(text) = state.queue.pop_front() {
+            if let Some((text, trace)) = state.queue.pop_front() {
                 // Serialize spawn with cancellation so no stale utterance can
                 // start after cancel has cleared the queue.
                 if let Ok(child) = backend(&text) {
+                    if let Some(trace) = trace {
+                        trace.mark("player_started", 0);
+                    }
+                    crate::timing::mark("speech playback process started");
                     state.active = Some((child, Instant::now()));
                 }
                 continue;
