@@ -162,6 +162,7 @@ impl GateContext {
 struct Events {
     context: GateContext,
     queue: VecDeque<ContinuousEvent>,
+    quiet_since: Option<Instant>,
     notify: Arc<tokio::sync::Notify>,
 }
 struct ClassifiedCaption {
@@ -284,6 +285,7 @@ impl ContinuousRecording {
         let events = Arc::new(Mutex::new(Events {
             context: GateContext::default(),
             queue: VecDeque::new(),
+            quiet_since: None,
             notify: Arc::new(tokio::sync::Notify::new()),
         }));
         let (c, s, g, l, e) = (
@@ -395,6 +397,13 @@ impl ContinuousRecording {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .manual_trigger()
+    }
+    /// Claim a quiet playback window without invalidating pending transcript events.
+    pub fn suppress_if_quiet(&self) -> bool {
+        let output = self.events.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.is_capturing() || !output.quiet_since.is_some_and(|at| at.elapsed() >= Duration::from_millis(250)) || output.queue.iter().any(|e| matches!(e, ContinuousEvent::Transcript {..} | ContinuousEvent::Continuation {..} | ContinuousEvent::State(VoiceState::Speaking | VoiceState::Transcribing))) { return false; }
+        if !self.suppressed.swap(true, Ordering::SeqCst) { self.epoch.fetch_add(1, Ordering::SeqCst); }
+        true
     }
     pub fn is_capturing(&self) -> bool {
         self.capturing.load(Ordering::SeqCst) && !self.is_finished()
@@ -811,25 +820,6 @@ async fn stream_job(
         result = job => result,
     }
 }
-/// Idle warm sessions are recycled before the provider could drop them.
-const WARM_MAX_IDLE: Duration = Duration::from_secs(50);
-struct Warm {
-    handle: Option<tokio::task::JoinHandle<Result<NariSession, VoiceError>>>,
-    since: Instant,
-}
-impl Warm {
-    fn spawn(key: &str) -> Self {
-        let key = key.to_string();
-        Self {
-            handle: Some(tokio::spawn(async move {
-                NariSession::connect(&key, Arc::new(AtomicBool::new(false))).await
-            })),
-            since: Instant::now(),
-        }
-    }
-    fn take(mut self) -> Option<tokio::task::JoinHandle<Result<NariSession, VoiceError>>> {
-        self.handle.take()
-    }
 // Retry only on fresh speech, never by replaying or recharging failed audio.
 fn recovery_delay(error: &VoiceError, failures: usize) -> Option<Duration> {
     let delays = match error {
@@ -865,6 +855,25 @@ async fn rejected_warm_session_never_opens_a_second_connection() {
     }
 }
 
+/// Idle warm sessions are recycled before the provider could drop them.
+const WARM_MAX_IDLE: Duration = Duration::from_secs(50);
+struct Warm {
+    handle: Option<tokio::task::JoinHandle<Result<NariSession, VoiceError>>>,
+    since: Instant,
+}
+impl Warm {
+    fn spawn(key: &str) -> Self {
+        let key = key.to_string();
+        Self {
+            handle: Some(tokio::spawn(async move {
+                NariSession::connect(&key, Arc::new(AtomicBool::new(false))).await
+            })),
+            since: Instant::now(),
+        }
+    }
+    fn take(mut self) -> Option<tokio::task::JoinHandle<Result<NariSession, VoiceError>>> {
+        self.handle.take()
+    }
 }
 impl Drop for Warm {
     fn drop(&mut self) {
@@ -908,19 +917,20 @@ async fn run(
     let mut segmenter = Segmenter::default();
     let mut generation = epoch.load(Ordering::SeqCst);
     let mut resume_at = Instant::now();
-    let mut next_id = 0u64;
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
     let mut jobs: VecDeque<(
         tokio::task::JoinHandle<Result<Option<ClassifiedCaption>, VoiceError>>,
         Arc<AtomicBool>,
         u64,
     )> = VecDeque::new();
     // Audio sink of the utterance currently streaming to Nari.
-    let mut live: Option<tokio::sync::mpsc::UnboundedSender<Vec<i16>>> = None;
+    let mut live: Option<(u64, tokio::sync::mpsc::UnboundedSender<Vec<i16>>)> = None;
     let mut warm: Option<Warm> = None;
     let mut warm_retry_at = Instant::now();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     // Each device lease rotates before the push-to-talk five-minute safety cap.
     let mut budget = Budget::default();
+    let mut consecutive_failures = 0;
     let mut budget_limited = false;
     let mut permission_at = Instant::now();
     let mut permitted = false;
@@ -940,7 +950,6 @@ async fn run(
         let setup_cancel = Arc::new(AtomicBool::new(false));
         let setup = open_capture(setup_cancel.clone(), recorder.clone());
         let (mic, mut pcm) = tokio::select! {
-    let mut consecutive_failures = 0;
             biased;
             _ = crate::nari::cancelled(&cancel) => { setup_cancel.store(true,Ordering::SeqCst); return Err(VoiceError::Cancelled); },
             result = setup => result?,
@@ -968,7 +977,16 @@ async fn run(
                     if paused.load(Ordering::SeqCst) || suppressed.load(Ordering::SeqCst) || Instant::now() < resume_at {
                         level.store(0,Ordering::Relaxed); continue;
                     }
-                    level.store(rms(&chunk).to_bits(),Ordering::Relaxed);
+                    let amplitude = rms(&chunk);
+                    level.store(amplitude.to_bits(),Ordering::Relaxed);
+                    {
+                        let mut output = events.lock().unwrap_or_else(|e| e.into_inner());
+                        if amplitude >= 0.018 || segmenter.active {
+                            output.quiet_since = None;
+                        } else {
+                            output.quiet_since.get_or_insert_with(Instant::now);
+                        }
+                    }
                     for seg in segmenter.push_stream(&chunk) {
                         match seg {
                             Seg::Start(audio) => {
@@ -981,10 +999,8 @@ async fn run(
                                     continue;
                                 }
                                 budget_limited = false;
-                                super::timing::begin();
-                                super::timing::mark("speech onset");
-                                next_id += 1;
-                                let id = next_id;
+                                let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+                                trace_turn(id, "speech_onset");
                                 let token = Arc::new(AtomicBool::new(false));
                                 let gate = gate.clone();
                                 let threshold = config.action_probability;
@@ -1030,13 +1046,14 @@ async fn run(
                                         }
                                     };
                                     caption_feed.abort();
-                                    super::timing::mark("final transcript");
+                                    trace_turn(id, "transcription_finished");
                                     if let Some(trigger) = fired {
                                         // Always close a provisional request, even when
                                         // nothing was added, so Jarvis knows to answer.
                                         let full = if text.trim().is_empty() { trigger } else { text };
                                         let mut output = events.lock().unwrap_or_else(|e|e.into_inner());
-                                        output.push(ContinuousEvent::Continuation(full.trim().chars().take(4096).collect()));
+                                        trace_turn(id, "continuation_ready");
+                                        output.push(ContinuousEvent::Continuation { id, text: full.trim().chars().take(4096).collect() });
                                         return Ok(None);
                                     }
                                     if text.trim().is_empty() { return Ok(None); }
@@ -1049,18 +1066,21 @@ async fn run(
                                     };
                                     let gate = gate.as_ref().ok_or(VoiceError::NotConfigured)?;
                                     let score = semantic_gate(gate,&text,threshold,state).await?;
-                                    super::timing::mark("gate decided");
+                                    trace_turn(id, "final_gate_decided");
                                     Ok(Some(ClassifiedCaption { id, text, score }))
                                 }),token,generation));
                             }
                             Seg::Audio(audio) => {
-                                if let Some(tx) = &live {
+                                if let Some((_, tx)) = &live {
                                     budget.extend(audio.len());
                                     if tx.send(audio).is_err() { live = None; }
                                 }
                             }
                             Seg::End => {
-                                if live.take().is_some() { super::timing::release(); }
+                                if let Some((id, tx)) = live.take() {
+                                    drop(tx);
+                                    trace_turn(id, "speech_endpoint");
+                                }
                             }
                         }
                     }
@@ -1074,7 +1094,7 @@ async fn run(
                         epoch.fetch_add(1, Ordering::SeqCst);
                         let mut out = events.lock().unwrap_or_else(|e| e.into_inner());
                         out.context = GateContext::default();
-                        out.queue.retain(|event| !matches!(event, ContinuousEvent::Caption { .. } | ContinuousEvent::CaptionScore { .. } | ContinuousEvent::Transcript(_) | ContinuousEvent::Rejected(_)));
+                        out.queue.retain(|event| !matches!(event, ContinuousEvent::Caption { .. } | ContinuousEvent::CaptionScore { .. } | ContinuousEvent::Transcript { .. } | ContinuousEvent::Rejected(_)));
                         drop(out);
                         live = None; warm = None;
                         for (handle,token,_) in jobs.drain(..) { token.store(true,Ordering::SeqCst); handle.abort(); }
@@ -1105,6 +1125,7 @@ async fn run(
                         let (handle,_,job_generation) = jobs.pop_front().unwrap();
                         let result = handle.await.map_err(|_|VoiceError::CaptureFailed)?;
                         if !cancel.load(Ordering::SeqCst) && job_generation == epoch.load(Ordering::SeqCst) && !suppressed.load(Ordering::SeqCst) && !paused.load(Ordering::SeqCst) {
+                            if result.is_ok() { consecutive_failures = 0; }
                             match result {
                                 Ok(Some(caption)) => {
                                     let mut output = events.lock().unwrap_or_else(|e|e.into_inner());
@@ -1135,7 +1156,6 @@ async fn run(
         // Closing the sink commits whatever was said before the device restart.
         live = None;
         if result.is_err() || capture.is_err() {
-                            if result.is_ok() { consecutive_failures = 0; }
             warm = None;
             for (handle, token, _) in jobs.drain(..) {
                 token.store(true, Ordering::SeqCst);
@@ -1183,7 +1203,7 @@ mod tests {
         while Instant::now() < deadline {
             while let Some(event) = recording.try_event() {
                 match event {
-                    ContinuousEvent::Transcript(text) => {
+                    ContinuousEvent::Transcript { text, .. } => {
                         assert!(text.to_lowercase().contains("window"));
                         accepted += 1;
                     }
@@ -1234,7 +1254,7 @@ mod tests {
             for (name, (earlier, candidate, require_name, expected)) in cases {
                 let mut ctx = GateContext::default();
                 for text in earlier {
-                    ctx.remember(&text);
+                    ctx.remember(1, &text);
                 }
                 let (score, accepted) = semantic_gate(
                     &client,
@@ -1300,7 +1320,7 @@ mod tests {
                         heartbeat = true;
                     }
                     ContinuousEvent::Error(error) => panic!("unexpected capture error: {error}"),
-                    ContinuousEvent::Transcript(_) => panic!("silence was transcribed"),
+                    ContinuousEvent::Transcript { .. } => panic!("silence was transcribed"),
                     _ => {}
                 }
             }
@@ -1321,7 +1341,7 @@ mod tests {
                 }
                 assert!(!matches!(
                     event,
-                    ContinuousEvent::Error(_) | ContinuousEvent::Transcript(_)
+                    ContinuousEvent::Error(_) | ContinuousEvent::Transcript { .. }
                 ));
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -1354,7 +1374,7 @@ mod tests {
         while let Some(event) = recording.try_event() {
             assert!(!matches!(
                 event,
-                ContinuousEvent::Error(_) | ContinuousEvent::Transcript(_)
+                ContinuousEvent::Error(_) | ContinuousEvent::Transcript { .. }
             ));
             stopped |= matches!(event, ContinuousEvent::Stopped);
         }
@@ -1468,7 +1488,7 @@ mod tests {
         let mut ctx = GateContext::default();
         ctx.chat.push(("assistant".into(), "Which one?".into()));
         for i in 0..20 {
-            ctx.remember(&i.to_string());
+            ctx.remember(i, &i.to_string());
         }
         let trigger = "  The \"second\" one.  ";
         let state = ctx.state(trigger, false);
@@ -1494,6 +1514,7 @@ mod tests {
         let mut events = Events {
             context: GateContext::default(),
             queue: VecDeque::new(),
+            quiet_since: None,
             notify: Arc::new(tokio::sync::Notify::new()),
         };
         for (id, text, raw) in [
@@ -1526,7 +1547,7 @@ mod tests {
                 );
             }
             if id == 3 {
-                let Some(ContinuousEvent::Transcript(payload)) = events.queue.pop_front() else {
+                let Some(ContinuousEvent::Transcript { id: 3, text: payload }) = events.queue.pop_front() else {
                     panic!("missing accepted request")
                 };
                 assert_eq!(
@@ -1542,11 +1563,12 @@ mod tests {
         let mut ctx = GateContext::default();
         let now = Instant::now();
         assert!(ctx.manual(now).is_none(), "nothing heard");
-        ctx.remember_at("old", now - MANUAL_TRIGGER_WINDOW - Duration::from_secs(1));
-        ctx.remember_at("first", now - Duration::from_secs(10));
-        ctx.remember_at("latest", now);
-        let payload: serde_json::Value =
-            serde_json::from_str(&ctx.manual(now).unwrap()).unwrap();
+        ctx.remember_at(1, "old", now - MANUAL_TRIGGER_WINDOW - Duration::from_secs(1));
+        ctx.remember_at(2, "first", now - Duration::from_secs(10));
+        ctx.remember_at(3, "latest", now);
+        let (id, text) = ctx.manual(now).unwrap();
+        assert_eq!(id, 3);
+        let payload: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(
             payload,
             serde_json::json!({"trigger":"latest","background_transcript":["first"]})
@@ -1556,12 +1578,13 @@ mod tests {
         let mut events = Events {
             context: GateContext::default(),
             queue: VecDeque::new(),
+            quiet_since: None,
             notify: Arc::new(tokio::sync::Notify::new()),
         };
-        events.context.remember_at("before", now);
+        events.context.remember_at(6, "before", now);
         events.context.inflight = Some((7, "just said".into()));
         assert!(events.manual_trigger());
-        let Some(ContinuousEvent::Transcript(payload)) = events.queue.pop_front() else {
+        let Some(ContinuousEvent::Transcript { id: 7, text: payload }) = events.queue.pop_front() else {
             panic!("manual trigger queued nothing")
         };
         assert_eq!(
@@ -1576,7 +1599,7 @@ mod tests {
         assert!(events.queue.is_empty(), "claimed caption is not sent twice");
         assert!(events.context.background.is_empty());
         for i in 0..20 {
-            ctx.remember_at(&i.to_string(), now);
+            ctx.remember_at(i, &i.to_string(), now);
         }
         assert_eq!((ctx.background.len(), ctx.heard.len()), (16, 16));
     }
@@ -1711,9 +1734,9 @@ mod tests {
             }
             while let Some(event) = recording.try_event() {
                 match event {
-                    ContinuousEvent::Transcript(_) if fired.is_none() => fired = Some(now_ns()),
+                    ContinuousEvent::Transcript { .. } if fired.is_none() => fired = Some(now_ns()),
                     ContinuousEvent::Caption { id, text } => eprintln!("caption {id} +{}ms: {text}", now_ns() / 1_000_000 % 100_000),
-                    ContinuousEvent::Continuation(text) => eprintln!("continuation: {} words", text.split_whitespace().count()),
+                    ContinuousEvent::Continuation { text, .. } => eprintln!("continuation: {} words", text.split_whitespace().count()),
                     ContinuousEvent::Error(error) => panic!("pipeline failed: {error}"),
                     _ => {}
                 }
@@ -1729,6 +1752,7 @@ mod tests {
         let mut e = Events {
             context: GateContext::default(),
             queue: VecDeque::new(),
+            quiet_since: None,
             notify: Arc::new(tokio::sync::Notify::new()),
         };
         for _ in 0..1000 {
