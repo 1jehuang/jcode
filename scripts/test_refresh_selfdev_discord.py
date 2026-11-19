@@ -46,6 +46,11 @@ class RefreshTest(unittest.TestCase):
                 refresh.refresh(**self.args)
         self.http.assert_not_called()
 
+    def test_refresh_masked_link(self):
+        self.message['content'] = f'Build notes\n[Download & release notes](<{self.url}>)'
+        refresh.refresh(**self.args)
+        self.assertEqual(self.methods(), ['GET', 'PATCH'])
+
     def test_invalid_inputs(self):
         for changes in [dict(message_id='12/34'), dict(tag='v1.0.0')]:
             with self.subTest(changes=changes), self.assertRaises(ValueError):
@@ -53,7 +58,8 @@ class RefreshTest(unittest.TestCase):
         self.fetch.assert_not_called()
 
     def test_unrelated_messages(self):
-        for changes in [dict(content=self.url + 'a'), dict(content=''), dict(id='different')]:
+        for changes in [dict(content=self.url + 'a'), dict(content=''), dict(id='different'),
+                        dict(content=f'[Download & release notes](<{self.url}/other>)')]:
             with self.subTest(changes=changes), patch.dict(self.message, changes):
                 self.http.reset_mock()
                 with self.assertRaises(ValueError):

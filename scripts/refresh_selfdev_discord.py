@@ -36,9 +36,9 @@ def refresh(*, tag, message_id, webhook_url, repository, token):
         return message
 
     previous = request('GET')
-    # Accept a standalone URL or Discord's <URL> form, not a prefix of another link.
-    if not re.search(r'(?:^|\s)(?:' + re.escape(url) + '|<' + re.escape(url)
-                     + r'>)(?=\s|$)', previous.get('content') or ''):
+    links = (url, f'<{url}>', f'[Download & release notes](<{url}>)')
+    pattern = r'(?<!\S)(?:' + '|'.join(map(re.escape, links)) + r')(?!\S)'
+    if not re.search(pattern, previous.get('content') or ''):
         raise ValueError('Existing message does not link to the exact release')
     content = announcements.format_message(tag=tag, name=release.get('name') or tag,
                                            body=body, url=url)
