@@ -664,10 +664,11 @@ fn configure_non_interactive(command: &mut TokioCommand) {
 }
 
 #[cfg(not(windows))]
-fn configure_tool_scratch(command: &mut TokioCommand) {
+fn configure_tool_env(command: &mut std::process::Command) {
     if let Some(dir) = tool_scratch_dir() {
         command.env("TMPDIR", &dir).env("JCODE_SCRATCH_DIR", dir);
     }
+    crate::hooks::apply_current_client_terminal_env(command);
 }
 
 #[cfg(unix)]
@@ -717,7 +718,7 @@ fn build_shell_command(cmd_str: &str) -> TokioCommand {
     {
         let mut cmd = TokioCommand::new("bash");
         cmd.arg("-c").arg(cmd_str);
-        configure_tool_scratch(&mut cmd);
+        configure_tool_env(cmd.as_std_mut());
         configure_non_interactive(&mut cmd);
         cmd
     }
@@ -754,9 +755,7 @@ fn build_detached_shell_wrapper(command: &str) -> StdCommand {
         .env("JCODE_RELOAD_DETACH_COMMAND", command)
         .envs(NON_INTERACTIVE_ENV.iter().copied())
         .env_remove("SSH_ASKPASS");
-    if let Some(dir) = tool_scratch_dir() {
-        cmd.env("TMPDIR", &dir).env("JCODE_SCRATCH_DIR", dir);
-    }
+    configure_tool_env(&mut cmd);
     cmd
 }
 

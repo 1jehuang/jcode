@@ -27,6 +27,10 @@ pub(super) async fn wait_for_session_env_launch_gate(session_id: &str) {
 mod session_environment;
 
 #[cfg(not(windows))]
+#[path = "bash_tests/client_identity.rs"]
+mod client_identity;
+
+#[cfg(not(windows))]
 #[test]
 fn bash_definition_prefers_repository_search_tools() {
     let definition = BashTool::new().to_definition();
