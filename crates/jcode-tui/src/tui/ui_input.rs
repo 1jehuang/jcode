@@ -974,7 +974,7 @@ pub(crate) fn openai_reset_status_hint(
     Some(format!("{count} {noun} available · {detail} · /reset"))
 }
 
-fn caption_line(row: &super::JarvisCaption, width: u16) -> Line<'static> {
+fn caption_line(row: &crate::tui::JarvisCaption, width: u16) -> Line<'static> {
     let (prefix, color) = match row.score {
         None => ("Heard: ".to_owned(), Color::DarkGray),
         Some((p, accepted)) => {
@@ -1007,7 +1007,7 @@ fn caption_cells_show_score_and_do_not_wrap() {
         (Some((0.94, false)), Color::Yellow, "94% Heard:"),
         (Some((0.95, true)), Color::Green, "95% Trigger:"),
     ] {
-        let row = super::JarvisCaption {
+        let row = crate::tui::JarvisCaption {
             id: 1,
             text: "界".repeat(40),
             score,
