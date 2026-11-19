@@ -72,7 +72,9 @@ reply; the ding is skipped if speech is already ready. Temporary provider
 failures release the microphone for a bounded cooldown. Repeat the utterance
 after listening resumes: failed audio is not replayed. A known credential or
 credit failure stops capture. Correct the issue, then use `/voice` to retry
-without restarting the conversation or resetting the hourly allowance.
+without restarting the conversation or resetting the hourly allowance. On updated
+clients, the Waybar `!` tooltip shows the failure and the next step, and clicking
+it requests the same retry as `/voice`. An older client cannot retry from Waybar.
 
 ## Cost limits
 
