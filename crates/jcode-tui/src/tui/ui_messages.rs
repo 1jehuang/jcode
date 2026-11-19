@@ -2808,6 +2808,9 @@ pub(crate) fn render_background_task_message(
         .unwrap_or_default();
     }
     if let Some(progress) = parse_background_task_progress_notification_markdown(&msg.content) {
+        if progress.tool_name == "selfdev-build" {
+            return render_selfdev_status("◌", &progress.summary, width);
+        }
         if progress.tool_name == "swarm" {
             return render_compact_swarm_background_progress(&progress, width);
         }
@@ -2823,6 +2826,16 @@ pub(crate) fn render_background_task_message(
         &parsed.tool_name,
         parsed.display_name.as_deref(),
     );
+    if parsed.tool_name == "selfdev-build" {
+        let state = match parsed.status.as_str() {
+            "running" => Some(("◌", "running")),
+            "↻ superseded" => Some(("↻", "superseded")),
+            _ => None,
+        };
+        if let Some((icon, state)) = state {
+            return render_selfdev_status(icon, &format!("{state} · {}", parsed.duration), width);
+        }
+    }
     let is_swarm = parsed.tool_name == "swarm";
     if is_swarm && !parsed.status.starts_with('✗') {
         return render_compact_swarm_background_completion(&parsed, width);
@@ -3041,6 +3054,29 @@ pub(crate) fn render_background_task_message(
     let mut lines = render_rounded_box(&title, box_content, max_box_width, border_style);
     if centered {
         left_pad_lines_for_centered_mode(&mut lines, width);
+    }
+    lines
+}
+
+fn render_selfdev_status(icon: &str, detail: &str, width: u16) -> Vec<Line<'static>> {
+    let centered = markdown::center_code_blocks();
+    let block_width = if centered {
+        super::centered_content_block_width(width, 96)
+    } else {
+        width as usize
+    };
+    let muted = Style::default().fg(dim_color());
+    let row = Line::from(vec![
+        Span::styled(format!("  {icon} "), muted),
+        Span::styled("selfdev build", Style::default().fg(tool_color())),
+        Span::styled(format!(" · {detail}"), muted),
+    ]);
+    let mut lines = vec![super::truncate_line_with_ellipsis_to_width(
+        &row,
+        block_width.saturating_sub(1),
+    )];
+    if centered {
+        super::left_pad_lines_to_block_width(&mut lines, width, block_width);
     }
     lines
 }

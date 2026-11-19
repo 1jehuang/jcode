@@ -943,6 +943,27 @@ fn render_background_task_failure_without_diagnostic_is_honest() {
 }
 
 #[test]
+fn selfdev_build_status_uses_one_tool_row() {
+    for (status, label) in [
+        ("running", "◌ selfdev build · running"),
+        ("↻ superseded", "↻ selfdev build · superseded"),
+    ] {
+        let msg = DisplayMessage::background_task(format!(
+            "**Background task** `bg123` · `selfdev-build` · {status} · 84.0s · exit 0\n\n```text\ncompiler output\n```\n\n_Full output:_ `bg action=\"output\" task_id=\"bg123\"`"
+        ));
+        for width in [20, 80] {
+            let lines =
+                render_background_task_message(&msg, width, crate::config::DiffDisplayMode::Off);
+            assert_eq!(lines.len(), 1);
+            assert!(lines[0].width() <= width as usize);
+            if width == 80 {
+                assert!(lines[0].to_string().contains(label));
+            }
+        }
+    }
+}
+
+#[test]
 fn render_background_task_success_is_compact_and_preserves_raw_output() {
     let msg = DisplayMessage::background_task(
         "**Background task** `bg123` · `bash` · ✓ completed · 7.1s · exit 0\n\n```text\nline 1\nline 2\nline 3\nline 4\nline 5\n```\n\n_Full output:_ `bg action=\"output\" task_id=\"bg123\"`",
