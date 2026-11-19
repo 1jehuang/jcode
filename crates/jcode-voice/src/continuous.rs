@@ -770,7 +770,15 @@ async fn semantic_gate(
     let response = client
         .evaluate_once(state, questions)
         .await
-        .map_err(|_| VoiceError::Network)?;
+        .map_err(|error| {
+            use jcode_base::jev::DecisionTransportFailure as Failure;
+            match error.downcast_ref::<Failure>() {
+                Some(Failure::Network) => VoiceError::Network,
+                Some(Failure::Http(status)) => VoiceError::Http(*status),
+                None if error.is::<jcode_base::subscription_notice::QuotaExceeded>() => VoiceError::Unavailable,
+                None => VoiceError::InvalidResponse,
+            }
+        })?;
     gate_answer(&response, threshold).map(Some)
 }
 
@@ -898,12 +906,13 @@ async fn stream_job(
 // Retry only on fresh speech, never by replaying or recharging failed audio.
 fn recovery_delay(error: &VoiceError, failures: usize) -> Option<Duration> {
     let delays = match error {
-        VoiceError::Http(429) => [15, 60],
-        VoiceError::Network | VoiceError::Timeout | VoiceError::NariRejected
-        | VoiceError::Http(408 | 500..=599) => [2, 8],
+        VoiceError::Http(429) => [15, 60, 60],
+        VoiceError::Network | VoiceError::Timeout | VoiceError::Http(408 | 500..=599) => [2, 8, 60],
+        // An unrecognized provider rejection may be configuration related.
+        VoiceError::NariRejected => return [2, 8].get(failures).copied().map(Duration::from_secs),
         _ => return None,
     };
-    delays.get(failures).copied().map(Duration::from_secs)
+    Some(Duration::from_secs(delays[failures.min(delays.len() - 1)]))
 }
 
 #[test]
@@ -922,11 +931,12 @@ fn deliberate_retry_cannot_reset_rolling_audio_or_classification_usage() {
 
 #[test]
 fn recovery_is_bounded_and_never_retries_known_permanent_errors() {
-    for error in [VoiceError::Network, VoiceError::NariRejected, VoiceError::Timeout, VoiceError::Http(503), VoiceError::Http(429)] {
+    for error in [VoiceError::Network, VoiceError::Timeout, VoiceError::Http(503), VoiceError::Http(429)] {
         assert!(recovery_delay(&error, 0) < recovery_delay(&error, 1));
-        assert_eq!(recovery_delay(&error, 2), None);
+        assert_eq!(recovery_delay(&error, usize::MAX), Some(Duration::from_secs(60)));
     }
-    for error in [VoiceError::NariNotConfigured, VoiceError::NariCreditsExhausted, VoiceError::Http(400), VoiceError::Cancelled, VoiceError::CaptureFailed] {
+    assert_eq!(recovery_delay(&VoiceError::NariRejected, 2), None);
+    for error in [VoiceError::NariNotConfigured, VoiceError::NariCreditsExhausted, VoiceError::Http(401), VoiceError::Http(402), VoiceError::Http(403), VoiceError::Http(400), VoiceError::Cancelled, VoiceError::CaptureFailed] {
         assert_eq!(recovery_delay(&error, 0), None);
     }
 }
@@ -1273,7 +1283,7 @@ async fn run(
             if let Err(error) = result {
                 let Some(delay) = recovery_delay(&error, consecutive_failures) else { return Err(error); };
                 capture?;
-                consecutive_failures += 1;
+                consecutive_failures = consecutive_failures.saturating_add(1);
                 emit(&events, ContinuousEvent::Recovering { error, delay });
                 emit(&events, ContinuousEvent::State(VoiceState::Suppressed));
                 level.store(0, Ordering::Relaxed);
@@ -1584,14 +1594,17 @@ mod tests {
         assert!(s.push_stream(&[0; 16000]).is_empty());
     }
     #[tokio::test]
-    async fn pause_resume_commits_one_nari_stream_after_all_audio() {
+    async fn long_network_outage_then_pause_resume_commits_only_fresh_audio() {
         use futures::{SinkExt, StreamExt};
         use serde_json::{Value, json};
         use tokio_tungstenite::tungstenite::Message;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}/voice/realtime", listener.local_addr().unwrap());
+        const OFFLINE_ATTEMPTS: usize = 8;
         let server = tokio::spawn(async move {
+            // Drop each TCP connection before the upgrade while the provider is offline.
+            for _ in 0..OFFLINE_ATTEMPTS { drop(listener.accept().await.unwrap().0); }
             let mut ws = tokio_tungstenite::accept_async(listener.accept().await.unwrap().0).await.unwrap();
             let mut samples = 0;
             while let Some(msg) = ws.next().await {
@@ -1616,6 +1629,17 @@ mod tests {
             panic!("stream closed before final commit");
         });
         let cancel = Arc::new(AtomicBool::new(false));
+        for failure in 0..OFFLINE_ATTEMPTS {
+            let endpoint = url.clone();
+            let stopped = cancel.clone();
+            let warm = tokio::spawn(async move { NariSession::connect_to(&endpoint, "test", stopped).await });
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            tx.send(vec![42; 320]).unwrap();
+            drop(tx);
+            let error = stream_job(Some(warm), String::new(), rx, cancel.clone(), |_| {}).await.unwrap_err();
+            assert_eq!(error, VoiceError::Network);
+            assert_eq!(recovery_delay(&error, failure).unwrap().as_secs(), [2, 8, 60][failure.min(2)]);
+        }
         let connect_cancel = cancel.clone();
         let mut warm = Some(tokio::spawn(async move { NariSession::connect_relay(&url, "test", connect_cancel).await }));
         let mut segmenter = Segmenter::default();
