@@ -1,4 +1,8 @@
+#[path = "catalog_routes_claude_code.rs"]
+mod claude_code_routes;
 use crate::auth::{AuthState, AuthStatus};
+use claude_code_routes::append_claude_code_routes;
+pub use claude_code_routes::claude_code_routes_for;
 
 use super::pricing::cheapness_for_route;
 use super::{
@@ -890,62 +894,6 @@ fn append_cursor_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>) 
             });
         }
     }
-}
-
-/// Claude Code CLI routes: one per configured instance per known Claude model.
-/// The default instance uses the bare `claude-code` api method, other
-/// instances `claude-code:<id>`, so picking a route also picks the account.
-fn append_claude_code_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>) {
-    if let Some(claude_code) = provider.claude_code_provider() {
-        routes.extend(claude_code.model_routes());
-    }
-}
-
-/// Provider label for a Claude Code instance route.
-pub(crate) fn claude_code_route_provider_label(
-    settings: &crate::config::ClaudeCodeConfig,
-    instance: &crate::config::ClaudeCodeInstanceConfig,
-) -> String {
-    match instance.display_name.as_deref().map(str::trim) {
-        Some(name) if !name.is_empty() => name.to_string(),
-        _ if settings.is_default_instance(&instance.id) => "Claude Code".to_string(),
-        _ => format!("Claude Code ({})", instance.id),
-    }
-}
-
-/// Routes for every configured instance, each from its own discovered models:
-/// instances have separate logins, so their model access can differ.
-pub fn claude_code_routes_for(
-    settings: &crate::config::ClaudeCodeConfig,
-    models_for: impl Fn(&crate::config::ClaudeCodeInstanceConfig) -> Vec<String>,
-) -> Vec<ModelRoute> {
-    let mut routes = Vec::new();
-    for instance in settings.effective_instances() {
-        let api_method = jcode_provider_core::claude_code_api_method(
-            (!settings.is_default_instance(&instance.id)).then_some(instance.id.as_str()),
-        );
-        let provider_label = claude_code_route_provider_label(settings, &instance);
-        let detail = match (&instance.jcode_account, instance.resolved_home()) {
-            (Some(label), _) => format!("Claude Code CLI, jcode account {label}"),
-            (None, Some(home)) => {
-                format!("Claude Code CLI, CLAUDE_CONFIG_DIR={}", home.display())
-            }
-            (None, None) => "Claude Code CLI, default login".to_string(),
-        };
-        for model in models_for(&instance) {
-            routes.push(ModelRoute {
-                catalog_metadata: None,
-                model,
-                provider: provider_label.clone(),
-                api_method: api_method.clone(),
-                available: true,
-                detail: detail.clone(),
-                usage: None,
-                cheapness: None,
-            });
-        }
-    }
-    routes
 }
 
 /// AWS Bedrock models and inference profiles, including the

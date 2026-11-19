@@ -372,7 +372,16 @@ fn saved_claude_accounts_default_to_the_cli_unless_toggled_native() {
         let routes = super::catalog_routes::claude_code_routes_for(&settings, |_| {
             vec!["claude-sonnet-4-6".to_string()]
         });
-        assert!(routes.iter().any(|r| r.api_method == "claude-code:claude-otter"));
         assert!(!routes.iter().any(|r| r.api_method == "claude-code:claude-fox"));
+        // Each CLI account is listed by name with its full Claude catalog,
+        // not only the few aliases the CLI itself reports.
+        let otter: Vec<_> = routes
+            .iter()
+            .filter(|r| r.api_method == "claude-code:claude-otter")
+            .collect();
+        assert!(otter.len() > 1, "{otter:?}");
+        assert!(otter.iter().all(|r| r.provider == "Claude Code (claude-otter)"
+            && r.detail.contains("claude-otter@example.com")));
+        assert!(otter.iter().any(|r| r.model == "claude-sonnet-4-6"));
     });
 }
