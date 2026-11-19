@@ -291,6 +291,21 @@ pub enum StoredDisplayRole {
     FileActivity,
 }
 
+impl StoredMessage {
+    /// Explicit notification roles exclude a message from user-turn accounting.
+    /// Jarvis provenance affects presentation only, never the conversation role.
+    pub fn has_context_display_role(&self) -> bool {
+        matches!(
+            self.display_role,
+            Some(
+                StoredDisplayRole::System
+                    | StoredDisplayRole::BackgroundTask
+                    | StoredDisplayRole::FileActivity
+            )
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredTokenUsage {
     /// Full prompt size resolved per request, before provider identity can change.

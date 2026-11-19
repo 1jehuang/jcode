@@ -451,7 +451,8 @@ pub(super) fn recent_history_window(
         })
         .sum::<usize>();
     let is_prompt = |message: &&HistoryMessage| {
-        message.role == "user" && !crate::session::is_attached_image_label_text(&message.content)
+        matches!(message.role.as_str(), "user" | "jarvis_user")
+            && !crate::session::is_attached_image_label_text(&message.content)
     };
     let excluded_prompts = messages[..start].iter().filter(is_prompt).count();
     let hidden_user_prompts = archived_prompts + excluded_prompts;

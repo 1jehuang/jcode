@@ -80,7 +80,7 @@ pub fn wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
             }
             let role = if is_tool_result {
                 "tool"
-            } else if message.display_role.is_some() {
+            } else if message.has_context_display_role() {
                 "system"
             } else {
                 match message.role {
