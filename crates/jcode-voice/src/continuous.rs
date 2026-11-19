@@ -606,8 +606,10 @@ impl Drop for ContinuousRecording {
     }
 }
 
-// 20 ms frames, 300 ms pre-roll, 180 ms confirmed voice, 700 ms end silence,
-// 20 seconds maximum utterance. All sample buffers have hard upper bounds.
+// Sample-clock deadlines cannot fire late after speech resumes.
+const PAUSE_MS: usize = 700;
+const COMMIT_GRACE_MS: usize = 600;
+const HARD_LIMIT_MS: usize = 20_000;
 #[derive(Default)]
 struct Segmenter {
     pending: VecDeque<i16>,
@@ -624,6 +626,8 @@ enum Seg {
     Start(Vec<i16>),
     /// More audio inside the current utterance (silence tail included).
     Audio(Vec<i16>),
+    Pause,
+    Resume,
     /// End of utterance after the trailing silence or the length cap.
     End,
 }
@@ -635,6 +639,7 @@ impl Segmenter {
         for event in self.push_stream(input) {
             match event {
                 Seg::Start(audio) | Seg::Audio(audio) => current.extend(audio),
+                Seg::Pause | Seg::Resume => (),
                 Seg::End => output.push(std::mem::take(&mut current)),
             }
         }
@@ -668,8 +673,14 @@ impl Segmenter {
                     Some(Seg::Audio(audio)) => audio.extend(frame),
                     _ => output.push(Seg::Audio(frame)),
                 }
+                if voice && self.quiet >= PAUSE_MS * 16 {
+                    output.push(Seg::Resume);
+                }
                 self.quiet = if voice { 0 } else { self.quiet + 320 };
-                if self.quiet >= 11200 || self.speech_len >= 320000 {
+                if self.quiet == PAUSE_MS * 16 {
+                    output.push(Seg::Pause);
+                }
+                if self.quiet >= (PAUSE_MS + COMMIT_GRACE_MS) * 16 || self.speech_len >= HARD_LIMIT_MS * 16 {
                     output.push(Seg::End);
                     self.speech_len = 0;
                     self.active = false;

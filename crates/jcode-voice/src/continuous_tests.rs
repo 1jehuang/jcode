@@ -351,10 +351,25 @@ fn speech_has_preroll_and_trailing_silence() {
     let mut s = Segmenter::default();
     s.push(&[0; 4800]);
     assert!(s.push(&[3000; 16000]).is_empty());
-    let out = s.push(&[0; 11200]);
+    let out = s.push(&[0; (PAUSE_MS + COMMIT_GRACE_MS) * 16]);
     assert_eq!(out.len(), 1);
     assert!(out[0].len() <= 320000);
     assert!(!s.active);
+}
+#[test]
+fn resumed_speech_cancels_commit_without_opening_another_stream() {
+    let mut s = Segmenter::default();
+    let mut transitions = Vec::new();
+    for (value, ms) in [(3000, 400), (0, 1280), (3000, 200), (0, 1280)] {
+        transitions.extend(s.push_stream(&vec![value; ms * 16]));
+    }
+    transitions.retain(|e| !matches!(e, Seg::Audio(_)));
+    assert!(matches!(
+        transitions.as_slice(),
+        [Seg::Start(_), Seg::Pause, Seg::Resume, Seg::Pause]
+    ));
+    assert!(matches!(s.push_stream(&[0; 320]).as_slice(), [Seg::Audio(_), Seg::End]));
+    assert!(s.push_stream(&[0; 16000]).is_empty());
 }
 #[test]
 fn brief_noise_is_not_speech() {

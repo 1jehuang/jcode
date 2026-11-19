@@ -15,6 +15,7 @@ pub(super) async fn run(
     gate: Option<jcode_base::jev::JevClient>,
 ) -> Result<(), VoiceError> {
     emit(&events, ContinuousEvent::State(VoiceState::Starting));
+    jcode_base::logging::info(&format!("JARVIS_CAPTURE settings pause_ms={PAUSE_MS} commit_grace_ms={COMMIT_GRACE_MS} hard_limit_ms={HARD_LIMIT_MS}"));
     let mut segmenter = Segmenter::default();
     let mut generation = epoch.load(Ordering::SeqCst);
     let mut resume_at = Instant::now();
@@ -173,6 +174,11 @@ pub(super) async fn run(
                                 if let Some((_, tx)) = &live {
                                     budget.0.lock().unwrap_or_else(|e| e.into_inner()).extend(audio.len());
                                     if tx.send(audio).is_err() { live = None; }
+                                }
+                            }
+                            event @ (Seg::Pause | Seg::Resume) => {
+                                if let Some((id, _)) = &live {
+                                    trace_turn(*id, if event == Seg::Pause { "speech_pause" } else { "speech_resumed" });
                                 }
                             }
                             Seg::End => {
