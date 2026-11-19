@@ -223,7 +223,6 @@ pub(crate) fn render_reasoning_message(
 fn render_plaintext_lines(content: &str, wrap_width: usize) -> Vec<Line<'static>> {
     let wrap_width = wrap_width.max(1);
     let mut lines: Vec<Line<'static>> = Vec::new();
-
     for raw_line in content.split('\n') {
         let raw_line = raw_line.trim_end_matches('\r');
         if raw_line.trim().is_empty() {
@@ -287,7 +286,6 @@ fn render_plaintext_lines(content: &str, wrap_width: usize) -> Vec<Line<'static>
             current.push_str(word);
             content_width += word_width;
         }
-
         lines.push(Line::from(current));
     }
 
@@ -887,6 +885,9 @@ struct ParsedTodoToolOutput {
 }
 
 fn parse_todo_tool_output(content: &str) -> Option<ParsedTodoToolOutput> {
+    // Remote display and timestamp injection can decorate tool results before
+    // they reach this renderer. Keep that transport metadata outside the
+    // structured payload parser so a valid todo result still renders as a card.
     let content = strip_todo_tool_output_headers(content);
     let mut todo_stream =
         serde_json::Deserializer::from_str(content).into_iter::<Vec<crate::todo::TodoItem>>();

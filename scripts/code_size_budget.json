@@ -11,7 +11,7 @@
     "crates/jcode-app-core/src/server/client_actions.rs": 1425,
     "crates/jcode-app-core/src/server/client_lifecycle.rs": 3657,
     "crates/jcode-app-core/src/server/client_lightweight_control.rs": 1208,
-    "crates/jcode-app-core/src/server/client_session.rs": 2087,
+    "crates/jcode-app-core/src/server/client_session.rs": 2089,
     "crates/jcode-app-core/src/server/client_state.rs": 1421,
     "crates/jcode-app-core/src/server/comm_control.rs": 2581,
     "crates/jcode-app-core/src/server/comm_session.rs": 1314,
