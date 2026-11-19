@@ -547,11 +547,13 @@ fn gate_separates_candidate_history_and_chat() {
 #[test]
 fn scored_captions_precede_dispatch_and_unscored_speech_stays_background() {
     let mut events = Events {
+        history: history::History::default(),
         context: GateContext::default(),
         queue: VecDeque::new(),
         quiet: QuietWindow::default(),
         notify: Arc::new(tokio::sync::Notify::new()),
     };
+    events.history.reset(Some(true));
     for (id, text, raw) in [
         (1, "ambient", Some(0.943)),
         (2, "unscored", None),
@@ -568,7 +570,10 @@ fn scored_captions_precede_dispatch_and_unscored_speech_stays_background() {
             )
             .unwrap()
         });
+        let mut audio = events.history.begin();
+        audio.append(&[id as i16, -9]);
         events.classified(ClassifiedCaption {
+            audio,
             id,
             text: text.into(),
             score,
@@ -596,6 +601,11 @@ fn scored_captions_precede_dispatch_and_unscored_speech_stays_background() {
         }
         assert!(events.queue.is_empty());
     }
+    assert_eq!(events.history.status().1, [3]);
+    assert_eq!(
+        events.history.clip(3).unwrap(),
+        (vec![3, -9], "request".into())
+    );
 }
 #[test]
 fn manual_trigger_sends_only_recent_speech() {
@@ -629,6 +639,7 @@ fn manual_trigger_sends_only_recent_speech() {
     assert_eq!(probe(&GateContext::default())["recent_acceptance"], false);
     // Speech still at the gate is claimed, and its later score dropped.
     let mut events = Events {
+        history: history::History::default(),
         context: GateContext::default(),
         queue: VecDeque::new(),
         quiet: QuietWindow::default(),
@@ -649,6 +660,7 @@ fn manual_trigger_sends_only_recent_speech() {
         serde_json::json!({"trigger":"just said","background_transcript":["before"]})
     );
     events.classified(ClassifiedCaption {
+        audio: Default::default(),
         id: 7,
         text: "just said".into(),
         score: Some((0.99, true)),
@@ -826,6 +838,7 @@ fn live_e2e_latency() {
 #[test]
 fn pending_requests_survive_telemetry_but_not_invalidation() {
     let mut e = Events {
+        history: history::History::default(),
         context: GateContext::default(),
         queue: VecDeque::new(),
         quiet: QuietWindow::default(),
@@ -875,6 +888,7 @@ fn pending_requests_survive_telemetry_but_not_invalidation() {
 fn caption_revision_keeps_score_after_row_even_before_poll() {
     use super::*;
     let mut e = Events {
+        history: history::History::default(),
         context: GateContext::default(),
         queue: VecDeque::new(),
         quiet: QuietWindow::default(),
@@ -913,6 +927,7 @@ fn caption_revision_keeps_score_after_row_even_before_poll() {
 #[test]
 fn bounded_events() {
     let mut e = Events {
+        history: history::History::default(),
         context: GateContext::default(),
         queue: VecDeque::new(),
         quiet: QuietWindow::default(),

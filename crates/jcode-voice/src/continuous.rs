@@ -4,6 +4,9 @@
     clippy::too_many_arguments,
     clippy::type_complexity
 )]
+#[cfg(test)]
+mod gate_eval;
+mod history;
 use crate::{NariSession, PcmRecording, VoiceError};
 use std::{
     collections::VecDeque,
@@ -218,12 +221,14 @@ impl QuietWindow {
     }
 }
 struct Events {
+    history: history::History,
     context: GateContext,
     queue: VecDeque<ContinuousEvent>,
     quiet: QuietWindow,
     notify: Arc<tokio::sync::Notify>,
 }
 struct ClassifiedCaption {
+    audio: history::Candidate,
     id: u64,
     text: String,
     score: Option<(f64, bool)>,
@@ -308,6 +313,8 @@ impl Events {
         }
         if self.context.claimed == Some(caption.id) {
             self.context.claimed = None;
+            self.history
+                .accept(caption.audio, caption.id, &caption.text);
             return;
         }
         if let Some((probability, accepted)) = caption.score {
@@ -317,6 +324,8 @@ impl Events {
                 accepted,
             });
             if accepted {
+                self.history
+                    .accept(caption.audio, caption.id, &caption.text);
                 let text = self.context.accepted(caption.text);
                 trace_turn(caption.id, "final_accepted");
                 self.push(ContinuousEvent::Transcript {
@@ -442,6 +451,7 @@ impl ContinuousRecording {
         let epoch = Arc::new(AtomicU64::new(0));
         let level = Arc::new(AtomicU32::new(0));
         let events = Arc::new(Mutex::new(Events {
+            history: history::History::default(),
             context: GateContext::default(),
             queue: VecDeque::new(),
             quiet: QuietWindow::default(),
@@ -561,6 +571,27 @@ impl ContinuousRecording {
             return false;
         }
         output.manual_trigger()
+    }
+    pub fn reset_audio_history(&self, enabled: Option<bool>) {
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .history
+            .reset(enabled);
+    }
+    pub fn audio_history_status(&self) -> (bool, Vec<u64>) {
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .history
+            .status()
+    }
+    pub fn audio_history_clip(&self, id: u64) -> Option<(Vec<i16>, String)> {
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .history
+            .clip(id)
     }
     /// Claim a quiet playback window without invalidating pending transcript events.
     pub fn suppress_if_quiet(&self) -> bool {

@@ -93,6 +93,9 @@ impl CaptureStatus {
         anyhow::bail!("Always-on capture status currently requires Unix")
     }
 
+    #[cfg(unix)]
+    pub(super) fn private_directory(&self) -> &Path { self.path.parent().expect("status directory") }
+
     fn retry_path(&self) -> PathBuf {
         self.path
             .with_extension(format!("retry-{}", self.retry_token))

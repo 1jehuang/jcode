@@ -30,7 +30,11 @@ pub(super) async fn run(
         u64,
     )> = VecDeque::new();
     // Audio sink of the utterance currently streaming to Nari.
-    let mut live: Option<(u64, tokio::sync::mpsc::UnboundedSender<Vec<i16>>)> = None;
+    let mut live: Option<(
+        u64,
+        tokio::sync::mpsc::UnboundedSender<Vec<i16>>,
+        Arc<Mutex<history::Candidate>>,
+    )> = None;
     let mut warm: Option<Warm> = None;
     let mut warm_retry_at = Instant::now();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -110,8 +114,11 @@ pub(super) async fn run(
                                 let child = token.clone();
                                 let warm_session = warm.take().and_then(Warm::take);
                                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                                let mut candidate = events.lock().unwrap_or_else(|e| e.into_inner()).history.begin();
+                                candidate.append(&audio);
+                                let candidate = Arc::new(Mutex::new(candidate));
                                 tx.send(audio).map_err(|_| VoiceError::CaptureFailed)?;
-                                live = Some((id, tx));
+                                live = Some((id, tx, candidate.clone()));
                                 let (events, epoch, paused, suppressed, stopped) = (events.clone(), epoch.clone(), paused.clone(), suppressed.clone(), cancel.clone());
                                 jobs.push_back((tokio::spawn(async move {
                                     let (partial_tx, partial_rx) = tokio::sync::watch::channel(String::new());
@@ -149,12 +156,14 @@ pub(super) async fn run(
                                         pending_final.0 = None;
                                         // Always close a provisional request, even when
                                         // nothing was added, so Jarvis knows to answer.
+                                        let nonempty_final = !text.trim().is_empty();
                                         let full = if text.trim().is_empty() { trigger } else { text };
                                         let mut output = events.lock().unwrap_or_else(|e|e.into_inner());
                                         if stopped.load(Ordering::SeqCst) || generation != epoch.load(Ordering::SeqCst) || paused.load(Ordering::SeqCst) || suppressed.load(Ordering::SeqCst) {
                                             trace_discard(id, "continuation_discarded", "epoch_changed");
                                             return Ok(None);
                                         }
+                                        if nonempty_final {output.history.accept(std::mem::take(&mut *candidate.lock().unwrap_or_else(|e| e.into_inner())), id, &full);}
                                         trace_turn(id, "continuation_ready");
                                         output.push(ContinuousEvent::Continuation { id, text: full.trim().chars().take(4096).collect() });
                                         return Ok(None);
@@ -170,22 +179,23 @@ pub(super) async fn run(
                                     let gate = gate.as_ref().ok_or(VoiceError::NotConfigured)?;
                                     let score = semantic_gate(gate,&text,threshold,state).await?;
                                     trace_turn(id, "final_gate_decided");
-                                    Ok(Some(ClassifiedCaption { id, text, score }))
+                                    Ok(Some(ClassifiedCaption { id, text, score, audio: std::mem::take(&mut *candidate.lock().unwrap_or_else(|e| e.into_inner())) }))
                                 }),token,generation));
                             }
                             Seg::Audio(audio) => {
-                                if let Some((_, tx)) = &live {
+                                if let Some((_, tx, candidate)) = &live {
+                                    candidate.lock().unwrap_or_else(|e| e.into_inner()).append(&audio);
                                     budget.0.lock().unwrap_or_else(|e| e.into_inner()).extend(audio.len());
                                     if tx.send(audio).is_err() { live = None; }
                                 }
                             }
                             event @ (Seg::Pause | Seg::Resume) => {
-                                if let Some((id, _)) = &live {
+                                if let Some((id, _, _)) = &live {
                                     trace_turn(*id, if event == Seg::Pause { "speech_pause" } else { "speech_resumed" });
                                 }
                             }
                             Seg::End => {
-                                if let Some((id, tx)) = live.take() {
+                                if let Some((id, tx, _)) = live.take() {
                                     trace_turn(id, "speech_endpoint");
                                     drop(tx);
                                 }

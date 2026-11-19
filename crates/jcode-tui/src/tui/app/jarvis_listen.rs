@@ -1,5 +1,6 @@
 //! Continuous voice remains client-side. Only gated requests become user turns.
 mod dispatch;
+mod history_control;
 use super::jarvis_status::CaptureStatus;
 use super::*;
 use crate::tui::JarvisCaption;
@@ -274,6 +275,9 @@ mod tests {
 #[derive(Default)]
 pub(super) struct AlwaysListening {
     playback: DeferredPlayback,
+    history: history_control::HistoryControl,
+    history_command: Option<String>,
+    history_request: Option<u64>,
     initialized: bool,
     recording: Option<ContinuousRecording>,
     status: Option<CaptureStatus>,
@@ -354,6 +358,11 @@ impl Drop for AlwaysListening {
     }
 }
 impl AlwaysListening {
+    pub(super) fn queue_history(&mut self, cmd: &str) -> &'static str {
+        if self.recording.is_none() || self.session.is_none() {return "Always-on Jarvis is not ready";}
+        self.history_command = Some(if cmd.trim().is_empty() {"status"}else{cmd.trim()}.into());
+        "Local audio history command queued"
+    }
     fn playback_trace(&self) -> jcode_voice::speech::PlaybackTrace {
         jcode_voice::speech::PlaybackTrace {
             session: self.session.clone().unwrap_or_else(|| "none".into()),
@@ -540,9 +549,13 @@ impl AlwaysListening {
         self.chat_version = None;
         self.triggered_at = None;
         self.session = None;
+        self.history = Default::default();
+        self.history_command = None;
+        self.history_request = None;
         if let Some(recording) = &self.recording {
             recording.set_suppressed(true);
             recording.set_paused(true);
+            recording.reset_audio_history(Some(false));
         }
     }
 }
@@ -607,6 +620,8 @@ impl App {
         if listener.session != session {
             listener.detach();
             listener.session = session;
+            #[cfg(unix)]
+            if let Some(status) = &listener.status {listener.history.attach(status.private_directory());}
         }
         let paused = listener.status.as_ref().is_some_and(CaptureStatus::paused);
         let cue_busy = listener
@@ -622,7 +637,7 @@ impl App {
         if !cue_busy {
             listener.playback.cue_player = None;
         }
-        let speech_busy = cue_busy
+        let mut speech_busy = cue_busy
             || self
                 .jarvis_speech
                 .as_ref()
@@ -644,6 +659,12 @@ impl App {
             }
         }
         if let Some(recording) = &recording {
+            if let Some(cmd) = listener.history_command.take().or_else(||listener.history.incoming()) {
+                let blocked = speech_busy || external_capture || listener.failed || listener.playback.partial.is_some() || self.voice_input.is_some();
+                let notice = listener.history.command(recording, &cmd, listener.history_request, blocked);
+                if let Some(caption) = listener.history.caption.take() { self.set_status_notice(format!("Replaying local audio: {caption}")); } else {self.set_status_notice(notice);}
+            }
+            speech_busy |= listener.history.busy();
             recording.set_paused(paused || listener.failed);
             // Fn tap (companion): act on what was just heard.
             if listener
@@ -712,6 +733,7 @@ impl App {
                             if let Some(player) = &self.jarvis_speech {
                                 player.cancel();
                             }
+                            listener.history_request = Some(id);
                             listener.playback.trigger(id, &text);
                         }
                         listener.trace(id, outcome);
@@ -777,7 +799,7 @@ impl App {
                     recording
                         .audio_level()
                         .max(push_to_talk_level.unwrap_or(0.0)),
-                    json!({"agent_turns_last_hour":listener.turns.len()}),
+                    json!({"agent_turns_last_hour":listener.turns.len(),"audio_history":listener.history.info(recording)}),
                 ) {
                     recording.stop();
                     listener.failed = true;
