@@ -148,6 +148,19 @@ pub(crate) async fn run(action: McpCommand) -> Result<()> {
                 "Logged in to MCP server '{name}'. Reconnect it or reload MCP servers to use the credentials."
             );
         }
+        McpCommand::Trust { path, yes } => {
+            super::trust::run_trust_command(super::args::TrustCommand::Grant {
+                path,
+                scope: super::args::TrustScopeArg::Mcp,
+                yes,
+            })?
+        }
+        McpCommand::Revoke { path } => {
+            super::trust::run_trust_command(super::args::TrustCommand::Revoke {
+                path,
+                scope: super::args::TrustScopeArg::Mcp,
+            })?
+        }
         McpCommand::Logout { server: name } => {
             let (_, url) = remote_server(&config, &name)?;
             let removed = oauth::logout(url)?;

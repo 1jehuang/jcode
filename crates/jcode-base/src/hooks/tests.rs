@@ -300,6 +300,29 @@ async fn pre_tool_gate_fails_open_on_timeout_and_odd_exits() {
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn pre_tool_gate_timeout_is_not_held_open_by_grandchild_stdout() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    // The hook exits at once but leaves a grandchild holding stdout open.
+    let script = write_executable_script(
+        temp.path(),
+        "grandchild.sh",
+        "#!/bin/sh\nsleep 30 &\nsleep 30\n",
+    );
+    let _env = gate_test_config(&script.to_string_lossy(), 300);
+    let started = std::time::Instant::now();
+    let decision = run_pre_tool_gate("ses_g", None, "bash", "{}")
+        .await
+        .decision;
+    assert_eq!(decision, GateDecision::Allow);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "gate must fail open at its timeout, not wait for the grandchild"
+    );
+}
+
 #[test]
 fn gate_stdout_json_decisions_parse_codex_shapes() {
     assert_eq!(parse_gate_stdout(""), CommandVerdict::default());
@@ -532,7 +555,10 @@ fn observer_dispatch_runs_each_configured_command() {
 
     dispatch_observer(HookEvent::new("session_start").session_id("ses_multi"));
     for _ in 0..100 {
-        if first_record.exists() && second_record.exists() {
+        let written = |path: &std::path::Path| {
+            std::fs::read_to_string(path).is_ok_and(|text| !text.is_empty())
+        };
+        if written(&first_record) && written(&second_record) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -625,4 +651,25 @@ async fn hook_process_replaces_daemon_terminal_env_with_client_snapshot() {
         String::from_utf8_lossy(&second_output.stdout),
         "client-pane-b|herdr-pane-b|client-pane-b|herdr-pane-b"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn project_observer_is_killed_after_its_timeout() {
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn sleep");
+    let pid = child.id();
+    // Keep a handle-free view: reap_with_deadline owns the child.
+    let _ = &mut child;
+    super::reap_with_deadline(child, std::time::Duration::from_millis(100));
+    let process = std::path::PathBuf::from(format!("/proc/{pid}"));
+    for _ in 0..200 {
+        if !process.exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("observer {pid} outlived its timeout");
 }

@@ -117,7 +117,7 @@ impl Registry {
         result: &Result<ToolOutput>,
         latency_ms: u64,
     ) {
-        if !crate::hooks::hook_configured("post_tool") {
+        if !crate::hooks::hook_configured_at("post_tool", ctx.working_dir.as_deref()) {
             return;
         }
         crate::hooks::dispatch_observer(Self::post_tool_event(
@@ -140,7 +140,7 @@ impl Registry {
         latency_ms: u64,
         output: &mut ToolOutput,
     ) {
-        if !crate::hooks::hook_configured("post_tool_feedback") {
+        if !crate::hooks::hook_configured_at("post_tool_feedback", ctx.working_dir.as_deref()) {
             return;
         }
         let event = Self::post_tool_event(
