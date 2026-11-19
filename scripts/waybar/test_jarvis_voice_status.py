@@ -12,6 +12,14 @@ spec.loader.exec_module(module)
 
 
 class StatusTests(unittest.TestCase):
+    def test_trigger_is_visible_without_disclosing_caption(self):
+        value = {"capturing": True, "state": "triggered", "caption": "private phrase"}
+        for renderer in (module.render, module.native_render):
+            result = renderer(value)
+            self.assertEqual(result["class"], "triggered")
+            self.assertIn("Voice request accepted", result["tooltip"])
+            self.assertNotIn("private phrase", json.dumps(result))
+
     def test_off_does_not_claim_capture(self):
         self.assertEqual(module.render(None)["text"], "")
         self.assertEqual(module.render({"capturing": False, "state": "paused"})["text"], "🎙 paused")

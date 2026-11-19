@@ -64,6 +64,8 @@ def render(value):
     for key, number in counters.items():
         if isinstance(number, (int, float)) and math.isfinite(number):
             tooltip += f"{key}: {number}\n"
+    if state == "triggered":
+        return {"text": "✓ Jarvis", "tooltip": html.escape("Voice request accepted\n" + tooltip), "class": "triggered"}
     return {"text": text, "tooltip": html.escape(tooltip), "class": "capturing" if capturing else "paused" if state == "paused" else "off"}
 
 
