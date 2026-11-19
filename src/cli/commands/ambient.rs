@@ -11,16 +11,12 @@ pub enum AmbientSubcommand {
 }
 
 pub async fn run_ambient_command(cmd: AmbientSubcommand) -> Result<()> {
-    if let AmbientSubcommand::RunVisible = cmd {
-        return run_ambient_visible().await;
-    }
-
     let debug_cmd = match cmd {
         AmbientSubcommand::Status => "ambient:status",
         AmbientSubcommand::Log => "ambient:log",
         AmbientSubcommand::Trigger => "ambient:trigger",
         AmbientSubcommand::Stop => "ambient:stop",
-        AmbientSubcommand::RunVisible => unreachable!(),
+        AmbientSubcommand::RunVisible => return run_ambient_visible().await,
     };
 
     debug::run_debug_command(debug_cmd, "", None, None, false).await
@@ -50,10 +46,12 @@ async fn run_ambient_visible() -> Result<()> {
     let mut app = tui::App::new(provider, registry);
     app.set_ambient_mode(context.system_prompt, context.initial_message);
 
-    let _ = crossterm::execute!(
+    if let Err(err) = crossterm::execute!(
         std::io::stdout(),
         crossterm::terminal::SetTitle(terminal_title("🤖 jcode ambient cycle"))
-    );
+    ) {
+        crate::logging::debug(&format!("Could not set ambient terminal title: {err}"));
+    }
 
     let result = app.run(terminal).await;
 
