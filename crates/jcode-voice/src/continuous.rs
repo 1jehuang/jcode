@@ -186,7 +186,40 @@ struct ClassifiedCaption {
     text: String,
     score: Option<(f64, bool)>,
 }
+impl ContinuousEvent {
+    fn discard_marker(&self) -> Option<(u64, &'static str)> {
+        match self {
+            Self::Transcript { id, .. } => Some((*id, "accepted_discarded")),
+            Self::Continuation { id, .. } => Some((*id, "continuation_discarded")),
+            _ => None,
+        }
+    }
+    fn expendable(&self) -> bool {
+        matches!(self, Self::Caption { .. } | Self::CaptionScore { .. } | Self::State(_) | Self::Level(_) | Self::Rejected(_))
+    }
+}
+fn trace_discard(id: u64, stage: &'static str, reason: &'static str) {
+    let ms = crate::timing::monotonic_ms();
+    jcode_base::logging::info(&format!("JARVIS_CAPTURE utterance={id} stage={stage} monotonic_ms={ms} reason={reason}"));
+}
+// Tokio cancellation drops this guard even when an in-flight job is aborted.
+struct PendingFinal(Option<u64>);
+impl Drop for PendingFinal {
+    fn drop(&mut self) {
+        if let Some(id) = self.0 { trace_discard(id, "continuation_discarded", "stream_aborted"); }
+    }
+}
 impl Events {
+    fn retain_events(&mut self, reason: &'static str, keep: impl Fn(&ContinuousEvent) -> bool) {
+        self.queue.retain(|e| {
+            if keep(e) { return true; }
+            if let Some((id, stage)) = e.discard_marker() { trace_discard(id, stage, reason); }
+            false
+        });
+    }
+    fn clear_pending_speech(&mut self, reason: &'static str) {
+        self.retain_events(reason, |e| !matches!(e, ContinuousEvent::Transcript { .. } | ContinuousEvent::Continuation { .. } | ContinuousEvent::Caption { .. } | ContinuousEvent::CaptionScore { .. } | ContinuousEvent::Rejected(_)));
+    }
     /// Queue a manual trigger. Returns false when nothing was heard recently.
     fn manual_trigger(&mut self) -> bool {
         match self.context.manual(Instant::now()) {
@@ -240,7 +273,14 @@ impl Events {
             _ => {}
         }
         if self.queue.len() >= 32 {
-            self.queue.pop_front();
+            // Visual updates must never evict an accepted request.
+            if let Some(pos) = self.queue.iter().position(ContinuousEvent::expendable) {
+                self.queue.remove(pos);
+            } else if event.expendable() {
+                return;
+            } else if let Some((id, stage)) = self.queue.pop_front().and_then(|e| e.discard_marker()) {
+                trace_discard(id, stage, "queue_overflow");
+            }
         }
         self.queue.push_back(event);
         self.notify.notify_one();
@@ -332,7 +372,7 @@ impl ContinuousRecording {
                         let result = rt.block_on(run(
                             c.clone(),
                             s,
-                            g,
+                            g.clone(),
                             l.clone(),
                             e.clone(),
                             key,
@@ -350,12 +390,17 @@ impl ContinuousRecording {
                 };
                 a.store(false, Ordering::SeqCst);
                 l.store(0, Ordering::Relaxed);
+                // Setup/reap failures can bypass the capture loop's cleanup.
+                // Invalidate outstanding completions before publishing terminal events.
+                g.fetch_add(1, Ordering::SeqCst);
+                let mut output = e.lock().unwrap_or_else(|e| e.into_inner());
+                output.clear_pending_speech(if c.load(Ordering::SeqCst) { "stopped" } else { "capture_failed" });
                 if let Err(error) = result {
                     if error != VoiceError::Cancelled {
-                        emit(&e, ContinuousEvent::Error(error));
+                        output.push(ContinuousEvent::Error(error));
                     }
                 }
-                emit(&e, ContinuousEvent::Stopped);
+                output.push(ContinuousEvent::Stopped);
             })
             .map_err(|_| VoiceError::CaptureFailed)?;
         Ok(Self {
@@ -390,10 +435,10 @@ impl ContinuousRecording {
         if self.paused.swap(value, Ordering::SeqCst) != value {
             self.epoch.fetch_add(1, Ordering::SeqCst);
             self.level.store(0, Ordering::Relaxed);
-            self.clear_speech_events(value);
+            self.clear_speech_events(value, if value { "paused" } else { "epoch_changed" });
         }
     }
-    fn clear_speech_events(&self, clear_chat: bool) {
+    fn clear_speech_events(&self, clear_chat: bool, reason: &'static str) {
         let mut output = self.events.lock().unwrap_or_else(|e| e.into_inner());
         output.quiet = QuietWindow::default();
         // Aborted gate jobs never report back: forget their pending caption.
@@ -402,27 +447,17 @@ impl ContinuousRecording {
         if clear_chat {
             output.context = GateContext::default();
         }
-        output.queue.retain(|event| {
-            !matches!(
-                event,
-                ContinuousEvent::Caption { .. }
-                    | ContinuousEvent::CaptionScore { .. }
-                    | ContinuousEvent::Transcript { .. }
-                    | ContinuousEvent::Rejected(_)
-            )
-        });
+        output.clear_pending_speech(reason);
     }
     /// Send recently heard speech as a request without the semantic gate:
     /// an explicit user action (Fn tap) replaces the classifier's decision.
     /// Returns false when nothing was heard in `MANUAL_TRIGGER_WINDOW`.
     pub fn manual_trigger(&self) -> bool {
-        if self.paused.load(Ordering::SeqCst) || self.cancel.load(Ordering::SeqCst) {
+        let mut output = self.events.lock().unwrap_or_else(|e| e.into_inner());
+        if self.paused.load(Ordering::SeqCst) || self.cancel.load(Ordering::SeqCst) || self.suppressed.load(Ordering::SeqCst) {
             return false;
         }
-        self.events
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .manual_trigger()
+        output.manual_trigger()
     }
     /// Claim a quiet playback window without invalidating pending transcript events.
     pub fn suppress_if_quiet(&self) -> bool {
@@ -437,7 +472,7 @@ impl ContinuousRecording {
     }
     pub fn stop(&self) {
         self.cancel.store(true, Ordering::SeqCst);
-        self.clear_speech_events(true);
+        self.clear_speech_events(true, "stopped");
     }
     /// Invalidates captured and pending speech on both edges. TTS cannot turn into a request.
     pub fn set_suppressed(&self, value: bool) {
@@ -446,7 +481,7 @@ impl ContinuousRecording {
         }
         if value {
             self.level.store(0, Ordering::Relaxed);
-            self.clear_speech_events(false);
+            self.clear_speech_events(false, "suppressed");
         }
     }
     pub fn audio_level(&self) -> f32 {
@@ -768,11 +803,9 @@ async fn early_trigger(
         let Ok(Some((probability, true))) = semantic_gate(&gate, &text, threshold, state).await else {
             continue;
         };
-        if !live() {
-            return None;
-        }
-        trace_turn(id, "partial_accepted");
         let mut output = events.lock().unwrap_or_else(|e| e.into_inner());
+        if !live() { return None; }
+        trace_turn(id, "partial_accepted");
         output.push(ContinuousEvent::Caption { id, text: text.chars().take(256).collect() });
         output.push(ContinuousEvent::CaptionScore { id, probability, accepted: true });
         let payload = output.context.accepted(text.clone());
@@ -1075,6 +1108,7 @@ async fn run(
                                     // Gate partials while audio streams. Once the final
                                     // transcript lands, any in-flight partial gate is stale.
                                     let mut fired: Option<String> = None;
+                                    let mut pending_final = PendingFinal(None);
                                     let text = loop {
                                         tokio::select! {
                                             biased;
@@ -1082,7 +1116,7 @@ async fn run(
                                             // On failure the recovery event clears deferred replies.
                                             text = &mut stream => break text?,
                                             trigger = &mut early, if fired.is_none() => {
-                                                match trigger { Some(t) => fired = Some(t), None => break (&mut stream).await? }
+                                                match trigger { Some(t) => { pending_final.0 = Some(id); fired = Some(t); }, None => break (&mut stream).await? }
                                                 // Loop again to await the final transcript.
                                             }
                                         }
@@ -1090,10 +1124,15 @@ async fn run(
                                     caption_feed.abort();
                                     trace_turn(id, "transcription_finished");
                                     if let Some(trigger) = fired {
+                                        pending_final.0 = None;
                                         // Always close a provisional request, even when
                                         // nothing was added, so Jarvis knows to answer.
                                         let full = if text.trim().is_empty() { trigger } else { text };
                                         let mut output = events.lock().unwrap_or_else(|e|e.into_inner());
+                                        if stopped.load(Ordering::SeqCst) || generation != epoch.load(Ordering::SeqCst) || paused.load(Ordering::SeqCst) || suppressed.load(Ordering::SeqCst) {
+                                            trace_discard(id, "continuation_discarded", "epoch_changed");
+                                            return Ok(None);
+                                        }
                                         trace_turn(id, "continuation_ready");
                                         output.push(ContinuousEvent::Continuation { id, text: full.trim().chars().take(4096).collect() });
                                         return Ok(None);
@@ -1136,7 +1175,7 @@ async fn run(
                         epoch.fetch_add(1, Ordering::SeqCst);
                         let mut out = events.lock().unwrap_or_else(|e| e.into_inner());
                         out.context = GateContext::default();
-                        out.queue.retain(|event| !matches!(event, ContinuousEvent::Caption { .. } | ContinuousEvent::CaptionScore { .. } | ContinuousEvent::Transcript { .. } | ContinuousEvent::Rejected(_)));
+                        out.clear_pending_speech(if permitted { "paused" } else { "permission_lost" });
                         drop(out);
                         live = None; warm = None;
                         for (handle,token,_) in jobs.drain(..) { token.store(true,Ordering::SeqCst); handle.abort(); }
@@ -1203,7 +1242,7 @@ async fn run(
             let mut out = events.lock().unwrap_or_else(|e| e.into_inner());
             let chat = std::mem::take(&mut out.context.chat);
             out.context = GateContext { chat, ..Default::default() };
-            out.queue.retain(|event| matches!(event, ContinuousEvent::State(_) | ContinuousEvent::Level(_)));
+            out.retain_events(if cancel.load(Ordering::SeqCst) { "stopped" } else { "capture_failed" }, |event| matches!(event, ContinuousEvent::State(_) | ContinuousEvent::Level(_)));
         }
         mic.stop();
         let capture = tokio::task::spawn_blocking(move || mic.finish())
@@ -1815,6 +1854,26 @@ mod tests {
         recording.stop();
         let _ = std::fs::remove_file(&marker);
         assert_eq!(seen.len(), rounds);
+    }
+    #[test]
+    fn pending_requests_survive_telemetry_but_not_invalidation() {
+        let mut e = Events { context: GateContext::default(), queue: VecDeque::new(), quiet: QuietWindow::default(), notify: Arc::new(tokio::sync::Notify::new()) };
+        let request = |id| ContinuousEvent::Transcript { id, text: "private".into() };
+        let final_text = |id| ContinuousEvent::Continuation { id, text: "private".into() };
+        assert_eq!(request(7).discard_marker(), Some((7, "accepted_discarded")));
+        assert_eq!(final_text(7).discard_marker(), Some((7, "continuation_discarded")));
+        for id in 1..=32 { e.push(request(id)); }
+        e.push(ContinuousEvent::Caption { id: 34, text: "ambient".into() });
+        assert_eq!(e.queue.front().unwrap().discard_marker(), Some((1, "accepted_discarded")));
+        e.push(final_text(32));
+        assert_eq!(e.queue.front().unwrap().discard_marker(), Some((2, "accepted_discarded")));
+        e.clear_pending_speech("suppressed");
+        assert!(e.queue.is_empty());
+        e.push(ContinuousEvent::Stopped);
+        e.push(final_text(9));
+        e.clear_pending_speech("stopped");
+        assert!(matches!(e.queue.pop_front(), Some(ContinuousEvent::Stopped)));
+        assert!(e.queue.is_empty());
     }
     #[test]
     fn bounded_events() {
