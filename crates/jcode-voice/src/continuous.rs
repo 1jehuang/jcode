@@ -1078,8 +1078,8 @@ async fn run(
                             }
                             Seg::End => {
                                 if let Some((id, tx)) = live.take() {
-                                    drop(tx);
                                     trace_turn(id, "speech_endpoint");
+                                    drop(tx);
                                 }
                             }
                         }
