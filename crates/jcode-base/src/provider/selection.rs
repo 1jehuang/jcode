@@ -103,6 +103,7 @@ impl MultiProvider {
             | LoginProviderTarget::Jcode
             | LoginProviderTarget::Azure
             | LoginProviderTarget::GrokBuild
+            | LoginProviderTarget::ZCode
             | LoginProviderTarget::Google => None,
         }
     }

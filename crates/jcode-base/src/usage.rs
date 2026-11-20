@@ -520,6 +520,16 @@ fn enqueue_provider_usage_tasks(tasks: &mut tokio::task::JoinSet<Option<Provider
         total += 1;
     }
 
+    if auth::zcode::has_cached_login() {
+        tasks.spawn(async {
+            fetch_zcode_usage_report().await.map(|mut report| {
+                attach_activity(&mut report, "zcode");
+                report
+            })
+        });
+        total += 1;
+    }
+
     total += enqueue_activity_sweeper_task(tasks);
 
     total
@@ -541,6 +551,7 @@ fn activity_source_has_dedicated_report(source_key: &str) -> bool {
         "gemini" => auth::gemini::has_api_key(),
         "cursor" => auth::cursor::has_cursor_native_auth(),
         "jcode" => crate::subscription_catalog::configured_api_key().is_some(),
+        "zcode" => auth::zcode::has_cached_login(),
         _ => {
             // The native Muse subscription stores its credential outside the env
             // files, so it needs its own check; without it the subscription is

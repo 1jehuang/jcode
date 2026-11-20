@@ -48,6 +48,9 @@ pub struct AuthStatus {
     pub cursor: AuthState,
     /// Grok Build CLI is installed. Runtime auth is delegated to its cached login.
     pub grok_build: AuthState,
+    /// ZCode (Z.AI Start Plan / Off-Peak) OAuth configured.
+    #[serde(default)]
+    pub zcode: AuthState,
     /// Any OpenAI-compatible catalog profile (Cerebras, Groq, ...) has usable
     /// credentials. These have no dedicated field and, since e0796a51c, no
     /// longer count toward the native `openrouter` slot.

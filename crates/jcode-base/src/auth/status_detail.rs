@@ -78,6 +78,13 @@ impl AuthStatus {
                     "not configured (run `jcode login --provider grok-build`)".to_string()
                 }
             }
+            crate::provider_catalog::LoginProviderTarget::ZCode => {
+                if self.zcode == AuthState::Available {
+                    "ZCode OAuth (Start Plan / Off-Peak)".to_string()
+                } else {
+                    "not configured (run `jcode login zcode`)".to_string()
+                }
+            }
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
                 let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
                 if self.state_for_provider(provider) == AuthState::Available {

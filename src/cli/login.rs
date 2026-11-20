@@ -374,6 +374,7 @@ pub async fn run_login_provider(
             LoginProviderTarget::GrokBuild => login_grok_build_flow(options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
+            LoginProviderTarget::ZCode => device_login::login_zcode_flow(options.no_browser),
             LoginProviderTarget::OpenRouter => {
                 login_openrouter_flow().map(|_| LoginFlowOutcome::Completed)
             }

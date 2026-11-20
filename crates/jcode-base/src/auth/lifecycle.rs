@@ -1525,6 +1525,9 @@ mod tests {
                 crate::provider_catalog::LoginProviderTarget::GrokBuild => {
                     Some(("grok-build", "grok-build", "openrouter", "grok-build"))
                 }
+                crate::provider_catalog::LoginProviderTarget::ZCode => {
+                    Some(("zcode", "zcode", "anthropic", "zcode"))
+                }
                 crate::provider_catalog::LoginProviderTarget::Claude => {
                     Some(("claude", "claude", "claude", "claude-oauth"))
                 }

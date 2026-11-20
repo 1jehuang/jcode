@@ -62,6 +62,7 @@ sha2 = "0.10"
 jcode-transport = { path = "../jcode-transport" }
 rand = "0.9.3"
 hex = "0.4"
+ring = "0.17"
 url = "2"
 open = "5"               # Open URLs in browser
 jcode-auth-types = { path = "../jcode-auth-types" }

@@ -516,6 +516,11 @@ impl App {
             crate::provider_catalog::LoginProviderTarget::GrokBuild => {
                 self.start_grok_build_login()
             }
+            crate::provider_catalog::LoginProviderTarget::ZCode => {
+                self.push_display_message(DisplayMessage::system(
+                    "Run `jcode login zcode` in your terminal to sign in with ZCode OAuth.",
+                ));
+            }
             crate::provider_catalog::LoginProviderTarget::Copilot => self.start_copilot_login(),
             crate::provider_catalog::LoginProviderTarget::Gemini => self.start_gemini_login(),
             crate::provider_catalog::LoginProviderTarget::Antigravity => {

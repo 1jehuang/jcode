@@ -124,6 +124,7 @@ struct DirectTransportConfig {
     headers: std::result::Result<HeaderMap, String>,
     auth_mode: String,
     auth_header: String,
+    zcode_signer: Option<Arc<jcode_base::auth::zcode::ZCodeClientSigner>>,
 }
 
 impl DirectTransportConfig {
@@ -136,6 +137,7 @@ impl DirectTransportConfig {
             auth_mode: direct_auth_mode(),
             auth_header: std::env::var("JCODE_ANTHROPIC_AUTH_HEADER")
                 .unwrap_or_else(|_| "x-api-key".to_string()),
+            zcode_signer: None,
         }
     }
 }
@@ -641,6 +643,56 @@ impl AnthropicProvider {
             direct_transport,
             profile_api_key,
             profile_models,
+        }
+    }
+
+    pub fn new_zcode(off_peak: bool) -> Self {
+        let base = if off_peak {
+            jcode_base::auth::zcode::ZCODE_OFF_PEAK_ANTHROPIC_BASE
+        } else {
+            jcode_base::auth::zcode::ZAI_ANTHROPIC_BASE
+        };
+        let mut headers = HeaderMap::new();
+        for (k, v) in jcode_base::auth::zcode::zcode_source_headers() {
+            if let (Ok(name), Ok(val)) = (
+                HeaderName::from_bytes(k.as_bytes()),
+                HeaderValue::from_str(&v),
+            ) {
+                headers.insert(name, val);
+            }
+        }
+        let direct_transport = DirectTransportConfig {
+            api_url: format!("{base}/v1/messages"),
+            #[cfg(test)]
+            oauth_api_url: None,
+            headers: Ok(headers),
+            auth_mode: "header".to_string(),
+            auth_header: "x-api-key".to_string(),
+            zcode_signer: Some(Arc::new(jcode_base::auth::zcode::ZCodeClientSigner::new())),
+        };
+        let client = jcode_provider_core::shared_http_client();
+        let profile_api_key = Some(
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(jcode_base::auth::zcode::resolve_coding_plan_api_key(&client))
+            })
+            .map_err(|err| format!("{err:#}")),
+        );
+        Self {
+            client,
+            model: Arc::new(std::sync::RwLock::new("GLM-5.3-Flash".to_string())),
+            reasoning_effort: Arc::new(std::sync::RwLock::new(None)),
+            service_tier: Arc::new(std::sync::RwLock::new(None)),
+            oauth_account: std::sync::RwLock::new(None),
+            credentials: Arc::new(RwLock::new(None)),
+            credential_mode: Arc::new(RwLock::new(AnthropicCredentialMode::ApiKey)),
+            request_credential: Arc::new(AtomicU8::new(0)),
+            max_tokens_override: None,
+            oauth_session_id: Uuid::new_v4().to_string(),
+            oauth_preflight_done: Arc::new(AtomicBool::new(false)),
+            direct_transport,
+            profile_api_key,
+            profile_models: Some(vec!["GLM-5.3-Flash".to_string(), "GLM-5.3".to_string()]),
         }
     }
 
@@ -2062,6 +2114,14 @@ async fn stream_response(
             ),
         };
         req = req.header("anthropic-beta", beta_header);
+        if let Some(signer) = &direct_transport.zcode_signer {
+            let signed = signer
+                .signed_headers(&client, &token, oauth_session_id)
+                .await?;
+            for (k, v) in signed {
+                req = req.header(k, v);
+            }
+        }
     }
 
     let req = jcode_provider_core::request_compression::json_body(

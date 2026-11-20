@@ -999,3 +999,67 @@ pub(crate) fn jcode_usage_report(me: &crate::subscription_api::SubscriptionMe) -
         ..Default::default()
     }
 }
+
+pub(super) async fn fetch_zcode_usage_report() -> Option<ProviderUsage> {
+    let creds = auth::zcode::load_credentials().ok()?;
+    let client = crate::provider::shared_http_client();
+    let mut extra_info = Vec::new();
+    if let Some(user) = &creds.user {
+        if let Some(email) = user.email.as_deref().filter(|s| !s.trim().is_empty()) {
+            extra_info.push(("Account".to_string(), email.to_string()));
+        } else if let Some(name) = user.name.as_deref().filter(|s| !s.trim().is_empty()) {
+            extra_info.push(("Account".to_string(), name.to_string()));
+        }
+    }
+    let mut limits = Vec::new();
+    match auth::zcode::fetch_billing_summary(&client).await {
+        Ok(summary) => {
+            if let Some(current) = summary.get("current").and_then(|v| v.get("data")) {
+                if let Some(plan_name) = current
+                    .get("plan_name")
+                    .or_else(|| current.get("planName"))
+                    .and_then(|v| v.as_str())
+                {
+                    extra_info.push(("Plan".to_string(), plan_name.to_string()));
+                }
+                if let (Some(used), Some(total)) = (
+                    current.get("used").and_then(|v| v.as_f64()),
+                    current.get("total").and_then(|v| v.as_f64()),
+                ) && total > 0.0
+                {
+                    limits.push(UsageLimit {
+                        name: "ZCode Plan".to_string(),
+                        usage_percent: usage_percent_from_used_limit(used, total),
+                        resets_at: current
+                            .get("reset_at")
+                            .or_else(|| current.get("resets_at"))
+                            .and_then(|v| v.as_str())
+                            .map(ToString::to_string),
+                    });
+                }
+            }
+            if let Some(balance) = summary.get("balance").and_then(|v| v.get("data"))
+                && let Some(rem) = balance
+                    .get("remaining")
+                    .or_else(|| balance.get("balance"))
+                    .and_then(|v| v.as_f64())
+            {
+                extra_info.push(("Balance".to_string(), format!("{rem:.0}")));
+            }
+        }
+        Err(err) => {
+            return Some(ProviderUsage {
+                provider_name: "ZCode (Z.AI)".to_string(),
+                extra_info,
+                error: Some(format!("{err:#}")),
+                ..Default::default()
+            });
+        }
+    }
+    Some(ProviderUsage {
+        provider_name: "ZCode (Z.AI)".to_string(),
+        limits,
+        extra_info,
+        ..Default::default()
+    })
+}

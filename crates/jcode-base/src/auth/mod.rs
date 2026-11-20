@@ -21,6 +21,7 @@ pub mod login_diagnostics;
 pub mod login_ui;
 pub mod muse;
 pub mod oauth;
+pub mod zcode;
 pub(crate) mod refresh_coordinator;
 pub mod refresh_state;
 pub mod router_transfer;
@@ -441,6 +442,7 @@ impl AuthStatus {
             || self.gemini == AuthState::Available
             || self.cursor == AuthState::Available
             || self.grok_build == AuthState::Available
+            || self.zcode == AuthState::Available
             || self.openai_compatible_any == AuthState::Available
     }
 
@@ -478,6 +480,7 @@ impl AuthStatus {
                 ("gemini", self.gemini.label().to_string()),
                 ("cursor", self.cursor.label().to_string()),
                 ("grok_build", self.grok_build.label().to_string()),
+                ("zcode", self.zcode.label().to_string()),
             ],
         );
     }
@@ -511,6 +514,7 @@ impl AuthStatus {
             LoginProviderAuthStateKey::Gemini => self.gemini,
             LoginProviderAuthStateKey::Cursor => self.cursor,
             LoginProviderAuthStateKey::GrokBuild => self.grok_build,
+            LoginProviderAuthStateKey::ZCode => self.zcode,
             LoginProviderAuthStateKey::Google => self.google,
         }
     }
@@ -576,6 +580,7 @@ impl AuthStatus {
                 }
             }
             crate::provider_catalog::LoginProviderTarget::GrokBuild => self.grok_build,
+            crate::provider_catalog::LoginProviderTarget::ZCode => self.zcode,
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
                 if crate::provider_catalog::openai_compatible_profile_is_configured(profile) {
                     AuthState::Available
@@ -747,6 +752,21 @@ impl AuthStatus {
                 AuthRefreshSupport::Automatic,
                 AuthValidationMethod::PresenceCheck,
             ),
+            crate::provider_catalog::LoginProviderTarget::ZCode => (
+                if state == AuthState::Available {
+                    AuthCredentialSource::JcodeManagedFile
+                } else {
+                    AuthCredentialSource::None
+                },
+                if state == AuthState::Available {
+                    "~/.jcode/zcode_oauth.json".to_string()
+                } else {
+                    "ZCode OAuth not configured".to_string()
+                },
+                AuthExpiryConfidence::Unknown,
+                AuthRefreshSupport::Automatic,
+                AuthValidationMethod::PresenceCheck,
+            ),
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile)
                 if profile.id == "muse-subscription" =>
             {
@@ -910,6 +930,13 @@ fn build_auth_status_uncached(mode: AuthProbeMode) -> (AuthStatus, Vec<(&'static
     });
     record_auth_probe_step(&mut timings, "grok_build", || {
         status.grok_build = if grok_build::has_cached_login() {
+            AuthState::Available
+        } else {
+            AuthState::NotConfigured
+        }
+    });
+    record_auth_probe_step(&mut timings, "zcode", || {
+        status.zcode = if zcode::has_cached_login() {
             AuthState::Available
         } else {
             AuthState::NotConfigured
@@ -1243,6 +1270,21 @@ fn assessment_for_key(
                 "Grok CLI OIDC session".to_string()
             } else {
                 "Grok Build subscription login not configured".to_string()
+            },
+            AuthExpiryConfidence::Unknown,
+            AuthRefreshSupport::Automatic,
+            AuthValidationMethod::PresenceCheck,
+        ),
+        LoginProviderAuthStateKey::ZCode => (
+            if state == AuthState::Available {
+                AuthCredentialSource::JcodeManagedFile
+            } else {
+                AuthCredentialSource::None
+            },
+            if state == AuthState::Available {
+                "~/.jcode/zcode_oauth.json".to_string()
+            } else {
+                "ZCode OAuth not configured".to_string()
             },
             AuthExpiryConfidence::Unknown,
             AuthRefreshSupport::Automatic,

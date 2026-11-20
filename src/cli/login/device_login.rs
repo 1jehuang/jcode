@@ -166,6 +166,55 @@ pub(super) async fn poll_muse_subscription_until_decided_by_code(
     }
 }
 
+pub(super) fn login_zcode_flow(no_browser: bool) -> Result<LoginFlowOutcome> {
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(login_zcode_oauth_flow(no_browser))
+    })?;
+    Ok(LoginFlowOutcome::Completed)
+}
+
+async fn login_zcode_oauth_flow(no_browser: bool) -> Result<()> {
+    let client = reqwest::Client::new();
+    let poll_token = auth::zcode::generate_poll_token()?;
+    let init = auth::zcode::init_cli_oauth(&client, &poll_token).await?;
+
+    println!("\nZCode (Z.AI) OAuth Login");
+    println!("Open this URL in your browser to authorize:\n");
+    println!("  {}\n", init.authorize_url);
+
+    if !no_browser {
+        let _ = open::that(&init.authorize_url);
+    }
+
+    println!("Waiting for authorization...");
+    let interval = std::time::Duration::from_secs(init.poll_interval_sec.max(1));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+    loop {
+        match auth::zcode::poll_cli_oauth(&client, &init.flow_id, &poll_token).await? {
+            auth::zcode::CliOAuthPollResult::Pending => {}
+            auth::zcode::CliOAuthPollResult::Failed => {
+                anyhow::bail!("ZCode OAuth authorization failed or was denied.");
+            }
+            auth::zcode::CliOAuthPollResult::Ready(creds) => {
+                let label = creds
+                    .user
+                    .as_ref()
+                    .and_then(|u| u.email.as_deref().or(u.name.as_deref()))
+                    .unwrap_or("zcode")
+                    .to_string();
+                auth::zcode::save_credentials(&creds)?;
+                println!("Logged in to ZCode as {label}!");
+                crate::telemetry::record_auth_success("zcode", "oauth_cli");
+                return Ok(());
+            }
+        }
+        if std::time::Instant::now() + interval >= deadline {
+            anyhow::bail!("Timed out waiting for ZCode OAuth authorization.");
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
 #[cfg(test)]
 type TestPollFn = Box<dyn Fn(&str, u64) -> Result<auth::muse::PollOutcome> + Send + Sync>;
 
