@@ -1942,6 +1942,12 @@ fn handle_server_event_inner(
             }
             if session_changed {
                 app.refresh_pinned_todos_now();
+            }
+            // A fresh client can learn its session id before the first History,
+            // so an empty row list must still be seeded.
+            // shortcut: this rescans the task dir on reattaches with no rows;
+            // track "seeded for this attachment" if that scan gets slow.
+            if session_changed || app.background_task_rows.is_empty() {
                 app.seed_running_background_tasks(&session_id);
             } else {
                 // A reattach may have missed completions of the rows it shows.

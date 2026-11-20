@@ -716,6 +716,40 @@ fn attaching_seeds_rows_for_the_sessions_running_background_shells() {
     assert_eq!(rows[0].status, crate::tui::BackgroundTaskRowStatus::Running);
 }
 
+/// A fresh client can learn its session id before the first History; that
+/// first History must still seed the session's running shells.
+#[test]
+fn fresh_client_that_knows_its_session_still_seeds_running_shells() {
+    let session_id = crate::id::new_id("ses_fresh_bg");
+    let manager = crate::background::global();
+    let info = manager.reserve_task_info();
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(manager.register_detached_task(
+        &info,
+        "bash",
+        Some("sleep 600".to_string()),
+        &session_id,
+        std::process::id(),
+        &chrono::Utc::now().to_rfc3339(),
+        true,
+        false,
+    ));
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.auto_server_reload = false;
+    app.remote_session_id = Some(session_id.clone());
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    handle_server_event(&mut app, startup_history(&session_id), &mut remote);
+    let rows = app.background_task_rows_ref().to_vec();
+    let _ = std::fs::remove_file(manager.status_path_for(&info.task_id));
+    let _ = std::fs::remove_file(manager.output_path_for(&info.task_id));
+
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].task_id, info.task_id);
+}
+
 /// Reattaching to the same session reconciles the rows it shows: one that
 /// finished is no longer shown as running, and one whose status file was
 /// cleaned up while the client was away is dropped. It does not rescan the
