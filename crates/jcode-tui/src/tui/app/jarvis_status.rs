@@ -12,6 +12,11 @@ pub(super) struct CaptureStatus {
     path: PathBuf,
     temporary: PathBuf,
     pause: PathBuf,
+    retry_token: String,
+    // Only typed VoiceError (whose Display is redacted) or constant fallback text.
+    failure: Option<(String, &'static str)>,
+    /// Created by the companion on an Fn tap: act on recent speech.
+    wake: PathBuf,
     _lease: File,
     levels: VecDeque<f32>,
     written: Option<Instant>,
@@ -74,6 +79,9 @@ impl CaptureStatus {
                 path: directory.join(format!("{pid}.json")),
                 temporary: directory.join(format!("{pid}.tmp")),
                 pause: directory.join(format!("{pid}.paused")),
+                retry_token: format!("{:016x}", rand::random::<u64>()),
+                failure: None,
+                wake: directory.join(format!("{pid}.wake")),
                 _lease: lease,
                 levels: VecDeque::with_capacity(64),
                 written: None,
@@ -83,6 +91,45 @@ impl CaptureStatus {
         }
         #[cfg(not(unix))]
         anyhow::bail!("Always-on capture status currently requires Unix")
+    }
+
+    fn retry_path(&self) -> PathBuf {
+        self.path
+            .with_extension(format!("retry-{}", self.retry_token))
+    }
+
+    pub(super) fn take_retry(&self) -> bool {
+        self.failure.is_some() && fs::remove_file(self.retry_path()).is_ok()
+    }
+
+    pub(super) fn set_failure(&mut self, error: Option<&jcode_voice::VoiceError>) {
+        use jcode_voice::VoiceError::*;
+        let hint = match error {
+            Some(NariNotConfigured) => "Check the configured Nari API key.",
+            Some(NariCreditsExhausted) => "Add Nari credits before retrying.",
+            Some(NariRejected) => "Check Nari account access and voice settings.",
+            Some(Http(429)) => "Wait for the provider rate limit to clear.",
+            Some(Network | Timeout | Http(500..=599)) => {
+                "Check the network and wait for the provider to recover."
+            }
+            Some(CaptureFailed | MicrophoneUnavailable) => {
+                "Check the microphone, recorder and capture permissions."
+            }
+            Some(NotConfigured) => "Check the client sign-in and voice configuration.",
+            _ => "Check the error in the Jarvis client before retrying.",
+        };
+        self.failure = Some((
+            error
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "Jarvis capture stopped".into()),
+            hint,
+        ));
+        self.written = None;
+    }
+
+    /// Consume a pending manual trigger request.
+    pub(super) fn take_wake(&self) -> bool {
+        fs::remove_file(&self.wake).is_ok()
     }
 
     pub(super) fn paused(&self) -> bool {
@@ -160,7 +207,15 @@ impl CaptureStatus {
             0.0
         });
         self.sequence = self.sequence.saturating_add(1);
-        let value = json!({"pid":std::process::id(),"capturing":capturing,"state":state,"levels":self.levels,"counters":counters,"sequence":self.sequence,"sample_interval_ms":50});
+        let mut value = json!({"pid":std::process::id(),"capturing":capturing,"state":state,"levels":self.levels,"counters":counters,"sequence":self.sequence,"sample_interval_ms":50});
+        if state == "error"
+            && let Some((reason, hint)) = &self.failure
+        {
+            value["error_reason"] = json!(reason);
+            value["error_hint"] = json!(hint);
+            value["retry_supported"] = json!(true);
+            value["retry_token"] = json!(self.retry_token);
+        }
         #[cfg(unix)]
         {
             use std::{io::Write, os::unix::fs::OpenOptionsExt};
@@ -182,9 +237,22 @@ impl CaptureStatus {
 
 impl Drop for CaptureStatus {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-        let _ = fs::remove_file(&self.temporary);
-        let _ = fs::remove_file(&self.pause);
+        for path in [
+            &self.path,
+            &self.temporary,
+            &self.pause,
+            &self.wake,
+            &self.retry_path(),
+        ] {
+            if let Err(error) = fs::remove_file(path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                crate::logging::warn(&format!(
+                    "Could not clean up voice status {}: {error}",
+                    path.display()
+                ));
+            }
+        }
     }
 }
 
@@ -256,6 +324,53 @@ mod tests {
             .unwrap();
         assert_eq!(read(&status.path)["sequence"], 102);
         assert!(fs::metadata(&status.path).unwrap().len() < 8192);
+    }
+
+    #[test]
+    fn error_snapshot_is_actionable_and_retry_is_single_use_and_lease_scoped() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("jcode-jarvis");
+        let mut status = CaptureStatus::in_directory(&directory).unwrap();
+        status.set_failure(Some(&jcode_voice::VoiceError::NariCreditsExhausted));
+        status.publish(false, "error", 0., json!({})).unwrap();
+        let snapshot: Value = serde_json::from_slice(&fs::read(&status.path).unwrap()).unwrap();
+        assert_eq!(snapshot["state"], "error");
+        assert_eq!(snapshot["retry_supported"], true);
+        assert!(
+            snapshot["error_reason"]
+                .as_str()
+                .unwrap()
+                .contains("credits")
+        );
+        assert!(
+            snapshot["error_hint"]
+                .as_str()
+                .unwrap()
+                .contains("Add Nari credits")
+        );
+        let marker = status.retry_path();
+        // Exercise the installed helper protocol end-to-end against an isolated runtime.
+        let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/waybar/jarvis-voice-status.py");
+        let output = std::process::Command::new("python3")
+            .arg(helper)
+            .arg("--toggle")
+            .env("XDG_RUNTIME_DIR", temp.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success() && output.stderr.is_empty());
+        assert!(status.take_retry());
+        assert!(!status.take_retry());
+        drop(status);
+        let mut restarted = CaptureStatus::in_directory(&directory).unwrap();
+        restarted.set_failure(None);
+        fs::write(marker, "").unwrap(); // late delivery from the previous indicator
+        assert!(!restarted.take_retry());
+        restarted.publish(false, "paused", 0., json!({})).unwrap();
+        let snapshot: Value = serde_json::from_slice(&fs::read(&restarted.path).unwrap()).unwrap();
+        assert!(
+            snapshot.get("retry_supported").is_none() && snapshot.get("error_reason").is_none()
+        );
     }
 
     #[test]

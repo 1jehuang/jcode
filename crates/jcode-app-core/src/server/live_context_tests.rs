@@ -112,6 +112,7 @@ async fn silent_stall_and_await_wakes_publish_idle_and_queued_context_entries() 
                 event.notification
             } else {
                 let event = crate::bus::BackgroundTaskStalled {
+                    elapsed_review: false,
                     task_id: "quiet-task".into(),
                     tool_name: "bash".into(),
                     display_name: None,

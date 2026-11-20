@@ -436,6 +436,14 @@ pub(crate) enum Command {
         #[arg(long)]
         no_voice_notifications: bool,
 
+        /// Do not use the Fn key as push-to-talk for always-on Jarvis
+        #[arg(long)]
+        no_jarvis_fn_key: bool,
+
+        /// Do not open an always-on Jarvis when Fn is held and none is running
+        #[arg(long)]
+        no_jarvis_fn_launch: bool,
+
         /// Do not handle open/reveal requests (clients open locally)
         #[arg(long)]
         no_open: bool,

@@ -63,7 +63,8 @@ impl App {
         false
     }
 
-    pub(super) fn cancel_jarvis_speech(&self) {
+    pub(super) fn cancel_jarvis_speech(&mut self) {
+        self.jarvis_listener.clear_playback();
         if let Some(player) = &self.jarvis_speech {
             player.cancel();
         }
@@ -98,6 +99,14 @@ impl App {
                 "Speech skipped while microphone input is active"
             );
             let text = speech_text(input)?;
+            if crate::tui::jarvis::always_on() {
+                anyhow::ensure!(
+                    self.jarvis_speech.is_some(),
+                    "Local speech backend is unavailable"
+                );
+                self.jarvis_listener.defer_speech(text);
+                return Ok("Held for local playback when the microphone is quiet. A newer request or revision may supersede it. Playback is not confirmed.".into());
+            }
             self.jarvis_listener.suppress_speech();
             self.jarvis_speech
                 .as_ref()

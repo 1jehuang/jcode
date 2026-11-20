@@ -3588,7 +3588,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "jcode"
-version = "1.0.1"
+version = "1.0.3"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3896,6 +3896,7 @@ dependencies = [
  "anyhow",
  "async-io",
  "jcode-base",
+ "jcode-build-support",
  "jcode-desktop-open",
  "jcode-transport",
  "jcode-voice",
@@ -4929,6 +4930,7 @@ dependencies = [
  "jcode-base",
  "jcode-provider-env",
  "libc",
+ "rand 0.9.3",
  "regex",
  "reqwest 0.12.28",
  "rustls",

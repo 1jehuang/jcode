@@ -1,9 +1,11 @@
+mod linux_prerelease;
 mod paths;
 mod platform_support;
 mod source_state;
 mod storage_helpers;
 mod version_gc;
 
+pub use linux_prerelease::{dispatch_linux_prerelease, linux_prerelease_candidate};
 pub use paths::{
     SELFDEV_CARGO_PROFILE, binary_name, binary_stem, client_update_candidate,
     current_binary_build_time_string, current_binary_built_at, find_dev_binary,

@@ -50,6 +50,10 @@ pub fn todo_file_path(home: &Path, session_id: &str, file: TodoFile) -> PathBuf 
         .join(format!("{session_id}{}.json", file.suffix()))
 }
 
+/// Cancellation history is stored separately from the active plan.
+mod cancellation;
+pub use cancellation::{TodoCancellation, append_cancellations, load_cancellations};
+
 /// Persisted long-session review clock.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoReviewState {

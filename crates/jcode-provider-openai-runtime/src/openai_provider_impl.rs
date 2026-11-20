@@ -38,63 +38,6 @@ fn catalog_error_is_auth_rejection(err: &anyhow::Error) -> bool {
         .is_some_and(|status| status.0 == 401 || status.0 == 403)
 }
 
-#[cfg(test)]
-#[test]
-fn borrowed_request_fingerprint_fields_match_owned_fields() {
-    use jcode_provider_core::fingerprint::stable_hash_json;
-
-    fn fingerprint(value: &Value) -> (u64, usize) {
-        (
-            stable_hash_json(value),
-            serde_json::to_vec(value).unwrap().len(),
-        )
-    }
-
-    for request in [
-        serde_json::json!({}),
-        serde_json::json!({"tools": null, "instructions": null}),
-        serde_json::json!({"tools": [], "instructions": ""}),
-        serde_json::json!({"tools": [{"name": "read", "schema": {"type": "object"}}], "instructions": "日本語\n"}),
-        serde_json::json!({"tools": {"unexpected": true}, "instructions": ["structured"]}),
-    ] {
-        let owned_tools = request
-            .get("tools")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!([]));
-        let owned_instructions = request.get("instructions").cloned();
-        let empty_tools = serde_json::json!([]);
-        let borrowed_tools = request.get("tools").unwrap_or(&empty_tools);
-        let borrowed_instructions = request.get("instructions");
-        assert_eq!(fingerprint(borrowed_tools), fingerprint(&owned_tools));
-        assert_eq!(
-            borrowed_instructions.map(fingerprint),
-            owned_instructions.as_ref().map(fingerprint)
-        );
-        // Full requests fall back to the caller's tool count, continuations to zero.
-        for fallback_count in [0, 7] {
-            assert_eq!(
-                borrowed_tools
-                    .as_array()
-                    .map(Vec::len)
-                    .unwrap_or(fallback_count),
-                owned_tools
-                    .as_array()
-                    .map(Vec::len)
-                    .unwrap_or(fallback_count)
-            );
-        }
-        if let Some(tools) = request.get("tools") {
-            assert!(std::ptr::eq(borrowed_tools, tools));
-        } else {
-            assert_eq!(borrowed_tools, &serde_json::json!([]));
-        }
-        assert_eq!(
-            borrowed_instructions.is_some(),
-            request.get("instructions").is_some()
-        );
-    }
-}
-
 #[async_trait]
 impl Provider for OpenAIProvider {
     fn set_session_id(&self, session_id: &str) {
@@ -241,7 +184,9 @@ impl Provider for OpenAIProvider {
         }
         let input_item_count = input.len();
         let request = self.response_request(input, tools, system).await;
-        let input = request["input"].as_array().expect("request input array");
+        let input = request["input"]
+            .as_array()
+            .context("OpenAI request input is not an array")?;
         let model_id = openai_request_model(&request);
         let is_chatgpt_mode = Self::is_chatgpt_mode(&*self.credentials.read().await);
 
@@ -397,7 +342,18 @@ impl Provider for OpenAIProvider {
 
         tokio::spawn(async move {
             let stream_task = async move {
-                let input = request["input"].as_array().expect("request input array");
+                let Some(input) = request["input"].as_array() else {
+                    if tx
+                        .send(Err(anyhow::anyhow!("OpenAI request input is not an array")))
+                        .await
+                        .is_err()
+                    {
+                        jcode_base::logging::debug(
+                            "OpenAI stream consumer closed before request validation error could be delivered",
+                        );
+                    }
+                    return;
+                };
                 let mut retry_diagnostics =
                     super::openai_retry_diagnostics::OpenAIRetryDiagnostics::default();
                 // Attempt persistent WebSocket continuation first

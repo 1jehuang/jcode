@@ -73,6 +73,25 @@ fn str_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
 }
 
+fn openai_search_query(action: &Value) -> String {
+    str_field(action, "query")
+        .map(str::to_string)
+        .or_else(|| {
+            action
+                .get("queries")
+                .and_then(Value::as_array)
+                .map(|queries| {
+                    queries
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+        })
+        .or_else(|| str_field(action, "url").map(str::to_string))
+        .unwrap_or_default()
+}
+
 /// Describe a provider-native item for display. Returns `None` for items that
 /// have nothing user-visible.
 pub fn provider_native_display(provider: &str, item: &Value) -> Option<ProviderNativeDisplay> {
@@ -106,22 +125,7 @@ pub fn provider_native_display(provider: &str, item: &Value) -> Option<ProviderN
         }
         (PROVIDER_NATIVE_OPENAI, "web_search_call") => {
             let action = item.get("action").unwrap_or(&Value::Null);
-            let query = str_field(action, "query")
-                .map(str::to_string)
-                .or_else(|| {
-                    action
-                        .get("queries")
-                        .and_then(Value::as_array)
-                        .map(|queries| {
-                            queries
-                                .iter()
-                                .filter_map(Value::as_str)
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        })
-                })
-                .or_else(|| str_field(action, "url").map(str::to_string))
-                .unwrap_or_default();
+            let query = openai_search_query(action);
             let status = str_field(item, "status").unwrap_or("completed");
             let is_error = status == "failed";
             let mut output = if is_error {
@@ -337,29 +341,14 @@ impl ProviderNativeItems {
                         Some(item.get("input").cloned().unwrap_or(Value::Null))
                     }
                     (PROVIDER_NATIVE_OPENAI, Some("web_search_call"))
-                        if str_field(item, "id").unwrap_or_default() == id
+                        if str_field(item, "id").unwrap_or("") == id
                             && matches!(
                                 str_field(item, "status"),
                                 Some("in_progress" | "searching")
                             ) =>
                     {
                         let action = item.get("action").unwrap_or(&Value::Null);
-                        let query = str_field(action, "query")
-                            .map(str::to_string)
-                            .or_else(|| {
-                                action
-                                    .get("queries")
-                                    .and_then(Value::as_array)
-                                    .map(|queries| {
-                                        queries
-                                            .iter()
-                                            .filter_map(Value::as_str)
-                                            .collect::<Vec<_>>()
-                                            .join(", ")
-                                    })
-                            })
-                            .or_else(|| str_field(action, "url").map(str::to_string))
-                            .unwrap_or_default();
+                        let query = openai_search_query(action);
                         Some(serde_json::json!({ "query": query }))
                     }
                     _ => None,

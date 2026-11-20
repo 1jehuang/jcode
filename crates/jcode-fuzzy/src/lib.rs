@@ -524,6 +524,33 @@ pub fn fuzzy_score_tokens(needle: &str, haystack: &str) -> Option<i32> {
 /// then bound insertions, deletions, substitutions and adjacent transpositions.
 pub fn search_word_is_close(needle: &str, word: &str) -> bool {
     let word = word.trim_matches(|c: char| !c.is_alphanumeric());
+    // Common short ASCII queries allow exactly one edit. Resolve that at
+    // the first mismatch instead of allocating two vectors and filling a DP table.
+    if (4..=8).contains(&needle.len()) && needle.is_ascii() && word.is_ascii() {
+        let (a, b) = (needle.as_bytes(), word.as_bytes());
+        if a.len().abs_diff(b.len()) > 1 {
+            return false;
+        }
+        let i = a
+            .iter()
+            .zip(b)
+            .take_while(|(x, y)| x.eq_ignore_ascii_case(y))
+            .count();
+        if i == a.len().min(b.len()) {
+            return true;
+        }
+        return match a.len().cmp(&b.len()) {
+            std::cmp::Ordering::Less => a[i..].eq_ignore_ascii_case(&b[i + 1..]),
+            std::cmp::Ordering::Greater => a[i + 1..].eq_ignore_ascii_case(&b[i..]),
+            std::cmp::Ordering::Equal => {
+                a[i + 1..].eq_ignore_ascii_case(&b[i + 1..])
+                    || (i + 1 < a.len()
+                        && a[i].eq_ignore_ascii_case(&b[i + 1])
+                        && a[i + 1].eq_ignore_ascii_case(&b[i])
+                        && a[i + 2..].eq_ignore_ascii_case(&b[i + 2..]))
+            }
+        };
+    }
     let pattern: Vec<char> = needle.chars().flat_map(char::to_lowercase).collect();
     if pattern.len() < 4 || pattern.len() > 128 {
         return false;

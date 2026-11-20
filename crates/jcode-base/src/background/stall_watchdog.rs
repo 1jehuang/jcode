@@ -104,6 +104,7 @@ impl BackgroundTaskManager {
 
                 Bus::global().publish(BusEvent::BackgroundTaskStalled(
                     crate::bus::BackgroundTaskStalled {
+                        elapsed_review: false,
                         task_id: status.task_id.clone(),
                         tool_name: status.tool_name.clone(),
                         display_name: status.display_name.clone(),
