@@ -2261,7 +2261,13 @@ impl App {
             KeyCode::Enter => {
                 if let Some(ref mut picker) = self.inline_interactive_state {
                     if picker.filtered.is_empty() {
+                        let is_explicit_model_cmd = picker.kind == PickerKind::Model
+                            && (self.input.trim_start().starts_with("/model ")
+                                || self.input.trim_start().starts_with("/models "));
                         self.inline_interactive_state = None;
+                        if is_explicit_model_cmd {
+                            return Ok(false);
+                        }
                         self.input.clear();
                         self.cursor_pos = 0;
                         return Ok(true);
