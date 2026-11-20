@@ -896,6 +896,10 @@ impl Provider for AntigravityProvider {
         "antigravity"
     }
 
+    fn supports_image_input(&self) -> bool {
+        true
+    }
+
     fn model(&self) -> String {
         self.model
             .read()
