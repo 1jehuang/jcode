@@ -34,6 +34,52 @@ use model::{
     progress_event_record, progress_wait_reason, push_task_event, task_dir, terminal_event_record,
 };
 
+/// Shared by a tool runner and the call it may later move into a background
+/// task (Alt+B or the foreground budget). The handoff happens after the call
+/// started, so the call reads it through a task-local set by [`Self::scope`].
+#[derive(Default)]
+pub struct ToolHandoff {
+    handed_off: std::sync::atomic::AtomicBool,
+    /// Detached child the call waits on; 0 when none.
+    detached_pid: std::sync::atomic::AtomicU32,
+}
+
+tokio::task_local! {
+    static TOOL_HANDOFF: Arc<ToolHandoff>;
+}
+
+impl ToolHandoff {
+    /// Run a tool call so it can see a later handoff.
+    pub fn scope<F: std::future::Future>(
+        self: &Arc<Self>,
+        call: F,
+    ) -> impl std::future::Future<Output = F::Output> + use<F> {
+        TOOL_HANDOFF.scope(Arc::clone(self), call)
+    }
+
+    /// True when the running call already belongs to a background task,
+    /// which reports its completion.
+    pub fn current_handed_off() -> bool {
+        TOOL_HANDOFF
+            .try_with(|handoff| handoff.handed_off.load(std::sync::atomic::Ordering::SeqCst))
+            .unwrap_or(false)
+    }
+
+    /// Record the detached child the running call waits on (`None` once it
+    /// exited), so cancelling the task that adopted the call stops it too.
+    pub fn set_current_detached_pid(pid: Option<u32>) {
+        let _ = TOOL_HANDOFF.try_with(|handoff| {
+            handoff
+                .detached_pid
+                .store(pid.unwrap_or(0), std::sync::atomic::Ordering::SeqCst)
+        });
+    }
+
+    fn detached_pid(&self) -> Option<u32> {
+        Some(self.detached_pid.load(std::sync::atomic::Ordering::SeqCst)).filter(|pid| *pid != 0)
+    }
+}
+
 /// Manages background task execution
 pub struct BackgroundTaskManager {
     tasks: Arc<RwLock<HashMap<String, RunningTask>>>,
@@ -632,6 +678,7 @@ impl BackgroundTaskManager {
             started_at_rfc3339,
             delivery_flags: delivery_flags_tx,
             handle,
+            handoff: None,
         };
 
         self.tasks
@@ -674,6 +721,40 @@ impl BackgroundTaskManager {
         wake: bool,
         handle: JoinHandle<Result<jcode_tool_types::ToolOutput>>,
     ) -> BackgroundTaskInfo {
+        self.adopt_handoff(
+            None,
+            tool_name,
+            display_name,
+            session_id,
+            notify,
+            wake,
+            handle,
+        )
+        .await
+    }
+
+    /// [`Self::adopt_with_options`] for a call run inside `handoff`'s scope:
+    /// the call learns it was adopted, and cancelling the task also stops the
+    /// detached child it waits on.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "adopt_with_options plus the call's handoff state"
+    )]
+    pub async fn adopt_handoff(
+        &self,
+        handoff: Option<Arc<ToolHandoff>>,
+        tool_name: &str,
+        display_name: Option<String>,
+        session_id: &str,
+        notify: bool,
+        wake: bool,
+        handle: JoinHandle<Result<jcode_tool_types::ToolOutput>>,
+    ) -> BackgroundTaskInfo {
+        if let Some(handoff) = &handoff {
+            handoff
+                .handed_off
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         let mut handle = model::AbortAdoptedTask(handle);
         // Reserve before the foreground caller can release its turn/tool guard.
         let runtime_activity = crate::runtime_activity::global()
@@ -853,6 +934,7 @@ impl BackgroundTaskManager {
             started_at_rfc3339: initial_status.started_at.clone(),
             delivery_flags: delivery_flags_tx,
             handle: wrapper_handle,
+            handoff,
         };
 
         self.tasks
@@ -1283,6 +1365,15 @@ impl BackgroundTaskManager {
                 // It finished first and already published its own completion.
                 return Ok(false);
             }
+            if let Some(pid) = task
+                .handoff
+                .as_ref()
+                .and_then(|handoff| handoff.detached_pid())
+            {
+                Self::terminate_detached_group(pid, _graceful_timeout).await;
+                // Its waiter dropped the child unreaped; do not leave a zombie.
+                let _ = crate::platform::try_reap_child_process(pid);
+            }
             let _status_guard = self.progress_updates.lock().await;
             // The abort can land after the task persisted its own terminal
             // status but before it published it. Keep that real result and
@@ -1354,18 +1445,7 @@ impl BackgroundTaskManager {
                 return Ok(false);
             };
 
-            #[cfg(unix)]
-            {
-                let _ = crate::platform::signal_detached_process_group(pid, libc::SIGTERM);
-                tokio::time::sleep(_graceful_timeout).await;
-                if crate::platform::is_process_running(pid) {
-                    let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
-                }
-            }
-            #[cfg(windows)]
-            {
-                let _ = crate::platform::signal_detached_process_group(pid, 0);
-            }
+            Self::terminate_detached_group(pid, _graceful_timeout).await;
 
             let completed_at = Utc::now();
             status.status = BackgroundTaskStatus::Failed;
@@ -1383,6 +1463,22 @@ impl BackgroundTaskManager {
             self.write_status_file(&status_path, &status).await;
             self.publish_completion(&status, false).await;
             Ok(true)
+        }
+    }
+
+    /// Stop a detached process group: TERM, then KILL after `_grace` on Unix.
+    async fn terminate_detached_group(pid: u32, _grace: std::time::Duration) {
+        #[cfg(unix)]
+        {
+            let _ = crate::platform::signal_detached_process_group(pid, libc::SIGTERM);
+            tokio::time::sleep(_grace).await;
+            if crate::platform::is_process_running(pid) {
+                let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
+            }
+        }
+        #[cfg(windows)]
+        {
+            let _ = crate::platform::signal_detached_process_group(pid, 0);
         }
     }
 

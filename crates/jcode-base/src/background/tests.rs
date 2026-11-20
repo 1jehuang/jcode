@@ -1188,6 +1188,70 @@ async fn cancel_keeps_terminal_status_written_before_abort() -> Result<()> {
     let completions = drain_completions(&mut events, &info.task_id);
     assert_eq!(completions.len(), 1, "exactly one: {completions:?}");
     assert_eq!(completions[0].status, BackgroundTaskStatus::Completed);
-    assert!(completions[0].wake, "the real completion keeps its delivery");
+    assert!(
+        completions[0].wake,
+        "the real completion keeps its delivery"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_an_adopted_call_stops_its_detached_child() -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let child = std::process::Command::new("sleep")
+        .arg("60")
+        .process_group(0)
+        .spawn()
+        .map_err(|err| anyhow!("spawn child: {err}"))?;
+    let pid = child.id();
+    let handoff = Arc::new(ToolHandoff::default());
+    let call = tokio::spawn(handoff.scope(async move {
+        // Like bash's detached waiter: hold the child and wait on it.
+        let _child = child;
+        ToolHandoff::set_current_detached_pid(Some(pid));
+        sleep(Duration::from_secs(3600)).await;
+        Ok(jcode_tool_types::ToolOutput::new("unreachable"))
+    }));
+    let info = manager
+        .adopt_handoff(
+            Some(Arc::clone(&handoff)),
+            "bash",
+            None,
+            "session-handoff-cancel",
+            true,
+            true,
+            call,
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while handoff.detached_pid().is_none() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+
+    assert!(
+        manager
+            .cancel_with_grace(&info.task_id, Duration::from_millis(50))
+            .await?
+    );
+    let stopped = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let _ = crate::platform::try_reap_child_process(pid);
+            if !crate::platform::is_process_running(pid) {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    if stopped.is_err() {
+        let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
+    }
+    assert!(stopped.is_ok(), "cancel must stop the detached child");
     Ok(())
 }

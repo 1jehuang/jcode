@@ -1200,3 +1200,48 @@ fn background_timeout_honors_values_above_the_foreground_cap() {
     assert_eq!(background_timeout_ms(Some(100)), Some(100));
     assert_eq!(background_timeout_ms(None), None);
 }
+
+/// A call already adopted by a background task must not promote itself into a
+/// second task at its own timeout: one shell, one task, one completion.
+#[tokio::test]
+async fn handed_off_bash_reports_its_real_exit_instead_of_promoting_again() {
+    for ctx in [
+        make_ctx(None),
+        make_agent_ctx(jcode_agent_runtime::InterruptSignal::new()),
+    ] {
+        let handoff = std::sync::Arc::new(crate::background::ToolHandoff::default());
+        let call = tokio::spawn(handoff.scope(async move {
+            BashTool::new()
+                .execute(
+                    json!({"command": "sleep 0.4; echo nested_handoff_ok", "timeout": 100}),
+                    ctx,
+                )
+                .await
+        }));
+        let info = crate::background::global()
+            .adopt_handoff(
+                Some(handoff),
+                "bash",
+                None,
+                "nested-handoff",
+                true,
+                true,
+                call,
+            )
+            .await;
+        let finished = crate::background::global()
+            .wait(&info.task_id, Duration::from_secs(10), false)
+            .await
+            .expect("adopted task should exist");
+        assert_eq!(finished.task.status, BackgroundTaskStatus::Completed);
+        let output = crate::background::global()
+            .output(&info.task_id)
+            .await
+            .expect("output should exist");
+        assert!(output.contains("nested_handoff_ok"), "output was: {output}");
+        assert!(
+            !output.contains("continuing in background"),
+            "output was: {output}"
+        );
+    }
+}

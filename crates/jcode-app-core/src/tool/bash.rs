@@ -1032,12 +1032,13 @@ impl BashTool {
                 Ok(ToolOutput::new(output).with_title(title_for_work))
             });
 
-        match tokio::time::timeout(timeout_duration, &mut work_handle).await {
-            Ok(join_result) => match join_result {
-                Ok(Ok(output)) => Ok(output),
-                Ok(Err(e)) => Err(anyhow::anyhow!("Command failed: {}", e)),
-                Err(join_err) => Err(anyhow::anyhow!("Command task panicked: {}", join_err)),
-            },
+        let join_result = match tokio::time::timeout(timeout_duration, &mut work_handle).await {
+            Ok(join_result) => join_result,
+            // The background task that adopted this call reports the real
+            // exit; promoting again would make one shell two tasks.
+            Err(_) if crate::background::ToolHandoff::current_handed_off() => {
+                (&mut work_handle).await
+            }
             Err(_) => {
                 // Timed out, but the command is still running. Instead of killing
                 // it, promote it to a background task so it keeps running, renders
@@ -1077,7 +1078,7 @@ impl BashTool {
                     super::background_delivery_notice(params.wake()),
                 );
 
-                Ok(ToolOutput::new(output)
+                return Ok(ToolOutput::new(output)
                     .with_title(title)
                     .with_metadata(json!({
                         "background": true,
@@ -1087,8 +1088,13 @@ impl BashTool {
                         "status_file": info.status_file.to_string_lossy(),
                         "timeout_promoted": true,
                         "foreground_timeout_ms": timeout_ms,
-                    })))
+                    })));
             }
+        };
+        match join_result {
+            Ok(Ok(output)) => Ok(output),
+            Ok(Err(e)) => Err(anyhow::anyhow!("Command failed: {}", e)),
+            Err(join_err) => Err(anyhow::anyhow!("Command task panicked: {}", join_err)),
         }
     }
 
@@ -1132,9 +1138,11 @@ impl BashTool {
         let mut child = crate::platform::spawn_detached(&mut cmd)?;
         let pid = child.id();
         let shutdown_signal = ctx.graceful_shutdown_signal.clone();
+        crate::background::ToolHandoff::set_current_detached_pid(Some(pid));
 
         loop {
             if let Some(status) = child.try_wait()? {
+                crate::background::ToolHandoff::set_current_detached_pid(None);
                 let output = tokio::fs::read_to_string(&info.output_file)
                     .await
                     .unwrap_or_default();
@@ -1150,7 +1158,11 @@ impl BashTool {
                 );
             }
 
-            if started.elapsed() >= timeout_duration {
+            // Once adopted, the background task owns this shell and reports
+            // its exit; promoting it again would make one shell two tasks.
+            if started.elapsed() >= timeout_duration
+                && !crate::background::ToolHandoff::current_handed_off()
+            {
                 let elapsed = started.elapsed();
                 manager
                     .register_detached_task(
@@ -1212,6 +1224,8 @@ impl BashTool {
                 .map(|signal| signal.is_set())
                 .unwrap_or(false)
             {
+                // The registered task owns the child across the reload.
+                crate::background::ToolHandoff::set_current_detached_pid(None);
                 manager
                     .register_detached_task(
                         &info,

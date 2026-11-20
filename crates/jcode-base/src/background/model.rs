@@ -249,6 +249,8 @@ pub(super) struct RunningTask {
     pub(super) started_at_rfc3339: String,
     pub(super) delivery_flags: watch::Sender<(bool, bool)>,
     pub(super) handle: JoinHandle<Result<TaskResult>>,
+    /// Set for an adopted tool call, so cancel can stop its detached child.
+    pub(super) handoff: Option<std::sync::Arc<super::ToolHandoff>>,
 }
 
 /// Result from a background task execution

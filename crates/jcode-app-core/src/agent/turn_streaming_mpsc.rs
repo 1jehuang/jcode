@@ -1596,15 +1596,18 @@ impl Agent {
                 let registry_clone = self.registry.clone();
                 let tool_name_for_spawn = tc.name.clone();
                 let tool_input_for_spawn = tc.input.clone();
-                let tool_handle =
-                    crate::runtime_activity::spawn_session(&self.session.id, async move {
+                let handoff = Arc::new(crate::background::ToolHandoff::default());
+                let tool_handle = crate::runtime_activity::spawn_session(
+                    &self.session.id,
+                    handoff.scope(async move {
                         registry_clone
                             .execute(&tool_name_for_spawn, tool_input_for_spawn, ctx)
                             .await
-                    })
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("Session transfer in progress; tool not accepted")
-                    })?;
+                    }),
+                )
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Session transfer in progress; tool not accepted")
+                })?;
 
                 // Reset background signal before waiting
                 self.background_tool_signal.reset();
@@ -1782,7 +1785,8 @@ impl Agent {
 
                     let (notify, wake) = tool_handoff::handoff_delivery(&tc.input);
                     let bg_info = crate::background::global()
-                        .adopt_with_options(
+                        .adopt_handoff(
+                            Some(handoff),
                             &tc.name,
                             tool_handoff::handoff_display_name(&tc.input),
                             &self.session.id,

@@ -52,16 +52,18 @@ async fn execute_with_background_budget(
     let tool_name = name.clone();
     let display_name = handoff_display_name(&input);
     let (notify, wake) = handoff_delivery(&input);
-    let mut work = crate::runtime_activity::spawn_session(&session_id, async move {
-        registry.execute(&tool_name, input, ctx).await
-    })
+    let handoff = Arc::new(crate::background::ToolHandoff::default());
+    let mut work = crate::runtime_activity::spawn_session(
+        &session_id,
+        handoff.scope(async move { registry.execute(&tool_name, input, ctx).await }),
+    )
     .ok_or_else(|| anyhow::anyhow!("Session transfer in progress; tool not accepted"))?;
     tokio::select! {
         biased;
         result = &mut work => result.map_err(|e| anyhow::anyhow!("Tool task panicked: {}", e))?,
         _ = tokio::time::sleep(budget), if auto_background && !budget.is_zero() => {
             let info = crate::background::global()
-                .adopt_with_options(&name, display_name, &session_id, notify, wake, work)
+                .adopt_handoff(Some(handoff), &name, display_name, &session_id, notify, wake, work)
                 .await;
             Ok(crate::tool::ToolOutput::new(format!(
                 "Tool '{}' was moved to background {} (task_id: {}).\n\n{}\n{}",
