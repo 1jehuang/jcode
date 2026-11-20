@@ -2083,6 +2083,31 @@ async fn stream_response(
     } else {
         direct_transport.api_url.as_str()
     };
+
+    // ZCode highspeed card: trigger the background draw loop on eligible
+    // coding-plan requests and mount the card when one is held. Carded
+    // requests reroute to the dedicated highspeed endpoint with the zcode
+    // JWT auth pair and are never signed (static client-side rule).
+    let mut highspeed_card: Option<jcode_base::auth::zcode_highspeed::HighspeedCard> = None;
+    let mut highspeed_url: Option<String> = None;
+    if !is_oauth
+        && direct_transport.zcode_signer.is_some()
+        && jcode_base::auth::zcode_highspeed::is_eligible_model(model_name)
+    {
+        let manager = jcode_base::auth::zcode_highspeed::shared();
+        manager.on_request(model_name, Some(oauth_session_id)).await;
+        if let Some(card) = manager.active_card_for(model_name).await
+            && let Some(auth) = jcode_base::auth::zcode_highspeed::HighspeedAuth::from_credentials()
+        {
+            highspeed_url = Some(jcode_base::auth::zcode_highspeed::highspeed_llm_url());
+            highspeed_card = Some(card);
+            let _ = auth; // headers applied below on the rerouted request
+        }
+    }
+    let mut url = url;
+    if let Some(carded) = &highspeed_url {
+        url = carded.as_str();
+    }
     // Local HTTP regressions exercise the real OAuth retry loop without
     // permitting a production environment override of the OAuth endpoint.
     #[cfg(test)]
@@ -2093,13 +2118,29 @@ async fn stream_response(
     };
 
     let mut req = client.post(url);
-    if !is_oauth {
-        req = req.headers(
-            direct_transport
-                .headers
-                .clone()
-                .map_err(anyhow::Error::msg)?,
-        );
+    req = req.headers(
+        direct_transport
+            .headers
+            .clone()
+            .map_err(anyhow::Error::msg)?,
+    );
+    if !is_oauth
+        && let (Some(card), Some(auth)) = (
+            highspeed_card.as_ref(),
+            jcode_base::auth::zcode_highspeed::HighspeedAuth::from_credentials(),
+        )
+    {
+        // Carded request: swap auth to the JWT pair + card id headers.
+        let mut headers = reqwest::header::HeaderMap::new();
+        jcode_base::auth::zcode_highspeed::apply_highspeed_card_headers(&mut headers, card, &auth);
+        for (name, value) in headers.iter() {
+            req = req.header(name, value);
+        }
+        jcode_base::logging::info(&format!(
+            "ZCode highspeed: card {} mounted (model rewritten to {})",
+            &card.card_id[..card.card_id.len().min(12)],
+            card.model,
+        ));
     }
     req = req.header("anthropic-version", API_VERSION).header(
         "accept",
@@ -2200,6 +2241,19 @@ async fn stream_response(
         let status = response.status();
         let retry_after = jcode_provider_core::retry_after::retry_after(response.headers());
         let error_text = jcode_base::util::http_error_body(response, "HTTP error").await;
+        // Card fallback: a rejected highspeed card (401 / biz 3402) drops the
+        // card so the retry goes out uncarded on the normal route.
+        if highspeed_card.is_some()
+            && jcode_base::auth::zcode_highspeed::is_highspeed_card_rejection(
+                status.as_u16(),
+                None,
+                &error_text,
+            )
+        {
+            jcode_base::auth::zcode_highspeed::shared()
+                .drop_card(&format!("HTTP {status}"))
+                .await;
+        }
         // Signing retry ladder: a 401 VERIFY_* rejection means the cached
         // signing key is stale. Invalidate and let the outer retry loop
         // re-sign (a fresh handshake) on the next attempt.

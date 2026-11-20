@@ -743,6 +743,79 @@ pub async fn resolve_coding_plan_api_key(client: &reqwest::Client) -> Result<Str
     Ok(full_key)
 }
 
+/// Coding-plan usage windows from the monitor plane (`/api/monitor/usage/quota/limit`,
+/// the same endpoint the official usage panel reads). Note: upstream `number`
+/// is the window total and is NOT comparable with `remaining`; only
+/// `remaining` and `percentage` are display-safe.
+#[derive(Debug, Clone, Deserialize)]
+pub struct QuotaCodingLimit {
+    #[serde(default)]
+    pub r#type: String,
+    #[serde(default)]
+    pub unit: Option<String>,
+    #[serde(default, rename = "number")]
+    pub total: Option<f64>,
+    #[serde(default)]
+    pub usage: Option<f64>,
+    #[serde(default)]
+    pub remaining: Option<f64>,
+    #[serde(default)]
+    pub percentage: Option<f64>,
+    #[serde(default, rename = "next_reset_time")]
+    pub next_reset_time: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct QuotaCodingPlan {
+    #[serde(default)]
+    pub level: Option<String>,
+    #[serde(default)]
+    pub limits: Vec<QuotaCodingLimit>,
+}
+
+pub async fn fetch_coding_plan_quota(client: &reqwest::Client) -> Result<QuotaCodingPlan> {
+    let creds = load_credentials()?;
+    let key = creds
+        .coding_plan_api_key
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .context("no cached coding-plan key; login to ZCode first")?;
+    let resp = client
+        .get("https://api.z.ai/api/monitor/usage/quota/limit")
+        .timeout(Duration::from_secs(15))
+        .header("authorization", &key)
+        .header("accept", "application/json")
+        .send()
+        .await
+        .context("ZCode quota/limit request failed")?;
+    let status = resp.status().as_u16();
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .context("invalid JSON from ZCode quota/limit")?;
+    let code = json.get("code").and_then(|v| v.as_i64());
+    if status < 200 || status >= 300 || (code.is_some() && code != Some(0) && code != Some(200)) {
+        anyhow::bail!(
+            "ZCode quota/limit failed (HTTP {status}, code {:?}): {}",
+            code,
+            json.get("msg").and_then(|v| v.as_str()).unwrap_or("unknown"),
+        );
+    }
+    let data = json.get("data").cloned().unwrap_or(serde_json::Value::Null);
+    let plan: QuotaCodingPlan = serde_json::from_value(data)
+        .context("unexpected ZCode quota/limit shape")?;
+    // Drop rows with no usable number (display noise, per the official panel).
+    let limits = plan
+        .limits
+        .into_iter()
+        .filter(|l| l.total.is_some() || l.usage.is_some() || l.remaining.is_some())
+        .collect();
+    Ok(QuotaCodingPlan {
+        level: plan.level,
+        limits,
+    })
+}
+
 pub async fn fetch_billing_summary(client: &reqwest::Client) -> Result<serde_json::Value> {
     let creds = load_credentials()?;
     let mut out = serde_json::Map::new();
