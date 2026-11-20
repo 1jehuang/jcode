@@ -101,6 +101,7 @@ A blocked command must not silently execute against the laptop.
 | `/test` | Prompt | Verification instruction is staged for the remote tick loop, not a laptop test process. |
 | `/initiatives`, `/goals` | Runtime | Explicit retired-feature notice, preserving old records. Does not resurrect obsolete tracking. |
 | `/overnight` | Runtime | Daemon-owned coordinator, status, log, review and cancellation scoped to the attached session. |
+| `/tasks` | UI + Runtime | Lists the attached session's background shells and spawned agents from server events. Output tails and runtimes come from task files on the laptop, so they are empty over SSH. Stopping goes to the daemon. |
 | `/context`, `/skills`, `/info` | Runtime | Server-owned context, skills and session data. Remote skill invocation also remains available. |
 | `/version`, `/changelog` | UI | Client build/changelog information. Version display labels cached server version separately. |
 | `/reset`, `/usage` | Runtime | Fetch host provider usage and review host-account-pinned quota resets. Reset consumption requires an explicit reviewed confirmation and never uses laptop credentials. |

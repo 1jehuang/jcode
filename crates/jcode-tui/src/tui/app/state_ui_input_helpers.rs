@@ -176,6 +176,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
         "Manage plugins: discover, installed, marketplaces, errors",
     ),
     RegisteredCommand::public(
+        "/tasks",
+        "List, inspect and stop background shells and spawned agents",
+    ),
+    RegisteredCommand::public(
         "/mcp",
         "Manage MCP servers: status, tools, reconnect, enable/disable",
     ),

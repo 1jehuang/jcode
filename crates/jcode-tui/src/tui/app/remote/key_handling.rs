@@ -510,6 +510,11 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             return Ok(());
         }
 
+        if trimmed == "/tasks" {
+            app.open_tasks_dialog();
+            return Ok(());
+        }
+
         if trimmed.split_whitespace().next() == Some("/plugin") {
             app_mod::state_ui::handle_info_command(app, trimmed);
             return Ok(());

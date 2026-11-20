@@ -42,6 +42,7 @@ impl Dialog {
             ask: None,
             pending_rewind: false,
             status: None,
+            tasks: None,
             pending_mcp: None,
         };
         dialog.queue_ask_user(request_id, questions);

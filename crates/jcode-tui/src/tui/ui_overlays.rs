@@ -340,6 +340,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "/plugin",
         "Discover and manage plugins and marketplaces",
     ));
+    lines.push(help_entry(
+        "/tasks",
+        "Background shells and spawned agents (↓ on an empty prompt)",
+    ));
     lines.push(help_entry("/info", "Show session info and token usage"));
     lines.push(help_entry(
         "/keys",

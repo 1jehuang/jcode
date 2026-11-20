@@ -220,6 +220,7 @@ impl Dialog {
             ask: None,
             pending_rewind: false,
             status: None,
+            tasks: None,
             pending_mcp: None,
         };
         dialog.stack.push(dialog.plugin_view(&Route::Plugin(tab)));

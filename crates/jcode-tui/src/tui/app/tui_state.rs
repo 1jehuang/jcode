@@ -1977,6 +1977,10 @@ impl crate::tui::TuiState for App {
         self.swarm_panel_focused
     }
 
+    fn task_pill_selected(&self) -> bool {
+        self.task_pill_selected
+    }
+
     fn swarm_panel_full_page(&self) -> bool {
         self.swarm_panel_full_page && self.inline_swarm_gallery_active()
     }

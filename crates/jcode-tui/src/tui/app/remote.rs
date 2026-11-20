@@ -151,6 +151,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         }
     }
     needs_redraw |= app.retire_expired_status_notice();
+    needs_redraw |= app.refresh_tasks_dialog();
     needs_redraw |= app.poll_usage_reset();
     needs_redraw |= app.poll_cloud_job();
     if app.take_cloud_remote_interrupt() {

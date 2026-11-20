@@ -848,33 +848,40 @@ fn live_status_snapshot(app: &dyn TuiState, elapsed: f32) -> crate::protocol::Sw
     }
 }
 
-/// Background launches finish their tool call immediately, but the work and
-/// its intent must remain visible while the agent moves on to another tool.
+/// Background launches finish their tool call immediately, but the work must
+/// remain visible while the agent moves on: Claude Code's `1 shell · ↓ to
+/// manage` pill (see `dialog::task_pill`), reversed once ↓ selects it.
 fn status_with_background_tasks(
     foreground: Line<'static>,
-    tasks: &[crate::tui::BackgroundTaskRow],
+    pill: Option<&str>,
+    pill_selected: bool,
     width: usize,
     processing: bool,
 ) -> Line<'static> {
-    use crate::tui::BackgroundTaskRowStatus;
     use jcode_tui_render::truncate_line_with_ellipsis_to_width as fit;
 
-    let running: Vec<_> = tasks
-        .iter()
-        .filter(|task| task.status == BackgroundTaskRowStatus::Running)
-        .collect();
-    if running.is_empty() {
+    let Some(pill) = pill else {
         return fit(&foreground, width);
-    }
-    let labels = running
-        .iter()
-        .map(|task| task.label.split_whitespace().collect::<Vec<_>>().join(" "))
-        .collect::<Vec<_>>()
-        .join(" · ");
-    let background = Line::from(Span::styled(
-        format!("bg {}: {}", running.len(), labels),
-        Style::default().fg(ai_color()),
-    ));
+    };
+    let pill_style = Style::default().fg(ai_color());
+    let background = Line::from(vec![
+        Span::styled(
+            pill.to_string(),
+            if pill_selected {
+                pill_style.add_modifier(Modifier::REVERSED)
+            } else {
+                pill_style
+            },
+        ),
+        Span::styled(
+            if pill_selected {
+                " · enter to view tasks"
+            } else {
+                " · ↓ to manage"
+            },
+            Style::default().fg(dim_color()),
+        ),
+    ]);
     // Idle tips must not displace actual work. While processing, reserve space
     // for both activities rather than letting a long foreground intent hide bg.
     if !processing || foreground.width() == 0 || width < 24 {

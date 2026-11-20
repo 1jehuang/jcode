@@ -1,57 +1,59 @@
 use super::*;
 use ratatui::style::Modifier;
 
-fn background_row(
-    label: &str,
-    status: crate::tui::BackgroundTaskRowStatus,
-) -> crate::tui::BackgroundTaskRow {
-    crate::tui::BackgroundTaskRow {
-        task_id: label.into(),
-        label: label.into(),
-        percent: None,
-        status,
-        completed_at: None,
-    }
-}
-
 #[test]
-fn background_status_keeps_all_running_intents_after_launch_returns() {
-    use crate::tui::BackgroundTaskRowStatus::*;
-    let tasks = [
-        background_row("Run tests", Running),
-        background_row("Build app", Running),
-        background_row("Already done", Completed),
-        background_row("Old failure", Failed),
-    ];
-    let text = status_with_background_tasks(Line::from("thinking…"), &tasks, 120, true).to_string();
-    assert_eq!(text, "thinking… · bg 2: Run tests · Build app");
-    let idle = status_with_background_tasks(Line::from("idle tip"), &tasks, 120, false).to_string();
-    assert_eq!(idle, "bg 2: Run tests · Build app");
+fn background_status_shows_the_task_pill_and_manage_hint() {
+    let status = |foreground: &str, pill, selected, processing| {
+        status_with_background_tasks(
+            Line::from(foreground.to_string()),
+            pill,
+            selected,
+            120,
+            processing,
+        )
+        .to_string()
+    };
     assert_eq!(
-        status_with_background_tasks(Line::from("thinking…"), &tasks[2..], 120, true).to_string(),
-        "thinking…"
+        status("thinking…", Some("2 shells"), false, true),
+        "thinking… · 2 shells · ↓ to manage"
+    );
+    assert_eq!(
+        status("idle tip", Some("1 background agent"), false, false),
+        "1 background agent · ↓ to manage"
+    );
+    assert_eq!(
+        status("idle tip", Some("1 shell"), true, false),
+        "1 shell · enter to view tasks"
+    );
+    assert_eq!(status("thinking…", None, false, true), "thinking…");
+    let selected = status_with_background_tasks(Line::from(""), Some("1 shell"), true, 120, false);
+    assert!(
+        selected.spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::REVERSED)
     );
 }
 
 #[test]
 fn background_status_fits_unicode_cells_and_keeps_background_visible() {
-    let tasks = [background_row(
-        "Run 界\n tests\tand more",
-        crate::tui::BackgroundTaskRowStatus::Running,
-    )];
     for width in 0..120 {
         for processing in [false, true] {
             let line = status_with_background_tasks(
                 Line::from("foreground 界 intent ".repeat(10)),
-                &tasks,
+                Some("3 background tasks"),
+                false,
                 width,
                 processing,
             );
             assert!(line.width() <= width, "width={width}: {line}");
             let text = line.to_string();
             assert!(!text.contains('\n') && !text.contains('\t'), "{text}");
-            if width >= 24 {
-                assert!(text.contains("bg 1:"), "width={width}: {text}");
+            if width >= 40 {
+                assert!(text.contains("3 background tasks"), "width={width}: {text}");
+            }
+            if (1..12).contains(&width) {
+                assert!(text.ends_with('…'), "width={width}: {text}");
             }
         }
     }

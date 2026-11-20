@@ -12,6 +12,7 @@ impl Dialog {
             ask: None,
             pending_rewind: false,
             status: Some("Loading checkpoints…".to_string()),
+            tasks: None,
             pending_mcp: None,
         }
     }

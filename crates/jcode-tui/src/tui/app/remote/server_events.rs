@@ -179,6 +179,13 @@ fn handle_server_event_inner(
         app.push_display_message(DisplayMessage::error(message.clone()));
         return true;
     }
+    // A swarm stop from the tasks dialog (`stop_swarm_member`).
+    if let ServerEvent::Done { id } = &event
+        && remote.finish_runtime_command(*id)
+    {
+        app.set_status_notice("Stopped agent");
+        return true;
+    }
 
     // Control responses are transcript notices, never conversation-turn activity.
     if let ServerEvent::RuntimeCommandResult {
@@ -189,6 +196,10 @@ fn handle_server_event_inner(
     } = event
     {
         remote.finish_runtime_command(id);
+        if command == "background_cancel" {
+            app.set_status_notice(message);
+            return true;
+        }
         if command == "poke"
             && let Some(enabled) = data["poke_enabled"].as_bool()
         {

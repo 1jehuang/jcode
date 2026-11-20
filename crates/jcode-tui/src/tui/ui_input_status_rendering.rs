@@ -299,9 +299,12 @@ pub(in super::super) fn draw_status(
         }
     };
 
+    let pill =
+        crate::tui::dialog::task_pill(app.background_task_rows(), &app.inline_swarm_members());
     let line = status_with_background_tasks(
         line,
-        app.background_task_rows(),
+        pill.as_deref(),
+        app.task_pill_selected(),
         area.width as usize,
         app.is_processing(),
     );

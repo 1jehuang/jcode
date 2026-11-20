@@ -90,6 +90,7 @@ mod idle_heap_release;
 mod idle_hibernation;
 mod inline_interactive;
 mod rewind;
+mod tasks_dialog;
 pub(crate) use inline_interactive::{model_picker_active_provider, split_model_picker_filter};
 mod input;
 mod input_help;
@@ -1537,6 +1538,8 @@ pub struct App {
     swarm_panel_focused: bool,
     // Whether the focused swarm panel owns the main transcript viewport.
     swarm_panel_full_page: bool,
+    // Whether ↓ selected the footer's background tasks pill.
+    task_pill_selected: bool,
     // Parent session to return to after entering a swarm/background agent.
     swarm_parent_session_id: Option<String>,
     // Diff display mode (cycle with /diff)
