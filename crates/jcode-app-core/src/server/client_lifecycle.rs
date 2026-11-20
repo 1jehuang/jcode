@@ -2504,6 +2504,10 @@ server_resumes: false,
                     if let Some(result) = super::runtime_ssh_loops::control(&client_session_id, &command, &args)? {
                         return Ok(result);
                     }
+                    // The tasks dialog stops a shell mid-turn, so this cannot wait for the Agent lock.
+                    if command == "background_cancel" {
+                        return super::runtime_commands::background_cancel(&client_session_id, &args).await;
+                    }
                     // Supplemental SSH/cloud commands intentionally precede the shared
                     // enum parser so new host workflows do not require a wire-enum release.
                     if super::runtime_ssh_sessions::handles(&command)

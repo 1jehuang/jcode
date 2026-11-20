@@ -23,6 +23,36 @@ pub(super) fn boolean_action(
     }
 }
 
+/// Stop one of this session's background tasks, as `bg cancel` does.
+pub(super) async fn background_cancel(
+    session_id: &str,
+    args: &[String],
+) -> Result<(Value, String)> {
+    let [task_id] = args else {
+        bail!("Usage: background_cancel <task_id>");
+    };
+    let manager = crate::background::global();
+    let plain_id = std::path::Path::new(task_id)
+        .file_name()
+        .and_then(|name| name.to_str())
+        == Some(task_id.as_str());
+    if !plain_id
+        || manager
+            .status(task_id)
+            .await
+            .is_none_or(|status| status.session_id != session_id)
+    {
+        bail!("No background task {task_id} in this session");
+    }
+    let cancelled = manager.cancel(task_id).await?;
+    let message = if cancelled {
+        format!("Stopped background task {task_id}")
+    } else {
+        format!("Background task {task_id} is not running")
+    };
+    Ok((json!({"task_id": task_id, "cancelled": cancelled}), message))
+}
+
 fn status_only(args: &[String]) -> Result<()> {
     match args {
         [] => Ok(()),
@@ -877,6 +907,32 @@ mod tests {
             };
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn background_cancel_stops_only_this_sessions_tasks() {
+        let manager = crate::background::global();
+        let info = manager
+            .spawn("bash", "tasks-dialog-owner", |_| async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok(crate::background::TaskResult {
+                    exit_code: Some(0),
+                    error: None,
+                    status: None,
+                })
+            })
+            .await;
+        let id = vec![info.task_id.clone()];
+        assert!(background_cancel("someone-else", &id).await.is_err());
+        assert!(
+            background_cancel("tasks-dialog-owner", &["../x".into()])
+                .await
+                .is_err()
+        );
+        let (data, _) = background_cancel("tasks-dialog-owner", &id).await.unwrap();
+        assert_eq!(data["cancelled"], true);
+        let status = manager.status(&info.task_id).await.unwrap();
+        assert_eq!(status.status, crate::bus::BackgroundTaskStatus::Failed);
     }
 
     #[tokio::test]
