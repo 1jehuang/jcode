@@ -150,6 +150,17 @@ impl MultiProvider {
         let model_spec = match &api_method_kind {
             ModelRouteApiMethod::Copilot => format!("copilot:{}", bare_name),
             ModelRouteApiMethod::GrokBuild => crate::provider::grok_build_model_spec(bare_name),
+            ModelRouteApiMethod::ZCode => {
+                let bare = bare_name.strip_prefix("zcode:").unwrap_or(bare_name).trim();
+                format!("zcode:{bare}")
+            }
+            ModelRouteApiMethod::ZCodeOffPeak => {
+                let bare = bare_name
+                    .strip_prefix("zcode-off-peak:")
+                    .unwrap_or(bare_name)
+                    .trim();
+                format!("zcode-off-peak:{bare}")
+            }
             ModelRouteApiMethod::ClaudeOAuth => format!("claude-oauth:{}", bare_name),
             ModelRouteApiMethod::AnthropicApiKey if provider_display == "Anthropic" => {
                 format!("claude-api:{}", bare_name)
@@ -171,6 +182,8 @@ impl MultiProvider {
         let provider_key = match &api_method_kind {
             ModelRouteApiMethod::JcodeSubscription => Some("jcode".to_string()),
             ModelRouteApiMethod::GrokBuild => Some("grok-build".to_string()),
+            ModelRouteApiMethod::ZCode => Some("zcode".to_string()),
+            ModelRouteApiMethod::ZCodeOffPeak => Some("zcode-off-peak".to_string()),
             ModelRouteApiMethod::AnthropicApiKey
                 if provider_display == "Anthropic"
                     && crate::provider::provider_for_model(bare_name) == Some("claude") =>
@@ -511,6 +524,17 @@ impl MultiProvider {
                 ModelRouteApiMethod::JcodeSubscription => return model.to_string(),
                 ModelRouteApiMethod::GrokBuild => {
                     return crate::provider::grok_build_model_spec(model);
+                }
+                ModelRouteApiMethod::ZCode => {
+                    let bare = model.strip_prefix("zcode:").unwrap_or(model).trim();
+                    return format!("zcode:{bare}");
+                }
+                ModelRouteApiMethod::ZCodeOffPeak => {
+                    let bare = model
+                        .strip_prefix("zcode-off-peak:")
+                        .unwrap_or(model)
+                        .trim();
+                    return format!("zcode-off-peak:{bare}");
                 }
                 ModelRouteApiMethod::ClaudeOAuth => return format!("claude-oauth:{model}"),
                 ModelRouteApiMethod::AnthropicApiKey => return format!("claude-api:{model}"),

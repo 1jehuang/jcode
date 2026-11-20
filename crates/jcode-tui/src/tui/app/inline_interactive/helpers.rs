@@ -130,6 +130,17 @@ pub(super) fn picker_route_model_spec(entry: &PickerEntry, route: &PickerOption)
         crate::provider::ModelRouteApiMethod::GrokBuild => {
             crate::provider::grok_build_model_spec(&bare_name)
         }
+        crate::provider::ModelRouteApiMethod::ZCode => {
+            let bare = bare_name.strip_prefix("zcode:").unwrap_or(&bare_name).trim();
+            format!("zcode:{bare}")
+        }
+        crate::provider::ModelRouteApiMethod::ZCodeOffPeak => {
+            let bare = bare_name
+                .strip_prefix("zcode-off-peak:")
+                .unwrap_or(&bare_name)
+                .trim();
+            format!("zcode-off-peak:{bare}")
+        }
         crate::provider::ModelRouteApiMethod::ClaudeOAuth => {
             format!("claude-oauth:{}", bare_name)
         }

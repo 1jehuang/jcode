@@ -260,6 +260,8 @@ pub use self::state::{ProviderModelSelectionSource, ProviderRuntimeState, Provid
 pub use session_restore::*;
 
 pub(crate) const GROK_BUILD_PROFILE_ID: &str = "grok-build";
+pub(crate) const ZCODE_PROFILE_ID: &str = "zcode";
+pub(crate) const ZCODE_OFF_PEAK_PROFILE_ID: &str = "zcode-off-peak";
 
 /// MultiProvider wraps multiple providers and allows seamless model switching
 pub struct MultiProvider {
@@ -1487,6 +1489,23 @@ impl MultiProvider {
             crate::logging::info("Hot-initialized Grok Build provider after login");
             registry.install_compatible_profile(GROK_BUILD_PROFILE_ID, grok);
         }
+        if crate::auth::zcode::has_cached_login() {
+            if registry.compatible_profile(ZCODE_PROFILE_ID).is_none()
+                && let Some(zcode) =
+                    external::instantiate_expected_external_provider(external::ZCODE_RUNTIME)
+            {
+                crate::logging::info("Hot-initialized ZCode provider after login");
+                registry.install_compatible_profile(ZCODE_PROFILE_ID, zcode);
+            }
+            if registry.compatible_profile(ZCODE_OFF_PEAK_PROFILE_ID).is_none()
+                && let Some(zcode_off_peak) = external::instantiate_expected_external_provider(
+                    external::ZCODE_OFF_PEAK_RUNTIME,
+                )
+            {
+                crate::logging::info("Hot-initialized ZCode Off-Peak provider after login");
+                registry.install_compatible_profile(ZCODE_OFF_PEAK_PROFILE_ID, zcode_off_peak);
+            }
+        }
 
         if let Some(anthropic) = self.anthropic_provider() {
             self.spawn_post_auth_model_refresh(anthropic, "Anthropic");
@@ -2088,6 +2107,34 @@ impl Provider for MultiProvider {
             provider.set_model(target_model)?;
             registry.install_compatible_profile(GROK_BUILD_PROFILE_ID, provider);
             registry.set_active_compatible_profile(GROK_BUILD_PROFILE_ID);
+            self.set_active_provider(ActiveProvider::OpenRouter);
+            return Ok(());
+        }
+
+        if let Some((profile_id, runtime_id, target_model)) = requested_model
+            .strip_prefix("zcode:")
+            .map(|m| (ZCODE_PROFILE_ID, external::ZCODE_RUNTIME, m))
+            .or_else(|| {
+                requested_model
+                    .strip_prefix("zcode-off-peak:")
+                    .map(|m| (ZCODE_OFF_PEAK_PROFILE_ID, external::ZCODE_OFF_PEAK_RUNTIME, m))
+            })
+        {
+            let target_model = target_model.trim();
+            if target_model.is_empty() {
+                anyhow::bail!("ZCode model cannot be empty");
+            }
+            if !crate::auth::zcode::has_cached_login() {
+                anyhow::bail!("ZCode is not authenticated (run `jcode login zcode`)");
+            }
+            let registry = ProviderRegistry::new(self);
+            let provider = registry
+                .compatible_profile(profile_id)
+                .or_else(|| external::instantiate_expected_external_provider(runtime_id))
+                .ok_or_else(|| anyhow!("ZCode runtime is not registered"))?;
+            provider.set_model(target_model)?;
+            registry.install_compatible_profile(profile_id, provider);
+            registry.set_active_compatible_profile(profile_id);
             self.set_active_provider(ActiveProvider::OpenRouter);
             return Ok(());
         }

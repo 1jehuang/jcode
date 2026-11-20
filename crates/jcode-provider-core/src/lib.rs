@@ -930,6 +930,8 @@ pub enum RuntimeKey {
     RemoteCatalog,
     Current,
     GrokBuild,
+    ZCode,
+    ZCodeOffPeak,
     /// Catch-all for unrecognized `api_method` strings.
     ///
     /// This must be a struct variant, not `Other(String)`. Serde's internally
@@ -962,6 +964,8 @@ impl RuntimeKey {
             ModelRouteApiMethod::RemoteCatalog => Self::RemoteCatalog,
             ModelRouteApiMethod::Current => Self::Current,
             ModelRouteApiMethod::GrokBuild => Self::GrokBuild,
+            ModelRouteApiMethod::ZCode => Self::ZCode,
+            ModelRouteApiMethod::ZCodeOffPeak => Self::ZCodeOffPeak,
             ModelRouteApiMethod::Other(method) => Self::Other {
                 method: method.clone(),
             },
@@ -989,6 +993,8 @@ impl RuntimeKey {
             Self::RemoteCatalog => "remote-catalog".to_string(),
             Self::Current => "current".to_string(),
             Self::GrokBuild => "grok-build".to_string(),
+            Self::ZCode => "zcode".to_string(),
+            Self::ZCodeOffPeak => "zcode-off-peak".to_string(),
             Self::Other { method } => method.clone(),
         }
     }
@@ -1074,6 +1080,14 @@ impl RouteSelection {
             RuntimeKey::Bedrock => format!("bedrock:{model}"),
             RuntimeKey::Antigravity => format!("antigravity:{model}"),
             RuntimeKey::GrokBuild => grok_build_model_spec(model),
+            RuntimeKey::ZCode => {
+                let bare = model.strip_prefix("zcode:").unwrap_or(model).trim();
+                format!("zcode:{bare}")
+            }
+            RuntimeKey::ZCodeOffPeak => {
+                let bare = model.strip_prefix("zcode-off-peak:").unwrap_or(model).trim();
+                format!("zcode-off-peak:{bare}")
+            }
             RuntimeKey::Gemini
             | RuntimeKey::CodeAssistOAuth
             | RuntimeKey::RemoteCatalog
@@ -1126,6 +1140,8 @@ pub enum ModelRouteApiMethod {
     RemoteCatalog,
     Current,
     GrokBuild,
+    ZCode,
+    ZCodeOffPeak,
     Other(String),
 }
 
@@ -1170,6 +1186,8 @@ impl ModelRouteApiMethod {
         match lower.as_str() {
             "jcode-subscription" => Self::JcodeSubscription,
             "grok-build" | "grok-build-acp" => Self::GrokBuild,
+            "zcode" | "zcode-oauth" => Self::ZCode,
+            "zcode-off-peak" => Self::ZCodeOffPeak,
             "openrouter" => Self::OpenRouter,
             "openai-compatible" => Self::OpenAiCompatible { profile_id: None },
             "copilot" => Self::Copilot,
@@ -1249,6 +1267,8 @@ impl ModelRouteApiMethod {
             Self::RemoteCatalog => "remote-catalog".to_string(),
             Self::Current => "current".to_string(),
             Self::GrokBuild => "grok-build-acp".to_string(),
+            Self::ZCode => "zcode-oauth".to_string(),
+            Self::ZCodeOffPeak => "zcode-off-peak".to_string(),
             Self::Other(method) => method
                 .split_once(':')
                 .map(|(method, _)| method)

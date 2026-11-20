@@ -472,6 +472,33 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
             }
         }
     }
+    let zcode_available = crate::auth::zcode::has_cached_login();
+    let zcode_detail = if zcode_available {
+        "ZCode OAuth".to_string()
+    } else {
+        "no ZCode login".to_string()
+    };
+    for (prefix, provider_label, api_method) in [
+        ("zcode", "ZCode", "zcode-oauth"),
+        ("zcode-off-peak", "ZCode Off-Peak", "zcode-off-peak"),
+    ] {
+        for model in ["GLM-5.3-Flash", "GLM-5.3"] {
+            let route = ModelRoute {
+                model: format!("{prefix}:{model}"),
+                provider: provider_label.to_string(),
+                api_method: api_method.to_string(),
+                available: zcode_available,
+                detail: zcode_detail.clone(),
+                cheapness: None,
+                usage: None,
+            };
+            if !routes.iter().any(|existing| {
+                existing.model == route.model && existing.api_method == route.api_method
+            }) {
+                routes.push(route);
+            }
+        }
+    }
     expand_saved_account_routes(routes)
 }
 
