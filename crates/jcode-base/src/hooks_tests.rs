@@ -626,3 +626,17 @@ async fn hook_process_replaces_daemon_terminal_env_with_client_snapshot() {
         "client-pane-b|herdr-pane-b|client-pane-b|herdr-pane-b"
     );
 }
+
+#[tokio::test]
+async fn the_current_clients_terminal_var_is_read_only_inside_its_scope() {
+    assert_eq!(current_client_terminal_var("YARAN_SESSION_ID"), None);
+    let env = vec![("YARAN_SESSION_ID".to_string(), "agent-7".to_string())];
+    let seen = with_client_terminal_env(env, async {
+        (
+            current_client_terminal_var("YARAN_SESSION_ID"),
+            current_client_terminal_var("AM_ME"),
+        )
+    })
+    .await;
+    assert_eq!(seen, (Some("agent-7".to_string()), None));
+}

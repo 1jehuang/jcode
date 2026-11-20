@@ -1588,7 +1588,9 @@ impl Registry {
             // Publish each completed connection independently. A slow handshake
             // must not hide an already-connected peer until an entire batch ends.
             let registry = self.clone();
-            tokio::spawn(async move {
+            // MCP children take this client's identity (see McpManager), and
+            // task-locals do not cross `tokio::spawn` on their own.
+            tokio::spawn(crate::hooks::inherit_client_terminal_env(async move {
                 use futures::StreamExt;
 
                 let configs: Vec<_> = mcp_manager
@@ -1605,21 +1607,24 @@ impl Registry {
                     let manager = Arc::clone(&mcp_manager);
                     // Own task per connect: its read guard must still be
                     // released while the loop below waits behind a writer.
-                    connections.push(tokio::spawn(async move {
-                        let manager = manager.read().await;
-                        // A prompt-boundary plugin reload may have removed or
-                        // replaced this startup snapshot while it was queued.
-                        let result = if manager.config().servers.get(&name).is_some_and(|current| {
-                            current.is_enabled()
-                                && serde_json::to_value(current).ok()
-                                    == serde_json::to_value(&config).ok()
-                        }) {
-                            manager.connect(&name, &config).await
-                        } else {
-                            return (name, Ok(()));
-                        };
-                        (name, result)
-                    }));
+                    connections.push(tokio::spawn(crate::hooks::inherit_client_terminal_env(
+                        async move {
+                            let manager = manager.read().await;
+                            // A prompt-boundary plugin reload may have removed or
+                            // replaced this startup snapshot while it was queued.
+                            let result =
+                                if manager.config().servers.get(&name).is_some_and(|current| {
+                                    current.is_enabled()
+                                        && serde_json::to_value(current).ok()
+                                            == serde_json::to_value(&config).ok()
+                                }) {
+                                    manager.connect(&name, &config).await
+                                } else {
+                                    return (name, Ok(()));
+                                };
+                            (name, result)
+                        },
+                    )));
                 }
 
                 // Prune cache entries for servers no longer configured, once.
@@ -1723,7 +1728,7 @@ impl Registry {
                         let _ = tx.send(crate::protocol::ServerEvent::McpStatus { servers });
                     }
                 }
-            });
+            }));
         }
     }
 
