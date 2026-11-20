@@ -14,14 +14,13 @@ impl ProcessGroupKillGuard {
 
 impl Drop for ProcessGroupKillGuard {
     fn drop(&mut self) {
-        if let Some(pid) = self.pid {
-            if let Err(error) = crate::platform::signal_detached_process_group(pid, libc::SIGKILL)
-                && error.raw_os_error() != Some(libc::ESRCH)
-            {
-                crate::logging::warn(&format!(
-                    "[bash] failed to kill timed-out process group {pid}: {error}"
-                ));
-            }
+        if let Some(pid) = self.pid
+            && let Err(error) = crate::platform::signal_detached_process_group(pid, libc::SIGKILL)
+            && error.raw_os_error() != Some(libc::ESRCH)
+        {
+            crate::logging::warn(&format!(
+                "[bash] failed to kill timed-out process group {pid}: {error}"
+            ));
         }
     }
 }
