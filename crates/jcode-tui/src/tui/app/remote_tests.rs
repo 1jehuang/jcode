@@ -685,6 +685,38 @@ fn startup_send_state_is_not_preserved_for_real_session_switch() {
 }
 
 #[test]
+fn attaching_seeds_rows_for_the_sessions_running_background_shells() {
+    let session_id = crate::id::new_id("ses_attach_bg");
+    let manager = crate::background::global();
+    let info = manager.reserve_task_info();
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(manager.register_detached_task(
+        &info,
+        "bash",
+        Some("sleep 600".to_string()),
+        &session_id,
+        std::process::id(),
+        &chrono::Utc::now().to_rfc3339(),
+        true,
+        false,
+    ));
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.auto_server_reload = false;
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    handle_server_event(&mut app, startup_history(&session_id), &mut remote);
+    let rows = app.background_task_rows_ref().to_vec();
+    let _ = std::fs::remove_file(manager.status_path_for(&info.task_id));
+    let _ = std::fs::remove_file(manager.output_path_for(&info.task_id));
+
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].task_id, info.task_id);
+    assert_eq!(rows[0].status, crate::tui::BackgroundTaskRowStatus::Running);
+}
+
+#[test]
 fn has_pending_startup_submission_requires_input_and_flag() {
     // Guards the predicate that gates post-connect startup dispatch.
     let mut app = create_test_app();

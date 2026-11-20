@@ -1928,6 +1928,7 @@ fn handle_server_event_inner(
                     app.interleave_message = None;
                     app.interleave_images.clear();
                     app.clear_pending_soft_interrupt_tracking();
+                    app.background_task_rows.clear();
                 }
                 app.remote_total_tokens = None;
                 app.remote_token_usage_totals = None;
@@ -1941,6 +1942,7 @@ fn handle_server_event_inner(
             }
             if session_changed {
                 app.refresh_pinned_todos_now();
+                app.seed_running_background_tasks(&session_id);
             }
             // Facts seeded from the last launch are only a first-frame guess.
             // When History reports a different model, drop them so the snapshot
