@@ -1212,7 +1212,7 @@ async fn cancelling_an_adopted_call_stops_its_detached_child() -> Result<()> {
     let call = tokio::spawn(handoff.scope(async move {
         // Like bash's detached waiter: hold the child and wait on it.
         let _child = child;
-        ToolHandoff::set_current_detached_pid(Some(pid));
+        let _process = ToolHandoff::track_current_process(pid);
         sleep(Duration::from_secs(3600)).await;
         Ok(jcode_tool_types::ToolOutput::new("unreachable"))
     }));
@@ -1228,7 +1228,7 @@ async fn cancelling_an_adopted_call_stops_its_detached_child() -> Result<()> {
         )
         .await;
     tokio::time::timeout(Duration::from_secs(2), async {
-        while handoff.detached_pid().is_none() {
+        while handoff.pids().is_empty() {
             sleep(Duration::from_millis(10)).await;
         }
     })

@@ -1245,3 +1245,81 @@ async fn handed_off_bash_reports_its_real_exit_instead_of_promoting_again() {
         );
     }
 }
+
+/// Cancelling a handed-off call stops every shell it runs, on both the piped
+/// path (a client is attached) and the detached path, including shells a
+/// batch runs side by side and the children those shells started.
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_a_handed_off_call_stops_all_of_its_shells() {
+    let (stdin_tx, _stdin_rx) = mpsc::unbounded_channel();
+    for ctx in [
+        make_ctx(Some(stdin_tx)),
+        make_agent_ctx(jcode_agent_runtime::InterruptSignal::new()),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_files: Vec<_> = (0..2)
+            .map(|i| dir.path().join(format!("{i}.pid")))
+            .collect();
+        let long = |pid_file: &std::path::Path| json!({"command": format!("sleep 60 & echo $! > {}; wait", pid_file.display())});
+        let inputs = [
+            json!({"command": "true"}),
+            long(&pid_files[0]),
+            long(&pid_files[1]),
+        ];
+        let handoff = std::sync::Arc::new(crate::background::ToolHandoff::default());
+        let call = tokio::spawn(handoff.scope(async move {
+            // Like batch: several shells inside one call, the first exits early.
+            let tool = BashTool::new();
+            let runs = inputs.map(|input| tool.execute(input, ctx.clone()));
+            futures::future::join_all(runs).await;
+            Ok(crate::tool::ToolOutput::new("unreachable"))
+        }));
+        let info = crate::background::global()
+            .adopt_handoff(
+                Some(handoff),
+                "batch",
+                None,
+                "handoff-stop-all",
+                true,
+                true,
+                call,
+            )
+            .await;
+        let pids: Vec<i32> = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let pids: Vec<i32> = pid_files
+                    .iter()
+                    .filter_map(|file| std::fs::read_to_string(file).ok())
+                    .filter_map(|text| text.trim().parse().ok())
+                    .collect();
+                if pids.len() == pid_files.len() {
+                    break pids;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("both shells should start");
+        // Let the quick shell exit, which used to clear the only pid slot.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert!(
+            crate::background::global()
+                .cancel_with_grace(&info.task_id, Duration::from_millis(100))
+                .await
+                .unwrap()
+        );
+        let alive = |pid: i32| unsafe { libc::kill(pid, 0) } == 0;
+        let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+            while pids.iter().any(|pid| alive(*pid)) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        for pid in &pids {
+            unsafe { libc::kill(*pid, libc::SIGKILL) };
+        }
+        assert!(stopped.is_ok(), "cancel must stop every shell's children");
+    }
+}

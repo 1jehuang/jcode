@@ -976,6 +976,10 @@ impl BashTool {
             command.current_dir(dir);
         }
         let mut child = command.spawn()?;
+        // Cancelling the task that adopts this call stops the shell's group.
+        let process = child
+            .id()
+            .map(crate::background::ToolHandoff::track_current_process);
 
         let stdin_handle = child.stdin.take();
         let stdout_handle = child.stdout.take();
@@ -997,8 +1001,9 @@ impl BashTool {
         // Run the command (read stdout/stderr, service stdin, wait for exit) in a
         // dedicated task so that, if it exceeds the foreground timeout, we can hand
         // the still-running task off to the background manager instead of killing it.
-        let mut work_handle: tokio::task::JoinHandle<Result<ToolOutput>> =
+        let unguarded_work_handle: tokio::task::JoinHandle<Result<ToolOutput>> =
             tokio::spawn(async move {
+                let _process = process;
                 let stdout_task = tokio::spawn(collect_output_reporting_progress(
                     stdout_handle,
                     stdout_progress,
@@ -1031,6 +1036,9 @@ impl BashTool {
                 let output = format_command_output(output, status.code());
                 Ok(ToolOutput::new(output).with_title(title_for_work))
             });
+        // Aborted when this call is dropped (a cancelled handoff), so the
+        // `kill_on_drop` child dies with it; a timeout promotion detaches it.
+        let mut work_handle = tokio_util::task::AbortOnDropHandle::new(unguarded_work_handle);
 
         let join_result = match tokio::time::timeout(timeout_duration, &mut work_handle).await {
             Ok(join_result) => join_result,
@@ -1052,7 +1060,7 @@ impl BashTool {
                         &ctx.session_id,
                         params.notify,
                         params.wake(),
-                        work_handle,
+                        work_handle.detach(),
                     )
                     .await;
                 // Route progress parsed from the still-running command's output
@@ -1138,11 +1146,11 @@ impl BashTool {
         let mut child = crate::platform::spawn_detached(&mut cmd)?;
         let pid = child.id();
         let shutdown_signal = ctx.graceful_shutdown_signal.clone();
-        crate::background::ToolHandoff::set_current_detached_pid(Some(pid));
+        let process = crate::background::ToolHandoff::track_current_process(pid);
 
         loop {
             if let Some(status) = child.try_wait()? {
-                crate::background::ToolHandoff::set_current_detached_pid(None);
+                drop(process);
                 let output = tokio::fs::read_to_string(&info.output_file)
                     .await
                     .unwrap_or_default();
@@ -1225,7 +1233,7 @@ impl BashTool {
                 .unwrap_or(false)
             {
                 // The registered task owns the child across the reload.
-                crate::background::ToolHandoff::set_current_detached_pid(None);
+                drop(process);
                 manager
                     .register_detached_task(
                         &info,

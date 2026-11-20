@@ -40,8 +40,25 @@ use model::{
 #[derive(Default)]
 pub struct ToolHandoff {
     handed_off: std::sync::atomic::AtomicBool,
-    /// Detached child the call waits on; 0 when none.
-    detached_pid: std::sync::atomic::AtomicU32,
+    /// Process groups the call runs (a batch runs several shells).
+    pids: std::sync::Mutex<std::collections::HashSet<u32>>,
+}
+
+/// Keeps a process group on its call's [`ToolHandoff`] until dropped.
+pub struct HandoffProcess(Option<(Arc<ToolHandoff>, u32)>);
+
+impl Drop for HandoffProcess {
+    fn drop(&mut self) {
+        if let Some((handoff, pid)) = self.0.take() {
+            lock_ignoring_poison(&handoff.pids).remove(&pid);
+        }
+    }
+}
+
+fn lock_ignoring_poison<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 tokio::task_local! {
@@ -65,18 +82,21 @@ impl ToolHandoff {
             .unwrap_or(false)
     }
 
-    /// Record the detached child the running call waits on (`None` once it
-    /// exited), so cancelling the task that adopted the call stops it too.
-    pub fn set_current_detached_pid(pid: Option<u32>) {
-        let _ = TOOL_HANDOFF.try_with(|handoff| {
-            handoff
-                .detached_pid
-                .store(pid.unwrap_or(0), std::sync::atomic::Ordering::SeqCst)
-        });
+    /// Record a process group the running call owns until the returned guard
+    /// drops, so cancelling the task that adopted the call stops it too.
+    pub fn track_current_process(pid: u32) -> HandoffProcess {
+        HandoffProcess(
+            TOOL_HANDOFF
+                .try_with(|handoff| {
+                    lock_ignoring_poison(&handoff.pids).insert(pid);
+                    (Arc::clone(handoff), pid)
+                })
+                .ok(),
+        )
     }
 
-    fn detached_pid(&self) -> Option<u32> {
-        Some(self.detached_pid.load(std::sync::atomic::Ordering::SeqCst)).filter(|pid| *pid != 0)
+    fn pids(&self) -> Vec<u32> {
+        lock_ignoring_poison(&self.pids).iter().copied().collect()
     }
 }
 
@@ -1404,17 +1424,19 @@ impl BackgroundTaskManager {
         // needs both locks before it can exit.
         let task = self.tasks.write().await.remove(task_id);
         if let Some(mut task) = task {
+            // Read before the abort: dropping the call untracks its shells.
+            let pids = task
+                .handoff
+                .as_ref()
+                .map(|handoff| handoff.pids())
+                .unwrap_or_default();
             task.handle.abort();
             if (&mut task.handle).await.is_ok() {
                 // It finished first and already published its own completion.
                 return Ok(false);
             }
-            if let Some(pid) = task
-                .handoff
-                .as_ref()
-                .and_then(|handoff| handoff.detached_pid())
-            {
-                Self::terminate_detached_group(pid, _graceful_timeout).await;
+            Self::terminate_detached_groups(&pids, _graceful_timeout).await;
+            for pid in pids {
                 // Its waiter dropped the child unreaped; do not leave a zombie.
                 let _ = crate::platform::try_reap_child_process(pid);
             }
@@ -1489,7 +1511,7 @@ impl BackgroundTaskManager {
                 return Ok(false);
             };
 
-            Self::terminate_detached_group(pid, _graceful_timeout).await;
+            Self::terminate_detached_groups(&[pid], _graceful_timeout).await;
 
             let completed_at = Utc::now();
             status.status = BackgroundTaskStatus::Failed;
@@ -1510,18 +1532,24 @@ impl BackgroundTaskManager {
         }
     }
 
-    /// Stop a detached process group: TERM, then KILL after `_grace` on Unix.
-    async fn terminate_detached_group(pid: u32, _grace: std::time::Duration) {
+    /// Stop detached process groups: TERM, then KILL after `_grace` on Unix.
+    async fn terminate_detached_groups(pids: &[u32], _grace: std::time::Duration) {
         #[cfg(unix)]
-        {
-            let _ = crate::platform::signal_detached_process_group(pid, libc::SIGTERM);
+        if !pids.is_empty() {
+            for &pid in pids {
+                let _ = crate::platform::signal_detached_process_group(pid, libc::SIGTERM);
+            }
             tokio::time::sleep(_grace).await;
-            if crate::platform::is_process_running(pid) {
-                let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
+            for &pid in pids {
+                // Probe the group, not the leader: an aborted call's leader
+                // can already be gone while its children ignore TERM.
+                if crate::platform::signal_detached_process_group(pid, 0).is_ok() {
+                    let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
+                }
             }
         }
         #[cfg(windows)]
-        {
+        for &pid in pids {
             let _ = crate::platform::signal_detached_process_group(pid, 0);
         }
     }
