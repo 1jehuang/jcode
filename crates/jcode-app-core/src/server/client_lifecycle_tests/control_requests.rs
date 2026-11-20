@@ -37,10 +37,14 @@ async fn parent_only_cancel_leaves_spawned_child_running() {
         InterruptSignal::new(),
     );
     let child_signal = InterruptSignal::new();
-    let _child_turn = crate::turn_cancel_registry::register_active_turn(&child, child_signal.clone());
+    let _child_turn =
+        crate::turn_cancel_registry::register_active_turn(&child, child_signal.clone());
     let members = Arc::new(RwLock::new(HashMap::from([
         (parent.clone(), cancel_scope_test_member(&parent, None)),
-        (child.clone(), cancel_scope_test_member(&child, Some(&parent))),
+        (
+            child.clone(),
+            cancel_scope_test_member(&child, Some(&parent)),
+        ),
     ])));
     let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
     let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
@@ -79,8 +83,7 @@ async fn parent_only_cancel_leaves_spawned_child_running() {
     let members = members.read().await;
     assert_eq!(members[&child].status, "running", "child stays running");
     assert_ne!(
-        members[&parent].status,
-        "stopped",
+        members[&parent].status, "stopped",
         "parent must stay non-terminal so late child reports are delivered"
     );
 }
@@ -96,10 +99,14 @@ async fn hard_cancel_still_stops_spawned_children() {
         InterruptSignal::new(),
     );
     let child_signal = InterruptSignal::new();
-    let _child_turn = crate::turn_cancel_registry::register_active_turn(&child, child_signal.clone());
+    let _child_turn =
+        crate::turn_cancel_registry::register_active_turn(&child, child_signal.clone());
     let members = Arc::new(RwLock::new(HashMap::from([
         (parent.clone(), cancel_scope_test_member(&parent, None)),
-        (child.clone(), cancel_scope_test_member(&child, Some(&parent))),
+        (
+            child.clone(),
+            cancel_scope_test_member(&child, Some(&parent)),
+        ),
     ])));
     let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
     let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
@@ -134,7 +141,10 @@ async fn hard_cancel_still_stops_spawned_children() {
     )
     .await;
 
-    assert!(child_signal.is_set(), "hard stop must cancel the child turn");
+    assert!(
+        child_signal.is_set(),
+        "hard stop must cancel the child turn"
+    );
     assert_eq!(members.read().await[&child].status, "stopped");
 }
 

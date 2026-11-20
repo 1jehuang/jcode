@@ -533,10 +533,15 @@ async fn worker_report_after_parent_turn_interrupt_is_still_delivered() {
     .await
     .expect("late worker report must wake the interrupted parent");
     let guard = agent.lock().await;
-    assert!(guard.messages().iter().any(|message| {
-        message.content.iter().any(|block| matches!(block,
-            crate::message::ContentBlock::Text { text, .. } if text.contains(&report.notification)))
-    }), "late worker report must reach the parent model context");
+    assert!(
+        guard.messages().iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(block,
+            crate::message::ContentBlock::Text { text, .. } if text.contains(&report.notification))
+            })
+        }),
+        "late worker report must reach the parent model context"
+    );
 }
 
 #[tokio::test]
