@@ -400,7 +400,8 @@ fn take_event(state: &mut RuntimeTheme) -> Option<Event> {
     }
     let event = state.reports.ready.pop_front()?;
     state.note_input(&event, Instant::now());
-    Some(event)
+    // After the report filter, which matches on raw characters.
+    Some(super::ctrl_layout::normalize_ctrl_layout(event))
 }
 
 /// Nonblocking burst drain with the same report filter as [`EventStream`].
