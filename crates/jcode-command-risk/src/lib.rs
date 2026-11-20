@@ -389,7 +389,7 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
     let targets: Vec<&Token> = tokens
         .iter()
         .skip(1)
-        .filter(|t| !t.is_flag() && !t.is_operator && !t.is_truncating_redirect_target)
+        .filter(|t| !t.is_flag() && !t.is_operator && !t.is_redirect_target)
         .collect();
 
     // A destructive command fed by a pipe takes its operands from the previous
@@ -449,7 +449,7 @@ fn assess_find(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFindi
         .skip(1)
         .skip_while(|t| matches!(t.text.as_str(), "-H" | "-L" | "-P" | "--"))
         .take_while(|t| !t.is_flag() && !t.is_operator && !matches!(t.text.as_str(), "!" | "("))
-        .filter(|t| !t.is_truncating_redirect_target)
+        .filter(|t| !t.is_redirect_target)
         .collect();
     let classify_roots = |findings: &mut Vec<RiskFinding>| {
         for raw in roots
