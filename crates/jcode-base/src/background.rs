@@ -78,11 +78,13 @@ async fn replace_file(path: &std::path::Path, contents: impl AsRef<[u8]>) {
         Ok(()) => fs::rename(&tmp, path).await,
         Err(error) => Err(error),
     };
-    if replaced.is_err() {
-        // e.g. Windows refusing to replace a file a reader holds open.
+    if let Err(error) = replaced {
+        // Keep the old file: a stale record beats a task that vanished.
         let _ = fs::remove_file(&tmp).await;
-        let _ = fs::remove_file(path).await;
-        let _ = fs::write(path, contents).await;
+        crate::logging::warn(&format!(
+            "Could not replace background task file {}: {error}",
+            path.display()
+        ));
     }
 }
 
