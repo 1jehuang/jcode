@@ -1022,6 +1022,67 @@ pub(super) async fn fetch_zcode_usage_report() -> Option<ProviderUsage> {
                 {
                     extra_info.push(("Plan".to_string(), plan_name.to_string()));
                 }
+                if let Some(plans) = current.get("plans").and_then(|v| v.as_array()) {
+                    for plan in plans {
+                        let plan_name = plan
+                            .get("name")
+                            .or_else(|| plan.get("plan_id"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("ZCode Plan");
+                        let status = plan
+                            .get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("active");
+                        extra_info.push(("Plan".to_string(), format!("{plan_name} ({status})")));
+                        let ends_at = plan
+                            .get("ends_at")
+                            .and_then(|v| v.as_i64())
+                            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                            .map(|dt| dt.to_rfc3339());
+                        if let Some(entitlements) =
+                            plan.get("entitlements").and_then(|v| v.as_array())
+                        {
+                            for ent in entitlements {
+                                let show_name = ent
+                                    .get("show_name")
+                                    .or_else(|| ent.get("entitlement_id"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("Quota");
+                                let grant = ent
+                                    .get("grant_units")
+                                    .and_then(|v| v.as_f64())
+                                    .unwrap_or(0.0);
+                                let used = ent
+                                    .get("used_units")
+                                    .or_else(|| ent.get("used"))
+                                    .and_then(|v| v.as_f64())
+                                    .unwrap_or(0.0);
+                                let unit_type = ent
+                                    .get("unit_type")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("units");
+                                let grant_label = if grant >= 1_000_000.0 {
+                                    format!("{:.0}M {unit_type}s", grant / 1_000_000.0)
+                                } else if grant >= 1_000.0 {
+                                    format!("{:.0}K {unit_type}s", grant / 1_000.0)
+                                } else {
+                                    format!("{grant:.0} {unit_type}s")
+                                };
+                                extra_info.push((
+                                    "Entitlement".to_string(),
+                                    format!("{show_name}: {grant_label}"),
+                                ));
+                                if grant > 0.0 {
+                                    limits.push(UsageLimit {
+                                        name: format!("{show_name} ({grant_label})"),
+                                        usage_percent: usage_percent_from_used_limit(used, grant),
+                                        resets_at: ends_at.clone(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
                 if let (Some(used), Some(total)) = (
                     current.get("used").and_then(|v| v.as_f64()),
                     current.get("total").and_then(|v| v.as_f64()),
