@@ -174,7 +174,9 @@ pub(super) fn login_zcode_flow(no_browser: bool) -> Result<LoginFlowOutcome> {
 }
 
 async fn login_zcode_oauth_flow(no_browser: bool) -> Result<()> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
     let poll_token = auth::zcode::generate_poll_token()?;
     let init = auth::zcode::init_cli_oauth(&client, &poll_token).await?;
 
@@ -182,15 +184,23 @@ async fn login_zcode_oauth_flow(no_browser: bool) -> Result<()> {
     println!("Open this URL in your browser to authorize:\n");
     println!("  {}\n", init.authorize_url);
 
-    if !no_browser {
-        let _ = open::that(&init.authorize_url);
-    }
+    maybe_open_browser(&init.authorize_url, no_browser);
 
     println!("Waiting for authorization...");
     let interval = std::time::Duration::from_secs(init.poll_interval_sec.max(1));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
     loop {
-        match auth::zcode::poll_cli_oauth(&client, &init.flow_id, &poll_token).await? {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            anyhow::bail!("Timed out waiting for ZCode OAuth authorization.");
+        }
+        let poll_result = tokio::time::timeout(
+            remaining,
+            auth::zcode::poll_cli_oauth(&client, &init.flow_id, &poll_token),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Timed out waiting for ZCode OAuth authorization."))??;
+        match poll_result {
             auth::zcode::CliOAuthPollResult::Pending => {}
             auth::zcode::CliOAuthPollResult::Failed => {
                 anyhow::bail!("ZCode OAuth authorization failed or was denied.");
@@ -208,10 +218,11 @@ async fn login_zcode_oauth_flow(no_browser: bool) -> Result<()> {
                 return Ok(());
             }
         }
-        if std::time::Instant::now() + interval >= deadline {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
             anyhow::bail!("Timed out waiting for ZCode OAuth authorization.");
         }
-        tokio::time::sleep(interval).await;
+        tokio::time::sleep(interval.min(remaining)).await;
     }
 }
 

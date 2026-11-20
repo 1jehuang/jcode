@@ -1061,6 +1061,7 @@ fn normalized_login_provider_id(provider_id: &str) -> Option<&'static str> {
         "openrouter" => Some("openrouter"),
         "jcode" | "subscription" | "jcode-subscription" => Some("jcode"),
         "grok-build" => Some("grok-build"),
+        "zcode" | "zcode-off-peak" => Some("zcode"),
         "bedrock" | "aws-bedrock" | "aws_bedrock" => Some("bedrock"),
         "cursor" => Some("cursor"),
         "copilot" => Some("copilot"),
@@ -1108,6 +1109,7 @@ pub fn model_switch_request_for_provider_id(
         Some("openrouter") => format!("openrouter:{}", model),
         Some("jcode") => model.to_string(),
         Some("grok-build") => crate::provider::grok_build_model_spec(model),
+        Some("zcode") => format!("zcode:{}", model),
         Some("bedrock") => format!("bedrock:{}", model),
         Some("cursor") => format!("cursor:{}", model),
         Some("copilot") => format!("copilot:{}", model),
@@ -1526,7 +1528,7 @@ mod tests {
                     Some(("grok-build", "grok-build", "openrouter", "grok-build"))
                 }
                 crate::provider_catalog::LoginProviderTarget::ZCode => {
-                    Some(("zcode", "zcode", "anthropic", "zcode"))
+                    Some(("zcode", "zcode", "claude", "zcode"))
                 }
                 crate::provider_catalog::LoginProviderTarget::Claude => {
                     Some(("claude", "claude", "claude", "claude-oauth"))

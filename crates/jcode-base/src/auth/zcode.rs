@@ -587,6 +587,7 @@ pub async fn resolve_coding_plan_api_key(client: &reqwest::Client) -> Result<Str
 pub async fn fetch_billing_summary(client: &reqwest::Client) -> Result<serde_json::Value> {
     let creds = load_credentials()?;
     let mut out = serde_json::Map::new();
+    let mut errors = Vec::new();
     for (key, url) in [
         ("current", ZCODE_BILLING_CURRENT_URL),
         ("balance", ZCODE_BILLING_BALANCE_URL),
@@ -598,12 +599,25 @@ pub async fn fetch_billing_summary(client: &reqwest::Client) -> Result<serde_jso
             .header("X-ZCode-App-Version", DEFAULT_ZCODE_APP_VERSION)
             .send()
             .await;
-        if let Ok(r) = resp
-            && r.status().is_success()
-            && let Ok(v) = r.json::<serde_json::Value>().await
-        {
-            out.insert(key.to_string(), v);
+        match resp {
+            Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+                Ok(v) => {
+                    out.insert(key.to_string(), v);
+                }
+                Err(err) => errors.push(format!("{key}: invalid JSON ({err})")),
+            },
+            Ok(r) => errors.push(format!("{key}: HTTP {}", r.status())),
+            Err(err) => errors.push(format!("{key}: {err}")),
         }
+    }
+    if out.is_empty() {
+        anyhow::bail!("ZCode billing fetch failed: {}", errors.join("; "));
+    }
+    if !errors.is_empty() {
+        out.insert(
+            "errors".to_string(),
+            serde_json::Value::Array(errors.into_iter().map(serde_json::Value::String).collect()),
+        );
     }
     Ok(serde_json::Value::Object(out))
 }

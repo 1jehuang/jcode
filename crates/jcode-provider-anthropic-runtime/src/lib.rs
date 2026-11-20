@@ -591,6 +591,11 @@ impl AnthropicProvider {
     }
 
     pub fn new() -> Self {
+        match std::env::var("JCODE_RUNTIME_PROVIDER").ok().as_deref() {
+            Some("zcode") => return Self::new_zcode(false),
+            Some("zcode-off-peak") => return Self::new_zcode(true),
+            _ => {}
+        }
         let model = std::env::var("JCODE_ANTHROPIC_MODEL").unwrap_or_else(|_| {
             if Self::is_usage_exhausted() {
                 "claude-sonnet-4-6".to_string()
@@ -647,6 +652,10 @@ impl AnthropicProvider {
     }
 
     pub fn new_zcode(off_peak: bool) -> Self {
+        // Standard ZCode Start Plan exchanges the ZCode OAuth token for a `zcode-api-key`
+        // project token and routes Anthropic-compatible requests to `api.z.ai/api/anthropic`
+        // (matching ZCode's `CodingPlanApiKeyResolver` for `builtin:zai-coding-plan`),
+        // whereas Off-Peak routes to `zcode.z.ai/api/paas/v4/anthropic`.
         let base = if off_peak {
             jcode_base::auth::zcode::ZCODE_OFF_PEAK_ANTHROPIC_BASE
         } else {
@@ -1652,6 +1661,9 @@ impl Provider for AnthropicProvider {
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {
+        if let Some(models) = &self.profile_models {
+            return models.clone();
+        }
         // Include both routes for model resolution. The picker reads each
         // route's scoped snapshot and never copies these IDs across routes.
         jcode_base::provider::known_anthropic_model_ids()

@@ -764,7 +764,7 @@ impl AuthStatus {
                     "ZCode OAuth not configured".to_string()
                 },
                 AuthExpiryConfidence::Unknown,
-                AuthRefreshSupport::Automatic,
+                AuthRefreshSupport::ManualRelogin,
                 AuthValidationMethod::PresenceCheck,
             ),
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile)
@@ -1287,7 +1287,7 @@ fn assessment_for_key(
                 "ZCode OAuth not configured".to_string()
             },
             AuthExpiryConfidence::Unknown,
-            AuthRefreshSupport::Automatic,
+            AuthRefreshSupport::ManualRelogin,
             AuthValidationMethod::PresenceCheck,
         ),
         LoginProviderAuthStateKey::Google => {
