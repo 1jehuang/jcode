@@ -506,6 +506,12 @@ pub(super) async fn start_processing_message(
         ));
         events.finish().await;
         drop(turn_lease);
+        crate::server::live_turn::run_stranded_background_completions(
+            completion_session_id,
+            report_agent,
+            completion_swarm,
+        )
+        .await;
     });
 }
 

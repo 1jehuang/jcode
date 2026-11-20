@@ -219,3 +219,57 @@ async fn resume_all_does_not_continue_empty_restored_worker() {
     let (_id, sessions, members, _) = fixture(true, "ready", false).await;
     assert_eq!(resume_all_count(&sessions, &members).await, 0);
 }
+
+#[tokio::test]
+async fn completion_queued_as_a_turn_ends_starts_the_follow_up_turn() {
+    use jcode_agent_runtime::{SoftInterruptMessage, SoftInterruptSource};
+    let (id, sessions, members, _receiver) = fixture(true, "ready", true).await;
+    let agent = sessions.read().await.get(&id).unwrap().clone();
+    let queue = agent.lock().await.soft_interrupt_queue();
+    for (content, source) in [
+        ("user note stays queued", SoftInterruptSource::User),
+        (
+            "stranded completion bg-1",
+            SoftInterruptSource::BackgroundTask,
+        ),
+    ] {
+        queue.lock().unwrap().push(SoftInterruptMessage {
+            content: content.into(),
+            images: Vec::new(),
+            urgent: false,
+            source,
+            client_id: None,
+        });
+    }
+    let (swarm_tx, _) = broadcast::channel(16);
+    let swarm = LiveTurnSwarmContext::new(
+        &members,
+        &Arc::new(RwLock::new(HashMap::new())),
+        &Arc::new(RwLock::new(VecDeque::new())),
+        &Arc::new(AtomicU64::new(0)),
+        &swarm_tx,
+    );
+
+    run_stranded_background_completions(id.clone(), Arc::clone(&agent), swarm).await;
+
+    let pending: Vec<_> = queue
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|message| message.content.clone())
+        .collect();
+    assert_eq!(pending, vec!["user note stays queued".to_string()]);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            {
+                let agent = agent.lock().await;
+                if agent.last_visible_conversation_role() == Some(crate::message::Role::Assistant) {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the stranded completion must start a follow-up turn");
+}

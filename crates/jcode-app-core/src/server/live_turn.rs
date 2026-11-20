@@ -290,6 +290,7 @@ pub(super) async fn spawn_tracked_live_turn_with_publication(
     let event_tx = events.sender();
     let session_id = session_id.to_string();
     let agent_arc = OwnedMutexGuard::mutex(&agent).clone();
+    let follow_up_agent = Arc::clone(&agent_arc);
     crate::runtime_activity::spawn_session(&session_id.clone(), async move {
         let start_message_index = agent.message_count();
         let resume_reminder = system_reminder.clone();
@@ -401,6 +402,14 @@ pub(super) async fn spawn_tracked_live_turn_with_publication(
         drop(reservation);
         events.finish().await;
         drop(turn_lease);
+        let follow_up = LiveTurnSwarmContext::new(
+            &swarm.members,
+            &swarm.swarms_by_id,
+            &swarm.event_history,
+            &swarm.event_counter,
+            &swarm.event_tx,
+        );
+        run_stranded_background_completions(session_id, follow_up_agent, follow_up).await;
     });
     true
 }
@@ -523,6 +532,63 @@ pub(super) async fn run_live_turn_if_idle(
         swarm,
     )
     .await
+}
+
+/// A background completion that lands after a turn's last soft-interrupt
+/// drain, while the turn still holds the agent, is queued, and nothing drains
+/// it until the user prompts. Once the turn has released the agent, start the
+/// follow-up turn that completion asked for.
+///
+/// Boxed with an explicit `Send` bound: it runs from the spawned turn it can
+/// start, so the compiler cannot infer `Send` through that cycle.
+pub(super) fn run_stranded_background_completions(
+    session_id: String,
+    agent: Arc<tokio::sync::Mutex<Agent>>,
+    swarm: LiveTurnSwarmContext,
+) -> futures::future::BoxFuture<'static, ()> {
+    use jcode_agent_runtime::SoftInterruptSource;
+    Box::pin(async move {
+        let Ok(agent) = agent.try_lock_owned() else {
+            return; // Its holder's turn drains the queue.
+        };
+        let queue = agent.soft_interrupt_queue();
+        let stranded: Vec<_> = {
+            let Ok(mut pending) = queue.lock() else {
+                return;
+            };
+            let (stranded, rest) = std::mem::take(&mut *pending)
+                .into_iter()
+                .partition(|message| message.source == SoftInterruptSource::BackgroundTask);
+            *pending = rest;
+            stranded
+        };
+        if stranded.is_empty() {
+            return;
+        }
+        let message = stranded
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let detail = Some(truncate_detail(&message, 120)).filter(|detail| !detail.is_empty());
+        let started = spawn_tracked_live_turn(
+            &session_id,
+            agent,
+            message,
+            Some(
+                "A background task for this session just finished. Review the completion message and continue if useful."
+                    .to_string(),
+            ),
+            None,
+            detail,
+            swarm,
+        )
+        .await;
+        if !started && let Ok(mut pending) = queue.lock() {
+            // Not runnable now: keep them queued, ahead of anything newer.
+            pending.splice(0..0, stranded);
+        }
+    })
 }
 
 pub(super) async fn run_live_system_turn_if_idle(
