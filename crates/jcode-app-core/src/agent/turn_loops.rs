@@ -1373,6 +1373,12 @@ impl Agent {
             }
         }
 
+        // An early exit (cancel, migration) after a late continuation must not
+        // drop the answer that was already final.
+        if final_text.is_empty() {
+            answered_before_interrupt.retain(|text| !text.trim().is_empty());
+            final_text = answered_before_interrupt.join("\n\n");
+        }
         Ok(final_text)
     }
 }
