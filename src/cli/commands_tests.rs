@@ -1889,8 +1889,9 @@ impl Provider for BackgroundThenSlowFinalProvider {
             if call == 1 {
                 tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
             }
+            let text = if call == 1 { "REPORT_TEXT" } else { "ACK_TEXT" };
             vec![
-                StreamEvent::TextDelta("done".into()),
+                StreamEvent::TextDelta(text.into()),
                 StreamEvent::MessageEnd {
                     stop_reason: Some("end_turn".into()),
                 },
@@ -1938,4 +1939,23 @@ async fn run_answers_a_background_completion_that_lands_during_the_final_respons
         3,
         "the turn continues once to answer the completion"
     );
+}
+
+#[tokio::test]
+async fn captured_run_keeps_the_final_answer_when_a_late_completion_continues_it() {
+    let _guard = crate::storage::lock_test_env();
+    let _saved = SavedEnv::capture(&["JCODE_HOME"]);
+    let temp = tempfile::tempdir().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", temp.path().canonicalize().unwrap());
+
+    let provider: Arc<dyn Provider> = Arc::new(BackgroundThenSlowFinalProvider(Arc::default()));
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = crate::agent::Agent::new(provider, registry);
+    let completions =
+        forward_background_completions(agent.session_id().to_string(), agent.soft_interrupt_queue());
+    let text = agent.run_once_capture("go").await.unwrap();
+    completions.abort();
+
+    assert!(text.contains("REPORT_TEXT"), "the original answer is kept: {text:?}");
+    assert!(text.contains("ACK_TEXT"), "the answer to the completion follows: {text:?}");
 }

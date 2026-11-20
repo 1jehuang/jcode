@@ -37,6 +37,9 @@ impl Agent {
             self.graceful_shutdown.clone(),
         );
         let mut final_text = String::new();
+        // Answers that were already final before a late soft interrupt continued
+        // the turn; callers that capture the result must still get them.
+        let mut answered_before_interrupt: Vec<String> = Vec::new();
         let trace = trace_enabled();
         let mut context_limit_retries = 0u32;
         let mut incomplete_continuations = 0u32;
@@ -1049,6 +1052,9 @@ impl Agent {
                         "Soft interrupt arrived with the final response; continuing headless turn ({} message(s))",
                         injected.len()
                     ));
+                    if !text_content.trim().is_empty() {
+                        answered_before_interrupt.push(std::mem::take(&mut text_content));
+                    }
                     if print_output {
                         println!();
                     }
@@ -1058,7 +1064,9 @@ impl Agent {
                 if print_output {
                     println!();
                 }
-                final_text = text_content;
+                answered_before_interrupt.push(text_content);
+                answered_before_interrupt.retain(|text| !text.trim().is_empty());
+                final_text = answered_before_interrupt.join("\n\n");
                 break;
             }
 
