@@ -581,6 +581,19 @@ pub(super) fn run_stranded_background_completions(
         let Ok(agent) = agent.try_lock_owned() else {
             return; // Its holder's turn drains the queue.
         };
+        // A session refusing automatic turns (e.g. a pending usage-limit
+        // resume), or one that moved elsewhere or is a stale copy, keeps them
+        // queued for whichever copy can run them.
+        if agent.session_lease_blocked()
+            || !swarm
+                .members
+                .read()
+                .await
+                .get(&session_id)
+                .is_some_and(member_accepts_automatic_turn)
+        {
+            return;
+        }
         let queue = agent.soft_interrupt_queue();
         let stranded: Vec<_> = {
             let Ok(mut pending) = queue.lock() else {

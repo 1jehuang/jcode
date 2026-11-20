@@ -1,6 +1,5 @@
 use super::live_turn::{
-    LiveTurnSwarmContext, member_accepts_automatic_turn, run_live_turn_if_idle,
-    run_stranded_background_completions,
+    LiveTurnSwarmContext, run_live_turn_if_idle, run_stranded_background_completions,
 };
 use super::state::SwarmEvent;
 use super::{
@@ -169,15 +168,9 @@ pub(super) async fn dispatch_background_task_completion(
     }
     // The busy turn may have released, and found nothing stranded, before
     // this queued. Drain it now if so; the drain takes the queue atomically,
-    // so it and the turn's own drain deliver it once. A session that refuses
-    // automatic turns (e.g. a pending usage-limit resume) keeps it queued.
-    let eligible = swarm_members
-        .read()
-        .await
-        .get(&task.session_id)
-        .is_some_and(member_accepts_automatic_turn);
+    // so it and the turn's own drain deliver it once.
     let agent = sessions.read().await.get(&task.session_id).cloned();
-    if eligible && let Some(agent) = agent {
+    if let Some(agent) = agent {
         run_stranded_background_completions(task.session_id.clone(), agent, swarm).await;
     }
 }
