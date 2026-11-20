@@ -1041,6 +1041,19 @@ impl Agent {
                         text_content = format!("[provider guardrail] {}", notice);
                     }
                 }
+                // A completion that arrived during the final response would be
+                // lost when a one-shot run exits; answer it in this turn.
+                let injected = self.inject_soft_interrupts();
+                if !injected.is_empty() {
+                    logging::info(&format!(
+                        "Soft interrupt arrived with the final response; continuing headless turn ({} message(s))",
+                        injected.len()
+                    ));
+                    if print_output {
+                        println!();
+                    }
+                    continue;
+                }
                 logging::info("Turn complete - no tool calls, returning");
                 if print_output {
                     println!();
