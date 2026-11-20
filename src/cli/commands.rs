@@ -2809,6 +2809,10 @@ async fn run_single_message_with_agent(
     // in-process activity guard. Keep this CLI continuation alive across the
     // wait too, rather than letting an idle-only runtime replacement lose it.
     // run_once's nested read reservations are deliberately safe.
+    let completions = forward_background_completions(
+        agent.session_id().to_string(),
+        agent.soft_interrupt_queue(),
+    );
     let result: Result<()> = async {
         let _runtime_activity = crate::runtime_activity::global().try_enter()?;
         if emit_json {
@@ -2832,6 +2836,7 @@ async fn run_single_message_with_agent(
         Ok(())
     }
     .await;
+    completions.abort();
 
     // `Agent::new` and session restore both register this process as the active
     // owner. Unlike the interactive lifecycle, `jcode run` has no later quit
@@ -2841,6 +2846,39 @@ async fn run_single_message_with_agent(
     // (issue #988).
     agent.mark_closed();
     result.map_err(explain_run_failover_prompt)
+}
+
+/// `jcode run` owns its agent in-process, so no daemon dispatches background
+/// completions to it. Queue each waking completion for this session as a soft
+/// interrupt; the turn loop injects it at its next safe point.
+fn forward_background_completions(
+    session_id: String,
+    queue: crate::agent::SoftInterruptQueue,
+) -> tokio::task::JoinHandle<()> {
+    let mut events = crate::bus::Bus::global().subscribe();
+    tokio::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(crate::bus::BusEvent::BackgroundTaskCompleted(task))
+                    if task.wake && task.session_id == session_id =>
+                {
+                    if let Ok(mut pending) = queue.lock() {
+                        pending.push(crate::agent::SoftInterruptMessage {
+                            content: crate::message::format_background_task_notification_markdown(
+                                &task,
+                            ),
+                            images: Vec::new(),
+                            urgent: false,
+                            source: crate::agent::SoftInterruptSource::BackgroundTask,
+                            client_id: None,
+                        });
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                _ => {}
+            }
+        }
+    })
 }
 
 /// `jcode run` has no countdown and nobody to press Esc, so it never switches
