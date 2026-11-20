@@ -716,9 +716,10 @@ fn attaching_seeds_rows_for_the_sessions_running_background_shells() {
     assert_eq!(rows[0].status, crate::tui::BackgroundTaskRowStatus::Running);
 }
 
-/// Reattaching to the same session reconciles its rows: a task that started
-/// while the client was away gets a row, and one that finished is no longer
-/// shown as running.
+/// Reattaching to the same session reconciles the rows it shows: one that
+/// finished is no longer shown as running, and one whose status file was
+/// cleaned up while the client was away is dropped. It does not rescan the
+/// task directory, so a task started while away gets no row yet.
 #[test]
 fn reattaching_to_the_same_session_reconciles_background_rows() {
     let session_id = crate::id::new_id("ses_reattach_bg");
@@ -739,12 +740,14 @@ fn reattaching_to_the_same_session_reconciles_background_rows() {
         info
     };
     let finished = register("finishes while away");
+    let cleaned = register("finishes and is cleaned up while away");
     let _guard = rt.enter();
     let mut app = create_test_app();
     app.is_remote = true;
     app.auto_server_reload = false;
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
     handle_server_event(&mut app, startup_history(&session_id), &mut remote);
+    assert_eq!(app.background_task_rows_ref().len(), 2);
 
     let started = register("starts while away");
     let status_path = manager.status_path_for(&finished.task_id);
@@ -752,9 +755,10 @@ fn reattaching_to_the_same_session_reconciles_background_rows() {
         serde_json::from_str(&std::fs::read_to_string(&status_path).unwrap()).unwrap();
     status.status = crate::bus::BackgroundTaskStatus::Completed;
     std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
+    std::fs::remove_file(manager.status_path_for(&cleaned.task_id)).unwrap();
     handle_server_event(&mut app, startup_history(&session_id), &mut remote);
     let rows = app.background_task_rows_ref().to_vec();
-    for info in [&finished, &started] {
+    for info in [&finished, &cleaned, &started] {
         let _ = std::fs::remove_file(manager.status_path_for(&info.task_id));
         let _ = std::fs::remove_file(manager.output_path_for(&info.task_id));
     }
@@ -769,11 +773,8 @@ fn reattaching_to_the_same_session_reconciles_background_rows() {
         Some(crate::tui::BackgroundTaskRowStatus::Completed),
         "{rows:?}"
     );
-    assert_eq!(
-        row(&started.task_id),
-        Some(crate::tui::BackgroundTaskRowStatus::Running),
-        "{rows:?}"
-    );
+    assert_eq!(row(&cleaned.task_id), None, "{rows:?}");
+    assert_eq!(row(&started.task_id), None, "{rows:?}");
 }
 
 #[test]

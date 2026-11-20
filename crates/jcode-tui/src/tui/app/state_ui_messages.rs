@@ -342,29 +342,40 @@ impl App {
             .then_some(status)
     }
 
-    /// A client that attaches after a task started never saw its start event,
-    /// and one that reattaches missed the completions of tasks it showed.
-    /// Reconcile the session's rows with the status files the daemon writes
-    /// on this machine, as the tasks dialog already reads.
-    pub(super) fn seed_running_background_tasks(&mut self, session_id: &str) {
-        let finished: Vec<crate::background::TaskStatusFile> = self
-            .background_task_rows
-            .iter()
-            .filter(|row| row.status == crate::tui::BackgroundTaskRowStatus::Running)
+    /// A client that reattaches missed the completions of tasks it showed.
+    /// Reconcile its running rows with the status files the daemon writes on
+    /// this machine; one whose file is gone (cleaned up) no longer runs.
+    pub(super) fn reconcile_running_background_tasks(&mut self, session_id: &str) {
+        let mut gone = Vec::new();
+        let mut finished = Vec::new();
+        for row in &self.background_task_rows {
             // Only a bare id names a status file.
-            .filter(|row| {
-                std::path::Path::new(&row.task_id).file_name()
-                    == Some(std::ffi::OsStr::new(&row.task_id))
-            })
-            .filter_map(|row| {
-                let path = crate::background::global().status_path_for(&row.task_id);
-                serde_json::from_slice(&std::fs::read(path).ok()?).ok()
-            })
-            .filter(|status: &crate::background::TaskStatusFile| {
-                status.session_id == session_id
-                    && !running_background_status_for(status, session_id)
-            })
-            .collect();
+            if row.status != crate::tui::BackgroundTaskRowStatus::Running
+                || std::path::Path::new(&row.task_id).file_name()
+                    != Some(std::ffi::OsStr::new(&row.task_id))
+            {
+                continue;
+            }
+            let path = crate::background::global().status_path_for(&row.task_id);
+            match std::fs::read(path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    gone.push(row.task_id.clone());
+                }
+                Ok(bytes) => {
+                    if let Ok(status) =
+                        serde_json::from_slice::<crate::background::TaskStatusFile>(&bytes)
+                        && status.session_id == session_id
+                        && !running_background_status_for(&status, session_id)
+                    {
+                        finished.push(status);
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        // Its result is unknown, so drop the row rather than guess one.
+        self.background_task_rows
+            .retain(|row| !gone.contains(&row.task_id));
         for status in finished {
             let label = crate::message::background_task_display_label(
                 &status.tool_name,
@@ -377,6 +388,12 @@ impl App {
             };
             self.finish_background_task(status.task_id, label, row_status);
         }
+    }
+
+    /// A client that attaches after a task started never saw its start event.
+    /// Seed rows for the session's running tasks from the status files the
+    /// daemon writes on this machine, as the tasks dialog already reads.
+    pub(super) fn seed_running_background_tasks(&mut self, session_id: &str) {
         // `status_path_for("")` is `<task dir>/.status.json`.
         let status_path = crate::background::global().status_path_for("");
         let Some(Ok(entries)) = status_path.parent().map(std::fs::read_dir) else {
