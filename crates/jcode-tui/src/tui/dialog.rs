@@ -936,11 +936,18 @@ impl Dialog {
             .max()
             .unwrap_or(0)
             + 2;
+        // A task's status and command stay one row each, truncated.
+        let single_row = matches!(view.route, Route::TaskShell(_) | Route::TaskAgent(_));
         for (label, value) in &view.info {
             let prefix = format!("{label}:");
             let prefix = format!("{prefix:<info_width$}");
             let value_width = width.saturating_sub(prefix.width()).max(10);
-            for (index, chunk) in wrap(value, value_width).into_iter().enumerate() {
+            let chunks = if single_row {
+                vec![value.clone()]
+            } else {
+                wrap(value, value_width)
+            };
+            for (index, chunk) in chunks.into_iter().enumerate() {
                 let head_span = if index == 0 {
                     Span::styled(prefix.clone(), bold)
                 } else {
@@ -959,7 +966,12 @@ impl Dialog {
                     None if label == "Status" => spans.push(Span::raw(chunk)),
                     None => spans.push(Span::styled(chunk, dim)),
                 }
-                detail.push(Line::from(spans));
+                let line = Line::from(spans);
+                detail.push(if single_row {
+                    jcode_tui_render::truncate_line_with_ellipsis_to_width(&line, width)
+                } else {
+                    line
+                });
             }
         }
         for (label, value) in &view.inline_info {

@@ -302,3 +302,41 @@ fn modified_x_never_stops_a_task() {
     }
     assert_eq!(route(&dialog), Route::Tasks);
 }
+
+#[test]
+fn detail_status_and_command_stay_on_one_row() {
+    let mut data = snapshot();
+    data.shells[1].label = "npm run build -- --watch 界界界 ".repeat(8);
+    data.shells[1].status = BackgroundTaskRowStatus::Failed;
+    data.shells[1].error = Some("process exited after a very long error ".repeat(6));
+    let mut dialog = Dialog::tasks(data);
+    let shell_row = dialog
+        .stack
+        .last()
+        .unwrap()
+        .items
+        .iter()
+        .position(|item| item.label.starts_with("npm"))
+        .unwrap();
+    for _ in 0..shell_row {
+        press(&mut dialog, KeyCode::Down);
+    }
+    press(&mut dialog, KeyCode::Enter);
+    assert!(matches!(route(&dialog), Route::TaskShell(_)));
+    for width in [24u16, 40] {
+        let rows = screen(&dialog, width, 24);
+        for row in &rows {
+            assert!(row.width() <= usize::from(width), "{width}: {row}");
+        }
+        let status = rows.iter().position(|row| row.contains("Status:")).unwrap();
+        let command = rows
+            .iter()
+            .position(|row| row.contains("Command:"))
+            .unwrap();
+        assert!(rows[status].ends_with('…'), "{rows:#?}");
+        assert!(rows[command].ends_with('…'), "{rows:#?}");
+        // No continuation rows between or after them.
+        assert_eq!(command - status, 2, "{rows:#?}");
+        assert!(!rows[command + 1].contains("npm"), "{rows:#?}");
+    }
+}
