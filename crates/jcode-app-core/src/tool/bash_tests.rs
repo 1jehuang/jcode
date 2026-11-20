@@ -1360,3 +1360,30 @@ async fn handed_off_detached_shell_shows_live_output() {
         "output was: {output:?}"
     );
 }
+
+/// A handed-off shell that exits nonzero is a failed task with its real exit
+/// code, as a background bash records it, not a success.
+#[tokio::test]
+async fn handed_off_bash_records_a_nonzero_exit_as_failed() {
+    for ctx in [
+        make_ctx(None),
+        make_agent_ctx(jcode_agent_runtime::InterruptSignal::new()),
+    ] {
+        let handoff = std::sync::Arc::new(crate::background::ToolHandoff::default());
+        let call = tokio::spawn(handoff.scope(async move {
+            BashTool::new()
+                .execute(json!({"command": "sleep 0.3; exit 7"}), ctx)
+                .await
+        }));
+        let manager = crate::background::global();
+        let info = manager
+            .adopt_handoff(Some(handoff), "bash", None, "handoff-exit", true, true, call)
+            .await;
+        let finished = manager
+            .wait(&info.task_id, Duration::from_secs(10), false)
+            .await
+            .expect("adopted task should exist");
+        assert_eq!(finished.task.status, BackgroundTaskStatus::Failed);
+        assert_eq!(finished.task.exit_code, Some(7));
+    }
+}

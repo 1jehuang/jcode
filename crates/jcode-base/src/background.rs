@@ -842,13 +842,30 @@ impl BackgroundTaskManager {
             let tool_result = (&mut handle.0).await;
             let duration_secs = started_at.elapsed().as_secs_f64();
 
+            // A shell reports a nonzero exit in `exit_code` metadata.
+            let failed_exit = |output: &jcode_tool_types::ToolOutput| {
+                output
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("exit_code")?.as_i64())
+                    .and_then(|code| i32::try_from(code).ok())
+                    .filter(|code| *code != 0)
+            };
             let (status, exit_code, error, output_text) = match tool_result {
-                Ok(Ok(output)) => (
-                    BackgroundTaskStatus::Completed,
-                    Some(0),
-                    None,
-                    output.output,
-                ),
+                Ok(Ok(output)) => match failed_exit(&output) {
+                    Some(code) => (
+                        BackgroundTaskStatus::Failed,
+                        Some(code),
+                        Some(format!("Command exited with code {code}")),
+                        output.output,
+                    ),
+                    None => (
+                        BackgroundTaskStatus::Completed,
+                        Some(0),
+                        None,
+                        output.output,
+                    ),
+                },
                 Ok(Err(e)) => (
                     BackgroundTaskStatus::Failed,
                     None,

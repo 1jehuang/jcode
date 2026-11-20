@@ -776,6 +776,16 @@ fn format_command_output(mut output: String, exit_code: Option<i32>) -> String {
     }
 }
 
+/// A finished shell's tool output. A nonzero exit also rides in `exit_code`
+/// metadata, so a background task that adopted the call records the failure.
+fn command_tool_output(output: String, exit_code: Option<i32>) -> ToolOutput {
+    let tool_output = ToolOutput::new(format_command_output(output, exit_code));
+    match exit_code.filter(|code| *code != 0) {
+        Some(code) => tool_output.with_metadata(json!({ "exit_code": code })),
+        None => tool_output,
+    }
+}
+
 #[cfg(test)]
 #[path = "bash_utf8_truncation_tests.rs"]
 mod utf8_truncation_tests;
@@ -1033,8 +1043,7 @@ impl BashTool {
                     }
                     output.push_str(&stderr);
                 }
-                let output = format_command_output(output, status.code());
-                Ok(ToolOutput::new(output).with_title(title_for_work))
+                Ok(command_tool_output(output, status.code()).with_title(title_for_work))
             });
         // Aborted when this call is dropped (a cancelled handoff), so the
         // `kill_on_drop` child dies with it; a timeout promotion detaches it.
@@ -1157,14 +1166,12 @@ impl BashTool {
                     .unwrap_or_default();
                 let _ = tokio::fs::remove_file(&info.output_file).await;
                 let _ = tokio::fs::remove_file(&info.status_file).await;
-                return Ok(
-                    ToolOutput::new(format_command_output(output, status.code())).with_title(
-                        params
-                            .intent
-                            .clone()
-                            .unwrap_or_else(|| params.command.clone()),
-                    ),
-                );
+                return Ok(command_tool_output(output, status.code()).with_title(
+                    params
+                        .intent
+                        .clone()
+                        .unwrap_or_else(|| params.command.clone()),
+                ));
             }
 
             // Once adopted, the background task owns this shell and reports
