@@ -10,6 +10,18 @@
 //! Authentication uses ZCode's CLI OAuth flow (`/oauth/cli/init` +
 //! `/oauth/cli/poll/{flow_id}`), storing `zcodejwttoken` and
 //! `oauth:zai:access_token` in `~/.jcode/zcode_oauth.json`.
+//!
+//! Signing semantics (protocol facts verified against the independent
+//! reference implementation https://github.com/TriDefender/zcode-api):
+//! - Only coding-plan credentials sign. Start-plan, off-peak and highspeed
+//!   routes are never signed (static client-side rule since 3.15.1).
+//! - The handshake is fail-open: a failure sends the request unsigned rather
+//!   than erroring, and a 401 VERIFY_SIGNATURE_* / VERIFY_APIKEY_EXPIRED
+//!   rejection re-handshakes once, then permanently bypasses signing for
+//!   that credential.
+//! - Coding-plan credentials are `{apiKeyId}.{secret}` pairs issued by the
+//!   `api_keys` + `api_keys/copy/{id}` biz endpoints; the project-access JWT
+//!   form (`accessToken`) is only used by the bigmodel OAuth login chain.
 
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
@@ -22,6 +34,8 @@ use ring::signature::Ed25519KeyPair;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tokio::sync::RwLock;
 
 pub const ZCODE_ORIGIN: &str = "https://zcode.z.ai";
@@ -34,13 +48,14 @@ pub const ZCODE_BILLING_CURRENT_URL: &str = "https://zcode.z.ai/api/v1/zcode-pla
 pub const ZCODE_BILLING_BALANCE_URL: &str = "https://zcode.z.ai/api/v1/zcode-plan/billing/balance";
 pub const ZCODE_HANDSHAKE_PATH: &str = "/api/paas/c1f3a7e2/v2/client";
 
-pub const DEFAULT_ZCODE_APP_VERSION: &str = "0.15.2";
+pub const DEFAULT_ZCODE_APP_VERSION: &str = "3.18.2";
 pub const ZCODE_APP_ID: &str = "zcode";
 const KDF_SALT: &[u8] = b"WD_CLIENT_SIGN_KDF_SALT";
 const KDF_INFO_HMAC: &[u8] = b"getSignKey_hmac";
 const KDF_INFO_ED25519: &[u8] = b"ed25519_priv";
 const HANDSHAKE_ACTION: &str = "get_sign_key";
 const POW_BITS: usize = 8;
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZCodeUser {
@@ -241,19 +256,44 @@ pub struct ParsedSigningCredential {
 }
 
 #[derive(Debug, Deserialize)]
+struct JwtHeader {
+    #[serde(default)]
+    alg: Option<String>,
+    #[serde(default, rename = "sign_type")]
+    sign_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct JwtPayload {
-    api_key: String,
+    #[serde(default, rename = "token_use")]
+    token_use: Option<String>,
+    #[serde(default)]
+    api_key: Option<String>,
 }
 
 pub fn parse_signing_credential(raw: &str) -> Option<ParsedSigningCredential> {
     let parts: Vec<&str> = raw.split('.').collect();
     if parts.len() == 3 && !parts[2].is_empty() {
+        // Strict project-access JWT parse (mirrors the 3.15.1 client): the
+        // header must be HS256/SIGN and the payload must be a project_access
+        // token carrying a non-empty api_key claim. Anything else is not a
+        // signable credential and falls through to the apiKey form check.
+        let header_ok = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(parts[0])
+            .ok()
+            .and_then(|b| serde_json::from_slice::<JwtHeader>(&b).ok())
+            .is_some_and(|h| h.alg.as_deref() == Some("HS256") && h.sign_type.as_deref() == Some("SIGN"));
+        if !header_ok {
+            return None;
+        }
         if let Ok(payload_bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[1])
             && let Ok(payload) = serde_json::from_slice::<JwtPayload>(&payload_bytes)
-            && !payload.api_key.trim().is_empty()
+            && payload.token_use.as_deref() == Some("project_access")
+            && let Some(api_key) = payload.api_key
+            && !api_key.trim().is_empty()
         {
             return Some(ParsedSigningCredential {
-                api_key_id: payload.api_key,
+                api_key_id: api_key,
                 secret: raw.to_string(),
                 credential: raw.to_string(),
                 handshake_field: "accessToken",
@@ -372,6 +412,12 @@ struct HandshakeResponse {
     #[serde(default)]
     code: Option<i64>,
     #[serde(default)]
+    msg: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    success: Option<bool>,
+    #[serde(default)]
     data: Option<HandshakeData>,
 }
 
@@ -384,6 +430,17 @@ struct HandshakeData {
 pub struct ZCodeClientSigner {
     origin: &'static str,
     key_pair: RwLock<Option<Arc<Ed25519KeyPair>>>,
+    /// Permanent bypass after two VERIFY rejections for this credential.
+    bypass: AtomicBool,
+}
+
+const VERIFY_SIGNATURE_INVALID: &str = "VERIFY_SIGNATURE_INVALID";
+const VERIFY_APIKEY_EXPIRED: &str = "VERIFY_APIKEY_EXPIRED";
+
+impl Default for ZCodeClientSigner {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ZCodeClientSigner {
@@ -391,11 +448,43 @@ impl ZCodeClientSigner {
         Self {
             origin: ZAI_API_ORIGIN,
             key_pair: RwLock::new(None),
+            bypass: AtomicBool::new(false),
         }
     }
 
     pub async fn invalidate(&self) {
         *self.key_pair.write().await = None;
+    }
+
+    /// Permanent fail-open bypass (mirrors the official client: two
+    /// consecutive 401 VERIFY_* rejections stop signing for this credential).
+    pub fn set_bypass(&self) {
+        self.bypass.store(true, Ordering::SeqCst);
+        crate::logging::info(
+            "ZCode client signing bypassed after repeated VERIFY rejections; sending unsigned",
+        );
+    }
+
+    /// True when the response is a signing rejection the client retries on:
+    /// HTTP 401 whose envelope mentions VERIFY_SIGNATURE_INVALID or
+    /// VERIFY_APIKEY_EXPIRED.
+    pub fn is_verify_failure(status: u16, body: &str) -> bool {
+        if status != 401 {
+            return false;
+        }
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
+            return false;
+        };
+        let candidates = [
+            json.get("msg").and_then(|v| v.as_str()),
+            json.get("reason").and_then(|v| v.as_str()),
+            json.pointer("/data/reason").and_then(|v| v.as_str()),
+            json.pointer("/error/reason").and_then(|v| v.as_str()),
+            json.pointer("/error/message").and_then(|v| v.as_str()),
+        ];
+        candidates
+            .iter()
+            .any(|c| matches!(*c, Some(VERIFY_SIGNATURE_INVALID) | Some(VERIFY_APIKEY_EXPIRED)))
     }
 
     async fn ensure_key_pair(
@@ -411,18 +500,26 @@ impl ZCodeClientSigner {
         let sig_msg = format!("{HANDSHAKE_ACTION}\n{}\n{ts}\n{nonce}", cred.api_key_id);
         let sig = create_handshake_signature(&cred.secret, &sig_msg)?;
         let handshake_url = format!("{}{ZCODE_HANDSHAKE_PATH}", self.origin);
+        // accessToken (project-access JWT) form uses Bearer auth; apiKey form
+        // keeps the bare `{id}.{secret}` Authorization string.
+        let (auth_header, auth_value) = if cred.handshake_field == "accessToken" {
+            (format!("Bearer {}", cred.secret), cred.credential.clone())
+        } else {
+            (cred.credential.clone(), cred.credential.clone())
+        };
         let body = serde_json::json!({
-            cred.handshake_field: cred.credential,
+            cred.handshake_field: auth_value,
             "nonce": nonce,
             "sig": sig,
             "ts": ts,
         });
         let resp = client
             .post(&handshake_url)
-            .header("Authorization", &cred.credential)
+            .header("Authorization", auth_header)
             .header("User-Agent", format!("ZCode/{DEFAULT_ZCODE_APP_VERSION}"))
             .header("X-ZCode-App-Version", DEFAULT_ZCODE_APP_VERSION)
             .json(&body)
+            .timeout(HANDSHAKE_TIMEOUT)
             .send()
             .await
             .context("ZCode signing handshake failed")?;
@@ -432,6 +529,25 @@ impl ZCodeClientSigner {
         let parsed: HandshakeResponse = resp.json().await?;
         if parsed.code == Some(500) {
             bail!("ZCode signing handshake server error 500");
+        }
+        if parsed.success == Some(false) || parsed.code.is_some_and(|c| c != 0 && c != 200) {
+            let detail = parsed
+                .msg
+                .or(parsed.message)
+                .unwrap_or_else(|| "unknown error".to_string());
+            if parsed.code == Some(1003) {
+                if let Ok(mut creds) = load_credentials() {
+                    creds.coding_plan_api_key = None;
+                    let _ = save_credentials(&creds);
+                }
+                bail!(
+                    "ZCode signing handshake token expired (code 1003: {detail}); please re-authenticate with ZCode"
+                );
+            }
+            bail!(
+                "ZCode signing handshake failed (code {:?}): {detail}",
+                parsed.code
+            );
         }
         let cipher = parsed
             .data
@@ -446,24 +562,64 @@ impl ZCodeClientSigner {
         Ok(kp)
     }
 
+    /// Sign the request headers. Fail-open: any signing error returns empty
+    /// headers so the caller sends the request unsigned instead of failing.
     pub async fn signed_headers(
         &self,
         client: &reqwest::Client,
         raw_credential: &str,
         session_id: &str,
-    ) -> Result<Vec<(&'static str, String)>> {
-        let cred = parse_signing_credential(raw_credential)
-            .context("invalid ZCode credential for signing")?;
-        let kp = self.ensure_key_pair(client, &cred).await?;
-        let ts = chrono::Utc::now().timestamp_millis().to_string();
-        let nonce = random_hex(16)?;
-        let pow = solve_pow(&cred.api_key_id, ZCODE_APP_ID, session_id, &ts)?;
+    ) -> Vec<(&'static str, String)> {
+        if self.bypass.load(Ordering::SeqCst) {
+            return Vec::new();
+        }
+        let Ok(cred) = parse_signing_credential(raw_credential)
+            .context("invalid ZCode credential for signing")
+        else {
+            crate::logging::info(
+                "ZCode credential is not signable (no {apiKeyId}.{secret} separator) — sending unsigned",
+            );
+            return Vec::new();
+        };
+        let kp = match self.ensure_key_pair(client, &cred).await {
+            Ok(kp) => kp,
+            Err(err) => {
+                crate::logging::info(&format!(
+                    "ZCode signing handshake failed — sending unsigned ({err:#})"
+                ));
+                self.invalidate().await;
+                return Vec::new();
+            }
+        };
+        let Ok(ts_usign) = u64::try_from(chrono::Utc::now().timestamp_millis()) else {
+            return Vec::new();
+        };
+        let ts = ts_usign.to_string();
+        let nonce = match random_hex(16) {
+            Ok(n) => n,
+            Err(err) => {
+                crate::logging::info(&format!(
+                    "ZCode signing nonce generation failed — sending unsigned ({err:#})"
+                ));
+                return Vec::new();
+            }
+        };
+        let pow = match solve_pow(&cred.api_key_id, ZCODE_APP_ID, session_id, &ts) {
+            Ok(p) => p,
+            Err(err) => {
+                crate::logging::info(&format!(
+                    "ZCode proof-of-work failed — sending unsigned ({err:#})"
+                ));
+                return Vec::new();
+            }
+        };
         let msg = format!(
             "{}\n{ts}\n{DEFAULT_ZCODE_APP_VERSION}\n{session_id}\n{nonce}",
             cred.api_key_id
         );
-        let sig = base64::engine::general_purpose::STANDARD.encode(kp.sign(msg.as_bytes()).as_ref());
-        Ok(vec![
+        let sig =
+            base64::engine::general_purpose::STANDARD.encode(kp.sign(msg.as_bytes()).as_ref());
+        vec![
             ("X-Client-Ts", ts),
             ("X-Client-Version", DEFAULT_ZCODE_APP_VERSION.to_string()),
             ("X-Client-Sig", sig),
@@ -471,7 +627,7 @@ impl ZCodeClientSigner {
             ("X-Client-Nonce", nonce),
             ("X-App-Id", ZCODE_APP_ID.to_string()),
             ("X-Client-Pow", pow),
-        ])
+        ]
     }
 }
 
@@ -558,27 +714,30 @@ pub async fn resolve_coding_plan_api_key(client: &reqwest::Client) -> Result<Str
         .and_then(|v| v.as_str())
         .context("missing apiKey")?;
 
-    let token_resp: serde_json::Value = client
-        .post(format!(
-            "{ZAI_API_ORIGIN}/api/biz/v1/organization/{org_id}/projects/{proj_id}/api_keys/{api_key_id}/access_tokens"
+    // Fetch the secret via the copy endpoint. The signing credential is the
+    // `{apiKeyId}.{secret}` pair — the project-access JWT form is only used
+    // by the bigmodel OAuth login chain and can never sign here (its
+    // privateCipher is undecryptable with this secret; live-verified against
+    // https://github.com/TriDefender/zcode-api).
+    let copy_resp: serde_json::Value = client
+        .get(format!(
+            "{ZAI_API_ORIGIN}/api/biz/v1/organization/{org_id}/projects/{proj_id}/api_keys/copy/{api_key_id}"
         ))
         .bearer_auth(biz_tok)
-        .json(&serde_json::json!({
-            "clientType": "zcode",
-            "clientVersion": DEFAULT_ZCODE_APP_VERSION,
-        }))
         .send()
         .await
-        .context("Z.AI access_tokens exchange failed")?
+        .context("Z.AI api_keys copy fetch failed")?
         .json()
         .await
-        .context("invalid JSON from access_tokens")?;
-    let full_key = token_resp
-        .pointer("/data/accessToken")
-        .or_else(|| token_resp.pointer("/data/access_token"))
+        .context("invalid JSON from api_keys copy")?;
+    let secret_key = copy_resp
+        .pointer("/data/secretKey")
+        .or_else(|| copy_resp.get("secretKey"))
         .and_then(|v| v.as_str())
-        .context("Z.AI access_tokens missing accessToken")?
-        .to_string();
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .context("Z.AI api_keys copy missing secretKey")?;
+    let full_key = format!("{api_key_id}.{secret_key}");
     creds.coding_plan_api_key = Some(full_key.clone());
     let _ = save_credentials(&creds);
     Ok(full_key)
@@ -633,13 +792,56 @@ mod tests {
         assert_eq!(api.secret, "secret456");
         assert_eq!(api.handshake_field, "apiKey");
 
-        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256"}"#);
-        let payload =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"api_key":"ak_999"}"#);
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"alg":"HS256","sign_type":"SIGN"}"#);
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"token_use":"project_access","api_key":"ak_999"}"#);
         let jwt = format!("{header}.{payload}.sig");
         let parsed = parse_signing_credential(&jwt).unwrap();
         assert_eq!(parsed.api_key_id, "ak_999");
         assert_eq!(parsed.handshake_field, "accessToken");
+    }
+
+    #[test]
+    fn rejects_non_signable_jwt_forms() {
+        // OAuth login JWTs (claude-style) must not be accepted for signing.
+        let wrong_alg = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"alg":"HS256"}"#);
+        let project_payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"token_use":"project_access","api_key":"ak_1"}"#);
+        assert!(parse_signing_credential(&format!("{wrong_alg}.{project_payload}.sig")).is_none());
+
+        let good_header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"alg":"HS256","sign_type":"SIGN"}"#);
+        // login JWT (token_use absent or login) is not a signing credential
+        let login_payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"sub":"user","api_key":"ak_1"}"#);
+        assert!(parse_signing_credential(&format!("{good_header}.{login_payload}.sig")).is_none());
+        // empty api_key claim
+        let empty_payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"token_use":"project_access","api_key":"  "}"#);
+        assert!(parse_signing_credential(&format!("{good_header}.{empty_payload}.sig")).is_none());
+    }
+
+    #[test]
+    fn verify_failure_detection() {
+        assert!(ZCodeClientSigner::is_verify_failure(
+            401,
+            r#"{"code":1004,"msg":"VERIFY_SIGNATURE_INVALID"}"#
+        ));
+        assert!(ZCodeClientSigner::is_verify_failure(
+            401,
+            r#"{"data":{"reason":"VERIFY_APIKEY_EXPIRED"}}"#
+        ));
+        assert!(!ZCodeClientSigner::is_verify_failure(
+            401,
+            r#"{"msg":"invalid api key"}"#
+        ));
+        assert!(!ZCodeClientSigner::is_verify_failure(
+            200,
+            r#"{"msg":"VERIFY_SIGNATURE_INVALID"}"#
+        ));
+        assert!(!ZCodeClientSigner::is_verify_failure(401, "not json"));
     }
 
     #[test]

@@ -656,7 +656,7 @@ impl AnthropicProvider {
         // Standard ZCode Start Plan exchanges the ZCode OAuth token for a `zcode-api-key`
         // project token and routes Anthropic-compatible requests to `api.z.ai/api/anthropic`
         // (matching ZCode's `CodingPlanApiKeyResolver` for `builtin:zai-coding-plan`),
-        // whereas Off-Peak routes to `zcode.z.ai/api/paas/v4/anthropic`.
+        // whereas Off-Peak routes to `zcode.z.ai/api/v1/off-peak/anthropic`.
         let base = if off_peak {
             jcode_base::auth::zcode::ZCODE_OFF_PEAK_ANTHROPIC_BASE
         } else {
@@ -671,6 +671,16 @@ impl AnthropicProvider {
                 headers.insert(name, val);
             }
         }
+        // Client Request Signing applies ONLY to coding-plan traffic (static
+        // client-side rule since 3.15.1): start-plan, off-peak and highspeed
+        // routes are never signed. The `zcode` provider here is the
+        // coding-plan-equivalent route (api.z.ai/api/anthropic), so it signs;
+        // the off-peak variant does not.
+        let zcode_signer = if off_peak {
+            None
+        } else {
+            Some(Arc::new(jcode_base::auth::zcode::ZCodeClientSigner::new()))
+        };
         let direct_transport = DirectTransportConfig {
             api_url: format!("{base}/v1/messages"),
             #[cfg(test)]
@@ -678,7 +688,7 @@ impl AnthropicProvider {
             headers: Ok(headers),
             auth_mode: "header".to_string(),
             auth_header: "x-api-key".to_string(),
-            zcode_signer: Some(Arc::new(jcode_base::auth::zcode::ZCodeClientSigner::new())),
+            zcode_signer,
         };
         let client = jcode_provider_core::shared_http_client();
         let profile_api_key = Some(
@@ -2142,9 +2152,8 @@ async fn stream_response(
         };
         req = req.header("anthropic-beta", beta_header);
         if let Some(signer) = &direct_transport.zcode_signer {
-            let signed = signer
-                .signed_headers(&client, &token, oauth_session_id)
-                .await?;
+            // Fail-open: empty headers mean unsigned, never an error.
+            let signed = signer.signed_headers(&client, &token, oauth_session_id).await;
             for (k, v) in signed {
                 req = req.header(k, v);
             }
@@ -2191,6 +2200,20 @@ async fn stream_response(
         let status = response.status();
         let retry_after = jcode_provider_core::retry_after::retry_after(response.headers());
         let error_text = jcode_base::util::http_error_body(response, "HTTP error").await;
+        // Signing retry ladder: a 401 VERIFY_* rejection means the cached
+        // signing key is stale. Invalidate and let the outer retry loop
+        // re-sign (a fresh handshake) on the next attempt.
+        if let Some(signer) = &direct_transport.zcode_signer
+            && jcode_base::auth::zcode::ZCodeClientSigner::is_verify_failure(
+                status.as_u16(),
+                &error_text,
+            )
+        {
+            signer.invalidate().await;
+            jcode_base::logging::info(
+                "ZCode signing VERIFY rejection — signing key invalidated, will re-handshake on retry",
+            );
+        }
         return Err(jcode_provider_core::retry_after::error_with_retry_after(
             format!("Anthropic API error ({}): {}", status, error_text),
             retry_after,
