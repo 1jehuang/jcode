@@ -36,12 +36,15 @@ pub(super) async fn background_cancel(
         .file_name()
         .and_then(|name| name.to_str())
         == Some(task_id.as_str());
-    if !plain_id
-        || manager
-            .status(task_id)
-            .await
-            .is_none_or(|status| status.session_id != session_id)
-    {
+    // Read the status file raw: status() can settle a finished detached task
+    // and publish its completion, which must not happen for another session.
+    let owner = if plain_id {
+        tokio::fs::read(manager.status_path_for(task_id)).await.ok()
+    } else {
+        None
+    }
+    .and_then(|bytes| serde_json::from_slice::<crate::background::TaskStatusFile>(&bytes).ok());
+    if owner.is_none_or(|status| status.session_id != session_id) {
         bail!("No background task {task_id} in this session");
     }
     let cancelled = manager.cancel(task_id).await?;
@@ -933,6 +936,40 @@ mod tests {
         assert_eq!(data["cancelled"], true);
         let status = manager.status(&info.task_id).await.unwrap();
         assert_eq!(status.status, crate::bus::BackgroundTaskStatus::Failed);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn background_cancel_ownership_check_does_not_settle_another_sessions_task() {
+        let manager = crate::background::global();
+        let mut exited = std::process::Command::new("true").spawn().unwrap();
+        exited.wait().unwrap();
+        let info = manager.reserve_task_info();
+        manager
+            .register_detached_task(
+                &info,
+                "bash",
+                None,
+                "tasks-dialog-detached-owner",
+                exited.id(),
+                &chrono::Utc::now().to_rfc3339(),
+                true,
+                true,
+            )
+            .await;
+        let id = vec![info.task_id.clone()];
+        assert!(background_cancel("someone-else", &id).await.is_err());
+        let raw: crate::background::TaskStatusFile =
+            serde_json::from_slice(&std::fs::read(&info.status_file).unwrap()).unwrap();
+        assert_eq!(
+            raw.status,
+            crate::bus::BackgroundTaskStatus::Running,
+            "a foreign session's request must not settle or publish the task"
+        );
+        let (data, _) = background_cancel("tasks-dialog-detached-owner", &id)
+            .await
+            .unwrap();
+        assert_eq!(data["cancelled"], false, "the owner's request settles it");
     }
 
     #[tokio::test]
