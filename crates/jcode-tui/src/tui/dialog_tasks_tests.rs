@@ -262,3 +262,15 @@ fn output_tail_keeps_last_non_blank_lines_without_escapes() {
     assert_eq!(&tail[8..], ["red", "progress 90%"]);
     assert!(read_output_tail(&dir.path().join("missing"), TAIL_LINES).is_empty());
 }
+
+#[test]
+fn modified_x_never_stops_a_task() {
+    let mut dialog = Dialog::tasks(snapshot());
+    for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+        assert!(!matches!(
+            dialog.handle_key(KeyCode::Char('x'), modifiers),
+            DialogKey::StopTask(_)
+        ));
+    }
+    assert_eq!(route(&dialog), Route::Tasks);
+}

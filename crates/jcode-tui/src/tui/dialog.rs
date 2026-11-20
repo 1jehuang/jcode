@@ -388,6 +388,7 @@ impl Dialog {
             return DialogKey::Handled;
         }
         if self.tasks.is_some()
+            && modifiers.is_empty()
             && let Some(key) = self.tasks_key(code)
         {
             return key;
