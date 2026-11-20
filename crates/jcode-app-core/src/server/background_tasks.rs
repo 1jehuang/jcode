@@ -1,4 +1,7 @@
-use super::live_turn::{LiveTurnSwarmContext, run_live_turn_if_idle};
+use super::live_turn::{
+    LiveTurnSwarmContext, member_accepts_automatic_turn, run_live_turn_if_idle,
+    run_stranded_background_completions,
+};
 use super::state::SwarmEvent;
 use super::{
     SessionAgents, SessionInterruptQueues, SwarmMember, fanout_session_event,
@@ -119,15 +122,22 @@ pub(super) async fn dispatch_background_task_completion(
         ));
     }
 
-    if task.wake
-        && !emit_external_wake(
+    let swarm = LiveTurnSwarmContext::new(
+        swarm_members,
+        swarms_by_id,
+        event_history,
+        event_counter,
+        swarm_event_tx,
+    );
+    if !task.wake
+        || emit_external_wake(
             &task.session_id,
             "background_task_completed",
             &notification,
             swarm_members,
         )
         .await
-        && !run_live_turn_if_idle(
+        || run_live_turn_if_idle(
             &task.session_id,
             &notification,
             Some(
@@ -135,29 +145,40 @@ pub(super) async fn dispatch_background_task_completion(
                     .to_string(),
             ),
             sessions,
-            LiveTurnSwarmContext::new(
-                swarm_members,
-                swarms_by_id,
-                event_history,
-                event_counter,
-                swarm_event_tx,
-            ),
+            swarm.clone(),
         )
         .await
-        && !queue_soft_interrupt_for_session(
-            &task.session_id,
-            notification.clone(),
-            false,
-            SoftInterruptSource::BackgroundTask,
-            soft_interrupt_queues,
-            sessions,
-        )
-        .await
+    {
+        return;
+    }
+    if !queue_soft_interrupt_for_session(
+        &task.session_id,
+        notification.clone(),
+        false,
+        SoftInterruptSource::BackgroundTask,
+        soft_interrupt_queues,
+        sessions,
+    )
+    .await
     {
         crate::logging::warn(&format!(
             "Failed to deliver background task completion to session {}",
             task.session_id
         ));
+        return;
+    }
+    // The busy turn may have released, and found nothing stranded, before
+    // this queued. Drain it now if so; the drain takes the queue atomically,
+    // so it and the turn's own drain deliver it once. A session that refuses
+    // automatic turns (e.g. a pending usage-limit resume) keeps it queued.
+    let eligible = swarm_members
+        .read()
+        .await
+        .get(&task.session_id)
+        .is_some_and(member_accepts_automatic_turn);
+    let agent = sessions.read().await.get(&task.session_id).cloned();
+    if eligible && let Some(agent) = agent {
+        run_stranded_background_completions(task.session_id.clone(), agent, swarm).await;
     }
 }
 
