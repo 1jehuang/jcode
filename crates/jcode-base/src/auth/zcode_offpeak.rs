@@ -154,6 +154,11 @@ async fn unwrap_data(resp: reqwest::Response) -> anyhow::Result<serde_json::Valu
     Ok(json.get("data").cloned().unwrap_or(serde_json::Value::Null))
 }
 
+pub async fn availability_default(creds: &OffPeakCredentials) -> anyhow::Result<Availability> {
+    let client = reqwest::Client::new();
+    availability(&client, creds).await
+}
+
 /// Probe whether a queue number can currently be taken.
 pub async fn availability(
     client: &reqwest::Client,

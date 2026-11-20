@@ -144,6 +144,7 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/update-rehearsal"
             | "/onboarding-sim"
             | "/usage"
+            | "/zcode"
             | "/reset"
             | "/subscription"
             | "/fix"
@@ -297,6 +298,7 @@ fn dispatch_single_local_command(app: &mut App, trimmed: &str) -> bool {
         || super::model_context::handle_model_command(app, trimmed)
         || app.handle_usage_reset_command(trimmed)
         || super::commands::handle_usage_command(app, trimmed)
+        || super::commands::handle_zcode_command(app, trimmed)
         || super::productivity::handle_productivity_command(app, trimmed)
         || super::commands::handle_feedback_command(app, trimmed)
         || super::commands::handle_telemetry_command(app, trimmed)

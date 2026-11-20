@@ -147,6 +147,16 @@ fn jwt() -> Option<String> {
     }
 }
 
+pub async fn list_claimable_plans_default() -> anyhow::Result<Vec<ClaimablePlan>> {
+    let client = reqwest::Client::new();
+    list_claimable_plans(&client).await
+}
+
+pub async fn claim_plan_default(plan_id: &str) -> ClaimOutcome {
+    let client = reqwest::Client::new();
+    claim_plan(&client, plan_id).await
+}
+
 /// Enumerate claimable plans from the billing preview face.
 pub async fn list_claimable_plans(client: &reqwest::Client) -> anyhow::Result<Vec<ClaimablePlan>> {
     let Some(jwt) = jwt() else {

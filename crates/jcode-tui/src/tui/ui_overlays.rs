@@ -337,6 +337,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     ));
     lines.push(help_entry("/usage", "Show connected provider usage limits"));
     lines.push(help_entry(
+        "/zcode",
+        "ZCode quota, trial plan claim, and off-peak status",
+    ));
+    lines.push(help_entry(
         "/support",
         "Email support with diagnostics prefilled",
     ));

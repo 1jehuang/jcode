@@ -167,6 +167,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     ),
     RegisteredCommand::public("/usage", "Show connected provider usage limits"),
     RegisteredCommand::public(
+        "/zcode",
+        "ZCode quota, trial plan claim, and off-peak status",
+    ),
+    RegisteredCommand::public(
         "/productivity",
         "Generate a shareable usage report + dashboard image",
     ),

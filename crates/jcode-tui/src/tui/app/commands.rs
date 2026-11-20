@@ -3644,6 +3644,161 @@ pub(super) fn handle_usage_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
+pub(super) fn handle_zcode_command(app: &mut App, trimmed: &str) -> bool {
+    let Some(rest) = trimmed.strip_prefix("/zcode") else {
+        return false;
+    };
+    if !rest.is_empty()
+        && !rest
+            .chars()
+            .next()
+            .map(|c| c.is_whitespace())
+            .unwrap_or(false)
+    {
+        return false;
+    }
+
+    let arg = rest.trim();
+    if arg.is_empty() || arg == "help" {
+        app.push_display_message(DisplayMessage::system(
+            "Usage:\n  /zcode quota              Show ZCode coding-plan usage windows\n  /zcode claim [list|<id>]  List or claim available weekend/trial plans\n  /zcode offpeak            Check off-peak ticket queue availability"
+                .to_string(),
+        ));
+        return true;
+    }
+
+    let run_blocking = |fut: std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>| {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            tokio::task::block_in_place(|| handle.block_on(fut))
+        } else if let Ok(rt) = tokio::runtime::Runtime::new() {
+            rt.block_on(fut)
+        } else {
+            "Failed to initialize async runtime".to_string()
+        }
+    };
+
+    if arg == "quota" {
+        let msg = run_blocking(Box::pin(async {
+            match crate::auth::zcode::fetch_coding_plan_quota_default().await {
+                Ok(plan) => {
+                    let mut lines = vec![format!(
+                        "ZCode Coding Plan (level: {})",
+                        plan.level.as_deref().unwrap_or("unknown")
+                    )];
+                    if plan.limits.is_empty() {
+                        lines.push("  (no usage windows reported)".to_string());
+                    } else {
+                        for l in &plan.limits {
+                            let rem = l
+                                .remaining
+                                .map(|v| format!("{v:.0}"))
+                                .unwrap_or_else(|| "-".to_string());
+                            let pct = l
+                                .percentage
+                                .map(|v| format!(" ({v:.0}% used)"))
+                                .unwrap_or_default();
+                            lines.push(format!("  - {}: remaining {rem}{pct}", l.r#type));
+                        }
+                    }
+                    lines.join("\n")
+                }
+                Err(err) => format!("ZCode quota unavailable: {err:#}"),
+            }
+        }));
+        app.push_display_message(DisplayMessage::system(msg));
+        return true;
+    }
+
+    if arg == "offpeak" {
+        let msg = run_blocking(Box::pin(async {
+            let Some(creds) = crate::auth::zcode_offpeak::OffPeakCredentials::from_credentials()
+            else {
+                return "ZCode off-peak requires ZCode login (/login zcode)".to_string();
+            };
+            match crate::auth::zcode_offpeak::availability_default(&creds).await {
+                Ok(avail) if avail.can_take_number => {
+                    "ZCode off-peak queue: available (can take ticket now)".to_string()
+                }
+                Ok(avail) => format!(
+                    "ZCode off-peak queue: unavailable (next_take_at: {:?})",
+                    avail.next_take_at
+                ),
+                Err(err) => format!("ZCode off-peak check failed: {err:#}"),
+            }
+        }));
+        app.push_display_message(DisplayMessage::system(msg));
+        return true;
+    }
+
+    if let Some(claim_rest) = arg.strip_prefix("claim") {
+        let sub = claim_rest.trim();
+        let msg = run_blocking(Box::pin(async move {
+            if sub == "list" {
+                match crate::auth::zcode_claim::list_claimable_plans_default().await {
+                    Ok(plans) if plans.is_empty() => {
+                        "No claimable ZCode plans available right now.".to_string()
+                    }
+                    Ok(plans) => {
+                        let mut lines = vec![format!("Claimable ZCode plans ({}):", plans.len())];
+                        for p in plans {
+                            lines.push(format!("  - {} ({})", p.name, p.plan_id));
+                        }
+                        lines.join("\n")
+                    }
+                    Err(err) => format!("ZCode claim preview failed: {err:#}"),
+                }
+            } else if !sub.is_empty() {
+                match crate::auth::zcode_claim::claim_plan_default(sub).await {
+                    crate::auth::zcode_claim::ClaimOutcome::Ok { plan_id, .. } => {
+                        format!("Claimed ZCode plan: {plan_id}")
+                    }
+                    crate::auth::zcode_claim::ClaimOutcome::Failed {
+                        plan_id,
+                        kind,
+                        code,
+                        message,
+                    } => format!("Failed to claim {plan_id} ({kind}, code {code}): {message}"),
+                }
+            } else {
+                match crate::auth::zcode_claim::list_claimable_plans_default().await {
+                    Ok(plans) if plans.is_empty() => {
+                        "No claimable ZCode plans available right now.".to_string()
+                    }
+                    Ok(plans) => {
+                        let mut lines = Vec::new();
+                        for p in plans {
+                            match crate::auth::zcode_claim::claim_plan_default(&p.plan_id).await {
+                                crate::auth::zcode_claim::ClaimOutcome::Ok { plan_id, .. } => {
+                                    lines.push(format!("Claimed ZCode plan: {plan_id}"));
+                                }
+                                crate::auth::zcode_claim::ClaimOutcome::Failed {
+                                    plan_id,
+                                    kind,
+                                    code,
+                                    message,
+                                } => {
+                                    lines.push(format!(
+                                        "Failed to claim {plan_id} ({kind}, code {code}): {message}"
+                                    ));
+                                }
+                            }
+                        }
+                        lines.join("\n")
+                    }
+                    Err(err) => format!("ZCode claim preview failed: {err:#}"),
+                }
+            }
+        }));
+        app.push_display_message(DisplayMessage::system(msg));
+        return true;
+    }
+
+    app.push_display_message(DisplayMessage::error(format!(
+        "Unknown /zcode subcommand '{arg}'. Try /zcode help"
+    )));
+    true
+}
+
 pub(super) fn handle_feedback_command(app: &mut App, trimmed: &str) -> bool {
     let Some(rest) = trimmed.strip_prefix("/feedback") else {
         return false;

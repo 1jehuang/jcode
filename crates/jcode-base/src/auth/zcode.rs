@@ -785,6 +785,11 @@ pub struct QuotaCodingPlan {
     pub limits: Vec<QuotaCodingLimit>,
 }
 
+pub async fn fetch_coding_plan_quota_default() -> Result<QuotaCodingPlan> {
+    let client = reqwest::Client::new();
+    fetch_coding_plan_quota(&client).await
+}
+
 pub async fn fetch_coding_plan_quota(client: &reqwest::Client) -> Result<QuotaCodingPlan> {
     let creds = load_credentials()?;
     let key = creds
