@@ -265,7 +265,7 @@ async fn manual_background_and_shutdown_do_not_wait_for_budget() {
 #[tokio::test(start_paused = true)]
 async fn handoff_keeps_the_calls_own_delivery_flags() {
     let registry = Registry::empty();
-    registry.register("bg".into(), Arc::new(WaitProbe)).await;
+    registry.register("bash".into(), Arc::new(WaitProbe)).await;
     let ctx = ToolContext {
         session_id: "handoff-delivery-flags".into(),
         message_id: "message".into(),
@@ -277,8 +277,8 @@ async fn handoff_keeps_the_calls_own_delivery_flags() {
     };
     let result = execute_with_background_budget(
         registry,
-        "bg".into(),
-        serde_json::json!({"action": "status", "wake": false}),
+        "bash".into(),
+        serde_json::json!({"command": "true", "wake": false}),
         ctx,
         Duration::from_millis(10),
     )
@@ -290,9 +290,23 @@ async fn handoff_keeps_the_calls_own_delivery_flags() {
     let status = crate::background::global().status(task_id).await.unwrap();
     assert!(status.notify);
     assert!(!status.wake, "explicit wake:false survives the handoff");
-    assert_eq!(handoff_delivery(&serde_json::json!({})), (true, true));
     assert_eq!(
-        handoff_delivery(&serde_json::json!({"notify": false, "wake": null})),
+        handoff_delivery("bash", &serde_json::json!({})),
+        (true, true)
+    );
+    assert_eq!(
+        handoff_delivery(
+            "remote_exec",
+            &serde_json::json!({"notify": false, "wake": null})
+        ),
         (false, false)
+    );
+    // communicate's `wake` targets another agent, not this task's delivery.
+    assert_eq!(
+        handoff_delivery(
+            "communicate",
+            &serde_json::json!({"notify": false, "wake": false})
+        ),
+        (true, true)
     );
 }

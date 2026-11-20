@@ -1783,7 +1783,7 @@ impl Agent {
                         tool_elapsed.as_secs_f64()
                     ));
 
-                    let (notify, wake) = tool_handoff::handoff_delivery(&tc.input);
+                    let (notify, wake) = tool_handoff::handoff_delivery(&tc.name, &tc.input);
                     let bg_info = crate::background::global()
                         .adopt_handoff(
                             Some(handoff),

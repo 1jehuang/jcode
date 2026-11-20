@@ -22,9 +22,14 @@ pub(super) fn handoff_display_name(input: &serde_json::Value) -> Option<String> 
     (!intent.is_empty()).then(|| crate::util::truncate_str(&intent, 28).to_string())
 }
 
-/// A handed-off call keeps the delivery it asked for: `notify` defaults to
-/// true and `wake` to `notify`, as bash and remote_exec define them.
-pub(super) fn handoff_delivery(input: &serde_json::Value) -> (bool, bool) {
+/// A handed-off bash or remote_exec call keeps the delivery it asked for:
+/// `notify` defaults to true and `wake` to `notify`, as those tools define
+/// them. Other tools' flags mean something else (communicate's `wake` wakes
+/// its target), so they get the default delivery.
+pub(super) fn handoff_delivery(name: &str, input: &serde_json::Value) -> (bool, bool) {
+    if !matches!(Registry::resolve_tool_name(name), "bash" | "remote_exec") {
+        return (true, true);
+    }
     let flag = |key: &str| input.get(key).and_then(serde_json::Value::as_bool);
     let notify = flag("notify").unwrap_or(true);
     (notify, flag("wake").unwrap_or(notify))
@@ -51,7 +56,7 @@ async fn execute_with_background_budget(
     let session_id = ctx.session_id.clone();
     let tool_name = name.clone();
     let display_name = handoff_display_name(&input);
-    let (notify, wake) = handoff_delivery(&input);
+    let (notify, wake) = handoff_delivery(&name, &input);
     let handoff = Arc::new(crate::background::ToolHandoff::default());
     let mut work = crate::runtime_activity::spawn_session(
         &session_id,
