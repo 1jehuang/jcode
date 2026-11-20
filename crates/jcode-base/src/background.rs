@@ -93,7 +93,27 @@ pub struct BackgroundTaskManager {
     /// Status files already seen in a terminal state by [`Self::sweep`]. A
     /// finished task never runs again, so the periodic sweep skips them.
     settled: Arc<Mutex<std::collections::HashSet<PathBuf>>>,
+    held_deliveries: HeldDeliveries,
     output_dir: PathBuf,
+}
+
+/// Tasks whose model delivery a `bg wait` holds, each with whether a
+/// completion that would have woken the model was published during the hold.
+/// Process-local, so a reload or crash drops every hold.
+type HeldDeliveries = Arc<std::sync::Mutex<HashMap<String, bool>>>;
+
+/// The wake a completion publishes with: none while a `bg wait` holds it.
+fn held_wake(held: &HeldDeliveries, task_id: &str, wake: bool) -> bool {
+    let mut held = held
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match held.get_mut(task_id) {
+        Some(suppressed) => {
+            *suppressed |= wake;
+            false
+        }
+        None => wake,
+    }
 }
 
 impl BackgroundTaskManager {
@@ -112,6 +132,7 @@ impl BackgroundTaskManager {
             progress_updates: Arc::new(Mutex::new(())),
             stall_watchdogs: Arc::new(RwLock::new(HashMap::new())),
             settled: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            held_deliveries: Arc::default(),
             output_dir,
         }
     }
@@ -228,8 +249,9 @@ impl BackgroundTaskManager {
             return status;
         }
 
-        let output_path = self.output_path_for(&status.task_id);
-        let output = fs::read_to_string(&output_path).await.unwrap_or_default();
+        let output = fs::read_to_string(self.output_path_for(&status.task_id))
+            .await
+            .unwrap_or_default();
         let exit_code = reaped_exit.or_else(|| Self::parse_exit_code_from_output(&output));
         let completed_at = Utc::now();
         let duration_secs = Self::status_duration_secs(&status.started_at, completed_at);
@@ -259,25 +281,7 @@ impl BackgroundTaskManager {
         );
 
         self.write_status_file(status_path, &status).await;
-
-        let output_preview = if output.len() > 500 {
-            format!("{}...", crate::util::truncate_str(&output, 500))
-        } else {
-            output
-        };
-        Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
-            task_id: status.task_id.clone(),
-            tool_name: status.tool_name.clone(),
-            display_name: status.display_name.clone(),
-            session_id: status.session_id.clone(),
-            status: final_status,
-            exit_code,
-            output_preview,
-            output_file: output_path,
-            duration_secs: duration_secs.unwrap_or_default(),
-            notify: status.notify,
-            wake: status.wake,
-        }));
+        self.publish_completion(&status, status.wake).await;
 
         status
     }
@@ -352,27 +356,7 @@ impl BackgroundTaskManager {
             terminal_event_record(BackgroundTaskStatus::Failed, None, Some(&error)),
         );
         self.write_status_file(status_path, &status).await;
-
-        let output_path = self.output_path_for(&status.task_id);
-        let output = fs::read_to_string(&output_path).await.unwrap_or_default();
-        let output_preview = if output.len() > 500 {
-            format!("{}...", crate::util::truncate_str(&output, 500))
-        } else {
-            output
-        };
-        Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
-            task_id: status.task_id.clone(),
-            tool_name: status.tool_name.clone(),
-            display_name: status.display_name.clone(),
-            session_id: status.session_id.clone(),
-            status: BackgroundTaskStatus::Failed,
-            exit_code: None,
-            output_preview,
-            output_file: output_path,
-            duration_secs: duration_secs.unwrap_or_default(),
-            notify: status.notify,
-            wake: status.wake,
-        }));
+        self.publish_completion(&status, status.wake).await;
 
         status
     }
@@ -556,6 +540,7 @@ impl BackgroundTaskManager {
         let started_at_rfc3339_for_task = started_at_rfc3339.clone();
         let (delivery_flags_tx, delivery_flags_rx) = watch::channel((notify, wake));
         let status_updates = Arc::clone(&self.progress_updates);
+        let held_deliveries = Arc::clone(&self.held_deliveries);
         let tasks_for_prune = Arc::clone(&self.tasks);
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -580,6 +565,7 @@ impl BackgroundTaskManager {
 
             let status_guard = status_updates.lock().await;
             let (notify_flag, wake_flag) = *delivery_flags_rx.borrow();
+            let published_wake = held_wake(&held_deliveries, &task_id_clone, wake_flag);
             let prior_status = tokio::fs::read_to_string(&status_path_clone)
                 .await
                 .ok()
@@ -661,7 +647,7 @@ impl BackgroundTaskManager {
                 output_file: output_path_clone,
                 duration_secs,
                 notify: notify_flag,
-                wake: wake_flag,
+                wake: published_wake,
             }));
 
             result
@@ -813,6 +799,7 @@ impl BackgroundTaskManager {
         let display_name_owned = initial_status.display_name.clone();
         let (delivery_flags_tx, delivery_flags_rx) = watch::channel((notify, wake));
         let status_updates = Arc::clone(&self.progress_updates);
+        let held_deliveries = Arc::clone(&self.held_deliveries);
         let tasks_for_prune = Arc::clone(&self.tasks);
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
         let wrapper_handle = tokio::spawn(runtime_activity.scope(async move {
@@ -846,6 +833,7 @@ impl BackgroundTaskManager {
 
             let status_guard = status_updates.lock().await;
             let (notify_flag, wake_flag) = *delivery_flags_rx.borrow();
+            let published_wake = held_wake(&held_deliveries, &task_id_clone, wake_flag);
             let prior_status = tokio::fs::read_to_string(&status_path_clone)
                 .await
                 .ok()
@@ -914,7 +902,7 @@ impl BackgroundTaskManager {
                 output_file: output_path_clone,
                 duration_secs,
                 notify: notify_flag,
-                wake: wake_flag,
+                wake: published_wake,
             }));
 
             Ok(TaskResult {
@@ -1349,40 +1337,51 @@ impl BackgroundTaskManager {
     }
 
     /// Hold model delivery of a running task's completion while a foreground
-    /// `bg wait` owns its result. False when there is nothing to hold.
-    pub async fn hold_delivery(&self, task_id: &str) -> bool {
+    /// `bg wait` in the task's own session owns its result. False when there
+    /// is nothing to hold. The hold lives only in this process's memory.
+    pub async fn hold_delivery(&self, task_id: &str, session_id: &str) -> bool {
         let _status_guard = self.progress_updates.lock().await;
         let status_path = self.status_path_for(task_id);
-        let Some(mut status) = self.read_status_file(&status_path).await else {
+        let Some(status) = self.read_status_file(&status_path).await else {
             return false;
         };
-        if status.status != BackgroundTaskStatus::Running || !status.wake {
+        if status.status != BackgroundTaskStatus::Running
+            || !status.wake
+            || status.session_id != session_id
+        {
             return false;
         }
-        status.wake = false;
-        self.write_status_file(&status_path, &status).await;
-        if let Some(task) = self.tasks.read().await.get(task_id) {
-            let _ = task.delivery_flags.send((status.notify, false));
+        let mut held = self
+            .held_deliveries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if held.contains_key(task_id) {
+            return false;
         }
+        held.insert(task_id.to_string(), false);
         true
     }
 
-    /// End a [`Self::hold_delivery`]. A task that finished during the hold
-    /// published its completion without waking the model; `deliver` publishes
-    /// it to the model now, for a waiter that ends without returning it.
+    /// End a [`Self::hold_delivery`]. A completion that would have woken the
+    /// model went out without waking it during the hold; `deliver` publishes
+    /// it to the model now, for a waiter that ends without returning it. A
+    /// requested stop never woke the model, so it stays passive.
     pub async fn release_delivery(&self, task_id: &str, deliver: bool) -> Option<TaskStatusFile> {
-        let status = {
+        let (status, suppressed) = {
             let _status_guard = self.progress_updates.lock().await;
-            let status_path = self.status_path_for(task_id);
-            let mut status = self.read_status_file(&status_path).await?;
-            status.wake = true;
-            self.write_status_file(&status_path, &status).await;
-            if let Some(task) = self.tasks.read().await.get(task_id) {
-                let _ = task.delivery_flags.send((status.notify, true));
-            }
-            status
+            let suppressed = self
+                .held_deliveries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(task_id)
+                .unwrap_or(false);
+            (
+                self.read_status_file(&self.status_path_for(task_id))
+                    .await?,
+                suppressed,
+            )
         };
-        if deliver && status.status != BackgroundTaskStatus::Running {
+        if deliver && suppressed {
             self.publish_completion(&status, true).await;
         }
         Some(status)
@@ -1548,7 +1547,7 @@ impl BackgroundTaskManager {
             output_file,
             duration_secs: status.duration_secs.unwrap_or_default(),
             notify: status.notify,
-            wake,
+            wake: held_wake(&self.held_deliveries, &status.task_id, wake),
         }));
     }
 

@@ -1271,7 +1271,11 @@ async fn held_delivery_publishes_once_without_waking_until_released() -> Result<
                 Ok(TaskResult::completed(Some(0)))
             })
             .await;
-        assert!(manager.hold_delivery(&info.task_id).await);
+        assert!(
+            manager
+                .hold_delivery(&info.task_id, "session-held-delivery")
+                .await
+        );
         let _ = finish_tx.send(());
         infos.push(info);
     }
@@ -1340,5 +1344,46 @@ async fn progress_after_a_task_settled_is_ignored() -> Result<()> {
             assert_ne!(event.task_id, info.task_id, "late progress was published");
         }
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn delivery_hold_is_process_local_owner_only_and_keeps_a_stop_passive() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut events = Bus::global().subscribe();
+    let info = manager
+        .spawn("bash", "session-hold-owner", |_| async move {
+            sleep(Duration::from_secs(3600)).await;
+            Ok(TaskResult::completed(Some(0)))
+        })
+        .await;
+
+    // Another session's wait must not silence the owner.
+    assert!(!manager.hold_delivery(&info.task_id, "session-other").await);
+    assert!(
+        manager
+            .hold_delivery(&info.task_id, "session-hold-owner")
+            .await
+    );
+    // Nothing on disk: a reload drops the hold and the task keeps its wake.
+    let persisted = manager
+        .status(&info.task_id)
+        .await
+        .ok_or_else(|| anyhow!("status should exist"))?;
+    assert!(persisted.wake, "the hold must not be persisted");
+
+    // A requested stop during the hold stays passive after an abandoned wait.
+    assert!(manager.cancel(&info.task_id).await?);
+    manager.release_delivery(&info.task_id, true).await;
+    let completions = drain_completions(&mut events, &info.task_id);
+    assert_eq!(
+        completions
+            .iter()
+            .map(|event| event.wake)
+            .collect::<Vec<_>>(),
+        vec![false],
+        "a stop never wakes the model"
+    );
     Ok(())
 }

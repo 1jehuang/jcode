@@ -836,7 +836,8 @@ impl Tool for BgTool {
                 // This reply carries the result, so hold the separate model
                 // delivery while it waits; one completion reaches the model once.
                 let hold = DeliveryHold(
-                    (blocking && manager.hold_delivery(&task_id).await).then(|| task_id.clone()),
+                    (blocking && manager.hold_delivery(&task_id, &ctx.session_id).await)
+                        .then(|| task_id.clone()),
                 );
                 let mut wait_result = manager
                     .wait(
