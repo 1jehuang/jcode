@@ -259,6 +259,7 @@ impl App {
                     }
                     _ = redraw_interval.tick() => {
                         let _ = self.flush_pending_resize_redraw();
+                        self.refresh_tasks_dialog();
                         status_spinner_renderer.draw_full(self, terminal)?;
                         super::run_shell::reset_status_spinner_interval(&mut status_spinner_interval, self);
                     }
@@ -1620,6 +1621,7 @@ impl App {
                         // Redraw periodically
                         _ = redraw_interval.tick() => {
                             let _ = self.flush_pending_resize_redraw();
+                            self.refresh_tasks_dialog();
                             status_spinner_renderer.draw_full(self, terminal)?;
                         }
                         // Poll tool execution
