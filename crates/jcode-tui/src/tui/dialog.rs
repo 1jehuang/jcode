@@ -1009,7 +1009,10 @@ impl Dialog {
             }
             detail.push(Line::from(Span::styled(title.clone(), bold)));
             if lines.is_empty() {
-                detail.push(Line::from(Span::styled(empty.clone(), dim)));
+                detail.push(jcode_tui_render::truncate_line_with_ellipsis_to_width(
+                    &Line::from(Span::styled(empty.clone(), dim)),
+                    width,
+                ));
             } else {
                 let inner = width.saturating_sub(4).max(4);
                 detail.push(Line::from(Span::styled(

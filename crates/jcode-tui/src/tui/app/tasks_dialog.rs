@@ -48,11 +48,11 @@ impl App {
                     runtime_secs,
                     exit_code: status.as_ref().and_then(|status| status.exit_code),
                     error: status.and_then(|status| status.error),
-                    output: if plain_id {
-                        read_output_tail(&manager.output_path_for(&row.task_id), TAIL_LINES)
-                    } else {
-                        Vec::new()
-                    },
+                    output: plain_id
+                        .then(|| {
+                            read_output_tail(&manager.output_path_for(&row.task_id), TAIL_LINES)
+                        })
+                        .flatten(),
                 }
             })
             .collect();

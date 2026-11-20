@@ -12,7 +12,7 @@ fn shell(id: &str, label: &str, status: BackgroundTaskRowStatus) -> ShellTask {
         runtime_secs: Some(75),
         exit_code: (status == BackgroundTaskRowStatus::Completed).then_some(0),
         error: None,
-        output: vec!["line one".into(), "line two".into()],
+        output: Some(vec!["line one".into(), "line two".into()]),
     }
 }
 
@@ -205,7 +205,11 @@ fn refresh_keeps_detail_and_closes_it_when_the_task_vanishes() {
     let mut dialog = Dialog::tasks(snapshot());
     press(&mut dialog, KeyCode::Enter);
     let mut next = snapshot();
-    next.shells[1].output.push("line three".into());
+    next.shells[1]
+        .output
+        .as_mut()
+        .unwrap()
+        .push("line three".into());
     dialog.set_tasks(next);
     assert_eq!(route(&dialog), Route::TaskShell("bg1".into()));
     let rows = screen(&dialog, 50, 20);
@@ -225,7 +229,7 @@ fn refresh_keeps_detail_and_closes_it_when_the_task_vanishes() {
 fn rows_and_output_never_exceed_the_width() {
     let mut data = snapshot();
     data.shells[1].label = "npm run build -- --watch 界界界 ".repeat(8);
-    data.shells[1].output = vec!["界".repeat(200)];
+    data.shells[1].output = Some(vec!["界".repeat(200)]);
     let mut dialog = Dialog::tasks(data);
     for width in [12u16, 24, 40, 80] {
         for row in screen(&dialog, width, 20) {
@@ -256,11 +260,11 @@ fn output_tail_keeps_last_non_blank_lines_without_escapes() {
     }
     text.push_str("\x1b[31mred\x1b[0m\nprogress 10%\rprogress 90%\n");
     std::fs::write(&path, text).unwrap();
-    let tail = read_output_tail(&path, TAIL_LINES);
+    let tail = read_output_tail(&path, TAIL_LINES).unwrap();
     assert_eq!(tail.len(), TAIL_LINES);
     assert_eq!(tail[0], "line 22");
     assert_eq!(&tail[8..], ["red", "progress 90%"]);
-    assert!(read_output_tail(&dir.path().join("missing"), TAIL_LINES).is_empty());
+    assert!(read_output_tail(&dir.path().join("missing"), TAIL_LINES).is_none());
 }
 
 #[test]
@@ -339,4 +343,25 @@ fn detail_status_and_command_stay_on_one_row() {
         assert_eq!(command - status, 2, "{rows:#?}");
         assert!(!rows[command + 1].contains("npm"), "{rows:#?}");
     }
+}
+
+#[test]
+fn missing_output_file_says_it_is_not_available_here() {
+    let mut data = snapshot();
+    data.shells[1].output = None;
+    let mut dialog = Dialog::tasks(data);
+    press(&mut dialog, KeyCode::Enter);
+    assert_eq!(route(&dialog), Route::TaskShell("bg1".into()));
+    let rows = screen(&dialog, 60, 20);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Output not available from this client")),
+        "{rows:#?}"
+    );
+    let rows = screen(&dialog, 24, 20);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Output not") && row.ends_with('…')),
+        "{rows:#?}"
+    );
 }

@@ -20,7 +20,8 @@ pub struct ShellTask {
     pub runtime_secs: Option<u64>,
     pub exit_code: Option<i32>,
     pub error: Option<String>,
-    pub output: Vec<String>,
+    /// `None` when the output file is not on this machine (a remote daemon).
+    pub output: Option<Vec<String>>,
 }
 
 /// Everything the dialog lists, refreshed by the app about once a second.
@@ -78,13 +79,11 @@ pub fn task_pill(rows: &[BackgroundTaskRow], agents: &[SwarmMemberStatus]) -> Op
 }
 
 /// The last `max` non-blank lines of a task's output file, with terminal
-/// escapes removed. Reads only the end of the file.
-pub fn read_output_tail(path: &std::path::Path, max: usize) -> Vec<String> {
+/// escapes removed. Reads only the end of the file; `None` if it is absent.
+pub fn read_output_tail(path: &std::path::Path, max: usize) -> Option<Vec<String>> {
     use std::io::{Read, Seek, SeekFrom};
     const TAIL_BYTES: u64 = 16 * 1024;
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return Vec::new();
-    };
+    let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().map(|meta| meta.len()).unwrap_or(0);
     let mut bytes = Vec::new();
     if file
@@ -92,7 +91,7 @@ pub fn read_output_tail(path: &std::path::Path, max: usize) -> Vec<String> {
         .is_err()
         || file.read_to_end(&mut bytes).is_err()
     {
-        return Vec::new();
+        return Some(Vec::new());
     }
     let text = crate::message::strip_ansi_escape_sequences(&String::from_utf8_lossy(&bytes));
     let lines: Vec<String> = text
@@ -102,7 +101,7 @@ pub fn read_output_tail(path: &std::path::Path, max: usize) -> Vec<String> {
         .map(|line| line.replace('\t', "    "))
         .filter(|line| !line.trim().is_empty())
         .collect();
-    lines[lines.len().saturating_sub(max)..].to_vec()
+    Some(lines[lines.len().saturating_sub(max)..].to_vec())
 }
 
 fn agent_label(agent: &SwarmMemberStatus) -> String {
@@ -316,8 +315,10 @@ impl Dialog {
             .push(("Command".to_string(), single_line(&shell.label)));
         view.boxed = Some((
             "Output".to_string(),
-            shell.output.clone(),
-            if shell.status == BackgroundTaskRowStatus::Running {
+            shell.output.clone().unwrap_or_default(),
+            if shell.output.is_none() {
+                "Output not available from this client"
+            } else if shell.status == BackgroundTaskRowStatus::Running {
                 "No output yet"
             } else {
                 "No output"
