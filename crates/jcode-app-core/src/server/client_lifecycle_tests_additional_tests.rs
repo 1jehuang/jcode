@@ -125,6 +125,7 @@ fn cancel_aborts_detached_streaming_turn_with_stale_stop_signal() -> anyhow::Res
             Some(1),
             None,
             None,
+            false,
         )
         .await;
 

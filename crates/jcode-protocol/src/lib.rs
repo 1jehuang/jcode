@@ -851,7 +851,7 @@ impl Request {
             | Request::ListTools { id }
             | Request::ToolResult { id, .. } => *id,
             Request::Message { id, .. } => *id,
-            Request::Cancel { id } => *id,
+            Request::Cancel { id, .. } => *id,
             Request::BackgroundTool { id } => *id,
             Request::SoftInterrupt { id, .. } => *id,
             Request::CancelSoftInterrupts { id, .. } => *id,

@@ -511,6 +511,7 @@ pub(super) async fn cancel_processing_message(
     request_id: Option<u64>,
     request_decoded_at: Option<Instant>,
     sessions: Option<&SessionAgents>,
+    parent_only: bool,
 ) {
     // Capture before cancellation releases the reservation. Modern clients
     // reject unscoped terminal events to protect newer turns from stale ones.
@@ -538,18 +539,22 @@ pub(super) async fn cancel_processing_message(
         .as_deref()
         .unwrap_or(session_control.session_id.as_str())
         .to_string();
-    // Stopping a session also stops the workers it spawned. This runs first
-    // and on every path, including the idle one: a coordinator waiting on
+    // A full cancel stops the session and the workers it spawned. This runs
+    // first and on every path, including the idle one: a coordinator waiting on
     // `await_members` has no running turn of its own while its workers do.
-    super::super::swarm::cancel_spawned_descendant_turns(
-        &session_control.session_id,
-        swarm.members,
-        swarm.swarms_by_id,
-        Some(swarm.event_history),
-        Some(swarm.event_counter),
-        Some(swarm.event_tx),
-    )
-    .await;
+    // A parent-only cancel (Esc) must leave those workers alive and keep the
+    // parent non-terminal so their later reports are still delivered.
+    if !parent_only {
+        super::super::swarm::cancel_spawned_descendant_turns(
+            &session_control.session_id,
+            swarm.members,
+            swarm.swarms_by_id,
+            Some(swarm.event_history),
+            Some(swarm.event_counter),
+            Some(swarm.event_tx),
+        )
+        .await;
+    }
     crate::logging::info(&format!(
         "SERVER_INTERRUPT_CANCEL_RECEIVED request_id={:?} session={} control_session={} client_processing={} message_id={:?} has_task={} decoded_age_ms={:?}",
         request_id,
@@ -632,17 +637,19 @@ pub(super) async fn cancel_processing_message(
         *state.task = None;
         *state.client_is_processing = false;
         if let Some(session_id) = state.session_id.take() {
-            update_member_status(
-                &session_id,
-                "stopped",
-                Some("cancelled".to_string()),
-                swarm.members,
-                swarm.swarms_by_id,
-                Some(swarm.event_history),
-                Some(swarm.event_counter),
-                Some(swarm.event_tx),
-            )
-            .await;
+            if !parent_only {
+                update_member_status(
+                    &session_id,
+                    "stopped",
+                    Some("cancelled".to_string()),
+                    swarm.members,
+                    swarm.swarms_by_id,
+                    Some(swarm.event_history),
+                    Some(swarm.event_counter),
+                    Some(swarm.event_tx),
+                )
+                .await;
+            }
         }
         if let Some(message_id) = state.message_id.take() {
             let _ = client_event_tx.send(scoped(ServerEvent::Interrupted));
@@ -709,21 +716,23 @@ pub(super) async fn cancel_processing_message(
             reset_control.reset_cancel_if_epoch(cancel_epoch);
         });
         *state.client_is_processing = false;
-        let status_session_id = state
-            .session_id
-            .take()
-            .unwrap_or_else(|| session_control.session_id.clone());
-        update_member_status(
-            &status_session_id,
-            "stopped",
-            Some("cancelled".to_string()),
-            swarm.members,
-            swarm.swarms_by_id,
-            Some(swarm.event_history),
-            Some(swarm.event_counter),
-            Some(swarm.event_tx),
-        )
-        .await;
+        if !parent_only {
+            let status_session_id = state
+                .session_id
+                .take()
+                .unwrap_or_else(|| session_control.session_id.clone());
+            update_member_status(
+                &status_session_id,
+                "stopped",
+                Some("cancelled".to_string()),
+                swarm.members,
+                swarm.swarms_by_id,
+                Some(swarm.event_history),
+                Some(swarm.event_counter),
+                Some(swarm.event_tx),
+            )
+            .await;
+        }
         let _ = client_event_tx.send(scoped(ServerEvent::Interrupted));
         if let Some(message_id) = state.message_id.take() {
             let _ = client_event_tx.send(scoped(ServerEvent::Done { id: message_id }));

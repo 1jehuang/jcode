@@ -865,7 +865,7 @@ pub(super) async fn handle_client(
         // that writer can be busy long enough that an already-decoded cancel would sit
         // behind outbound bytes instead of signalling the agent's lock-free cancel
         // handle. Queue the Ack through the event channel and signal cancellation first.
-        if let Request::Cancel { id } = request {
+        if let Request::Cancel { id, parent_only } = request {
             let ack_queued = client_event_tx.send(ServerEvent::Ack { id }).is_ok();
             crate::logging::info(&format!(
                 "SERVER_INTERRUPT_CANCEL_PRE_ACK_DISPATCH id={} session={} ack_queued={} decoded_to_dispatch_ms={}",
@@ -894,6 +894,7 @@ pub(super) async fn handle_client(
                 Some(id),
                 Some(request_decoded_at),
                 Some(&sessions),
+                parent_only,
             )
             .await;
             crate::logging::info(&format!(
@@ -1161,7 +1162,7 @@ pub(super) async fn handle_client(
                 }
             }
 
-            Request::Cancel { id } => {
+            Request::Cancel { id, parent_only } => {
                 cancel_processing_message(
                     &mut ProcessingState {
                         client_is_processing: &mut client_is_processing,
@@ -1181,6 +1182,7 @@ pub(super) async fn handle_client(
                     Some(id),
                     Some(request_decoded_at),
                     Some(&sessions),
+                    parent_only,
                 )
                 .await;
                 if !client_is_processing {

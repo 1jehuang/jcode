@@ -1,5 +1,143 @@
 use super::*;
 
+fn cancel_scope_test_member(session_id: &str, parent: Option<&str>) -> SwarmMember {
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    SwarmMember {
+        session_id: session_id.to_string(),
+        event_tx,
+        event_txs: HashMap::new(),
+        working_dir: None,
+        swarm_id: Some("esc-scope-swarm".to_string()),
+        swarm_enabled: true,
+        status: "running".to_string(),
+        detail: None,
+        task_label: None,
+        friendly_name: Some(session_id.to_string()),
+        report_back_to_session_id: parent.map(str::to_string),
+        latest_completion_report: None,
+        role: "agent".to_string(),
+        joined_at: Instant::now(),
+        last_status_change: Instant::now(),
+        is_headless: true,
+        output_tail: None,
+        todo_progress: None,
+        todo_items: Vec::new(),
+        runtime: crate::protocol::SwarmMemberRuntime::default(),
+    }
+}
+
+#[tokio::test]
+async fn parent_only_cancel_leaves_spawned_child_running() {
+    let tag = format!("esc-parent-only-{}", std::process::id());
+    let parent = format!("{tag}-parent");
+    let child = format!("{tag}-child");
+    let parent_control = SessionControlHandle::cancel_only(
+        &parent,
+        Arc::new(std::sync::Mutex::new(Vec::new())),
+        InterruptSignal::new(),
+    );
+    let child_signal = InterruptSignal::new();
+    let _child_turn = crate::turn_cancel_registry::register_active_turn(&child, child_signal.clone());
+    let members = Arc::new(RwLock::new(HashMap::from([
+        (parent.clone(), cancel_scope_test_member(&parent, None)),
+        (child.clone(), cancel_scope_test_member(&child, Some(&parent))),
+    ])));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+    let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+    let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (swarm_event_tx, _swarm_events) = broadcast::channel(8);
+    let (client_event_tx, _client_events) = mpsc::unbounded_channel();
+    let mut client_is_processing = true;
+    let mut message_id = Some(7);
+    let mut session_id = Some(parent.clone());
+    let mut task = None;
+
+    cancel_processing_message(
+        &mut ProcessingState {
+            client_is_processing: &mut client_is_processing,
+            message_id: &mut message_id,
+            session_id: &mut session_id,
+            task: &mut task,
+        },
+        &parent_control,
+        &client_event_tx,
+        &SwarmStatusRefs {
+            members: &members,
+            swarms_by_id: &swarms_by_id,
+            event_history: &event_history,
+            event_counter: &event_counter,
+            event_tx: &swarm_event_tx,
+        },
+        Some(7),
+        None,
+        None,
+        true,
+    )
+    .await;
+
+    assert!(!child_signal.is_set(), "Esc must not cancel the child turn");
+    let members = members.read().await;
+    assert_eq!(members[&child].status, "running", "child stays running");
+    assert_ne!(
+        members[&parent].status,
+        "stopped",
+        "parent must stay non-terminal so late child reports are delivered"
+    );
+}
+
+#[tokio::test]
+async fn hard_cancel_still_stops_spawned_children() {
+    let tag = format!("esc-hard-stop-{}", std::process::id());
+    let parent = format!("{tag}-parent");
+    let child = format!("{tag}-child");
+    let parent_control = SessionControlHandle::cancel_only(
+        &parent,
+        Arc::new(std::sync::Mutex::new(Vec::new())),
+        InterruptSignal::new(),
+    );
+    let child_signal = InterruptSignal::new();
+    let _child_turn = crate::turn_cancel_registry::register_active_turn(&child, child_signal.clone());
+    let members = Arc::new(RwLock::new(HashMap::from([
+        (parent.clone(), cancel_scope_test_member(&parent, None)),
+        (child.clone(), cancel_scope_test_member(&child, Some(&parent))),
+    ])));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+    let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+    let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (swarm_event_tx, _swarm_events) = broadcast::channel(8);
+    let (client_event_tx, _client_events) = mpsc::unbounded_channel();
+    let mut client_is_processing = true;
+    let mut message_id = Some(8);
+    let mut session_id = Some(parent.clone());
+    let mut task = None;
+
+    cancel_processing_message(
+        &mut ProcessingState {
+            client_is_processing: &mut client_is_processing,
+            message_id: &mut message_id,
+            session_id: &mut session_id,
+            task: &mut task,
+        },
+        &parent_control,
+        &client_event_tx,
+        &SwarmStatusRefs {
+            members: &members,
+            swarms_by_id: &swarms_by_id,
+            event_history: &event_history,
+            event_counter: &event_counter,
+            event_tx: &swarm_event_tx,
+        },
+        Some(8),
+        None,
+        None,
+        false,
+    )
+    .await;
+
+    assert!(child_signal.is_set(), "hard stop must cancel the child turn");
+    assert_eq!(members.read().await[&child].status, "stopped");
+}
+
 #[test]
 fn cancel_soft_interrupts_by_id_reports_each_requested_id_exactly_once() {
     let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -353,6 +491,7 @@ async fn cancel_without_local_task_still_signals_session_control() {
         Some(99),
         None,
         None,
+        false,
     )
     .await;
 
@@ -428,6 +567,7 @@ async fn deferred_cancel_reset_does_not_erase_newer_cancel() {
             Some(request_id),
             None,
             None,
+            false,
         )
         .await;
     };
