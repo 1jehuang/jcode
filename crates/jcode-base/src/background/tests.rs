@@ -1387,3 +1387,55 @@ async fn delivery_hold_is_process_local_owner_only_and_keeps_a_stop_passive() ->
     );
     Ok(())
 }
+
+/// An adopted task's output file links to its shell's live log; recording
+/// the final output replaces the link and never truncates that log, which
+/// the shell may still be writing under another task (e.g. across a reload).
+#[cfg(unix)]
+#[tokio::test]
+async fn adopted_task_final_output_leaves_the_shells_live_log_intact() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let log = tmp.path().join("shell.log");
+    std::fs::write(&log, "live shell log")?;
+    let handoff = Arc::new(ToolHandoff::default());
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel::<()>();
+    let call_log = log.clone();
+    let call = tokio::spawn(handoff.scope(async move {
+        ToolHandoff::set_current_output_file(&call_log);
+        let _ = finish_rx.await;
+        Ok(jcode_tool_types::ToolOutput::new("final output"))
+    }));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while lock_ignoring_poison(&handoff.output_file).is_none() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    let info = manager
+        .adopt_handoff(
+            Some(handoff),
+            "bash",
+            None,
+            "session-live-log",
+            false,
+            false,
+            call,
+        )
+        .await;
+    assert_eq!(
+        manager.output(&info.task_id).await.as_deref(),
+        Some("live shell log")
+    );
+    let _ = finish_tx.send(());
+    manager
+        .wait(&info.task_id, Duration::from_secs(10), false)
+        .await
+        .expect("adopted task should exist");
+    assert_eq!(std::fs::read_to_string(&log)?, "live shell log");
+    assert_eq!(
+        manager.output(&info.task_id).await.as_deref(),
+        Some("final output")
+    );
+    Ok(())
+}

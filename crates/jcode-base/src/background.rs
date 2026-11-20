@@ -13,8 +13,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::fs::{self, File};
-use tokio::io::AsyncWriteExt;
+use tokio::fs;
 use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant as TokioInstant, MissedTickBehavior};
@@ -61,6 +60,30 @@ fn lock_ignoring_poison<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Replace `path` by renaming a fully written temporary file over it, so a
+/// concurrent reader never sees it half-written and a hard link to the old
+/// file (a shell's live log) keeps its contents.
+async fn replace_file(path: &std::path::Path, contents: impl AsRef<[u8]>) {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let tmp = PathBuf::from(tmp);
+    let replaced = match fs::write(&tmp, contents.as_ref()).await {
+        Ok(()) => fs::rename(&tmp, path).await,
+        Err(error) => Err(error),
+    };
+    if replaced.is_err() {
+        // e.g. Windows refusing to replace a file a reader holds open.
+        let _ = fs::remove_file(&tmp).await;
+        let _ = fs::remove_file(path).await;
+        let _ = fs::write(path, contents).await;
+    }
 }
 
 tokio::task_local! {
@@ -248,7 +271,7 @@ impl BackgroundTaskManager {
 
     async fn write_status_file(&self, path: &std::path::Path, status: &TaskStatusFile) {
         if let Ok(json) = serde_json::to_string_pretty(status) {
-            let _ = fs::write(path, json).await;
+            replace_file(path, json).await;
         }
     }
 
@@ -635,7 +658,7 @@ impl BackgroundTaskManager {
                 terminal_event_record(status.clone(), exit_code, error.as_deref()),
             );
             if let Ok(json) = serde_json::to_string_pretty(&final_status) {
-                let _ = tokio::fs::write(&status_path_clone, json).await;
+                replace_file(&status_path_clone, json).await;
             }
 
             // Drop this task from the live map now that its terminal status is
@@ -883,9 +906,9 @@ impl BackgroundTaskManager {
                 ),
             };
 
-            if let Ok(mut file) = File::create(&output_path_clone).await {
-                let _ = file.write_all(output_text.as_bytes()).await;
-            }
+            // Replace, not truncate: the file may be a hard link to the live
+            // log of a shell that keeps running under another task.
+            replace_file(&output_path_clone, &output_text).await;
 
             let status_guard = status_updates.lock().await;
             let (notify_flag, wake_flag) = *delivery_flags_rx.borrow();
@@ -927,7 +950,7 @@ impl BackgroundTaskManager {
                 terminal_event_record(status.clone(), exit_code, error.as_deref()),
             );
             if let Ok(json) = serde_json::to_string_pretty(&final_status) {
-                let _ = tokio::fs::write(&status_path_clone, json).await;
+                replace_file(&status_path_clone, json).await;
             }
 
             // Prune the live-map entry only after the terminal status file is
@@ -1518,7 +1541,7 @@ impl BackgroundTaskManager {
                 terminal_event_record(event_status, event_exit_code, event_error.as_deref()),
             );
             if let Ok(json) = serde_json::to_string_pretty(&final_status) {
-                let _ = fs::write(&task.status_path, json).await;
+                replace_file(&task.status_path, json).await;
             }
             self.publish_completion(&final_status, false).await;
 
