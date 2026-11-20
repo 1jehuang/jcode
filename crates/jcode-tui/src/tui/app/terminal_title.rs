@@ -5,7 +5,30 @@
 //! Time is the current/last observed working episode (including continuations),
 //! never the age of an open tab or a fabricated lifetime total.
 use super::{App, DisplayMessage};
+use crate::tui::program_status::{self, ProgramState};
 use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum TurnOutcome {
+    #[default]
+    None,
+    Done,
+    Error,
+    Interrupted,
+    Retrying,
+}
+
+pub(super) fn program_state(processing: bool, outcome: TurnOutcome) -> ProgramState {
+    if processing {
+        return ProgramState::Working;
+    }
+    match outcome {
+        TurnOutcome::None | TurnOutcome::Interrupted => ProgramState::Idle,
+        TurnOutcome::Done => ProgramState::Done,
+        TurnOutcome::Error => ProgramState::Error,
+        TurnOutcome::Retrying => ProgramState::Working,
+    }
+}
 
 #[derive(Default)]
 pub(super) struct TerminalTitleState {
@@ -14,6 +37,11 @@ pub(super) struct TerminalTitleState {
     pub last_sent: String,
     pub last_refresh: Option<Instant>,
     pub last_work: Option<Duration>,
+    pub turn_outcome: TurnOutcome,
+    pub turn_error_message: Option<String>,
+    pub last_program_state: Option<ProgramState>,
+    pub last_program_title: String,
+    pub last_program_message: String,
 }
 
 pub(super) fn edit_line_counts(message: &DisplayMessage) -> (usize, usize) {
@@ -74,6 +102,96 @@ impl App {
             crate::tui::herdr::AgentState::Idle
         };
         crate::tui::herdr::sync(state, self.active_client_session_id());
+        self.sync_program_status();
+    }
+
+    /// Record how the last turn ended so the OSC 7501 reporter can say
+    /// `done`, `error`, or `idle` instead of guessing from the screen.
+    pub(super) fn note_turn_started(&mut self) {
+        // A new send starts a fresh guardrail streak. On SSH the turn-end
+        // follow-up scheduler returns early without consuming this flag, so
+        // clearing it here prevents a stale stop from marking a later
+        // successful turn as an error.
+        self.turn_guardrail_stopped = false;
+        let mut state = self.terminal_title.borrow_mut();
+        state.turn_outcome = TurnOutcome::None;
+        state.turn_error_message = None;
+    }
+
+    pub(super) fn note_turn_done(&self, guardrail_stopped: bool) {
+        let mut state = self.terminal_title.borrow_mut();
+        if guardrail_stopped {
+            state.turn_outcome = TurnOutcome::Error;
+            state.turn_error_message = Some("provider guardrail stop".to_string());
+        } else {
+            state.turn_outcome = TurnOutcome::Done;
+            state.turn_error_message = None;
+        }
+    }
+
+    pub(super) fn note_turn_failed(&self, message: impl Into<String>) {
+        let mut state = self.terminal_title.borrow_mut();
+        state.turn_outcome = TurnOutcome::Error;
+        state.turn_error_message = Some(message.into());
+    }
+
+    pub(super) fn note_turn_interrupted(&self) {
+        let mut state = self.terminal_title.borrow_mut();
+        state.turn_outcome = TurnOutcome::Interrupted;
+        state.turn_error_message = None;
+    }
+
+    pub(super) fn note_turn_retrying(&self, message: impl Into<String>) {
+        let mut state = self.terminal_title.borrow_mut();
+        state.turn_outcome = TurnOutcome::Retrying;
+        state.turn_error_message = Some(message.into());
+    }
+
+    /// Clear a retry hold when the held request is canceled, so the terminal
+    /// stops showing the agent as working.
+    pub(super) fn clear_retrying_outcome(&self) {
+        if self.terminal_title.borrow().turn_outcome == TurnOutcome::Retrying {
+            self.note_turn_interrupted();
+        }
+    }
+
+    /// Emit the current state through OSC 7501 when it changes. The TUI
+    /// client owns the pane PTY, so this is the program-to-terminal channel
+    /// herdr-core reads. Cheap enough for every tick: unchanged reports are
+    /// dropped before allocating.
+    pub(super) fn sync_program_status(&self) {
+        if self.suppress_terminal_title_updates {
+            return;
+        }
+        let (outcome, error_message, last_state, last_title, last_message, title) = {
+            let state = self.terminal_title.borrow();
+            (
+                state.turn_outcome,
+                state.turn_error_message.clone(),
+                state.last_program_state,
+                state.last_program_title.clone(),
+                state.last_program_message.clone(),
+                state.base.clone(),
+            )
+        };
+        let program_state = program_state(self.is_processing(), outcome);
+        let message = if program_state == ProgramState::Error || outcome == TurnOutcome::Retrying {
+            error_message.unwrap_or_default()
+        } else {
+            String::new()
+        };
+        if last_state == Some(program_state) && last_title == title && last_message == message {
+            return;
+        }
+        program_status::emit(&program_status::report(
+            program_state,
+            Some(title.as_str()),
+            (!message.is_empty()).then_some(message.as_str()),
+        ));
+        let mut state = self.terminal_title.borrow_mut();
+        state.last_program_state = Some(program_state);
+        state.last_program_title = title;
+        state.last_program_message = message;
     }
 
     pub(super) fn set_terminal_title_base(&self, session_id: &str, base: String) {
@@ -233,5 +351,27 @@ mod tests {
         message.tool_data.as_mut().unwrap().name = "edit".into();
         message.content = "Error: could not apply patch\n-old\n+new".into();
         assert_eq!(edit_line_counts(&message), (0, 0));
+    }
+
+    #[test]
+    fn program_status_tracks_turn_lifecycle() {
+        assert_eq!(
+            program_state(true, TurnOutcome::Error),
+            ProgramState::Working
+        );
+        assert_eq!(program_state(false, TurnOutcome::None), ProgramState::Idle);
+        assert_eq!(
+            program_state(false, TurnOutcome::Interrupted),
+            ProgramState::Idle
+        );
+        assert_eq!(program_state(false, TurnOutcome::Done), ProgramState::Done);
+        assert_eq!(
+            program_state(false, TurnOutcome::Error),
+            ProgramState::Error
+        );
+        assert_eq!(
+            program_state(false, TurnOutcome::Retrying),
+            ProgramState::Working
+        );
     }
 }
