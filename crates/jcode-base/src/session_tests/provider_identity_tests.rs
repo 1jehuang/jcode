@@ -39,6 +39,36 @@ fn derive_session_provider_key_keeps_openai_compatible_profile_namespace() {
     );
 }
 
+/// Another session on the shared server switched to native Claude and left
+/// its pin in the process env. A new session on an OpenAI-compatible profile
+/// keeps its own identity, so its swarm workers do not run the profile's
+/// model through Claude.
+#[test]
+fn derive_session_provider_key_ignores_another_sessions_native_pin() {
+    let _lock = lock_env();
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "claude");
+    let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "zai");
+    let _active = EnvVarGuard::set("JCODE_ACTIVE_PROVIDER", "openrouter");
+
+    assert_eq!(
+        derive_session_provider_key("OpenRouter").as_deref(),
+        Some("zai")
+    );
+    assert_eq!(
+        derive_session_provider_key("Claude Code").as_deref(),
+        Some("claude-code")
+    );
+    assert_eq!(
+        derive_session_provider_key("openai").as_deref(),
+        Some("openai")
+    );
+    // A native session still honors a pin for its own provider.
+    assert_eq!(
+        derive_session_provider_key("claude").as_deref(),
+        Some("claude")
+    );
+}
+
 #[test]
 fn save_label_becomes_the_session_title() {
     let mut session = Session::create_with_id(

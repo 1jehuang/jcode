@@ -46,24 +46,45 @@ pub fn derive_session_provider_key(provider_name: &str) -> Option<String> {
         return Some("jcode".to_string());
     }
 
-    if let Ok(runtime_provider) = std::env::var("JCODE_RUNTIME_PROVIDER") {
-        let runtime_provider = runtime_provider.trim().to_ascii_lowercase();
-        if !runtime_provider.is_empty() && runtime_provider != "openai-compatible" {
-            return Some(runtime_provider);
+    let runtime_provider = std::env::var("JCODE_RUNTIME_PROVIDER")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    // The shared server keeps one process env for every session, and a session
+    // that switches to native Claude or OpenAI writes its pin there. That pin
+    // must not relabel a session running another provider: its swarm workers
+    // would inherit the wrong route (an OpenAI-compatible model sent to Claude).
+    let name_family = match normalized_name.as_str() {
+        "anthropic" | "claude" | "claude cli" => {
+            Some(jcode_provider_core::DualAuthProvider::Anthropic)
         }
+        "openai" => Some(jcode_provider_core::DualAuthProvider::OpenAI),
+        _ => None,
+    };
+    let runtime_pin_is_foreign = jcode_provider_core::AuthRoute::parse(&runtime_provider)
+        .is_some_and(|route| Some(route.provider) != name_family);
+
+    if !runtime_pin_is_foreign
+        && !runtime_provider.is_empty()
+        && runtime_provider != "openai-compatible"
+    {
+        return Some(runtime_provider);
     }
 
-    if let Ok(namespace) = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE") {
-        let namespace = namespace.trim().to_ascii_lowercase();
-        if !namespace.is_empty() {
-            return Some(namespace);
+    // OpenAI-compatible runtimes identify themselves through these; a native
+    // runtime with a foreign pin goes straight to its own name.
+    if !runtime_pin_is_foreign || normalized_name == "openrouter" {
+        if let Ok(namespace) = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE") {
+            let namespace = namespace.trim().to_ascii_lowercase();
+            if !namespace.is_empty() {
+                return Some(namespace);
+            }
         }
-    }
 
-    if let Ok(active) = std::env::var("JCODE_ACTIVE_PROVIDER") {
-        let active = active.trim().to_ascii_lowercase();
-        if !active.is_empty() {
-            return Some(active);
+        if let Ok(active) = std::env::var("JCODE_ACTIVE_PROVIDER") {
+            let active = active.trim().to_ascii_lowercase();
+            if !active.is_empty() {
+                return Some(active);
+            }
         }
     }
 
