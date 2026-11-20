@@ -329,3 +329,55 @@ async fn stranded_completion_starts_after_the_client_releases_the_finished_turn(
     .await
     .expect("the stranded completion must start a follow-up turn");
 }
+
+/// A completion retried while a client turn released the agent mutex but
+/// still owns its turn lease must neither run nor supersede that turn: the
+/// turn keeps its terminal publication and its own drain delivers the
+/// completion, which stays queued.
+#[tokio::test]
+async fn completion_retry_leaves_the_active_turn_its_terminal_event() {
+    let (id, sessions, members, _receiver) = fixture(true, "ready", true).await;
+    let agent = sessions.read().await.get(&id).unwrap().clone();
+    let queue = agent.lock().await.soft_interrupt_queue();
+    let lease = agent.lock().await.claim_server_turn().unwrap();
+    let publication = crate::server::swarm::begin_turn_publication(&id).await;
+    let task = crate::bus::BackgroundTaskCompleted {
+        task_id: "bg-mid-turn".into(),
+        tool_name: "bash".into(),
+        display_name: None,
+        session_id: id.clone(),
+        status: crate::bus::BackgroundTaskStatus::Completed,
+        exit_code: Some(0),
+        output_preview: "done\n".into(),
+        output_file: std::env::temp_dir().join("bg-mid-turn.output"),
+        duration_secs: 1.0,
+        notify: true,
+        wake: true,
+    };
+    let (swarm_tx, _) = broadcast::channel(16);
+
+    crate::server::background_tasks::dispatch_background_task_completion(
+        &task,
+        &sessions,
+        &Arc::new(RwLock::new(HashMap::new())),
+        &members,
+        &Arc::new(RwLock::new(HashMap::new())),
+        &Arc::new(RwLock::new(VecDeque::new())),
+        &Arc::new(AtomicU64::new(0)),
+        &swarm_tx,
+    )
+    .await;
+
+    let pending: Vec<_> = queue
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|message| message.content.clone())
+        .collect();
+    assert_eq!(pending.len(), 1, "left queued for the turn's own drain");
+    assert!(pending[0].contains("bg-mid-turn"));
+    let mut completed = false;
+    publication.complete(async { completed = true }).await;
+    assert!(completed, "the active turn must still publish Done/Error");
+    drop(lease);
+}

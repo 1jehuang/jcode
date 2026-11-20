@@ -209,19 +209,55 @@ pub(super) async fn spawn_tracked_live_turn_with_images(
     input: LiveTurnInput,
     swarm: LiveTurnSwarmContext,
 ) -> bool {
+    // Claim before superseding the session's publication: while another turn
+    // still owns the lease the claim fails, and that turn must keep its
+    // terminal Done/Error.
+    let Some(reserved) = reserve_live_turn(session_id, &agent) else {
+        return false;
+    };
     // Direct callers can explicitly replace a waiting turn. Automatic wake
     // callers have already refused sessions whose provider wait still owns it.
     super::usage_limit_resume::cancel_pending_resume(session_id);
     let publication = super::swarm::begin_turn_publication(session_id).await;
-    spawn_tracked_live_turn_with_publication(session_id, agent, input, swarm, publication).await
+    spawn_reserved_live_turn(session_id, agent, input, swarm, publication, reserved).await
 }
 
 pub(super) async fn spawn_tracked_live_turn_with_publication(
+    session_id: &str,
+    agent: OwnedMutexGuard<Agent>,
+    input: LiveTurnInput,
+    swarm: LiveTurnSwarmContext,
+    publication: Arc<super::swarm::TurnPublication>,
+) -> bool {
+    let Some(reserved) = reserve_live_turn(session_id, &agent) else {
+        return false;
+    };
+    spawn_reserved_live_turn(session_id, agent, input, swarm, publication, reserved).await
+}
+
+fn reserve_live_turn(
+    session_id: &str,
+    agent: &Agent,
+) -> Option<(
+    crate::runtime_activity::ActivityReservation,
+    crate::agent::TurnLease,
+)> {
+    let admission = crate::runtime_activity::global()
+        .try_enter_session(session_id)
+        .ok()?;
+    Some((admission, agent.claim_server_turn().ok()?))
+}
+
+async fn spawn_reserved_live_turn(
     session_id: &str,
     mut agent: OwnedMutexGuard<Agent>,
     input: LiveTurnInput,
     swarm: LiveTurnSwarmContext,
     publication: Arc<super::swarm::TurnPublication>,
+    (_admission, turn_lease): (
+        crate::runtime_activity::ActivityReservation,
+        crate::agent::TurnLease,
+    ),
 ) -> bool {
     let LiveTurnInput {
         message,
@@ -230,12 +266,6 @@ pub(super) async fn spawn_tracked_live_turn_with_publication(
         display_role,
         status_detail,
     } = input;
-    let Ok(_admission) = crate::runtime_activity::global().try_enter_session(session_id) else {
-        return false;
-    };
-    let Ok(turn_lease) = agent.claim_server_turn() else {
-        return false;
-    };
     if swarm
         .members
         .read()
