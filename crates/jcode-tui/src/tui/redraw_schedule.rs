@@ -27,6 +27,26 @@ pub(crate) const REDRAW_STATIC_STREAM: Duration = Duration::from_millis(80);
 /// closely at a background pane, but agent swarms keep a dozen of them
 /// streaming at once, so full-rate repaints there are pure battery cost.
 pub(crate) const REDRAW_UNFOCUSED_MIN: Duration = Duration::from_millis(100);
+/// Text batching rate for an unfocused client that is streaming a reply. Each
+/// batch is a full frame, so this is the expensive part of a mirrored working
+/// window: at 100ms it measured 10 full frames/s and about 9% of a core. The
+/// spinner does not depend on this rate, it is repainted as a single cell on
+/// its own 80ms clock (see `status_spinner_only_symbol`).
+pub(crate) const REDRAW_UNFOCUSED_STREAM: Duration = Duration::from_millis(250);
+/// Tick and text batching rate for an unfocused client whose window is known
+/// to be out of sight (see `window_visibility`). Nothing it paints is seen, so
+/// it only keeps its state current for the moment it is shown again.
+pub(crate) const REDRAW_HIDDEN: Duration = Duration::from_secs(1);
+
+/// How long an unfocused client leaves the server socket alone between text
+/// batches.
+pub(crate) fn unfocused_event_hold(focused: bool) -> Duration {
+    if crate::tui::window_visibility::hidden(focused) {
+        REDRAW_HIDDEN
+    } else {
+        REDRAW_UNFOCUSED_STREAM
+    }
+}
 
 /// Whether this session has been left alone long enough to be treated as
 /// dormant (deep idle): no stream activity *and* no user interaction for
@@ -425,14 +445,18 @@ pub(crate) fn redraw_interval_with_policy_and_animation(
     }
 }
 
-/// Fastest tick for an unfocused client. Text that is still being revealed
-/// (or a scroll animation) keeps [`REDRAW_UNFOCUSED_MIN`] so a visible tiled
-/// pane still shows live output. A background turn that is only thinking or
+/// Fastest tick for an unfocused client. A scroll animation keeps
+/// [`REDRAW_UNFOCUSED_MIN`]. Text that is still being revealed is batched at
+/// [`REDRAW_UNFOCUSED_STREAM`], so a visible tiled pane still shows live output. A background turn that is only thinking or
 /// running a tool has nothing but a spinner and timer to move, so it ticks at
 /// the passive liveness rate: measured 10 full frames/s per such session before.
 fn unfocused_redraw_min(state: &dyn TuiState) -> Duration {
-    if state.stream_reveal_pending() || state.has_pending_mouse_scroll_animation() {
+    if crate::tui::window_visibility::hidden(state.client_focused()) {
+        REDRAW_HIDDEN.max(REDRAW_PASSIVE_LIVENESS)
+    } else if state.has_pending_mouse_scroll_animation() {
         REDRAW_UNFOCUSED_MIN
+    } else if state.stream_reveal_pending() {
+        REDRAW_UNFOCUSED_STREAM
     } else {
         REDRAW_PASSIVE_LIVENESS
     }

@@ -188,30 +188,55 @@ progress and does not dim a prerequisite-ready lane merely because its phase is
 later. This note describes the prerequisite gate, not the lane's lifecycle or
 other blockers.
 
-## Completely blocked
+## Cancelling a todo
 
-No way forward.
+The active plan uses three statuses: `pending`, `in_progress`, and `completed`.
+Cancel work you no longer intend to do with an action rather than another status:
 
-`completely_blocked` is a condition on an unfinished todo, not another lifecycle status. Its object contains only a nonempty `reason` string explaining the blocker.
+```json
+{"cancel":[{"name":"compiler-promotion","reason":"Superseded by publish-built-014"}]}
+```
+
+Cancellation removes the item from the plan and records why it was withdrawn.
+It does not count as successful completion. If another lane explicitly depends
+on that item, redirect its prerequisite to a replacement or explicitly clear
+that dependency before cancelling (or in the same edit).
+
+The cancellation history for a session lives at `todos/cancellations/<session-id>.json` under `JCODE_HOME`. It contains the item as it was before cancellation, the reason, and the timestamp.
+
+When space is tight, the collapsed pinned todo view prioritizes rows with live workers before showing `+N more`. This is a display choice only. Expanding the list restores plan order, and scheduling and dependencies are unchanged.
+
+## Pausing a todo
+
+A todo has no "blocked" state. An unfinished todo keeps receiving automatic continuation unless one of these applies:
+
+| Field | Level | Pauses until | Use for |
+| --- | --- | --- | --- |
+| `waiting_on: {ids, reason}` | todo | the listed background tasks or `await_members` waits finish | work that is already running somewhere else |
+| `requires_user_auth: {reason}` | todo | the user authenticates and the field is cleared with `null` | a login, 2FA prompt, or credential the agent has no access to |
+| `cannot_complete: "<reason>"` | goal | the reason is cleared with `""` | a goal that is genuinely impossible |
 
 ```json
 {
   "update": [
-    {
-      "name": "Recover source data",
-      "completely_blocked": {
-        "reason": "Required source data no longer exists"
-      }
-    }
+    {"name": "Compare benchmark", "waiting_on": {"ids": ["bench-task"], "reason": "Rerun in progress"}},
+    {"name": "Deploy to production", "requires_user_auth": {"reason": "Log in to the deploy dashboard"}}
+  ],
+  "goals": [
+    {"group": "migration", "cannot_complete": "Source data was deleted upstream", "closed_feedback_loop": "absent", "feedback_loop": "None possible", "feedback_loop_relevance": "indirect", "feedback_loop_coverage": "narrow", "feedback_loop_traceability": "unmapped"}
   ]
 }
 ```
 
-The TUI labels this condition **✋ Completely blocked** and shows the reason. Keep the todo pending or in progress. Automatic continuation skips that item without scheduling timed review reminders; independent work remains actionable. Clear the condition with `"completely_blocked": null` when a way forward exists, then reassess rather than assuming the task is complete.
+These are conditions on unfinished work, not lifecycle statuses: keep the todo pending or in progress. A failed command, a retry, an approval, or a decision is not a reason to pause: `requires_user_auth` is only for authentication the agent cannot perform itself. `waiting_on` also accepts a bare list of IDs. Both todo pauses clear automatically when the todo is completed or cancelled.
+
+The TUI shows the waiting reason on the todo row, marks a required login with **✋ Needs your login**, and lists a goal that cannot complete in the footer above the composer. Independent work stays actionable in every case.
+
+The former `external_blocker` and `completely_blocked` item fields were removed. Saved todos that still carry them load as ordinary actionable todos, and a tool call that sends them is rejected with a pointer to the fields above.
 
 ## Live worker status in todo lanes
 
-An assigned worker's todo lane shares the opened session's live status renderer: activity spinner, observed input/output tokens, streaming throughput, connection, elapsed time, and current tool intent. Missing telemetry is not guessed from context size or lifetime totals. Waiting and stopped workers show their available reason instead of a live spinner. A completely blocked condition pauses its item without hiding independent work in the same lane.
+An assigned worker's todo lane shares the opened session's live status renderer: activity spinner, observed input/output tokens, streaming throughput, connection, elapsed time, and current tool intent. Missing telemetry is not guessed from context size or lifetime totals. Waiting and stopped workers show their available reason instead of a live spinner. A todo that needs the user to log in pauses only itself, without hiding independent work in the same lane.
 
 Passive worker status is displayed with the todo lanes rather than in a second list beside the pinned todo band. Focused worker navigation and transcript controls remain available.
 

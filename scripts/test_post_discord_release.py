@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import io
+import tempfile
 import json
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -45,8 +47,125 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
 
 class DiscordReleaseTests(unittest.TestCase):
+    def test_linux_selfdev_announcement(self):
+        tag = 'selfdev-linux-' + 'ab' * 20
+        format_notes = lambda body: MODULE.format_message(tag=tag, name='', body=body, url='https://example.org/download')
+        msg = format_notes('## Highlights\n- Captions update as you speak.\n- Configure the push-to-talk key.\n\n<!-- marker -->')
+        self.assertIn('**What changed**\n- Captions update as you speak.\n- Configure the push-to-talk key.', msg)
+        self.assertTrue(msg.endswith('[Download & release notes](<https://example.org/download>)'))
+        self.assertNotIn('marker', msg)
+        self.assertNotIn('What changed', format_notes('Older build without highlights.'))
+        comparison = 'https://github.com/1jehuang/jcode/compare/' + '0' * 40 + '...' + 'ab' * 20
+        self.assertIn(f'[All 19 commits](<{comparison}>)', format_notes(f'## Bundled changes\n\n[View all 19 commits]({comparison})'))
+        self.assertLessEqual(len(format_notes('## Highlights\n' + ('- ' + '🙂' * 300 + '\n') * 8).encode('utf-16-le')) // 2, 2000)
+
     def setUp(self) -> None:
         WebhookHandler.response_status = 200
+
+    def test_checked_in_announcement_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "v-test.json"
+            with mock.patch.object(MODULE, "ANNOUNCEMENT_DIR", Path(directory)):
+                self.assertIsNone(MODULE.load_announcement("missing"))
+                self.assertIsNone(MODULE.load_announcement("../v-test"))
+                for value in ([], {}, [""], [4], ["😀" * 1001], ["a", "x" * 2001]):
+                    path.write_text(json.dumps(value))
+                    with self.subTest(value_type=type(value)), self.assertRaises(RuntimeError):
+                        MODULE.load_announcement("v-test")
+                path.write_text(json.dumps(["😀" * 1000, "second"]))
+                self.assertEqual(MODULE.load_announcement("v-test"), ["😀" * 1000, "second"])
+                path.write_text("not json")
+                with self.assertRaises(RuntimeError):
+                    MODULE.load_announcement("v-test")
+
+    def multipart_http(self, *, fail_receipt=False, fail_delivery=False, fail_pending=False):
+        release = {"id": 100, "body": "notes", "html_url": "https://example.test/v-test"}
+        posts = []
+        patches = []
+
+        def request(req, timeout):
+            if "discord.test" in req.full_url:
+                posts.append(json.loads(req.data))
+                if fail_delivery:
+                    raise urllib.error.URLError("response lost")
+                # Simulate a concurrent human edit while Discord is in flight.
+                release["body"] += "\nhuman edit"
+                result = {"id": str(len(posts))}
+            elif req.method == "PATCH":
+                body = json.loads(req.data)["body"]
+                if fail_pending and "pending" in body:
+                    raise urllib.error.URLError("pending write failed")
+                if fail_receipt and "sent:" in body:
+                    raise urllib.error.URLError("receipt write failed")
+                patches.append(body)
+                release["body"] = body
+                result = dict(release)
+            else:
+                result = dict(release)
+            return io.BytesIO(json.dumps(result).encode())
+
+        return release, posts, patches, request
+
+    def run_multipart(self):
+        return MODULE.announce_release(repository="owner/repo", tag="v-test", token="fake",
+                                       webhook_url="https://discord.test/webhook")
+
+    def test_multipart_http_receipts_and_resume(self) -> None:
+        release, posts, patches, request = self.multipart_http()
+        with (mock.patch.object(MODULE, "load_announcement", return_value=["first", "second"]),
+              mock.patch.object(MODULE.urllib.request, "urlopen", side_effect=request)):
+            self.assertEqual(self.run_multipart(), "2")
+            self.assertEqual([p["content"] for p in posts], ["first", "second"])
+            self.assertTrue(all(p["allowed_mentions"] == {"parse": []} for p in posts))
+            self.assertEqual(sum("human edit" in p for p in patches), 4)
+            self.assertIn("sent:1", release["body"])
+            self.assertIn("sent:2", release["body"])
+            self.assertIn(MODULE.announcement_marker("v-test"), release["body"])
+            self.assertIsNone(self.run_multipart())
+            self.assertEqual(len(posts), 2)
+            # A lost final marker is safe: all individual receipts remain.
+            release["body"] = release["body"].replace(MODULE.announcement_marker("v-test"), "")
+            self.run_multipart()
+            self.assertEqual(len(posts), 2)
+            # Resume from the first durable receipt, not the beginning.
+            release["body"] = patches[1]
+            self.run_multipart()
+            self.assertEqual([p["content"] for p in posts], ["first", "second", "second"])
+
+    def test_pending_checkpoint_blocks_duplicates_after_uncertain_delivery(self) -> None:
+        for failure in ("receipt", "delivery"):
+            release, posts, _, request = self.multipart_http(
+                fail_receipt=failure == "receipt", fail_delivery=failure == "delivery")
+            with (self.subTest(failure=failure),
+                  mock.patch.object(MODULE, "load_announcement", return_value=["first", "second"]),
+                  mock.patch.object(MODULE.urllib.request, "urlopen", side_effect=request),
+                  mock.patch("sys.stderr", new_callable=io.StringIO) as stderr):
+                self.run_multipart()
+                self.assertIn("Partial Discord announcement", stderr.getvalue())
+                self.assertIn("pending", release["body"])
+                with self.assertRaisesRegex(RuntimeError, "Reconcile manually"):
+                    self.run_multipart()
+                self.assertEqual(len(posts), 1)
+                self.assertNotIn(MODULE.announcement_marker("v-test"), release["body"])
+
+    def test_pending_write_failure_never_sends(self) -> None:
+        _, posts, _, request = self.multipart_http(fail_pending=True)
+        with (mock.patch.object(MODULE, "load_announcement", return_value=["first"]),
+              mock.patch.object(MODULE.urllib.request, "urlopen", side_effect=request),
+              self.assertRaises(urllib.error.URLError)):
+            self.run_multipart()
+        self.assertEqual(posts, [])
+
+    def test_changed_manifest_refuses_resume(self) -> None:
+        release, posts, patches, request = self.multipart_http()
+        with mock.patch.object(MODULE.urllib.request, "urlopen", side_effect=request):
+            with mock.patch.object(MODULE, "load_announcement", return_value=["first", "second"]):
+                self.run_multipart()
+            release["body"] = patches[1]
+            with (mock.patch.object(MODULE, "load_announcement", return_value=["changed", "second"]),
+                  self.assertRaisesRegex(RuntimeError, "content changed")):
+                self.run_multipart()
+        self.assertEqual(len(posts), 2)
 
     def test_preview_is_commit_list_with_single_link(self) -> None:
         body = (

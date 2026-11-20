@@ -12,7 +12,6 @@ mod browser;
 mod calendar;
 mod codemode;
 mod communicate;
-mod compile_remote;
 #[cfg(target_os = "macos")]
 mod computer;
 mod config_edit_notice;
@@ -33,6 +32,7 @@ pub mod applet;
 mod goal;
 pub mod inflight;
 mod jcode_docs;
+pub(crate) mod load_tools;
 pub use jcode_docs::{BundledDocs, bundled_docs, register_bundled_docs};
 pub mod mcp;
 mod memory;
@@ -41,6 +41,7 @@ mod open;
 mod panel;
 mod patch;
 mod read;
+pub mod remote_exec;
 pub(crate) mod sdk;
 pub mod selfdev;
 pub(crate) mod serde_coerce;
@@ -53,7 +54,10 @@ mod todo;
 mod user_response;
 mod webfetch;
 mod websearch;
+mod withheld_identity;
 mod write;
+
+use withheld_identity::withheld_call_key;
 
 use crate::compaction::CompactionManager;
 use crate::provider::Provider;
@@ -271,19 +275,65 @@ pub(crate) fn session_mcp_alias_is_allowed(
 /// models routinely stringify booleans, but anything else (including `1`) is
 /// treated as absent: accidentally spending the remaining context window should
 /// take an unambiguous yes.
-#[cfg(test)]
-pub(crate) fn accept_large_output_schema_property_for_test() -> Value {
-    jcode_tool_core::accept_large_output_schema_property()
-}
-
 fn accepts_large_output(input: &Value) -> bool {
-    // Same key the schema advertises, so the documented flag and the honored
-    // flag cannot drift apart.
+    // The key is not in any schema (that would cost tokens on every request);
+    // the refusal message names it.
     match input.get(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY) {
         Some(Value::Bool(accepted)) => *accepted,
         Some(Value::String(raw)) => raw.trim().eq_ignore_ascii_case("true"),
         _ => false,
     }
+}
+
+/// Leading text of the message that replaces a withheld result.
+const OUTPUT_WITHHELD_MARKER: &str = "⚠️ OUTPUT WITHHELD";
+
+/// The call each session most recently had withheld, so repeating it accepts
+/// the cost.
+///
+/// Strict-schema providers cannot send a key the schema does not declare, so
+/// the flag alone would leave them with no way to opt in. An immediate,
+/// identical repeat is an equally unambiguous yes and needs no schema.
+static WITHHELD_CALLS: LazyLock<StdRwLock<HashMap<String, Vec<u64>>>> =
+    LazyLock::new(|| StdRwLock::new(HashMap::new()));
+
+/// Withheld calls remembered per session. A batch can have several sub-calls
+/// withheld at once, so one slot is not enough.
+const WITHHELD_CALLS_PER_SESSION: usize = 8;
+
+/// True when this call repeats one that was withheld for the session. The
+/// record is consumed, so each refusal buys exactly one accepted repeat.
+fn take_repeated_withheld_call(session_id: &str, key: u64) -> bool {
+    let mut calls = WITHHELD_CALLS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(keys) = calls.get_mut(session_id) else {
+        return false;
+    };
+    let Some(position) = keys.iter().position(|seen| *seen == key) else {
+        return false;
+    };
+    keys.remove(position);
+    if keys.is_empty() {
+        calls.remove(session_id);
+    }
+    true
+}
+
+fn remember_withheld_call(session_id: &str, key: u64) {
+    let mut calls = WITHHELD_CALLS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Bound the map so abandoned sessions cannot grow it without limit.
+    if calls.len() >= 4096 && !calls.contains_key(session_id) {
+        calls.clear();
+    }
+    let keys = calls.entry(session_id.to_string()).or_default();
+    keys.retain(|seen| *seen != key);
+    if keys.len() >= WITHHELD_CALLS_PER_SESSION {
+        keys.remove(0);
+    }
+    keys.push(key);
 }
 
 /// Aliases are surface-dependent, but policy follows original identities for
@@ -340,6 +390,12 @@ impl Clone for Registry {
         }
     }
 }
+
+#[path = "registry_touched_paths.rs"]
+mod registry_touched_paths;
+
+#[path = "registry_lifecycle.rs"]
+mod registry_lifecycle;
 
 impl Registry {
     /// Desktop opts in through its inline response renderer capability.
@@ -439,14 +495,14 @@ impl Registry {
                 apply_patch::ApplyPatchTool::new,
             );
             Self::insert_tool_timed(&mut m, &mut timings, "bash", bash::BashTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "browser", browser::BrowserTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "open", open::OpenTool::new);
             Self::insert_tool_timed(
                 &mut m,
                 &mut timings,
-                "compile_remote",
-                compile_remote::CompileRemoteTool::new,
+                load_tools::LOAD_TOOLS_NAME,
+                load_tools::LoadToolsTool::new,
             );
-            Self::insert_tool_timed(&mut m, &mut timings, "browser", browser::BrowserTool::new);
-            Self::insert_tool_timed(&mut m, &mut timings, "open", open::OpenTool::new);
             #[cfg(target_os = "macos")]
             Self::insert_tool_timed(
                 &mut m,
@@ -685,244 +741,6 @@ impl Registry {
         crate::util::estimate_tokens(s)
     }
 
-    /// Paths a tool call names in its input, labelled by the input key they
-    /// came from, resolved against the session working directory. Covers the
-    /// common path keys, `paths` arrays (first 8), and `apply_patch` file
-    /// headers (Codex envelope and unified diff).
-    fn touched_paths(input: &Value, ctx: &ToolContext) -> Vec<(&'static str, std::path::PathBuf)> {
-        let mut touched = Vec::new();
-        let Some(object) = input.as_object() else {
-            return touched;
-        };
-        let resolve = |path: &str| ctx.resolve_path(std::path::Path::new(path));
-        for key in [
-            "file_path",
-            "path",
-            "target",
-            "target_path",
-            "old_path",
-            "new_path",
-        ] {
-            if let Some(path) = object.get(key).and_then(Value::as_str) {
-                touched.push((key, resolve(path)));
-            }
-        }
-        if let Some(paths) = object.get("paths").and_then(Value::as_array) {
-            for path in paths.iter().filter_map(Value::as_str).take(8) {
-                touched.push(("paths", resolve(path)));
-            }
-        }
-        if let Some(patch) = object.get("patch_text").and_then(Value::as_str) {
-            for path in Self::patch_paths(patch) {
-                if !touched
-                    .iter()
-                    .any(|(_, existing)| *existing == resolve(path))
-                {
-                    touched.push(("patch", resolve(path)));
-                }
-            }
-        }
-        touched
-    }
-
-    /// File paths named in patch headers. Deletions are included because the
-    /// path was still touched; `/dev/null` sides of unified diffs are not.
-    fn patch_paths(patch: &str) -> Vec<&str> {
-        let mut paths = Vec::new();
-        for line in patch.lines() {
-            let path = [
-                "*** Add File: ",
-                "*** Update File: ",
-                "*** Delete File: ",
-                "*** Move to: ",
-            ]
-            .iter()
-            .find_map(|prefix| line.strip_prefix(prefix))
-            .or_else(|| {
-                let header = line
-                    .strip_prefix("+++ ")
-                    .or_else(|| line.strip_prefix("--- "))?;
-                let header = header.split('\t').next().unwrap_or(header).trim();
-                if header == "/dev/null" {
-                    return None;
-                }
-                Some(
-                    header
-                        .strip_prefix("a/")
-                        .or_else(|| header.strip_prefix("b/"))
-                        .unwrap_or(header),
-                )
-            });
-            if let Some(path) = path.map(str::trim).filter(|path| !path.is_empty())
-                && !paths.contains(&path)
-            {
-                paths.push(path);
-            }
-        }
-        paths
-    }
-
-    fn tool_lifecycle_fields(
-        phase: &str,
-        requested_name: &str,
-        resolved_name: &str,
-        input: &Value,
-        ctx: &ToolContext,
-    ) -> Vec<(String, String)> {
-        let cwd = ctx
-            .working_dir
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "none".to_string());
-        let input_json = serde_json::to_string(input).unwrap_or_default();
-        let mut fields = vec![
-            ("phase".to_string(), phase.to_string()),
-            ("tool_name".to_string(), requested_name.to_string()),
-            ("resolved_tool_name".to_string(), resolved_name.to_string()),
-            ("session_id".to_string(), ctx.session_id.clone()),
-            ("message_id".to_string(), ctx.message_id.clone()),
-            ("tool_call_id".to_string(), ctx.tool_call_id.clone()),
-            (
-                "execution_mode".to_string(),
-                format!("{:?}", ctx.execution_mode),
-            ),
-            ("cwd".to_string(), cwd),
-            ("input_json_bytes".to_string(), input_json.len().to_string()),
-        ];
-
-        if let Some(object) = input.as_object() {
-            let mut keys = object.keys().cloned().collect::<Vec<_>>();
-            keys.sort();
-            fields.push(("input_keys".to_string(), keys.join(",")));
-
-            let touched_paths = Self::touched_paths(input, ctx)
-                .into_iter()
-                .map(|(key, path)| format!("{key}:{}", path.display()))
-                .collect::<Vec<_>>();
-            if !touched_paths.is_empty() {
-                fields.push(("touched_paths".to_string(), touched_paths.join(",")));
-                fields.push((
-                    "touched_path_count".to_string(),
-                    touched_paths.len().to_string(),
-                ));
-            }
-
-            for text_key in ["command", "prompt", "task", "query", "content"] {
-                if let Some(text) = object.get(text_key).and_then(Value::as_str) {
-                    fields.push((format!("{text_key}_bytes"), text.len().to_string()));
-                    fields.push((
-                        format!("{text_key}_chars"),
-                        text.chars().count().to_string(),
-                    ));
-                }
-            }
-        }
-
-        fields
-    }
-
-    /// Maximum fraction of context budget a single tool output may consume.
-    /// Outputs that would push total context beyond this are truncated.
-    const CONTEXT_GUARD_THRESHOLD: f32 = 0.90;
-
-    /// Event payload shared by the `post_tool` observer and the
-    /// `post_tool_feedback` hook.
-    fn post_tool_event(
-        event_name: &'static str,
-        resolved_name: &str,
-        input: &Value,
-        ctx: &ToolContext,
-        result: std::result::Result<&ToolOutput, &anyhow::Error>,
-        latency_ms: u64,
-    ) -> crate::hooks::HookEvent {
-        let mut unique_paths: Vec<String> = Vec::new();
-        for (_, path) in Self::touched_paths(input, ctx) {
-            let path = path.display().to_string();
-            if !unique_paths.contains(&path) {
-                unique_paths.push(path);
-            }
-        }
-        let mut event = crate::hooks::HookEvent::new(event_name)
-            .session_id(ctx.session_id.clone())
-            .field("TOOL_NAME", resolved_name)
-            .field("TOOL_CALL_ID", ctx.tool_call_id.clone())
-            .field(
-                "TOOL_INPUT",
-                crate::hooks::truncate_tool_input(&input.to_string()),
-            )
-            .field("TOUCHED_PATHS", unique_paths.join("\n"))
-            .field("STATUS", if result.is_ok() { "ok" } else { "error" })
-            .field("DURATION_MS", latency_ms.to_string());
-        if let Some(dir) = &ctx.working_dir {
-            event = event.cwd(dir.display().to_string());
-        }
-        match result {
-            Ok(output) => {
-                event = event.field("OUTPUT_BYTES", output.output.len().to_string());
-            }
-            Err(error) => {
-                const ERROR_LIMIT: usize = 1000;
-                let message: String = error.to_string().chars().take(ERROR_LIMIT).collect();
-                event = event.field("ERROR", message);
-            }
-        }
-        event
-    }
-
-    /// Fire the `post_tool` observer hook with tool outcome metadata.
-    /// No-op (without building the payload) when the hook is not configured.
-    fn fire_post_tool_hook(
-        resolved_name: &str,
-        input: &Value,
-        ctx: &ToolContext,
-        result: &Result<ToolOutput>,
-        latency_ms: u64,
-    ) {
-        if !crate::hooks::hook_configured("post_tool") {
-            return;
-        }
-        crate::hooks::dispatch_observer(Self::post_tool_event(
-            "post_tool",
-            resolved_name,
-            input,
-            ctx,
-            result.as_ref(),
-            latency_ms,
-        ));
-    }
-
-    /// Run the synchronous `post_tool_feedback` hooks after a successful tool
-    /// call and append whatever they print to the tool result, so linters and
-    /// checkers can feed findings straight back to the model.
-    async fn apply_post_tool_feedback(
-        resolved_name: &str,
-        input: &Value,
-        ctx: &ToolContext,
-        latency_ms: u64,
-        output: &mut ToolOutput,
-    ) {
-        if !crate::hooks::hook_configured("post_tool_feedback") {
-            return;
-        }
-        let event = Self::post_tool_event(
-            "post_tool_feedback",
-            resolved_name,
-            input,
-            ctx,
-            Ok(output),
-            latency_ms,
-        );
-        if let Some(feedback) =
-            crate::hooks::run_post_tool_feedback(&event, &input.to_string()).await
-        {
-            if !output.output.is_empty() && !output.output.ends_with('\n') {
-                output.output.push('\n');
-            }
-            output.output.push_str("\n[post_tool_feedback]\n");
-            output.output.push_str(&feedback);
-        }
-    }
-
     /// Maximum fraction of context budget a single tool output may occupy.
     /// Even if we have room, a single output shouldn't dominate the context.
     const SINGLE_OUTPUT_MAX_FRACTION: f32 = 0.30;
@@ -955,7 +773,7 @@ impl Registry {
             0.0
         };
         format!(
-            "⚠️ OUTPUT WITHHELD: this result is ~{output}k tokens ({percent:.0}% of the \
+            "{OUTPUT_WITHHELD_MARKER}: this result is ~{output}k tokens ({percent:.0}% of the \
              {budget}k context budget, of which {used}k is already used), so it was not \
              returned. Nothing was added to the context except this message.\n\n\
              Narrow the request first: add or tighten `path`, `glob`, or `type`, set \
@@ -963,8 +781,9 @@ impl Registry {
              read a specific line range. A targeted query is almost always the better \
              answer than a truncated dump.\n\n\
              If you genuinely need this output and accept the token cost, repeat the same \
-             call with `\"accept_large_output\": true`. That returns the first ~{affordable}k \
-             tokens and permanently spends them from this session's context.",
+             call unchanged as your next call (or add `\"accept_large_output\": true`). That \
+             returns the first ~{affordable}k tokens and permanently spends them from this \
+             session's context.",
             output = output_tokens as f32 / 1000.0,
             percent = percent_of_budget,
             budget = budget / 1000,
@@ -1118,7 +937,13 @@ impl Registry {
         );
 
         let started_at = std::time::Instant::now();
-        let result = tool.execute(input.clone(), ctx.clone()).await;
+        // Hooks, policy, telemetry and the context guard stay in the runtime.
+        // Only the workspace side effect moves to the execution environment.
+        let result = if !is_custom && remote_exec::routes(resolved_name) {
+            remote_exec::execute(resolved_name, input.clone(), &ctx).await
+        } else {
+            tool.execute(input.clone(), ctx.clone()).await
+        };
         let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
         crate::telemetry::record_tool_execution(resolved_name, &input, result.is_ok(), latency_ms);
@@ -1152,9 +977,15 @@ impl Registry {
         Self::apply_post_tool_feedback(resolved_name, &input, &ctx, latency_ms, &mut output).await;
 
         // Context overflow guard: check if this output would push us over the limit
-        output = self
-            .guard_context_overflow(name, output, accepts_large_output(&input))
-            .await;
+        // Opt in with the flag, or by repeating a call that was just withheld.
+        let call_key = withheld_call_key(resolved_name, &input);
+        let accepted =
+            accepts_large_output(&input) | take_repeated_withheld_call(&ctx.session_id, call_key);
+        let already_marked = output.output.starts_with(OUTPUT_WITHHELD_MARKER);
+        output = self.guard_context_overflow(name, output, accepted).await;
+        if !already_marked && output.output.starts_with(OUTPUT_WITHHELD_MARKER) {
+            remember_withheld_call(&ctx.session_id, call_key);
+        }
 
         let mut fields = Self::tool_lifecycle_fields("done", name, resolved_name, &input, &ctx);
         fields.push(("elapsed_ms".to_string(), latency_ms.to_string()));
@@ -1168,6 +999,10 @@ impl Registry {
 
         Ok(output)
     }
+
+    /// Maximum fraction of context budget a single tool output may consume.
+    /// Outputs that would push total context beyond this are truncated.
+    const CONTEXT_GUARD_THRESHOLD: f32 = 0.90;
 
     /// Check if a tool output would overflow the context window and truncate if needed.
     /// Returns the (possibly truncated) output.

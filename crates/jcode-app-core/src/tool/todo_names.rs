@@ -4,10 +4,9 @@ use super::*;
 /// Keep the existing leniency for providers that stringify tool arguments.
 /// Item fields where an explicit null is a documented "clear" instruction.
 const NULL_CLEARS: &[&str] = &[
-    "completely_blocked",
-    "external_blocker",
     "lane_dependencies",
     "lane_after",
+    "requires_user_auth",
     "waiting_on",
 ];
 
@@ -27,7 +26,7 @@ pub(super) fn normalize_containers(input: &mut Value) {
             *phases = parsed;
         }
     }
-    for key in ["update", "add", "remove"] {
+    for key in ["update", "add", "remove", "cancel"] {
         let Some(value) = input.get_mut(key) else {
             continue;
         };
@@ -74,7 +73,7 @@ fn task_name(todo: &Value) -> Option<&str> {
     todo.get("content").and_then(Value::as_str)
 }
 
-fn resolve_name(todos: &[Value], name: &str) -> Result<String> {
+pub(super) fn resolve_name(todos: &[Value], name: &str) -> Result<String> {
     let mut matches = todos.iter().filter(|todo| task_name(todo) == Some(name));
     let todo = matches
         .next()

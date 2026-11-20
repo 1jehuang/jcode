@@ -5,9 +5,14 @@
 //!
 //! Also provides debug socket events for exposing full TUI state.
 
+#[path = "backend_screen.rs"]
+mod screen;
 mod ssh_sessions;
 
 use crate::message::ToolCall;
+#[path = "backend_protocol_io.rs"]
+mod protocol_io;
+
 use crate::protocol::{AuthChanged, FeatureToggle, HistoryBase, Request, ServerEvent};
 use crate::server;
 use crate::transport::{Stream, WriteHalf};
@@ -256,6 +261,9 @@ pub struct RemoteConnection {
     _dummy_peer: Option<Stream>,
     session_id: Option<String>,
     cloud_authority: Option<std::sync::Weak<std::sync::atomic::AtomicBool>>,
+    screen_feed: Option<screen::ScreenFeed>,
+    pub(crate) jarvis_tools_configured: bool,
+    pub(crate) local_tools_request: Option<u64>,
     cloud_callbacks: Vec<tokio::task::AbortHandle>,
     client_instance_id: Option<String>,
     next_request_id: u64,
@@ -279,6 +287,11 @@ pub struct RemoteConnection {
     #[cfg(test)]
     protocol_bytes_scanned: usize,
     has_loaded_history: bool,
+    /// The connected server accepts `Request::ClientFocus`. Learned from its
+    /// Pong, so an older server is never sent a request it would reject.
+    server_accepts_focus: bool,
+    /// Last (focused, hidden) state reported to this server, if any.
+    reported_focus: Option<(bool, bool)>,
     last_account_usage_poll: Option<Instant>,
     call_output_tokens_seen: u64,
 }
@@ -310,8 +323,23 @@ pub(crate) fn soft_interrupt_client_id(request_id: u64) -> String {
     format!("tui-{request_id}")
 }
 
-fn account_usage_poll_due(last_poll: Option<Instant>, now: Instant) -> bool {
-    last_poll.is_none_or(|last| now.saturating_duration_since(last) >= Duration::from_secs(30))
+/// Usage poll period for a window the user is looking at.
+const ACCOUNT_USAGE_POLL: Duration = Duration::from_secs(30);
+/// Usage poll period for an unfocused window. The quota display there is not
+/// being read, and focusing the window polls on the next tick. With 34 parked
+/// clients the 30s poll alone sent the shared server a request every second.
+const ACCOUNT_USAGE_POLL_UNFOCUSED: Duration = Duration::from_secs(300);
+
+fn account_usage_poll_interval(focused: bool) -> Duration {
+    if focused {
+        ACCOUNT_USAGE_POLL
+    } else {
+        ACCOUNT_USAGE_POLL_UNFOCUSED
+    }
+}
+
+fn account_usage_poll_due(last_poll: Option<Instant>, now: Instant, interval: Duration) -> bool {
+    last_poll.is_none_or(|last| now.saturating_duration_since(last) >= interval)
 }
 
 fn remote_protocol_frame_exceeds_limit(buffered: usize, incoming: usize) -> bool {
@@ -321,6 +349,9 @@ fn remote_protocol_frame_exceeds_limit(buffered: usize, incoming: usize) -> bool
 }
 
 pub(crate) trait RemoteEventState {
+    fn finish_local_tools_request(&mut self, _id: u64, _accepted: bool) -> bool {
+        false
+    }
     /// Replay has no outstanding control requests. Live connections track IDs.
     fn finish_runtime_command(&mut self, _id: u64) -> bool {
         false
@@ -440,6 +471,9 @@ impl RemoteConnection {
             _dummy_peer: None,
             session_id: None,
             cloud_authority: None,
+            screen_feed: None,
+            jarvis_tools_configured: false,
+            local_tools_request: None,
             cloud_callbacks: Vec::new(),
             client_instance_id: client_instance_id.map(str::to_string),
             // Keep reattached turn Done distinct from bootstrap acknowledgments.
@@ -453,6 +487,8 @@ impl RemoteConnection {
             #[cfg(test)]
             protocol_bytes_scanned: 0,
             has_loaded_history: false,
+            server_accepts_focus: false,
+            reported_focus: None,
             last_account_usage_poll: None,
             call_output_tokens_seen: 0,
         };
@@ -595,81 +631,6 @@ impl RemoteConnection {
         }
     }
 
-    async fn send_request_with_interrupt_trigger(
-        &self,
-        request: Request,
-        interrupt_trigger: Option<&str>,
-    ) -> Result<()> {
-        let control_id = match &request {
-            Request::Subscribe { id, .. }
-            | Request::GetHistory { id }
-            | Request::ResumeSession { id, .. }
-            | Request::GetModelCatalog { id, .. }
-            | Request::AccountUsage { id }
-            | Request::GetState { id } => Some(*id),
-            _ => None,
-        };
-        if let Some(id) = control_id {
-            let mut ids = self
-                .control_done_ids
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if ids.len() >= 256 {
-                ids.pop_front();
-            }
-            ids.push_back(id);
-        }
-        let json = serde_json::to_string(&request)? + "\n";
-        let interrupt_log = self.interrupt_request_log_fields(&request, interrupt_trigger);
-        if let Some(fields) = &interrupt_log {
-            crate::logging::info(&format!(
-                "REMOTE_INTERRUPT_SEND_START {} json_bytes={}",
-                fields,
-                json.len()
-            ));
-        }
-
-        let mut timing = super::cloud_latency::begin_request(&request);
-        let total_start = Instant::now();
-        let backlogged = self
-            .outbound_pending
-            .load(std::sync::atomic::Ordering::Acquire)
-            > 0;
-        let result = match self.enqueue_outbound(json.into_bytes()) {
-            Err(error) => Err(error),
-            Ok(_) if backlogged => Ok(()),
-            // Surface prompt write failures (broken pipe) to the caller, but
-            // never wait longer than a short bound: a full socket must not
-            // stall the loop that drains server events.
-            Ok(done) => match tokio::time::timeout(OUTBOUND_RESULT_WAIT, done).await {
-                Ok(Ok(Err(error))) => Err(anyhow::anyhow!(error)),
-                Ok(Err(_)) => Err(anyhow::anyhow!("remote connection writer closed")),
-                Ok(Ok(Ok(()))) | Err(_) => Ok(()),
-            },
-        };
-        if let Some(fields) = &interrupt_log {
-            match &result {
-                Ok(()) => crate::logging::info(&format!(
-                    "REMOTE_INTERRUPT_SEND_OK {} queued total_ms={}",
-                    fields,
-                    total_start.elapsed().as_millis()
-                )),
-                Err(error) => crate::logging::warn(&format!(
-                    "REMOTE_INTERRUPT_SEND_ERR {} total_ms={} error={}",
-                    fields,
-                    total_start.elapsed().as_millis(),
-                    error
-                )),
-            }
-        }
-        if let Some(timing) = &mut timing {
-            timing.finish(if result.is_ok() { "ok" } else { "error" });
-        }
-        result?;
-        self.request_timings.request_sent(&request);
-        Ok(())
-    }
-
     /// Queue bytes for the connection writer task, spawning it on first use.
     /// Never waits on the socket, so the caller keeps draining server events.
     /// The returned receiver resolves with the write result.
@@ -791,10 +752,12 @@ impl RemoteConnection {
 
     /// Clear the server-side conversation and replace it with a fresh session.
     pub async fn clear(&mut self) -> Result<u64> {
-        let had_cloud_authority = self.cloud_authority.is_some();
+        let had_cloud_authority = self.cloud_authority.is_some()
+            || self.jarvis_tools_configured
+            || self.local_tools_request.is_some();
         self.revoke_cloud_authority();
         if had_cloud_authority {
-            self.configure_cloud_tools(Default::default()).await?;
+            self.clear_local_tools().await?;
         }
         let id = self.next_request_id;
         self.next_request_id += 1;
@@ -911,6 +874,49 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    /// Ask the server what it supports. Its Pong carries the capability list.
+    pub async fn request_capabilities(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::Ping { id }).await?;
+        Ok(id)
+    }
+
+    /// Record the capability list from a Pong. Stream keepalive Pongs carry
+    /// none and must not clear what the server already advertised.
+    pub fn note_server_capabilities(&mut self, capabilities: &[String]) {
+        if capabilities
+            .iter()
+            .any(|capability| capability == crate::protocol::CLIENT_FOCUS_CAPABILITY)
+        {
+            self.server_accepts_focus = true;
+        }
+    }
+
+    /// Tell the server whether this window has focus, and whether an
+    /// unfocused window is out of sight, once per change, so it can batch
+    /// streamed text for sessions nobody is looking at. A no-op until the
+    /// server has advertised support.
+    pub async fn sync_focus(&mut self, focused: bool, hidden: bool) {
+        let hidden = hidden && !focused;
+        if !self.server_accepts_focus || self.reported_focus == Some((focused, hidden)) {
+            return;
+        }
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        if self
+            .send_request(Request::ClientFocus {
+                id,
+                focused,
+                hidden,
+            })
+            .await
+            .is_ok()
+        {
+            self.reported_focus = Some((focused, hidden));
+        }
+    }
+
     /// Ask the server for the fully route-expanded model catalog.
     ///
     /// The bootstrap `History` payload deliberately ships model *names* only
@@ -932,8 +938,14 @@ impl RemoteConnection {
     /// Request account quotas from the daemon, never from the render thread.
     /// The daemon shares in-flight fetches and applies provider retry backoff.
     pub async fn poll_account_usage(&mut self) -> Result<()> {
+        self.poll_account_usage_for_focus(true).await
+    }
+
+    /// Periodic poll from the tick loop, paced by whether the window is focused.
+    pub async fn poll_account_usage_for_focus(&mut self, focused: bool) -> Result<()> {
         let now = Instant::now();
-        if !account_usage_poll_due(self.last_account_usage_poll, now) {
+        let interval = account_usage_poll_interval(focused);
+        if !account_usage_poll_due(self.last_account_usage_poll, now, interval) {
             return Ok(());
         }
         // Throttle failed sends too, so a slow connection cannot flood retries.
@@ -946,10 +958,12 @@ impl RemoteConnection {
     /// Resume a specific session by ID
     pub async fn resume_session(&mut self, session_id: &str) -> Result<()> {
         if self.session_id.as_deref() != Some(session_id) {
-            let had_cloud_authority = self.cloud_authority.is_some();
+            let had_cloud_authority = self.cloud_authority.is_some()
+                || self.jarvis_tools_configured
+                || self.local_tools_request.is_some();
             self.revoke_cloud_authority();
             if had_cloud_authority {
-                self.configure_cloud_tools(Default::default()).await?;
+                self.clear_local_tools().await?;
             }
         }
         let request = Request::ResumeSession {
@@ -1370,88 +1384,6 @@ impl RemoteConnection {
             .await
     }
 
-    /// Read the next event from the server.
-    ///
-    /// This is **cancellation safe** and may be used directly as a branch in a
-    /// `tokio::select!`. Every byte pulled from the socket is moved into the
-    /// persistent [`Self::read_buffer`] immediately, and the only `.await`
-    /// point is [`AsyncBufReadExt::fill_buf`], which tokio guarantees reads
-    /// nothing when its future is dropped. A previous implementation used
-    /// `BufReader::read_line`, which tokio documents as **not** cancellation
-    /// safe: when a large payload (e.g. a multi-megabyte `History` event for a
-    /// session with images) was mid-read and a sibling `select!` branch (a
-    /// redraw tick, terminal event, or bus event) completed first, the
-    /// `read_line` future was dropped and the bytes it had already consumed
-    /// from the socket were lost. That desynced the newline-framed protocol
-    /// stream: the next read began mid-payload, surfaced as "stray non-JSON
-    /// protocol line" warnings, the real `History` was discarded, and the
-    /// session stayed stuck on "loading session…" until a manual `/restart`.
-    pub async fn next_event(&mut self) -> RemoteRead {
-        let mut stray_lines = 0usize;
-        loop {
-            // Serve any complete line already buffered before touching the
-            // socket. This drains backlog left by a previous (possibly
-            // cancelled) call before issuing a new read.
-            if let Some(line) = self.take_buffered_line() {
-                match self.classify_protocol_line(line, &mut stray_lines) {
-                    LineOutcome::Event(event) => return RemoteRead::Event(*event),
-                    LineOutcome::Skip => continue,
-                    LineOutcome::Disconnect(reason) => return RemoteRead::Disconnected(reason),
-                }
-            }
-
-            // No complete line yet: pull more bytes. `fill_buf` is cancel safe,
-            // so if a `select!` peer wins the race here nothing is read or lost.
-            let chunk = match self.reader.fill_buf().await {
-                Ok(buf) => buf,
-                Err(error) => {
-                    crate::logging::warn(&format!(
-                        "RemoteConnection::next_event: io error={} (session_id={:?}, client_instance_id={:?})",
-                        error, self.session_id, self.client_instance_id
-                    ));
-                    return RemoteRead::Disconnected(RemoteDisconnectReason::Io(error.to_string()));
-                }
-            };
-            if chunk.is_empty() {
-                // EOF. Surface any trailing partial line for diagnostics, then
-                // report a clean peer-closed disconnect.
-                if self.read_buffer.is_empty() {
-                    crate::logging::warn(&format!(
-                        "RemoteConnection::next_event: peer closed (session_id={:?}, client_instance_id={:?})",
-                        self.session_id, self.client_instance_id
-                    ));
-                } else {
-                    let preview: String = String::from_utf8_lossy(&self.read_buffer)
-                        .chars()
-                        .take(240)
-                        .collect();
-                    crate::logging::warn(&format!(
-                        "RemoteConnection::next_event: peer closed mid-line, discarding {} buffered bytes preview={:?} (session_id={:?}, client_instance_id={:?})",
-                        self.read_buffer.len(),
-                        preview,
-                        self.session_id,
-                        self.client_instance_id
-                    ));
-                    self.read_buffer.clear();
-                    self.read_buffer_scan_start = 0;
-                }
-                return RemoteRead::Disconnected(RemoteDisconnectReason::PeerClosed);
-            }
-            let len = chunk.len();
-            if remote_protocol_frame_exceeds_limit(self.read_buffer.len(), len) {
-                self.reader.consume(len);
-                self.read_buffer.clear();
-                self.read_buffer_scan_start = 0;
-                return RemoteRead::Disconnected(RemoteDisconnectReason::Protocol(format!(
-                    "remote protocol frame exceeded {} bytes",
-                    MAX_REMOTE_PROTOCOL_FRAME_BYTES
-                )));
-            }
-            self.read_buffer.extend_from_slice(chunk);
-            self.reader.consume(len);
-        }
-    }
-
     /// Split off the next complete newline-delimited line (without the trailing
     /// `\n`) from the persistent read buffer, leaving any partial remainder in
     /// place for the next read.
@@ -1490,100 +1422,6 @@ impl RemoteConnection {
         Some(line)
     }
 
-    /// Decide what a single decoded protocol line means: a real event, a line
-    /// to skip (blank/stray), or a fatal protocol/transport error.
-    fn classify_protocol_line(&self, line: Vec<u8>, stray_lines: &mut usize) -> LineOutcome {
-        let text = match String::from_utf8(line) {
-            Ok(text) => text,
-            Err(error) => {
-                *stray_lines += 1;
-                let preview: String = String::from_utf8_lossy(error.as_bytes())
-                    .chars()
-                    .take(240)
-                    .collect();
-                crate::logging::warn(&format!(
-                    "RemoteConnection::next_event: skipping stray non-UTF-8 protocol line {}/{} preview={:?} (session_id={:?}, client_instance_id={:?})",
-                    *stray_lines,
-                    MAX_STRAY_REMOTE_PROTOCOL_LINES,
-                    preview,
-                    self.session_id,
-                    self.client_instance_id
-                ));
-                if *stray_lines >= MAX_STRAY_REMOTE_PROTOCOL_LINES {
-                    return LineOutcome::Disconnect(RemoteDisconnectReason::Protocol(
-                        "too many stray non-JSON protocol lines".to_string(),
-                    ));
-                }
-                return LineOutcome::Skip;
-            }
-        };
-        let trimmed = text.trim_start();
-        if trimmed.trim().is_empty() {
-            crate::logging::warn(&format!(
-                "RemoteConnection::next_event: skipping blank line (session_id={:?}, client_instance_id={:?})",
-                self.session_id, self.client_instance_id
-            ));
-            return LineOutcome::Skip;
-        }
-        if !trimmed.starts_with('{') {
-            *stray_lines += 1;
-            let preview: String = text.chars().take(240).collect();
-            crate::logging::warn(&format!(
-                "RemoteConnection::next_event: skipping stray non-JSON protocol line {}/{} preview={:?} (session_id={:?}, client_instance_id={:?})",
-                *stray_lines,
-                MAX_STRAY_REMOTE_PROTOCOL_LINES,
-                preview,
-                self.session_id,
-                self.client_instance_id
-            ));
-            if *stray_lines >= MAX_STRAY_REMOTE_PROTOCOL_LINES {
-                return LineOutcome::Disconnect(RemoteDisconnectReason::Protocol(
-                    "too many stray non-JSON protocol lines".to_string(),
-                ));
-            }
-            return LineOutcome::Skip;
-        }
-        match self.request_timings.parse_event(&text) {
-            Ok(ServerEvent::Done { id })
-                if self
-                    .control_done_ids
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .contains(&id) =>
-            {
-                LineOutcome::Skip
-            }
-            Ok(event) => LineOutcome::Event(Box::new(event)),
-            Err(error) => {
-                // A single unparseable JSON line (e.g. the tail half of a frame
-                // split by a lost write, or an event variant this client build
-                // doesn't know) must not kill the whole session. Count it
-                // against the stray-line budget and resync on the next line;
-                // only give up if the stream keeps failing to parse (which
-                // indicates a real protocol/version mismatch). See issue #422:
-                // huge sessions used to die permanently on one corrupt frame.
-                *stray_lines += 1;
-                let preview: String = text.chars().take(240).collect();
-                crate::logging::warn(&format!(
-                    "RemoteConnection::next_event: skipping unparseable protocol line {}/{} error={} preview={:?} (session_id={:?}, client_instance_id={:?})",
-                    *stray_lines,
-                    MAX_STRAY_REMOTE_PROTOCOL_LINES,
-                    error,
-                    preview,
-                    self.session_id,
-                    self.client_instance_id
-                ));
-                if *stray_lines >= MAX_STRAY_REMOTE_PROTOCOL_LINES {
-                    return LineOutcome::Disconnect(RemoteDisconnectReason::Protocol(format!(
-                        "too many unparseable protocol lines; last error: {}",
-                        error
-                    )));
-                }
-                LineOutcome::Skip
-            }
-        }
-    }
-
     /// Get writer for sending requests
     pub fn writer(&self) -> Arc<Mutex<WriteHalf>> {
         Arc::clone(&self.writer)
@@ -1608,6 +1446,9 @@ impl RemoteConnection {
             _dummy_peer: Some(b),
             session_id: None,
             cloud_authority: None,
+            screen_feed: None,
+            jarvis_tools_configured: false,
+            local_tools_request: None,
             cloud_callbacks: Vec::new(),
             client_instance_id: None,
             next_request_id: 1,
@@ -1620,6 +1461,8 @@ impl RemoteConnection {
             #[cfg(test)]
             protocol_bytes_scanned: 0,
             has_loaded_history: false,
+            server_accepts_focus: false,
+            reported_focus: None,
             last_account_usage_poll: None,
             call_output_tokens_seen: 0,
         }
@@ -1637,6 +1480,11 @@ impl RemoteConnection {
 
     /// Set session ID
     pub fn set_session_id(&mut self, id: String) {
+        if self.session_id.as_deref() != Some(id.as_str()) {
+            self.stop_screen_context();
+            self.jarvis_tools_configured = false;
+            self.local_tools_request = None;
+        }
         self.session_id = Some(id);
     }
 

@@ -2,12 +2,12 @@ use super::*;
 use crate::session::SessionCounts;
 
 #[test]
-fn title_no_sessions_is_icon_only() {
+fn title_no_sessions_remains_visible_without_an_icon() {
     let title = format_menubar_title(SessionCounts {
         total: 0,
         streaming: 0,
     });
-    assert_eq!(title, "");
+    assert_eq!(title, "0/0");
 }
 
 #[test]
@@ -100,8 +100,8 @@ fn session_menu_item_title_loads_persisted_todo_title() {
             completion_confidence: None,
             confidence_history: Vec::new(),
             blocked_by: Vec::new(),
-            completely_blocked: None,
-            external_blocker: None,
+            requires_user_auth: None,
+            waiting_reason: None,
             waiting_on: Vec::new(),
             assigned_to: None,
             stage: None,

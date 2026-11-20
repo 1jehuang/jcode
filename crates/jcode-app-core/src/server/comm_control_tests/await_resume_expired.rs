@@ -84,7 +84,7 @@ async fn resume_background_awaits_finalizes_states_expired_while_down() {
 
     assert!(!event.completed, "expired await should finalize as timeout");
     assert!(
-        event.summary.contains("Timed out"),
+        event.summary.contains("timed out"),
         "summary: {}",
         event.summary
     );

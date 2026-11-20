@@ -1,18 +1,28 @@
 use super::*;
 
 #[test]
-fn blocker_footer_is_cell_bounded_and_clears_when_resolved() {
-    let payload = serde_json::json!({"todos": [
-        {"id":"release", "content":"Release", "status":"pending", "priority":"high",
-         "external_blocker":{"reason":"Jeremy must approve rollout 恢复", "review_at":"2099-01-01T00:00:00Z"}},
+fn pause_footer_is_cell_bounded_and_clears_when_resolved() {
+    let payload = serde_json::json!({"goals": [
+        {"group":"migration", "cannot_complete":"Source data deleted upstream 恢复"},
+        {"group":"finished", "cannot_complete":"Nothing left open here"}
+    ], "todos": [
+        {"id":"copy", "content":"Copy rows", "status":"pending", "priority":"high",
+         "group":"migration"},
+        {"id":"bench", "content":"Benchmark", "status":"pending", "priority":"high",
+         "waiting_on":["task"], "waiting_reason":"Rerun in progress"},
         {"id":"device", "content":"Device check", "status":"in_progress", "priority":"high",
-         "completely_blocked":{"reason":"Connect an iPhone"}},
+         "requires_user_auth":{"reason":"Connect an iPhone"}},
         {"id":"done", "content":"Old task", "status":"completed", "priority":"high",
-         "completely_blocked":{"reason":"stale reason"}}
-    ]}).to_string();
+         "group":"finished", "requires_user_auth":{"reason":"stale reason"}}
+    ]})
+    .to_string();
     for width in [0, 1, 8, 24, 80, 160] {
         let lines = messages::todo_blocker_footer(Some(&payload), width);
-        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines.len(),
+            2,
+            "waiting and finished work stay out of the footer"
+        );
         assert!(lines.iter().all(|line| line.width() <= usize::from(width)));
         if width > 0 {
             for line in &lines {
@@ -20,12 +30,14 @@ fn blocker_footer_is_cell_bounded_and_clears_when_resolved() {
             }
         }
         if width >= 80 {
-            assert!(
-                lines[0]
-                    .to_string()
-                    .contains("Jeremy must approve rollout 恢复")
+            assert_eq!(
+                lines[0].to_string(),
+                "✋ Needs you · Device check: Connect an iPhone"
             );
-            assert!(lines[1].to_string().contains("Connect an iPhone"));
+            assert_eq!(
+                lines[1].to_string(),
+                "Cannot complete · migration: Source data deleted upstream 恢复"
+            );
         }
     }
     assert!(messages::todo_blocker_footer(None, 80).is_empty());
@@ -41,7 +53,7 @@ fn blocker_footer_renders_immediately_above_input() {
         pinned_todos_payload: Some(
             serde_json::json!({"todos":[{
                 "id":"device", "content":"Device check", "status":"pending", "priority":"high",
-                "completely_blocked":{"reason":"Connect an iPhone"}
+                "requires_user_auth":{"reason":"Connect an iPhone"}
             }]})
             .to_string(),
         ),
@@ -61,11 +73,17 @@ fn blocker_footer_renders_immediately_above_input() {
         .position(|row| row.contains("composer-marker"))
         .unwrap();
     assert!(
-        rows[input_row - 1].contains("Blocked · Device check: Connect an iPhone"),
+        rows[input_row - 1].starts_with('✋')
+            && rows[input_row - 1].contains("Needs you · Device check: Connect an iPhone"),
         "{rows:#?}"
     );
     let blocker_row = &terminal.backend().buffer().content[(input_row - 1) * 120..input_row * 120];
-    for cell in blocker_row.iter().take("Blocked".len()) {
+    // The wide glyph's continuation cell carries no style of its own.
+    for cell in blocker_row
+        .iter()
+        .take("✋ Needs".width())
+        .filter(|cell| !cell.symbol().trim().is_empty())
+    {
         assert_eq!(cell.fg, rgb(225, 180, 80));
     }
 }
@@ -73,11 +91,11 @@ fn blocker_footer_renders_immediately_above_input() {
 #[test]
 fn blocked_reason_lives_below_response_not_in_pinned_todos() {
     let _guard = viewport_snapshot_test_lock();
-    let reason = "No working hardware audio sink available. 恢复音频 requires an external device.";
+    let reason = "No hardware audio sink. 恢复音频 requires an external device.";
     let payload = serde_json::json!({"todos": [{
         "id": "audio", "content": "Restore audio", "status": "in_progress", "priority": "high",
         "stage": 1, "group": "Audio",
-        "completely_blocked": {"reason": reason}
+        "requires_user_auth": {"reason": reason}
     }]})
     .to_string();
     let mut state = TestState {
@@ -125,7 +143,7 @@ fn blocked_reason_lives_below_response_not_in_pinned_todos() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        text.find("The launcher is repaired.").unwrap() < text.find("Completely blocked:").unwrap()
+        text.find("The launcher is repaired.").unwrap() < text.find("Needs your login:").unwrap()
     );
     assert!(text.contains(reason));
     assert_eq!(text.matches(reason).count(), 1);
@@ -133,7 +151,7 @@ fn blocked_reason_lives_below_response_not_in_pinned_todos() {
     state.pinned_todos_payload = Some(
         serde_json::json!({"todos": [{
             "id": "audio", "content": "Restore audio", "status": "completed", "priority": "high",
-            "completely_blocked": {"reason": reason}
+            "requires_user_auth": {"reason": reason}
         }]})
         .to_string(),
     );

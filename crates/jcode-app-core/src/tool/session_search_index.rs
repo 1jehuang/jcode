@@ -164,10 +164,15 @@ pub fn hash_token(token: &str) -> u32 {
     hash
 }
 
+#[cfg(test)]
+#[path = "session_search_index_normalization_tests.rs"]
+mod normalization_tests;
+
 /// Tokenize searchable text into sorted unique hashes. Returns `(hashes,
 /// overflowed)`.
 pub fn hash_tokens_for_text(text: &str) -> (Vec<u32>, bool) {
-    let tokens = jcode_session_types::tokenize_session_search_query(&text.to_lowercase());
+    let tokens =
+        jcode_session_types::tokenize_prelowercased_session_search_text(&text.to_lowercase());
     let mut hashes: Vec<u32> = tokens
         .iter()
         .filter(|token| token.len() <= MAX_INDEX_TOKEN_LEN)

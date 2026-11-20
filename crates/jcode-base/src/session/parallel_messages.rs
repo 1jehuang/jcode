@@ -52,11 +52,17 @@ fn parse_one(raw: &RawValue) -> Result<StoredMessage, serde_json::Error> {
 }
 
 fn parse_raw_messages(raws: &[Box<RawValue>]) -> Result<Vec<StoredMessage>, serde_json::Error> {
+    // Small arrays are always sequential. Avoid querying CPU/cgroup topology
+    // for them, which cannot change that decision and adds filesystem work to
+    // every short session load.
+    if raws.len() < PARALLEL_MIN_MESSAGES {
+        return raws.iter().map(|raw| parse_one(raw)).collect();
+    }
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
         .min(MAX_THREADS);
-    if raws.len() < PARALLEL_MIN_MESSAGES || threads < 2 {
+    if threads < 2 {
         return raws.iter().map(|raw| parse_one(raw)).collect();
     }
     let chunk = raws.len().div_ceil(threads);
@@ -139,6 +145,50 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         let parsed: Holder = serde_json::from_value(value).unwrap();
         assert_eq!(ids(&parsed.messages), ids(&sequential(n)));
+    }
+
+    #[test]
+    #[ignore = "paired short-session parsing benchmark, run explicitly"]
+    fn benchmark_short_session_topology_query() {
+        use std::{hint::black_box, time::Instant};
+        for count in [0, 1, 16] {
+            let raws: Vec<Box<RawValue>> = (0..count)
+                .map(|index| serde_json::from_str(&message_json(index)).unwrap())
+                .collect();
+            for pair in 0..5 {
+                let legacy = || {
+                    let start = Instant::now();
+                    for _ in 0..500 {
+                        black_box(
+                            std::thread::available_parallelism()
+                                .map(|n| n.get())
+                                .unwrap_or(1)
+                                .min(MAX_THREADS),
+                        );
+                        let parsed: Result<Vec<_>, _> =
+                            raws.iter().map(|raw| parse_one(raw)).collect();
+                        black_box(parsed.unwrap());
+                    }
+                    start.elapsed()
+                };
+                let optimized = || {
+                    let start = Instant::now();
+                    for _ in 0..500 {
+                        black_box(parse_raw_messages(black_box(&raws)).unwrap());
+                    }
+                    start.elapsed()
+                };
+                let (before, after) = if pair % 2 == 0 {
+                    (legacy(), optimized())
+                } else {
+                    let after = optimized();
+                    (legacy(), after)
+                };
+                eprintln!(
+                    "short-session count={count} pair={pair}: before={before:?} after={after:?}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -115,12 +115,17 @@ const WEB_ALLOWED_ORIGINS = new Set([
 // per-database hard cap, leaving 2 GB of headroom for an emergency prune to
 // catch up before inserts would start failing.
 const D1_SOFT_LIMIT_BYTES = 8_000_000_000;
+const D1_HARD_LIMIT_BYTES = 10_000_000_000;
 const EMERGENCY_PRUNE_COOLDOWN_MS = 10 * 60 * 1000;
 // Best-effort per-isolate state (resets on isolate recycle, which is fine:
 // the next request re-observes the size from its own insert result).
-let lastObservedDbSizeBytes = 0;
-let lastEmergencyPruneAtMs = 0;
-let lastObservedBulkDbSizeBytes = 0;
+const dbPressure = new WeakMap();
+function pressureFor(env) {
+  if (!dbPressure.has(env.DB)) {
+    dbPressure.set(env.DB, { size: 0, lastPruneAt: 0 });
+  }
+  return dbPressure.get(env.DB);
+}
 
 // ---------------------------------------------------------------------------
 // Workers Analytics Engine firehose.
@@ -345,7 +350,8 @@ function writeConcurrencyFirehose(env, body) {
 // AE is a sampled forensic backup, not a durable ACK or additive rollup.
 export const FIREHOSE_USAGE_SCHEMA = {
   blobs: ["event", "event_id", "session_id", "id", "version", "os", "arch",
-    "source", "provider", "model", "build_channel", "occurred_at", "country"],
+    "source", "provider", "model", "build_channel", "occurred_at", "country",
+    "requested_model", "resolved_model"],
   doubles: ["input_tokens", "output_tokens", "cache_read_input_tokens",
     "cache_creation_input_tokens", "total_tokens", "responses", "is_ci", "usage_contract_version"],
 };
@@ -519,10 +525,10 @@ export default {
     if (request.method === "GET" && url.pathname === "/v1/health") {
       try {
         const probe = await env.DB.prepare("SELECT 1").run();
-        observeDbSize(probe);
+        observeDbSize(probe, env);
         if (env.DB_BULK) {
           const bulkProbe = await env.DB_BULK.prepare("SELECT 1").run();
-          lastObservedBulkDbSizeBytes = bulkProbe?.meta?.size_after || lastObservedBulkDbSizeBytes;
+          observeDbSize(bulkProbe, { DB: env.DB_BULK });
         }
       } catch (err) {
         return jsonResponse(
@@ -533,11 +539,16 @@ export default {
       }
       return jsonResponse({
         ok: true,
-        db_size_bytes: lastObservedDbSizeBytes,
+        db_size_bytes: pressureFor(env).size,
         db_soft_limit_bytes: D1_SOFT_LIMIT_BYTES,
-        over_soft_limit: lastObservedDbSizeBytes >= D1_SOFT_LIMIT_BYTES,
-        bulk_db_size_bytes: env.DB_BULK ? lastObservedBulkDbSizeBytes : null,
-        last_emergency_prune_at_ms: lastEmergencyPruneAtMs || null,
+        db_hard_limit_bytes: D1_HARD_LIMIT_BYTES,
+        over_soft_limit: pressureFor(env).size >= D1_SOFT_LIMIT_BYTES,
+        bulk_db_size_bytes: env.DB_BULK ? pressureFor({ DB: env.DB_BULK }).size : null,
+        bulk_db_soft_limit_bytes: env.DB_BULK ? D1_SOFT_LIMIT_BYTES : null,
+        bulk_db_hard_limit_bytes: env.DB_BULK ? D1_HARD_LIMIT_BYTES : null,
+        bulk_over_soft_limit: env.DB_BULK ? pressureFor({ DB: env.DB_BULK }).size >= D1_SOFT_LIMIT_BYTES : null,
+        last_emergency_prune_at_ms: pressureFor(env).lastPruneAt || null,
+        bulk_last_emergency_prune_at_ms: env.DB_BULK ? pressureFor({ DB: env.DB_BULK }).lastPruneAt || null : null,
       }, 200, cors);
     }
 
@@ -642,8 +653,8 @@ export default {
 
     let durableOk = true;
     let concurrencyDurable = null;
+    const storeEnv = bulkEnv(env, body.event);
     try {
-      const storeEnv = bulkEnv(env, body.event);
       await insertEvent(storeEnv, body);
       if (CONCURRENCY_EVENTS.includes(body.event)) {
         concurrencyDurable = await insertConcurrencyDetails(storeEnv, body);
@@ -651,22 +662,18 @@ export default {
     } catch (err) {
       durableOk = false;
       console.error(
-        `d1 insert failed for ${body.event} (db_size=${lastObservedDbSizeBytes})`,
+        `d1 insert failed for ${body.event} (db_size=${pressureFor(storeEnv).size})`,
         err?.message || err,
       );
       // A full/limit failure means the internal free-page pool is exhausted
       // (June 2026 failure mode). Prune NOW so telemetry recovers within
       // minutes instead of staying dead until someone notices.
       if (isDbFullError(err) && ctx && typeof ctx.waitUntil === "function") {
-        const now = Date.now();
-        if (now - lastEmergencyPruneAtMs >= EMERGENCY_PRUNE_COOLDOWN_MS) {
-          lastEmergencyPruneAtMs = now;
-          ctx.waitUntil(emergencyPrune(env));
-        }
+        maybeScheduleEmergencyPrune(storeEnv, ctx, true);
       }
     }
 
-    maybeScheduleEmergencyPrune(env, ctx);
+    maybeScheduleEmergencyPrune(storeEnv, ctx);
 
     if (body.event === "session_concurrency" && !concurrencyDurable && !firehoseOk) {
       // The parent row alone does not contain the metric. Preserve it but ask
@@ -686,41 +693,41 @@ export default {
     }, 200, cors);
   },
 
-  // Nightly retention pruning bounds durable raw-history growth and keeps the
+  // Hourly retention pruning bounds durable raw-history growth and keeps the
   // database inside its paid-plan storage budget. Aggregate signal is preserved
   // in the daily_active_users rollup and in long-retention lifecycle events.
   async scheduled(event, env, ctx) {
     ctx.waitUntil(
       (async () => {
-        // Private account data is not covered by ordinary event retention.
-        // Run first so later maintenance failures cannot skip its 90-day expiry.
-        try {
-          for (let batch = 0; batch < 12; batch++) {
-            const result = await env.DB.prepare(`DELETE FROM oauth_accounts WHERE rowid IN (
-              SELECT rowid FROM oauth_accounts WHERE created_at < datetime('now', '-90 days') LIMIT 10000
-            )`).run();
-            if ((result.meta?.changes || 0) < 10000) break;
+        if (event.cron === "17 4 * * *") {
+          // Private account data is not covered by ordinary event retention.
+          // Run first so later maintenance failures cannot skip its 90-day expiry.
+          try {
+            for (let batch = 0; batch < 12; batch++) {
+              const result = await env.DB.prepare(`DELETE FROM oauth_accounts WHERE rowid IN (
+                SELECT rowid FROM oauth_accounts WHERE created_at < datetime('now', '-90 days') LIMIT 10000
+              )`).run();
+              if ((result.meta?.changes || 0) < 10000) break;
+            }
+          } catch {
+            console.warn("private OAuth account retention failed");
           }
-        } catch {
-          console.warn("private OAuth account retention failed");
-        }
-        try {
-          for (let batch = 0; batch < 100; batch++) {
-            const result = await env.DB.prepare(`DELETE FROM usage_report_ledger WHERE receipt_key IN (
-              SELECT receipt_key FROM usage_report_ledger WHERE created_at < unixepoch('now', '-8 days') LIMIT 10000
-            )`).run();
-            if ((result.meta?.changes || 0) < 10000) break;
+          // Price recently seen labels so new models are not silently valued at $0.
+          // Runs before the ledger retention loop: pricing is three small reads
+          // and a few batches, and it stopped on 2026-11-03, the first night the
+          // ledger had rows past its 8-day window, because it sat behind that loop.
+          await syncModelPricesWithRetry(env);
+          try {
+            for (let batch = 0; batch < 100; batch++) {
+              const result = await env.DB.prepare(`DELETE FROM usage_report_ledger WHERE receipt_key IN (
+                SELECT receipt_key FROM usage_report_ledger WHERE created_at < unixepoch('now', '-8 days') LIMIT 10000
+              )`).run();
+              if ((result.meta?.changes || 0) < 10000) break;
+            }
+          } catch (err) {
+            console.warn("usage ledger retention failed", err?.message || err);
           }
-        } catch (err) {
-          console.warn("usage ledger retention failed", err?.message || err);
-        }
-        await repairDailyActivityYesterday(env);
-        // Price any model label first seen recently, so new models (e.g.
-        // claude-opus-5-5) are not silently valued at $0 in spend dashboards.
-        try {
-          await syncModelPrices(env);
-        } catch (err) {
-          console.warn("model price sync failed", err?.message || err);
+          await repairDailyActivityYesterday(env);
         }
         await pruneOldEvents(env);
         if (env.DB_BULK) {
@@ -729,19 +736,44 @@ export default {
         // If the normal prune did not free enough headroom, escalate with the
         // emergency (halved) retention windows instead of waiting for inserts
         // to start failing mid-day.
-        try {
-          const probe = await env.DB.prepare("SELECT 1").run();
-          observeDbSize(probe);
-        } catch {
-          // ignore: size stays at last observation
-        }
-        if (lastObservedDbSizeBytes >= D1_SOFT_LIMIT_BYTES) {
-          await emergencyPrune(env);
+        const stores = [env];
+        if (env.DB_BULK) stores.push({ ...env, DB: env.DB_BULK, DB_MAIN: env.DB });
+        for (const store of stores) {
+          try {
+            observeDbSize(await store.DB.prepare("SELECT 1").run(), store);
+          } catch {
+            // ignore: size stays at last observation
+          }
+          if (pressureFor(store).size >= D1_SOFT_LIMIT_BYTES) {
+            await emergencyPrune(store);
+          }
         }
       })(),
     );
   },
 };
+
+function isD1Overload(err) {
+  const message = [err?.message, err?.cause?.message].filter(Boolean).join(" ");
+  return Number(err?.code) === 7429 || Number(err?.cause?.code) === 7429
+    || /\b7429\b|\bD1(?: DB| database)? is overloaded\b/i.test(message);
+}
+
+// One retry after D1's ten-second overload window, so a busy database at 04:17
+// does not cost a whole day of pricing. The upserts are idempotent. Never
+// throws: later nightly maintenance must still run.
+export async function syncModelPricesWithRetry(env, { cooldownMs = 11000, ...options } = {}) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await syncModelPrices(env, options);
+    } catch (err) {
+      console.warn("model price sync failed", err?.message || err);
+      if (attempt > 0 || !isD1Overload(err)) return null;
+      await new Promise((resolve) => setTimeout(resolve, cooldownMs));
+    }
+  }
+  return null;
+}
 
 async function repairDailyActivityYesterday(env) {
   try {
@@ -924,12 +956,13 @@ function redactSecretsInValue(value) {
   }
 }
 
-function observeDbSize(result) {
+function observeDbSize(result, env) {
+  const pressure = pressureFor(env);
   const size = result?.meta?.size_after;
-  if (typeof size === "number" && size > 0) {
-    lastObservedDbSizeBytes = size;
+  if (Number.isFinite(size) && size > 0) {
+    pressure.size = size;
   }
-  return lastObservedDbSizeBytes;
+  return pressure.size;
 }
 
 function isDbFullError(err) {
@@ -947,25 +980,25 @@ function isDbFullError(err) {
   );
 }
 
-function maybeScheduleEmergencyPrune(env, ctx) {
-  if (lastObservedDbSizeBytes < D1_SOFT_LIMIT_BYTES) {
+function maybeScheduleEmergencyPrune(env, ctx, force = false) {
+  const pressure = pressureFor(env);
+  if (!ctx || typeof ctx.waitUntil !== "function") return;
+  if (!force && pressure.size < D1_SOFT_LIMIT_BYTES) {
     return;
   }
   const now = Date.now();
-  if (now - lastEmergencyPruneAtMs < EMERGENCY_PRUNE_COOLDOWN_MS) {
+  if (now - pressure.lastPruneAt < EMERGENCY_PRUNE_COOLDOWN_MS) {
     return;
   }
-  lastEmergencyPruneAtMs = now;
-  if (ctx && typeof ctx.waitUntil === "function") {
-    ctx.waitUntil(emergencyPrune(env));
-  }
+  pressure.lastPruneAt = now;
+  ctx.waitUntil(emergencyPrune(env));
 }
 
 async function emergencyPrune(env) {
   console.error(
-    `EMERGENCY PRUNE: db size ${lastObservedDbSizeBytes} bytes >= soft limit ${D1_SOFT_LIMIT_BYTES}; pruning with halved retention windows`,
+    `EMERGENCY PRUNE: db size ${pressureFor(env).size} bytes; soft limit ${D1_SOFT_LIMIT_BYTES}; pruning with halved retention windows`,
   );
-  await pruneOldEvents(env, { retentionScale: 0.5, maxBatches: 24 });
+  await pruneOldEvents(env, { retentionScale: 0.5 });
 }
 
 // Retention windows, in days, per event type. Children (turn_details /
@@ -1009,31 +1042,55 @@ const RETENTION_DAYS = {
   desktop_update: 365,
 };
 
-const PRUNE_BATCH_LIMIT = 10000;
-const PRUNE_MAX_BATCHES_PER_RUN = 12;
+const PRUNE_BATCH_LIMIT = 2000;
+// Two 2k batches per family each hour allow 96k expired rows/day/family,
+// about 4x the busiest family's 24k/day measured on 2026-11-13. Small batches
+// reduce D1 CPU bursts while leaving room for both stores and emergency passes.
+const PRUNE_MAX_BATCHES_PER_FAMILY = 2;
+
+async function runRetentionStatement(statement) {
+  try {
+    return await statement.run();
+  } catch (err) {
+    if (!isD1Overload(err)) throw err;
+    // D1's overload protection uses a ten-second resource window. Retry only
+    // this idempotent retention statement, once, after that window clears.
+    await new Promise((resolve) => setTimeout(resolve, 11000));
+    return statement.run();
+  }
+}
 
 async function pruneOldEvents(env, options = {}) {
   const retentionScale = options.retentionScale ?? 1;
-  const maxBatches = options.maxBatches ?? PRUNE_MAX_BATCHES_PER_RUN;
+  const maxBatches = options.maxBatches ?? PRUNE_MAX_BATCHES_PER_FAMILY;
   const linkageDays = Math.max(1, Math.round(90 * retentionScale));
   const linkageCutoff = `-${linkageDays} days`;
   // The conversion key is deliberately short-lived. Keep the aggregate CTA and
   // install anchors, but sever the browser <-> CLI join after 90 days.
   for (const table of ["web_details", "install_details"]) {
     try {
-      await env.DB.prepare(
-        `UPDATE ${table} SET conversion_id = NULL WHERE conversion_id IS NOT NULL
-         AND event_id IN (
-           SELECT event_id FROM events
-           WHERE created_at < datetime('now', ?) AND event_id IS NOT NULL
-         )`
-      ).bind(linkageCutoff).run();
+      for (let batch = 0; batch < maxBatches; batch++) {
+        // Drive this from the small, partially indexed detail table. An IN
+        // subquery over old events materializes millions of unrelated IDs.
+        const result = await runRetentionStatement(env.DB.prepare(
+          `UPDATE ${table} SET conversion_id = NULL WHERE rowid IN (
+             SELECT detail.rowid FROM ${table} AS detail
+             WHERE detail.conversion_id IS NOT NULL AND EXISTS (
+               SELECT 1 FROM events
+               WHERE events.event_id = detail.event_id
+                 AND events.created_at < datetime('now', ?)
+             ) LIMIT ?
+           )`
+        ).bind(linkageCutoff, PRUNE_BATCH_LIMIT));
+        if ((result?.meta?.changes ?? result?.changes ?? 0) < PRUNE_BATCH_LIMIT) break;
+      }
     } catch (err) {
       console.warn(`${table} attribution redaction failed`, err?.message || err);
     }
   }
-  let batchesUsed = 0;
   for (const [eventType, days] of Object.entries(RETENTION_DAYS)) {
+    // A backlogged early family must not starve later families indefinitely.
+    let batchesUsed = 0;
     const scaledDays = Math.max(1, Math.round(days * retentionScale));
     const cutoff = `-${scaledDays} days`;
     while (batchesUsed < maxBatches) {
@@ -1042,73 +1099,75 @@ async function pruneOldEvents(env, options = {}) {
       // abort pruning of the event rows themselves).
       if (WEB_EVENTS.includes(eventType)) {
         try {
-          await env.DB.prepare(
+          await runRetentionStatement(env.DB.prepare(
             `DELETE FROM web_details WHERE event_id IN (
                SELECT event_id FROM events
                WHERE event = ? AND created_at < datetime('now', ?) AND event_id IS NOT NULL
                LIMIT ?)`
-          ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT).run();
+          ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT));
         } catch (err) {
           console.warn(`web_details prune failed for ${eventType}`, err?.message || err);
         }
       }
       if (INSTALL_FUNNEL_EVENTS.includes(eventType)) {
         try {
-          await env.DB.prepare(
+          await runRetentionStatement(env.DB.prepare(
             `DELETE FROM install_details WHERE event_id IN (
                SELECT event_id FROM events
                WHERE event = ? AND created_at < datetime('now', ?) AND event_id IS NOT NULL
                LIMIT ?)`
-          ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT).run();
+          ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT));
         } catch (err) {
           console.warn(`install_details prune failed for ${eventType}`, err?.message || err);
         }
       }
       if (eventType === "desktop_update") {
         try {
-          await env.DB.prepare(
+          await runRetentionStatement(env.DB.prepare(
             `DELETE FROM desktop_update_details WHERE event_id IN (
                SELECT event_id FROM events
                WHERE event = ? AND created_at < datetime('now', ?) AND event_id IS NOT NULL
                LIMIT ?)`
-          ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT).run();
+          ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT));
         } catch (err) {
           console.warn(`desktop_update_details prune failed`, err?.message || err);
         }
       }
-      if (eventType === "todo_session") {
+      // Split main databases never had this bulk-only detail table. Legacy
+      // unsplit databases and the bulk binding still need child cleanup.
+      if (eventType === "todo_session" && (env.DB_MAIN || !env.DB_BULK)) {
         try {
-          await env.DB.prepare(
+          await runRetentionStatement(env.DB.prepare(
             `DELETE FROM todo_session_details WHERE event_id IN (
                SELECT event_id FROM events
                WHERE event = ? AND created_at < datetime('now', ?) AND event_id IS NOT NULL
                LIMIT ?)`
-          ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT).run();
+          ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT));
         } catch (err) {
           console.warn("todo_session_details prune failed", err?.message || err);
         }
       }
       try {
         // Delete detail children first so the events FK never blocks the prune.
-        await env.DB.prepare(
+        await runRetentionStatement(env.DB.prepare(
           `DELETE FROM turn_details WHERE event_id IN (
              SELECT event_id FROM events
              WHERE event = ? AND created_at < datetime('now', ?) AND event_id IS NOT NULL
              LIMIT ?)`
-        ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT).run();
-        await env.DB.prepare(
+        ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT));
+        await runRetentionStatement(env.DB.prepare(
           `DELETE FROM session_details WHERE event_id IN (
              SELECT event_id FROM events
              WHERE event = ? AND created_at < datetime('now', ?) AND event_id IS NOT NULL
              LIMIT ?)`
-        ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT).run();
-        const result = await env.DB.prepare(
+        ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT));
+        const result = await runRetentionStatement(env.DB.prepare(
           `DELETE FROM events WHERE id IN (
              SELECT id FROM events
              WHERE event = ? AND created_at < datetime('now', ?)
              LIMIT ?)`
-        ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT).run();
-        if (!env.DB_MAIN) observeDbSize(result);
+        ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT));
+        observeDbSize(result, env);
         const changes = result?.meta?.changes ?? result?.changes ?? 0;
         // Empty event families must not consume the deletion budget, or adding
         // a family permanently starves later families of retention checks.
@@ -2287,11 +2346,7 @@ async function insertDynamic(env, table, entries) {
   const sql = `INSERT OR IGNORE INTO ${table} (${columns.join(", ")}) VALUES (${placeholders})`;
   const values = entries.map(([, value]) => value);
   const result = await env.DB.prepare(sql).bind(...values).run();
-  if (env.DB_MAIN) {
-    lastObservedBulkDbSizeBytes = result?.meta?.size_after || lastObservedBulkDbSizeBytes;
-  } else {
-    observeDbSize(result);
-  }
+  observeDbSize(result, env);
   return result;
 }
 
@@ -2325,6 +2380,14 @@ export function normalizeUsageReportEvent(body) {
   for (const field of ["provider", "model", "build_channel"]) {
     if (body[field] != null && (typeof body[field] !== "string" || body[field].trim().length > 120)) return `Invalid usage_report ${field}`;
   }
+  for (const field of ["requested_model", "resolved_model"]) {
+    const value = body[field];
+    if (value != null && (typeof value !== "string" || !value.trim()
+      || new TextEncoder().encode(value).length > 120 || /[\u0000-\u001f\u007f-\u009f]/u.test(value))) {
+      return `Invalid usage_report ${field}`;
+    }
+    if (value != null) body[field] = normalizeUsageLabel(value);
+  }
   body.usage_contract_version ??= 1;
   if (![1, 2].includes(body.usage_contract_version)) return "Invalid usage_report usage_contract_version";
   if (body.usage_contract_version === 2 && body.occurred_at == null) return "Missing usage_report occurred_at";
@@ -2348,6 +2411,14 @@ export function normalizeUsageReportEvent(body) {
   body.model = normalizeUsageLabel(body.model);
   if (!body.model) {
     return "Missing usage_report model";
+  }
+  // Resolution is response-observed metadata, not a historical alias rewrite.
+  // Old clients retain their original model and unknown attribution (NULL).
+  if (body.resolved_model != null) {
+    body.requested_model ??= body.model;
+    body.model = body.resolved_model;
+  } else if (body.requested_model != null) {
+    body.model = body.requested_model;
   }
   const suppliedTotal = body.total_tokens;
   for (const field of USAGE_TOKEN_FIELDS) {
@@ -2381,8 +2452,9 @@ async function recordDailyModelUsage(env, body) {
     INSERT INTO usage_report_ledger (
       usage_date, source, provider, model, build_channel, is_ci, responses,
       input_tokens, output_tokens, cache_read_input_tokens,
-      cache_creation_input_tokens, total_tokens, receipt_key, usage_contract_version
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      cache_creation_input_tokens, total_tokens, receipt_key, usage_contract_version,
+      requested_model, resolved_model
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(receipt_key) DO NOTHING
   `).bind(
     usageDate,
@@ -2399,6 +2471,8 @@ async function recordDailyModelUsage(env, body) {
     body.total_tokens,
     receiptKey,
     body.usage_contract_version,
+    body.requested_model ?? null,
+    body.resolved_model ?? null,
   ).run();
 }
 

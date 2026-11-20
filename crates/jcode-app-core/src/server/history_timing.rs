@@ -105,6 +105,7 @@ pub(in crate::server) async fn send_resume_todos(
     let json = encode_event(&ServerEvent::Todos {
         session_id: session_id.to_owned(),
         payload: payload.to_string(),
+        pushes: true,
     });
     timing.stage("writer_lock");
     let mut writer = writer.lock().await;

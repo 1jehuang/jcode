@@ -1,6 +1,8 @@
 pub mod account_picker;
 pub(crate) mod app;
+pub mod jarvis;
 pub mod justrust_status;
+pub(crate) mod screen_context;
 
 #[derive(Clone)]
 pub struct ContextSnapshot {
@@ -41,6 +43,10 @@ mod info_widget_cloud_directories;
 // `jcode-terminal-image` crate (shared with the `read` tool). Re-exported here
 // so existing `crate::tui::image` paths keep working.
 pub use jcode_terminal_image::display as image;
+#[path = "tui_text_filter.rs"]
+mod text_filter;
+
+mod focus_carryover;
 pub mod info_widget;
 mod info_widget_layout;
 mod info_widget_overview;
@@ -77,6 +83,7 @@ mod ui;
 mod ui_diff;
 pub mod usage_overlay;
 pub mod visual_debug;
+pub(crate) mod window_visibility;
 pub mod workspace_client;
 pub use jcode_tui_workspace::workspace_map;
 pub use jcode_tui_workspace::workspace_map_widget;
@@ -691,6 +698,13 @@ pub(crate) fn hash_rendered_image_signature_fields(
     hash_rendered_image_anchor(image.anchor.as_ref(), hasher);
 }
 
+#[derive(Debug, Clone)]
+pub struct JarvisCaption {
+    pub id: u64,
+    pub text: String,
+    pub score: Option<(f64, bool)>,
+}
+
 /// Trait for TUI state consumed by the shared renderer.
 ///
 /// This is a wide (114-method) presentation interface: the read-only surface the
@@ -735,6 +749,11 @@ pub trait TuiState {
     /// Version counter for display_messages (monotonic, increments on mutation)
     fn display_messages_version(&self) -> u64;
     fn streaming_text(&self) -> &str;
+    /// Content signature for the prepare cache. Views without tracked mutations
+    /// hash on demand so even same-length replacements invalidate correctly.
+    fn streaming_text_hash(&self) -> u64 {
+        ui::hash_text_for_cache(self.streaming_text())
+    }
     /// JSON payload for the pinned todo band rendered at the top of the chat
     /// viewport when `display.pin_todos` is enabled. `None` when the feature
     /// is off or the session has no todos.
@@ -932,6 +951,9 @@ pub trait TuiState {
     fn voice_input_status(&self) -> Option<(bool, String)> {
         None
     }
+    fn jarvis_transcript(&self) -> Option<&std::collections::VecDeque<crate::tui::JarvisCaption>> {
+        None
+    }
     /// Voice input rendered in the composer instead of the status line.
     fn voice_composer_preview(&self) -> Option<VoiceComposerPreview> {
         None
@@ -1024,6 +1046,10 @@ pub trait TuiState {
     fn inline_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
         Vec::new()
     }
+    /// Whether ownership-scoped gallery members exist, without requiring a list.
+    fn has_inline_swarm_members(&self) -> bool {
+        !self.inline_swarm_members().is_empty()
+    }
     /// Members available for cards embedded beneath swarm spawn tool calls.
     ///
     /// This may be broader than `inline_swarm_members`: the gallery is scoped by
@@ -1061,6 +1087,12 @@ pub trait TuiState {
     /// Render streaming text using incremental markdown renderer
     /// This is more efficient than re-rendering on every frame
     fn render_streaming_markdown(&self, width: usize) -> Vec<Line<'static>>;
+    /// `(generation, count)` of the leading lines of the last
+    /// `render_streaming_markdown` result that are unchanged for as long as
+    /// the generation is. `(0, 0)` when nothing is known to be stable.
+    fn streaming_markdown_stable_prefix(&self) -> (u64, usize) {
+        (0, 0)
+    }
     /// Whether centered mode is enabled
     fn centered_mode(&self) -> bool;
     /// Authentication status for all supported providers
@@ -1648,64 +1680,6 @@ impl PickerKind {
     pub fn uses_compact_navigation(&self) -> bool {
         self.schema().layout == InlineInteractiveLayout::Compact
     }
-
-    pub fn filter_text(&self, entry: &PickerEntry) -> String {
-        match self {
-            Self::Account => {
-                let provider = entry
-                    .active_option()
-                    .map(|option| option.provider.as_str())
-                    .unwrap_or("");
-                let state = entry.account_state_label().unwrap_or("");
-                format!("{} {} {}", entry.name, provider, state)
-            }
-            Self::Login => {
-                let auth_kind = entry
-                    .active_option()
-                    .map(|option| option.provider.as_str())
-                    .unwrap_or("");
-                let state = entry
-                    .active_option()
-                    .map(|option| option.api_method.as_str())
-                    .unwrap_or("");
-                let detail = entry
-                    .active_option()
-                    .map(|option| option.detail.as_str())
-                    .unwrap_or("");
-                format!("{} {} {} {}", entry.name, auth_kind, state, detail)
-            }
-            Self::Usage => {
-                let status = entry
-                    .active_option()
-                    .map(|option| option.provider.as_str())
-                    .unwrap_or("");
-                let window = entry
-                    .active_option()
-                    .map(|option| option.api_method.as_str())
-                    .unwrap_or("");
-                let detail = entry
-                    .active_option()
-                    .map(|option| option.detail.as_str())
-                    .unwrap_or("");
-                format!("{} {} {} {}", entry.name, status, window, detail)
-            }
-            Self::Model => {
-                let route = entry.active_option();
-                let provider = route.map(|option| option.provider.as_str()).unwrap_or("");
-                let method = route.map(|option| option.api_method.as_str()).unwrap_or("");
-                let detail = route.map(|option| option.detail.as_str()).unwrap_or("");
-                // Include the pretty name so a query like "opus 4.8" matches
-                // the row even though the underlying id is `claude-opus-4-8`.
-                let pretty =
-                    crate::tui::app::helpers::model_names::pretty_known_model_family(&entry.name)
-                        .unwrap_or_default();
-                format!(
-                    "{} {} {} {} {}",
-                    entry.name, pretty, provider, method, detail
-                )
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2240,271 +2214,4 @@ pub fn prewarm_focused_side_panel(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        CacheTtlInfo, KvCacheProblemKind, connection_type_icon, detect_kv_cache_problem,
-        keyboard_enhancement_flags, resolve_subscribe_metadata, scheduled_notification_text,
-    };
-    use crate::ambient::AmbientStatus;
-    use crate::tui::info_widget::AmbientWidgetData;
-    use crossterm::event::KeyboardEnhancementFlags;
-
-    fn warm_cache_ttl() -> CacheTtlInfo {
-        CacheTtlInfo {
-            is_estimate: false,
-            remaining_secs: 240,
-            ttl_secs: 300,
-            is_cold: false,
-            cold_for_secs: 0,
-            cached_tokens: Some(12_000),
-        }
-    }
-
-    fn cold_cache_ttl() -> CacheTtlInfo {
-        CacheTtlInfo {
-            is_estimate: false,
-            remaining_secs: 0,
-            ttl_secs: 300,
-            is_cold: true,
-            cold_for_secs: 90,
-            cached_tokens: Some(12_000),
-        }
-    }
-
-    #[test]
-    fn cache_estimate_is_not_evidence_of_an_expected_warm_hit() {
-        let mut timer = warm_cache_ttl();
-        assert!(super::cache_expected_warm(Some(&timer)));
-        timer.is_estimate = true;
-        assert!(!super::cache_expected_warm(Some(&timer)));
-    }
-
-    #[test]
-    fn subscribe_metadata_prefers_remote_working_dir_override() {
-        let local_dir = std::path::Path::new("/client/project");
-        let (working_dir, selfdev) =
-            resolve_subscribe_metadata(Some(local_dir), Some("/server/project"), false);
-
-        assert_eq!(working_dir.as_deref(), Some("/server/project"));
-        assert_eq!(selfdev, None);
-    }
-
-    #[test]
-    fn subscribe_metadata_uses_client_cwd_without_override() {
-        let local_dir = std::path::Path::new("/client/project");
-        let (working_dir, _selfdev) = resolve_subscribe_metadata(Some(local_dir), None, false);
-
-        assert_eq!(working_dir.as_deref(), Some("/client/project"));
-    }
-
-    #[test]
-    fn format_compact_age_is_glanceable() {
-        use super::format_compact_age;
-        assert_eq!(format_compact_age(0), "0s");
-        assert_eq!(format_compact_age(45), "45s");
-        assert_eq!(format_compact_age(60), "1m");
-        assert_eq!(format_compact_age(3_660), "1h 1m");
-        assert_eq!(format_compact_age(7_200), "2h");
-        assert_eq!(format_compact_age(90_000), "1d 1h");
-        assert_eq!(format_compact_age(172_800), "2d");
-    }
-
-    #[test]
-    fn anthropic_cache_creation_on_turn_two_is_warmup_not_problem() {
-        let ttl = warm_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem(
-                "anthropic",
-                None,
-                2,
-                12_000,
-                Some(0),
-                Some(12_000),
-                Some(&ttl)
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn anthropic_cache_creation_without_read_on_warm_later_turn_is_problem() {
-        let ttl = warm_cache_ttl();
-        let problem = detect_kv_cache_problem(
-            "anthropic",
-            None,
-            3,
-            12_000,
-            Some(0),
-            Some(12_000),
-            Some(&ttl),
-        )
-        .expect("expected explicit cache creation without read to warn");
-        assert_eq!(problem.kind, KvCacheProblemKind::UnexpectedCacheCreation);
-        assert_eq!(problem.affected_tokens, Some(12_000));
-    }
-
-    #[test]
-    fn cache_read_suppresses_cache_creation_warning() {
-        let ttl = warm_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem(
-                "anthropic",
-                None,
-                3,
-                12_000,
-                Some(8_000),
-                Some(4_000),
-                Some(&ttl)
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn cold_cache_suppresses_cache_warning() {
-        let ttl = cold_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem(
-                "anthropic",
-                None,
-                3,
-                12_000,
-                Some(0),
-                Some(12_000),
-                Some(&ttl)
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn openai_explicit_zero_cache_read_on_warm_cacheable_turn_is_problem() {
-        let ttl = warm_cache_ttl();
-        let problem = detect_kv_cache_problem("openai", None, 3, 8_000, Some(0), None, Some(&ttl))
-            .expect("expected explicit zero cached tokens to warn");
-        assert_eq!(problem.kind, KvCacheProblemKind::ExpectedCacheReadMissing);
-        assert_eq!(problem.affected_tokens, Some(8_000));
-    }
-
-    #[test]
-    fn missing_cache_read_metric_is_not_a_warning() {
-        let ttl = warm_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem("openai", None, 3, 8_000, None, None, Some(&ttl)),
-            None
-        );
-    }
-
-    #[test]
-    fn read_only_warning_requires_cacheable_input_size() {
-        let ttl = warm_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem("openai", None, 3, 800, Some(0), None, Some(&ttl)),
-            None
-        );
-    }
-
-    #[test]
-    fn openrouter_zero_cache_read_requires_known_cache_capable_upstream() {
-        let ttl = warm_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem("openrouter", None, 3, 8_000, Some(0), None, Some(&ttl)),
-            None
-        );
-
-        let problem = detect_kv_cache_problem(
-            "openrouter",
-            Some("OpenAI"),
-            3,
-            8_000,
-            Some(0),
-            None,
-            Some(&ttl),
-        )
-        .expect("known OpenAI upstream should make explicit zero read actionable");
-        assert_eq!(problem.kind, KvCacheProblemKind::ExpectedCacheReadMissing);
-    }
-
-    #[test]
-    fn unsupported_provider_zero_cache_read_does_not_warn_even_if_metric_present() {
-        let ttl = warm_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem("copilot", None, 3, 8_000, Some(0), None, Some(&ttl)),
-            None
-        );
-    }
-
-    #[test]
-    fn gemini_zero_cache_read_uses_conservative_minimum() {
-        let ttl = warm_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem("gemini", None, 3, 3_000, Some(0), None, Some(&ttl)),
-            None
-        );
-
-        let problem = detect_kv_cache_problem("gemini", None, 3, 5_000, Some(0), None, Some(&ttl))
-            .expect("large Gemini prompt with explicit zero cached content should warn");
-        assert_eq!(problem.kind, KvCacheProblemKind::ExpectedCacheReadMissing);
-    }
-
-    #[test]
-    fn connection_type_icon_uses_protocol_specific_icons() {
-        assert_eq!(connection_type_icon(Some("websocket")), Some("🔌"));
-        assert_eq!(connection_type_icon(Some("wss")), Some("🔌"));
-        assert_eq!(connection_type_icon(Some("https")), Some("🌐"));
-        assert_eq!(connection_type_icon(Some("https/sse")), Some("🌐"));
-        assert_eq!(connection_type_icon(Some("http")), Some("🌐"));
-        assert_eq!(connection_type_icon(Some("unknown")), None);
-        assert_eq!(connection_type_icon(None), None);
-    }
-
-    #[test]
-    fn connection_type_icons_avoid_vs16_sequences() {
-        // macOS window/tab title fonts ignore the VS16 emoji-presentation
-        // selector, so title icons must be single emoji-default codepoints.
-        for connection in ["websocket", "wss", "https", "https/sse", "http"] {
-            let icon = connection_type_icon(Some(connection)).unwrap();
-            assert_eq!(
-                icon.chars().count(),
-                1,
-                "connection icon for '{connection}' must be a single codepoint, got {icon:?}"
-            );
-            assert!(
-                !icon.contains('\u{FE0F}'),
-                "connection icon for '{connection}' must not need VS16, got {icon:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn scheduled_notification_text_uses_session_reminder_count_only() {
-        let info = AmbientWidgetData {
-            show_widget: false,
-            status: AmbientStatus::Disabled,
-            queue_count: 88,
-            next_queue_preview: Some("ambient backlog".to_string()),
-            reminder_count: 2,
-            next_reminder_preview: Some("follow up".to_string()),
-            last_run_ago: None,
-            last_summary: None,
-            next_wake: Some("in 0s".to_string()),
-            next_reminder_wake: Some("in 5m".to_string()),
-            budget_percent: None,
-        };
-
-        assert_eq!(
-            scheduled_notification_text(Some(&info)).as_deref(),
-            Some("⏰ next scheduled task in 5m · 2 queued")
-        );
-    }
-
-    #[test]
-    fn keyboard_enhancement_flags_avoid_report_all_keys_escape_mode() {
-        let flags = keyboard_enhancement_flags();
-
-        assert!(flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
-        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
-        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
-        assert!(!flags.contains(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES));
-    }
-}
+mod tests;

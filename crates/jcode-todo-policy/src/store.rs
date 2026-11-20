@@ -50,6 +50,10 @@ pub fn todo_file_path(home: &Path, session_id: &str, file: TodoFile) -> PathBuf 
         .join(format!("{session_id}{}.json", file.suffix()))
 }
 
+/// Cancellation history is stored separately from the active plan.
+mod cancellation;
+pub use cancellation::{TodoCancellation, append_cancellations, load_cancellations};
+
 /// Persisted long-session review clock.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoReviewState {
@@ -327,8 +331,8 @@ mod tests {
             details: Some("worker-authored details".into()),
             group: Some("server output reports".into()),
             stage: Some(9),
-            completely_blocked: None,
-            external_blocker: None,
+            requires_user_auth: None,
+            waiting_reason: None,
             waiting_on: vec!["worker-task".into()],
             ..Default::default()
         }];
@@ -388,8 +392,8 @@ mod tests {
         let todo = crate::TodoItem {
             id: "validate".into(),
             status: "pending".into(),
-            completely_blocked: None,
-            external_blocker: None,
+            requires_user_auth: None,
+            waiting_reason: None,
             waiting_on: vec![
                 "running".into(),
                 "finished".into(),

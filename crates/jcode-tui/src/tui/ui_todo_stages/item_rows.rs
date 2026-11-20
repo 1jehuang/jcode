@@ -10,7 +10,7 @@ pub(crate) fn render_todo_item_line(
     base_indent: &str,
     inner_width: usize,
 ) -> Line<'static> {
-    if crate::todo::todo_completely_blocked(todo)
+    if crate::todo::todo_requires_user_auth(todo)
         || todo.status != "in_progress"
         || todo
             .group

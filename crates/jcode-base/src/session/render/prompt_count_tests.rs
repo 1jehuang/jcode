@@ -23,13 +23,16 @@ fn compacted_tool_session(turns: usize) -> Session {
             );
         }
     }
-    session.compaction = Some(StoredCompactionState {
-        summary_text: "summary".into(),
-        openai_encrypted_content: None,
-        covers_up_to_turn: turns,
-        original_turn_count: turns,
-        compacted_count: session.messages.len(),
-    });
+    session.compaction = Some(
+        StoredCompactionState {
+            summary_text: "summary".into(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: turns,
+            original_turn_count: turns,
+            compacted_count: session.messages.len(),
+        }
+        .into(),
+    );
     session.add_message(Role::User, vec![text("current prompt")]);
     session
 }
@@ -67,7 +70,8 @@ fn compacted_single_tool_heavy_turn_is_never_truncated() {
     for _ in 0..100 {
         session.messages.insert(1, tool_result.clone());
     }
-    session.compaction.as_mut().unwrap().compacted_count = session.messages.len() - 1;
+    std::sync::Arc::make_mut(session.compaction.as_mut().unwrap()).compacted_count =
+        session.messages.len() - 1;
     let (_, _, info) = render_messages_and_images_with_compacted_history(&session, 1);
     let info = info.unwrap();
     assert_eq!(info.hidden_user_prompts, 0);
@@ -108,7 +112,7 @@ fn compacted_background_wakes_match_effective_display_role() {
         // Legacy wakes in the compacted prefix must not increase the absolute
         // prompt offset, even though they keep role=user in the raw history.
         session.messages.insert(1, wake);
-        session.compaction.as_mut().unwrap().compacted_count += 1;
+        std::sync::Arc::make_mut(session.compaction.as_mut().unwrap()).compacted_count += 1;
     }
     for window in [0, 1, 64, usize::MAX] {
         let (rendered, _, info) =

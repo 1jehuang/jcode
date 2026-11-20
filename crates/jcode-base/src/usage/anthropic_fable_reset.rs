@@ -3,12 +3,20 @@
 
 use super::anthropic_reset::{authorize, fresh_access_token, get_json, reset_client};
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Write;
 
 const BASE: &str = "https://api.anthropic.com";
 const STATUS: &str = "/api/oauth/usage?cedar_ember=1&skip_spend=1";
+
+// Sorted field order preserves the legacy JSON map's wire bytes.
+#[derive(Serialize)]
+struct ResetRequest<'a> {
+    grant_id: &'a str,
+    program: &'static str,
+    request_id: &'a str,
+}
 
 struct InvalidateOnDrop<'a>(&'a str);
 
@@ -207,7 +215,7 @@ async fn redeem(
     std::fs::File::open(root)?.sync_all()?;
     let _invalidate = InvalidateOnDrop(label);
     let response = authorize(client.post(format!("{base}/api/organizations/{organization}/reset_rate_limits")), token)
-        .json(&serde_json::json!({"program":"cedar_ember", "grant_id":grant_id, "request_id":request_id}))
+        .json(&ResetRequest { grant_id: &grant_id, program: "cedar_ember", request_id: &request_id })
         .send().await.context("Fable reset outcome uncertain. Pending marker retained; check Claude Usage before reconciliation.")?;
     anyhow::ensure!(
         response.status().is_success(),
@@ -246,6 +254,28 @@ async fn redeem(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_request_matches_legacy_bytes_after_sources_drop_without_sending() {
+        for value in ["", "dummy-id", "雪\"\\\n\u{0000}"] {
+            let source = value.to_owned();
+            let expected = serde_json::to_vec(&serde_json::json!({
+                "program": "cedar_ember", "grant_id": source, "request_id": source
+            }))
+            .unwrap();
+            let builder = reqwest::Client::new()
+                .post("https://example.invalid/reset")
+                .json(&super::ResetRequest {
+                    grant_id: &source,
+                    program: "cedar_ember",
+                    request_id: &source,
+                });
+            drop(source);
+            let request = builder.build().unwrap();
+            assert_eq!(request.body().unwrap().as_bytes().unwrap(), expected);
+        }
+    }
+
     fn fixture() -> Status {
         serde_json::from_value(serde_json::json!({
             "eligible":true,"at_limit":true,"exhausted":["seven_day_overage_included"],

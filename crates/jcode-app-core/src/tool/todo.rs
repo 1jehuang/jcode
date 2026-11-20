@@ -24,8 +24,8 @@ mod names;
 mod name_tests;
 
 #[cfg(test)]
-#[path = "todo_external_blocker_tests.rs"]
-mod external_blocker_tests;
+#[path = "todo_pause_tests.rs"]
+mod pause_tests;
 
 #[cfg(test)]
 #[path = "todo_lane_dependency_tests.rs"]
@@ -52,32 +52,59 @@ fn patch_lane_after(todos: &mut [Value], id: &str, value: Value) -> Result<()> {
     patch_lane_field(todos, id, "lane_after", value)
 }
 
-fn validate_external_blockers(previous: &[TodoItem], todos: &[TodoItem]) -> Result<()> {
-    let now = chrono::Utc::now();
-    for todo in todos {
-        if let Some(required) = &todo.completely_blocked
-            && required.reason.trim().is_empty()
-        {
-            bail!(
-                "completely_blocked.reason must be nonempty for todo {}",
-                todo.id
-            );
-        }
-        if let Some(blocker) = &todo.external_blocker {
-            if blocker.reason.trim().is_empty() {
-                bail!(
-                    "external_blocker.reason must explain the external condition for todo {}",
-                    todo.id
-                );
+/// Resolve the item pause fields at the tool boundary. `waiting_on` arrives as
+/// `{ids, reason}` (a bare ID list is still accepted) and is stored as the ID
+/// list plus `waiting_reason`. Items have no block of their own, so the removed
+/// blocker fields are rejected with the replacement spelled out.
+fn normalize_item_pauses(input: &mut Value) -> Result<()> {
+    let Some(obj) = input.as_object_mut() else {
+        return Ok(());
+    };
+    for key in ["update", "add", "todos"] {
+        let Some(items) = obj.get_mut(key).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for item in items {
+            let Some(fields) = item.as_object_mut() else {
+                continue;
+            };
+            for removed in ["external_blocker", "completely_blocked"] {
+                if fields.get(removed).is_some_and(|value| !value.is_null()) {
+                    bail!(
+                        "{removed} was removed: todos cannot be blocked. Use waiting_on for \
+                         running tasks or other agents, requires_user_auth when the step needs a login \
+                         or credential only the user has, or the goal's cannot_complete when the goal \
+                         is impossible. Otherwise keep working."
+                    );
+                }
+                fields.remove(removed);
             }
-            let unchanged = previous
-                .iter()
-                .any(|old| old.id == todo.id && old.external_blocker == todo.external_blocker);
-            if !unchanged && blocker.review_at <= now {
-                bail!(
-                    "external_blocker.review_at must be a future RFC3339 deadline for todo {}",
-                    todo.id
-                );
+            let Some(waiting) = fields.get_mut("waiting_on") else {
+                continue;
+            };
+            if let Value::String(raw) = waiting
+                && let Ok(parsed @ (Value::Object(_) | Value::Array(_) | Value::Null)) =
+                    serde_json::from_str::<Value>(raw.trim())
+            {
+                *waiting = parsed;
+            }
+            // Writing `{ids, reason}` replaces the reason. A bare list is
+            // either a model write without a reason (clears it) or an already
+            // normalized item, whose resolved reason must survive a second pass.
+            match waiting {
+                Value::Object(wait) => {
+                    let reason = wait
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|reason| !reason.is_empty())
+                        .map(|reason| json!(reason));
+                    *waiting = wait.remove("ids").unwrap_or(Value::Null);
+                    fields.insert("waiting_reason".into(), reason.unwrap_or(Value::Null));
+                }
+                _ => {
+                    fields.entry("waiting_reason").or_insert(Value::Null);
+                }
             }
         }
     }
@@ -97,7 +124,7 @@ async fn prepare_background_dependencies(
         let prior = previous.iter().find(|old| old.id == todo.id);
         let active = !crate::todo::todo_status_is_completed(&todo.status)
             && !crate::todo::todo_status_is_cancelled(&todo.status)
-            && !crate::todo::todo_completely_blocked(todo);
+            && !crate::todo::todo_requires_user_auth(todo);
         for id in &todo.waiting_on {
             // Check before the manager constructs any filesystem path.
             if id.is_empty()
@@ -168,64 +195,6 @@ impl TodoTool {
     }
 }
 
-/// Fold each incoming todo's confidence into its tool-maintained history.
-///
-/// The model reports `confidence` while working and `completion_confidence` at
-/// completion. Each todo-tool write contributes at most one observation so a
-/// single completion update cannot manufacture an apparent intermediate step.
-/// The append-only trail lets downstream consumers distinguish an
-/// evidence-driven rise (75 -> 85 -> 95 -> 100) from a bulk end-of-task stamp
-/// (75 -> 100). Model-supplied `confidence_history` is ignored: the tool owns
-/// this field.
-fn merge_confidence_history(previous: &[TodoItem], incoming: &mut [TodoItem]) {
-    let prior: HashMap<&str, &TodoItem> = previous
-        .iter()
-        .map(|todo| (todo.id.as_str(), todo))
-        .collect();
-    for todo in incoming.iter_mut() {
-        let previous_todo = prior.get(todo.id.as_str()).copied();
-        let mut history = previous_todo
-            .map(|prev| prev.confidence_history.clone())
-            .unwrap_or_default();
-        if history.is_empty()
-            && let Some(value) = previous_todo.and_then(|prev| {
-                if prev.status == "completed" {
-                    prev.completion_confidence.or(prev.confidence)
-                } else {
-                    prev.confidence
-                }
-            })
-        {
-            history.push(value);
-        }
-        let observation = if todo.status == "completed" {
-            todo.completion_confidence.or(todo.confidence)
-        } else {
-            todo.confidence
-        };
-        if let Some(value) = observation
-            && history.last() != Some(&value)
-        {
-            history.push(value);
-        }
-        todo.confidence_history = history;
-        // `assigned_to` links a todo to the swarm worker running it. It is set
-        // by swarm dispatch, not the model (the schema does not expose it), so
-        // a model rewrite of the list must not silently unassign the worker.
-        if todo.assigned_to.is_none() {
-            todo.assigned_to = previous_todo.and_then(|prev| prev.assigned_to.clone());
-        }
-        // Only a new start claims local ownership. Merely rewriting an old
-        // unassigned in-progress item does not establish who is working on it.
-        if todo.assigned_to.is_none()
-            && todo.status == "in_progress"
-            && previous_todo.is_none_or(|prev| prev.status != "in_progress")
-        {
-            todo.assigned_to = Some("@self".to_string());
-        }
-    }
-}
-
 /// How a todo call wrote, for measuring whether agents use incremental edits
 /// instead of resending the list. Counted locally in
 /// `~/.jcode/stats/todo-write-modes.json`; nothing leaves the machine.
@@ -233,7 +202,7 @@ fn todo_write_mode(input: &Value) -> &'static str {
     let has = |key: &str| input.get(key).is_some_and(|value| !value.is_null());
     match (
         has("todos") || has("phases"),
-        has("update") || has("add") || has("remove"),
+        has("update") || has("add") || has("remove") || has("cancel"),
     ) {
         (true, _) => "full",
         (false, true) => "patch",
@@ -257,18 +226,65 @@ fn record_todo_write_mode(input: &Value) {
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
     *counts.entry(mode.to_string()).or_default() += 1;
-    let _ = std::fs::create_dir_all(&dir);
-    let _ = crate::storage::write_json_fast(&path, &counts);
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        crate::logging::warn(&format!(
+            "Failed to create todo statistics directory {}: {error}",
+            dir.display()
+        ));
+        return;
+    }
+    if let Err(error) = crate::storage::write_json_fast(&path, &counts) {
+        crate::logging::warn(&format!(
+            "Failed to persist todo write statistics {}: {error}",
+            path.display()
+        ));
+    }
 }
+
+/// Every key an update may carry once names and pauses are normalized: the
+/// stored todo fields plus their public aliases.
+const UPDATE_FIELDS: &[&str] = &[
+    "id",
+    "content",
+    "details",
+    "status",
+    "priority",
+    "group",
+    "lane",
+    "stage",
+    "phase",
+    "wave",
+    "lane_after",
+    "lane_dependencies",
+    "lane_owner",
+    "confidence",
+    "completion_confidence",
+    "confidence_history",
+    "blocked_by",
+    "waiting_on",
+    "waiting_reason",
+    "requires_user_auth",
+    "assigned_to",
+    "intent",
+];
 
 /// Turn incremental edits into a full `todos` list so every downstream rule
 /// (status validation, confidence history, gates, lane and plan sync) runs on
 /// one path. `update` changes only the given fields of todos matched by `id`;
 /// `add` appends new todos (or inserts each after its `after` id); `remove`
 /// drops ids. Full replacements and incremental edits are mutually exclusive.
-fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<Value> {
+#[cfg(test)]
+fn apply_todo_patch(input: Value, stored: impl FnOnce() -> Value) -> Result<Value> {
+    prepare_todo_patch(input, stored, &mut Vec::new())
+}
+
+fn prepare_todo_patch(
+    mut input: Value,
+    stored: impl FnOnce() -> Value,
+    cancellations: &mut Vec<crate::todo::store::TodoCancellation>,
+) -> Result<Value> {
     names::normalize_containers(&mut input);
-    let patching = ["update", "add", "remove"]
+    let patching = ["update", "add", "remove", "cancel"]
         .iter()
         .any(|key| input.get(*key).is_some_and(|value| !value.is_null()));
     let named_replacement = ["phases", "todos"]
@@ -284,17 +300,18 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
         stored.as_array().map(Vec::as_slice).unwrap_or(&[]),
     )?;
     flatten_phases(&mut input)?;
+    normalize_item_pauses(&mut input)?;
     let Some(obj) = input.as_object_mut() else {
         return Ok(input);
     };
-    let patching = ["update", "add", "remove"]
+    let patching = ["update", "add", "remove", "cancel"]
         .iter()
         .any(|key| obj.get(*key).is_some_and(|value| !value.is_null()));
     if !patching {
         return Ok(input);
     }
     if obj.get("todos").is_some_and(|value| !value.is_null()) {
-        bail!("send either a full `todos` list or `update`/`add`/`remove` edits, not both");
+        bail!("send either a full `todos` list or `update`/`add`/`cancel` edits, not both");
     }
     let parse_list = |value: Option<Value>| -> Result<Vec<Value>> {
         match value {
@@ -310,6 +327,7 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
             Some(other) => bail!("expected a list, got {other}"),
         }
     };
+    let cancels = parse_list(obj.remove("cancel"))?;
     let updates = parse_list(obj.remove("update"))?;
     let adds = parse_list(obj.remove("add"))?;
     let removes: Vec<String> = parse_list(obj.remove("remove"))?
@@ -325,6 +343,35 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
     };
     let id_of = |todo: &Value| todo.get("id").and_then(Value::as_str).map(str::to_string);
 
+    let mut cancelled_ids = std::collections::HashSet::new();
+    for cancel in cancels {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Cancel {
+            name: String,
+            reason: String,
+        }
+        let Cancel { name, reason } = serde_json::from_value(cancel)?;
+        let reason = reason.trim();
+        if reason.is_empty() {
+            bail!("cancel requires a nonempty reason");
+        }
+        let id = names::resolve_name(&todos, &name)?;
+        if !cancelled_ids.insert(id.clone())
+            || removes.contains(&id)
+            || updates.iter().any(|u| u["id"].as_str() == Some(&id))
+        {
+            bail!("conflicting edits for cancelled todo {name:?}");
+        }
+        let original = todos
+            .iter()
+            .find(|t| t["id"].as_str() == Some(&id))
+            .ok_or_else(|| anyhow::anyhow!("resolved todo {name:?} no longer exists"))?;
+        cancellations.push(crate::todo::store::TodoCancellation::new(
+            serde_json::from_value(original.clone())?,
+            reason.to_owned(),
+        ));
+    }
     for update in updates {
         let Some(fields) = update.as_object() else {
             bail!("each update must be an object with an id");
@@ -342,6 +389,16 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
             .as_object_mut()
             .ok_or_else(|| anyhow::anyhow!("stored todo {id:?} is not an object"))?;
         validate_membership(fields)?;
+        // The update schema is open (see `parameters_schema`), so a misspelled
+        // field would otherwise be stored and silently ignored.
+        if let Some(unknown) = fields
+            .keys()
+            .find(|key| !UPDATE_FIELDS.contains(&key.as_str()))
+        {
+            bail!(
+                "unknown update field {unknown:?} on {id:?}; update takes the same fields as add, plus rename_to"
+            );
+        }
         for (key, value) in fields {
             if key != "id" {
                 // `phase`/`lane` are the card's words for `stage`/`group`;
@@ -439,6 +496,26 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
         todos.retain(|todo| !id_of(todo).is_some_and(|id| removes.contains(&id)));
     }
 
+    if !cancelled_ids.is_empty() {
+        todos.retain(|todo| !id_of(todo).is_some_and(|id| cancelled_ids.contains(&id)));
+        for todo in &todos {
+            for (field, public_field) in [
+                ("lane_after", "lane_dependencies"),
+                ("blocked_by", "blocked_by"),
+            ] {
+                if todo[field].as_array().is_some_and(|deps| {
+                    deps.iter()
+                        .filter_map(Value::as_str)
+                        .any(|id| cancelled_ids.contains(id))
+                }) {
+                    bail!(
+                        "cannot cancel a prerequisite of {}; redirect or clear its {public_field} in the same edit",
+                        todo["content"]
+                    );
+                }
+            }
+        }
+    }
     obj.insert("todos".to_string(), Value::Array(todos));
     Ok(input)
 }
@@ -454,6 +531,7 @@ fn parse_todo_input(input: Value) -> Result<TodoInput> {
     let mut input = input;
     names::normalize_public_input(&mut input, &[])?;
     flatten_phases(&mut input)?;
+    normalize_item_pauses(&mut input)?;
     let params: TodoInput = serde_json::from_value(normalize_todo_input(input))?;
     if let Some(todos) = &params.todos {
         let mut ids = std::collections::HashSet::new();
@@ -469,7 +547,7 @@ fn parse_todo_input(input: Value) -> Result<TodoInput> {
             .find(|todo| crate::todo::canonical_todo_status(&todo.status).is_none())
     }) {
         bail!(
-            "invalid todo status {:?}; expected one of: pending, in_progress, completed, cancelled",
+            "invalid todo status {:?}; expected one of: pending, in_progress, completed; use cancel to withdraw work",
             todo.status
         );
     }
@@ -516,7 +594,7 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
     let Some(phases) = obj.get("phases").filter(|value| !value.is_null()) else {
         return Ok(());
     };
-    if ["todos", "update", "add", "remove"]
+    if ["todos", "update", "add", "remove", "cancel"]
         .iter()
         .any(|key| obj.get(*key).is_some_and(|v| !v.is_null()))
     {
@@ -588,12 +666,22 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
                     "group",
                     "wave",
                     "lane_after",
+                    "lane_dependencies",
                     "lane_owner",
                 ]
                 .iter()
                 .any(|key| item.contains_key(*key))
                 {
                     bail!("hierarchical items must not own phase/lane/stage/group membership");
+                }
+                for key in item.keys() {
+                    // Pause normalization below still handles legacy null
+                    // blocker keys and supplies their migration guidance.
+                    if !UPDATE_FIELDS.contains(&key.as_str())
+                        && !["external_blocker", "completely_blocked"].contains(&key.as_str())
+                    {
+                        bail!("unexpected phase item field {key:?}");
+                    }
                 }
                 let id = item
                     .get("id")
@@ -624,132 +712,9 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
 
 /// Normalize a goal's group label: trimmed, with empty/whitespace collapsed
 /// to `None` (the implicit goal of an ungrouped list).
-fn goal_group_key(group: Option<&str>) -> Option<String> {
-    group
-        .map(str::trim)
-        .filter(|group| !group.is_empty())
-        .map(str::to_string)
-}
-
-fn todo_telemetry_update(
-    previous: &[TodoItem],
-    todos: &[TodoItem],
-    goals: &[TodoGoal],
-    plan: &TodoPlan,
-) -> crate::telemetry::TodoTelemetryUpdate {
-    let previous_by_id: HashMap<&str, &TodoItem> = previous
-        .iter()
-        .map(|todo| (todo.id.as_str(), todo))
-        .collect();
-    let current_by_id: HashMap<&str, &TodoItem> =
-        todos.iter().map(|todo| (todo.id.as_str(), todo)).collect();
-
-    let todos_created = current_by_id
-        .keys()
-        .filter(|id| !previous_by_id.contains_key(**id))
-        .count()
-        .min(u32::MAX as usize) as u32;
-    let todos_completed = current_by_id
-        .iter()
-        .filter(|(id, todo)| {
-            todo.status == "completed"
-                && previous_by_id
-                    .get(**id)
-                    .is_none_or(|previous| previous.status != "completed")
-        })
-        .count()
-        .min(u32::MAX as usize) as u32;
-    let todos_abandoned = previous_by_id
-        .iter()
-        .filter(|(id, todo)| todo.status != "completed" && !current_by_id.contains_key(**id))
-        .count()
-        .min(u32::MAX as usize) as u32;
-    let current_incomplete = current_by_id
-        .values()
-        .filter(|todo| todo.status != "completed")
-        .count()
-        .min(u32::MAX as usize) as u32;
-
-    let mut group_completion: HashMap<Option<String>, bool> = HashMap::new();
-    for todo in current_by_id.values() {
-        let completed = todo.status == "completed";
-        group_completion
-            .entry(goal_group_key(todo.group.as_deref()))
-            .and_modify(|all_completed| *all_completed &= completed)
-            .or_insert(completed);
-    }
-
-    crate::telemetry::TodoTelemetryUpdate {
-        todos_created,
-        todos_completed,
-        todos_abandoned,
-        current_incomplete,
-        list_size: todos.len().min(u32::MAX as usize) as u32,
-        groups_completed: group_completion
-            .values()
-            .filter(|completed| **completed)
-            .count()
-            .min(u32::MAX as usize) as u32,
-        groups_total: group_completion.len().min(u32::MAX as usize) as u32,
-        confidence: crate::telemetry::TelemetryScoreSummary::from_scores(
-            current_by_id
-                .values()
-                .filter_map(|todo| todo.confidence.map(|state| state.legacy_score())),
-        ),
-        completion_confidence: crate::telemetry::TelemetryScoreSummary::from_scores(
-            current_by_id
-                .values()
-                .filter_map(|todo| todo.completion_confidence.map(|state| state.legacy_score())),
-        ),
-        understands_user_intent: crate::telemetry::TelemetryScoreSummary::from_scores(
-            plan.understands_user_intent
-                .map(|state| state.legacy_score()),
-        ),
-        closed_feedback_loop: crate::telemetry::TelemetryScoreSummary::from_scores(
-            goals
-                .iter()
-                .filter_map(|goal| goal.closed_feedback_loop.map(|state| state.legacy_score())),
-        ),
-        feedback_loop_relevance: crate::telemetry::TelemetryScoreSummary::from_scores(
-            goals.iter().filter_map(|goal| {
-                goal.feedback_loop_relevance
-                    .map(|state| state.legacy_score())
-            }),
-        ),
-        feedback_loop_coverage: crate::telemetry::TelemetryScoreSummary::from_scores(
-            goals.iter().filter_map(|goal| {
-                goal.feedback_loop_coverage
-                    .map(|state| state.legacy_score())
-            }),
-        ),
-        end_to_end_ownership: crate::telemetry::TelemetryScoreSummary::from_scores(
-            goals
-                .iter()
-                .filter_map(|goal| goal.delivery_state.map(|state| state.legacy_score())),
-        ),
-    }
-}
-
-fn record_todo_telemetry(
-    previous: &[TodoItem],
-    todos: &[TodoItem],
-    goals: &[TodoGoal],
-    plan: &TodoPlan,
-) {
-    crate::telemetry::record_todo_update(todo_telemetry_update(previous, todos, goals, plan));
-}
-
-/// Append `value` to `history` when it is a new observation.
-///
-/// One todo-tool write contributes at most one entry per score, so a single
-/// bulk update cannot manufacture an apparent gradual climb.
-fn record_score_observation<T: Copy + PartialEq>(history: &mut Vec<T>, value: Option<T>) {
-    if let Some(value) = value
-        && history.last() != Some(&value)
-    {
-        history.push(value);
-    }
-}
+#[path = "todo_telemetry.rs"]
+mod todo_telemetry;
+use todo_telemetry::*;
 
 /// Merge incoming goal assessments with the stored ones.
 ///
@@ -818,7 +783,16 @@ fn merge_goals(stored: &[TodoGoal], incoming: Option<Vec<TodoGoal>>) -> Vec<Todo
             if goal.stopping_evidence.is_none() {
                 goal.stopping_evidence = prev.stopping_evidence.clone();
             }
+            if goal.cannot_complete.is_none() {
+                goal.cannot_complete = prev.cannot_complete.clone();
+            }
         }
+        // An empty reason is the documented way to resume a goal.
+        goal.cannot_complete = goal
+            .cannot_complete
+            .take()
+            .map(|reason| reason.trim().to_string())
+            .filter(|reason| !reason.is_empty());
         record_score_observation(
             &mut goal.closed_feedback_loop_history,
             goal.closed_feedback_loop,
@@ -876,6 +850,52 @@ fn prune_orphaned_goals(goals: Vec<TodoGoal>, todos: &[TodoItem]) -> Vec<TodoGoa
         .collect()
 }
 
+/// Explain a goal assessment that this write sent but `prune_orphaned_goals`
+/// discards because no todo carries its group any more.
+///
+/// Without this the write returned normally, the assessment vanished, and the
+/// agent kept resending it (field report: goals-only updates for a finished
+/// group were "silently dropped").
+fn ignored_goal_groups_note(incoming: &[TodoGoal], todos: &[TodoItem]) -> Option<String> {
+    if todos.is_empty() {
+        return None;
+    }
+    let live_groups: std::collections::HashSet<Option<String>> = todos
+        .iter()
+        .map(|todo| goal_group_key(todo.group.as_deref()))
+        .collect();
+    let mut ignored: Vec<String> = Vec::new();
+    for goal in incoming {
+        let key = goal_group_key(goal.group.as_deref());
+        if live_groups.contains(&key) {
+            continue;
+        }
+        let label = match key {
+            Some(group) => format!("\"{group}\""),
+            None => "(ungrouped)".to_string(),
+        };
+        if !ignored.contains(&label) {
+            ignored.push(label);
+        }
+    }
+    if ignored.is_empty() {
+        return None;
+    }
+    let mut live: Vec<String> = live_groups
+        .into_iter()
+        .map(|group| match group {
+            Some(group) => format!("\"{group}\""),
+            None => "(ungrouped)".to_string(),
+        })
+        .collect();
+    live.sort();
+    Some(format!(
+        "Note: goal assessment ignored for {}: no todo is in that group, so it was not saved. Current groups: {}.",
+        ignored.join(", "),
+        live.join(", ")
+    ))
+}
+
 fn changed_goal_fields(before: Option<&TodoGoal>, after: Option<&TodoGoal>) -> Vec<TodoGoalField> {
     let mut fields = Vec::new();
     if before.and_then(|goal| goal.closed_feedback_loop)
@@ -918,6 +938,11 @@ fn changed_goal_fields(before: Option<&TodoGoal>, after: Option<&TodoGoal>) -> V
         != after.and_then(|goal| goal.stopping_evidence.as_ref())
     {
         fields.push(TodoGoalField::StoppingEvidence);
+    }
+    if before.and_then(|goal| goal.cannot_complete.as_ref())
+        != after.and_then(|goal| goal.cannot_complete.as_ref())
+    {
+        fields.push(TodoGoalField::CannotComplete);
     }
     fields
 }
@@ -1149,113 +1174,9 @@ fn build_todo_output(
         .with_metadata(metadata))
 }
 
-/// Leniently normalize raw todo-tool arguments before strict deserialization.
-///
-/// Some providers (notably Claude tool calling) intermittently emit tool
-/// arguments as JSON *strings* instead of native types: the whole `todos`
-/// array as one stringified JSON blob, individual items as stringified
-/// objects, or numeric fields like `confidence` as `"90"`. Strict
-/// `serde_json::from_value` rejects these with `invalid type: string ...`,
-/// failing the entire call (issue #357; same provider quirk as #106).
-fn normalize_todo_input(mut input: Value) -> Value {
-    let Some(obj) = input.as_object_mut() else {
-        return input;
-    };
-    if let Some(plan) = obj.get_mut("plan") {
-        if let Value::String(raw) = plan {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                *plan = Value::Null;
-            } else if let Ok(parsed @ (Value::Object(_) | Value::Null)) =
-                serde_json::from_str::<Value>(trimmed)
-            {
-                *plan = parsed;
-            }
-        }
-        if let Some(fields) = plan.as_object_mut() {
-            for key in [
-                "alignment_score",
-                "user_intention_alignment",
-                "understands_user_intent",
-            ] {
-                if let Some(value) = fields.get_mut(key) {
-                    coerce_empty_string_to_null(value);
-                }
-            }
-        }
-    }
-    for key in ["todos", "goals"] {
-        let Some(entries) = obj.get_mut(key) else {
-            continue;
-        };
-
-        // Whole array sent as a stringified JSON blob.
-        if let Value::String(raw) = entries {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                *entries = Value::Null;
-            } else if let Ok(parsed @ (Value::Array(_) | Value::Null)) =
-                serde_json::from_str::<Value>(trimmed)
-            {
-                *entries = parsed;
-            }
-        }
-
-        if let Value::Array(items) = entries {
-            for item in items.iter_mut() {
-                // Individual item sent as a stringified JSON object.
-                if let Value::String(raw) = item
-                    && let Ok(parsed @ Value::Object(_)) = serde_json::from_str::<Value>(raw.trim())
-                {
-                    *item = parsed;
-                }
-                let Some(fields) = item.as_object_mut() else {
-                    continue;
-                };
-                if key == "todos"
-                    && let Some(Value::String(status)) = fields.get_mut("status")
-                    && let Some(canonical) = crate::todo::canonical_todo_status(status)
-                {
-                    *status = canonical.to_string();
-                }
-                for key in [
-                    "confidence",
-                    "completion_confidence",
-                    "alignment_score",
-                    "user_intention_alignment",
-                    "closed_feedback_loop",
-                    // Pre-rename aliases; some prompts and replayed transcripts
-                    // still carry the old keys.
-                    "hill_climbability",
-                    "end_to_end_ownership",
-                    "delivery_state",
-                    "feedback_loop_relevance",
-                    "feedback_loop_coverage",
-                    "feedback_loop_traceability",
-                    "difficulty",
-                    "autonomy",
-                ] {
-                    if let Some(value) = fields.get_mut(key) {
-                        coerce_empty_string_to_null(value);
-                    }
-                }
-            }
-        }
-    }
-    input
-}
-
-/// Coerce an empty or whitespace-only string to `null` so an omitted-but-sent
-/// assessment reads as absent. Numeric legacy scores (ints, floats, numeric
-/// strings) are handled by the semantic-state deserializers themselves, so no
-/// numeric coercion is needed here anymore.
-fn coerce_empty_string_to_null(value: &mut Value) {
-    if let Value::String(raw) = value
-        && raw.trim().is_empty()
-    {
-        *value = Value::Null;
-    }
-}
+#[path = "todo_normalize.rs"]
+mod normalize;
+use normalize::normalize_todo_input;
 
 #[async_trait]
 impl Tool for TodoTool {
@@ -1268,14 +1189,8 @@ impl Tool for TodoTool {
         // deliberately handwritten. Never generate it from gate constants or
         // interpolate private thresholds, because that would teach the model
         // how to target the evaluator instead of reporting an honest assessment.
-        "Use the todo tool very frequently. Read/update todos and goal assessments. \
-         Initialize with phases, then patch by unique task name. \
-         Keep status current. Phases are sequential, lanes parallel, items ordered. \
-         Block only for an indispensable action by someone else with no safe workaround: \
-         name who must do what and why you cannot proceed. Uncertainty, task size, and \
-         agent coordination are not blockers. Continue independent work. \
-         external_blocker keeps work pending/in_progress and schedules reassessment at review_at \
-         instead of a separate schedule call; null clears it. completely_blocked means no way forward."
+        "Track this session's work as a phased todo plan with goal assessments; \
+         use it very frequently and keep status current."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -1285,7 +1200,7 @@ impl Tool for TodoTool {
                 "intent": super::intent_schema_property(),
                 "update": {
                     "type": "array",
-                    "description": "Patch by name; omitted fields stay unchanged.",
+                    "description": "Patch by name with fields as in add; omitted fields stay unchanged.",
                     "items": {
                         "type": "object",
                         "required": ["name"],
@@ -1301,10 +1216,9 @@ impl Tool for TodoTool {
                         "additionalProperties": true
                     }
                 },
-                "remove": {
-                    "type": "array",
-                    "description": "Delete by name; prefer cancelling.",
-                    "items": {"type": "string"}
+                "cancel": {
+                    "type": "array", "description": "Withdraw and archive why.",
+                    "items": {"type": "object", "additionalProperties": false, "required": ["name", "reason"], "properties": {"name": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}}}
                 },
                 "todos": {
                     "type": "array",
@@ -1321,30 +1235,27 @@ impl Tool for TodoTool {
                                 "type": "string"
                             },
                             "waiting_on": {
-                                "type": ["array", "null"],
-                                "items": {"type": "string"},
-                                "description": "This session's background/await_members IDs. Blocks only while running; notifies/wakes on completion. []/null clears."
-                            },
-                            "completely_blocked": {
                                 "type": ["object", "null"],
+                                "description": "Pause while this session's background/await_members tasks run; wakes on completion. null clears.",
+                                "required": ["ids", "reason"],
+                                "additionalProperties": false,
+                                "properties": {
+                                    "ids": {"type": "array", "items": {"type": "string"}},
+                                    "reason": {"type": "string"}
+                                }
+                            },
+                            "requires_user_auth": {
+                                "type": ["object", "null"],
+                                "description": "Pause until the user completes an authentication you have no access to, such as a login, 2FA prompt, or credential. Approvals, decisions, retries, and waits on other agents (use waiting_on) do not qualify; a todo with neither pause stays yours to continue. null clears.",
                                 "required": ["reason"],
                                 "additionalProperties": false,
                                 "properties": {
                                     "reason": {"type": "string", "minLength": 1}
                                 }
                             },
-                            "external_blocker": {
-                                "type": ["object", "null"],
-                                "required": ["reason", "review_at"],
-                                "additionalProperties": false,
-                                "properties": {
-                                    "reason": {"type": "string", "minLength": 1},
-                                    "review_at": {"type": "string", "format": "date-time", "description": "Future RFC3339 reassessment time, not assumed resolution."}
-                                }
-                            },
                             "status": {
                                 "type": "string",
-                                "enum": ["pending", "in_progress", "completed", "cancelled"]
+                                "enum": ["pending", "in_progress", "completed"]
                             },
                             "priority": {
                                 "type": "string"
@@ -1440,6 +1351,10 @@ impl Tool for TodoTool {
                             "stopping_evidence": {
                                 "type": "string",
                                 "description": "Observed evidence supporting iteration_maturity."
+                            },
+                            "cannot_complete": {
+                                "type": "string",
+                                "description": "Why this goal is genuinely impossible; stops work on its todos. Not for failures you can retry or work around. Empty string clears."
                             }
                         }
                     }
@@ -1463,62 +1378,73 @@ impl Tool for TodoTool {
             "type": "string",
             "description": "Insert after this task name."
         });
-        schema["properties"]["update"]["items"]["properties"] =
-            schema["properties"]["todos"]["items"]["properties"].clone();
+        // update repeats no item fields: it takes the same ones as add, and
+        // listing them a third time cost ~230 tokens on every request. The
+        // price is that an open item makes this tool ineligible for OpenAI
+        // strict mode, so field names and types are checked here instead.
         schema["properties"]["update"]["items"]["properties"]["rename_to"] = json!({
-            "type": "string", "minLength": 1,
+            "type": "string",
             "description": "New unique name; preserves identity and dependencies."
         });
-        schema["properties"]["update"]["items"]["additionalProperties"] = json!(false);
         schema["properties"]["add"]["items"]["properties"] = add_properties;
         schema["properties"]["add"]["items"]["additionalProperties"] = json!(false);
-        schema["properties"]["update"]["items"]["properties"]["waiting_on"] =
-            schema["properties"]["todos"]["items"]["properties"]["waiting_on"].clone();
-        schema["properties"]["update"]["items"]["properties"]["external_blocker"] =
-            schema["properties"]["todos"]["items"]["properties"]["external_blocker"].clone();
-        schema["properties"]["update"]["items"]["properties"]["completely_blocked"] =
-            schema["properties"]["todos"]["items"]["properties"]["completely_blocked"].clone();
-        // The item schema is built locally above. Remove flat aliases from the
-        // hierarchical representation without assuming the JSON object shape.
-        let mut item = schema["properties"]["todos"]["items"].clone();
+        // Like update, phase items refer to add rather than repeating its
+        // fields. Runtime validation rejects unknown fields and membership.
+        let item = json!({
+            "type": "object",
+            "required": ["name", "status", "priority", "confidence"],
+            "properties": {
+                "name": {"type": "string", "minLength": 1},
+                "status": {"type": "string"},
+                "priority": {"type": "string"},
+                "confidence": {"type": "string"}
+            },
+            "additionalProperties": true
+        });
         if let Some(properties) = schema["properties"].as_object_mut() {
             properties.remove("todos");
         }
-        if let Some(properties) = item["properties"].as_object_mut() {
-            properties.remove("phase");
-            properties.remove("lane");
-            properties.remove("lane_dependencies");
-            properties.remove("lane_owner");
-        }
-        item["additionalProperties"] = json!(false);
         schema["properties"]["phases"] = json!({
             "type": "array",
-            "description": "Replace entire plan; [] clears. Prefer patches after initialization.",
+            "description": "Replace plan ([] clears). Then use update/add/cancel. Phases are sequential, lanes parallel, items ordered.",
             "items": {"type": "object", "required": ["phase", "lanes"], "additionalProperties": false,
                 "properties": {"phase": {"type": "integer", "minimum": 1}, "lanes": {
                     "type": "array", "minItems": 1, "items": {"type": "object", "required": ["lane", "items"], "additionalProperties": false,
-                        "properties": {"lane": {"type": "string", "minLength": 1}, "dependencies": {
+                        "properties": {"lane": {"type": "string", "minLength": 1, "description": "Short name for this workstream's work, e.g. parser. Not a placeholder like main."}, "dependencies": {
                             "type": ["array", "null"], "minItems": 1, "uniqueItems": true,
                             "items": {"type": "string", "minLength": 1},
                             "description": "Earlier-phase prerequisite task names; replaces phase barrier. Omit/null for normal ordering."
                         }, "owner": {
                             "type": "string", "enum": ["self", "worker"],
-                            "description": "Who runs the lane. Default self. worker: a swarm worker auto-spawns when the lane is ready, no launch call."
+                            "description": "Default self. worker: a swarm worker auto-spawns when the lane is ready, no launch call."
                         }, "items": {"type": "array", "minItems": 1, "items": item}}
                     }
                 }}}
         });
         schema["properties"]["add"]["description"] =
             json!("Specify phase/lane or inherit from after.");
+        // Item fields repeat across phases, add, and update, and every word is
+        // paid on every request. Describe them once, on add (the superset),
+        // and point the other two routes at it.
+        let phase_items = &mut schema["properties"]["phases"]["items"]["properties"]["lanes"]["items"]
+            ["properties"]["items"];
+        phase_items["description"] = json!(
+            "Item fields as in add, except after and phase/lane membership (set on containers)."
+        );
         schema
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let write_mode_input = input.clone();
-        let input = apply_todo_patch(input, || {
-            serde_json::to_value(load_todos(&ctx.session_id).unwrap_or_default())
-                .unwrap_or(Value::Array(Vec::new()))
-        })?;
+        let mut cancellations = Vec::new();
+        let input = prepare_todo_patch(
+            input,
+            || {
+                serde_json::to_value(load_todos(&ctx.session_id).unwrap_or_default())
+                    .unwrap_or(Value::Array(Vec::new()))
+            },
+            &mut cancellations,
+        )?;
         let params = parse_todo_input(input)?;
         let is_write = params.todos.is_some() || params.goals.is_some() || params.plan.is_some();
         let operation = if is_write { "write" } else { "read" };
@@ -1526,6 +1452,17 @@ impl Tool for TodoTool {
             // Goals/plan-only writes keep the stored todo list.
             let previous = load_todos(&ctx.session_id).unwrap_or_default();
             let mut todos = params.todos.unwrap_or_else(|| previous.clone());
+            if let Some(todo) = todos.iter().find(|todo| {
+                crate::todo::todo_status_is_cancelled(&todo.status)
+                    && !previous.iter().any(|old| {
+                        old.id == todo.id && crate::todo::todo_status_is_cancelled(&old.status)
+                    })
+            }) {
+                bail!(
+                    "use cancel with a name and reason to withdraw {:?}, not a cancelled status",
+                    todo.content
+                );
+            }
             crate::todo::stages::normalize_lane_owners(&mut todos);
             crate::todo::store::validate_session_lane_dependencies(
                 &crate::storage::jcode_dir()?,
@@ -1534,16 +1471,15 @@ impl Tool for TodoTool {
             )
             .map_err(anyhow::Error::msg)?;
             for todo in &mut todos {
+                // Finished work needs no authorization, and a reason only
+                // describes the dependencies it was written for.
                 if !crate::todo::is_incomplete_todo(todo) {
-                    todo.external_blocker = None;
-                    todo.completely_blocked = None;
-                } else if todo.completely_blocked.is_some() {
-                    // Complete blockers have no timed review. Existing task
-                    // and todo dependencies remain useful once unblocked.
-                    todo.external_blocker = None;
+                    todo.requires_user_auth = None;
+                }
+                if todo.waiting_on.is_empty() {
+                    todo.waiting_reason = None;
                 }
             }
-            validate_external_blockers(&previous, &todos)?;
             prepare_background_dependencies(
                 crate::background::global(),
                 &ctx.session_id,
@@ -1556,10 +1492,13 @@ impl Tool for TodoTool {
             (|| {
                 let stored_goals = load_goals(&ctx.session_id).unwrap_or_default();
                 let stored_plan = load_plan(&ctx.session_id).unwrap_or_default();
+                let ignored_goals =
+                    ignored_goal_groups_note(params.goals.as_deref().unwrap_or_default(), &todos);
                 let goals = prune_orphaned_goals(merge_goals(&stored_goals, params.goals), &todos);
                 let plan = merge_plan(&stored_plan, params.plan);
-                let (observations, nudges) =
+                let (observations, mut nudges) =
                     record_reframe_observations(&plan, &goals, &todos, &previous);
+                nudges.extend(ignored_goals);
                 for observation in &observations {
                     let kind = match observation.kind {
                         GateObservationKind::IntentUnderstanding => {
@@ -1597,36 +1536,14 @@ impl Tool for TodoTool {
                 let concise_plan_change = assessment_only
                     .then(|| plan_change(&stored_plan, &plan))
                     .flatten();
-                save_todos(&ctx.session_id, &todos)?;
-                if previous
-                    .iter()
-                    .chain(&todos)
-                    .any(|todo| todo.external_blocker.is_some())
-                {
-                    if let Err(error) =
-                        crate::ambient::reconcile_stored_todo_reviews(&ctx.session_id)
-                    {
-                        // A failed durable wake must not leave silent suppression.
-                        // Keep unrelated/newer todo fields, clearing only the exact
-                        // blocker generations this write attempted to schedule.
-                        let mut current = load_todos(&ctx.session_id)?;
-                        for todo in &mut current {
-                            if todo.external_blocker.is_some()
-                                && todos.iter().any(|attempted| {
-                                    attempted.id == todo.id
-                                        && attempted.external_blocker == todo.external_blocker
-                                })
-                            {
-                                todo.external_blocker = None;
-                            }
-                        }
-                        save_todos(&ctx.session_id, &current)?;
-                        bail!(
-                            "Could not persist durable todo reviews; matching external blockers were cleared so work remains actionable: {error:#}"
-                        );
-                    }
-                    super::ambient::nudge_schedule_runner();
+                if !cancellations.is_empty() {
+                    crate::todo::store::append_cancellations(
+                        &crate::storage::jcode_dir()?,
+                        &ctx.session_id,
+                        &cancellations,
+                    )?;
                 }
+                save_todos(&ctx.session_id, &todos)?;
                 save_goals(&ctx.session_id, &goals)?;
                 save_plan(&ctx.session_id, &plan)?;
                 if let Err(err) = update_todo_review_cycle(&ctx.session_id, &previous, &todos) {

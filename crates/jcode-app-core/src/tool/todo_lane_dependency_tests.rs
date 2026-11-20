@@ -9,6 +9,26 @@ fn parsed(value: Value) -> Vec<TodoItem> {
 }
 
 #[test]
+fn cancellation_preserves_legacy_direct_prerequisite_until_explicitly_cleared() {
+    let mut stored = json!([item("a", 1, "base"), item("b", 2, "work")]);
+    stored[1]["blocked_by"] = json!(["a"]);
+    let cancel = json!([{"name":"a", "reason":"obsolete"}]);
+    assert!(
+        apply_todo_patch(json!({"cancel":cancel}), || stored.clone())
+            .unwrap_err()
+            .to_string()
+            .contains("blocked_by")
+    );
+    let remaining = apply_todo_patch(
+        json!({"cancel":cancel,"update":[{"name":"b","blocked_by":[]}]}),
+        || stored,
+    )
+    .unwrap();
+    assert_eq!(remaining["todos"].as_array().unwrap().len(), 1);
+    assert_eq!(remaining["todos"][0]["id"], "b");
+}
+
+#[test]
 fn hierarchical_after_is_copied_to_every_member() {
     let todos = parsed(json!({"phases": [
         {"phase": 9, "lanes": [{"lane": "base", "items": [{"id": "a", "content": "A", "status": "pending", "priority": "high"}]}]},
@@ -58,7 +78,6 @@ fn incremental_edits_apply_to_whole_lane_and_new_members_inherit() {
 #[test]
 fn public_schema_exposes_lane_dependencies_only_at_correct_levels() {
     let schema = TodoTool.parameters_schema();
-    assert!(schema["properties"]["update"]["items"]["properties"]["lane_dependencies"].is_object());
     assert!(schema["properties"]["add"]["items"]["properties"]["lane_dependencies"].is_object());
     assert!(
         schema["properties"]["update"]["items"]["properties"]

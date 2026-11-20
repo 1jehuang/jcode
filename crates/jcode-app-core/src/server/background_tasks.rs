@@ -209,7 +209,7 @@ pub(super) async fn dispatch_background_task_stalled(
     if task.wake
         && !emit_external_wake(
             &task.session_id,
-            "background_task_stalled",
+            if task.elapsed_review { "background_task_elapsed_review" } else { "background_task_stalled" },
             &notification,
             swarm_members,
         )
@@ -217,10 +217,12 @@ pub(super) async fn dispatch_background_task_stalled(
         && !run_live_turn_if_idle(
             &task.session_id,
             &notification,
-            Some(
+            Some(if task.elapsed_review {
+                "Review elapsed runtime and diagnose any avoidable delay. Leave healthy work running without restarting it.".to_string()
+            } else {
                 "A background task for this session has produced no output or progress for its stall window. Inspect it and decide whether to keep waiting, fix it, or cancel it."
-                    .to_string(),
-            ),
+                    .to_string()
+            }),
             sessions,
             LiveTurnSwarmContext::new(
                 swarm_members,
@@ -376,7 +378,7 @@ pub(super) async fn dispatch_swarm_worker_report(
     ).await {
         let queued = queue_soft_interrupt_for_session(
             &event.session_id,
-            format!("{}\n\nReview this worker report and continue coordinating the remaining actionable plan, including assigning available workers their next work.", event.notification),
+            format!("{}\n\nIntegrate results. Continue actionable work or stop idle workers.", event.notification),
             false,
             SoftInterruptSource::System,
             soft_interrupt_queues,
@@ -651,15 +653,15 @@ const SWARM_TOOL_INTENTS_CAP: usize = 3;
 const SWARM_TOOL_INTENT_CAP: usize = 120;
 
 fn todo_display_status(todo: &crate::todo::TodoItem) -> String {
-    if crate::todo::todo_completely_blocked(todo) {
-        "completely_blocked".into()
+    if crate::todo::todo_requires_user_auth(todo) {
+        "requires_user_auth".into()
     } else {
         todo.status.clone()
     }
 }
 
-/// A complete blocker applies to the worker only when every unfinished item
-/// is completely blocked. Independent pending/running work must remain actionable.
+/// The worker as a whole is paused for the user only when every unfinished
+/// item needs authorization. Independent pending/running work stays actionable.
 pub(super) fn todo_runtime_projection(
     todos: &[crate::todo::TodoItem],
 ) -> (Vec<String>, Option<String>) {
@@ -671,16 +673,16 @@ pub(super) fn todo_runtime_projection(
     let reason = (!unfinished.is_empty()
         && unfinished
             .iter()
-            .all(|todo| crate::todo::todo_completely_blocked(todo)))
+            .all(|todo| crate::todo::todo_requires_user_auth(todo)))
     .then(|| {
         unfinished
             .iter()
-            .filter_map(|todo| todo.completely_blocked.as_ref())
+            .filter_map(|todo| todo.requires_user_auth.as_ref())
             .map(|required| required.reason.trim().to_string())
             .collect::<Vec<_>>()
             .join("; ")
     })
-    .map(|reason| format!("Completely blocked: {reason}"));
+    .map(|reason| format!("Needs your login: {reason}"));
     (statuses, reason)
 }
 
@@ -891,7 +893,7 @@ mod tests {
             "in_progress"
         );
         for todo in &mut event.todos {
-            todo.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+            todo.requires_user_auth = Some(crate::todo::TodoUserAuth {
                 reason: "Required data is permanently unavailable".into(),
             });
         }
@@ -903,7 +905,7 @@ mod tests {
                 runtime
                     .todo_statuses
                     .iter()
-                    .all(|s| s == "completely_blocked")
+                    .all(|s| s == "requires_user_auth")
             );
             assert!(
                 runtime
@@ -912,9 +914,9 @@ mod tests {
                     .unwrap()
                     .contains("Required data is permanently unavailable")
             );
-            assert_eq!(members["worker"].todo_items[0].status, "completely_blocked");
+            assert_eq!(members["worker"].todo_items[0].status, "requires_user_auth");
         }
-        event.todos[19].completely_blocked = None;
+        event.todos[19].requires_user_auth = None;
         dispatch_swarm_todo_progress(&event, &members, &swarms).await;
         assert!(
             members.read().await["worker"]

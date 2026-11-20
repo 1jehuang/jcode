@@ -28,7 +28,7 @@ pub(super) fn send_stream_keepalive_mpsc(event_tx: &mpsc::UnboundedSender<Server
     });
 }
 
-type StreamUsageSink = fn(&str, &str, &str, [Option<u64>; 4]);
+type StreamUsageSink = fn(&str, &str, &str, Option<&str>, [Option<u64>; 4]);
 
 struct ObservedStreamUsage {
     provider: String,
@@ -42,10 +42,11 @@ struct ObservedStreamUsage {
 /// Capture routing identity when usage arrives, rather than using the requested
 /// model or consulting mutable routing state after compaction/tool execution.
 pub(super) struct StreamUsageRecorder<
-    F: FnMut(&str, &str, &str, [Option<u64>; 4]) = StreamUsageSink,
+    F: FnMut(&str, &str, &str, Option<&str>, [Option<u64>; 4]) = StreamUsageSink,
 > {
     session_id: String,
     observed: Option<ObservedStreamUsage>,
+    resolved_model: Option<String>,
     emit: F,
 }
 
@@ -54,12 +55,13 @@ impl StreamUsageRecorder {
         Self {
             session_id: session_id.to_string(),
             observed: None,
+            resolved_model: None,
             emit: record_partial_stream_usage,
         }
     }
 }
 
-impl<F: FnMut(&str, &str, &str, [Option<u64>; 4])> StreamUsageRecorder<F> {
+impl<F: FnMut(&str, &str, &str, Option<&str>, [Option<u64>; 4])> StreamUsageRecorder<F> {
     pub(super) fn observe(&mut self, provider: &str, model: &str, counters: [Option<u64>; 4]) {
         if counters.iter().any(Option::is_some) {
             self.observed = Some(ObservedStreamUsage {
@@ -70,19 +72,30 @@ impl<F: FnMut(&str, &str, &str, [Option<u64>; 4])> StreamUsageRecorder<F> {
         }
     }
 
+    /// Metadata can arrive before or after the usage frame. Keep it until the
+    /// attempt is emitted, without changing the user's selected route.
+    pub(super) fn resolve_model(&mut self, model: String) {
+        let model = model.trim();
+        if !model.is_empty() && model.len() <= 256 && !model.chars().any(char::is_control) {
+            self.resolved_model = Some(model.to_string());
+        }
+    }
+
     pub(super) fn finish(&mut self) {
+        let resolved_model = self.resolved_model.take();
         if let Some(usage) = self.observed.take() {
             (self.emit)(
                 &self.session_id,
                 &usage.provider,
                 &usage.model,
+                resolved_model.as_deref(),
                 usage.counters,
             );
         }
     }
 }
 
-impl<F: FnMut(&str, &str, &str, [Option<u64>; 4])> Drop for StreamUsageRecorder<F> {
+impl<F: FnMut(&str, &str, &str, Option<&str>, [Option<u64>; 4])> Drop for StreamUsageRecorder<F> {
     fn drop(&mut self) {
         self.finish();
     }
@@ -98,15 +111,17 @@ pub(super) fn record_partial_stream_usage(
     session_id: &str,
     provider: &str,
     model: &str,
+    resolved_model: Option<&str>,
     [input, output, cache_read, cache_creation]: [Option<u64>; 4],
 ) {
     if input.is_none() && output.is_none() && cache_read.is_none() && cache_creation.is_none() {
         return;
     }
-    crate::telemetry::record_provider_usage(
+    crate::telemetry::record_provider_usage_with_model_attribution(
         Some(session_id),
         provider,
         model,
+        resolved_model,
         crate::telemetry::UsageSource::Agent,
         crate::telemetry::ProviderUsage {
             input_tokens: input.unwrap_or(0),
@@ -122,13 +137,61 @@ mod usage_capture_tests {
     use super::*;
 
     #[test]
+    fn response_model_metadata_is_late_bound_and_cleared_between_attempts() {
+        let mut reports = Vec::new();
+        {
+            let mut recorder = StreamUsageRecorder {
+                session_id: "session".into(),
+                observed: None,
+                resolved_model: None,
+                emit: |_: &str, _: &str, requested: &str, resolved: Option<&str>, counts| {
+                    reports.push((requested.to_string(), resolved.map(str::to_string), counts));
+                },
+            };
+            recorder.observe("openrouter", "high", [Some(20), Some(2), None, None]);
+            recorder.resolve_model("anthropic/claude-future-99".into());
+            recorder.finish();
+            // No metadata on the fallback attempt must not reuse the old ID.
+            recorder.observe("openrouter", "high", [Some(30), Some(3), None, None]);
+            recorder.finish();
+            // Nor can a metadata-only attempt leak into the next response.
+            recorder.resolve_model("failed-metadata-only".into());
+            recorder.finish();
+            recorder.observe("openrouter", "coder", [Some(40), Some(4), None, None]);
+            recorder.resolve_model("actual-coder".into());
+            recorder.resolve_model("\n\0".into());
+            recorder.resolve_model("x".repeat(257));
+            // Drop persists the last response with its valid metadata.
+        }
+        assert_eq!(reports.len(), 3);
+        assert_eq!(reports[0].0, "high");
+        assert_eq!(reports[0].1.as_deref(), Some("anthropic/claude-future-99"));
+        assert_eq!(reports[1].1, None);
+        assert_eq!(reports[2].0, "coder");
+        assert_eq!(reports[2].1.as_deref(), Some("actual-coder"));
+        assert_eq!(reports[2].2, [Some(40), Some(4), None, None]);
+    }
+
+    #[test]
+    fn metadata_without_usage_does_not_invent_a_report() {
+        let mut recorder = StreamUsageRecorder {
+            session_id: "session".into(),
+            observed: None,
+            resolved_model: None,
+            emit: |_: &str, _: &str, _: &str, _: Option<&str>, _| panic!("metadata is not usage"),
+        };
+        recorder.resolve_model("actual-model".into());
+    }
+
+    #[test]
     fn cumulative_usage_is_emitted_once_with_observed_fallback_identity() {
         let mut reports = Vec::new();
         {
             let mut recorder = StreamUsageRecorder {
                 session_id: "worker-session".to_string(),
                 observed: None,
-                emit: |session: &str, provider: &str, model: &str, counts| {
+                resolved_model: None,
+                emit: |session: &str, provider: &str, model: &str, _: Option<&str>, counts| {
                     reports.push((
                         session.to_string(),
                         provider.to_string(),
@@ -159,7 +222,8 @@ mod usage_capture_tests {
             let mut recorder = StreamUsageRecorder {
                 session_id: "worker-session".to_string(),
                 observed: None,
-                emit: |_: &str, _: &str, _: &str, counts| reports.push(counts),
+                resolved_model: None,
+                emit: |_: &str, _: &str, _: &str, _: Option<&str>, counts| reports.push(counts),
             };
             recorder.observe("anthropic", "model", [None, None, None, Some(20)]);
             Err(())
@@ -170,7 +234,10 @@ mod usage_capture_tests {
             let _unobserved = StreamUsageRecorder {
                 session_id: "worker-session".to_string(),
                 observed: None,
-                emit: |_: &str, _: &str, _: &str, _| panic!("invented unreported usage"),
+                resolved_model: None,
+                emit: |_: &str, _: &str, _: &str, _: Option<&str>, _| {
+                    panic!("invented unreported usage")
+                },
             };
         }
     }
@@ -184,7 +251,8 @@ mod usage_capture_tests {
             let mut recorder = StreamUsageRecorder {
                 session_id: "worker-session".to_string(),
                 observed: None,
-                emit: move |_: &str, _: &str, _: &str, counts| {
+                resolved_model: None,
+                emit: move |_: &str, _: &str, _: &str, _: Option<&str>, counts| {
                     captured.lock().unwrap().push(counts)
                 },
             };

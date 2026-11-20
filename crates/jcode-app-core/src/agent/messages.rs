@@ -9,7 +9,11 @@ impl Agent {
         self.persist_session_now()
     }
 
-    pub(crate) fn add_message(&mut self, role: Role, content: Vec<ContentBlock>) -> String {
+    pub(crate) fn add_message(
+        &mut self,
+        role: Role,
+        content: impl Into<crate::message::SharedContent>,
+    ) -> String {
         let id = self.session.add_message(role, content);
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
@@ -25,7 +29,7 @@ impl Agent {
     pub(crate) fn add_message_with_display_role(
         &mut self,
         role: Role,
-        content: Vec<ContentBlock>,
+        content: impl Into<crate::message::SharedContent>,
         display_role: Option<StoredDisplayRole>,
     ) -> String {
         let id = self
@@ -45,7 +49,7 @@ impl Agent {
     pub(crate) fn add_message_with_duration(
         &mut self,
         role: Role,
-        content: Vec<ContentBlock>,
+        content: impl Into<crate::message::SharedContent>,
         duration_ms: Option<u64>,
     ) -> String {
         let id = self
@@ -65,7 +69,7 @@ impl Agent {
     pub(crate) fn add_message_ext(
         &mut self,
         role: Role,
-        content: Vec<ContentBlock>,
+        content: impl Into<crate::message::SharedContent>,
         duration_ms: Option<u64>,
         token_usage: Option<crate::session::StoredTokenUsage>,
     ) -> String {
@@ -214,6 +218,27 @@ mod durable_error_tests {
         fn fork(&self) -> Arc<dyn crate::provider::Provider> {
             Arc::new(Self)
         }
+    }
+
+    #[test]
+    fn message_insertion_retains_shared_payload_storage() {
+        let _lock = crate::storage::lock_test_env();
+        let mut agent = Agent::new_provisional_with_initial_working_dir(
+            Arc::new(NoNetworkProvider),
+            Registry::empty(),
+            None,
+        );
+        let message = Message::user("shared payload");
+        agent.add_message(Role::User, message.content.clone());
+        assert!(
+            agent
+                .session
+                .messages
+                .last()
+                .unwrap()
+                .content
+                .shares_storage_with(&message.content)
+        );
     }
 
     #[test]

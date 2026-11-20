@@ -3,6 +3,20 @@ use super::openrouter_sse_stream::run_stream_with_retries;
 use super::*;
 use jcode_base::provider::{ModelCatalogRefreshSummary, summarize_model_catalog_refresh};
 
+fn canonical_input_parts(request: &Value) -> (&[Value], Option<&Value>, Option<&Value>, usize) {
+    let items = request
+        .get("messages")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let system = items
+        .first()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("system"));
+    let tools = request.get("tools");
+    let count = tools.and_then(Value::as_array).map(Vec::len).unwrap_or(0);
+    (items, system, tools, count)
+}
+
 #[async_trait]
 impl Provider for OpenRouterProvider {
     fn runtime_display_name(&self) -> String {
@@ -251,21 +265,8 @@ impl Provider for OpenRouterProvider {
             }
         }
 
-        let message_items = request
-            .get("messages")
-            .and_then(|value| value.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let tools_value = request.get("tools").cloned();
-        let system_value = message_items
-            .first()
-            .filter(|message| message.get("role").and_then(|role| role.as_str()) == Some("system"))
-            .cloned();
-        let tool_count = tools_value
-            .as_ref()
-            .and_then(|value| value.as_array())
-            .map(|tools| tools.len())
-            .unwrap_or(0);
+        let (message_items, system_value, tools_value, tool_count) =
+            canonical_input_parts(&request);
         jcode_provider_core::fingerprint::log_provider_canonical_input(
             if self.supports_provider_features {
                 "openrouter"
@@ -279,9 +280,9 @@ impl Provider for OpenRouterProvider {
                 "chat_completions"
             },
             &request,
-            &message_items,
-            system_value.as_ref(),
-            tools_value.as_ref(),
+            message_items,
+            system_value,
+            tools_value,
             Some(tool_count),
             &[
                 ("cache_supported", cache_supported.to_string()),
@@ -1088,3 +1089,7 @@ fn declares_image_input(model: &jcode_provider_openrouter::ModelInfo) -> bool {
         .iter()
         .any(|modality| modality.eq_ignore_ascii_case("image"))
 }
+
+#[cfg(test)]
+#[path = "openrouter_canonical_input_tests.rs"]
+mod canonical_input_tests;

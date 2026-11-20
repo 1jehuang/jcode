@@ -12,14 +12,17 @@ const TODOS_VIEW_TITLE: &str = "Todos";
 /// Display-message role used by the inline chat todo card.
 const TODO_CARD_ROLE: &str = "todos";
 
+#[path = "todos_remote_cache.rs"]
+pub(super) mod remote_cache;
+
 impl App {
     fn current_todo_state(
         &self,
-    ) -> (
+    ) -> std::sync::Arc<(
         Vec<TodoItem>,
         crate::todo::TodoPlan,
         Vec<crate::todo::TodoGoal>,
-    ) {
+    )> {
         // A session-bound remote snapshot can arrive before History. SSH still
         // never reads local todo files, including for the requested resume id.
         let session_id = self
@@ -30,38 +33,14 @@ impl App {
                 .remote_todos_payload
                 .as_ref()
                 .filter(|(id, _)| Some(id.as_str()) == session_id)
-                .and_then(|(_, payload)| {
-                    serde_json::from_str::<serde_json::Value>(payload).map_or_else(
-                        |error| {
-                            crate::logging::debug(&format!(
-                                "Invalid remote todo snapshot: {error}"
-                            ));
-                            None
-                        },
-                        Some,
-                    )
-                })
-                .unwrap_or_default();
-            return (
-                serde_json::from_value(payload["todos"].clone()).unwrap_or_else(|error| {
-                    crate::logging::debug(&format!("Invalid remote todos: {error}"));
-                    Vec::new()
-                }),
-                serde_json::from_value(payload["plan"].clone()).unwrap_or_else(|error| {
-                    crate::logging::debug(&format!("Invalid remote todo plan: {error}"));
-                    crate::todo::TodoPlan::default()
-                }),
-                serde_json::from_value(payload["goals"].clone()).unwrap_or_else(|error| {
-                    crate::logging::debug(&format!("Invalid remote todo goals: {error}"));
-                    Vec::new()
-                }),
-            );
+                .map(|(_, payload)| payload.as_str());
+            return remote_cache::load(&self.remote_todos_cache, payload);
         }
-        (
+        std::sync::Arc::new((
             load_current_session_todos(session_id),
             load_current_session_plan(session_id),
             load_current_session_goals(session_id),
-        )
+        ))
     }
 
     pub(super) fn remote_todos_refresh_due(&mut self) -> bool {
@@ -88,8 +67,20 @@ impl App {
     /// immediate refresh. An idle session therefore needs only a slow safety
     /// poll: a 2s poll from every open window kept the shared server and each
     /// client waking for nothing.
+    ///
+    /// The fast poll during a turn exists to show changes made by something
+    /// other than this session's own todo tool, such as a swarm worker. Nobody
+    /// sees that in an unfocused window, and gaining focus refreshes at once,
+    /// so a background turn polls slowly too.
     fn remote_todos_poll_interval(&self) -> std::time::Duration {
-        if self.is_processing() {
+        // A server that pushes every change needs no poll at all. A request
+        // is still sent when `remote_todos_requested_at` is cleared (focus,
+        // the todo tool, attach), and this long interval only catches a push
+        // that was somehow lost.
+        if self.remote_todos_pushed {
+            return std::time::Duration::from_secs(600);
+        }
+        if self.is_processing() && self.client_focused {
             std::time::Duration::from_secs(2)
         } else {
             std::time::Duration::from_secs(30)
@@ -101,17 +92,32 @@ impl App {
         self.remote_todos_requested_at = None;
     }
 
-    pub(super) fn receive_remote_todos(&mut self, session_id: String, payload: String) {
+    /// Store a server todo snapshot. Returns true when it differs from the one
+    /// already held, which is the only case that needs a repaint.
+    ///
+    /// The safety poll answers with the same snapshot nearly every time.
+    /// Treating each answer as a change cost a full frame per poll in every
+    /// open window: measured 2.4 such frames a second across the clients of
+    /// one machine, all repainting an unchanged todo list.
+    pub(super) fn receive_remote_todos(&mut self, session_id: String, payload: String) -> bool {
         let expected = self
             .active_client_session_id()
             .or(self.resume_session_id.as_deref());
         if expected != Some(session_id.as_str()) {
-            return;
+            return false;
+        }
+        if self
+            .remote_todos_payload
+            .as_ref()
+            .is_some_and(|(held_session, held)| *held_session == session_id && *held == payload)
+        {
+            return false;
         }
         self.remote_todos_payload = Some((session_id, payload));
         self.refresh_todo_card_if_needed();
         self.refresh_todos_view_now();
         self.refresh_pinned_todos_now();
+        true
     }
 
     pub(super) fn todos_view_enabled(&self) -> bool {
@@ -142,11 +148,12 @@ impl App {
     /// transcript keeps at most one card so repeated toggles don't stack.
     pub(super) fn show_todo_card(&mut self) {
         let session_id = self.active_client_session_id().map(str::to_string);
-        let (todos, plan, goals) = self.current_todo_state();
-        let tasks = self.todo_card_background_tasks(&todos);
-        let content = with_background_tasks(todo_card_payload_json(&todos, &plan, &goals), &tasks);
+        let state = self.current_todo_state();
+        let (todos, plan, goals) = &*state;
+        let tasks = self.todo_card_background_tasks(todos);
+        let content = with_background_tasks(todo_card_payload_json(todos, plan, goals), &tasks);
         self.todo_card_rendered_hash =
-            hash_todos_payload(session_id.as_deref(), &todos, &plan, &goals)
+            hash_todos_payload(session_id.as_deref(), todos, plan, goals)
                 ^ hash_background_tasks(&tasks);
 
         if let Some(idx) = self.latest_todo_card_index() {
@@ -167,15 +174,16 @@ impl App {
             return false;
         };
         let session_id = self.active_client_session_id().map(str::to_string);
-        let (todos, plan, goals) = self.current_todo_state();
-        let tasks = self.todo_card_background_tasks(&todos);
-        let next_hash = hash_todos_payload(session_id.as_deref(), &todos, &plan, &goals)
+        let state = self.current_todo_state();
+        let (todos, plan, goals) = &*state;
+        let tasks = self.todo_card_background_tasks(todos);
+        let next_hash = hash_todos_payload(session_id.as_deref(), todos, plan, goals)
             ^ hash_background_tasks(&tasks);
         if next_hash == self.todo_card_rendered_hash {
             return false;
         }
         self.todo_card_rendered_hash = next_hash;
-        let content = with_background_tasks(todo_card_payload_json(&todos, &plan, &goals), &tasks);
+        let content = with_background_tasks(todo_card_payload_json(todos, plan, goals), &tasks);
         self.replace_display_message_content(idx, content)
     }
 
@@ -183,6 +191,11 @@ impl App {
     /// (`display.pin_todos`). Returns true when the payload changed and the
     /// viewport should redraw. Disk reads are throttled to once per second.
     pub(super) fn refresh_pinned_todos_if_needed(&mut self) -> bool {
+        // Replay state comes exclusively from historical events or explicit
+        // snapshots. Today's file must never replace a historical pinned card.
+        if self.is_replay {
+            return false;
+        }
         if !crate::config::config().display.pin_todos {
             if self.pinned_todos_payload.is_some() {
                 self.pinned_todos_payload = None;
@@ -199,7 +212,8 @@ impl App {
         }
         self.pinned_todos_checked_at = Some(Instant::now());
         let session_id = self.active_client_session_id().map(str::to_string);
-        let (todos, plan, goals) = self.current_todo_state();
+        let state = self.current_todo_state();
+        let (todos, plan, goals) = &*state;
         if todos.is_empty() {
             if self.pinned_todos_payload.is_some() {
                 self.pinned_todos_payload = None;
@@ -208,9 +222,9 @@ impl App {
             }
             return false;
         }
-        let agents = self.todo_card_agents(&todos);
-        let tasks = self.todo_card_background_tasks(&todos);
-        let next_hash = hash_todos_payload(session_id.as_deref(), &todos, &plan, &goals)
+        let agents = self.todo_card_agents(todos);
+        let tasks = self.todo_card_background_tasks(todos);
+        let next_hash = hash_todos_payload(session_id.as_deref(), todos, plan, goals)
             ^ hash_todo_card_agents(&agents)
             ^ hash_background_tasks(&tasks);
         if next_hash == self.pinned_todos_rendered_hash && self.pinned_todos_payload.is_some() {
@@ -218,7 +232,7 @@ impl App {
         }
         self.pinned_todos_rendered_hash = next_hash;
         self.pinned_todos_payload = Some(with_background_tasks(
-            todo_card_payload_json_with_agents(&todos, &plan, &goals, &agents),
+            todo_card_payload_json_with_agents(todos, plan, goals, &agents),
             &tasks,
         ));
         true
@@ -409,13 +423,14 @@ impl App {
 
     fn refresh_todos_view_cache(&mut self, force: bool) -> bool {
         let session_id = self.active_client_session_id();
-        let (todos, plan, goals) = self.current_todo_state();
-        let next_hash = hash_todos_payload(session_id, &todos, &plan, &goals);
+        let state = self.current_todo_state();
+        let (todos, plan, goals) = &*state;
+        let next_hash = hash_todos_payload(session_id, todos, plan, goals);
         if !force && self.todos_view_rendered_hash == next_hash {
             return false;
         }
 
-        self.todos_view_markdown = build_todos_view_markdown(session_id, &todos, &plan, &goals);
+        self.todos_view_markdown = build_todos_view_markdown(session_id, todos, plan, goals);
         self.todos_view_updated_at_ms = now_ms();
         self.todos_view_rendered_hash = next_hash;
         true
@@ -562,10 +577,16 @@ fn load_current_session_todos(session_id: Option<&str>) -> Vec<TodoItem> {
     let Some(session_id) = session_id else {
         return Vec::new();
     };
-    crate::todo::load_todos(session_id).unwrap_or_else(|error| {
+    visible_todos(crate::todo::load_todos(session_id).unwrap_or_else(|error| {
         crate::logging::debug(&format!("Could not load current todos: {error}"));
         Vec::new()
-    })
+    }))
+}
+
+// Project live lists without rewriting old snapshots or replay events.
+fn visible_todos(mut items: Vec<TodoItem>) -> Vec<TodoItem> {
+    items.retain(|item| !crate::todo::todo_status_is_cancelled(&item.status));
+    items
 }
 
 fn load_current_session_goals(session_id: Option<&str>) -> Vec<crate::todo::TodoGoal> {
@@ -777,11 +798,11 @@ fn format_todo_compact_markdown(todo: &TodoItem) -> String {
         .filter(|group| !group.is_empty())
         .map(|group| format!(" _({group})_"))
         .unwrap_or_default();
-    let blocker_detail = if crate::todo::todo_completely_blocked(todo) {
-        match todo.completely_blocked.as_ref() {
-            Some(blocker) => format!("\n  ✋ **Completely blocked**: {}\n", blocker.reason),
+    let blocker_detail = if crate::todo::todo_requires_user_auth(todo) {
+        match todo.requires_user_auth.as_ref() {
+            Some(blocker) => format!("\n  ✋ **Needs your login**: {}\n", blocker.reason),
             None => {
-                crate::logging::warn("Todo marked completely blocked without blocker details");
+                crate::logging::warn("Todo requires user authorization without a reason");
                 String::new()
             }
         }
@@ -790,7 +811,7 @@ fn format_todo_compact_markdown(todo: &TodoItem) -> String {
     };
     format!(
         "- {} {}{group}{blocker_detail}\n",
-        if crate::todo::todo_completely_blocked(todo) {
+        if crate::todo::todo_requires_user_auth(todo) {
             "✋"
         } else {
             status_badge(&todo.status, !todo.blocked_by.is_empty())
@@ -848,9 +869,12 @@ fn hash_todos_payload(
         todo.confidence.hash(&mut hasher);
         todo.completion_confidence.hash(&mut hasher);
         todo.blocked_by.hash(&mut hasher);
-        if let Some(blocker) = &todo.completely_blocked {
-            blocker.reason.hash(&mut hasher);
-        }
+        todo.requires_user_auth
+            .as_ref()
+            .map(|auth| &auth.reason)
+            .hash(&mut hasher);
+        todo.waiting_on.hash(&mut hasher);
+        todo.waiting_reason.hash(&mut hasher);
         todo.assigned_to.hash(&mut hasher);
         todo.stage.hash(&mut hasher);
     }
@@ -866,6 +890,7 @@ fn hash_todos_payload(
         goal.delivery_state.hash(&mut hasher);
         goal.difficulty.hash(&mut hasher);
         goal.autonomy.hash(&mut hasher);
+        goal.cannot_complete.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -976,8 +1001,8 @@ mod tests {
             completion_confidence: completion_confidence
                 .map(crate::todo::ConfidenceState::from_legacy_score),
             confidence_history: Vec::new(),
-            external_blocker: None,
-            completely_blocked: None,
+            waiting_reason: None,
+            requires_user_auth: None,
             waiting_on: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,
@@ -990,7 +1015,7 @@ mod tests {
     fn complete_blocker_panel_preserves_reason_and_invalidates_cache() {
         let mut item = todo("1", "Connect", "pending", "high", None, None);
         let before = hash_todos_payload(None, &[item.clone()], &plan(), &[]);
-        item.completely_blocked = Some(crate::todo::TodoCompleteBlocker {
+        item.requires_user_auth = Some(crate::todo::TodoUserAuth {
             reason: "Only the account owner can grant access.\nKeep this entire explanation."
                 .into(),
         });
@@ -998,10 +1023,10 @@ mod tests {
         assert_ne!(before, after);
         let markdown = format_todo_compact_markdown(&item);
         assert!(markdown.contains("✋"));
-        assert!(markdown.contains("Completely blocked"));
+        assert!(markdown.contains("Needs your login"));
         assert!(!markdown.contains("Approve access"));
         assert!(markdown.contains("Keep this entire explanation."));
-        item.completely_blocked.as_mut().unwrap().reason.push('!');
+        item.requires_user_auth.as_mut().unwrap().reason.push('!');
         assert_ne!(
             after,
             hash_todos_payload(None, &[item.clone()], &plan(), &[])
