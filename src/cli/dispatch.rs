@@ -8,7 +8,7 @@ use std::time::Instant;
 use super::args::{
     AmbientCommand, Args, AuthCommand, CloudCommand, CloudSessionsCommand, Command, MemoryCommand,
     ModelCommand, ProviderCommand, RestartCommand, ServerCommand, SessionCommand,
-    TranscriptModeArg,
+    TranscriptModeArg, ZcodeCommand,
 };
 use crate::{
     agent, auth, build, provider, provider_catalog, server, session, setup_hints, startup_profile,
@@ -363,6 +363,21 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             } => {
                 let provider_arg = auth_doctor_provider_arg(provider.as_deref(), &args.provider);
                 commands::run_auth_doctor_command(provider_arg, validate, json).await?
+            }
+        },
+        Some(Command::Zcode(subcmd)) => match subcmd {
+            ZcodeCommand::Quota { json } => {
+                super::zcode::run_quota_command(json).await?;
+            }
+            ZcodeCommand::Claim {
+                plan_id,
+                list,
+                json,
+            } => {
+                super::zcode::run_claim_command(plan_id, list, json).await?;
+            }
+            ZcodeCommand::Offpeak { json } => {
+                super::zcode::run_offpeak_command(json).await?;
             }
         },
         Some(Command::Provider(subcmd)) => match subcmd {

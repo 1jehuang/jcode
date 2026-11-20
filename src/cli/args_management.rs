@@ -153,6 +153,36 @@ pub(crate) enum AuthCommand {
 }
 
 #[derive(Subcommand, Debug)]
+pub(crate) enum ZcodeCommand {
+    /// Show ZCode coding-plan quota windows and billing summary
+    Quota {
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// List or claim available ZCode weekend/trial plans
+    Claim {
+        /// Specific plan_id to claim (if omitted, lists and claims available plans)
+        #[arg(long)]
+        plan_id: Option<String>,
+
+        /// Only list claimable plans without claiming
+        #[arg(long)]
+        list: bool,
+
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check ZCode off-peak ticket queue availability
+    Offpeak {
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub(crate) enum AmbientCommand {
     /// Show ambient mode status
     Status,

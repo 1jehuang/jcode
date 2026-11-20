@@ -31,3 +31,4 @@ pub mod startup;
 pub mod telemetry;
 pub mod terminal;
 pub mod tui_launch;
+pub mod zcode;

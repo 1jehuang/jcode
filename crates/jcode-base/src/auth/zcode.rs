@@ -747,11 +747,23 @@ pub async fn resolve_coding_plan_api_key(client: &reqwest::Client) -> Result<Str
 /// the same endpoint the official usage panel reads). Note: upstream `number`
 /// is the window total and is NOT comparable with `remaining`; only
 /// `remaining` and `percentage` are display-safe.
+fn deserialize_opt_string_or_num<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let val: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    Ok(match val {
+        Some(serde_json::Value::String(s)) => Some(s),
+        Some(serde_json::Value::Number(n)) => Some(n.to_string()),
+        _ => None,
+    })
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct QuotaCodingLimit {
     #[serde(default)]
     pub r#type: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_opt_string_or_num")]
     pub unit: Option<String>,
     #[serde(default, rename = "number")]
     pub total: Option<f64>,

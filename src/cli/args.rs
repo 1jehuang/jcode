@@ -373,6 +373,10 @@ pub(crate) enum Command {
     #[command(subcommand)]
     Provider(ProviderCommand),
 
+    /// ZCode plan quota, trial claiming, and off-peak helpers
+    #[command(subcommand)]
+    Zcode(ZcodeCommand),
+
     /// Memory management commands
     #[command(subcommand)]
     Memory(MemoryCommand),
@@ -1149,6 +1153,7 @@ pub(crate) use management::AuthCommand;
 pub(crate) use management::MemoryCommand;
 pub(crate) use management::ModelCommand;
 pub(crate) use management::ProviderCommand;
+pub(crate) use management::ZcodeCommand;
 pub(crate) use management::SessionCommand;
 #[cfg(test)]
 mod tests;
