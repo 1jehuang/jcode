@@ -273,3 +273,59 @@ async fn completion_queued_as_a_turn_ends_starts_the_follow_up_turn() {
     .await
     .expect("the stranded completion must start a follow-up turn");
 }
+
+#[tokio::test]
+async fn stranded_completion_starts_after_the_client_releases_the_finished_turn() {
+    use jcode_agent_runtime::{SoftInterruptMessage, SoftInterruptSource};
+    let (id, sessions, members, _receiver) = fixture(true, "ready", true).await;
+    let agent = sessions.read().await.get(&id).unwrap().clone();
+    let queue = agent.lock().await.soft_interrupt_queue();
+    queue.lock().unwrap().push(SoftInterruptMessage {
+        content: "stranded completion bg-2".into(),
+        images: Vec::new(),
+        urgent: false,
+        source: SoftInterruptSource::BackgroundTask,
+        client_id: None,
+    });
+    // A finished client turn: its lease is gone, but the client's completion
+    // reconciler still holds the turn's publication pin.
+    let (pin, released) = {
+        let lease = agent.lock().await.claim_server_turn().unwrap();
+        (lease.publication_pin(), lease.released())
+    };
+    let (swarm_tx, _) = broadcast::channel(16);
+    let swarm = LiveTurnSwarmContext::new(
+        &members,
+        &Arc::new(RwLock::new(HashMap::new())),
+        &Arc::new(RwLock::new(VecDeque::new())),
+        &Arc::new(AtomicU64::new(0)),
+        &swarm_tx,
+    );
+
+    let follow_up = spawn_stranded_background_completions_after_release(
+        released,
+        id.clone(),
+        Arc::clone(&agent),
+        swarm,
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!follow_up.is_finished(), "must wait for the pin");
+    assert_eq!(queue.lock().unwrap().len(), 1);
+
+    drop(pin);
+    follow_up.await.unwrap();
+    assert!(queue.lock().unwrap().is_empty());
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            {
+                let agent = agent.lock().await;
+                if agent.last_visible_conversation_role() == Some(crate::message::Role::Assistant) {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the stranded completion must start a follow-up turn");
+}

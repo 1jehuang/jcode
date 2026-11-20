@@ -505,13 +505,14 @@ pub(super) async fn start_processing_message(
             true,
         ));
         events.finish().await;
+        let turn_released = turn_lease.released();
         drop(turn_lease);
-        crate::server::live_turn::run_stranded_background_completions(
+        crate::server::live_turn::spawn_stranded_background_completions_after_release(
+            turn_released,
             completion_session_id,
             report_agent,
             completion_swarm,
-        )
-        .await;
+        );
     });
 }
 

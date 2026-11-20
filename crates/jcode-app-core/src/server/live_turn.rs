@@ -591,6 +591,23 @@ pub(super) fn run_stranded_background_completions(
     })
 }
 
+/// [`run_stranded_background_completions`] for a client turn. Its completion
+/// reconciler keeps the turn's publication pin, and so the turn gate, until
+/// it has joined the turn task, so a follow-up started from inside that task
+/// cannot claim the agent and would stay queued. Start it from its own task
+/// once the turn is `released`.
+pub(super) fn spawn_stranded_background_completions_after_release(
+    released: impl std::future::Future<Output = ()> + Send + 'static,
+    session_id: String,
+    agent: Arc<tokio::sync::Mutex<Agent>>,
+    swarm: LiveTurnSwarmContext,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        released.await;
+        run_stranded_background_completions(session_id, agent, swarm).await;
+    })
+}
+
 pub(super) async fn run_live_system_turn_if_idle(
     session_id: &str,
     message: &str,
