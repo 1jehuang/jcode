@@ -310,3 +310,70 @@ async fn handoff_keeps_the_calls_own_delivery_flags() {
         (true, true)
     );
 }
+
+/// Exits nonzero after the handoff budget, reporting it as bash does.
+struct FailingShellProbe;
+
+#[async_trait::async_trait]
+impl crate::tool::Tool for FailingShellProbe {
+    fn name(&self) -> &str {
+        "bash"
+    }
+    fn description(&self) -> &str {
+        "Failing shell probe"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object"})
+    }
+    async fn execute(
+        &self,
+        _: serde_json::Value,
+        _: ToolContext,
+    ) -> Result<crate::tool::ToolOutput> {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        Ok(crate::tool::ToolOutput::new("exit 7")
+            .with_metadata(serde_json::json!({"exit_code": 7})))
+    }
+}
+
+/// A shell called by an alias (`shell`, `functions.bash`) that exits nonzero
+/// after its handoff is a failed task, as it is when called as `bash`.
+#[tokio::test]
+async fn handed_off_shell_alias_records_a_nonzero_exit_as_failed() {
+    for alias in ["shell", "shell_exec", "functions.bash"] {
+        let registry = Registry::empty();
+        registry
+            .register("bash".into(), Arc::new(FailingShellProbe))
+            .await;
+        let ctx = ToolContext {
+            session_id: format!("handoff-alias-{alias}"),
+            message_id: "message".into(),
+            tool_call_id: "alias-probe".into(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: ToolExecutionMode::Direct,
+        };
+        let result = execute_with_background_budget(
+            registry,
+            alias.into(),
+            serde_json::json!({"command": "exit 7"}),
+            ctx,
+            Duration::from_millis(10),
+        )
+        .await
+        .unwrap();
+        let task_id = result.output.split("task_id: ").nth(1).unwrap();
+        let task_id = task_id.split(')').next().unwrap();
+        let finished = crate::background::global()
+            .wait(task_id, Duration::from_secs(10), false)
+            .await
+            .expect("adopted task should exist");
+        assert_eq!(
+            finished.task.status,
+            crate::bus::BackgroundTaskStatus::Failed,
+            "{alias}"
+        );
+        assert_eq!(finished.task.exit_code, Some(7), "{alias}");
+    }
+}

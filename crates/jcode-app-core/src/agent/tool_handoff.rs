@@ -67,8 +67,10 @@ async fn execute_with_background_budget(
         biased;
         result = &mut work => result.map_err(|e| anyhow::anyhow!("Tool task panicked: {}", e))?,
         _ = tokio::time::sleep(budget), if auto_background && !budget.is_zero() => {
+            // The task records the resolved name: its exit handling keys on `bash`.
+            let resolved = Registry::resolve_tool_name_for_session(&session_id, &name);
             let info = crate::background::global()
-                .adopt_handoff(Some(handoff), &name, display_name, &session_id, notify, wake, work)
+                .adopt_handoff(Some(handoff), resolved, display_name, &session_id, notify, wake, work)
                 .await;
             Ok(crate::tool::ToolOutput::new(format!(
                 "Tool '{}' was moved to background {} (task_id: {}).\n\n{}\n{}",

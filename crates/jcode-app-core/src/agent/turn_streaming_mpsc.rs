@@ -1787,7 +1787,7 @@ impl Agent {
                     let bg_info = crate::background::global()
                         .adopt_handoff(
                             Some(handoff),
-                            &tc.name,
+                            Registry::resolve_tool_name_for_session(&self.session.id, &tc.name),
                             tool_handoff::handoff_display_name(&tc.input),
                             &self.session.id,
                             notify,
