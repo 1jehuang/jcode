@@ -1871,6 +1871,20 @@ server_resumes: false,
                 if let Some(snapshot) = try_available_models_snapshot(&agent).await {
                     last_available_models_snapshot = Some(snapshot);
                 }
+                // A completion that found the agent locked by the history
+                // send is queued with no turn left to drain it.
+                super::live_turn::run_stranded_background_completions(
+                    client_session_id.clone(),
+                    Arc::clone(&agent),
+                    super::live_turn::LiveTurnSwarmContext::new(
+                        &swarm_members,
+                        &swarms_by_id,
+                        &event_history,
+                        &event_counter,
+                        &swarm_event_tx,
+                    ),
+                )
+                .await;
             }
 
             Request::GetModelCatalog { id, subscribe_usage_updates } => {
