@@ -94,13 +94,15 @@ impl App {
                 _ => false,
             };
         }
-        // ↓ keeps scrolling a chat that is not at the bottom.
+        // ↓ keeps scrolling a chat that is not at the bottom or a focused pane.
         if code != KeyCode::Down
             || !modifiers.is_empty()
             || !self.input.is_empty()
             || self.auto_scroll_paused
             || self.pending_history_anchor.is_some()
             || self.inline_interactive_state.is_some()
+            || self.diff_pane_focus
+            || (self.diagram_focus && self.diagram_available())
         {
             return false;
         }
@@ -207,6 +209,14 @@ mod tests {
         let mut app = app_with_running_shell();
         app.auto_scroll_paused = true;
         assert!(!app.handle_task_pill_key(KeyCode::Down, none));
+        assert!(!app.task_pill_selected);
+    }
+
+    #[test]
+    fn down_scrolls_a_focused_pane_instead_of_selecting_the_pill() {
+        let mut app = app_with_running_shell();
+        app.diff_pane_focus = true;
+        assert!(!app.handle_task_pill_key(KeyCode::Down, KeyModifiers::NONE));
         assert!(!app.task_pill_selected);
     }
 }
