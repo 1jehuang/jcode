@@ -91,7 +91,8 @@ impl App {
                     self.open_tasks_dialog();
                     true
                 }
-                KeyCode::Esc | KeyCode::Up => true,
+                // Ctrl+Up and friends deselect but still reach their bindings.
+                KeyCode::Esc | KeyCode::Up if modifiers.is_empty() => true,
                 _ => false,
             };
         }
@@ -201,6 +202,18 @@ mod tests {
         assert!(app.handle_task_pill_key(KeyCode::Down, none));
         assert!(!app.handle_task_pill_key(KeyCode::Char('a'), none));
         assert!(!app.task_pill_selected && app.dialog.is_none());
+    }
+
+    #[test]
+    fn modified_up_deselects_the_pill_without_consuming_the_key() {
+        let mut app = app_with_running_shell();
+        assert!(app.handle_task_pill_key(KeyCode::Down, KeyModifiers::NONE));
+        assert!(!app.handle_task_pill_key(KeyCode::Up, KeyModifiers::CONTROL));
+        assert!(!app.task_pill_selected);
+        // Plain Up still only deselects.
+        assert!(app.handle_task_pill_key(KeyCode::Down, KeyModifiers::NONE));
+        assert!(app.handle_task_pill_key(KeyCode::Up, KeyModifiers::NONE));
+        assert!(!app.task_pill_selected);
     }
 
     #[test]
