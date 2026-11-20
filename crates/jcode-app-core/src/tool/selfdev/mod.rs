@@ -490,7 +490,11 @@ impl Drop for BuildLockGuard {
         // Windows does not allow deleting an open lock file. Close the handle
         // before unlinking so self-dev builds do not leave a permanent lock.
         self.file.take();
-        let _ = std::fs::remove_file(&self.path);
+        if let Err(error) = std::fs::remove_file(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::logging::warn(&format!("Could not remove self-dev build lock: {error}"));
+        }
     }
 }
 

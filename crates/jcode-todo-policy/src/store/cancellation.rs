@@ -24,6 +24,10 @@ impl TodoCancellation {
     }
 }
 
+fn directory(home: &Path) -> PathBuf {
+    home.join("todos").join("cancellations")
+}
+
 fn path(home: &Path, session: &str) -> io::Result<PathBuf> {
     if !super::is_safe_session_id(session) {
         return Err(io::Error::new(
@@ -31,14 +35,14 @@ fn path(home: &Path, session: &str) -> io::Result<PathBuf> {
             "invalid todo session ID",
         ));
     }
-    Ok(home
-        .join("todos")
-        .join("cancellations")
-        .join(format!("{session}.json")))
+    Ok(directory(home).join(format!("{session}.json")))
 }
 
 pub fn load_cancellations(home: &Path, session_id: &str) -> io::Result<Vec<TodoCancellation>> {
-    Ok(super::read_optional(&path(home, session_id)?)?.unwrap_or_default())
+    match super::read_optional(&path(home, session_id)?)? {
+        Some(history) => Ok(history),
+        None => Ok(Vec::new()),
+    }
 }
 
 /// Append the entire batch atomically. Reject unreadable history rather than replacing it.
@@ -57,7 +61,7 @@ pub fn append_cancellations(
             "cancellation reason must not be blank",
         ));
     }
-    fs::create_dir_all(path.parent().expect("session file under cancellations"))?;
+    fs::create_dir_all(directory(home))?;
     // A stable lock inode protects the read/modify/rename sequence across processes.
     let lock = fs::OpenOptions::new()
         .read(true)
@@ -66,7 +70,7 @@ pub fn append_cancellations(
         .truncate(false)
         .open(path.with_extension("lock"))?;
     lock.lock()?;
-    let mut history: Vec<TodoCancellation> = super::read_optional(&path)?.unwrap_or_default();
+    let mut history: Vec<TodoCancellation> = load_cancellations(home, session_id)?;
     history.extend_from_slice(entries);
     jcode_storage::write_json_secret(&path, &history).map_err(io::Error::other)
 }

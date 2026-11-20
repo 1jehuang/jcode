@@ -112,11 +112,10 @@ mod runtime_identity_tests;
 mod history_fingerprint;
 #[cfg(test)]
 use history_fingerprint::AppliedHistoryFingerprint;
-use history_fingerprint::history_images_match_retained;
-use history_fingerprint::history_payload_fingerprint;
-use history_fingerprint::last_applied_history_fingerprint;
-use history_fingerprint::record_applied_history_fingerprint;
-use history_fingerprint::should_skip_identical_history_payload;
+use history_fingerprint::{
+    history_images_match_retained, history_payload_fingerprint, last_applied_history_fingerprint,
+    record_applied_history_fingerprint, should_skip_identical_history_payload,
+};
 #[cfg(test)]
 #[path = "server_events/history_dedup_tests.rs"]
 mod history_dedup_tests;

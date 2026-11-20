@@ -22,12 +22,10 @@ use std::time::{Duration, Instant};
 
 use super::{
     DEFAULT_SESSION_SCAN_LIMIT, MAX_SESSION_SCAN_LIMIT, MIN_SESSION_SCAN_LIMIT, PreviewMessage,
-    SEARCH_CONTENT_BUDGET_BYTES, ServerGroup, SessionInfo,
+    ResumeTarget, SEARCH_CONTENT_BUDGET_BYTES, ServerGroup, SessionInfo, SessionSource,
 };
 
 mod mobile_inventory;
-
-use super::{ResumeTarget, SessionSource};
 
 #[cfg(test)]
 const TRANSCRIPT_SEARCH_CHUNK_BYTES: usize = 64 * 1024;

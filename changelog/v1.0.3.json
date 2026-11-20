@@ -1,0 +1,8 @@
+{
+  "version": "1.0.3",
+  "date": "2026-11-19",
+  "title": "Keep macOS menu bar counts visible",
+  "highlights": ["The macOS menu bar shows session counts using native text contrast, including 0/0 when no sessions are running."],
+  "improvements": [],
+  "fixes": []
+}

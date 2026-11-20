@@ -275,40 +275,42 @@ impl DeferredPlayback {
     fn trigger(&mut self, id: u64, text: &str) {
         self.latest = Some(id);
         self.speech = None;
-        self.partial = serde_json::from_str::<serde_json::Value>(text)
-            .ok()
-            .and_then(|env| {
-                (env["still_speaking"].as_bool() == Some(true)).then(|| {
-                    (
-                        id,
-                        env["trigger"]
-                            .as_str()
-                            .unwrap_or_default()
-                            .trim()
-                            .to_owned(),
-                        Instant::now(),
-                    )
-                })
-            });
+        self.partial = match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(env) if env["still_speaking"].as_bool() == Some(true) => Some((
+                id,
+                env["trigger"].as_str().unwrap_or("").trim().to_owned(),
+                Instant::now(),
+            )),
+            _ => None,
+        };
         // No cue while the user is still talking: it plays on finalize.
         self.ding = self.partial.is_none();
     }
 
     fn finalize(&mut self, id: u64, text: &str) {
-        if !self.partial.as_ref().is_some_and(|(old, _, _)| *old == id) {
+        let Some((_, partial, _)) = self.partial.take_if(|(old, _, _)| *old == id) else {
             return;
-        }
+        };
         self.ding = true;
-        if self.partial.take().unwrap().1 != text.trim() {
+        if partial != text.trim() {
             self.speech = None;
         }
+    }
+}
+fn stop_cue(child: &mut std::process::Child) {
+    if let Err(error) = child.kill()
+        && error.kind() != std::io::ErrorKind::InvalidInput
+    {
+        crate::logging::warn(&format!("Could not stop voice cue: {error}"));
     }
 }
 impl Drop for DeferredPlayback {
     fn drop(&mut self) {
         if let Some((mut child, _)) = self.cue_player.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+            stop_cue(&mut child);
+            if let Err(error) = child.wait() {
+                crate::logging::warn(&format!("Could not reap voice cue: {error}"));
+            }
         }
     }
 }
@@ -323,7 +325,7 @@ impl AlwaysListening {
     fn playback_trace(&self) -> jcode_voice::speech::PlaybackTrace {
         jcode_voice::speech::PlaybackTrace {
             session: self.session.clone().unwrap_or_else(|| "none".into()),
-            utterance: self.playback.latest.unwrap_or_default(),
+            utterance: self.playback.latest.unwrap_or(0),
         }
     }
     pub(super) fn defer_speech(&mut self, text: String) {
@@ -573,7 +575,7 @@ impl App {
             .as_mut()
             .is_some_and(|(child, at)| {
                 if at.elapsed() > Duration::from_secs(3) {
-                    let _ = child.kill();
+                    stop_cue(child);
                 }
                 matches!(child.try_wait(), Ok(None))
             });
@@ -805,18 +807,23 @@ impl App {
                         }),
                     other => other,
                 };
-                let request_id = result.as_ref().ok().copied();
-                let stage = if let Err(error) = result {
-                    self.push_display_message(DisplayMessage::error(format!(
-                        "Voice request was not sent: {error}"
-                    )));
-                    "send_failed"
-                } else {
-                    listener.dispatch.sent(&req);
-                    if interleave {
-                        "interleave_sent"
-                    } else {
-                        "sent"
+                let (request_id, stage) = match result {
+                    Err(error) => {
+                        self.push_display_message(DisplayMessage::error(format!(
+                            "Voice request was not sent: {error}"
+                        )));
+                        (None, "send_failed")
+                    }
+                    Ok(id) => {
+                        listener.dispatch.sent(&req);
+                        (
+                            Some(id),
+                            if interleave {
+                                "interleave_sent"
+                            } else {
+                                "sent"
+                            },
+                        )
                     }
                 };
                 crate::logging::info(&format!(
