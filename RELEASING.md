@@ -2,6 +2,32 @@
 
 Official releases have two gates: **successful CI for the exact tagged commit** and **a complete platform asset set before publication**. Local preparation can save build time, but it does not bypass either gate. `.github/workflows/release.yml` owns final publication.
 
+## Linux self-dev prereleases
+
+To share successful TUI self-dev builds from a maintainer checkout, run
+`git config --local jcode.linuxPrerelease true` and authenticate `gh` with
+permission to dispatch Actions in `1jehuang/jcode`. Commit and push your work
+to `master` **before building**. The hook requests a CI build of the public
+commit, not an upload of your workstation binary. Dirty or unpublished work
+stays local. Set the same config key to `false` to turn this off.
+
+Linux x86_64 testers can find `selfdev-linux-<commit>` prereleases with
+`gh release list -R 1jehuang/jcode` and download a chosen build with
+`gh release download <tag> -R 1jehuang/jcode`. Verify the archive against
+`SHA256SUMS`, extract it into a separate directory, and run the extracted
+launcher. This is a manual testing channel, separate from stable updates and
+the cross-platform v1 preview below. Rebuilding a commit does not create a
+second public release.
+
+Before requesting `selfdev build` or `build-reload`, run `selfdev logs` and
+review the changes since the last **published Linux prerelease**, not just
+the last local build. Both tool actions require public `release_notes`: write
+short bullets about what testers will notice, including changes made by other
+agents. Keep internal build reasons, chat context, and local paths out of the
+notes. Discord uses these highlights. The GitHub release also links the full
+commit range so changes omitted from the summary remain discoverable. CLI and
+manual workflow builds without authored notes still use public commit titles.
+
 ## Opt-in v1 preview channel
 
 The separate `.github/workflows/preview.yml` pipeline is **enabled by default** on

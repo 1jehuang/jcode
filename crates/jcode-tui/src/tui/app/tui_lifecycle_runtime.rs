@@ -27,6 +27,7 @@ impl App {
         app.auto_poke_default_on = false;
         app.overnight_auto_poke = None;
         app.queued_messages.clear();
+        app.queued_images.clear();
         app.queued_commands.clear();
         app.hidden_queued_system_messages.clear();
         app.status_notice = None;

@@ -121,6 +121,7 @@ fn test_handle_background_task_completed_adds_delivery_transcript_card() {
 fn test_local_stalled_background_injection_adds_transcript_entry() {
     let mut app = create_test_app();
     let event = BusEvent::BackgroundTaskStalled(crate::bus::BackgroundTaskStalled {
+        elapsed_review: false,
         task_id: "stalled-delivery".to_string(),
         tool_name: "bash".to_string(),
         display_name: None,

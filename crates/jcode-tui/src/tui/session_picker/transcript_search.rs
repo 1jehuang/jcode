@@ -286,7 +286,7 @@ fn build_candidates(
         // Literal metadata matches still go to the worker, which upgrades
         // their rank once it knows where in the transcript each word came from,
         // unless every word already comes from a user-intent field.
-        if !defer_metadata && missing_tokens.is_empty() && (tokens.len() < 4 || !entry.has_prompt) {
+        if !defer_metadata && missing_tokens.is_empty() && (tokens.len() < 2 || !entry.has_prompt) {
             let intent = lowercase_field(&entry.intent_text);
             if tokens.iter().all(|token| intent.contains(token.as_str())) {
                 continue;
@@ -385,7 +385,7 @@ struct PhraseQuery {
 impl PhraseQuery {
     fn new(query: &str) -> Option<Self> {
         let words = phrase_words(query, 256);
-        if words.len() < 4 || words.len() > 64 {
+        if !(2..=64).contains(&words.len()) {
             return None;
         }
         Some(Self {
@@ -400,6 +400,18 @@ impl PhraseQuery {
 
     fn rank(&self, prompt: &str) -> usize {
         let prompt = phrase_words(prompt, 2048);
+        if self.words.len() < 4 {
+            // Short keyword queries need all words in one user message, not
+            // necessarily adjacent or in the order the user remembers them.
+            return if self.words.iter().enumerate().all(|(i, word)| {
+                let needed = self.words[..=i].iter().filter(|w| *w == word).count();
+                prompt.iter().filter(|w| *w == word).take(needed).count() == needed
+            }) {
+                self.words.len()
+            } else {
+                0
+            };
+        }
         if prompt.len() + 1 < self.words.len() * 4 / 5 {
             return 0;
         }
@@ -444,8 +456,14 @@ fn user_prompt_phrase_rank(paths: &[PathBuf], phrase: &PhraseQuery, cancel: &Ato
         }
         if let Some(segments) = text_cache::segments(path, cancel) {
             for (text, source) in segments.iter() {
+                if cancel.load(Ordering::Relaxed) {
+                    return 0;
+                }
                 if source == Source::User {
                     sink.best = sink.best.max(phrase.rank(text));
+                    if sink.best == phrase.words.len() {
+                        return sink.best;
+                    }
                 }
             }
             continue;

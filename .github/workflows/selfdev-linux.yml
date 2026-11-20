@@ -1,0 +1,170 @@
+name: Linux self-dev prerelease
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full 40-character commit SHA on master
+        type: string
+        required: true
+      release_notes:
+        description: Optional public highlights, one per line (otherwise use public commit subjects)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: selfdev-linux-${{ inputs.sha }}
+  cancel-in-progress: false
+
+env:
+  SHA: ${{ inputs.sha }}
+  ARCHIVE: jcode-linux-x86_64.tar.gz
+
+jobs:
+  verify:
+    if: github.repository == '1jehuang/jcode' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.release.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact master commit
+        run: |
+          set -euo pipefail
+          [[ $SHA =~ ^[0-9a-f]{40}$ ]]
+          [[ $(git cat-file -t "$SHA") == commit ]]
+          git merge-base --is-ancestor "$SHA" "$GITHUB_SHA"
+          tag="refs/tags/selfdev-linux-$SHA"
+          if git show-ref --verify --quiet "$tag"; then
+            [[ $(git rev-parse "$tag^{commit}") == "$SHA" ]]
+          fi
+      - id: release
+        name: Skip completed releases, resume interrupted drafts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="selfdev-linux-$SHA"
+          file="$RUNNER_TEMP/release.json"
+          status=$(curl --silent --show-error -o "$file" -w '%{http_code}' \
+            -H "Authorization: Bearer $GH_TOKEN" "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/tags/$tag")
+          case "$status" in
+            404) build=true ;;
+            200)
+              jq -e --arg tag "$tag" '.tag_name == $tag and .prerelease' "$file" >/dev/null
+              if jq -e '.draft' "$file" >/dev/null; then
+                jq -e --arg sha "$SHA" '.target_commitish == $sha' "$file" >/dev/null
+                build=true
+              else
+                [[ $(git rev-parse "refs/tags/$tag^{commit}") == "$SHA" ]]
+                jq -e --arg archive "$ARCHIVE" '([.assets[] | select(.state == "uploaded" and .size > 0) | .name] | index($archive) != null and index("SHA256SUMS") != null)' "$file" >/dev/null
+                build=false
+              fi ;;
+            *) echo "Release lookup returned HTTP $status" >&2; exit 1 ;;
+          esac
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: verify
+    if: needs.verify.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.0
+      - run: bash scripts/install_justrust_hosted_ci.sh
+      - name: Build portable self-dev binary on hosted justrust
+        env:
+          JCODE_API_KEY: ${{ secrets.JUSTRUST_API_KEY }}
+        run: |
+          set -euo pipefail
+          [[ $(git rev-parse HEAD) == "$SHA" && -n $JCODE_API_KEY ]]
+          JCODE_BUILD_SEMVER=$(python3 -c 'import tomllib; print("v" + tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          JCODE_BUILD_SEMVER+="-selfdev.${GITHUB_RUN_ID}"
+          export JCODE_BUILD_SEMVER
+          bash scripts/build_preview_linux_hosted.sh x86_64-unknown-linux-gnu
+          echo "JCODE_BUILD_SEMVER=$JCODE_BUILD_SEMVER" >> "$GITHUB_ENV"
+      - name: Smoke test and checksum portable archive
+        run: |
+          set -euo pipefail
+          bash scripts/package_preview_linux_hosted.sh
+          cd dist
+          ./jcode-linux-x86_64 --no-update --no-selfdev --version | grep -F -- "$JCODE_BUILD_SEMVER ($(git rev-parse --short HEAD))"
+          sha256sum "$ARCHIVE" > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portable
+          path: |
+            dist/jcode-linux-x86_64.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: portable
+          path: dist
+      - name: Publish complete non-latest prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum --check SHA256SUMS
+          tag="selfdev-linux-$SHA"
+          title="jcode Linux prerelease · ${SHA:0:9}"
+          notes="$RUNNER_TEMP/highlights.md"
+          tags="$RUNNER_TEMP/releases.txt"
+          existing=false
+          if gh release view "$tag" --json body --jq .body > "$notes"; then existing=true; fi
+          if [[ $existing == false ]] || ! grep -Fxq '## Highlights' "$notes"; then
+            gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
+              --jq '.[] | select(.draft == false and .prerelease) | [.published_at, .tag_name] | @tsv' \
+              | LC_ALL=C sort -r | cut -f2 > "$tags"
+            python3 ../scripts/selfdev_release_highlights.py "$tags" > "$notes"
+          fi
+          if [[ $existing == false ]]; then
+            gh release create "$tag" --target "$SHA" --draft --prerelease --latest=false \
+              --title "$title" --notes-file "$notes"
+          fi
+          # Do not modify a published release. A cancelled run may leave a draft.
+          gh release view "$tag" --json isDraft,isPrerelease,targetCommitish | \
+            jq -e --arg sha "$SHA" '.isDraft and .isPrerelease and .targetCommitish == $sha'
+          gh release upload "$tag" "$ARCHIVE" SHA256SUMS --clobber
+          gh release edit "$tag" --title "$title" --notes-file "$notes" --draft=false --prerelease --latest=false
+
+  announce:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Announce Linux self-dev prerelease on Discord
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run discord-release.yml --repo "$GITHUB_REPOSITORY" --ref master -f "tag=selfdev-linux-$SHA"
