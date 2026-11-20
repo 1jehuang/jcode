@@ -1284,6 +1284,15 @@ impl BackgroundTaskManager {
                 return Ok(false);
             }
             let _status_guard = self.progress_updates.lock().await;
+            // The abort can land after the task persisted its own terminal
+            // status but before it published it. Keep that real result and
+            // publish it once, with the task's own delivery.
+            if let Some(status) = self.read_status_file(&task.status_path).await
+                && status.status != BackgroundTaskStatus::Running
+            {
+                self.publish_completion(&status, status.wake).await;
+                return Ok(false);
+            }
 
             // Update status file
             let (notify_flag, wake_flag) = *task.delivery_flags.borrow();
@@ -1318,7 +1327,7 @@ impl BackgroundTaskManager {
             if let Ok(json) = serde_json::to_string_pretty(&final_status) {
                 let _ = fs::write(&task.status_path, json).await;
             }
-            self.publish_cancelled(&final_status).await;
+            self.publish_completion(&final_status, false).await;
 
             Ok(true)
         } else {
@@ -1372,14 +1381,14 @@ impl BackgroundTaskManager {
                 terminal_event_record(event_status, event_exit_code, event_error.as_deref()),
             );
             self.write_status_file(&status_path, &status).await;
-            self.publish_cancelled(&status).await;
+            self.publish_completion(&status, false).await;
             Ok(true)
         }
     }
 
-    /// Publish a requested stop so UIs settle the task. Like Claude Code's
-    /// TaskStop, a stop someone asked for never wakes the model.
-    async fn publish_cancelled(&self, status: &TaskStatusFile) {
+    /// Publish a settled task's completion. Like Claude Code's TaskStop, a
+    /// stop someone asked for passes `wake: false` so it never wakes the model.
+    async fn publish_completion(&self, status: &TaskStatusFile, wake: bool) {
         let output_file = self.output_path_for(&status.task_id);
         let output = fs::read_to_string(&output_file).await.unwrap_or_default();
         let output_preview = if output.len() > 500 {
@@ -1398,7 +1407,7 @@ impl BackgroundTaskManager {
             output_file,
             duration_secs: status.duration_secs.unwrap_or_default(),
             notify: status.notify,
-            wake: false,
+            wake,
         }));
     }
 

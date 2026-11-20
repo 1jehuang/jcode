@@ -1146,3 +1146,48 @@ async fn detached_cancel_publishes_once_even_after_sweep() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn cancel_keeps_terminal_status_written_before_abort() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut events = Bus::global().subscribe();
+    let info = manager
+        .spawn_with_notify(
+            "bash",
+            None,
+            "session-cancel-terminal",
+            true,
+            true,
+            |_output_path| async move {
+                sleep(Duration::from_secs(3600)).await;
+                Ok(TaskResult::completed(Some(0)))
+            },
+        )
+        .await;
+    // The task persisted its real result, but the abort lands before it publishes.
+    let mut finished = manager
+        .read_status_file(&info.status_file)
+        .await
+        .ok_or_else(|| anyhow!("status should exist"))?;
+    finished.status = BackgroundTaskStatus::Completed;
+    finished.exit_code = Some(0);
+    manager
+        .write_status_file(&info.status_file, &finished)
+        .await;
+
+    assert!(!manager.cancel(&info.task_id).await?);
+    let status = manager
+        .status(&info.task_id)
+        .await
+        .ok_or_else(|| anyhow!("status should exist"))?;
+    assert_eq!(status.status, BackgroundTaskStatus::Completed);
+    assert_eq!(status.exit_code, Some(0));
+    assert_eq!(status.error, None);
+
+    let completions = drain_completions(&mut events, &info.task_id);
+    assert_eq!(completions.len(), 1, "exactly one: {completions:?}");
+    assert_eq!(completions[0].status, BackgroundTaskStatus::Completed);
+    assert!(completions[0].wake, "the real completion keeps its delivery");
+    Ok(())
+}
