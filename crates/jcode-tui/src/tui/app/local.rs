@@ -548,6 +548,12 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
             app.push_display_message(DisplayMessage::background_task(notification.clone()));
             app.hidden_queued_system_messages.push(notification);
         }
+    } else if !task.wake {
+        // As in server mode, a completion that must not wake the model (such
+        // as a requested stop) is only shown, never written to its history.
+        if first_model_delivery(&task) {
+            app.push_display_message(DisplayMessage::background_task(notification));
+        }
     } else if first_model_delivery(&task) {
         app.push_display_message(DisplayMessage::background_task(notification.clone()));
         app.add_provider_message(Message {
@@ -570,7 +576,7 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
         );
         let _ = app.session.save();
 
-        if task.wake && !app.cloud_handoff_blocks_work() {
+        if !app.cloud_handoff_blocks_work() {
             app.pending_turn = true;
             app.is_processing = true;
             app.status = ProcessingStatus::Sending;
@@ -775,5 +781,35 @@ mod background_delivery_tests {
         assert_eq!(app.session.messages.len(), before);
         assert_eq!(app.hidden_queued_system_messages.len(), 1);
         assert!(!app.pending_turn);
+    }
+
+    #[test]
+    fn idle_completion_that_must_not_wake_is_shown_but_kept_out_of_history() {
+        let mut app = super::super::tests::create_test_app();
+        let before = app.session.messages.len();
+        let task = BackgroundTaskCompleted {
+            task_id: "bg-stopped".to_string(),
+            tool_name: "bash".to_string(),
+            display_name: None,
+            session_id: app.session.id.clone(),
+            status: crate::bus::BackgroundTaskStatus::Failed,
+            exit_code: None,
+            output_preview: "Cancelled by user".to_string(),
+            output_file: std::env::temp_dir().join("bg-stopped.output"),
+            duration_secs: 1.0,
+            notify: true,
+            wake: false,
+        };
+
+        handle_bus_event(&mut app, Ok(BusEvent::BackgroundTaskCompleted(task)));
+
+        assert_eq!(app.session.messages.len(), before, "no model history write");
+        assert!(!app.pending_turn);
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|message| message.content.contains("bg-stopped")),
+            "the user still sees the completion"
+        );
     }
 }
