@@ -842,8 +842,10 @@ impl BackgroundTaskManager {
             let tool_result = (&mut handle.0).await;
             let duration_secs = started_at.elapsed().as_secs_f64();
 
-            // A shell reports a nonzero exit in `exit_code` metadata.
+            // A shell reports a nonzero exit in `exit_code` metadata; other
+            // tools (e.g. `bg` reporting someone else's failed task) must not.
             let failed_exit = |output: &jcode_tool_types::ToolOutput| {
+                (tool_name_owned == "bash").then_some(())?;
                 output
                     .metadata
                     .as_ref()
