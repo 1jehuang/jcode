@@ -46,6 +46,7 @@ pub(super) fn route_supports_reasoning_effort(api_method: &str) -> bool {
         Method::JcodeSubscription
         | Method::GrokBuild
         | Method::ZCode
+        | Method::ZCodeCodingPlan
         | Method::ZCodeOffPeak
         | Method::Copilot
         | Method::Cursor

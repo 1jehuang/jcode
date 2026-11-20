@@ -593,6 +593,7 @@ impl AnthropicProvider {
     pub fn new() -> Self {
         match std::env::var("JCODE_RUNTIME_PROVIDER").ok().as_deref() {
             Some("zcode") => return Self::new_zcode(false),
+            Some("zcode-coding") => return Self::new_zcode_coding_plan(),
             Some("zcode-off-peak") => return Self::new_zcode(true),
             _ => {}
         }
@@ -703,6 +704,20 @@ impl AnthropicProvider {
             profile_api_key,
             profile_models: Some(vec!["GLM-5.3-Flash".to_string(), "GLM-5.3".to_string()]),
         }
+    }
+
+    /// Z.AI Coding Plan route (`builtin:zai-coding-plan`): same exchanged
+    /// coding-plan key, but the `api.z.ai/api/anthropic` endpoint and GLM-5.3
+    /// as the default model.
+    pub fn new_zcode_coding_plan() -> Self {
+        let mut provider = Self::new_zcode(false);
+        provider.direct_transport.api_url = format!(
+            "{}/v1/messages",
+            jcode_base::auth::zcode::ZAI_ANTHROPIC_BASE
+        );
+        *provider.model.write().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            "GLM-5.3".to_string();
+        provider
     }
 
     fn direct_api_key(&self) -> Result<String> {

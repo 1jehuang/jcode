@@ -154,6 +154,13 @@ impl MultiProvider {
                 let bare = bare_name.strip_prefix("zcode:").unwrap_or(bare_name).trim();
                 format!("zcode:{bare}")
             }
+            ModelRouteApiMethod::ZCodeCodingPlan => {
+                let bare = bare_name
+                    .strip_prefix("zcode-coding:")
+                    .unwrap_or(bare_name)
+                    .trim();
+                format!("zcode-coding:{bare}")
+            }
             ModelRouteApiMethod::ZCodeOffPeak => {
                 let bare = bare_name
                     .strip_prefix("zcode-off-peak:")
@@ -183,6 +190,7 @@ impl MultiProvider {
             ModelRouteApiMethod::JcodeSubscription => Some("jcode".to_string()),
             ModelRouteApiMethod::GrokBuild => Some("grok-build".to_string()),
             ModelRouteApiMethod::ZCode => Some("zcode".to_string()),
+            ModelRouteApiMethod::ZCodeCodingPlan => Some("zcode-coding".to_string()),
             ModelRouteApiMethod::ZCodeOffPeak => Some("zcode-off-peak".to_string()),
             ModelRouteApiMethod::AnthropicApiKey
                 if provider_display == "Anthropic"
@@ -528,6 +536,13 @@ impl MultiProvider {
                 ModelRouteApiMethod::ZCode => {
                     let bare = model.strip_prefix("zcode:").unwrap_or(model).trim();
                     return format!("zcode:{bare}");
+                }
+                ModelRouteApiMethod::ZCodeCodingPlan => {
+                    let bare = model
+                        .strip_prefix("zcode-coding:")
+                        .unwrap_or(model)
+                        .trim();
+                    return format!("zcode-coding:{bare}");
                 }
                 ModelRouteApiMethod::ZCodeOffPeak => {
                     let bare = model

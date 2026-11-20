@@ -228,6 +228,14 @@ pub fn register_external_provider_runtimes() {
         || std::sync::Arc::new(jcode_provider_anthropic_runtime::AnthropicProvider::new_zcode(false)),
     );
     crate::provider::external::register_external_provider(
+        crate::provider::external::ZCODE_CODING_PLAN_RUNTIME,
+        || {
+            std::sync::Arc::new(
+                jcode_provider_anthropic_runtime::AnthropicProvider::new_zcode_coding_plan(),
+            )
+        },
+    );
+    crate::provider::external::register_external_provider(
         crate::provider::external::ZCODE_OFF_PEAK_RUNTIME,
         || std::sync::Arc::new(jcode_provider_anthropic_runtime::AnthropicProvider::new_zcode(true)),
     );

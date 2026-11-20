@@ -478,8 +478,14 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
     } else {
         "no ZCode login".to_string()
     };
+    // Both Z.AI plans stay selectable in the picker:
+    // - `zcode:` routes through the Start Plan Weekend-Build/zcode-plan endpoint
+    //   (zcode.z.ai/api/v1/zcode-plan/anthropic) with the exchanged coding-plan key.
+    // - `zcode-coding:` routes through the Z.AI Coding Plan endpoint
+    //   (api.z.ai/api/anthropic) with the same exchanged key.
     for (prefix, provider_label, api_method) in [
         ("zcode", "ZCode", "zcode-oauth"),
+        ("zcode-coding", "ZCode Coding Plan", "zcode-coding-plan"),
         ("zcode-off-peak", "ZCode Off-Peak", "zcode-off-peak"),
     ] {
         for model in ["GLM-5.3-Flash", "GLM-5.3"] {

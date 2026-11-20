@@ -261,6 +261,7 @@ pub use session_restore::*;
 
 pub(crate) const GROK_BUILD_PROFILE_ID: &str = "grok-build";
 pub(crate) const ZCODE_PROFILE_ID: &str = "zcode";
+pub(crate) const ZCODE_CODING_PLAN_PROFILE_ID: &str = "zcode-coding";
 pub(crate) const ZCODE_OFF_PEAK_PROFILE_ID: &str = "zcode-off-peak";
 
 /// MultiProvider wraps multiple providers and allows seamless model switching
@@ -2114,6 +2115,11 @@ impl Provider for MultiProvider {
         if let Some((profile_id, runtime_id, target_model)) = requested_model
             .strip_prefix("zcode:")
             .map(|m| (ZCODE_PROFILE_ID, external::ZCODE_RUNTIME, m))
+            .or_else(|| {
+                requested_model
+                    .strip_prefix("zcode-coding:")
+                    .map(|m| (ZCODE_CODING_PLAN_PROFILE_ID, external::ZCODE_CODING_PLAN_RUNTIME, m))
+            })
             .or_else(|| {
                 requested_model
                     .strip_prefix("zcode-off-peak:")

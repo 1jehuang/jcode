@@ -931,6 +931,7 @@ pub enum RuntimeKey {
     Current,
     GrokBuild,
     ZCode,
+    ZCodeCodingPlan,
     ZCodeOffPeak,
     /// Catch-all for unrecognized `api_method` strings.
     ///
@@ -965,6 +966,7 @@ impl RuntimeKey {
             ModelRouteApiMethod::Current => Self::Current,
             ModelRouteApiMethod::GrokBuild => Self::GrokBuild,
             ModelRouteApiMethod::ZCode => Self::ZCode,
+            ModelRouteApiMethod::ZCodeCodingPlan => Self::ZCodeCodingPlan,
             ModelRouteApiMethod::ZCodeOffPeak => Self::ZCodeOffPeak,
             ModelRouteApiMethod::Other(method) => Self::Other {
                 method: method.clone(),
@@ -994,6 +996,7 @@ impl RuntimeKey {
             Self::Current => "current".to_string(),
             Self::GrokBuild => "grok-build".to_string(),
             Self::ZCode => "zcode".to_string(),
+            Self::ZCodeCodingPlan => "zcode-coding-plan".to_string(),
             Self::ZCodeOffPeak => "zcode-off-peak".to_string(),
             Self::Other { method } => method.clone(),
         }
@@ -1084,6 +1087,10 @@ impl RouteSelection {
                 let bare = model.strip_prefix("zcode:").unwrap_or(model).trim();
                 format!("zcode:{bare}")
             }
+            RuntimeKey::ZCodeCodingPlan => {
+                let bare = model.strip_prefix("zcode-coding:").unwrap_or(model).trim();
+                format!("zcode-coding:{bare}")
+            }
             RuntimeKey::ZCodeOffPeak => {
                 let bare = model.strip_prefix("zcode-off-peak:").unwrap_or(model).trim();
                 format!("zcode-off-peak:{bare}")
@@ -1141,6 +1148,7 @@ pub enum ModelRouteApiMethod {
     Current,
     GrokBuild,
     ZCode,
+    ZCodeCodingPlan,
     ZCodeOffPeak,
     Other(String),
 }
@@ -1187,6 +1195,7 @@ impl ModelRouteApiMethod {
             "jcode-subscription" => Self::JcodeSubscription,
             "grok-build" | "grok-build-acp" => Self::GrokBuild,
             "zcode" | "zcode-oauth" => Self::ZCode,
+            "zcode-coding-plan" | "zcode-coding" => Self::ZCodeCodingPlan,
             "zcode-off-peak" => Self::ZCodeOffPeak,
             "openrouter" => Self::OpenRouter,
             "openai-compatible" => Self::OpenAiCompatible { profile_id: None },
@@ -1268,6 +1277,7 @@ impl ModelRouteApiMethod {
             Self::Current => "current".to_string(),
             Self::GrokBuild => "grok-build-acp".to_string(),
             Self::ZCode => "zcode-oauth".to_string(),
+            Self::ZCodeCodingPlan => "zcode-coding-plan".to_string(),
             Self::ZCodeOffPeak => "zcode-off-peak".to_string(),
             Self::Other(method) => method
                 .split_once(':')

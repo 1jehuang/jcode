@@ -134,6 +134,13 @@ pub(super) fn picker_route_model_spec(entry: &PickerEntry, route: &PickerOption)
             let bare = bare_name.strip_prefix("zcode:").unwrap_or(&bare_name).trim();
             format!("zcode:{bare}")
         }
+        crate::provider::ModelRouteApiMethod::ZCodeCodingPlan => {
+            let bare = bare_name
+                .strip_prefix("zcode-coding:")
+                .unwrap_or(&bare_name)
+                .trim();
+            format!("zcode-coding:{bare}")
+        }
         crate::provider::ModelRouteApiMethod::ZCodeOffPeak => {
             let bare = bare_name
                 .strip_prefix("zcode-off-peak:")
