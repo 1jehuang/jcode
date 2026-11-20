@@ -200,7 +200,7 @@ pub(super) async fn run(
                         out.context = GateContext::default();
                         out.clear_pending_speech(if permitted { "paused" } else { "permission_lost" });
                         drop(out);
-                        if live.take().is_some() { super::timing::release(); }
+                        if live.take().is_some() { crate::timing::release(); }
                         warm = None;
                         for (handle,token,_) in jobs.drain(..) { token.store(true,Ordering::SeqCst); handle.abort(); }
                         break Ok(());
