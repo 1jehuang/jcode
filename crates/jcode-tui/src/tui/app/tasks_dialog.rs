@@ -84,7 +84,8 @@ impl App {
     /// pill, a second ↓ or Enter opens the dialog, Esc or ↑ deselects, and any
     /// other key deselects and keeps its usual meaning.
     pub(super) fn handle_task_pill_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
-        if std::mem::take(&mut self.task_pill_selected) {
+        // A paste or finished tasks leave nothing to open: the key acts as usual.
+        if std::mem::take(&mut self.task_pill_selected) && self.task_pill_selectable() {
             return match code {
                 KeyCode::Down | KeyCode::Enter if modifiers.is_empty() => {
                     self.open_tasks_dialog();
@@ -97,7 +98,6 @@ impl App {
         // ↓ keeps scrolling a chat that is not at the bottom or a focused pane.
         if code != KeyCode::Down
             || !modifiers.is_empty()
-            || !self.input.is_empty()
             || self.auto_scroll_paused
             || self.pending_history_anchor.is_some()
             || self.inline_interactive_state.is_some()
@@ -106,9 +106,14 @@ impl App {
         {
             return false;
         }
-        self.task_pill_selected =
-            task_pill(&self.background_task_rows, &self.inline_swarm_members()).is_some();
+        self.task_pill_selected = self.task_pill_selectable();
         self.task_pill_selected
+    }
+
+    /// The pill can be selected only on an empty prompt while tasks run.
+    pub(super) fn task_pill_selectable(&self) -> bool {
+        self.input.is_empty()
+            && task_pill(&self.background_task_rows, &self.inline_swarm_members()).is_some()
     }
 
     /// Switch to a spawned agent through the swarm panel's enter path.
@@ -218,5 +223,23 @@ mod tests {
         app.diff_pane_focus = true;
         assert!(!app.handle_task_pill_key(KeyCode::Down, KeyModifiers::NONE));
         assert!(!app.task_pill_selected);
+    }
+
+    #[test]
+    fn enter_after_a_paste_or_when_tasks_end_does_not_open_the_dialog() {
+        let none = KeyModifiers::NONE;
+        let mut app = app_with_running_shell();
+        assert!(app.handle_task_pill_key(KeyCode::Down, none));
+        app.input = "pasted text".into();
+        assert!(!crate::tui::TuiState::task_pill_selected(&app));
+        assert!(!app.handle_task_pill_key(KeyCode::Enter, none));
+        assert!(app.dialog.is_none());
+
+        let mut app = app_with_running_shell();
+        assert!(app.handle_task_pill_key(KeyCode::Down, none));
+        app.background_task_rows.clear();
+        assert!(!crate::tui::TuiState::task_pill_selected(&app));
+        assert!(!app.handle_task_pill_key(KeyCode::Enter, none));
+        assert!(app.dialog.is_none());
     }
 }

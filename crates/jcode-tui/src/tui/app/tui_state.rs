@@ -1978,7 +1978,7 @@ impl crate::tui::TuiState for App {
     }
 
     fn task_pill_selected(&self) -> bool {
-        self.task_pill_selected
+        self.task_pill_selected && self.task_pill_selectable()
     }
 
     fn swarm_panel_full_page(&self) -> bool {
