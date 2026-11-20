@@ -19,6 +19,8 @@ pub struct MockProvider {
     pub captured_resume_session_ids: Arc<Mutex<Vec<Option<String>>>>,
     /// Captured model names from complete() calls (for testing)
     pub captured_models: Arc<Mutex<Vec<String>>>,
+    /// Captured request messages from complete() calls (for testing)
+    pub captured_messages: Arc<Mutex<Vec<Vec<Message>>>>,
 }
 
 impl MockProvider {
@@ -30,6 +32,7 @@ impl MockProvider {
             captured_system_prompts: Arc::new(Mutex::new(Vec::new())),
             captured_resume_session_ids: Arc::new(Mutex::new(Vec::new())),
             captured_models: Arc::new(Mutex::new(Vec::new())),
+            captured_messages: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -45,6 +48,7 @@ impl MockProvider {
             captured_system_prompts: Arc::new(Mutex::new(Vec::new())),
             captured_resume_session_ids: Arc::new(Mutex::new(Vec::new())),
             captured_models: Arc::new(Mutex::new(Vec::new())),
+            captured_messages: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -58,7 +62,7 @@ impl MockProvider {
 impl Provider for MockProvider {
     async fn complete(
         &self,
-        _messages: &[Message],
+        messages: &[Message],
         _tools: &[ToolDefinition],
         system: &str,
         resume_session_id: Option<&str>,
@@ -73,6 +77,10 @@ impl Provider for MockProvider {
             .unwrap()
             .push(resume_session_id.map(|s| s.to_string()));
         self.captured_models.lock().unwrap().push(self.model());
+        self.captured_messages
+            .lock()
+            .unwrap()
+            .push(messages.to_vec());
 
         let events = self
             .responses
@@ -119,6 +127,7 @@ impl Provider for MockProvider {
             captured_system_prompts: self.captured_system_prompts.clone(),
             captured_resume_session_ids: self.captured_resume_session_ids.clone(),
             captured_models: self.captured_models.clone(),
+            captured_messages: self.captured_messages.clone(),
         })
     }
 }
