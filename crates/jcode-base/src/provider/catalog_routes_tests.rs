@@ -478,7 +478,7 @@ fn custom_config_profile_model_never_gets_a_copilot_route_from_either_source() {
 fn named_profile_merge_skips_builtin_duplicate_and_keeps_config_only_models() {
     let built_in = ModelRoute {
         catalog_metadata: None,
-        model: "A6-Coder-Large".into(),
+        model: "Acme-Coder-Large".into(),
         provider: "Acme".into(),
         api_method: "openai-compatible:acme".into(),
         available: true,
@@ -488,12 +488,12 @@ fn named_profile_merge_skips_builtin_duplicate_and_keeps_config_only_models() {
     };
     let configured_duplicate = ModelRoute {
         provider: "acme".into(),
-        model: "a6-coder-large".into(),
+        model: "acme-coder-large".into(),
         ..built_in.clone()
     };
     let config_only = ModelRoute {
         provider: "acme".into(),
-        model: "A6-Coder-Small".into(),
+        model: "Acme-Coder-Small".into(),
         ..built_in.clone()
     };
 

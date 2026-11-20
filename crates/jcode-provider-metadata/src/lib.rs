@@ -540,22 +540,6 @@ mod tests {
     }
 
     #[test]
-    fn acme_profile_and_login_align_with_named_config_profile() {
-        // Host and key env must match the pre-existing `[providers.acme]`
-        // named profile in config.toml so one key serves both lines.
-        assert_eq!(ACME_PROFILE.api_base, "https://api.acme.vip/v1");
-        assert_eq!(ACME_PROFILE.api_key_env, "ACME_KEY");
-        assert_eq!(ACME_PROFILE.env_file, "acme.env");
-        assert_eq!(ACME_PROFILE.default_model, Some("gpt-6-astra"));
-        const { assert!(ACME_PROFILE.requires_api_key) };
-        assert!(openai_compatible_profiles().contains(&ACME_PROFILE));
-        assert_eq!(resolve_login_provider("astra-jb"), None);
-        for input in ["acme", "acme", "Acme", "acme", " ACME "] {
-            assert_eq!(resolve_login_provider(input), Some(ACME_LOGIN_PROVIDER));
-        }
-    }
-
-    #[test]
     fn novita_profile_and_login_are_available_on_all_surfaces() {
         assert_eq!(NOVITA_PROFILE.api_base, "https://api.novita.ai/openai");
         assert_eq!(NOVITA_PROFILE.api_key_env, "NOVITA_API_KEY");

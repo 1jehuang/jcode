@@ -921,14 +921,6 @@ impl OpenRouterProvider {
         if self.configured_reasoning_efforts().is_some() {
             return false;
         }
-        if self
-            .profile_id
-            .as_deref()
-            .is_some_and(|id| id.eq_ignore_ascii_case("acme"))
-            && self.model_config(&self.model_snapshot()).is_some()
-        {
-            return false;
-        }
         if self.model_reasoning_support() == Some(false) {
             return false;
         }
@@ -968,14 +960,6 @@ impl OpenRouterProvider {
     pub(crate) fn supports_openai_reasoning_effort(&self) -> bool {
         if self.configured_reasoning_efforts().is_some() {
             return true;
-        }
-        if self
-            .profile_id
-            .as_deref()
-            .is_some_and(|id| id.eq_ignore_ascii_case("acme"))
-            && self.model_config(&self.model_snapshot()).is_some()
-        {
-            return false;
         }
         if let Some(explicit) = self.model_reasoning_support() {
             return explicit;
