@@ -561,8 +561,20 @@ impl Dialog {
             if fresh.title.is_empty() {
                 break;
             }
+            // Task rows reorder as shells start and finish: follow the task.
+            let followed = (fresh.route == Route::Tasks)
+                .then(|| view.visible().get(view.selected).copied())
+                .flatten()
+                .and_then(|index| view.items[index].action.clone());
             fresh.filter = view.filter;
-            fresh.selected = view.selected.min(fresh.visible().len().saturating_sub(1));
+            let visible = fresh.visible();
+            fresh.selected = followed
+                .and_then(|action| {
+                    visible
+                        .iter()
+                        .position(|&index| fresh.items[index].action.as_ref() == Some(&action))
+                })
+                .unwrap_or_else(|| view.selected.min(visible.len().saturating_sub(1)));
             self.stack.push(fresh);
         }
     }

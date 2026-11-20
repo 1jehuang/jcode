@@ -264,6 +264,34 @@ fn output_tail_keeps_last_non_blank_lines_without_escapes() {
 }
 
 #[test]
+fn selection_follows_the_task_when_rows_reorder() {
+    use BackgroundTaskRowStatus::*;
+    let mut dialog = Dialog::tasks(snapshot());
+    press(&mut dialog, KeyCode::Down);
+    // A new shell lands on top of the list; the agent stays selected.
+    let mut next = snapshot();
+    next.shells.push(shell("bg2", "npm test", Running));
+    dialog.set_tasks(next.clone());
+    assert_eq!(
+        press(&mut dialog, KeyCode::Char('x')),
+        DialogKey::StopTask(TaskTarget::Agent("s1".into()))
+    );
+    // The selected shell finishing moves it to Completed: x no longer
+    // stops the row that took its place.
+    press(&mut dialog, KeyCode::Up);
+    press(&mut dialog, KeyCode::Up);
+    assert_eq!(
+        press(&mut dialog, KeyCode::Char('x')),
+        DialogKey::StopTask(TaskTarget::Shell("bg2".into()))
+    );
+    next.shells[2].status = Completed;
+    dialog.set_tasks(next);
+    assert_eq!(press(&mut dialog, KeyCode::Char('x')), DialogKey::Handled);
+    assert_eq!(press(&mut dialog, KeyCode::Enter), DialogKey::Handled);
+    assert_eq!(route(&dialog), Route::TaskShell("bg2".into()));
+}
+
+#[test]
 fn modified_x_never_stops_a_task() {
     let mut dialog = Dialog::tasks(snapshot());
     for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
