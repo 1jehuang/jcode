@@ -286,6 +286,49 @@ fn message_text(message: &Message) -> &str {
     content_text(&message.content)
 }
 
+#[tokio::test]
+async fn narrowed_agent_keeps_denied_mcp_tool_blocked_while_mcp_stays_allowed() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    register_fake_deferred_mcp_surface(&registry).await;
+    for name in ["danger", "safe"] {
+        registry
+            .register(
+                format!("mcp__server__{name}"),
+                Arc::new(VerboseFakeMcpTool {
+                    name: name.to_string(),
+                    description: String::new(),
+                }) as Arc<dyn crate::tool::Tool>,
+            )
+            .await;
+    }
+    let session = Session::create(None, None);
+    let session_id = session.id.clone();
+    let mut agent = Agent::new_with_session(provider.clone(), registry.clone(), session, None);
+    agent
+        .narrow_tools(None, &["mcp__server__danger".to_string()])
+        .await;
+
+    let allowed = |id: &str, alias: &str| {
+        crate::tool::session_mcp_alias_is_allowed(id, alias, alias, "mcp_call")
+    };
+    assert!(!allowed(&session_id, "mcp__server__danger"));
+    assert!(allowed(&session_id, "mcp__server__safe"));
+    assert_eq!(
+        agent.session.tool_denylist,
+        Some(vec!["mcp__server__danger".to_string()])
+    );
+
+    // A resumed worker keeps the deny list.
+    let saved = agent.session.clone();
+    drop(agent);
+    let resumed_id = saved.id.clone();
+    let _resumed = Agent::new_with_session(provider, registry, saved, None);
+    assert!(!allowed(&resumed_id, "mcp__server__danger"));
+    assert!(allowed(&resumed_id, "mcp__server__safe"));
+}
+
 #[test]
 fn agent_drop_removes_its_configured_session_tool_policy() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);

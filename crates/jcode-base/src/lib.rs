@@ -19,6 +19,7 @@
 )]
 
 pub mod account_login;
+pub mod agent_def;
 pub mod applets;
 pub mod auth;
 pub mod background;
@@ -79,6 +80,7 @@ pub mod platform;
 pub mod power_inhibit;
 pub mod process_memory;
 pub mod process_title;
+pub mod project_trust;
 pub mod prompt;
 pub mod protocol;
 pub mod provider;
