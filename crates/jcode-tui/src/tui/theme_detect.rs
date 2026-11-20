@@ -152,9 +152,18 @@ pub(super) fn auto_theme_enabled() -> bool {
     is_auto_theme(&configured_theme())
 }
 
+/// The runtime OSC 11 query is only safe where the terminal reply reaches the
+/// event filter as the escape sequence it is. crossterm's Windows reader builds
+/// key events from console input records, so the reply arrives as loose key
+/// presses and its `ESC \` terminator as a bare `\` the filter cannot match.
+const fn runtime_queries_supported_on_platform() -> bool {
+    !cfg!(windows)
+}
+
 pub(super) fn runtime_queries_enabled() -> bool {
     use std::io::IsTerminal;
-    auto_theme_enabled()
+    runtime_queries_supported_on_platform()
+        && auto_theme_enabled()
         && std::io::stdin().is_terminal()
         && std::io::stdout().is_terminal()
         && terminal_background_query_supported(
@@ -372,6 +381,14 @@ mod tests {
         SILENT_TERMINAL_CACHE_MAX, cache_silent_terminal_at, silent_terminal_is_cached_at,
         terminal_background_query_supported,
     };
+
+    #[test]
+    fn runtime_queries_are_never_sent_where_replies_arrive_as_key_events() {
+        assert_eq!(
+            super::runtime_queries_supported_on_platform(),
+            !cfg!(windows)
+        );
+    }
 
     #[test]
     fn explicit_theme_overrides_disable_runtime_detection() {
