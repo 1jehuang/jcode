@@ -409,6 +409,19 @@ impl App {
             }
         }
 
+        if crate::auth::zcode::has_cached_login() {
+            for zcode_route in [
+                "zcode:GLM-5.3-Flash",
+                "zcode:GLM-5.3",
+                "zcode-coding:GLM-5.3",
+                "zcode-coding:GLM-5.3-Flash",
+                "zcode-off-peak:GLM-5.3-Flash",
+                "zcode-off-peak:GLM-5.3",
+            ] {
+                push_unique(&mut seen, &mut models, zcode_route.to_string());
+            }
+        }
+
         models
             .into_iter()
             .map(|model| (format!("/model {}", model), "Switch to model"))
@@ -768,6 +781,30 @@ impl App {
 
         if prefix_trimmed == "/agents" {
             return vec![("/agents".into(), "Open agent model config picker")];
+        }
+
+        if prefix_trimmed == "/zcode" || prefix.starts_with("/zcode ") {
+            return self.rank_suggestions(
+                input,
+                vec![
+                    (
+                        "/zcode quota".into(),
+                        "Show ZCode coding-plan usage windows",
+                    ),
+                    (
+                        "/zcode claim".into(),
+                        "Claim available weekend/trial plans",
+                    ),
+                    (
+                        "/zcode claim list".into(),
+                        "List claimable weekend/trial plans",
+                    ),
+                    (
+                        "/zcode offpeak".into(),
+                        "Check off-peak ticket queue availability",
+                    ),
+                ],
+            );
         }
 
         if prefix.starts_with("/help ") || prefix.starts_with("/? ") {

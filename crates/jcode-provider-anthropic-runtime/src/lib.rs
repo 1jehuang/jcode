@@ -125,6 +125,7 @@ struct DirectTransportConfig {
     auth_mode: String,
     auth_header: String,
     zcode_signer: Option<Arc<jcode_base::auth::zcode::ZCodeClientSigner>>,
+    zcode_start_plan: bool,
 }
 
 impl DirectTransportConfig {
@@ -138,6 +139,7 @@ impl DirectTransportConfig {
             auth_header: std::env::var("JCODE_ANTHROPIC_AUTH_HEADER")
                 .unwrap_or_else(|_| "x-api-key".to_string()),
             zcode_signer: None,
+            zcode_start_plan: false,
         }
     }
 }
@@ -653,17 +655,18 @@ impl AnthropicProvider {
     }
 
     pub fn new_zcode(off_peak: bool) -> Self {
-        // Standard ZCode Start Plan exchanges the ZCode OAuth token for a `zcode-api-key`
-        // project token and routes Anthropic-compatible requests to `api.z.ai/api/anthropic`
-        // (matching ZCode's `CodingPlanApiKeyResolver` for `builtin:zai-coding-plan`),
-        // whereas Off-Peak routes to `zcode.z.ai/api/v1/off-peak/anthropic`.
+        // ZCode Start Plan (`zcode:`) routes to `zcode.z.ai/api/v1/zcode-plan/anthropic`
+        // using the ZCode OAuth JWT (`Authorization: Bearer <zcodejwttoken>`) and the
+        // 3-block ZCode system prompt shape (without which the gateway returns 405/3012).
+        // Off-Peak (`zcode-off-peak:`) routes to `zcode.z.ai/api/v1/off-peak/anthropic`.
+        // Neither Start Plan nor Off-Peak uses Client Request Signing.
         let base = if off_peak {
             jcode_base::auth::zcode::ZCODE_OFF_PEAK_ANTHROPIC_BASE
         } else {
-            jcode_base::auth::zcode::ZAI_ANTHROPIC_BASE
+            jcode_base::auth::zcode::ZCODE_PLAN_ANTHROPIC_BASE
         };
         let mut headers = HeaderMap::new();
-        for (k, v) in jcode_base::auth::zcode::zcode_source_headers() {
+        for (k, v) in jcode_base::auth::zcode::zcode_start_plan_llm_headers() {
             if let (Ok(name), Ok(val)) = (
                 HeaderName::from_bytes(k.as_bytes()),
                 HeaderValue::from_str(&v),
@@ -671,32 +674,19 @@ impl AnthropicProvider {
                 headers.insert(name, val);
             }
         }
-        // Client Request Signing applies ONLY to coding-plan traffic (static
-        // client-side rule since 3.15.1): start-plan, off-peak and highspeed
-        // routes are never signed. The `zcode` provider here is the
-        // coding-plan-equivalent route (api.z.ai/api/anthropic), so it signs;
-        // the off-peak variant does not.
-        let zcode_signer = if off_peak {
-            None
-        } else {
-            Some(Arc::new(jcode_base::auth::zcode::ZCodeClientSigner::new()))
-        };
         let direct_transport = DirectTransportConfig {
             api_url: format!("{base}/v1/messages"),
             #[cfg(test)]
             oauth_api_url: None,
             headers: Ok(headers),
-            auth_mode: "header".to_string(),
-            auth_header: "x-api-key".to_string(),
-            zcode_signer,
+            auth_mode: "bearer".to_string(),
+            auth_header: "authorization".to_string(),
+            zcode_signer: None,
+            zcode_start_plan: true,
         };
         let client = jcode_provider_core::shared_http_client();
         let profile_api_key = Some(
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(jcode_base::auth::zcode::resolve_coding_plan_api_key(&client))
-            })
-            .map_err(|err| format!("{err:#}")),
+            jcode_base::auth::zcode::load_start_plan_jwt().map_err(|err| format!("{err:#}")),
         );
         Self {
             client,
@@ -716,18 +706,57 @@ impl AnthropicProvider {
         }
     }
 
-    /// Z.AI Coding Plan route (`builtin:zai-coding-plan`): same exchanged
-    /// coding-plan key, but the `api.z.ai/api/anthropic` endpoint and GLM-5.3
-    /// as the default model.
+    /// Z.AI Coding Plan route (`builtin:zai-coding-plan`): exchanges the ZCode
+    /// OAuth token for a `zcode-api-key` project token, routes to
+    /// `api.z.ai/api/anthropic`, applies Client Request Signing v4, and defaults
+    /// to GLM-5.3.
     pub fn new_zcode_coding_plan() -> Self {
-        let mut provider = Self::new_zcode(false);
-        provider.direct_transport.api_url = format!(
-            "{}/v1/messages",
-            jcode_base::auth::zcode::ZAI_ANTHROPIC_BASE
+        let mut headers = HeaderMap::new();
+        for (k, v) in jcode_base::auth::zcode::zcode_source_headers() {
+            if let (Ok(name), Ok(val)) = (
+                HeaderName::from_bytes(k.as_bytes()),
+                HeaderValue::from_str(&v),
+            ) {
+                headers.insert(name, val);
+            }
+        }
+        let direct_transport = DirectTransportConfig {
+            api_url: format!(
+                "{}/v1/messages",
+                jcode_base::auth::zcode::ZAI_ANTHROPIC_BASE
+            ),
+            #[cfg(test)]
+            oauth_api_url: None,
+            headers: Ok(headers),
+            auth_mode: "header".to_string(),
+            auth_header: "x-api-key".to_string(),
+            zcode_signer: Some(Arc::new(jcode_base::auth::zcode::ZCodeClientSigner::new())),
+            zcode_start_plan: false,
+        };
+        let client = jcode_provider_core::shared_http_client();
+        let profile_api_key = Some(
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(jcode_base::auth::zcode::resolve_coding_plan_api_key(&client))
+            })
+            .map_err(|err| format!("{err:#}")),
         );
-        *provider.model.write().unwrap_or_else(|poisoned| poisoned.into_inner()) =
-            "GLM-5.3".to_string();
-        provider
+        Self {
+            client,
+            model: Arc::new(std::sync::RwLock::new("GLM-5.3".to_string())),
+            reasoning_effort: Arc::new(std::sync::RwLock::new(None)),
+            service_tier: Arc::new(std::sync::RwLock::new(None)),
+            oauth_account: std::sync::RwLock::new(None),
+            credentials: Arc::new(RwLock::new(None)),
+            credential_mode: Arc::new(RwLock::new(AnthropicCredentialMode::ApiKey)),
+            request_credential: Arc::new(AtomicU8::new(0)),
+            max_tokens_override: None,
+            oauth_session_id: Uuid::new_v4().to_string(),
+            oauth_preflight_done: Arc::new(AtomicBool::new(false)),
+            direct_transport,
+            profile_api_key,
+            profile_models: Some(vec!["GLM-5.3-Flash".to_string(), "GLM-5.3".to_string()]),
+        }
     }
 
     fn direct_api_key(&self) -> Result<String> {
@@ -2199,12 +2228,58 @@ async fn stream_response(
                 req = req.header(k, v);
             }
         }
+        if direct_transport.zcode_start_plan {
+            req = req
+                .header("x-request-id", Uuid::new_v4().to_string())
+                .header("x-zcode-session-type", "main")
+                .header("x-zcode-trace-id", Uuid::new_v4().to_string());
+        }
     }
+
+    let transformed_request;
+    let wire_request = if direct_transport.zcode_start_plan {
+        let mut cloned = request.clone();
+        let (cli_prefix, stable_section) = jcode_base::auth::zcode::zcode_start_plan_system_blocks();
+        let custom_text = match cloned.system.take() {
+            Some(ApiSystem::Blocks(blocks)) => blocks
+                .into_iter()
+                .map(|b| b.text)
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+            None => String::new(),
+        };
+        let ephemeral = jcode_provider_anthropic::CacheControlParam {
+            kind: "ephemeral",
+            ttl: None,
+        };
+        cloned.system = Some(ApiSystem::Blocks(vec![
+            jcode_provider_anthropic::ApiSystemBlock {
+                block_type: "text",
+                text: cli_prefix.to_string(),
+                cache_control: None,
+            },
+            jcode_provider_anthropic::ApiSystemBlock {
+                block_type: "text",
+                text: stable_section.to_string(),
+                cache_control: Some(ephemeral.clone()),
+            },
+            jcode_provider_anthropic::ApiSystemBlock {
+                block_type: "text",
+                text: format!("\n\n{custom_text}"),
+                cache_control: Some(ephemeral),
+            },
+        ]));
+        transformed_request = cloned;
+        &transformed_request
+    } else {
+        request
+    };
 
     let req = jcode_provider_core::request_compression::json_body(
         req,
         url,
-        request,
+        wire_request,
         jcode_base::provider::request_compression_mode(),
     )?;
     let response = jcode_provider_core::transport::send_with_initial_response_timeout(

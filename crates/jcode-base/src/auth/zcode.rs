@@ -645,6 +645,56 @@ pub fn zcode_source_headers() -> Vec<(&'static str, String)> {
     ]
 }
 
+/// Headers sent by the official ZCode client on Start Plan / Off-Peak LLM
+/// requests (`zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages`).
+pub fn zcode_start_plan_llm_headers() -> Vec<(&'static str, String)> {
+    let os_category = match std::env::consts::OS {
+        "macos" => "macos",
+        "windows" => "windows",
+        _ => "linux",
+    };
+    let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "darwin-arm64".to_string(),
+        ("macos", "x86_64") => "darwin-x64".to_string(),
+        ("linux", "aarch64") => "linux-arm64".to_string(),
+        ("linux", "x86_64") => "linux-x64".to_string(),
+        (os, arch) => format!("{os}-{arch}"),
+    };
+    vec![
+        ("HTTP-Referer", ZCODE_ORIGIN.to_string()),
+        (
+            "User-Agent",
+            format!("ZCode/{DEFAULT_ZCODE_APP_VERSION} ai-sdk/anthropic/3.0.81"),
+        ),
+        ("X-ZCode-App-Version", DEFAULT_ZCODE_APP_VERSION.to_string()),
+        ("X-Title", "Z Code@cli".to_string()),
+        ("X-Release-Channel", "production".to_string()),
+        ("X-Client-Language", "en-US".to_string()),
+        ("X-ZCode-Agent", "glm".to_string()),
+        ("X-Platform", platform),
+        ("X-Os-Category", os_category.to_string()),
+    ]
+}
+
+/// Load the ZCode Start Plan JWT (`zcodejwttoken`) from `~/.jcode/zcode_oauth.json`.
+pub fn load_start_plan_jwt() -> Result<String> {
+    let creds = load_credentials()?;
+    if creds.token.trim().is_empty() {
+        anyhow::bail!("ZCode OAuth token is empty; run `jcode login --provider zcode`");
+    }
+    Ok(creds.token)
+}
+
+/// Official ZCode 3-block system prompt identity prefix and stable section
+/// required by `zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages` (without
+/// these blocks the gateway rejects with HTTP 405 code 3012).
+pub fn zcode_start_plan_system_blocks() -> (&'static str, &'static str) {
+    (
+        "You are ZCode, an interactive agent",
+        "\nYou are an agent working with the user toward their goals, using your own judgment along the way.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.\n - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n - Reference code as `file_path:line_number` — it's clickable.",
+    )
+}
+
 pub async fn resolve_coding_plan_api_key(client: &reqwest::Client) -> Result<String> {
     let mut creds = load_credentials()?;
     if let Some(key) = creds
