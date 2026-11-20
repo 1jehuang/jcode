@@ -589,17 +589,20 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
 }
 
 /// A turn's tool-execution loop subscribes to the bus beside the main loop, so
-/// one completion can arrive twice; only the first reaches the model.
+/// one completion can arrive twice; only the first reaches the model. Keyed by
+/// `wake` too: a passive copy is only shown, so it must not stop a later
+/// waking republish (an interrupted `bg wait` releasing its hold) from
+/// reaching the model.
 /// shortcut: process-wide and never pruned (one small key per finished task);
 /// move onto `App` if sessions ever run thousands of background tasks.
 fn first_model_delivery(task: &BackgroundTaskCompleted) -> bool {
     static DELIVERED: std::sync::LazyLock<
-        std::sync::Mutex<std::collections::HashSet<(String, String)>>,
+        std::sync::Mutex<std::collections::HashSet<(String, String, bool)>>,
     > = std::sync::LazyLock::new(Default::default);
     DELIVERED
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert((task.session_id.clone(), task.task_id.clone()))
+        .insert((task.session_id.clone(), task.task_id.clone(), task.wake))
 }
 
 fn handle_background_task_stalled(app: &mut App, task: crate::bus::BackgroundTaskStalled) {
@@ -781,6 +784,40 @@ mod background_delivery_tests {
         assert_eq!(app.session.messages.len(), before);
         assert_eq!(app.hidden_queued_system_messages.len(), 1);
         assert!(!app.pending_turn);
+    }
+
+    #[test]
+    fn passive_completion_does_not_block_a_later_waking_republish() {
+        let mut app = super::super::tests::create_test_app();
+        let before = app.session.messages.len();
+        let mut task = BackgroundTaskCompleted {
+            task_id: "bg-held".to_string(),
+            tool_name: "bash".to_string(),
+            display_name: None,
+            session_id: app.session.id.clone(),
+            status: crate::bus::BackgroundTaskStatus::Completed,
+            exit_code: Some(0),
+            output_preview: "done\n".to_string(),
+            output_file: std::env::temp_dir().join("bg-held.output"),
+            duration_secs: 1.0,
+            notify: true,
+            wake: false,
+        };
+        handle_bus_event(
+            &mut app,
+            Ok(BusEvent::BackgroundTaskCompleted(task.clone())),
+        );
+        assert_eq!(app.session.messages.len(), before);
+
+        task.wake = true;
+        handle_bus_event(
+            &mut app,
+            Ok(BusEvent::BackgroundTaskCompleted(task.clone())),
+        );
+        assert_eq!(app.session.messages.len(), before + 1, "delivered once");
+        assert!(app.pending_turn);
+        handle_bus_event(&mut app, Ok(BusEvent::BackgroundTaskCompleted(task)));
+        assert_eq!(app.session.messages.len(), before + 1, "not twice");
     }
 
     #[test]
