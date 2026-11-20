@@ -140,6 +140,59 @@ async fn startup_recovery_resumes_interrupted_headless_sessions_after_reload() -
     clippy::await_holding_lock,
     reason = "test intentionally serializes process-wide JCODE_HOME/env state across async recovery assertions"
 )]
+async fn startup_recovery_reattaches_idle_headless_worker_stopped_by_restart() -> Result<()> {
+    let _storage_guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new()?;
+    let _env = configure_test_env(&temp);
+
+    let mut idle = crate::session::Session::create(None, Some("idle-worker".to_string()));
+    idle.save()?;
+    let swarm_id = "swarm-idle-restart-reattach";
+    persist_swarm_state_snapshot(
+        swarm_id,
+        None,
+        None,
+        &[persisted_headless_member(
+            &idle.id,
+            swarm_id,
+            "ready",
+            "idle before restart",
+        )],
+    );
+
+    let server = Server::new(Arc::new(StreamingMockProvider::default()));
+    assert_eq!(
+        server.swarm_state.members.read().await[&idle.id].status,
+        "stopped"
+    );
+    server.recover_headless_sessions_on_startup().await;
+
+    let sessions = server.sessions.read().await;
+    assert!(
+        sessions.contains_key(&idle.id),
+        "idle headless worker must be reattached without a continuation"
+    );
+    drop(sessions);
+    let persisted = crate::storage::read_json::<serde_json::Value>(
+        &crate::storage::durable_state_dir()
+            .join("swarm")
+            .join(format!("{swarm_id}.json")),
+    )?;
+    assert!(
+        !persisted.to_string().contains("not restored"),
+        "revived worker must not retain a stale restart note in durable state"
+    );
+    let member = server.swarm_state.members.read().await[&idle.id].clone();
+    assert_eq!(member.status, "ready");
+    assert_eq!(member.detail.as_deref(), Some("idle before restart"));
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test intentionally serializes process-wide JCODE_HOME/env state across async recovery assertions"
+)]
 async fn startup_recovery_honors_pending_intent_for_stopped_worker() -> Result<()> {
     let _storage_guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new()?;
