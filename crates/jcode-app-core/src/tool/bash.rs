@@ -1147,6 +1147,7 @@ impl BashTool {
         let pid = child.id();
         let shutdown_signal = ctx.graceful_shutdown_signal.clone();
         let process = crate::background::ToolHandoff::track_current_process(pid);
+        crate::background::ToolHandoff::set_current_output_file(&info.output_file);
 
         loop {
             if let Some(status) = child.try_wait()? {

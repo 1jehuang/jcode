@@ -42,6 +42,8 @@ pub struct ToolHandoff {
     handed_off: std::sync::atomic::AtomicBool,
     /// Process groups the call runs (a batch runs several shells).
     pids: std::sync::Mutex<std::collections::HashSet<u32>>,
+    /// A file the call's shell writes its output to as it runs.
+    output_file: std::sync::Mutex<Option<PathBuf>>,
 }
 
 /// Keeps a process group on its call's [`ToolHandoff`] until dropped.
@@ -93,6 +95,14 @@ impl ToolHandoff {
                 })
                 .ok(),
         )
+    }
+
+    /// Record the file the running call's shell writes as it runs, so the
+    /// task that adopts the call shows that output live.
+    pub fn set_current_output_file(path: &std::path::Path) {
+        let _ = TOOL_HANDOFF.try_with(|handoff| {
+            lock_ignoring_poison(&handoff.output_file).get_or_insert_with(|| path.to_path_buf());
+        });
     }
 
     fn pids(&self) -> Vec<u32> {
@@ -772,10 +782,16 @@ impl BackgroundTaskManager {
         let status_path = self.output_dir.join(format!("{}.status.json", task_id));
 
         // Retain an output artifact before publishing the running task or
-        // returning its ID. Adopted work buffers its output until completion,
-        // when the wrapper below replaces this initially empty file. Create it
+        // returning its ID. It links to the file a shell writes as it runs,
+        // so the task shows live output; other work buffers its output until
+        // completion, when the wrapper below replaces this file. Create it
         // before spawning that wrapper so a fast completion cannot be truncated.
-        let _ = std::fs::write(&output_path, "");
+        let live_output = handoff
+            .as_ref()
+            .and_then(|handoff| lock_ignoring_poison(&handoff.output_file).clone());
+        if live_output.is_none_or(|live| std::fs::hard_link(live, &output_path).is_err()) {
+            let _ = std::fs::write(&output_path, "");
+        }
 
         let initial_status = TaskStatusFile {
             task_id: task_id.clone(),

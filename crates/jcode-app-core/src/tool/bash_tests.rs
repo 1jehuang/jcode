@@ -1323,3 +1323,40 @@ async fn cancelling_a_handed_off_call_stops_all_of_its_shells() {
         assert!(stopped.is_ok(), "cancel must stop every shell's children");
     }
 }
+
+/// A handed-off detached shell shows its output while it runs, not only once
+/// it exits, and still reports its full output at the end.
+#[cfg(unix)]
+#[tokio::test]
+async fn handed_off_detached_shell_shows_live_output() {
+    let ctx = make_agent_ctx(jcode_agent_runtime::InterruptSignal::new());
+    let handoff = std::sync::Arc::new(crate::background::ToolHandoff::default());
+    let call = tokio::spawn(handoff.scope(async move {
+        BashTool::new()
+            .execute(
+                json!({"command": "echo live_line; sleep 1.5; echo final_line"}),
+                ctx,
+            )
+            .await
+    }));
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let manager = crate::background::global();
+    let info = manager
+        .adopt_handoff(Some(handoff), "bash", None, "live-output", true, true, call)
+        .await;
+    let live = manager.output(&info.task_id).await.unwrap_or_default();
+    assert!(live.contains("live_line"), "live output was: {live:?}");
+    assert_eq!(
+        manager.status(&info.task_id).await.unwrap().status,
+        BackgroundTaskStatus::Running
+    );
+    manager
+        .wait(&info.task_id, Duration::from_secs(10), false)
+        .await
+        .expect("adopted task should exist");
+    let output = manager.output(&info.task_id).await.unwrap_or_default();
+    assert!(
+        output.contains("live_line") && output.contains("final_line"),
+        "output was: {output:?}"
+    );
+}
