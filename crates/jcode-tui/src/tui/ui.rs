@@ -3346,7 +3346,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         capture.layout.input_area = Some(chunks[7].into());
         capture.layout.input_lines_raw = app.input().lines().count().max(1);
         capture.layout.input_lines_wrapped = base_input_height as usize;
-        super::ui_diagnostics::log_composer_row(frame, chat_area, &*chunks);
+        super::ui_diagnostics::log_composer_row(frame, chat_area, &chunks);
         // Capture state snapshot
         capture.state.is_processing = app.is_processing();
         capture.state.input_len = app.input().len();
