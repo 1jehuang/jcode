@@ -1780,13 +1780,14 @@ impl Agent {
                         tool_elapsed.as_secs_f64()
                     ));
 
+                    let (notify, wake) = tool_handoff::handoff_delivery(&tc.input);
                     let bg_info = crate::background::global()
                         .adopt_with_options(
                             &tc.name,
                             tool_handoff::handoff_display_name(&tc.input),
                             &self.session.id,
-                            true,
-                            true,
+                            notify,
+                            wake,
                             tool_handle,
                         )
                         .await;
@@ -1801,7 +1802,7 @@ impl Agent {
                         tc.name,
                         reason,
                         bg_info.task_id,
-                        crate::tool::background_delivery_notice(true),
+                        crate::tool::background_delivery_notice(wake),
                         crate::tool::BACKGROUND_WAIT_GUIDANCE
                     );
 

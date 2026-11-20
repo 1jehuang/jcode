@@ -261,3 +261,38 @@ async fn manual_background_and_shutdown_do_not_wait_for_budget() {
         assert_eq!(start.elapsed(), Duration::ZERO);
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn handoff_keeps_the_calls_own_delivery_flags() {
+    let registry = Registry::empty();
+    registry.register("bg".into(), Arc::new(WaitProbe)).await;
+    let ctx = ToolContext {
+        session_id: "handoff-delivery-flags".into(),
+        message_id: "message".into(),
+        tool_call_id: "delivery-probe".into(),
+        working_dir: None,
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: ToolExecutionMode::Direct,
+    };
+    let result = execute_with_background_budget(
+        registry,
+        "bg".into(),
+        serde_json::json!({"action": "status", "wake": false}),
+        ctx,
+        Duration::from_millis(10),
+    )
+    .await
+    .unwrap();
+    assert!(result.output.contains("You will not be notified"));
+    let task_id = result.output.split("task_id: ").nth(1).unwrap();
+    let task_id = task_id.split(')').next().unwrap();
+    let status = crate::background::global().status(task_id).await.unwrap();
+    assert!(status.notify);
+    assert!(!status.wake, "explicit wake:false survives the handoff");
+    assert_eq!(handoff_delivery(&serde_json::json!({})), (true, true));
+    assert_eq!(
+        handoff_delivery(&serde_json::json!({"notify": false, "wake": null})),
+        (false, false)
+    );
+}
