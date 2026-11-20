@@ -16,7 +16,7 @@
     "crates/jcode-app-core/src/tool/session_search/searchable_text.rs": 2,
     "crates/jcode-app-core/src/tool/withheld_identity.rs": 2,
     "crates/jcode-base/src/auth/account_store.rs": 1,
-    "crates/jcode-base/src/hooks.rs": 2,
+    "crates/jcode-base/src/hooks/mod.rs": 2,
     "crates/jcode-base/src/mcp/manager.rs": 2,
     "crates/jcode-base/src/memory_jev.rs": 1,
     "crates/jcode-base/src/subscription_notice.rs": 1,

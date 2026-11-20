@@ -26,6 +26,20 @@ pub(crate) enum McpCommand {
         /// Server name from the merged MCP configuration
         server: String,
     },
+    /// Trust the exact current executable project MCP configuration (alias of `jcode trust grant --scope mcp`)
+    Trust {
+        /// Project directory to review (defaults to the current directory)
+        path: Option<std::path::PathBuf>,
+
+        /// Approve non-interactively after reviewing the project MCP files
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+    /// Revoke saved MCP trust for a project (alias of `jcode trust revoke --scope mcp`)
+    Revoke {
+        /// Project directory to revoke (defaults to the current directory)
+        path: Option<std::path::PathBuf>,
+    },
 }
 
 #[cfg(test)]
