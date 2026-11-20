@@ -156,13 +156,22 @@ impl BackgroundTaskManager {
 
     async fn finalize_detached_status_if_needed(
         &self,
-        mut status: TaskStatusFile,
+        status: TaskStatusFile,
         status_path: &std::path::Path,
     ) -> TaskStatusFile {
+        if status.status != BackgroundTaskStatus::Running
+            || !status.detached
+            || status.pid.is_none()
+        {
+            return status;
+        }
+        // Settle from a fresh read under the status lock, so a concurrent
+        // cancel or finalizer cannot publish this completion a second time.
+        let _status_guard = self.progress_updates.lock().await;
+        let mut status = self.read_status_file(status_path).await.unwrap_or(status);
         if status.status != BackgroundTaskStatus::Running || !status.detached {
             return status;
         }
-
         let Some(pid) = status.pid else {
             return status;
         };
@@ -431,7 +440,7 @@ impl BackgroundTaskManager {
         F: FnOnce(PathBuf) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<TaskResult>> + Send,
     {
-        self.spawn_with_notify(tool_name, None, session_id, true, false, execute_fn)
+        self.spawn_with_notify(tool_name, None, session_id, true, true, execute_fn)
             .await
     }
 
@@ -648,7 +657,7 @@ impl BackgroundTaskManager {
         session_id: &str,
         handle: JoinHandle<Result<jcode_tool_types::ToolOutput>>,
     ) -> BackgroundTaskInfo {
-        self.adopt_with_options(tool_name, None, session_id, true, false, handle)
+        self.adopt_with_options(tool_name, None, session_id, true, true, handle)
             .await
     }
 
@@ -1270,7 +1279,10 @@ impl BackgroundTaskManager {
         let task = self.tasks.write().await.remove(task_id);
         if let Some(mut task) = task {
             task.handle.abort();
-            let _ = (&mut task.handle).await;
+            if (&mut task.handle).await.is_ok() {
+                // It finished first and already published its own completion.
+                return Ok(false);
+            }
             let _status_guard = self.progress_updates.lock().await;
 
             // Update status file
@@ -1306,22 +1318,29 @@ impl BackgroundTaskManager {
             if let Ok(json) = serde_json::to_string_pretty(&final_status) {
                 let _ = fs::write(&task.status_path, json).await;
             }
+            self.publish_cancelled(&final_status).await;
 
             Ok(true)
         } else {
-            let _status_guard = self.progress_updates.lock().await;
-
             let status_path = self.status_path_for(task_id);
-            let Some(mut status) = self.read_status_file(&status_path).await else {
+            let Some(status) = self.read_status_file(&status_path).await else {
                 return Ok(false);
             };
-            status = self
+            // Settles (and publishes) a detached task that already exited.
+            let status = self
                 .finalize_detached_status_if_needed(status, &status_path)
                 .await;
             if status.status != BackgroundTaskStatus::Running || !status.detached {
                 return Ok(false);
             }
 
+            let _status_guard = self.progress_updates.lock().await;
+            let Some(mut status) = self.read_status_file(&status_path).await else {
+                return Ok(false);
+            };
+            if status.status != BackgroundTaskStatus::Running {
+                return Ok(false);
+            }
             let Some(pid) = status.pid else {
                 return Ok(false);
             };
@@ -1353,8 +1372,34 @@ impl BackgroundTaskManager {
                 terminal_event_record(event_status, event_exit_code, event_error.as_deref()),
             );
             self.write_status_file(&status_path, &status).await;
+            self.publish_cancelled(&status).await;
             Ok(true)
         }
+    }
+
+    /// Publish a requested stop so UIs settle the task. Like Claude Code's
+    /// TaskStop, a stop someone asked for never wakes the model.
+    async fn publish_cancelled(&self, status: &TaskStatusFile) {
+        let output_file = self.output_path_for(&status.task_id);
+        let output = fs::read_to_string(&output_file).await.unwrap_or_default();
+        let output_preview = if output.len() > 500 {
+            format!("{}...", crate::util::truncate_str(&output, 500))
+        } else {
+            output
+        };
+        Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
+            task_id: status.task_id.clone(),
+            tool_name: status.tool_name.clone(),
+            display_name: status.display_name.clone(),
+            session_id: status.session_id.clone(),
+            status: status.status.clone(),
+            exit_code: status.exit_code,
+            output_preview,
+            output_file,
+            duration_secs: status.duration_secs.unwrap_or_default(),
+            notify: status.notify,
+            wake: false,
+        }));
     }
 
     /// Abort every live in-process task before an exec-based server reload.
