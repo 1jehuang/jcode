@@ -346,6 +346,11 @@ impl App {
     /// Reconcile its running rows with the status files the daemon writes on
     /// this machine; one whose file is gone (cleaned up) no longer runs.
     pub(super) fn reconcile_running_background_tasks(&mut self, session_id: &str) {
+        // A remote daemon's status files are not on this machine; a missing
+        // file proves nothing there, so keep rows as the events left them.
+        if crate::tui::is_ssh_remote() {
+            return;
+        }
         let mut gone = Vec::new();
         let mut finished = Vec::new();
         for row in &self.background_task_rows {
