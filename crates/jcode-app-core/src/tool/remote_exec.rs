@@ -258,8 +258,9 @@ pub(crate) async fn execute(name: &str, input: Value, ctx: &ToolContext) -> Resu
 async fn execute_background(mut input: Value, ctx: &ToolContext) -> Result<ToolOutput> {
     let flag =
         |key: &str, default: bool| input.get(key).and_then(Value::as_bool).unwrap_or(default);
-    let wake = flag("wake", false);
-    let notify = flag("notify", true) || wake;
+    let notify = flag("notify", true);
+    let wake = flag("wake", notify);
+    let notify = notify || wake;
     let text = |key: &str| {
         input
             .get(key)
@@ -286,13 +287,7 @@ async fn execute_background(mut input: Value, ctx: &ToolContext) -> Result<ToolO
             handle,
         )
         .await;
-    let delivery = if wake {
-        "The agent will be woken when the task completes."
-    } else if notify {
-        "You will be notified when the task completes."
-    } else {
-        "Notifications disabled."
-    };
+    let delivery = super::background_delivery_notice(wake);
     Ok(ToolOutput::new(format!(
         "Command started in background as requested.\n\nTask ID: {}\nName: {}\n\n{}\n\n{}",
         info.task_id,

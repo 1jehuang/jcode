@@ -1786,7 +1786,7 @@ impl Agent {
                             tool_handoff::handoff_display_name(&tc.input),
                             &self.session.id,
                             true,
-                            false,
+                            true,
                             tool_handle,
                         )
                         .await;
@@ -1797,10 +1797,11 @@ impl Agent {
                         "by the user".to_string()
                     };
                     let bg_msg = format!(
-                        "Tool '{}' was moved to background {} (task_id: {}).\n\n{}",
+                        "Tool '{}' was moved to background {} (task_id: {}).\n\n{}\n{}",
                         tc.name,
                         reason,
                         bg_info.task_id,
+                        crate::tool::background_delivery_notice(true),
                         crate::tool::BACKGROUND_WAIT_GUIDANCE
                     );
 

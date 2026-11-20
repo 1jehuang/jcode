@@ -52,11 +52,15 @@ async fn execute_with_background_budget(
         result = &mut work => result.map_err(|e| anyhow::anyhow!("Tool task panicked: {}", e))?,
         _ = tokio::time::sleep(budget), if auto_background && !budget.is_zero() => {
             let info = crate::background::global()
-                .adopt_with_options(&name, display_name, &session_id, true, false, work)
+                .adopt_with_options(&name, display_name, &session_id, true, true, work)
                 .await;
             Ok(crate::tool::ToolOutput::new(format!(
-                "Tool '{}' was moved to background {} (task_id: {}).\n\n{}",
-                name, automatic_handoff_reason(budget), info.task_id, crate::tool::BACKGROUND_WAIT_GUIDANCE
+                "Tool '{}' was moved to background {} (task_id: {}).\n\n{}\n{}",
+                name,
+                automatic_handoff_reason(budget),
+                info.task_id,
+                crate::tool::background_delivery_notice(true),
+                crate::tool::BACKGROUND_WAIT_GUIDANCE
             )))
         }
     }
