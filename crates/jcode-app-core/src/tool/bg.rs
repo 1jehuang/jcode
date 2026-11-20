@@ -852,11 +852,19 @@ impl Tool for BgTool {
                 if let Some(held) = hold.release()
                     && let Some(released) = manager.release_delivery(&held, false).await
                     && is_terminal(&released.status)
-                    && let Some(result) = wait_result.as_mut()
-                    && !is_terminal(&result.task.status)
+                    && wait_result
+                        .as_ref()
+                        .is_none_or(|result| !is_terminal(&result.task.status))
                 {
-                    // It finished after the wait returned: its completion went
-                    // out without waking the model, so this reply delivers it.
+                    // It finished after the wait returned (or the wait lost
+                    // it): its completion went out without waking the model,
+                    // so this reply delivers it.
+                    let result = wait_result.get_or_insert(background::BackgroundTaskWaitResult {
+                        reason: background::BackgroundTaskWaitReason::Finished,
+                        task: released.clone(),
+                        progress_event: None,
+                        event_record: None,
+                    });
                     result.reason = background::BackgroundTaskWaitReason::Finished;
                     result.task = released;
                 }
