@@ -1343,6 +1343,46 @@ impl BackgroundTaskManager {
         Ok(Some(status))
     }
 
+    /// Hold model delivery of a running task's completion while a foreground
+    /// `bg wait` owns its result. False when there is nothing to hold.
+    pub async fn hold_delivery(&self, task_id: &str) -> bool {
+        let _status_guard = self.progress_updates.lock().await;
+        let status_path = self.status_path_for(task_id);
+        let Some(mut status) = self.read_status_file(&status_path).await else {
+            return false;
+        };
+        if status.status != BackgroundTaskStatus::Running || !status.wake {
+            return false;
+        }
+        status.wake = false;
+        self.write_status_file(&status_path, &status).await;
+        if let Some(task) = self.tasks.read().await.get(task_id) {
+            let _ = task.delivery_flags.send((status.notify, false));
+        }
+        true
+    }
+
+    /// End a [`Self::hold_delivery`]. A task that finished during the hold
+    /// published its completion without waking the model; `deliver` publishes
+    /// it to the model now, for a waiter that ends without returning it.
+    pub async fn release_delivery(&self, task_id: &str, deliver: bool) -> Option<TaskStatusFile> {
+        let status = {
+            let _status_guard = self.progress_updates.lock().await;
+            let status_path = self.status_path_for(task_id);
+            let mut status = self.read_status_file(&status_path).await?;
+            status.wake = true;
+            self.write_status_file(&status_path, &status).await;
+            if let Some(task) = self.tasks.read().await.get(task_id) {
+                let _ = task.delivery_flags.send((status.notify, true));
+            }
+            status
+        };
+        if deliver && status.status != BackgroundTaskStatus::Running {
+            self.publish_completion(&status, true).await;
+        }
+        Some(status)
+    }
+
     /// Cancel a running task
     pub async fn cancel(&self, task_id: &str) -> Result<bool> {
         self.cancel_with_grace(task_id, std::time::Duration::from_millis(400))

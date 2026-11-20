@@ -1255,3 +1255,52 @@ async fn cancelling_an_adopted_call_stops_its_detached_child() -> Result<()> {
     assert!(stopped.is_ok(), "cancel must stop the detached child");
     Ok(())
 }
+
+#[tokio::test]
+async fn held_delivery_publishes_once_without_waking_until_released() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut events = Bus::global().subscribe();
+    let mut abandoned_events = Bus::global().subscribe();
+    let mut infos = Vec::new();
+    for _ in 0..2 {
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel::<()>();
+        let info = manager
+            .spawn("bash", "session-held-delivery", |_| async move {
+                let _ = finish_rx.await;
+                Ok(TaskResult::completed(Some(0)))
+            })
+            .await;
+        assert!(manager.hold_delivery(&info.task_id).await);
+        let _ = finish_tx.send(());
+        infos.push(info);
+    }
+    for info in &infos {
+        manager
+            .wait(&info.task_id, Duration::from_secs(5), false)
+            .await;
+    }
+    sleep(Duration::from_millis(50)).await;
+
+    // A waiter that returns the result releases without delivering again.
+    let returned = manager.release_delivery(&infos[0].task_id, false).await;
+    assert_eq!(
+        returned.map(|task| task.status),
+        Some(BackgroundTaskStatus::Completed)
+    );
+    let completions = drain_completions(&mut events, &infos[0].task_id);
+    assert_eq!(completions.len(), 1, "exactly one: {completions:?}");
+    assert!(!completions[0].wake, "the waiter's reply is the delivery");
+
+    // An abandoned waiter hands the completion back to the model.
+    manager.release_delivery(&infos[1].task_id, true).await;
+    let completions = drain_completions(&mut abandoned_events, &infos[1].task_id);
+    assert_eq!(
+        completions
+            .iter()
+            .map(|event| event.wake)
+            .collect::<Vec<_>>(),
+        vec![false, true]
+    );
+    Ok(())
+}

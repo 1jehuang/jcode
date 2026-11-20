@@ -162,6 +162,28 @@ fn status_label(status: &BackgroundTaskStatus) -> &'static str {
     }
 }
 
+/// A `bg wait` delivery hold. Dropped without [`Self::release`] (the wait was
+/// abandoned), it hands a completion that arrived meanwhile back to the model.
+struct DeliveryHold(Option<String>);
+
+impl DeliveryHold {
+    fn release(mut self) -> Option<String> {
+        self.0.take()
+    }
+}
+
+impl Drop for DeliveryHold {
+    fn drop(&mut self) {
+        if let Some(task_id) = self.0.take()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            runtime.spawn(async move {
+                background::global().release_delivery(&task_id, true).await;
+            });
+        }
+    }
+}
+
 fn is_terminal(status: &BackgroundTaskStatus) -> bool {
     !matches!(status, BackgroundTaskStatus::Running)
 }
@@ -811,7 +833,12 @@ impl Tool for BgTool {
                     .unwrap_or_else(|| "Waiting for background task".to_string());
                 let wait_guard =
                     blocking.then(|| crate::wait_registry::register(&ctx.session_id, &wait_reason));
-                let wait_result = manager
+                // This reply carries the result, so hold the separate model
+                // delivery while it waits; one completion reaches the model once.
+                let hold = DeliveryHold(
+                    (blocking && manager.hold_delivery(&task_id).await).then(|| task_id.clone()),
+                );
+                let mut wait_result = manager
                     .wait(
                         &task_id,
                         wait_duration,
@@ -821,6 +848,17 @@ impl Tool for BgTool {
                     )
                     .await;
                 drop(wait_guard);
+                if let Some(held) = hold.release()
+                    && let Some(released) = manager.release_delivery(&held, false).await
+                    && is_terminal(&released.status)
+                    && let Some(result) = wait_result.as_mut()
+                    && !is_terminal(&result.task.status)
+                {
+                    // It finished after the wait returned: its completion went
+                    // out without waking the model, so this reply delivers it.
+                    result.reason = background::BackgroundTaskWaitReason::Finished;
+                    result.task = released;
+                }
                 match wait_result {
                     Some(wait_result) => {
                         let task = wait_result.task;
