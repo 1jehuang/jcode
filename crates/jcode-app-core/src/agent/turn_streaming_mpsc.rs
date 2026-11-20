@@ -1340,7 +1340,7 @@ impl Agent {
                 // non-streaming loop's recovery behavior (issue #672).
                 if saw_message_end
                     && !self.is_graceful_shutdown()
-                    && self.maybe_continue_empty_post_tool_response(
+                    && self.maybe_retry_streaming_empty_post_tool_response(
                         text_content.trim().is_empty(),
                         prompt_has_recent_tool_result,
                         stop_reason.as_deref(),
