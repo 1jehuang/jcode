@@ -1942,8 +1942,10 @@ fn handle_server_event_inner(
             }
             if session_changed {
                 app.refresh_pinned_todos_now();
-                app.seed_running_background_tasks(&session_id);
             }
+            // Also on a reattach to the same session: its tasks may have
+            // started or finished while this client was away.
+            app.seed_running_background_tasks(&session_id);
             // Facts seeded from the last launch are only a first-frame guess.
             // When History reports a different model, drop them so the snapshot
             // below is applied exactly as on a cold start (including the

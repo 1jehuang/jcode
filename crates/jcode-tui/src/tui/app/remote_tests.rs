@@ -716,6 +716,66 @@ fn attaching_seeds_rows_for_the_sessions_running_background_shells() {
     assert_eq!(rows[0].status, crate::tui::BackgroundTaskRowStatus::Running);
 }
 
+/// Reattaching to the same session reconciles its rows: a task that started
+/// while the client was away gets a row, and one that finished is no longer
+/// shown as running.
+#[test]
+fn reattaching_to_the_same_session_reconciles_background_rows() {
+    let session_id = crate::id::new_id("ses_reattach_bg");
+    let manager = crate::background::global();
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let register = |label: &str| {
+        let info = manager.reserve_task_info();
+        rt.block_on(manager.register_detached_task(
+            &info,
+            "bash",
+            Some(label.to_string()),
+            &session_id,
+            std::process::id(),
+            &chrono::Utc::now().to_rfc3339(),
+            true,
+            false,
+        ));
+        info
+    };
+    let finished = register("finishes while away");
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.auto_server_reload = false;
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    handle_server_event(&mut app, startup_history(&session_id), &mut remote);
+
+    let started = register("starts while away");
+    let status_path = manager.status_path_for(&finished.task_id);
+    let mut status: crate::background::TaskStatusFile =
+        serde_json::from_str(&std::fs::read_to_string(&status_path).unwrap()).unwrap();
+    status.status = crate::bus::BackgroundTaskStatus::Completed;
+    std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
+    handle_server_event(&mut app, startup_history(&session_id), &mut remote);
+    let rows = app.background_task_rows_ref().to_vec();
+    for info in [&finished, &started] {
+        let _ = std::fs::remove_file(manager.status_path_for(&info.task_id));
+        let _ = std::fs::remove_file(manager.output_path_for(&info.task_id));
+    }
+
+    let row = |task_id: &str| {
+        rows.iter()
+            .find(|row| row.task_id == task_id)
+            .map(|row| row.status)
+    };
+    assert_eq!(
+        row(&finished.task_id),
+        Some(crate::tui::BackgroundTaskRowStatus::Completed),
+        "{rows:?}"
+    );
+    assert_eq!(
+        row(&started.task_id),
+        Some(crate::tui::BackgroundTaskRowStatus::Running),
+        "{rows:?}"
+    );
+}
+
 #[test]
 fn has_pending_startup_submission_requires_input_and_flag() {
     // Guards the predicate that gates post-connect startup dispatch.

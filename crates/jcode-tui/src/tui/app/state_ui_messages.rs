@@ -342,10 +342,41 @@ impl App {
             .then_some(status)
     }
 
-    /// A client that attaches after a task started never saw its start event.
-    /// Seed rows for the session's running tasks from the status files the
-    /// daemon writes on this machine, as the tasks dialog already reads.
+    /// A client that attaches after a task started never saw its start event,
+    /// and one that reattaches missed the completions of tasks it showed.
+    /// Reconcile the session's rows with the status files the daemon writes
+    /// on this machine, as the tasks dialog already reads.
     pub(super) fn seed_running_background_tasks(&mut self, session_id: &str) {
+        let finished: Vec<crate::background::TaskStatusFile> = self
+            .background_task_rows
+            .iter()
+            .filter(|row| row.status == crate::tui::BackgroundTaskRowStatus::Running)
+            // Only a bare id names a status file.
+            .filter(|row| {
+                std::path::Path::new(&row.task_id).file_name()
+                    == Some(std::ffi::OsStr::new(&row.task_id))
+            })
+            .filter_map(|row| {
+                let path = crate::background::global().status_path_for(&row.task_id);
+                serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+            })
+            .filter(|status: &crate::background::TaskStatusFile| {
+                status.session_id == session_id
+                    && !running_background_status_for(status, session_id)
+            })
+            .collect();
+        for status in finished {
+            let label = crate::message::background_task_display_label(
+                &status.tool_name,
+                status.display_name.as_deref(),
+            );
+            let row_status = if status.status == crate::bus::BackgroundTaskStatus::Completed {
+                crate::tui::BackgroundTaskRowStatus::Completed
+            } else {
+                crate::tui::BackgroundTaskRowStatus::Failed
+            };
+            self.finish_background_task(status.task_id, label, row_status);
+        }
         // `status_path_for("")` is `<task dir>/.status.json`.
         let status_path = crate::background::global().status_path_for("");
         let Some(Ok(entries)) = status_path.parent().map(std::fs::read_dir) else {
