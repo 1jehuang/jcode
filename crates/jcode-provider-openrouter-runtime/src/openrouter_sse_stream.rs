@@ -709,6 +709,8 @@ fn is_provider_overload_message(error_str: &str) -> bool {
         "server is busy",
         "at capacity",
         "capacity constraints",
+        // Chinese-language gateways ("service temporarily unavailable").
+        "服务暂时不可用",
     ]
     .iter()
     .any(|marker| error_str.contains(marker))
@@ -782,6 +784,13 @@ mod tests {
     fn shared_status_adapter_ignores_metadata_before_permanent_failure() {
         let error = "endpoint: HTTP 529\nmodel: status: 503\nauth: HTTP 402\nHTTP 401: temporarily unavailable";
         assert!(!is_retryable_error(error));
+    }
+
+    #[test]
+    fn chinese_gateway_unavailable_event_is_retried() {
+        assert!(is_retryable_error(
+            "服务暂时不可用。 原因：上游服务、网络链路或代理返回异常响应。 解决方案：请稍后重试。"
+        ));
     }
 
     #[test]

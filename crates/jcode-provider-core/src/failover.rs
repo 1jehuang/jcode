@@ -289,6 +289,9 @@ pub fn is_provider_overload_message(message: &str) -> bool {
             // The provider lost its own upstream mid-response ("The model
             // provider's stream was interrupted. Please retry.").
             "stream was interrupted",
+            // Chinese-language gateways: "服务暂时不可用" ("service temporarily
+            // unavailable ... please retry later").
+            "服务暂时不可用",
         ]
         .iter()
         .any(|marker| lower.contains(marker))
@@ -390,6 +393,13 @@ mod tests {
         ));
         assert!(!is_provider_overload_message(
             "Anthropic API error (401 Unauthorized): temporarily unavailable"
+        ));
+    }
+
+    #[test]
+    fn chinese_gateway_unavailable_is_overload() {
+        assert!(is_provider_overload_message(
+            "服务暂时不可用。 原因：上游服务、网络链路或代理返回异常响应。 解决方案：请稍后重试。"
         ));
     }
 

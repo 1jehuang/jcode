@@ -230,6 +230,8 @@ const TRANSIENT_MARKERS: &[&str] = &[
     "api_error",
     "temporarily unavailable",
     "try again",
+    // Chinese-language gateways ("service temporarily unavailable").
+    "服务暂时不可用",
 ];
 
 fn parse_retry_after(lower: &str) -> Option<Duration> {
