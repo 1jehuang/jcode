@@ -6,7 +6,8 @@
 //! high-effort turns can think silently for many minutes before emitting a
 //! single event and would otherwise look like a dead connection.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 /// Largest multiplier [`stream_idle_timeout_multiplier_for_effort`] can return.
 ///

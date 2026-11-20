@@ -1,7 +1,7 @@
 //! Shared guards that bound an assistant turn. Kept separate from the large
 //! turn driver so the production file-size budget stays flat.
 
-use super::{App, DisplayMessage};
+use super::super::{App, DisplayMessage};
 
 /// Start the fixed deadline and retry budget together.
 pub(super) fn start_bounds() -> (crate::provider::TurnDeadline, crate::network_retry::RetryBudget) {

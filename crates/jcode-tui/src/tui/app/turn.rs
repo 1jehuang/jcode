@@ -1,4 +1,4 @@
-#[path = "turn_system_reminder.rs"]
+#[path = "turn_bounds.rs"] mod turn_bounds; #[path = "turn_system_reminder.rs"]
 pub(super) mod system_reminder;
 use super::*;
 #[path = "turn_prepared_turn.rs"]
@@ -54,7 +54,7 @@ impl App {
         let mut redraw_interval = super::run_shell::redraw_timer(redraw_period);
         let mut status_spinner_interval = super::run_shell::status_spinner_interval();
         let mut status_spinner_renderer = super::run_shell::StatusSpinnerRenderer::default();
-        let (turn_deadline, mut retry_budget) = super::turn_bounds::start_bounds();
+        let (turn_deadline, mut retry_budget) = turn_bounds::start_bounds();
         'turn_loop: loop {
             self.streaming.response_output.reset();
             // Mark the turn as in-flight work: from here until the turn ends,
@@ -159,7 +159,7 @@ impl App {
 
             let mut stream = loop {
                 tokio::select! {
-                    biased; _ = turn_deadline.sleep() => { return super::turn_bounds::fail_turn_deadline(self); }
+                    biased; _ = turn_deadline.sleep() => { return turn_bounds::fail_turn_deadline(self); }
                     // Handle keyboard input while waiting for API
                     event = event_stream.next() => {
                         match event {
@@ -272,11 +272,11 @@ impl App {
                                     };
                                     status_spinner_renderer.draw_full(self, terminal)?;
                                     super::run_shell::reset_status_spinner_interval(&mut status_spinner_interval, self);
-                                    let _ = crate::network_retry::wait_until_probably_online_bounded(retry_budget).await;
+                                    crate::network_retry::wait_until_probably_online_bounded(retry_budget).await;
                                     self.push_display_message(DisplayMessage::system(
                                         "Network connectivity looks restored; retrying request.".to_string(),
                                     ));
-                                    if !retry_budget.record_attempt() { return super::turn_bounds::fail_retry_limit(self); } continue 'turn_loop;
+                                    if !retry_budget.record_attempt() { return turn_bounds::fail_retry_limit(self); } continue 'turn_loop;
                                 }
                                 return Err(err);
                             }
@@ -317,13 +317,13 @@ impl App {
             let mut openai_native_compaction: Option<(String, usize)> = None;
 
             // Stream with input handling
-            loop { if turn_deadline.expired() { return super::turn_bounds::fail_turn_deadline(self); }
+            loop { if turn_deadline.expired() { return turn_bounds::fail_turn_deadline(self); }
                 let desired_redraw = crate::tui::redraw_interval(self);
                 if desired_redraw != redraw_period {
                     redraw_period = desired_redraw;
                     redraw_interval = super::run_shell::redraw_timer(redraw_period);
                 }
-                tokio::select! { _ = turn_deadline.sleep() => { return super::turn_bounds::fail_turn_deadline(self); }
+                tokio::select! { _ = turn_deadline.sleep() => { return turn_bounds::fail_turn_deadline(self); }
                     // Cheap single-cell spinner refresh between full redraws. This
                     // keeps the thinking/connecting spinner feeling responsive
                     // (especially in low-resource tiers where full redraws run at
@@ -885,11 +885,11 @@ impl App {
                                                 listener: plan.listener_summary.clone(),
                                             };
                                             status_spinner_renderer.draw_full(self, terminal)?;
-                                            let _ = crate::network_retry::wait_until_probably_online_bounded(retry_budget).await;
+                                            crate::network_retry::wait_until_probably_online_bounded(retry_budget).await;
                                             self.push_display_message(DisplayMessage::system(
                                                 "Network connectivity looks restored; retrying request.".to_string(),
                                             ));
-                                            if !retry_budget.record_attempt() { return super::turn_bounds::fail_retry_limit(self); } continue 'turn_loop;
+                                            if !retry_budget.record_attempt() { return turn_bounds::fail_retry_limit(self); } continue 'turn_loop;
                                         }
                                         return Err(anyhow::anyhow!("Stream error: {}", message));
                                     }
@@ -1187,11 +1187,11 @@ impl App {
                                         listener: plan.listener_summary.clone(),
                                     };
                                     status_spinner_renderer.draw_full(self, terminal)?;
-                                    let _ = crate::network_retry::wait_until_probably_online_bounded(retry_budget).await;
+                                    crate::network_retry::wait_until_probably_online_bounded(retry_budget).await;
                                     self.push_display_message(DisplayMessage::system(
                                         "Network connectivity looks restored; retrying request.".to_string(),
                                     ));
-                                    if !retry_budget.record_attempt() { return super::turn_bounds::fail_retry_limit(self); } continue 'turn_loop;
+                                    if !retry_budget.record_attempt() { return turn_bounds::fail_retry_limit(self); } continue 'turn_loop;
                                 }
                                 return Err(e);
                             }
@@ -1211,11 +1211,11 @@ impl App {
                                         listener: plan.listener_summary.clone(),
                                     };
                                     status_spinner_renderer.draw_full(self, terminal)?;
-                                    let _ = crate::network_retry::wait_until_probably_online_bounded(retry_budget).await;
+                                    crate::network_retry::wait_until_probably_online_bounded(retry_budget).await;
                                     self.push_display_message(DisplayMessage::system(
                                         "Network connectivity looks restored; retrying request.".to_string(),
                                     ));
-                                    if !retry_budget.record_attempt() { return super::turn_bounds::fail_retry_limit(self); } continue 'turn_loop;
+                                    if !retry_budget.record_attempt() { return turn_bounds::fail_retry_limit(self); } continue 'turn_loop;
                                 }
                                 break;
                             }
