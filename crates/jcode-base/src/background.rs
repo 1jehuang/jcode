@@ -17,7 +17,7 @@ use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{Duration, Instant as TokioInstant, MissedTickBehavior};
+use tokio::time::{Duration, Instant as TokioInstant};
 
 mod elapsed_review;
 mod model;
@@ -48,6 +48,9 @@ pub struct BackgroundTaskManager {
     /// Status files already seen in a terminal state by [`Self::sweep`]. A
     /// finished task never runs again, so the periodic sweep skips them.
     settled: Arc<Mutex<std::collections::HashSet<PathBuf>>>,
+    /// Revision counter bumped whenever a status file changes. Waiters
+    /// subscribe to this to wake immediately on completion instead of polling.
+    status_revision: watch::Sender<u64>,
     output_dir: PathBuf,
 }
 
@@ -67,6 +70,7 @@ impl BackgroundTaskManager {
             progress_updates: Arc::new(Mutex::new(())),
             stall_watchdogs: Arc::new(RwLock::new(HashMap::new())),
             settled: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            status_revision: watch::channel(0).0,
             output_dir,
         }
     }
@@ -149,6 +153,17 @@ impl BackgroundTaskManager {
         if let Ok(json) = serde_json::to_string_pretty(status) {
             let _ = fs::write(path, json).await;
         }
+        self.signal_status_revision();
+    }
+
+    /// Wake all waiters after a status-file change.
+    fn signal_status_revision(&self) {
+        self.status_revision.send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+
+    /// Subscribe to status changes. Each received value is a new revision.
+    pub fn status_revision(&self) -> watch::Receiver<u64> {
+        self.status_revision.subscribe()
     }
 
     async fn finalize_detached_status_if_needed(
@@ -500,6 +515,7 @@ impl BackgroundTaskManager {
         let (delivery_flags_tx, delivery_flags_rx) = watch::channel((notify, wake));
         let status_updates = Arc::clone(&self.progress_updates);
         let tasks_for_prune = Arc::clone(&self.tasks);
+        let status_revision = self.status_revision.clone();
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
 
         // Spawn the background task
@@ -563,6 +579,7 @@ impl BackgroundTaskManager {
             if let Ok(json) = serde_json::to_string_pretty(&final_status) {
                 let _ = tokio::fs::write(&status_path_clone, json).await;
             }
+            status_revision.send_modify(|revision| *revision = revision.wrapping_add(1));
 
             // Drop this task from the live map now that its terminal status is
             // persisted. Order matters: pruning only after the status-file
@@ -723,6 +740,7 @@ impl BackgroundTaskManager {
         let (delivery_flags_tx, delivery_flags_rx) = watch::channel((notify, wake));
         let status_updates = Arc::clone(&self.progress_updates);
         let tasks_for_prune = Arc::clone(&self.tasks);
+        let status_revision = self.status_revision.clone();
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
         let wrapper_handle = tokio::spawn(runtime_activity.scope(async move {
             let tool_result = (&mut handle.0).await;
@@ -794,6 +812,7 @@ impl BackgroundTaskManager {
             if let Ok(json) = serde_json::to_string_pretty(&final_status) {
                 let _ = tokio::fs::write(&status_path_clone, json).await;
             }
+            status_revision.send_modify(|revision| *revision = revision.wrapping_add(1));
 
             // Prune the live-map entry only after the terminal status file is
             // persisted (and after registration below, so instant completions
@@ -982,6 +1001,7 @@ impl BackgroundTaskManager {
         return_on_progress: bool,
     ) -> Option<BackgroundTaskWaitResult> {
         let mut bus_rx = Bus::global().subscribe();
+        let mut revision_rx = self.status_revision();
         let initial = self.status(task_id).await?;
         if initial.status != BackgroundTaskStatus::Running {
             return Some(BackgroundTaskWaitResult {
@@ -1004,8 +1024,6 @@ impl BackgroundTaskManager {
         let deadline = TokioInstant::now() + max_wait;
         let timeout = tokio::time::sleep_until(deadline);
         tokio::pin!(timeout);
-        let mut poll = tokio::time::interval(Duration::from_secs(1));
-        poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
@@ -1023,7 +1041,22 @@ impl BackgroundTaskManager {
                         event_record: None,
                     });
                 }
-                _ = poll.tick() => {
+                changed = revision_rx.changed() => {
+                    if changed.is_err() {
+                        // Sender dropped: recheck once and stop waiting.
+                        let task = self.status(task_id).await?;
+                        let reason = if task.status == BackgroundTaskStatus::Running {
+                            BackgroundTaskWaitReason::Timeout
+                        } else {
+                            BackgroundTaskWaitReason::Finished
+                        };
+                        return Some(BackgroundTaskWaitResult {
+                            reason,
+                            task,
+                            progress_event: None,
+                            event_record: None,
+                        });
+                    }
                     let task = self.status(task_id).await?;
                     if task.status != BackgroundTaskStatus::Running {
                         return Some(BackgroundTaskWaitResult {
@@ -1306,6 +1339,7 @@ impl BackgroundTaskManager {
             if let Ok(json) = serde_json::to_string_pretty(&final_status) {
                 let _ = fs::write(&task.status_path, json).await;
             }
+            self.signal_status_revision();
 
             Ok(true)
         } else {

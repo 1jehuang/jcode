@@ -440,6 +440,8 @@ async fn wait_many_polling(
     let deadline = Instant::now() + max_wait;
     let mut last_progress = std::collections::HashMap::new();
     let mut wait_guard = None;
+    let mut bus_rx = crate::bus::Bus::global().subscribe();
+    let mut revision_rx = manager.status_revision();
     for task_id in task_ids {
         if let Some(task) = manager.status(task_id).await {
             last_progress.insert(task_id.clone(), task.progress.clone());
@@ -501,7 +503,37 @@ async fn wait_many_polling(
             };
             crate::wait_registry::register(session_id, &reason)
         });
-        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // Wake on the next completion/progress/stall signal instead of polling
+        // on a one-second timer. The deadline is only a ceiling.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let timeout = tokio::time::sleep(remaining);
+        tokio::pin!(timeout);
+        tokio::select! {
+            _ = &mut timeout => {}
+            _ = revision_rx.changed() => {}
+            event = bus_rx.recv() => {
+                let relevant = match event {
+                    Ok(crate::bus::BusEvent::BackgroundTaskCompleted(event)) => {
+                        task_ids.iter().any(|id| id == &event.task_id)
+                    }
+                    Ok(crate::bus::BusEvent::BackgroundTaskProgress(event)) => {
+                        task_ids.iter().any(|id| id == &event.task_id)
+                    }
+                    Ok(crate::bus::BusEvent::BackgroundTaskStalled(event)) => {
+                        task_ids.iter().any(|id| id == &event.task_id)
+                    }
+                    // Lagged or closed: recheck status immediately.
+                    Err(_) => true,
+                    _ => false,
+                };
+                if !relevant {
+                    // Keep waiting, but do not spin: consume events until a
+                    // relevant one, the deadline, or a status-change signal.
+                    continue;
+                }
+            }
+        }
     }
 }
 
@@ -968,6 +1000,35 @@ mod tests {
         drop(future);
         assert_eq!(crate::wait_registry::current(sid), None);
         manager.cancel(&task.task_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn multi_wait_returns_immediately_on_completion_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = background::BackgroundTaskManager::with_output_dir(dir.path().into());
+        let sid = "bg_multi_wait_signal";
+        let task = manager
+            .spawn("test", sid, |_| async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                Ok(background::TaskResult::completed(Some(0)))
+            })
+            .await;
+        let ids = vec![task.task_id.clone()];
+
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            wait_many_polling(&manager, sid, &ids, Duration::from_secs(2), false, "all"),
+        )
+        .await
+        .expect("wait must return via completion signal well before the 1s poll tick");
+        let elapsed = started.elapsed();
+
+        assert_eq!(result.unwrap().0, "all_finished");
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "completion wake took {elapsed:?}; expected signal-driven wake"
+        );
     }
 
     #[test]

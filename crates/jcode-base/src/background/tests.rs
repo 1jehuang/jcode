@@ -507,6 +507,44 @@ async fn wait_returns_when_task_finishes() -> Result<()> {
 }
 
 #[tokio::test]
+async fn wait_wakes_immediately_for_short_task() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+
+    let info = manager
+        .spawn_with_notify(
+            "bash",
+            None,
+            "session-wait-short",
+            false,
+            false,
+            |output_path| async move {
+                sleep(Duration::from_millis(10)).await;
+                tokio::fs::write(&output_path, "done").await?;
+                Ok(TaskResult::completed(Some(0)))
+            },
+        )
+        .await;
+
+    let started = std::time::Instant::now();
+    let wait_result = tokio::time::timeout(
+        Duration::from_millis(100),
+        manager.wait(&info.task_id, Duration::from_secs(2), true),
+    )
+    .await
+    .expect("wait must wake on completion, not wait for a one-second poll tick")
+    .ok_or_else(|| anyhow!("task should exist"))?;
+    let elapsed = started.elapsed();
+
+    assert_eq!(wait_result.reason, BackgroundTaskWaitReason::Finished);
+    assert!(
+        elapsed < Duration::from_millis(100),
+        "completion wake took {elapsed:?}; expected signal-driven wake"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn wait_returns_on_progress_checkpoint() -> Result<()> {
     let tmp = tempdir()?;
     let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
