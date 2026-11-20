@@ -1242,6 +1242,11 @@ impl BackgroundTaskManager {
         let Some(mut status) = self.read_status_file(&status_path).await else {
             return Ok(None);
         };
+        // A late progress line (read after the task settled) must not flip a
+        // finished row back to Running.
+        if status.status != BackgroundTaskStatus::Running {
+            return Ok(Some(status));
+        }
 
         let mut progress = progress.normalize();
         if let Some(existing) = status.progress.as_ref() {

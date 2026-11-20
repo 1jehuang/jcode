@@ -1304,3 +1304,41 @@ async fn held_delivery_publishes_once_without_waking_until_released() -> Result<
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn progress_after_a_task_settled_is_ignored() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let info = manager
+        .spawn("bash", "session-late-progress", |_| async move {
+            Ok(TaskResult::completed(Some(0)))
+        })
+        .await;
+    manager
+        .wait(&info.task_id, Duration::from_secs(5), false)
+        .await;
+    let mut events = Bus::global().subscribe();
+    let late = BackgroundTaskProgress {
+        kind: BackgroundTaskProgressKind::Determinate,
+        percent: Some(99.0),
+        message: None,
+        current: None,
+        total: None,
+        unit: None,
+        eta_seconds: None,
+        updated_at: Utc::now().to_rfc3339(),
+        source: BackgroundTaskProgressSource::ParsedOutput,
+    };
+    let status = manager
+        .update_progress(&info.task_id, late)
+        .await?
+        .ok_or_else(|| anyhow!("task should exist"))?;
+    assert_eq!(status.status, BackgroundTaskStatus::Completed);
+    assert!(status.progress.is_none());
+    while let Ok(event) = events.try_recv() {
+        if let BusEvent::BackgroundTaskProgress(event) = event {
+            assert_ne!(event.task_id, info.task_id, "late progress was published");
+        }
+    }
+    Ok(())
+}
